@@ -1369,6 +1369,10 @@ class VesselPlugin(AIPluginBase):
                     optional.append(extra)
             connect_schema["optional_fields"] = optional
             connect_schema["game_choices"] = enabled
+            # The entry point must stay visible on *every* turn (not just
+            # Vessel turns) so Synth can decide to enter a world — tag it
+            # ``core`` so the per-turn scope gate never hides it.
+            connect_schema["scope"] = "core"
             actions["vessel_connect"] = connect_schema
             return actions
 
@@ -1380,6 +1384,10 @@ class VesselPlugin(AIPluginBase):
                 continue
             entry = dict(schema)
             entry["description"] = entry["description"].format(world=connected)
+            # Gameplay verbs only matter on a Vessel turn — tag them so the
+            # per-turn scope gate keeps them out of ordinary chat prompts while
+            # they stay registered/callable in-world.
+            entry["scope"] = "vessel"
             actions[f"{prefix}{verb}"] = entry
         for verb, schema in self._world_extra_verbs_for(connected).items():
             entry = dict(schema)
@@ -1388,6 +1396,7 @@ class VesselPlugin(AIPluginBase):
                 entry["description"] = desc.format(world=connected)
             # World actions must stay on the Fast Lane like the core set.
             entry.pop("external_effects", None)
+            entry["scope"] = "vessel"
             # Anti double-prefix: a connector may already namespace its verbs.
             name = verb if verb.startswith("vessel_") else f"{prefix}{verb}"
             actions[name] = entry
@@ -1395,6 +1404,7 @@ class VesselPlugin(AIPluginBase):
         disconnect_entry["description"] = disconnect_entry["description"].format(
             world=connected
         )
+        disconnect_entry["scope"] = "vessel"
         actions["vessel_disconnect"] = disconnect_entry
         return actions
 

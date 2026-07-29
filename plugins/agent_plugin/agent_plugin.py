@@ -187,17 +187,20 @@ class AgentPlugin(AIPluginBase):
             "agent_list_files": {
                 "required_fields": [],
                 "optional_fields": ["path", "recursive", "max_depth", "limit"],
+                "scope": "agent",
                 "description": "List files/directories within the allowed agent filesystem roots.",
             },
             "agent_read_file": {
                 "required_fields": ["path"],
                 "optional_fields": ["start_line", "end_line", "max_chars"],
+                "scope": "agent",
                 "description": "Read a text file within the allowed agent filesystem roots.",
             },
             "agent_write_file": {
                 "required_fields": ["path", "content"],
                 "optional_fields": ["mode"],
                 "security_level": "medium",
+                "scope": "agent",
                 "external_effects": ["filesystem"],
                 "description": (
                     "Write a text file within the allowed agent filesystem roots. "
@@ -210,6 +213,7 @@ class AgentPlugin(AIPluginBase):
                 "required_fields": ["path", "old_string", "new_string"],
                 "optional_fields": ["expected_replacements"],
                 "security_level": "medium",
+                "scope": "agent",
                 "external_effects": ["filesystem"],
                 "description": (
                     "Edit an existing text file in place by replacing an exact literal "
@@ -231,6 +235,7 @@ class AgentPlugin(AIPluginBase):
                     "max_results",
                     "max_file_bytes",
                 ],
+                "scope": "agent",
                 "description": (
                     "Search file contents within the allowed sandbox roots (a native grep). "
                     "'pattern' is plain text by default; set 'regex' true for a Python regex. "
@@ -243,6 +248,7 @@ class AgentPlugin(AIPluginBase):
                 "required_fields": ["command"],
                 "optional_fields": ["cwd", "timeout"],
                 "security_level": "high",
+                "scope": "agent",
                 "external_effects": ["shell"],
                 "description": (
                     "Run a shell command and capture its stdout/stderr/exit code. "
@@ -259,6 +265,10 @@ class AgentPlugin(AIPluginBase):
                 "required_fields": ["goal"],
                 "optional_fields": ["engine", "max_iterations"],
                 "security_level": "medium",
+                # Escape hatch: kept visible on every turn (``core``) so a
+                # Fast-Lane turn can always delegate real filesystem/shell work
+                # to a Drone, whose own prompt uses the full unfiltered tool set.
+                "scope": "core",
                 "external_effects": ["drone"],
                 "description": (
                     "Delegate a focused sub-task to an ephemeral sub-agent (a 'Drone'). "
@@ -273,6 +283,7 @@ class AgentPlugin(AIPluginBase):
                 "required_fields": ["task_id"],
                 "optional_fields": [],
                 "security_level": "medium",
+                "scope": "agent",
                 "external_effects": ["agent_task"],
                 "description": (
                     "Resume a previously paused agent task by its numeric id, continuing "

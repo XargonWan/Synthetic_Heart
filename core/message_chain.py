@@ -112,6 +112,26 @@ _ACTION_SYSTEM_KEYS = frozenset(
 )
 
 
+def _resolve_message_action_for_path(interface_path: Optional[str]) -> Optional[str]:
+    """Resolve the outbound message action type for an interface path.
+
+    Standard interfaces map through ``_INTERFACE_TO_MESSAGE_ACTION``. A Vessel
+    embodiment path (``vessel/<world>``) has no chat ``message_*`` action — its
+    outbound reply is a spoken action ``vessel_<world>_say``. The world is taken
+    structurally from the second path segment (no keyword matching). Returns
+    ``None`` when the path carries no resolvable outbound action.
+    """
+    if not interface_path:
+        return None
+    parts = str(interface_path).split("/")
+    prefix = parts[0] if parts else str(interface_path)
+    if prefix == "vessel":
+        if len(parts) >= 2 and parts[1].strip():
+            return f"vessel_{parts[1].strip()}_say"
+        return None
+    return _INTERFACE_TO_MESSAGE_ACTION.get(prefix)
+
+
 def _normalize_message_payload_text(actions: list) -> list:
     """Promote legacy message payload text aliases to payload.text.
 
@@ -519,6 +539,72 @@ def _drop_leaked_recon_actions(actions: list) -> list:
     return kept
 
 
+def _drop_out_of_scope_leaked_actions(actions: list, ctx: Optional[dict]) -> list:
+    """Drop actions the current turn never offered (engine state contamination).
+
+    The per-turn Fast-Lane prompt hides out-of-scope actions via the Hybrid-C
+    scope gate (see ``core.prompt_engine._derive_default_prompt_action_types``):
+    on a plain chat turn (e.g. ``ollama_serve``) the ``vessel_*`` / ``agent_*``
+    actions are removed from the prompt, so a well-behaved model can only choose
+    from the in-scope allowlist. A *state-retaining* external engine (e.g. the
+    browser-driven selenium endpoint, which cannot be reset from our side) keeps
+    the conversation history across turns, so on a core turn it sometimes echoes
+    an action it was offered on an earlier *Vessel* turn — e.g.
+    ``vessel_minecraft_collect_block`` — even though the current prompt never
+    contained it. That leaked action is not deliverable on this interface: the
+    corrector then demands a chat reply, the model re-emits the same off-scope
+    action, and the turn loops into the ``😵`` fallback.
+
+    This filter drops any action whose ``type`` is NOT in the scoped allowlist
+    (``ctx['allowed_action_types']``) that ``plugin_instance`` recorded from the
+    exact prompt generated for this turn. It is fully structural — the allowlist
+    is the set of action names actually offered, there is no keyword list and no
+    message-text inspection — so it stays correct in every language and as the
+    action set changes. Guarded: if no scoped allowlist is available (the turn
+    was not scope-gated, e.g. a beat with its own explicit scope) the list is
+    returned untouched so this never narrows a legitimately-wide turn.
+
+    Args:
+        actions: List of action dicts to filter.
+        ctx: The runtime context dict for the current turn.
+
+    Returns:
+        The filtered list of actions (out-of-scope leaked actions removed).
+    """
+    if not isinstance(actions, list) or not actions or not isinstance(ctx, dict):
+        return actions
+
+    scoped = ctx.get("allowed_action_types") or ctx.get("allowed_actions")
+    if not isinstance(scoped, (list, set, tuple)) or not scoped:
+        # No scoped allowlist recorded for this turn — do not narrow it.
+        return actions
+
+    allowlist = {str(a).strip() for a in scoped if a}
+    if not allowlist:
+        return actions
+
+    kept: list = []
+    dropped: list = []
+    for action in actions:
+        if not isinstance(action, dict):
+            kept.append(action)
+            continue
+        atype = action.get("type") or action.get("action")
+        if isinstance(atype, str) and atype.strip() and atype.strip() not in allowlist:
+            dropped.append(atype.strip())
+        else:
+            kept.append(action)
+
+    if dropped:
+        log_warning(
+            f"[message_chain] Dropped {len(dropped)} out-of-scope action(s) not "
+            f"offered this turn (state-retaining engine leak): {dropped}; "
+            f"{len(kept)} action(s) remain"
+        )
+
+    return kept
+
+
 def _normalize_message_unknown(actions: list, interface_path: Optional[str]) -> list:
     """Normalize 'message_unknown' action types to the correct interface-specific type.
 
@@ -586,7 +672,10 @@ def _normalize_message_unknown(actions: list, interface_path: Optional[str]) -> 
 
 
 def _build_missing_reply_hint(
-    interface_path: str, is_reactive_vessel_chat: bool
+    interface_path: str,
+    is_reactive_vessel_chat: bool,
+    current_player_message: str | None = None,
+    last_self_line: str | None = None,
 ) -> str:
     """Build the corrector hint shown when a user-facing turn produced no reply.
 
@@ -595,17 +684,34 @@ def _build_missing_reply_hint(
     name the right action family. The vessel world is the second segment of the
     interface path (e.g. ``vessel/minecraft`` -> ``vessel_minecraft_say``); if it
     is missing we fall back to the generic ``vessel_<world>_say`` placeholder.
+
+    ``current_player_message`` and ``last_self_line`` steer the retry toward the
+    player's *new* message and away from parroting Synth's own previous line
+    (the weak-cortex self-echo loop). Both are passed through verbatim from the
+    turn context — the hint never inspects their content for keywords, so it
+    stays multi-language safe.
     """
     if is_reactive_vessel_chat:
         parts = (interface_path or "").split("/")
         world = parts[1] if len(parts) > 1 and parts[1] else "<world>"
         say_action = f"vessel_{world}_say"
-        return (
+        hint = (
             "CHAT REPLY REQUIRED: A player spoke to you in-world and is waiting for a reply. "
             f"You MUST include a speak action for this world (e.g., '{say_action}') so your words "
             "are voiced in the world. Internal actions like diary entries and emotion updates do "
             "NOT substitute for speaking back to the player."
         )
+        if current_player_message and current_player_message.strip():
+            hint += (
+                " Answer THIS latest message from the player: "
+                f'"{current_player_message.strip()}".'
+            )
+        if last_self_line and last_self_line.strip():
+            hint += (
+                " Do NOT repeat your own previous line "
+                f'("{last_self_line.strip()}") — write a new, relevant reply.'
+            )
+        return hint
     return (
         "CHAT REPLY REQUIRED: The user is waiting for a reply in this active conversation turn. "
         f"You MUST include a message action targeting the originating interface '{(interface_path or '').split('/')[0]}' "
@@ -635,6 +741,42 @@ def _vessel_say_delivered(processed: Any) -> bool:
         ):
             return True
     return False
+
+
+def _last_self_vessel_utterance(ctx: dict[str, Any], interface_path: str) -> str | None:
+    """Return the text of Synth's most recent own reply in this vessel chat.
+
+    Reads the current-chat history the prompt was built from (the per-interface
+    deque stored on ``ctx`` under ``interface_path``) and returns the text of the
+    latest entry authored by Synth itself (``user_id``/``sender_id`` == ``self``).
+    Used to detect and suppress a verbatim self-echo on a weak cortex, where the
+    model parrots its own last spoken line instead of answering the player.
+
+    Detection is purely structural (author identity + exact string equality),
+    never based on the message text or any language-specific token, so it stays
+    multi-language safe and keyword-free. Returns None when nothing is found.
+    """
+    if not interface_path:
+        return None
+    try:
+        history = ctx.get(interface_path)
+    except Exception:
+        return None
+    if not history:
+        return None
+    try:
+        entries = list(history)
+    except Exception:
+        return None
+    for entry in reversed(entries):
+        if not isinstance(entry, dict):
+            continue
+        author = entry.get("user_id") or entry.get("sender_id")
+        if isinstance(author, str) and author == "self":
+            text = entry.get("text")
+            if isinstance(text, str) and text.strip():
+                return text
+    return None
 
 
 async def _deliver_vessel_fallback_reply(
@@ -1595,16 +1737,14 @@ async def handle_incoming_message(
                 # but omitted the actions wrapper entirely.  Infer the
                 # correct message action from the context interface_path.
                 _ctx_ipath = ctx.get("interface_path", "") if ctx else ""
-                _ctx_iface = (
-                    _ctx_ipath.split("/")[0] if "/" in _ctx_ipath else _ctx_ipath
-                )
-                _inferred_type = _INTERFACE_TO_MESSAGE_ACTION.get(_ctx_iface)
+                _inferred_type = _resolve_message_action_for_path(_ctx_ipath)
                 if _inferred_type:
                     _text_content = parsed.get("text", "")
-                    _payload: dict[str, Any] = {
-                        "text": _text_content,
-                        "interface_path": _ctx_ipath,
-                    }
+                    # A vessel say action takes only `text`; a chat message
+                    # action also carries interface_path for routing.
+                    _payload: dict[str, Any] = {"text": _text_content}
+                    if not _inferred_type.startswith("vessel_"):
+                        _payload["interface_path"] = _ctx_ipath
                     _msg_action: dict[str, Any] = {
                         "type": _inferred_type,
                         "payload": _payload,
@@ -1749,13 +1889,20 @@ async def handle_incoming_message(
                                     "response",
                                 ) and isinstance(value, str):
                                     if ctx_ipath:
-                                        iface_prefix = str(ctx_ipath).split("/")[0]
-                                        resolved = _INTERFACE_TO_MESSAGE_ACTION.get(
-                                            iface_prefix
+                                        resolved = _resolve_message_action_for_path(
+                                            str(ctx_ipath)
                                         )
                                         if resolved:
                                             synthetic_type = resolved
-                                        if "interface_path" not in payload:
+                                        # A vessel say action carries only text;
+                                        # only chat message actions need routing
+                                        # via interface_path.
+                                        if (
+                                            not str(synthetic_type).startswith(
+                                                "vessel_"
+                                            )
+                                            and "interface_path" not in payload
+                                        ):
                                             payload["interface_path"] = str(ctx_ipath)
                                 synthetic_actions.append(
                                     {"type": synthetic_type, "payload": payload}
@@ -1788,6 +1935,14 @@ async def handle_incoming_message(
                 # starving the turn and triggering the corrector's 😵 loop, while
                 # preserving any real deliverable action in the same array.
                 actions = _drop_leaked_recon_actions(actions)
+                # Drop actions the current turn never offered (e.g. a leaked
+                # vessel_* action echoed by a state-retaining engine on a plain
+                # chat turn). See _drop_out_of_scope_leaked_actions: this uses the
+                # per-turn scoped allowlist recorded from the exact prompt, so an
+                # off-scope leak is removed before it can drive the corrector into
+                # the 😵 loop, while every in-scope deliverable action survives.
+                if is_from_cortex:
+                    actions = _drop_out_of_scope_leaked_actions(actions, ctx)
 
                 # --- New: Validate action types early and trigger corrector for unsupported types ---
                 try:
@@ -1837,8 +1992,17 @@ async def handle_incoming_message(
                             if "/" in ctx_interface_path
                             else ctx_interface_path
                         )
-                        resolved_message_type = _INTERFACE_TO_MESSAGE_ACTION.get(
-                            interface_prefix, "message_synth_webui"
+                        # A generic message action emitted during a Vessel
+                        # embodiment turn must be spoken IN-WORLD, not routed to
+                        # the WebUI fallback. The resolver returns
+                        # vessel_<world>_say for a vessel path (world taken
+                        # structurally from interface_path, no keyword matching).
+                        # Without this, a generic "message_send" is misrouted to
+                        # message_synth_webui and the in-world player never hears
+                        # the reply.
+                        resolved_message_type = (
+                            _resolve_message_action_for_path(ctx_interface_path)
+                            or "message_synth_webui"
                         )
                         rewrote_generic_message_action = False
                         for act in actions:
@@ -2111,7 +2275,25 @@ async def handle_incoming_message(
                                         f"[message_chain] 🔇 Stripped TTS from autonomous message: {removed_payload.get('text', '')[:40]}..."
                                     )
 
-                        for action in actions:
+                        # Anti-echo guard for a reactive in-world player chat: on a
+                        # weak vessel cortex the model sometimes parrots its own last
+                        # spoken line (present in the current-chat history it was
+                        # prompted with) instead of answering the player's new
+                        # message. Compute Synth's most recent own utterance in this
+                        # vessel chat once, up front, so any ``vessel_<world>_say``
+                        # whose text is byte-identical to it can be dropped below —
+                        # leaving ``has_inworld_reply`` False so the missing-reply
+                        # corrector re-runs the turn and produces a fresh reply.
+                        # Structural (author identity + exact string equality),
+                        # keyword-free, multi-language safe.
+                        last_self_vessel_say: str | None = None
+                        if is_reactive_vessel_chat:
+                            last_self_vessel_say = _last_self_vessel_utterance(
+                                ctx, str(ctx.get("interface_path") or "")
+                            )
+                        vessel_echo_indices: list[int] = []
+
+                        for _action_idx, action in enumerate(actions):
                             # Support both 'action' and 'type' keys
                             action_name = None
                             if isinstance(action, dict):
@@ -2132,6 +2314,31 @@ async def handle_incoming_message(
                                 and action_name.startswith("vessel_")
                                 and action_name.endswith("_say")
                             )
+                            # Suppress a verbatim self-echo (see anti-echo note above).
+                            if (
+                                is_vessel_speak
+                                and last_self_vessel_say is not None
+                                and isinstance(action, dict)
+                            ):
+                                say_payload = action.get("payload")
+                                say_text = (
+                                    say_payload.get("text")
+                                    if isinstance(say_payload, dict)
+                                    else None
+                                )
+                                if (
+                                    isinstance(say_text, str)
+                                    and say_text.strip() == last_self_vessel_say.strip()
+                                ):
+                                    vessel_echo_indices.append(_action_idx)
+                                    log_warning(
+                                        "[message_chain] 🌀 Suppressing verbatim vessel "
+                                        f"self-echo ('{say_text[:40]}') — model repeated its "
+                                        "own last line; forcing a fresh reply to the player"
+                                    )
+                                    # Do NOT count this as an in-world reply so the
+                                    # corrector re-runs and produces a real answer.
+                                    continue
                             if is_vessel_speak:
                                 has_inworld_reply = True
                             if (
@@ -2148,6 +2355,14 @@ async def handle_incoming_message(
                                 # break
                             if action_name in current_user_output_action_types:
                                 has_user_output_action = True
+
+                        # Drop the echoed say actions so they are never dispatched.
+                        if vessel_echo_indices and isinstance(actions, list):
+                            for _idx in reversed(vessel_echo_indices):
+                                try:
+                                    actions.pop(_idx)
+                                except Exception:
+                                    pass
 
                     # ------------------------------------------------------------------
                     # LLM-CHOSEN VOICE REPLY (text turn): merge into a single voice note
@@ -2925,9 +3140,24 @@ async def handle_incoming_message(
 
                             errors_list = list(errors)
                             if missing_user_reply:
+                                _hint_player_msg = (
+                                    ctx.get("original_user_message") or text
+                                    if is_reactive_vessel_chat
+                                    else None
+                                )
+                                _hint_last_self = (
+                                    _last_self_vessel_utterance(
+                                        ctx, str(interface_path or "")
+                                    )
+                                    if is_reactive_vessel_chat
+                                    else None
+                                )
                                 errors_list.append(
                                     _build_missing_reply_hint(
-                                        interface_path, is_reactive_vessel_chat
+                                        interface_path,
+                                        is_reactive_vessel_chat,
+                                        current_player_message=_hint_player_msg,
+                                        last_self_line=_hint_last_self,
                                     )
                                 )
 
@@ -2997,7 +3227,20 @@ async def handle_incoming_message(
                                     "failed_actions": [],
                                     "errors": [
                                         _build_missing_reply_hint(
-                                            interface_path, is_reactive_vessel_chat
+                                            interface_path,
+                                            is_reactive_vessel_chat,
+                                            current_player_message=(
+                                                ctx.get("original_user_message") or text
+                                                if is_reactive_vessel_chat
+                                                else None
+                                            ),
+                                            last_self_line=(
+                                                _last_self_vessel_utterance(
+                                                    ctx, str(interface_path or "")
+                                                )
+                                                if is_reactive_vessel_chat
+                                                else None
+                                            ),
                                         )
                                     ],
                                     "had_json_errors": False,

@@ -285,9 +285,92 @@ def _is_non_user_facing_action(action_def: Any) -> bool:
     return any(hint in hint_text for hint in _NON_USER_FACING_ACTION_HINTS)
 
 
+# Structural namespacing prefixes -> declared scope, used ONLY as a transitional
+# fallback when an action does not declare an explicit ``scope`` in its schema.
+# This is action-name namespacing (a stable structural convention), NOT keyword
+# feature routing on message content — the mapping never inspects any user text.
+_SCOPE_NAME_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("vessel_", "vessel"),
+    ("agent_", "agent"),
+)
+_DEFAULT_ACTION_SCOPES: frozenset[str] = frozenset({"core"})
+
+
+def _action_scopes(action_def: Any) -> set[str]:
+    """Return the set of prompt scopes an action belongs to.
+
+    Resolution order (fail-safe, structural — never message text):
+    1. an explicit ``scope`` key on the (normalized) action schema, either a
+       string or a list/tuple/set of strings;
+    2. otherwise a transitional fallback derived from the action-name prefix
+       (``vessel_*`` => ``vessel``, ``agent_*`` => ``agent``) — this is stable
+       structural namespacing, not keyword routing;
+    3. otherwise the default ``{"core"}`` (always visible).
+    """
+    if isinstance(action_def, dict):
+        declared = action_def.get("scope")
+        if isinstance(declared, str) and declared.strip():
+            return {declared.strip()}
+        if isinstance(declared, (list, tuple, set)):
+            scopes = {str(s).strip() for s in declared if str(s).strip()}
+            if scopes:
+                return scopes
+    return set(_DEFAULT_ACTION_SCOPES)
+
+
+def _action_scopes_by_name(action_name: str, action_def: Any) -> set[str]:
+    """``_action_scopes`` with the name-prefix fallback applied.
+
+    Kept separate so the prefix fallback only kicks in when no explicit scope is
+    declared, preserving the primacy of the schema-declared value.
+    """
+    if isinstance(action_def, dict) and action_def.get("scope"):
+        return _action_scopes(action_def)
+    name = str(action_name or "")
+    for prefix, scope in _SCOPE_NAME_PREFIXES:
+        if name.startswith(prefix):
+            return {scope}
+    return set(_DEFAULT_ACTION_SCOPES)
+
+
+def _resolve_turn_scopes(
+    message: Any | None,
+    context_memory: Any | None,
+    interface_path: str | None,
+) -> set[str]:
+    """Compute the set of action scopes visible for the current Fast-Lane turn.
+
+    Always includes ``core`` (never hidden). Adds vessel-support scopes
+    (``vessel``, ``recon``, ``wiki``) only on a Vessel embodiment turn, detected
+    a-priori and structurally via :func:`core.vessel_focus.is_vessel_turn`.
+
+    Deliberately does NOT add the ``agent`` scope: whether a turn escalates to
+    the Agent Lane is decided DOWNSTREAM by the deterministic
+    :func:`core.agent_router.classify` on the actions the model already emitted —
+    it is never predicted here. Heavy ``agent_*`` tools therefore stay hidden
+    from the Fast-Lane chat prompt and remain reachable via (1) an
+    ``external_effects`` action promoting the turn to the Agent Lane, whose
+    :meth:`core.agent_core.AgentLoopManager._build_agent_prompt` uses the full
+    ``tool_registry.all_tools()``, or (2) ``spawn_drone`` (kept ``core``).
+
+    Fail-safe: on any error resolves to a wide set so no scope is wrongly hidden.
+    """
+    scopes: set[str] = {"core"}
+    try:
+        from core.vessel_focus import is_vessel_turn
+
+        if is_vessel_turn(message, context_memory, interface_path):
+            scopes.update({"vessel", "recon", "wiki"})
+    except Exception:
+        # Never hide anything on error: widen to every known scope.
+        return {"core", "vessel", "recon", "wiki", "interface"}
+    return scopes
+
+
 def _derive_default_prompt_action_types(
     available_actions: dict[str, Any],
     interface_name: str | None,
+    turn_scopes: set[str] | None = None,
 ) -> set[str]:
     try:
         from core.core_initializer import INTERFACE_REGISTRY
@@ -307,6 +390,14 @@ def _derive_default_prompt_action_types(
         if current_interface:
             action_interfaces = _action_source_tokens(action_def) & interface_names
             if action_interfaces and current_interface not in action_interfaces:
+                continue
+
+        # Per-turn scope gate: drop actions whose declared scope is not visible
+        # this turn. ``core`` is always allowed; the ``interface`` scope rides on
+        # the interface filter above, so a scope-less/core action is kept.
+        if turn_scopes is not None:
+            action_scopes = _action_scopes_by_name(action_name, action_def)
+            if not (action_scopes & turn_scopes) and "core" not in action_scopes:
                 continue
 
         allowed.add(action_name)
@@ -1998,16 +2089,22 @@ async def build_prompt_request(
                 )
 
         if allowed_action_types_for_prompt is None:
+            # Per-turn scope gate: hide out-of-scope actions from the Fast-Lane
+            # prompt while they stay registered/callable. Vessel scopes are added
+            # a-priori on a Vessel turn; the ``agent`` scope is intentionally
+            # never added here (see _resolve_turn_scopes).
+            turn_scopes = _resolve_turn_scopes(message, context_memory, interface_path)
             derived_action_types = _derive_default_prompt_action_types(
                 full_actions,
                 interface_name,
+                turn_scopes=turn_scopes,
             )
             if derived_action_types and len(derived_action_types) < len(full_actions):
                 allowed_action_types_for_prompt = derived_action_types
                 log_debug(
                     "[json_prompt] Derived default prompt action scope: "
                     f"{len(derived_action_types)}/{len(full_actions)} actions kept "
-                    f"for interface={interface_name}"
+                    f"for interface={interface_name} scopes={sorted(turn_scopes)}"
                 )
 
         if allowed_action_types_for_prompt is not None:
