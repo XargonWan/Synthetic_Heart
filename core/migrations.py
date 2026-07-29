@@ -298,11 +298,115 @@ async def _rename_timestamp_columns() -> None:
                 pass
 
 
+def _dedup_text_segments(text: str | None, separator: str) -> str | None:
+    """Drop duplicate ``separator``-joined segments from ``text`` (normalised compare).
+
+    Returns the de-duplicated string, or the original value when nothing changed
+    / there is nothing to dedup. Normalisation is lowercase + collapsed
+    whitespace — structural only, no keyword or phrase matching.
+    """
+    if not text or separator not in text:
+        return text
+    seen: set[str] = set()
+    kept: list[str] = []
+    for seg in text.split(separator):
+        norm = " ".join(seg.split()).lower()
+        if not norm:
+            # Preserve genuinely empty segments verbatim (rare) to avoid altering
+            # spacing when there is nothing to dedup.
+            kept.append(seg)
+            continue
+        if norm in seen:
+            continue
+        seen.add(norm)
+        kept.append(seg)
+    return separator.join(kept)
+
+
+async def _dedup_diary_segments() -> None:
+    """Retroactively de-duplicate repeated segments in existing ``ai_diary`` rows.
+
+    The daily upsert concatenates every entry into one row per day. Before the
+    insert-time dedup was added, an LLM re-emitting the same content/summary/
+    thought/user_message made rows accumulate identical fragments. This one-shot
+    migration rewrites each row with duplicate segments removed.
+
+    Idempotent (a second run finds nothing to change) and best-effort: any row
+    that fails is skipped without aborting the batch. ``content`` and
+    ``personal_thought`` are split on the ``\\n\\n---\\n\\n`` separator;
+    ``interaction_summary`` and ``user_message`` on ``\\n---\\n``.
+    """
+    from core.db import _get_db_type, get_conn_ctx
+
+    _SEP_BLOCK = "\n\n---\n\n"
+    _SEP_LINE = "\n---\n"
+    # (column, separator)
+    fields: list[tuple[str, str]] = [
+        ("content", _SEP_BLOCK),
+        ("personal_thought", _SEP_BLOCK),
+        ("interaction_summary", _SEP_LINE),
+        ("user_message", _SEP_LINE),
+    ]
+
+    db_type = _get_db_type()
+    async with get_conn_ctx() as conn:
+        async with conn.cursor() as cur:
+            if not await _table_exists(cur, "ai_diary", db_type):
+                return
+            await cur.execute(
+                "SELECT id, content, personal_thought, interaction_summary, "
+                "user_message FROM ai_diary"
+            )
+            rows = await cur.fetchall()
+            changed = 0
+            for row in rows or []:
+                if isinstance(row, dict):
+                    row_id = row.get("id")
+                    values = {col: row.get(col) for col, _sep in fields}
+                else:
+                    row_id = row[0]
+                    values = {
+                        "content": row[1],
+                        "personal_thought": row[2],
+                        "interaction_summary": row[3],
+                        "user_message": row[4],
+                    }
+                updates: dict[str, str | None] = {}
+                for col, sep in fields:
+                    original = values.get(col)
+                    deduped = _dedup_text_segments(original, sep)
+                    if deduped != original:
+                        updates[col] = deduped
+                if not updates:
+                    continue
+                set_clause = ", ".join(f"{col}=%s" for col in updates)
+                params = list(updates.values()) + [row_id]
+                try:
+                    await cur.execute(
+                        f"UPDATE ai_diary SET {set_clause} WHERE id=%s",  # noqa: S608
+                        tuple(params),
+                    )
+                    changed += 1
+                except Exception as exc:
+                    log_warning(
+                        f"[migrations] diary dedup skipped row id={row_id}: {exc}"
+                    )
+            try:
+                await conn.commit()
+            except Exception:
+                pass
+            if changed:
+                log_info(
+                    f"[migrations] De-duplicated segments in {changed} ai_diary row(s)"
+                )
+
+
 # Registry of startup migrations, applied in order. Each entry is
 # (name, coroutine-callable). Add new one-shot migrations here.
 _STARTUP_MIGRATIONS: list[tuple[str, Any]] = [
     ("drop_legacy_recent_chats", _drop_legacy_recent_chats),
     ("rename_timestamp_columns", _rename_timestamp_columns),
+    ("dedup_diary_segments", _dedup_diary_segments),
 ]
 
 
