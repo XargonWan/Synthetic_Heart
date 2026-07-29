@@ -2574,5 +2574,35 @@ function shutdown() {
   if (typeof hardExit.unref === 'function') hardExit.unref();
 }
 
+// A protocol/version error is thrown SYNCHRONOUSLY from deep inside
+// minecraft-protocol's packet transform stream (e.g. framing.js "throw e" on a
+// version mismatch: "This server is version 1.20.2, you are using version
+// 1.21.11"). That throw escapes the mineflayer bot's own 'error' emitter, so
+// without a process-level guard it becomes an UNHANDLED exception and crashes
+// the whole Node bridge — turning a recoverable, reportable connect failure
+// into a full process death + relaunch loop. Catch it here: record the reason,
+// settle any in-flight /connect as a clean failure so the Python connector gets
+// a real message instead of a vague "Server disconnected", tear the bot down,
+// and KEEP the HTTP bridge alive.
+function handleFatalAsync(kind, err) {
+  const msg = err && err.message ? err.message : String(err);
+  lastError = msg;
+  log(`${kind} (kept alive):`, msg);
+  if (bot) {
+    try {
+      bot.removeAllListeners();
+      bot.quit();
+    } catch (_e) {
+      /* ignore */
+    }
+    bot = null;
+    connected = false;
+  }
+  settleConnect({ ok: false, detail: msg });
+}
+
+process.on('uncaughtException', (err) => handleFatalAsync('uncaughtException', err));
+process.on('unhandledRejection', (reason) => handleFatalAsync('unhandledRejection', reason));
+
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
