@@ -83,7 +83,22 @@ Automatic cutover and backups
 - ``SOURCE_DB_*`` identifies the preserved legacy MariaDB source used only for migration and verification.
 - ``SYNTH_DB_BACKUP_ENABLED=1`` enables the embedded application-owned backup scheduler.
 - ``SYNTH_DB_BACKUP_INTERVAL_HOURS=24`` controls the pg_dump cadence.
-- ``SYNTH_BACKUPS_DIR`` selects where runtime and legacy archival dumps are written inside the synth container. The WebUI Settings tab also exposes a manual backup action that writes to this same directory.
+- ``SYNTH_BACKUPS_DIR`` selects where runtime and legacy archival dumps are written inside the synth container. The WebUI Settings tab also exposes a manual backup action that writes to this same directory. The manual backup action now also downloads the resulting archive to the browser, and a companion action can back up a specific list of tables (see :doc:`api_endpoints`).
+
+Logging & retention
+-------------------
+
+The on-disk log naming scheme, rotation, gzip compression, and retention are
+documented in full in :doc:`logging`. The relevant environment variables are:
+
+- ``LOG_DIR`` — directory that holds all log files (default ``logs``).
+- ``LOG_RETENTION_DAYS`` — days of logs to keep (plain + gzip combined) before
+  deletion (default ``7``). Today and yesterday stay plain text; older days
+  within the window are gzip-compressed; anything past the window is deleted.
+- ``LOGGING_LEVEL`` — root logging level for the main runtime (default ``INFO``).
+
+Because logging is initialised during bootstrap (before the database), these
+are environment variables rather than runtime config-registry keys.
 
 Legacy migration note
 ---------------------

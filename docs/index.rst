@@ -56,6 +56,7 @@ getting started.
    COMPONENT_DEVELOPMENT_GUIDE
    dev_components
    api_endpoints
+   logging
    agent_integration
    agentic_tools
    component_pattern

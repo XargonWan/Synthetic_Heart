@@ -250,6 +250,36 @@ Expected output:
 - No connection errors
 - Connection acquire/release logs show proper cleanup
 
+Backup & read-only query access
+-------------------------------
+
+The runtime database can be backed up and queried through both the WebUI/HTTP
+API and the ``synth-db`` MCP server.
+
+**HTTP API** (see :doc:`api_endpoints` for full parameters):
+
+- ``POST /api/database/backup`` — full runtime backup; returns the generated
+  filename. The WebUI Settings tab triggers this and then downloads the archive
+  to the browser via ``GET /api/database/backup/download?filename=<name>``.
+- ``POST /api/database/backup/table`` — backup a **list** of tables
+  (``{"tables": ["a", "b"]}``). Table names are sanitised to identifier
+  characters; any invalid name rejects the whole request.
+- ``POST /api/database/query`` — run a **read-only** ``SELECT``/``WITH`` query.
+  Non-read-only statements (INSERT/UPDATE/DELETE/DDL/multiple statements) are
+  rejected with ``400``. ``limit`` is clamped to ``1..1000`` (default ``200``).
+
+Both backup handlers write to ``SYNTH_BACKUPS_DIR`` and the download handler
+confines the requested filename to that directory (path traversal → ``403``).
+
+**synth-db MCP server** (``mcp_servers/synth_db.py``):
+
+- ``run_select("SELECT ...")`` — read-only query, row cap ``1..200``.
+- ``backup_database(confirm=False, target=None)`` — full backup; dry-run unless
+  ``confirm=True``.
+- ``backup_table(tables=[...], confirm=False, target=None)`` — backup a list of
+  tables. Table names are sanitised; an invalid name rejects the request. Dry-run
+  unless ``confirm=True``.
+
 References
 ----------
 
