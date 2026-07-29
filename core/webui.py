@@ -94,6 +94,62 @@ _VRM_DIR_ENV = "SYNTH_WEBUI_VRM_DIR"
 _WEBUI_TOUCH_CONTEXT_ID = "__webui_touch_overlay"
 _WEBUI_TOUCH_PRIORITY = 11
 
+# Read-only query guard for the /api/database/query endpoint. Anything that is
+# not a single SELECT/WITH statement is rejected before it reaches the DB.
+_READ_ONLY_QUERY_RE = re.compile(r"^\s*(?:select|with)\b", re.IGNORECASE)
+_WRITE_QUERY_RE = re.compile(
+    r"\b(?:insert|update|delete|drop|alter|create|truncate|replace|grant|"
+    r"revoke|merge|call|exec|execute|attach|detach|vacuum|pragma|set|copy)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_read_only_query(query: str) -> bool:
+    """Return True only for a single read-only SELECT/WITH statement."""
+    if not isinstance(query, str):
+        return False
+    stripped = query.strip().rstrip(";").strip()
+    if not stripped:
+        return False
+    # Reject multiple statements.
+    if ";" in stripped:
+        return False
+    if not _READ_ONLY_QUERY_RE.match(stripped):
+        return False
+    if _WRITE_QUERY_RE.search(stripped):
+        return False
+    return True
+
+
+def _serialize_query_rows(rows: list, limit: int) -> list:
+    """Coerce DB rows into JSON-serialisable values, capped at *limit*."""
+    from datetime import date, datetime
+    from decimal import Decimal
+
+    def _coerce(value: object) -> object:
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, (datetime, date)):
+            return value.isoformat()
+        if isinstance(value, Decimal):
+            return float(value)
+        if isinstance(value, (bytes, bytearray)):
+            try:
+                return value.decode("utf-8", errors="replace")
+            except Exception:
+                return repr(value)
+        return str(value)
+
+    out: list = []
+    for row in rows[:limit]:
+        if isinstance(row, dict):
+            out.append({str(k): _coerce(v) for k, v in row.items()})
+        elif isinstance(row, (list, tuple)):
+            out.append([_coerce(v) for v in row])
+        else:
+            out.append(_coerce(row))
+    return out
+
 
 # Ensure correct MIME types are registered
 mimetypes.init()
@@ -961,6 +1017,27 @@ class SynthWebUIInterface:
             self.set_external_endpoint_model
         )
         self.app.post("/api/database/backup")(self.create_database_backup_endpoint)
+        self.app.get(
+            "/api/database/backup/download",
+            dependencies=[Depends(_require_api_token)],
+        )(self.download_database_backup_endpoint)
+        self.app.post(
+            "/api/database/backup/table",
+            dependencies=[Depends(_require_api_token)],
+        )(self.create_table_backup_endpoint)
+        self.app.post(
+            "/api/database/query",
+            dependencies=[Depends(_require_api_token)],
+        )(self.database_query_endpoint)
+        # Log archive: filtered query, one-shot ZIP download of the whole logs dir.
+        self.app.get(
+            "/api/logs/query",
+            dependencies=[Depends(_require_api_token)],
+        )(self.logs_query_endpoint)
+        self.app.get(
+            "/api/logs/download",
+            dependencies=[Depends(_require_api_token)],
+        )(self.download_logs_archive_endpoint)
 
         # Template sections route for modular loading
         self.app.get("/templates/{section}.html")(self.serve_template_section)
@@ -1500,6 +1577,230 @@ class SynthWebUIInterface:
             error_msg = str(e)
             log_error(
                 f"{LOG_PREFIX} create_database_backup_endpoint failed: {error_msg}"
+            )
+            raise HTTPException(status_code=500, detail=error_msg)
+
+    async def create_table_backup_endpoint(self, request: Request):
+        """Create a gzip SQL dump restricted to a list of tables.
+
+        Body: ``{"tables": ["table_a", "table_b", ...]}``.
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+        tables = body.get("tables") if isinstance(body, dict) else None
+        if not isinstance(tables, list) or not tables:
+            raise HTTPException(
+                status_code=400,
+                detail="Body must contain a non-empty 'tables' list",
+            )
+        try:
+            from core.db_backup import create_table_backup
+
+            backup_path = await create_table_backup([str(t) for t in tables])
+            if backup_path is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Per-table database backup did not produce an output file",
+                )
+            return JSONResponse(
+                {
+                    "success": True,
+                    "path": str(backup_path),
+                    "filename": backup_path.name,
+                    "tables": [str(t) for t in tables],
+                }
+            )
+        except HTTPException:
+            raise
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} create_table_backup_endpoint failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
+
+    async def download_database_backup_endpoint(self, filename: str):
+        """Stream a previously-created backup file as an attachment.
+
+        The *filename* is confined to the configured backups directory to
+        prevent path traversal.
+        """
+        try:
+            from core.db_backup import _backups_dir
+
+            backups_root = _backups_dir().resolve()
+            # Reject any path component / traversal outright.
+            candidate = (backups_root / Path(filename).name).resolve()
+            try:
+                candidate.relative_to(backups_root)
+            except ValueError:
+                raise HTTPException(status_code=403, detail="Access denied")
+            if not candidate.exists() or not candidate.is_file():
+                raise HTTPException(status_code=404, detail="Backup file not found")
+            return FileResponse(
+                str(candidate),
+                media_type="application/gzip",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{candidate.name}"'
+                },
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            error_msg = str(e)
+            log_error(
+                f"{LOG_PREFIX} download_database_backup_endpoint failed: {error_msg}"
+            )
+            raise HTTPException(status_code=500, detail=error_msg)
+
+    async def database_query_endpoint(self, request: Request):
+        """Run a read-only (SELECT/WITH) query and return rows as JSON.
+
+        Body: ``{"query": "SELECT ...", "limit": 200}``.
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+        query = body.get("query") if isinstance(body, dict) else None
+        if not isinstance(query, str) or not query.strip():
+            raise HTTPException(status_code=400, detail="Body must contain a 'query'")
+        raw_limit = body.get("limit", 200) if isinstance(body, dict) else 200
+        try:
+            limit = max(1, min(int(raw_limit), 1000))
+        except (TypeError, ValueError):
+            limit = 200
+
+        if not _is_read_only_query(query):
+            raise HTTPException(
+                status_code=400,
+                detail="Only read-only queries (SELECT / WITH) are permitted",
+            )
+
+        try:
+            from core.db import execute_query
+
+            rows = await execute_query(query)
+            serialized = _serialize_query_rows(rows, limit)
+            return JSONResponse(
+                {
+                    "success": True,
+                    "row_count": len(serialized),
+                    "truncated": len(serialized) >= limit,
+                    "rows": serialized,
+                }
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} database_query_endpoint failed: {error_msg}")
+            raise HTTPException(status_code=400, detail=error_msg)
+
+    async def logs_query_endpoint(self, request: Request):
+        """Search on-disk log files (gzip-aware) with filters.
+
+        Query params: ``q`` (text/regex), ``regex`` (bool), ``stems`` (comma
+        list), ``level`` (min level), ``since`` (ISO timestamp), ``limit``.
+        """
+        try:
+            from core import log_archive
+
+            params = request.query_params
+            query = params.get("q", "") or ""
+            is_regex = str(params.get("regex", "")).lower() in {"1", "true", "yes"}
+            stems_raw = params.get("stems", "") or ""
+            stems = [s.strip() for s in stems_raw.split(",") if s.strip()] or None
+            level = params.get("level") or None
+            since_raw = params.get("since") or None
+            since = None
+            if since_raw:
+                try:
+                    from datetime import datetime as _dt
+
+                    since = _dt.fromisoformat(since_raw)
+                except ValueError:
+                    since = None
+            try:
+                limit = max(1, min(int(params.get("limit", 500)), 5000))
+            except (TypeError, ValueError):
+                limit = 500
+
+            log_dir = Path(os.getenv("LOG_DIR", "logs"))
+            hits = log_archive.search(
+                query=query,
+                is_regex=is_regex,
+                stems=stems,
+                level=level,
+                since=since,
+                max_results=limit,
+                log_dir=log_dir,
+                truncate_large=2000,
+            )
+            return JSONResponse(
+                {
+                    "success": True,
+                    "count": len(hits),
+                    "truncated": len(hits) >= limit,
+                    "hits": [
+                        {
+                            "stem": h.stem,
+                            "file": h.file,
+                            "level": h.level,
+                            "timestamp": h.timestamp,
+                            "line": h.line,
+                        }
+                        for h in hits
+                    ],
+                }
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} logs_query_endpoint failed: {error_msg}")
+            raise HTTPException(status_code=400, detail=error_msg)
+
+    async def download_logs_archive_endpoint(self):
+        """Stream a ZIP archive of the entire log directory (all rotations)."""
+        try:
+            import io
+            import zipfile
+            from datetime import datetime as _dt
+
+            from core import log_archive
+            from fastapi.responses import StreamingResponse
+
+            log_dir = Path(os.getenv("LOG_DIR", "logs"))
+            files = list(log_archive.iter_all_files(log_dir))
+            if not files:
+                raise HTTPException(status_code=404, detail="No log files found")
+
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for path in files:
+                    try:
+                        zf.write(str(path), arcname=path.name)
+                    except OSError:
+                        continue
+            buffer.seek(0)
+            stamp = _dt.now().strftime("%Y%m%dT%H%M%S")
+            headers = {
+                "Content-Disposition": f'attachment; filename="synth-logs-{stamp}.zip"'
+            }
+            return StreamingResponse(
+                buffer,
+                media_type="application/zip",
+                headers=headers,
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            error_msg = str(e)
+            log_error(
+                f"{LOG_PREFIX} download_logs_archive_endpoint failed: {error_msg}"
             )
             raise HTTPException(status_code=500, detail=error_msg)
 

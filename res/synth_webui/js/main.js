@@ -6153,6 +6153,30 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 const filename = payload.filename || payload.path || 'backup completed';
                                 if (backupStatus) backupStatus.textContent = `Backup created: ${filename}`;
                                 try { if (window.showToast) window.showToast(`Database backup created: ${filename}`, false); } catch (e) { /* ignore */ }
+                                // Trigger a browser download of the freshly created backup.
+                                const downloadName = payload.filename || (payload.path ? String(payload.path).split('/').pop() : '');
+                                if (downloadName) {
+                                    try {
+                                        if (backupStatus) backupStatus.textContent = `Downloading ${downloadName}…`;
+                                        const dl = await fetch(`/api/database/backup/download?filename=${encodeURIComponent(downloadName)}`);
+                                        if (dl.ok) {
+                                            const blob = await dl.blob();
+                                            const objectUrl = window.URL.createObjectURL(blob);
+                                            const anchor = document.createElement('a');
+                                            anchor.href = objectUrl;
+                                            anchor.download = downloadName;
+                                            document.body.appendChild(anchor);
+                                            anchor.click();
+                                            document.body.removeChild(anchor);
+                                            window.setTimeout(() => window.URL.revokeObjectURL(objectUrl), 4000);
+                                            if (backupStatus) backupStatus.textContent = `Backup downloaded: ${downloadName}`;
+                                        } else if (backupStatus) {
+                                            backupStatus.textContent = `Backup created: ${downloadName} (download failed: HTTP ${dl.status})`;
+                                        }
+                                    } catch (dlErr) {
+                                        if (backupStatus) backupStatus.textContent = `Backup created: ${downloadName} (download failed)`;
+                                    }
+                                }
                             } catch (error) {
                                 const message = error && error.message ? error.message : 'Backup failed';
                                 if (backupStatus) backupStatus.textContent = `Backup failed: ${message}`;
@@ -6804,6 +6828,144 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         loadFailureLog();
                     });
                 }
+
+                // ── Archive & Query sub-tab ──
+                const logsArchiveDownloadBtn = document.getElementById('logs-archive-download');
+                const logsArchiveDownloadStatus = document.getElementById('logs-archive-download-status');
+                const logsQueryText = document.getElementById('logs-query-text');
+                const logsQueryRegex = document.getElementById('logs-query-regex');
+                const logsQueryStems = document.getElementById('logs-query-stems');
+                const logsQueryLevel = document.getElementById('logs-query-level');
+                const logsQueryLimit = document.getElementById('logs-query-limit');
+                const logsQueryRunBtn = document.getElementById('logs-query-run');
+                const logsQueryMeta = document.getElementById('logs-query-meta');
+                const logsQueryOutput = document.getElementById('logs-query-output');
+
+                async function downloadBlobFromUrl(url, statusEl, opts) {
+                    const options = opts || {};
+                    if (statusEl) statusEl.textContent = options.pending || 'Preparing download…';
+                    try {
+                        const response = await fetch(url, { method: options.method || 'GET', headers: options.headers, body: options.body });
+                        if (!response.ok) {
+                            let detail = `HTTP ${response.status}`;
+                            try {
+                                const payload = await response.json();
+                                detail = payload.detail || payload.error || detail;
+                            } catch (e) { /* not json */ }
+                            throw new Error(detail);
+                        }
+                        const disposition = response.headers.get('content-disposition') || '';
+                        let filename = options.fallbackName || 'download';
+                        const match = disposition.match(/filename="?([^"]+)"?/i);
+                        if (match && match[1]) filename = match[1];
+                        const blob = await response.blob();
+                        const objectUrl = window.URL.createObjectURL(blob);
+                        const anchor = document.createElement('a');
+                        anchor.href = objectUrl;
+                        anchor.download = filename;
+                        document.body.appendChild(anchor);
+                        anchor.click();
+                        document.body.removeChild(anchor);
+                        window.setTimeout(() => window.URL.revokeObjectURL(objectUrl), 4000);
+                        if (statusEl) statusEl.textContent = `Downloaded ${filename}`;
+                        return filename;
+                    } catch (error) {
+                        const message = error && error.message ? error.message : 'Download failed';
+                        if (statusEl) statusEl.textContent = `Download failed: ${message}`;
+                        try { if (window.showToast) window.showToast(`Download failed: ${message}`, true); } catch (e) { /* ignore */ }
+                        throw error;
+                    }
+                }
+
+                if (logsArchiveDownloadBtn) {
+                    logsArchiveDownloadBtn.addEventListener('click', async () => {
+                        logsArchiveDownloadBtn.disabled = true;
+                        try {
+                            await downloadBlobFromUrl('/api/logs/download', logsArchiveDownloadStatus, {
+                                pending: 'Building log archive…',
+                                fallbackName: 'synth-logs.zip',
+                            });
+                        } catch (e) { /* status already set */ }
+                        finally { logsArchiveDownloadBtn.disabled = false; }
+                    });
+                }
+
+                function renderLogQueryResults(payload) {
+                    if (!logsQueryOutput) return;
+                    const hits = Array.isArray(payload.hits) ? payload.hits : [];
+                    if (!hits.length) {
+                        logsQueryOutput.innerHTML = '<div class="logs-empty-state">No matching log lines.</div>';
+                        return;
+                    }
+                    const frag = document.createDocumentFragment();
+                    hits.forEach((hit) => {
+                        const level = String(hit.level || 'other').toLowerCase();
+                        const row = document.createElement('div');
+                        row.className = `logs-query-hit level-${level}`;
+                        const stem = document.createElement('span');
+                        stem.className = 'lqh-stem';
+                        stem.textContent = hit.stem || '';
+                        const lvl = document.createElement('span');
+                        lvl.className = 'lqh-level';
+                        lvl.textContent = hit.level || '';
+                        const text = document.createElement('span');
+                        text.className = 'lqh-text';
+                        text.textContent = hit.line || '';
+                        row.appendChild(stem);
+                        row.appendChild(lvl);
+                        row.appendChild(text);
+                        frag.appendChild(row);
+                    });
+                    logsQueryOutput.innerHTML = '';
+                    logsQueryOutput.appendChild(frag);
+                }
+
+                async function runLogsQuery() {
+                    if (!logsQueryOutput) return;
+                    const params = new URLSearchParams();
+                    const q = (logsQueryText && logsQueryText.value || '').trim();
+                    if (q) params.set('q', q);
+                    if (logsQueryRegex && logsQueryRegex.checked) params.set('regex', 'true');
+                    const stems = (logsQueryStems && logsQueryStems.value || '').trim();
+                    if (stems) params.set('stems', stems);
+                    const level = logsQueryLevel && logsQueryLevel.value || '';
+                    if (level) params.set('level', level);
+                    let limit = parseInt(logsQueryLimit && logsQueryLimit.value, 10);
+                    if (!Number.isFinite(limit) || limit < 1) limit = 500;
+                    if (limit > 5000) limit = 5000;
+                    params.set('limit', String(limit));
+                    if (logsQueryMeta) logsQueryMeta.textContent = 'Searching…';
+                    logsQueryOutput.innerHTML = '<div class="logs-empty-state">Searching…</div>';
+                    try {
+                        const response = await fetch(`/api/logs/query?${params.toString()}`);
+                        const payload = await response.json().catch(() => ({}));
+                        if (!response.ok || !payload.success) {
+                            throw new Error(payload.detail || payload.error || `HTTP ${response.status}`);
+                        }
+                        renderLogQueryResults(payload);
+                        if (logsQueryMeta) {
+                            const truncNote = payload.truncated ? ' (truncated — refine query or raise limit)' : '';
+                            logsQueryMeta.textContent = `${payload.count || 0} matches${truncNote}`;
+                        }
+                    } catch (error) {
+                        const message = error && error.message ? error.message : 'Query failed';
+                        if (logsQueryMeta) logsQueryMeta.textContent = `Query failed: ${message}`;
+                        logsQueryOutput.innerHTML = `<div class="logs-empty-state">Query failed: ${safeEscapeHtml(message)}</div>`;
+                    }
+                }
+
+                if (logsQueryRunBtn) {
+                    logsQueryRunBtn.addEventListener('click', runLogsQuery);
+                }
+                if (logsQueryText) {
+                    logsQueryText.addEventListener('keydown', (event) => {
+                        if (event.key === 'Enter') {
+                            event.preventDefault();
+                            runLogsQuery();
+                        }
+                    });
+                }
+
                 switchLogsSubtab(logsState.currentSubtab || 'live');
                 window.__synth_logs_initialized = true;
             }

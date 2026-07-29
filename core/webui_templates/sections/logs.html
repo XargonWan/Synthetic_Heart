@@ -5,6 +5,7 @@
             <nav class="logs-subnav" role="tablist" aria-label="Logs views">
                 <button class="logs-subnav-btn active" type="button" data-logs-subtab="live" aria-selected="true">Live Log Stream</button>
                 <button class="logs-subnav-btn" type="button" data-logs-subtab="failures" aria-selected="false">LLM Failures</button>
+                <button class="logs-subnav-btn" type="button" data-logs-subtab="archive" aria-selected="false">Archive &amp; Query</button>
             </nav>
         </div>
 
@@ -86,6 +87,40 @@
                 </div>
 
                 <div id="logs-failures-pagination" class="logs-failures-pagination"></div>
+            </section>
+
+            <section class="logs-subpanel" id="logs-panel-archive" data-logs-subtab="archive">
+                <div class="log-controls logs-archive-controls">
+                    <button id="logs-archive-download" type="button">⬇ Download all logs (.zip)</button>
+                    <span id="logs-archive-download-status" class="logs-archive-status"></span>
+                </div>
+                <div class="log-controls logs-archive-controls">
+                    <input type="text" id="logs-query-text" placeholder="Search text or regex..." style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border); background: rgba(12, 12, 20, 0.58); color: inherit; min-width: 240px;" />
+                    <label><input type="checkbox" id="logs-query-regex" /> Regex</label>
+                    <label>
+                        Stems:
+                        <input type="text" id="logs-query-stems" placeholder="e.g. synth,webui" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border); background: rgba(12, 12, 20, 0.58); color: inherit; min-width: 160px; margin-left: 0.35rem;" />
+                    </label>
+                    <label>
+                        Level:
+                        <select id="logs-query-level" style="margin-left: 0.5rem; padding: 0.25rem 0.5rem;">
+                            <option value="">All</option>
+                            <option value="DEBUG">DEBUG</option>
+                            <option value="INFO">INFO</option>
+                            <option value="WARNING">WARNING</option>
+                            <option value="ERROR">ERROR</option>
+                        </select>
+                    </label>
+                    <label>
+                        Limit:
+                        <input type="number" id="logs-query-limit" value="500" min="1" max="5000" style="width: 90px; padding: 0.25rem 0.5rem; margin-left: 0.35rem;" />
+                    </label>
+                    <button id="logs-query-run" type="button">Search</button>
+                </div>
+                <div id="logs-query-meta" class="logs-archive-status"></div>
+                <div id="logs-query-output" class="logs-query-output">
+                    <div class="logs-empty-state">Run a query to search across today's, yesterday's and archived logs.</div>
+                </div>
             </section>
         </div>
     </div>
@@ -253,5 +288,53 @@
         background: rgba(12, 12, 20, 0.42);
         border: 1px dashed rgba(255, 255, 255, 0.1);
     }
+
+    .logs-archive-controls {
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+    }
+
+    .logs-archive-status {
+        color: var(--text-soft);
+        font-size: 0.85rem;
+    }
+
+    .logs-query-output {
+        display: flex;
+        flex-direction: column;
+        gap: 0.2rem;
+        padding: 0.75rem 0;
+        overflow-y: auto;
+        font-family: var(--mono, monospace);
+        font-size: 0.82rem;
+    }
+
+    .logs-query-hit {
+        display: flex;
+        gap: 0.6rem;
+        padding: 0.25rem 0.5rem;
+        border-radius: 6px;
+        background: rgba(12, 12, 20, 0.42);
+        white-space: pre-wrap;
+        word-break: break-word;
+    }
+
+    .logs-query-hit .lqh-stem {
+        color: #b9d2ff;
+        flex: 0 0 auto;
+    }
+
+    .logs-query-hit .lqh-level {
+        flex: 0 0 auto;
+        text-transform: uppercase;
+        font-size: 0.72rem;
+        opacity: 0.85;
+    }
+
+    .logs-query-hit.level-error .lqh-level { color: #ff8a75; }
+    .logs-query-hit.level-warning .lqh-level { color: #ffcf6b; }
+    .logs-query-hit.level-info .lqh-level { color: #7fd6a6; }
+    .logs-query-hit.level-debug .lqh-level { color: var(--text-soft); }
     </style>
 </section>
