@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -151,6 +152,122 @@ def build_database_backup_plan_for_connection(
         ),
         env=env,
     )
+
+
+_TABLE_NAME_RE = None  # lazily compiled in _sanitize_table_names
+
+
+def _sanitize_table_names(tables: list[str]) -> list[str]:
+    """Validate and de-duplicate table identifiers for a per-table backup.
+
+    Only plain SQL identifiers are allowed (letters, digits, underscore,
+    optionally a single ``schema.table`` qualifier). Anything else is
+    rejected to keep the value out of the shelled-out dump command.
+    """
+    global _TABLE_NAME_RE
+    if _TABLE_NAME_RE is None:
+        _TABLE_NAME_RE = re.compile(
+            r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?$"
+        )
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw in tables:
+        name = str(raw).strip()
+        if not name:
+            continue
+        if not _TABLE_NAME_RE.match(name):
+            raise ValueError(f"Invalid table identifier: {raw!r}")
+        if name in seen:
+            continue
+        seen.add(name)
+        cleaned.append(name)
+    if not cleaned:
+        raise ValueError("At least one valid table name is required")
+    return cleaned
+
+
+def build_database_backup_plan_for_tables(
+    tables: list[str],
+    *,
+    now: datetime | None = None,
+    filename_prefix: str | None = None,
+) -> DatabaseBackupPlan:
+    """Build a backup plan restricted to *tables* for the runtime database."""
+    backend = _get_db_type()
+    host, port, user, password, database = _read_db_config()
+    safe_tables = _sanitize_table_names(list(tables))
+
+    backup_time = now or datetime.now(timezone.utc)
+    timestamp = backup_time.strftime("%Y%m%dT%H%M%SZ")
+    backup_root = _backups_dir()
+    env = os.environ.copy()
+    prefix = filename_prefix or f"runtime-{backend}-tables"
+
+    if backend == "postgres":
+        env["PGPASSWORD"] = str(password)
+        table_args: list[str] = []
+        for tbl in safe_tables:
+            table_args.extend(("--table", tbl))
+        return DatabaseBackupPlan(
+            backend=backend,
+            database=str(database),
+            output_path=backup_root / f"{prefix}-{database}-{timestamp}.sql.gz",
+            command=(
+                shutil.which("pg_dump") or "pg_dump",
+                "--host",
+                str(host),
+                "--port",
+                str(port),
+                "--username",
+                str(user),
+                "--dbname",
+                str(database),
+                "--format=plain",
+                "--no-owner",
+                "--no-privileges",
+                "--encoding=UTF8",
+                *table_args,
+            ),
+            env=env,
+        )
+
+    env["MYSQL_PWD"] = str(password)
+    return DatabaseBackupPlan(
+        backend=backend,
+        database=str(database),
+        output_path=backup_root / f"{prefix}-{database}-{timestamp}.sql.gz",
+        command=(
+            shutil.which("mysqldump") or "mysqldump",
+            "--host",
+            str(host),
+            "--port",
+            str(port),
+            "--user",
+            str(user),
+            "--single-transaction",
+            "--quick",
+            "--routines",
+            "--triggers",
+            "--skip-lock-tables",
+            str(database),
+            *safe_tables,
+        ),
+        env=env,
+    )
+
+
+async def create_table_backup(
+    tables: list[str],
+    *,
+    reason: str = "manual_table_webui",
+    filename_prefix: str | None = None,
+) -> Path | None:
+    """Create a gzip SQL dump restricted to *tables* for the runtime DB."""
+    plan = build_database_backup_plan_for_tables(
+        tables, filename_prefix=filename_prefix
+    )
+    return await create_backup_from_plan(plan, reason=reason)
 
 
 def _run_backup_sync(plan: DatabaseBackupPlan) -> None:
