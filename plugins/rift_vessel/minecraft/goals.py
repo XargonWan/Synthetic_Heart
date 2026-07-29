@@ -29,6 +29,7 @@ Design notes
 from __future__ import annotations
 
 import json
+import traceback
 from typing import Any, Dict, List
 
 from core.db import _get_db_type, get_conn_ctx
@@ -456,7 +457,11 @@ async def set_goal(
             "target": target,
         }
     except Exception as exc:
-        log_error(f"{LOG_PREFIX} set_goal failed: {exc}")
+        # This guard keeps the session alive, but a *deterministic* bug here
+        # silently disables the entire goal subsystem (no goal ever persists).
+        # Log the full traceback so the next occurrence points straight at the
+        # offending line instead of only surfacing ``str(exc)`` (see TODO §0).
+        log_error(f"{LOG_PREFIX} set_goal failed: {exc}\n{traceback.format_exc()}")
         return {"status": "error", "message": str(exc)}
 
 
@@ -565,7 +570,11 @@ async def update_active_goal(
             "target": new_target if change_target else goal.get("target"),
         }
     except Exception as exc:
-        log_debug(f"{LOG_PREFIX} update_active_goal failed: {exc}")
+        # Sibling write path (action beat / goal-expander drone record progress
+        # here). Surface the full traceback for the same reason as ``set_goal``.
+        log_error(
+            f"{LOG_PREFIX} update_active_goal failed: {exc}\n{traceback.format_exc()}"
+        )
         return {"status": "error", "message": str(exc)}
 
 

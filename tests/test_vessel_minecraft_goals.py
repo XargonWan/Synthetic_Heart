@@ -268,6 +268,58 @@ async def test_setting_new_goal_abandons_previous(fake_db: _FakeStore) -> None:
 
 
 @pytest.mark.asyncio
+async def test_set_goal_all_optional_fields_roundtrip(fake_db: _FakeStore) -> None:
+    """End-to-end: a fully-populated self-authored goal persists and reloads.
+
+    Regression for TODO section 0 -- ``set_goal`` was failing at runtime for
+    every call (a deterministic bug silently swallowed by the broad
+    ``except Exception`` guard), so no goal ever reached ``minecraft_goals`` and
+    the whole autonomy loop stalled. This drives every optional field
+    (``note`` / ``destination`` / ``steps`` / ``target_kind`` / ``target_name``)
+    through the real write path and asserts the goal both saves *and* reloads
+    intact via ``get_active_goal`` -- exactly the path that must never regress.
+    """
+    res = await goals.set_goal(
+        "gather enough iron for a full set of tools",
+        session_id="s-roundtrip",
+        note="starting from the birch forest",
+        destination={"x": 128.0, "y": 63.0, "z": -44.0},
+        steps=[
+            "chop wood",
+            "craft a wooden pickaxe",
+            "mine stone",
+            "craft a stone pickaxe",
+            "mine iron ore",
+        ],
+        target_kind="block",
+        target_name="Iron_Ore",
+    )
+    assert res["status"] == "ok"
+    assert res["description"] == "gather enough iron for a full set of tools"
+    assert res["destination"] == {"x": 128.0, "y": 63.0, "z": -44.0}
+    assert len(res["steps"]) == 5
+    assert res["target"] == {"kind": "block", "name": "iron_ore"}
+
+    active = await goals.get_active_goal()
+    assert active is not None
+    assert active["status"] == goals.STATUS_ACTIVE
+    assert active["description"] == "gather enough iron for a full set of tools"
+    assert active["note"] == "starting from the birch forest"
+    assert active["destination"] == {"x": 128.0, "y": 63.0, "z": -44.0}
+    assert active["steps"] == [
+        "chop wood",
+        "craft a wooden pickaxe",
+        "mine stone",
+        "craft a stone pickaxe",
+        "mine iron ore",
+    ]
+    assert active["current_step"] == 0
+    assert active["current_step_text"] == "chop wood"
+    assert active["target_kind"] == "block"
+    assert active["target_name"] == "iron_ore"
+
+
+@pytest.mark.asyncio
 async def test_list_recent_goals_newest_first(fake_db: _FakeStore) -> None:
     await goals.set_goal("a")
     await goals.set_goal("b")
