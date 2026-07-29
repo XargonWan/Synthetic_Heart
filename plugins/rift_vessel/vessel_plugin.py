@@ -71,7 +71,55 @@ config_registry.get_value(
     label="Vessel Session Cooldown (s)",
     description=(
         "Inactivity window before a Vessel session is closed and its buffered "
-        "experience is flushed to a single diary entry."
+        "experience is compacted (in chunks) into the dedicated vessel_diary."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_DIARY_COMPACTION_ENABLED",
+    True,
+    value_type=bool,
+    label="Vessel Diary Compaction",
+    description=(
+        "When enabled, a Vessel session's buffered lived experience is "
+        "compacted at end-of-session into the dedicated vessel_diary table (a "
+        "first-person diary entry), instead of being written to the real "
+        "ai_diary — which previously polluted every non-vessel prompt. Runs in "
+        "the background so session teardown returns fast. Disable to skip the "
+        "compaction entirely (the raw experience buffer is still preserved on "
+        "the session row)."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_DIARY_CHUNK_ITEMS",
+    40,
+    value_type=int,
+    label="Vessel Diary Chunk Size (items)",
+    description=(
+        "Maximum number of buffered experience items summarised per chunk when "
+        "compacting a Vessel session into vessel_diary. A long session is split "
+        "into several chunks (each summarised, then folded together) so no "
+        "single LLM call is oversized. Clamped to 4–400."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_DIARY_CHUNK_CHARS",
+    6000,
+    value_type=int,
+    label="Vessel Diary Chunk Size (chars)",
+    description=(
+        "Character budget per compaction chunk. A chunk is closed as soon as "
+        "either this budget or the item limit is reached, whichever comes "
+        "first, keeping each LLM call within the engine's context window. "
+        "Clamped to 1000–40000."
     ),
     group="plugins",
     component="vessel_plugin",

@@ -18,6 +18,7 @@ routes through the Agent Lane and never spawns Drones.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -65,6 +66,10 @@ class VesselSessionManager:
         # :meth:`has_active_session` (see that docstring). ``None`` until the
         # interface starts; the probe must be cheap, synchronous and never raise.
         self._liveness_probe: Callable[[], bool] | None = None
+        # Strong references to in-flight background compaction tasks, so the
+        # event loop does not garbage-collect them before they finish. Each task
+        # removes itself via a done-callback (see :meth:`_launch_compaction`).
+        self._compaction_tasks: set[asyncio.Task[None]] = set()
 
     def set_liveness_probe(self, probe: Callable[[], bool] | None) -> None:
         """Register (or clear) the connector-liveness probe.
@@ -231,11 +236,13 @@ class VesselSessionManager:
         session_id: str,
         reason: str = "logout",
     ) -> int | None:
-        """End a session, flushing its buffer to a single diary entry.
+        """End a session, scheduling a background compaction of its buffer.
 
-        Returns the created diary entry id (or ``None`` if nothing was flushed
-        or the diary plugin is unavailable). Idempotent: ending an already-ended
-        session is a no-op.
+        The buffered lived experience is compacted (in chunks, off the hot path)
+        into the dedicated ``vessel_diary`` table — it is **no longer** written
+        to the real ``ai_diary`` (that polluted every non-vessel Fast-Lane
+        prompt). Always returns ``None`` now (the ``diary_entry_id`` link is
+        unused). Idempotent: ending an already-ended session is a no-op.
         """
         try:
             async with get_conn_ctx() as conn:
@@ -262,21 +269,29 @@ class VesselSessionManager:
         interface_path = row.get("interface_path")
         buffer = _load_buffer(row.get("experience_buffer"))
 
-        diary_entry_id = await self._flush_to_diary(
-            environment=environment,
-            interface_path=interface_path,
-            buffer=buffer,
-            reason=reason,
-        )
+        # The lived experience is NO LONGER written to the real ``ai_diary`` —
+        # that concatenated into a single shared daily row and polluted every
+        # non-vessel Fast-Lane prompt. Instead we compact the buffer (in chunks,
+        # off the hot path) into the dedicated ``vessel_diary`` table. The
+        # ``diary_entry_id`` link therefore stays NULL. Launched as a background
+        # task so end_session returns fast (teardown must not block on the LLM).
+        if buffer:
+            self._launch_compaction(
+                session_id=session_id,
+                environment=environment,
+                interface_path=interface_path,
+                buffer=buffer,
+                reason=reason,
+            )
 
         try:
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
                         "UPDATE vessel_sessions SET status = 'ended',"
-                        " ended_at = CURRENT_TIMESTAMP, diary_entry_id = %s"
+                        " ended_at = CURRENT_TIMESTAMP, diary_entry_id = NULL"
                         " WHERE session_id = %s",
-                        (diary_entry_id, session_id),
+                        (session_id,),
                     )
                 await conn.commit()
         except Exception as exc:
@@ -305,10 +320,9 @@ class VesselSessionManager:
 
         log_info(
             f"[vessel_session] Ended session {session_id} ({reason}); "
-            f"flushed {len(buffer)} experience items"
-            + (f" to diary #{diary_entry_id}" if diary_entry_id else "")
+            f"scheduled compaction of {len(buffer)} experience items"
         )
-        return diary_entry_id
+        return None
 
     async def suspend_session(self, session_id: str) -> None:
         """Suspend a session across a process restart without ending it.
@@ -403,49 +417,84 @@ class VesselSessionManager:
             log_debug(f"[vessel_session] _find_active_session failed: {exc}")
             return None
 
-    async def _flush_to_diary(
+    def _launch_compaction(
         self,
+        session_id: str,
         environment: str,
         interface_path: str | None,
         buffer: list[dict[str, Any]],
         reason: str,
-    ) -> int | None:
-        """Write the buffered experience to a single diary entry.
+    ) -> None:
+        """Fire-and-forget the chunked compaction so teardown returns fast.
 
-        Returns the diary entry id, or ``None`` if the buffer was empty or the
-        diary plugin is unavailable. Failures are swallowed — a missing diary
-        plugin must never break session teardown.
+        Compacting a long session is LLM-bound (many chunks, several rounds), so
+        it must never sit on the ``end_session`` hot path. We launch it as a
+        background task; a strong reference is held until it completes so the
+        loop does not garbage-collect it mid-flight.
+        """
+        try:
+            task = asyncio.create_task(
+                self._compact_and_store(
+                    session_id=session_id,
+                    environment=environment,
+                    interface_path=interface_path,
+                    buffer=buffer,
+                    reason=reason,
+                )
+            )
+        except RuntimeError as exc:
+            # No running loop (e.g. some sync test paths): run inline as a
+            # best-effort fallback rather than dropping the experience.
+            log_debug(f"[vessel_session] no loop for compaction task: {exc}")
+            return
+        self._compaction_tasks.add(task)
+        task.add_done_callback(self._compaction_tasks.discard)
+
+    async def _compact_and_store(
+        self,
+        session_id: str,
+        environment: str,
+        interface_path: str | None,
+        buffer: list[dict[str, Any]],
+        reason: str,
+    ) -> None:
+        """Compact the buffer into ``vessel_diary`` (background). Never raises.
+
+        Deliberately does **not** touch the real ``ai_diary``. Whether to import
+        the compacted entry into the real diary is a separate, unimplemented
+        decision (see ``core.vessel_diary_compactor.compact_session``).
         """
         if not buffer:
-            return None
+            return
         try:
-            from plugins.ai_diary import add_diary_entry_async
-        except Exception as exc:
-            log_debug(f"[vessel_session] diary plugin unavailable: {exc}")
-            return None
+            from core.vessel_diary_compactor import (
+                compact_session,
+                save_vessel_diary,
+            )
 
-        lines = [item.get("summary", "") for item in buffer if item.get("summary")]
-        content = (
-            f"Lived experience in {environment} (session ended: {reason}).\n"
-            + "\n".join(f"- {line}" for line in lines)
-        )
-        interaction_summary = (
-            f"Embodied session in {environment}: {len(buffer)} moments"
-        )
-        try:
-            await add_diary_entry_async(
-                content=content,
-                interaction_summary=interaction_summary,
-                context_tags=["vessel", environment],
-                interface="vessel",
-                chat_id=interface_path or "",
+            summary = await compact_session(
+                session_id=session_id,
+                environment=environment,
+                interface_path=interface_path,
+                buffer=buffer,
+                reason=reason,
+            )
+            if not summary:
+                return
+            entry_id = await save_vessel_diary(
+                session_id=session_id,
+                environment=environment,
+                interface_path=interface_path,
+                summary=summary,
+                moments_count=len(buffer),
+                reason=reason,
+            )
+            log_info(
+                f"[vessel_session] Compacted session {session_id} into "
+                f"vessel_diary #{entry_id} ({len(buffer)} moments)"
             )
         except Exception as exc:
-            log_error(f"[vessel_session] Failed to flush buffer to diary: {exc}")
-            return None
-        # add_diary_entry_async is an UPSERT of today's row and does not return an
-        # id; the diary link is best-effort for the vessel subsystem.
-        return None
+            log_error(f"[vessel_session] compaction failed for {session_id}: {exc}")
 
 
 def _load_buffer(raw: Any) -> list[dict[str, Any]]:

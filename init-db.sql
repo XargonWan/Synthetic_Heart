@@ -151,6 +151,25 @@ CREATE TABLE IF NOT EXISTS vessel_activity_log (
     INDEX idx_vessel_activity_session (session_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Rift Vessel Diary: the compacted autobiographical entry produced by chunked
+-- LLM summarisation of a session's lived experience at end-of-session. This is
+-- SEPARATE from the real ai_diary — the vessel no longer writes to ai_diary
+-- (that polluted the Fast Lane prompt). Whether/how to import these entries into
+-- ai_diary is a later, unimplemented decision. Never a bare `timestamp` column.
+CREATE TABLE IF NOT EXISTS vessel_diary (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    session_id VARCHAR(128),
+    interface_path VARCHAR(512),
+    environment VARCHAR(64) NOT NULL,
+    summary LONGTEXT NOT NULL,
+    moments_count INT DEFAULT 0,
+    reason VARCHAR(32),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_vessel_diary_created_at (created_at DESC),
+    INDEX idx_vessel_diary_environment (environment),
+    INDEX idx_vessel_diary_session (session_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- Minecraft Goals: Synth's self-authored, free-text in-world objectives for the
 -- Minecraft Vessel (world-specific; owned by the Minecraft goal store,
 -- plugins/rift_vessel/minecraft/goals.py). There is NO catalogue of predefined

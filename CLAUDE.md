@@ -83,7 +83,7 @@ get_recent_errors(minutes=60)
 - `memoria` — memory subsystem
 - `gemini_extract` — Gemini extraction pipeline
 
-Logs rotate at 2000 lines — extremely fast in DEBUG mode (1–2 interactions). All MCP tools span rotations via `lookback_files` (default 3). Increase it if the window is too narrow.
+Logs rotate **daily** (with an intra-day size safety cap ~50 MB producing `.<N>.log` shards). Today and yesterday stay plain text; older days within `LOG_RETENTION_DAYS` (default 7) are **gzip-compressed** (`.log.gz`); anything past the window is deleted. All synth-logs tools read gzip archives transparently and span rotations. See `docs/logging.rst`.
 
 ### synth-db — live database access
 
@@ -101,12 +101,14 @@ runtime state without touching code or log files.
 | `get_chat_history("interface_path")` | Conversation history for a user/channel |
 | `get_grillo_beats()` | Grillo beat schedule |
 | `get_external_endpoints()` | Configured LLM endpoints (keys redacted) |
-| `run_select("SELECT ...")` | Arbitrary read-only query |
+| `run_select("SELECT ...")` | Arbitrary read-only query (row cap 1–200) |
+| `backup_database(confirm=True)` | ⚠ Full runtime DB backup to `SYNTH_BACKUPS_DIR` |
+| `backup_table(tables=[...], confirm=True)` | ⚠ Backup a list of tables (names sanitised) |
 | `set_config("KEY", "val", confirm=True)` | ⚠ Update a config value |
 | `add_memory(content, confirm=True)` | ⚠ Insert a memory entry |
 | `delete_memory(id, confirm=True)` | ⚠ Delete a memory by id |
 
-**Write tools require `confirm=True`** — omit it to get a dry-run preview.
+**Write/backup tools require `confirm=True`** — omit it to get a dry-run preview.
 
 ### synth-cortex — structured cortex_api.log inspection
 
