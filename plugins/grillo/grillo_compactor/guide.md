@@ -16,6 +16,12 @@ useful instead of unbounded.
 - **Selection:** runs nightly at `GRILLO_COMPACT_TIME`.
 - **Output:** compacted memory rows; source memories moved to the archive.
 
+## Run Now
+
+The plugin is **runnable** from the WebUI Plugins tab: the **Run compaction**
+button triggers a single compaction cycle on demand (dispatched to
+`run_action("compact_now", ...)`) without waiting for the nightly schedule.
+
 ## How it works
 
 The plugin clusters candidate memories older than `GRILLO_COMPACT_AGE_DAYS`,
