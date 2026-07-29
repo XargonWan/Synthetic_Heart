@@ -27,11 +27,17 @@ Three hard constraints shape the whole subsystem:
    directly; no reasoning loop is required. (Each action is still passively
    auto-exposed as an MCP tool, ``synth_vessel_*`` — that is read-only exposure,
    not task creation.)
-2. **No diary during a session.** A session accumulates an in-DB
-   *experience buffer*. The autobiographical **diary/memory entry is written
-   exactly once, at end-of-session** — either an explicit logout or after
-   ``VESSEL_SESSION_COOLDOWN_SEC`` (default 3600 s) of inactivity. This mirrors
-   how a person remembers "an afternoon of playing", not every footstep.
+2. **No diary during a session; one factual operational recap at end-of-session.**
+   A session accumulates an in-DB *experience buffer* and an audit trail in
+   ``vessel_activity_log``. At **end-of-session** — an explicit logout or after
+   ``VESSEL_SESSION_COOLDOWN_SEC`` (default 3600 s) of inactivity — a **single
+   factual, third-person operational recap** is written to the dedicated
+   ``vessel_diary`` table (``reason = "activity_recap"``), **never** the shared
+   ``ai_diary``. The old first-person "lived experience" narrative is removed
+   (Decision A): the recap records *what was done in concrete, resumable terms*
+   (coordinates/quantities/state) so it is Synth's working memory at the next
+   login. It is produced by the dedicated **Rift Vessel Compactor** plugin
+   (see :ref:`vessel-compactor`), not an inline task.
 3. **The Vessel has its own Activities voice.** Like Radio and Grillo, vessel
    events are logged to ``vessel_activity_log`` and surfaced through a dedicated
    ``/api/history/vessel`` endpoint and History sub-tab (with per-item delete).
@@ -224,8 +230,8 @@ costs a full cognition turn; a lightweight reflex/attention layer that reacts
 without a full LLM turn is a documented **future phase** and must also respect
 constraint 1 (no agentic tasks).
 
-Sessions & lived experience
---------------------------
+Sessions & operational recap
+----------------------------
 
 ``VesselSessionManager`` owns the lifecycle:
 
@@ -234,11 +240,48 @@ Sessions & lived experience
 * ``record_experience(session_id, event_type, summary, data)`` — appends to the
   in-DB ``experience_buffer``. **No diary is written here.**
 * ``touch(session_id)`` — updates ``last_event_at``.
-* ``end_session(session_id, reason)`` — flushes the buffer to a **single**
-  ``plugins.ai_diary`` "lived experience" entry (tagged with the environment),
-  marks the session ``ended``. Idempotent.
+* ``end_session(session_id, reason)`` — marks the session ``ended`` and triggers
+  compaction. If the **Rift Vessel Compactor** plugin has registered a handler
+  (via ``set_compaction_handler``), the manager delegates to it — the plugin
+  enqueues the session id on its own off-chain low-priority worker to build the
+  factual operational recap. If no handler is registered, it falls back to the
+  legacy inline ``_launch_compaction``/``_compact_and_store`` path
+  (autobiographical, gated by ``VESSEL_DIARY_COMPACTION_ENABLED``). Idempotent.
+* ``set_compaction_handler(handler)`` — registration hook mirroring
+  ``set_liveness_probe`` so core never imports the plugin.
 * ``close_expired_sessions(cooldown_sec)`` — the scheduler ends sessions idle
   longer than ``VESSEL_SESSION_COOLDOWN_SEC``.
+
+.. _vessel-compactor:
+
+Rift Vessel Compactor plugin
+----------------------------
+
+The **Rift Vessel Compactor** (``plugins/rift_vessel/vessel_compactor/``) is a
+dedicated plugin — a *separate scope* from the G.R.I.L.L.O. Compactor, sharing
+only its runnable *shape*. It owns end-of-session compaction:
+
+* **Automatic on ENDED.** At ``start()`` it registers ``_on_session_ended`` via
+  ``vessel_session_manager.set_compaction_handler``. When a session ends the
+  handler **enqueues** the session id onto the plugin's **internal, off-chain,
+  low-priority asyncio worker queue** and returns immediately (teardown never
+  blocks on the LLM). This is **not** the message chain — no in-world turn, no
+  Agent Lane, no Drone.
+* **Manual "Run compaction".** ``get_metadata()`` declares the runnable quartet
+  (``run_action = "compact_now"``); the WebUI Plugins tab can trigger it. With no
+  payload it compacts the most recently ended session; ``{"session_id": "..."}``
+  targets a specific one.
+* **Recap builder.** The worker calls
+  :func:`core.vessel_diary_compactor.compact_activity_recap`, which reads the
+  session's ``vessel_activity_log`` rows, summarises them in chunks into a
+  **factual, third-person operational recap** (no persona/first person), folds
+  the partials (recursing when oversized) on the vessel-scope Cortex, and stores
+  one row in ``vessel_diary`` with ``reason = "activity_recap"``. Fully
+  fail-safe (LLM error → deterministic plain-text join; empty log → no entry;
+  never raises).
+* **Config:** ``VESSEL_COMPACTOR_ENABLED`` (component ``vessel_compactor``,
+  default ``True``). Disabling it makes ``end_session`` fall back to the legacy
+  inline path.
 
 Database
 --------
@@ -280,6 +323,15 @@ Key                             Purpose
 ``VESSEL_REFLECTION_ENABLED``   Enable the deliberate reflection pause (``True`` default)
 ``VESSEL_REFLECTION_DURATION_SEC``  Reflection window seconds — will/action beats held off, motor keeps moving (15, clamped 3–300)
 ``VESSEL_REFLECTION_MIN_INTERVAL_SEC``  Anti-thrash floor between two reflection pauses (60, clamped 10–3600)
+``VESSEL_SELF_PRESERVATION_ENABLED``  Enable the fast survival reflex on the motor tick (``True`` default)
+``VESSEL_SP_LOW_OXYGEN``        Drowning threshold on the 0..20 air-bubble scale (6); NOT air ticks
+``VESSEL_SP_LOW_HEALTH``        Health at/below which a fight escalates from defend to flee (6)
+``VESSEL_SP_HOSTILE_DIST``      Distance (blocks) within which a hostile mob triggers the reflex (8)
+``VESSEL_SP_FIGHT_BACK``        Fight nearby aggressors (``attack``/``shoot``) before fleeing (``True`` default)
+``VESSEL_SP_FIGHT_MAX_FAILS``   Consecutive failed fight attempts before escalating to flee (8 — health-primary, keeps fighting while healthy)
+``VESSEL_SP_USE_RANGED``        Use a carried bow/crossbow (with ammo) against a distant aggressor via ``shoot`` (``True`` default)
+``VESSEL_SP_RANGED_MIN_DIST``   Target distance (blocks) at/above which the reflex prefers ranged over melee (5.0)
+``VESSEL_SP_APPRAISAL_ENABLED``  Enable the post-damage appraisal will beat — a ``PRIORITY_URGENT`` Fast-Lane LLM turn on taking damage (``True`` default)
 ``MINECRAFT_BRIDGE_RUN_AT_START``  Optional boot pre-warm (False). The bridge starts **on demand** by default, only when Synth enters the world.
 ``MINECRAFT_BRIDGE_HOST``       Bridge bind host (``127.0.0.1``)
 ``MINECRAFT_BRIDGE_PORT``       Bridge HTTP port (``8137``)
@@ -541,6 +593,77 @@ flat list of stacks, where the same id can appear in several stacks) into an
 id→total map exposed as ``WorldState.extra["inventory_counts"]`` (via the
 ``MinecraftConnector._inventory_counts`` helper — plain, fail-safe aggregation,
 no keyword logic). The raw ``inventory`` list is still available alongside it.
+
+Self-preservation & combat
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Evaluated **first** on every motor tick (before the no-goal early return, so
+Synth reacts even with no active goal), ``MinecraftConnector._survival_threat``
+classifies threats from **numeric telemetry + game enum ids only** (never user
+text) in strict priority: **dead** → ``respawn``; **drowning** (liquid block id
+at head *or* ``is_in_water``, AND ``oxygen <= VESSEL_SP_LOW_OXYGEN``) →
+``goto_surface``; **burning** (feet/head on a hot block id) → ``flee``;
+**aggressive combat** → defend or escalate to flee.
+
+**Fight all aggressors, not just the nearest, and pre-emptively.** The combat
+branch calls ``MinecraftConnector._aggressive_targets(state, near_dist)`` — every
+aggressive mob, nearest-first, that either carries the structural ``hostile``
+flag within ``VESSEL_SP_HOSTILE_DIST`` **or** is ``is_targeting_me`` at **any**
+distance (so a skeleton firing from range, or a mob that has already locked aggro
+before closing, is engaged pre-emptively). **Players are never a reflex target**
+(``kind == "player"`` is skipped — a human hit is social, handled by the
+appraisal beat). The nearest aggressor is latched as ``_fight_target``; on target
+change ``_fight_fail_count`` resets.
+
+**Weapon selection is structural.** While ``VESSEL_SP_FIGHT_BACK`` is on AND
+``health > VESSEL_SP_LOW_HEALTH`` (health is the *primary* escalation driver) AND
+``_fight_fail_count < VESSEL_SP_FIGHT_MAX_FAILS`` (default 8):
+
+#. if ``VESSEL_SP_USE_RANGED`` AND ``has_ranged_weapon`` (a bow/crossbow carried
+   with ammo) AND the target distance ``>= VESSEL_SP_RANGED_MIN_DIST`` (5.0) →
+   **ranged** via the ``shoot`` verb (native bow firing in the bridge — draw with
+   ``activateItem()``, charge, release with ``deactivateItem()`` — no bow plugin);
+#. otherwise → **melee** via ``attack``, which equips the highest-damage weapon
+   carried (``bestMeleeWeapon()`` in the bridge) and swings a short burst.
+
+Below the health floor, or once the fail cap is hit, the reflex escalates to
+``flee``. The bridge ``worldSnapshot`` surfaces the structural combat fields
+``has_ranged_weapon`` / ``ranged_ammo`` / ``best_melee_damage`` and tags each
+nearby entity with ``is_targeting_me``.
+
+**Damage-appraisal will beat (LLM, elevated priority).** The reflex above is the
+*fast* motor response; on top of it a high-priority appraisal beat lets Synth
+*think about* the hit in character. The trigger is **taking damage this tick**:
+``get_world_state`` computes ``damage_taken`` as the drop in ``health`` since the
+previous snapshot (numeric-only) and surfaces it in
+``WorldState.extra["damage_taken"]`` — so an unseen/ranged attacker or a trap
+also fires the beat. The delta is **single-read** (the baseline advances on every
+``get_world_state`` call), so ``_maybe_run_damage_appraisal`` runs **first** in
+the scheduler autonomy checks. When ``damage_taken > 0`` and
+``VESSEL_SP_APPRAISAL_ENABLED`` (default True), it builds
+``core/vessel_beat.py::build_damage_appraisal_prompt`` and enqueues it as an
+ordinary Fast-Lane ``vessel`` message tagged ``_vessel_appraisal`` →
+``PRIORITY_URGENT`` (superseding older pending autonomous vessel beats) and
+``no_compact``. Anti-thrash: at most one appraisal per ``resolve_will_interval``.
+
+**Player vs mob framing (structural).** The bridge attributes each hit with a
+time-boxed ``lastDamage`` (``DAMAGE_ATTRIBUTION_WINDOW_MS = 2500``);
+``worldSnapshot`` exposes ``damage_from_player`` = true only when the last hit's
+source was a **player**, null when stale/environmental.
+``build_damage_appraisal_prompt`` branches on it: a **player** hit gets a
+*social* framing (do NOT reflexively swing back; consider ``vessel_<world>_say``,
+ask/back off/remember), a **mob** hit gets a *combat* framing offering
+``vessel_<world>_attack`` and — when a ranged weapon with ammo is carried —
+``vessel_<world>_shoot``. Fast-Lane only (no ``external_effects`` → never the
+Agent Lane/Drones, no mid-session diary). Unit-tested in
+``tests/test_vessel_beat.py`` (prompt) and ``tests/test_vessel_survival.py``
+(combat reflex).
+
+**GOTCHA — oxygen is the 0..20 bubble scale.** At runtime mineflayer
+``bot.oxygenLevel`` reports the vanilla 0..20 air-bubble scale (20 = full lungs,
+0 = out of air), **not** air ticks — a healthy submerged bot reads ~20, so
+``VESSEL_SP_LOW_OXYGEN`` must be on that scale (default 6 ≈ two bubbles left). An
+air-ticks threshold would false-fire the drowning reflex constantly.
 
 ``core/vessel_beat.py`` is pure and side-effect-free (dataclass **or** dict
 input, fail-safe autonomy gating, interval clamp/failsafe on both
