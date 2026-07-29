@@ -559,6 +559,36 @@ def _merge_json_list(existing_json: str | None, new_items: list) -> list:
     return combined
 
 
+def _norm_segment(text: str) -> str:
+    """Normalise a text segment for dedup comparison (lowercase, collapse whitespace)."""
+    return " ".join(text.split()).lower()
+
+
+def _append_dedup_segment(
+    existing: str | None, new_text: str | None, separator: str
+) -> str | None:
+    """Append ``new_text`` to ``existing`` unless it duplicates a segment already present.
+
+    The daily diary row concatenates every entry with ``separator``. Without a
+    text dedup, an LLM that re-emits the same summary/thought/content on repeated
+    turns makes the row grow with identical fragments. This splits the existing
+    blob on ``separator``, normalises each segment (lowercase + collapsed
+    whitespace), and drops ``new_text`` when a matching segment is already there.
+
+    Returns the (possibly unchanged) merged string, or the single non-empty side
+    when the other is empty. Structural/normalised comparison only — no keyword
+    or phrase matching.
+    """
+    if not new_text:
+        return existing
+    if not existing:
+        return new_text
+    seen = {_norm_segment(seg) for seg in existing.split(separator) if seg.strip()}
+    if _norm_segment(new_text) in seen:
+        return existing
+    return f"{existing}{separator}{new_text}"
+
+
 async def _get_user_message_column_limit(cursor: Any) -> int:
     """Discover ai_diary.user_message max length from INFORMATION_SCHEMA.
 
@@ -708,23 +738,15 @@ async def _upsert_diary_impl(
                     ex_chat_id,
                     ex_thread_id,
                 ) = existing
-                merged_content = (
-                    f"{ex_content}{_SEP}{content}" if ex_content else content
+                merged_content = _append_dedup_segment(ex_content, content, _SEP)
+                merged_thought = _append_dedup_segment(
+                    ex_thought, personal_thought, _SEP
                 )
-                merged_thought = (
-                    f"{ex_thought}{_SEP}{personal_thought}"
-                    if ex_thought and personal_thought
-                    else (personal_thought or ex_thought)
+                merged_summary = _append_dedup_segment(
+                    ex_summary, interaction_summary, "\n---\n"
                 )
-                merged_summary = (
-                    f"{ex_summary}\n---\n{interaction_summary}"
-                    if ex_summary and interaction_summary
-                    else (interaction_summary or ex_summary)
-                )
-                merged_user_msg = (
-                    f"{ex_user_msg}\n---\n{user_message}"
-                    if ex_user_msg and user_message
-                    else (user_message or ex_user_msg)
+                merged_user_msg = _append_dedup_segment(
+                    ex_user_msg, user_message, "\n---\n"
                 )
                 merged_user_msg = _clip_for_column(merged_user_msg, user_message_limit)
                 merged_interface = _merge_diary_interface(ex_interface, interface)
