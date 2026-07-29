@@ -100,6 +100,48 @@ _COMPLETION_TOOL = "attempt_completion"
 _DELIVERY_ACTION_PREFIX = "message_"
 
 
+def _context_allowed_tools(context: dict[str, Any] | None) -> set[str] | None:
+    """Return a Drone's tool allow-list from context, or ``None`` if unrestricted.
+
+    A task-scoped Drone (e.g. the vessel goal-expander/planner) is spawned via
+    :meth:`AgentLoopManager.run_drone` with an explicit ``allowed_tools`` set,
+    which lands under ``context["drone"]["allowed_tools"]``. When present, the
+    agent loop restricts BOTH the prompt's AVAILABLE TOOLS block and the tool
+    executor gate to that set (plus the always-implicit completion sentinel), so
+    the Drone can never emit an out-of-scope action even if a
+    broken/hallucinating cortex proposes one. Purely structural — reads the
+    context marker only, no keyword/language logic. Returns ``None`` (no
+    restriction) for a normal Agent turn or an unrestricted Drone.
+    """
+    if not isinstance(context, dict):
+        return None
+    drone = context.get("drone")
+    if not isinstance(drone, dict):
+        return None
+    allowed = drone.get("allowed_tools")
+    if not isinstance(allowed, (list, tuple, set)):
+        return None
+    names = {str(t) for t in allowed if t}
+    return names or None
+
+
+def _tool_allowed_by_context(tool_name: str, context: dict[str, Any] | None) -> bool:
+    """True when ``tool_name`` is permitted under the context's Drone allow-list.
+
+    The completion sentinel is always permitted (it ends the turn and is never a
+    real action). When no allow-list is set the tool is unrestricted. Defence in
+    depth for the executor gate — mirrors the prompt-side filter so an
+    out-of-scope tool a hallucinating cortex slips past the prompt is still
+    refused before execution.
+    """
+    allowed = _context_allowed_tools(context)
+    if allowed is None:
+        return True
+    if tool_name == _COMPLETION_TOOL:
+        return True
+    return tool_name in allowed
+
+
 def _programmatic_delivery_fix(args: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     """Attempt cheap, safe repairs to a failed delivery action's payload.
 
@@ -816,6 +858,7 @@ class AgentLoopManager:
         preplanned_calls: list[Dict[str, Any]] | None = None,
         task_id: int | None = None,
         prior_observations: list[Dict[str, Any]] | None = None,
+        cortex_scope: str = "agent",
     ) -> Dict[str, Any]:
         """Run a bounded agentic turn that re-injects tool results into the model.
 
@@ -857,16 +900,19 @@ class AgentLoopManager:
             )
 
         # Resolve the Cortex engine for the agentic loop. When the caller did
-        # not pin an explicit engine, honour the AGENT_CORTEX override (scope
-        # "agent"): "Default" reuses the active Base Cortex, otherwise the
-        # agent runs on a dedicated LLM better suited for tool-calling work.
+        # not pin an explicit engine, honour the scope override (default
+        # "agent"): "Default" reuses the active Base Cortex, otherwise the turn
+        # runs on a dedicated LLM better suited for tool-calling work. Callers
+        # may pin another scope (e.g. "vessel" for the goal-expansion Drone) so
+        # its engine matches VESSEL_CORTEX rather than the generic AGENT_CORTEX.
         if not engine:
             try:
                 from core.config import get_active_cortex_engine
 
-                engine = await get_active_cortex_engine(scope="agent")
+                engine = await get_active_cortex_engine(scope=cortex_scope)
                 log_debug(
-                    f"[agent_core] Agentic loop engine resolved (scope=agent): {engine}"
+                    f"[agent_core] Agentic loop engine resolved "
+                    f"(scope={cortex_scope}): {engine}"
                 )
             except Exception as exc:
                 log_warning(
@@ -936,6 +982,13 @@ class AgentLoopManager:
         # have replied when nothing reached the interface.
         delivered_message_ok = False
         delivery_failures: list[str] = []
+
+        # LogChat is warned at most once per turn when the agent-scope engine
+        # produces an empty response and the loop falls back to the Base Cortex
+        # (see the base-cortex safety net inside the iteration loop below), so a
+        # persistently broken AGENT_CORTEX does not spam the operator every
+        # iteration.
+        agent_engine_fallback_notified = False
 
         # Diary discipline: a single agentic turn is ONE moment, not many. The
         # model must not write a diary entry on every iteration — at most one at
@@ -1053,7 +1106,7 @@ class AgentLoopManager:
                     # the agentic loop actually runs on the selected engine
                     # instead of the generic active plugin.
                     raw_response = await asyncio.wait_for(
-                        self._call_engine_direct(prompt, engine),
+                        self._call_engine_direct(prompt, engine, cortex_scope),
                         timeout=per_call_timeout,
                     )
                 else:
@@ -1091,7 +1144,7 @@ class AgentLoopManager:
                         1.0, timeout_seconds - (time.monotonic() - start)
                     )
                     fallback_text = await asyncio.wait_for(
-                        self._call_engine_direct(prompt, engine),
+                        self._call_engine_direct(prompt, engine, cortex_scope),
                         timeout=max(2.0, min(engine_timeout, remaining_after_primary)),
                     )
                 except asyncio.TimeoutError:
@@ -1099,8 +1152,100 @@ class AgentLoopManager:
                 if fallback_text:
                     raw_text = fallback_text
 
+            # Base-cortex safety net. The agent-scope engine (AGENT_CORTEX /
+            # scope="agent") can be a registered endpoint that passes the
+            # startup probe yet returns a hard error at call time (e.g. an
+            # expired/invalid API key answering HTTP 401). Its response is then
+            # empty, the primary retry above hits the same broken engine, and
+            # the whole turn ends ``empty_response`` — silently starving the
+            # out-of-band Drones (goal expander / planner) so goals never gain
+            # sub-steps and never advance. When the response is still empty and
+            # the agent engine is NOT already the Base Cortex, retry once on the
+            # Base Cortex so a misconfigured AGENT_CORTEX degrades gracefully
+            # instead of blocking autonomy entirely. Warn loudly (log + LogChat,
+            # once per turn) so the misconfiguration is visible to the operator.
+            if not raw_text.strip():
+                base_engine: str | None = None
+                try:
+                    from core.config import get_active_cortex_engine
+
+                    base_engine = await get_active_cortex_engine()
+                except Exception as exc:
+                    log_debug(
+                        f"[agent_core] Could not resolve Base Cortex for the "
+                        f"empty-response safety net: {exc}"
+                    )
+                if base_engine and base_engine != engine:
+                    warn_msg = (
+                        f"[agent_core] Agent engine {engine!r} returned an empty "
+                        f"response (likely a broken AGENT_CORTEX, e.g. an invalid "
+                        f"API key); falling back to Base Cortex {base_engine!r}. "
+                        f"Fix AGENT_CORTEX to silence this."
+                    )
+                    log_warning(warn_msg)
+                    if not agent_engine_fallback_notified:
+                        agent_engine_fallback_notified = True
+                        try:
+                            from core.notifier import notifier
+
+                            notifier(
+                                f"⚠️ Agent cortex '{engine}' failed (empty "
+                                f"response — likely a broken AGENT_CORTEX / bad "
+                                f"API key). Falling back to Base Cortex "
+                                f"'{base_engine}'. Please fix AGENT_CORTEX."
+                            )
+                        except Exception as notify_exc:
+                            log_debug(
+                                f"[agent_core] Could not notify LogChat about the "
+                                f"agent-engine fallback: {notify_exc}"
+                            )
+                    try:
+                        remaining_after_base = max(
+                            1.0, timeout_seconds - (time.monotonic() - start)
+                        )
+                        base_text = await asyncio.wait_for(
+                            self._call_engine_direct(prompt, base_engine),
+                            timeout=max(2.0, min(engine_timeout, remaining_after_base)),
+                        )
+                    except asyncio.TimeoutError:
+                        base_text = ""
+                    if base_text and base_text.strip():
+                        raw_text = base_text
+
             parsed, _meta = extract_json_from_text(raw_text, return_metadata=True)
             tool_calls = self._extract_tool_calls(parsed)
+
+            # Defence in depth: enforce the Drone tool allow-list before ANY
+            # execution. A restricted Drone (e.g. the vessel goal-expander,
+            # limited to lookup_knowledge + update_goal) must never run an
+            # out-of-scope tool such as an in-world ``vessel_<world>_say`` even
+            # if a broken/hallucinating cortex proposes one that slipped past the
+            # prompt filter. Refused calls become an observation the model sees,
+            # never an execution. Structural (reads the context allow-list only,
+            # no keyword/language logic); a no-op for unrestricted turns.
+            if _context_allowed_tools(context) is not None:
+                permitted: list[Any] = []
+                for c in tool_calls:
+                    c_name = str(c.get("name") or c.get("type") or "").strip()
+                    if _tool_allowed_by_context(c_name, context):
+                        permitted.append(c)
+                    else:
+                        log_warning(
+                            f"[agent_core] Iteration {i}: refusing out-of-scope "
+                            f"tool '{c_name}' (not in Drone allow-list)"
+                        )
+                        observations.append(
+                            {
+                                "iteration": i,
+                                "role": "tool",
+                                "tool": c_name,
+                                "content": (
+                                    f"Tool '{c_name}' is not available for this "
+                                    "task. Use only the listed AVAILABLE TOOLS."
+                                ),
+                            }
+                        )
+                tool_calls = permitted
 
             # Explicit completion signal. The model ends the turn by calling the
             # dedicated ``attempt_completion`` tool (a sentinel, not a real
@@ -1571,6 +1716,8 @@ class AgentLoopManager:
         max_iterations: int | None = None,
         timeout_seconds: float | None = None,
         original_message: Any = None,
+        allowed_tools: set[str] | None = None,
+        cortex_scope: str = "agent",
     ) -> Dict[str, Any]:
         """Run an ephemeral, task-scoped sub-agent ("Drone").
 
@@ -1585,12 +1732,26 @@ class AgentLoopManager:
         Args:
             goal: The focused sub-task objective for the Drone.
             engine: Optional cortex engine name. When ``None`` the Drone inherits
-                the agent-scope engine (same resolution as the parent Agent).
+                the ``cortex_scope`` engine (same resolution as the parent Agent).
+            cortex_scope: Cortex scope used to resolve the engine/model when
+                ``engine`` is ``None`` (default ``"agent"``). Out-of-band vessel
+                Drones (the goal expander/planner) pass ``"vessel"`` so they run
+                on VESSEL_CORTEX instead of the generic AGENT_CORTEX — which may
+                be a slow browser-driven engine that cannot complete a
+                multi-step tool-calling turn within the Drone budget.
             context: Optional context dict; a ``drone`` marker is injected.
             parent_task_id: DB id of the Agent task that spawned this Drone.
             max_iterations: Hard cap (defaults to ``DRONE_MAX_ITERATIONS``).
             timeout_seconds: Wall-clock budget (defaults to ``DRONE_TURN_TIMEOUT_SEC``).
             original_message: Optional originating message (for audit/safety).
+            allowed_tools: Optional allow-list of tool names this Drone may use.
+                When provided, the Drone's prompt only lists these tools AND the
+                executor refuses any tool outside the set (defence in depth), so
+                a task-scoped Drone (e.g. the vessel goal-expander/planner) can
+                never emit an out-of-scope action — such as an in-world
+                ``vessel_<world>_say`` — even if a broken/hallucinating cortex
+                proposes one. The completion sentinel is always implicitly
+                allowed. Structural, keyword-free.
 
         Returns:
             The standard :meth:`run_agentic_turn` result dict (``iterations``,
@@ -1604,10 +1765,13 @@ class AgentLoopManager:
             )
 
         drone_context: Dict[str, Any] = dict(context or {})
-        drone_context["drone"] = {
+        drone_meta: Dict[str, Any] = {
             "is_drone": True,
             "parent_task_id": parent_task_id,
         }
+        if allowed_tools:
+            drone_meta["allowed_tools"] = sorted(str(t) for t in allowed_tools)
+        drone_context["drone"] = drone_meta
 
         log_info(
             f"[agent_core] Spawning Drone (parent_task_id={parent_task_id}, "
@@ -1621,18 +1785,25 @@ class AgentLoopManager:
             max_iterations=max_iterations,
             timeout_seconds=timeout_seconds,
             original_message=original_message,
+            cortex_scope=cortex_scope,
         )
 
     async def _call_engine_direct(
         self,
         prompt: Dict[str, Any],
         engine_name: str | None,
+        cortex_scope: str = "agent",
     ) -> str:
         """Fallback direct call to the active cortex engine.
 
         Some runtime paths can return an empty string through ``plugin_instance``
         even when the model produced output. This fallback talks to the engine
         directly and returns its raw text response.
+
+        ``cortex_scope`` selects which cortex scope's per-scope model override to
+        honour (default ``"agent"``). Out-of-band vessel Drones (the goal
+        expander/planner) pass ``"vessel"`` so the model matches VESSEL_CORTEX
+        rather than the generic AGENT_CORTEX.
         """
         try:
             from core.config import (
@@ -1642,20 +1813,21 @@ class AgentLoopManager:
             )
             from core.cortex_registry import get_cortex_registry
 
-            # Agentic turns always run on the "agent" cortex scope; resolve its
-            # per-scope model so a scope-specific model override is honoured even
-            # on this direct fallback path.
+            # Resolve the per-scope model so a scope-specific model override is
+            # honoured even on this direct fallback path. The scope defaults to
+            # "agent" (ordinary agentic turns) but callers may pin another scope
+            # (e.g. "vessel" for the goal-expansion Drone).
             scope_model: str | None = None
             if engine_name:
                 resolved_engine = engine_name
                 try:
-                    _, scope_model = await get_active_cortex_scope(scope="agent")
+                    _, scope_model = await get_active_cortex_scope(scope=cortex_scope)
                 except Exception:
                     scope_model = None
             else:
                 try:
                     resolved_engine, scope_model = await get_active_cortex_scope(
-                        scope="agent"
+                        scope=cortex_scope
                     )
                 except Exception:
                     resolved_engine = await get_active_cortex_engine()
@@ -1855,9 +2027,18 @@ class AgentLoopManager:
             and context["drone"].get("is_drone")
         )
 
+        # Task-scoped Drone allow-list: when the spawning caller restricted this
+        # Drone to a specific tool set (e.g. the vessel goal-expander/planner is
+        # limited to lookup_knowledge + update_goal), hide every other tool from
+        # the prompt so the model never even sees — let alone proposes — an
+        # out-of-scope action such as an in-world ``vessel_<world>_say``.
+        allowed_tools = _context_allowed_tools(context)
+
         tool_lines: list[str] = []
         for tool in tool_registry.all_tools():
             if is_drone and tool.name == "spawn_drone":
+                continue
+            if allowed_tools is not None and tool.name not in allowed_tools:
                 continue
             params = []
             for p in tool.parameters:

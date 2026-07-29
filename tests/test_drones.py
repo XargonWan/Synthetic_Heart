@@ -151,10 +151,12 @@ async def test_drone_engine_override_forwarded(monkeypatch):
         timeout_seconds=None,
         original_message=None,
         preplanned_calls=None,
+        cortex_scope="agent",
     ):
         captured["engine"] = engine
         captured["context"] = context
         captured["max_iterations"] = max_iterations
+        captured["cortex_scope"] = cortex_scope
         return {
             "iterations": 1,
             "observations": [],
@@ -171,12 +173,14 @@ async def test_drone_engine_override_forwarded(monkeypatch):
         engine="my-tool-cortex",
         parent_task_id=5,
         max_iterations=2,
+        cortex_scope="vessel",
     )
 
     assert out["final_text"] == "ok"
     assert captured["engine"] == "my-tool-cortex"
     assert captured["context"]["drone"] == {"is_drone": True, "parent_task_id": 5}
     assert captured["max_iterations"] == 2
+    assert captured["cortex_scope"] == "vessel"
 
 
 @pytest.mark.asyncio
