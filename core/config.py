@@ -479,6 +479,47 @@ def serialize_cortex_scope_value(engine: str, model: str | None = None) -> str:
     return json.dumps({"engine": engine, "model": model})
 
 
+# General rule (see AGENTS.md / user request "regola generale per tutti gli
+# override"): whenever a cortex *scope override* (AGENT_CORTEX, GRILLO_CORTEX,
+# TRAINER_CORTEX, LIVE_CORTEX, VESSEL_CORTEX, ...) points at an engine that is
+# not currently usable, the resolver degrades transparently to the non-override
+# Base Cortex. Every such degradation is announced in the logs *and* on LogChat
+# so the operator can see the misconfiguration -- but only once per override key
+# per process, to avoid flooding LogChat on every prompt build.
+_CORTEX_OVERRIDE_FALLBACK_WARNED: set[str] = set()
+
+
+def _warn_cortex_override_fallback(
+    override_key: str, chosen: str, fallback: str
+) -> None:
+    """Announce an override→Base cortex degradation to logs and LogChat.
+
+    Emitted every time in the logs (cheap, always useful when debugging) but
+    pushed to LogChat only once per ``override_key`` per process so a broken
+    override does not spam the operator's chat on every resolution.
+    """
+    log_warning(
+        f"[config] ⚠️ Cortex override {override_key}='{chosen}' is unavailable; "
+        f"falling back to Base Cortex '{fallback}'. Fix {override_key} to silence this."
+    )
+    if override_key in _CORTEX_OVERRIDE_FALLBACK_WARNED:
+        return
+    _CORTEX_OVERRIDE_FALLBACK_WARNED.add(override_key)
+    try:
+        from core.notifier import notifier
+
+        notifier(
+            f"⚠️ Cortex override {override_key} ('{chosen}') is unavailable "
+            f"(unregistered or missing cortex capability). Falling back to Base "
+            f"Cortex '{fallback}'. Please fix {override_key}."
+        )
+    except Exception as notify_exc:  # pragma: no cover - defensive
+        log_debug(
+            f"[config] Could not notify LogChat about the cortex override "
+            f"fallback for {override_key}: {notify_exc}"
+        )
+
+
 async def get_active_cortex_engine(scope: str | None = None) -> str:
     """Return the effective cortex engine for a given scope.
 
@@ -543,6 +584,46 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
         ):
             available.discard("anthropic")
 
+        # General rule for *every* cortex scope: an engine that is registered
+        # (probe may even read "success") but whose external endpoint is NOT
+        # actually cortex-capable is guaranteed to fail as an LLM backend --
+        # e.g. AGENT_CORTEX='logfare-mykey', an endpoint whose auto-probe found
+        # no cortex capability (capabilities.cortex=false) yet 401s on
+        # generate_response. Such an engine passes the plain ``chosen in
+        # available`` registration check and would be returned verbatim,
+        # starving the scope. Prune every non-cortex external endpoint from
+        # ``available`` up front so ``chosen`` (or ``base``/``sibling``) falls
+        # into the override→Base degradation below.
+        #
+        # Key off the *auto-probed* ``capabilities`` map, NOT the merged
+        # ``effective_subsystem_map()``: the latter lets a manual
+        # ``subsystem_map`` override force cortex=true on top of a failed probe
+        # (the exact logfare-mykey/logfare-claude misconfiguration -- probe
+        # says cortex=false, operator override says true, endpoint 401s). The
+        # honest structural signal of real cortex capability is the probe
+        # result. Detection stays purely structural (the capability map),
+        # never keyword/string matching.
+        try:
+            from core.external_endpoints.registry import (
+                get_external_endpoint_registry,
+            )
+
+            _all_endpoints = await get_external_endpoint_registry().list_endpoints(
+                enabled_only=True
+            )
+            _non_cortex = {
+                ep.engine_name()
+                for ep in _all_endpoints
+                if not ep.capabilities.get("cortex")
+            }
+            if _non_cortex:
+                available.difference_update(_non_cortex)
+        except Exception as cap_exc:  # pragma: no cover - defensive
+            log_debug(
+                f"[config] Could not verify cortex capability of external "
+                f"endpoints: {cap_exc}"
+            )
+
         if chosen not in available:
             # Before treating this as a genuinely stale/removed engine, check
             # whether it's a still-configured external endpoint (e.g. Venice2)
@@ -562,7 +643,26 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
                 endpoints = await get_external_endpoint_registry().list_endpoints(
                     enabled_only=True
                 )
-                if chosen in {ep.engine_name() for ep in endpoints}:
+                # Only keep ``chosen`` if it is a configured external endpoint
+                # that the auto-probe found genuinely *cortex*-capable. An
+                # endpoint whose probed ``capabilities.cortex`` is False (e.g. an
+                # STT/vision-only key, or one whose cortex probe failed) is
+                # guaranteed to fail as an LLM engine -- keeping it here would
+                # starve the scope (the exact AGENT_CORTEX=logfare-mykey 401
+                # case). We deliberately read the probed ``capabilities`` and
+                # NOT ``effective_subsystem_map()``, because a manual
+                # ``subsystem_map`` override can force cortex=true on top of a
+                # failed probe -- which is precisely the misconfiguration this
+                # guards against. Detection is purely structural (the capability
+                # map), never keyword/string matching. This makes the
+                # override→Base degradation below the *general rule* for every
+                # scope, not just a one-off transient-registration escape hatch.
+                cortex_endpoints = {
+                    ep.engine_name()
+                    for ep in endpoints
+                    if ep.capabilities.get("cortex")
+                }
+                if chosen in cortex_endpoints:
                     log_warning(
                         f"[config] ⚠️ Cortex engine '{chosen}' is a configured "
                         "external endpoint not yet registered in the CortexRegistry "
@@ -613,12 +713,17 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
                 if base != fallback:
                     updates.append(("BASE_CORTEX", fallback))
 
-            stale_key = override_key if use_override and override_key else "BASE_CORTEX"
-            log_warning(
-                f"[config] ⚠️ Cortex engine '{chosen}' is no longer registered. "
-                f"Falling back to '{fallback}'. "
-                f"Update {stale_key} to silence this warning."
-            )
+            if use_override and override_key is not None:
+                # Override→Base degradation is the general rule: announce it in
+                # the logs *and* on LogChat (once per override key) so the
+                # operator sees the misconfiguration.
+                _warn_cortex_override_fallback(override_key, chosen, fallback)
+            else:
+                log_warning(
+                    f"[config] ⚠️ Cortex engine '{chosen}' is no longer registered. "
+                    f"Falling back to '{fallback}'. "
+                    f"Update BASE_CORTEX to silence this warning."
+                )
             try:
                 seen_keys: set[str] = set()
                 for key, value in updates:
@@ -665,6 +770,8 @@ async def get_active_cortex_scope(scope: str | None = None) -> tuple[str, str | 
         override_key = "LIVE_CORTEX"
     elif scope == "agent":
         override_key = "AGENT_CORTEX"
+    elif scope == "vessel":
+        override_key = "VESSEL_CORTEX"
 
     if override_key is not None:
         ov_engine, ov_model = parse_cortex_scope_value(

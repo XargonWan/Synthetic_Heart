@@ -232,8 +232,13 @@ async def test_get_active_cortex_engine_keeps_pending_external_endpoint(monkeypa
             return "anthropic"
 
     class FakeEndpoint:
+        capabilities = {"cortex": True}
+
         def engine_name(self):
             return "Venice2"
+
+        def effective_subsystem_map(self):
+            return {"cortex": True}
 
     class FakeExternalEndpointRegistry:
         async def list_endpoints(self, enabled_only=False):
@@ -263,6 +268,69 @@ async def test_get_active_cortex_engine_keeps_pending_external_endpoint(monkeypa
 
     assert engine == "Venice2"
     set_value.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_active_cortex_engine_override_to_noncortex_endpoint_falls_back_to_base(
+    monkeypatch,
+):
+    """General rule: a scope override pointing at a configured external
+    endpoint that does NOT advertise the cortex capability must degrade
+    transparently to the non-override Base Cortex, and the override key must
+    be reset to 'Default'. This is the AGENT_CORTEX=logfare-mykey (cortex:false)
+    401 case -- keeping a non-cortex endpoint would starve the scope."""
+    from core import config as conf
+    import core.config_manager as cm
+
+    class FakeRegistry:
+        def get_available_engines(self):
+            return ["selenium-llm-engine"]
+
+        def get_default_engine(self):
+            return "selenium-llm-engine"
+
+    class FakeEndpoint:
+        # Auto-probe found no cortex capability (the honest signal the resolver
+        # keys off), even though this endpoint may still be reachable.
+        capabilities = {"cortex": False}
+
+        def engine_name(self):
+            return "logfare-mykey"
+
+        def effective_subsystem_map(self):
+            return {"cortex": False}
+
+    class FakeExternalEndpointRegistry:
+        async def list_endpoints(self, enabled_only=False):
+            return [FakeEndpoint()]
+
+    values = {
+        "BASE_CORTEX": "selenium-llm-engine",
+        "AGENT_CORTEX": "logfare-mykey",
+    }
+    set_value = AsyncMock()
+
+    monkeypatch.setattr(
+        cm.config_registry,
+        "get_value",
+        lambda key, default=None: values.get(key, default),
+    )
+    monkeypatch.setattr(cm.config_registry, "set_value", set_value)
+    monkeypatch.setattr(
+        "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
+    )
+    monkeypatch.setattr(
+        "core.external_endpoints.registry.get_external_endpoint_registry",
+        lambda: FakeExternalEndpointRegistry(),
+    )
+    # Silence LogChat delivery in the unit test.
+    monkeypatch.setattr("core.notifier.notifier", lambda *a, **k: None)
+    conf._CORTEX_OVERRIDE_FALLBACK_WARNED.clear()
+
+    engine = await conf.get_active_cortex_engine("agent")
+
+    assert engine == "selenium-llm-engine"
+    set_value.assert_any_await("AGENT_CORTEX", "Default")
 
 
 @pytest.mark.asyncio
@@ -348,3 +416,70 @@ async def test_get_active_cortex_engine_allows_anthropic_when_key_configured(
 
     assert engine == "anthropic"
     set_value.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_active_cortex_engine_registered_noncortex_endpoint_falls_back(
+    monkeypatch,
+):
+    """Primary-path gap: an override engine that IS registered (and whose probe
+    even read 'success') but whose external endpoint advertises cortex=False must
+    still degrade to Base and reset the override to 'Default'. This is the exact
+    live AGENT_CORTEX=logfare-mykey case -- it passed the plain `chosen in
+    available` check and was returned verbatim, 401ing every turn. Unlike the
+    sibling test above, here `logfare-mykey` IS in get_available_engines()."""
+    from core import config as conf
+    import core.config_manager as cm
+
+    class FakeRegistry:
+        def get_available_engines(self):
+            # logfare-mykey IS registered here -- the primary-path gap.
+            return ["selenium-llm-engine", "logfare-mykey"]
+
+        def get_default_engine(self):
+            return "selenium-llm-engine"
+
+    class FakeEndpoint:
+        # logfare-mykey's auto-probe found no cortex capability. A manual
+        # subsystem_map override forcing cortex=true must NOT rescue it -- the
+        # resolver keys off the probed capabilities, so effective_subsystem_map
+        # returning True here would be a trap the fix must ignore.
+        capabilities = {"cortex": False}
+
+        def engine_name(self):
+            return "logfare-mykey"
+
+        def effective_subsystem_map(self):
+            # Simulate the live misconfiguration: operator override says cortex.
+            return {"cortex": True}
+
+    class FakeExternalEndpointRegistry:
+        async def list_endpoints(self, enabled_only=False):
+            return [FakeEndpoint()]
+
+    values = {
+        "BASE_CORTEX": "selenium-llm-engine",
+        "AGENT_CORTEX": "logfare-mykey",
+    }
+    set_value = AsyncMock()
+
+    monkeypatch.setattr(
+        cm.config_registry,
+        "get_value",
+        lambda key, default=None: values.get(key, default),
+    )
+    monkeypatch.setattr(cm.config_registry, "set_value", set_value)
+    monkeypatch.setattr(
+        "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
+    )
+    monkeypatch.setattr(
+        "core.external_endpoints.registry.get_external_endpoint_registry",
+        lambda: FakeExternalEndpointRegistry(),
+    )
+    monkeypatch.setattr("core.notifier.notifier", lambda *a, **k: None)
+    conf._CORTEX_OVERRIDE_FALLBACK_WARNED.clear()
+
+    engine = await conf.get_active_cortex_engine("agent")
+
+    assert engine == "selenium-llm-engine"
+    set_value.assert_any_await("AGENT_CORTEX", "Default")
