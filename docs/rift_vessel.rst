@@ -166,18 +166,21 @@ The Rift Vessel is primarily used in interactive game worlds, where
 responsiveness matters. Two behaviours make embodiment feel like a person who
 is *concentrating on the game* rather than multitasking every chat:
 
-**Priority — a pure 0–10 numeric ranking (higher = more urgent), with NO
+**Priority — a pure 0–11 numeric ranking (higher = more urgent), with NO
 de-prioritisation.** Each message is assigned an absolute urgency from its
 **structural origin only** (never from message text, never conditional on
-whether a session is active): a real in-world **player** chat →
-``PRIORITY_HIGH``; Synth's **own** autonomous perception/will-beat →
-``PRIORITY_AMBIENT`` (below every human); the trainer → ``PRIORITY_TRAINER``;
-ordinary chat → ``PRIORITY_GENERAL``; an urgent (``priority=True``) message →
-``PRIORITY_URGENT``. Ordinary chat is **never demoted** because Synth happens to
-be embodied — a person addressing Synth is always answered promptly, and the
-game's own perceptions simply sit at a lower rung so they yield to humans. The
-whole block is lazily imported and fully guarded, so removing the Vessel plugin
-leaves queueing untouched.
+whether a session is active): a reflection-pause turn (``_vessel_reflection``) →
+``PRIORITY_REFLECTION`` (9, above player chat so a stop-and-think turn is
+consumed before ordinary in-world traffic, yet below urgent/emergency); a real
+in-world **player** chat → ``PRIORITY_HIGH`` (8); Synth's **own** autonomous
+perception/will-beat → ``PRIORITY_AMBIENT`` (4, below every human); the trainer
+→ ``PRIORITY_TRAINER`` (7); ordinary chat → ``PRIORITY_GENERAL`` (6); an urgent
+(``priority=True``) message → ``PRIORITY_URGENT`` (10); an emergency →
+``PRIORITY_EMERGENCY`` (11). Ordinary chat is **never demoted** because Synth
+happens to be embodied — a person addressing Synth is always answered promptly,
+and the game's own perceptions simply sit at a lower rung so they yield to
+humans. The whole block is lazily imported and fully guarded, so removing the
+Vessel plugin leaves queueing untouched.
 
 **Connection-driven session lifecycle (3 states).** Whether the game generates
 work is tied to the **real** connection, tracked by
@@ -274,6 +277,9 @@ Key                             Purpose
 ``VESSEL_ACTION_INTERVAL_SEC``  Seconds between action beats — LLM Fast-Lane turn (20, clamped 3–300)
 ``VESSEL_MOTOR_ENABLED``        Enable the fast motorics reflex (``True`` default)
 ``VESSEL_MOTOR_INTERVAL_SEC``   Seconds between fast motor ticks — no LLM (3, clamped 1–60)
+``VESSEL_REFLECTION_ENABLED``   Enable the deliberate reflection pause (``True`` default)
+``VESSEL_REFLECTION_DURATION_SEC``  Reflection window seconds — will/action beats held off, motor keeps moving (15, clamped 3–300)
+``VESSEL_REFLECTION_MIN_INTERVAL_SEC``  Anti-thrash floor between two reflection pauses (60, clamped 10–3600)
 ``MINECRAFT_BRIDGE_RUN_AT_START``  Optional boot pre-warm (False). The bridge starts **on demand** by default, only when Synth enters the world.
 ``MINECRAFT_BRIDGE_HOST``       Bridge bind host (``127.0.0.1``)
 ``MINECRAFT_BRIDGE_PORT``       Bridge HTTP port (``8137``)
@@ -404,8 +410,9 @@ around, set and pursue its own goals, gather, build, and interact — while stil
 obeying the Vessel's hard constraints (Fast Lane only, no Agent Lane/Drones, a
 single diary at end-of-session).
 
-**Three speeds: volition (slow, LLM) + action (middle, LLM) + motorics (fast,
-reflex).** Autonomy is split into three independently-paced layers so that
+**Three speeds + a reflection pause: volition (slow, LLM) + action (middle, LLM)
++ motorics (fast, reflex), with a reflection pause (LLM, elevated priority) on
+top.** Autonomy is split into three independently-paced layers so that
 *deciding what to want* (slow, deliberate, personality-driven) never bottlenecks
 *deciding the next concrete step* (middle), which in turn never bottlenecks
 *moving the body* (fast, reactive). All three are driven by the interface
@@ -414,7 +421,11 @@ exists to close the "walks around but never accomplishes anything" gap: the will
 beat authors a free-text goal but is forbidden to move or act, while the motor
 tick can move but never reads the goal's words — so nothing translated *"gather
 wood"* into the concrete verb ``vessel_minecraft_collect_block`` / ``mine`` /
-``craft``. The action beat is that translator.
+``craft``. The action beat is that translator. On top of these three sits the
+**reflection pause** (described below): a deliberate stop-and-think turn that
+fires when Synth is playing without a real objective, prunes its own pending
+autonomous beats, and spends one elevated-priority cognition turn authoring or
+refining the goal before ordinary autonomy resumes.
 
 **Will beat — volition (slow, LLM), like G.R.I.L.L.O.** Every
 ``VESSEL_WILL_INTERVAL_SEC`` seconds (default 45, falling back to the legacy
@@ -482,6 +493,48 @@ the goal's free text**. The base ``VesselConnectorBase.motor_step`` is a no-op
 returning ``{"acted": False, "reason": "no_motorics"}``, so a world without
 motorics degrades gracefully.
 
+**Reflection pause — deliberate stop-and-think (LLM, elevated priority).** On
+top of the three speeds sits a *reflection pause*. Because the single message
+consumer can be blocked for a long time by a slow, uncancellable Base-Cortex
+turn, will beats may pile up unconsumed and Synth can end up aimlessly wandering
+with **no goal**. The reflection pause fixes the queue *ordering* of that
+situation. Every scheduler tick, *before* the will/action beats, the scheduler
+(``interface/vessel_interface.py::_maybe_run_reflection``) checks — from
+**structure only, never message text** — whether Synth is playing without a real
+objective. When a session is active, autonomy and reflection are enabled
+(``VESSEL_AUTONOMY_ENABLED`` and ``VESSEL_REFLECTION_ENABLED``, both default
+True), a player has been quiet for ``VESSEL_WILL_QUIET_SEC``, the anti-thrash
+floor ``VESSEL_REFLECTION_MIN_INTERVAL_SEC`` (default 60, clamped ``[10, 3600]``)
+has elapsed, and Synth has **no active goal or a goal with no step plan**
+(``_goal_from_world_state`` / ``_goal_needs_expansion``), it:
+
+#. builds a structural prompt via :mod:`core.vessel_beat`
+   (``build_reflection_prompt``) framed as an intentional, *private* pause that
+   must **not** speak (no ``say``) — only author/refine the goal via
+   ``vessel_<world>_set_goal`` / ``vessel_<world>_update_goal``;
+#. enqueues it as a ``vessel`` message tagged ``_vessel_reflection`` →
+   ``PRIORITY_REFLECTION`` (9, above player chat), whose enqueue path **prunes
+   older pending autonomous vessel beats** for that world
+   (``core/message_queue.py::_supersede_pending_vessel_beats`` — which keeps
+   player chat and ``no_compact`` items; it never uses
+   ``drop_vessel_queue_for_world``, which would also drop player chat);
+#. opens a ``_reflecting`` window of ``VESSEL_REFLECTION_DURATION_SEC`` (default
+   15, clamped ``[3, 300]``) during which the will and action **beats** are held
+   off — but the **motor tick and survival reflex keep running, so the body
+   still moves**;
+#. on expiry, resets ``_last_will_beat_at = 0.0`` so the will beat re-fires
+   immediately and resumes normal autonomy on the freshly-committed goal.
+
+**Known tension (by design).** Clearing the queue removes only *pending* items —
+a reflection turn still cannot run until the in-flight (possibly slow selenium)
+turn drains, so this fixes queue *order*, not consumer *starvation*. The
+reflection pause **complements** the goal-expander Drone; both are kept. It is
+keyword-free and fully guarded; the pure prompt and config helpers
+(``build_reflection_prompt``, ``is_reflection_enabled``,
+``resolve_reflection_duration``, ``resolve_reflection_min_interval``) are
+unit-tested in ``tests/test_vessel_beat.py``, and the ``PRIORITY_REFLECTION``
+band ordering in ``tests/test_vessel_realtime.py``.
+
 **Structured inventory.** So cognition can judge *how many* of a thing it still
 needs without rescanning, ``get_world_state`` aggregates the raw inventory (a
 flat list of stacks, where the same id can appear in several stacks) into an
@@ -537,20 +590,39 @@ strictly **reference**: it states how the world works, it never tells Synth what
 to do — the spontaneity rule (self-authored goals, no catalogue) is fully
 preserved.
 
-* **Source (Minecraft) — the live wiki, not a curated file.** The Minecraft
-  adapter consults the **live** `minecraft.wiki <https://minecraft.wiki>`_ (its
-  MediaWiki API is open to bots, no auth) via
-  ``plugins/rift_vessel/minecraft/wiki_client.py``. There is **no** hand-written
-  fact file. ``wiki_client.lookup(query, limit, *, cache_only=False)`` searches
-  for pages matching the query, then for each page serves a **one-time LLM
-  summary** — a short EN factual note (*how the game works*, never *what to do*)
-  — cached incrementally on disk as
-  ``plugins/rift_vessel/minecraft/wiki/cache/<slug>.json``
-  (``{title, url, raw_extract, summary, fetched_at}``). Repeated lookups of the
-  same page are served straight from cache with no re-fetch and no
-  re-summarise. Matching is keyword-free and structural: the ``query`` is
-  whitespace-joined game tokens (a goal ``target_name``, block/item ids) matched
-  against page-title slugs.
+* **World-agnostic mechanism + per-game sources.** The KB *mechanism* lives in
+  the core module ``plugins/rift_vessel/knowledge_client.py``
+  (``knowledge_client``) — search, cache, summarise and web-fallback are all
+  world-agnostic and driven entirely by adapter-supplied descriptors. A world
+  declares its own knowledge source(s) via ``WikiSource`` descriptors returned
+  from the connector's ``get_knowledge_wiki_sources()`` hook
+  (``VesselConnectorBase`` returns ``[]`` by default). A ``WikiSource`` carries
+  only structural, game-specific data: ``name``, ``api_url`` (a MediaWiki
+  ``api.php`` endpoint, or ``""`` for a web-only world), ``page_url`` (page-link
+  prefix), ``user_agent``, ``game`` (name substituted into the default summary
+  prompt) and an optional full ``summary_prompt`` override. **No wiki endpoint
+  is hardcoded in core code** — ``knowledge_client.lookup(cache_dir, sources,
+  query, limit, *, cache_only=False)`` takes the sources as a parameter.
+* **Local-first precedence.** The lookup consults, in order: (1) the **local
+  cache** first — offline-safe and instant, and the only tier read when
+  ``cache_only`` is set; (2) each **per-game wiki** in declared order — every
+  matching page is fetched, summarised once, and cached; (3) a **generic web
+  search** as a last resort, *only when no declared wiki matched* — reusing
+  ``plugins/web_search/search_engine.py::collect_valid_results``, gated by
+  ``VESSEL_KNOWLEDGE_WEB_FALLBACK`` (default ``True``), with results summarised
+  and cached exactly like a wiki page. Every tier writes back to ``cache_dir``
+  keyed by a slug of the title
+  (``{title, url, raw_extract, summary, fetched_at}``), so a fact is fetched at
+  most once. Each note is ``{title, text, url}``. Matching is keyword-free and
+  structural: the ``query`` is whitespace-joined game tokens (a goal
+  ``target_name``, block/item ids) matched against page-title slugs.
+* **Minecraft source — the live wiki, not a curated file.** The Minecraft
+  adapter ships ``plugins/rift_vessel/minecraft/wiki_client.py``, a thin shim
+  that declares the Minecraft ``WikiSource`` (the **live**
+  `minecraft.wiki <https://minecraft.wiki>`_ MediaWiki API, no auth) and
+  delegates to the core client. There is **no** hand-written fact file.
+  ``MinecraftConnector.get_knowledge_wiki_sources()`` returns that descriptor and
+  the cache lives at ``plugins/rift_vessel/minecraft/wiki/cache/<slug>.json``.
 * **Lookup verb.** The connector exposes a Fast-Lane, ``external_effects``-free
   ``lookup_knowledge`` verb (namespaced ``vessel_minecraft_lookup_knowledge``,
   ``required_fields: ["query"]``, ``optional_fields: ["limit"]``,
@@ -567,8 +639,11 @@ preserved.
   allowed to fetch and summarise. Config:
   ``VESSEL_KNOWLEDGE_LIVE_FETCH`` (bool, default ``True`` — set ``False`` to
   disable all network and stay cache-only everywhere),
-  ``VESSEL_KNOWLEDGE_FETCH_TIMEOUT_SEC`` (int, default 4, clamp 1–30) and
-  ``VESSEL_KNOWLEDGE_SUMMARY_MAX_CHARS`` (int, default 600, clamp 120–4000). The
+  ``VESSEL_KNOWLEDGE_WEB_FALLBACK`` (bool, default ``True`` — allow the generic
+  web-search fallback when no declared wiki matched; ``cache_only`` beats always
+  skip it), ``VESSEL_KNOWLEDGE_FETCH_TIMEOUT_SEC`` (int, default 4, clamp 1–30)
+  and ``VESSEL_KNOWLEDGE_SUMMARY_MAX_CHARS`` (int, default 600, clamp 120–4000).
+  The
   KB is fully offline-testable with the live API and the LLM mocked
   (``tests/test_vessel_knowledge.py``).
 * **Prompt injection.** When a beat's ``WorldState.extra["knowledge"]`` is
