@@ -40,7 +40,9 @@ from core.core_initializer import register_plugin
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.plugin_base import PluginBase
 from core.vessel_registry import register_vessel_connector
+from plugins.rift_vessel.knowledge_client import WikiSource
 from plugins.rift_vessel.minecraft import goals as mc_goals
+from plugins.rift_vessel.minecraft import wiki_client
 from plugins.rift_vessel.vessel_base import (
     PerceptionCallback,
     PerceptionEvent,
@@ -1322,7 +1324,9 @@ class MinecraftConnector(VesselConnectorBase):
             if not tokens:
                 return []
             query = " ".join(dict.fromkeys(tokens))  # de-dup, preserve order
-            return await self.lookup_knowledge(query, limit=cap)
+            # Automatic beat path: cache-only so a WorldState build never blocks
+            # on the network or the LLM (AGENTS.md §5c).
+            return await self.lookup_knowledge(query, limit=cap, cache_only=True)
         except Exception as exc:  # pragma: no cover - defensive
             log_debug(f"{LOG_PREFIX} knowledge resolution failed: {exc}")
             return []
@@ -2817,7 +2821,9 @@ class MinecraftConnector(VesselConnectorBase):
                 limit = int(raw_limit) if raw_limit is not None else 5
             except (TypeError, ValueError):
                 limit = 5
-            entries = await self.lookup_knowledge(query, limit=limit)
+            # Explicit verb / goal-expansion Drone: allow the live path (network
+            # + LLM), unlike the cache-only automatic beat path.
+            entries = await self.lookup_knowledge(query, limit=limit, cache_only=False)
             notes = [
                 {
                     "title": e.get("title"),
@@ -2848,75 +2854,45 @@ class MinecraftConnector(VesselConnectorBase):
         }
 
     # ------------------------------------------------------------------
-    # Knowledge base (curated game rules — reference only, never a script)
+    # Knowledge base (live game wiki + web fallback — reference, never a script)
     # ------------------------------------------------------------------
 
-    def get_knowledge_sources(self) -> list[dict[str, Any]]:
-        """Return the curated Minecraft knowledge-base entries.
+    def get_knowledge_wiki_sources(self) -> list[WikiSource]:
+        """Return the Minecraft knowledge sources for the core client.
 
-        Loaded once (cached) from ``wiki/knowledge.json`` next to this module.
-        Each entry is reference material about how the world works (mining
-        tiers, crafting, smelting, etc.) with structural ``tags`` (lowercase
-        game ids) used for keyword-free matching. Fail-safe: a missing or
-        malformed file yields an empty list so the rest of the Vessel keeps
-        working.
+        Declares the live `minecraft.wiki <https://minecraft.wiki>`_ MediaWiki
+        endpoint. The world-agnostic client
+        (:mod:`plugins.rift_vessel.knowledge_client`) consumes these to search,
+        fetch, summarise, and cache pages — the source URLs are never hardcoded
+        in the core.
         """
-        cached = getattr(self, "_knowledge_cache", None)
-        if cached is not None:
-            return cached
-        entries: list[dict[str, Any]] = []
-        try:
-            import json
-            from pathlib import Path
-
-            manifest = Path(__file__).resolve().parent / "wiki" / "knowledge.json"
-            if manifest.is_file():
-                data = json.loads(manifest.read_text(encoding="utf-8"))
-                raw = data.get("entries") if isinstance(data, dict) else None
-                if isinstance(raw, list):
-                    entries = [e for e in raw if isinstance(e, dict)]
-        except Exception as exc:  # pragma: no cover - defensive
-            log_warning(f"{LOG_PREFIX} knowledge base load failed: {exc}")
-            entries = []
-        self._knowledge_cache = entries
-        return entries
+        return [wiki_client.MINECRAFT_WIKI_SOURCE]
 
     async def lookup_knowledge(
-        self, query: str, limit: int = 5
+        self, query: str, limit: int = 5, *, cache_only: bool = False
     ) -> list[dict[str, Any]]:
-        """Return knowledge entries relevant to ``query`` (a structural token).
+        """Return knowledge notes relevant to ``query`` (a structural token).
 
         ``query`` is expected to be structural game tokens (a goal
         ``target_name``, item/block ids, whitespace-joined) — never a
         natural-language sentence — so matching stays keyword-free and
-        language-agnostic. Entries are ranked by how many query tokens overlap
-        their ``tags``; a curated ``text`` field is returned verbatim (already a
-        distilled fact). Best-effort live enrichment from the entry ``url`` is
-        intentionally deferred to keep the beat fast and offline-safe — the
-        curated text is authoritative.
+        language-agnostic. Delegates to :func:`wiki_client.lookup`, which drives
+        the local-first precedence ``local cache → minecraft.wiki → generic web
+        search`` and returns each note as ``{"title", "text", "url"}``.
+
+        ``cache_only`` (set by the automatic will/action-beat path) forbids any
+        network or LLM call, serving only already-cached pages. Fully fail-safe:
+        any error degrades to ``[]`` rather than breaking the beat.
         """
-        sources = self.get_knowledge_sources()
-        if not sources:
-            return []
         try:
-            lim = max(0, int(limit))
-        except Exception:
+            lim = max(1, int(limit))
+        except (TypeError, ValueError):
             lim = 5
-        tokens = {tok for tok in str(query or "").lower().split() if tok}
-        if not tokens:
-            return sources[:lim]
-        scored: list[tuple[int, dict[str, Any]]] = []
-        for entry in sources:
-            tags = entry.get("tags") or []
-            tag_set = {str(t).lower() for t in tags if t}
-            title = str(entry.get("title") or "").lower()
-            score = len(tokens & tag_set)
-            if score == 0 and any(tok in title for tok in tokens):
-                score = 1
-            if score > 0:
-                scored.append((score, entry))
-        scored.sort(key=lambda pair: pair[0], reverse=True)
-        return [entry for _score, entry in scored[:lim]]
+        try:
+            return await wiki_client.lookup(query, limit=lim, cache_only=cache_only)
+        except Exception as exc:  # pragma: no cover - defensive
+            log_warning(f"{LOG_PREFIX} lookup_knowledge failed: {exc}")
+            return []
 
     @property
     def is_connected(self) -> bool:

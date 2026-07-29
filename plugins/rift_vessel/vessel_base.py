@@ -239,8 +239,26 @@ class VesselConnectorBase(ABC):
         """
         return []
 
+    def get_knowledge_wiki_sources(self) -> List[Any]:
+        """Return this world's live **wiki knowledge sources**.
+
+        Each entry is a
+        :class:`plugins.rift_vessel.knowledge_client.WikiSource` descriptor that
+        tells the world-agnostic knowledge client *which* wiki(s) to consult for
+        this game (the source URLs are declared per-world here, never hardcoded
+        in the core client). The client drives the local-first precedence
+        ``local cache → per-game wiki(s) → generic web search`` and summarises +
+        caches each page once. This is the modern counterpart of
+        :meth:`get_knowledge_sources` (a static curated list) — a connector
+        typically overrides this instead, and routes :meth:`lookup_knowledge`
+        through :func:`plugins.rift_vessel.knowledge_client.lookup`.
+
+        Optional override. Defaults to an empty list (no wiki sources).
+        """
+        return []
+
     async def lookup_knowledge(
-        self, query: str, limit: int = 5
+        self, query: str, limit: int = 5, *, cache_only: bool = False
     ) -> List[Dict[str, Any]]:
         """Return knowledge-base entries relevant to ``query``.
 
@@ -252,6 +270,11 @@ class VesselConnectorBase(ABC):
         (falling back to a substring test on the entry ``title``), and returns
         at most ``limit`` entries. A connector may override this to consult a
         live wiki with a local fallback.
+
+        ``cache_only`` is a hint to any live-wiki override that the caller is on
+        the automatic will/action-beat path and must not touch the network or
+        the LLM (serve only already-cached pages). The static-source default
+        implementation is already offline, so it ignores the flag.
 
         Optional override. Defaults to a structural filter over
         :meth:`get_knowledge_sources`.

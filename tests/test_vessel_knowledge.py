@@ -362,3 +362,164 @@ async def test_act_lookup_knowledge_empty_payload_is_ok(
     assert isinstance(result, VesselActionResult)
     assert result.ok is True
     assert result.data.get("query") == ""
+
+
+# ---------------------------------------------------------------------------
+# Per-game wiki sources — the source URLs are declared by the adapter, not the
+# core client (TODO - Rift Vessel.md §9 item 1)
+# ---------------------------------------------------------------------------
+
+
+def test_minecraft_declares_its_own_wiki_source() -> None:
+    """The connector supplies a WikiSource; the core client is not hardcoded."""
+    from plugins.rift_vessel.knowledge_client import WikiSource
+
+    connector = MinecraftConnector()
+    sources = connector.get_knowledge_wiki_sources()
+    assert len(sources) == 1
+    src = sources[0]
+    assert isinstance(src, WikiSource)
+    assert src.api_url == wiki_client._API_URL
+    assert src.page_url == wiki_client._PAGE_URL
+    assert src.game == "Minecraft"
+
+
+def test_vessel_base_has_no_wiki_sources_by_default() -> None:
+    """The world-agnostic base declares no wiki source (each world opts in)."""
+    from plugins.rift_vessel.vessel_base import VesselConnectorBase
+
+    # A bare subclass inherits the empty default.
+    class _Dummy(VesselConnectorBase):
+        async def connect(self, *_a: object, **_k: object) -> bool:  # type: ignore[override]
+            return True
+
+        async def disconnect(self) -> None:  # type: ignore[override]
+            return None
+
+        async def act(self, *_a: object, **_k: object):  # type: ignore[override]
+            return None
+
+        async def get_world_state(self):  # type: ignore[override]
+            return None
+
+        @property
+        def is_connected(self) -> bool:  # type: ignore[override]
+            return False
+
+    assert _Dummy().get_knowledge_wiki_sources() == []
+
+
+# ---------------------------------------------------------------------------
+# knowledge_client.lookup — core client drives multi-source + web fallback
+# (TODO - Rift Vessel.md §9 items 2 & 3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_core_client_local_first_precedence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cached page satisfies the quota before any wiki is searched.
+
+    The local cache is Tier 1: when it already fills ``limit`` notes, the
+    client returns without ever hitting the network.
+    """
+    from plugins.rift_vessel import knowledge_client as kc
+
+    cache = tmp_path / "cache"
+    kc.write_cache(
+        cache,
+        {
+            "title": "Iron Ore",
+            "url": "https://minecraft.wiki/w/Iron_Ore",
+            "raw_extract": "raw",
+            "summary": "Iron ore needs a stone pickaxe.",
+            "fetched_at": 0.0,
+        },
+    )
+
+    async def _boom_search(*_a: object, **_k: object) -> list[str]:  # pragma: no cover
+        raise AssertionError("a full cache hit must not search the wiki")
+
+    monkeypatch.setattr(kc, "search_wiki", _boom_search)
+
+    src = kc.WikiSource(name="mc", api_url="http://x/api.php", page_url="http://x/w/")
+    notes = await kc.lookup(cache, [src], "iron_ore", limit=1)
+    assert notes == [
+        {
+            "title": "Iron Ore",
+            "text": "Iron ore needs a stone pickaxe.",
+            "url": "https://minecraft.wiki/w/Iron_Ore",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_core_client_web_fallback_when_no_wiki_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When no declared wiki knows the answer, the generic web search is used."""
+    from plugins.rift_vessel import knowledge_client as kc
+
+    cache = tmp_path / "cache"
+
+    async def _empty_search(*_a: object, **_k: object) -> list[str]:
+        return []
+
+    async def _web(_q: str, limit: int = 3) -> list[dict[str, str]]:
+        return [{"title": "Redstone", "text": "raw redstone facts", "url": "http://w"}]
+
+    async def _summary(_src: object, _title: str, _extract: str) -> str:
+        return "Redstone powers contraptions."
+
+    monkeypatch.setattr(kc, "search_wiki", _empty_search)
+    monkeypatch.setattr(kc, "web_search", _web)
+    monkeypatch.setattr(kc, "summarize", _summary)
+
+    src = kc.WikiSource(name="mc", api_url="http://x/api.php", page_url="http://x/w/")
+    notes = await kc.lookup(cache, [src], "redstone", limit=3)
+    assert notes == [
+        {
+            "title": "Redstone",
+            "text": "Redstone powers contraptions.",
+            "url": "http://w",
+        }
+    ]
+    # The web result was cached like a wiki page.
+    cached = json.loads((cache / "redstone.json").read_text(encoding="utf-8"))
+    assert cached["summary"] == "Redstone powers contraptions."
+
+
+@pytest.mark.asyncio
+async def test_core_client_cache_only_skips_web_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cache_only must never reach the wiki or the web fallback."""
+    from plugins.rift_vessel import knowledge_client as kc
+
+    cache = tmp_path / "cache"
+
+    async def _boom_search(*_a: object, **_k: object) -> list[str]:  # pragma: no cover
+        raise AssertionError("cache_only must not search the wiki")
+
+    async def _boom_web(*_a: object, **_k: object):  # pragma: no cover
+        raise AssertionError("cache_only must not fall back to the web")
+
+    monkeypatch.setattr(kc, "search_wiki", _boom_search)
+    monkeypatch.setattr(kc, "web_search", _boom_web)
+
+    src = kc.WikiSource(name="mc", api_url="http://x/api.php", page_url="http://x/w/")
+    assert await kc.lookup(cache, [src], "unknown", limit=3, cache_only=True) == []
+
+
+def test_wikisource_summary_prompt_is_reference_not_a_script() -> None:
+    """The default summary prompt frames facts as reference, never a script."""
+    from plugins.rift_vessel.knowledge_client import WikiSource
+
+    src = WikiSource(name="mc", game="Minecraft")
+    prompt = src.build_summary_prompt("Iron Ore", "some extract", 600)
+    assert "Minecraft" in prompt
+    assert "Iron Ore" in prompt
+    # Reference, not a script: it must not tell the agent what to do.
+    assert "how the game works" in prompt
+    assert "Do NOT suggest goals" in prompt
