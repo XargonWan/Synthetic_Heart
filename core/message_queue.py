@@ -28,7 +28,7 @@ from core.user_utils import ensure_message_user_fields
 
 # Use a priority queue so events can be processed before regular messages.
 #
-# Priority scale: a plain 0–10 numeric axis where HIGHER = MORE URGENT.
+# Priority scale: a plain 0–11 numeric axis where HIGHER = MORE URGENT.
 # The names are deliberately generic (broad-scope) — the *meaning* lives in the
 # comments, not in narrow feature-bound names. Producers pick the closest band.
 #
@@ -36,8 +36,15 @@ from core.user_utils import ensure_message_user_fields
 # (lowest key popped first). To make "higher = more urgent" work we push the
 # NEGATED priority as the heap key via ``_heap_key`` — never push a raw priority
 # value. The monotonic ``_counter`` stays the FIFO tie-break.
-PRIORITY_EMERGENCY = 10  # Reserved top band — not used by the normal enqueue paths
-PRIORITY_URGENT = 9  # Scheduled events, auto_response(priority=True)
+#
+# NOTE ON VALUES: producers reference these constants **by name**, never by the
+# raw integer, so the exact numbers are free to be re-spaced. REFLECTION was
+# inserted between HIGH and URGENT (bumping EMERGENCY→11, URGENT→10) so a Vessel
+# "stop and think about my goal" turn can jump ahead of ordinary in-world player
+# chat yet still yield to a real-world emergency/safety notification.
+PRIORITY_EMERGENCY = 11  # Reserved top band — a real emergency, above everything
+PRIORITY_URGENT = 10  # Scheduled events, auto_response(priority=True), safety
+PRIORITY_REFLECTION = 9  # Vessel "pause & reflect on my goal" turn (above player chat)
 PRIORITY_HIGH = 8  # Direct prioritised human input (e.g. in-world player chat)
 PRIORITY_TRAINER = 7  # The trainer — must always reach Synth promptly
 PRIORITY_GENERAL = 6  # Ordinary user chat (telegram/discord/matrix/webui/ollama…)
@@ -795,6 +802,12 @@ async def enqueue(
         # Synth (set by the vessel interface). Used below to rank it above
         # Synth's own autonomous vessel perceptions and to prune stale ones.
         "vessel_player_chat": bool(getattr(message, "_vessel_player_chat", False)),
+        # Structural marker: a Vessel "pause & reflect on my goal" turn (set by
+        # the vessel interface when Synth stops to author/expand its goal). Used
+        # below to rank it at PRIORITY_REFLECTION — ahead of ordinary in-world
+        # player chat but below any real emergency/urgent notification — and to
+        # prune stale autonomous beats so the reflection turn runs unobstructed.
+        "vessel_reflection": bool(getattr(message, "_vessel_reflection", False)),
     }
 
     global _counter
@@ -818,6 +831,19 @@ async def enqueue(
     # failure, leaves enqueue behaviour unchanged.
     if priority:
         priority_val = PRIORITY_URGENT
+    elif interface == "vessel" and item.get("vessel_reflection"):
+        # Synth deliberately stopped to think about its goal. This ranks ABOVE
+        # ordinary in-world player chat (HIGH) yet below any urgent/emergency
+        # notification, so the reflection turn is the next thing consumed. Prune
+        # the older autonomous beats already queued for this world so the
+        # reflection turn is not coalesced with — or delayed behind — stale
+        # will/action beats (structural + world scope, guarded; player chats and
+        # ``no_compact`` items are preserved).
+        priority_val = PRIORITY_REFLECTION
+        try:
+            _supersede_pending_vessel_beats(chat_id)
+        except Exception as _ref_exc:  # pragma: no cover - defensive
+            log_debug(f"[QUEUE] Vessel reflection prune skipped: {_ref_exc}")
     elif interface == "vessel" and item.get("vessel_player_chat"):
         # A human speaking in-world. Prune stale autonomous perceptions for the
         # same world so the player is answered promptly (structural, guarded).

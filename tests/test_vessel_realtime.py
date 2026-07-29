@@ -113,7 +113,10 @@ def test_has_active_session_probe_failure_is_safe() -> None:
 
 
 def _make_message(
-    interface_path: str, *, vessel_player_chat: bool = False
+    interface_path: str,
+    *,
+    vessel_player_chat: bool = False,
+    vessel_reflection: bool = False,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         text="hello",
@@ -124,6 +127,7 @@ def _make_message(
         thread_id=None,
         message_thread_id=None,
         _vessel_player_chat=vessel_player_chat,
+        _vessel_reflection=vessel_reflection,
     )
 
 
@@ -346,6 +350,35 @@ async def test_urgent_message_stays_high_regardless(
     )
 
     assert _semantic_priority(put_items) == mq.PRIORITY_URGENT
+
+
+@pytest.mark.asyncio
+async def test_vessel_reflection_ranked_above_player_chat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reflection-pause turn gets PRIORITY_REFLECTION.
+
+    The deliberate stop-and-think turn is ranked above a real player chat
+    (HIGH) so it is consumed before ordinary in-world traffic, yet stays below
+    urgent/emergency so it never pre-empts a true escalation.
+    """
+    import core.message_queue as mq
+
+    put_items = _patch_enqueue_hot_path(monkeypatch, session_active=True)
+    message = _make_message("vessel/minecraft", vessel_reflection=True)
+
+    await mq.enqueue(
+        bot=None,
+        message=message,
+        interface_id="vessel",
+        skip_mention_check=True,
+    )
+
+    assert _semantic_priority(put_items) == mq.PRIORITY_REFLECTION
+    # Above player chat, below urgent/emergency.
+    assert mq.PRIORITY_REFLECTION > mq.PRIORITY_HIGH
+    assert mq.PRIORITY_URGENT > mq.PRIORITY_REFLECTION
+    assert mq.PRIORITY_EMERGENCY > mq.PRIORITY_URGENT
 
 
 # ---------------------------------------------------------------------------

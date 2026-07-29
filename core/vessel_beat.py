@@ -524,6 +524,114 @@ def build_decision_prompt(world_state: Any, world: str) -> str:
     return build_will_prompt(world_state, world)
 
 
+def build_reflection_prompt(world_state: Any, world: str) -> str:
+    """Build the **reflection** ("pause & think") prompt from a ``WorldState``.
+
+    This is the deliberate *stop-and-think* turn. When the scheduler notices
+    Synth is playing without a real objective — no active goal at all, or a goal
+    that still has no concrete step plan — it enqueues this prompt at an
+    elevated priority (:data:`core.message_queue.PRIORITY_REFLECTION`) so the
+    next cognition turn is dedicated to sorting out *what to do*: author a fresh
+    goal if there is none, or break the current free-text goal into a first
+    concrete step to chase.
+
+    Unlike the will beat (which is framed as an idle "quiet moment") this frames
+    the moment as an explicit, intentional pause: Synth deliberately halted its
+    aimless movement to reflect, and should come out of it with a clear
+    objective. It is still Fast-Lane only (a single ordinary cognition turn, no
+    Agent Lane / Drone / mid-session diary) and still purely structural — it
+    surfaces only the world snapshot + goal state, never keyword/text matching.
+
+    Args:
+        world_state: A ``WorldState`` dataclass or an equivalent dict.
+        world:       The connected world name (e.g. ``"minecraft"``) used to
+                     namespace the verbs referenced in the cue.
+
+    Returns:
+        A ready-to-enqueue prompt string.
+    """
+    ws = world_state_to_dict(world_state)
+    extra = ws["extra"]
+
+    health = ws["health"]
+    health_txt = f"{float(health):.0f}" if isinstance(health, (int, float)) else "?"
+    position_txt = _fmt_position(ws["position"])
+
+    entities_txt = _fmt_items(extra.get("entities") or [])
+    blocks_txt = _fmt_items(extra.get("blocks") or [], key="name")
+    inventory_txt = _fmt_items(extra.get("inventory") or [])
+    affordances_txt = _fmt_affordances(extra.get("affordances") or [])
+    goal_txt = _fmt_goal(extra.get("current_goal"))
+    recent_txt = _fmt_items(extra.get("recent_goals") or [], key="description")
+    has_goal = _has_current_goal(extra.get("current_goal"))
+
+    prefix = f"vessel_{world}_"
+
+    lines = [
+        f"[Embodiment — you stopped moving and took a deliberate moment to "
+        f"think about what you are doing in the {world} world.]",
+        "",
+        "You realised you were drifting without a clear purpose, so you paused "
+        "on your own to sort out what you actually want to do next. Take this "
+        "turn to think it through and come out of it with a clear objective.",
+        "",
+        "Where you are right now:",
+        f"- Health: {health_txt}",
+        f"- Position: {position_txt}",
+        f"- Nearby entities/NPCs: {entities_txt}",
+        f"- Nearby blocks of interest: {blocks_txt}",
+        f"- Inventory: {inventory_txt}",
+        f"- Things you could interact with: {affordances_txt}",
+        f"- Your current goal: {goal_txt}",
+        f"- Things you set out to do before: {recent_txt}",
+        "",
+    ]
+
+    if not has_goal:
+        lines.append(
+            "Right now you have NO goal at all — that is why your body was just "
+            "wandering. This pause is exactly the moment to choose one. Decide, "
+            "in your own words and in character, what you genuinely want to be "
+            "doing in this world — big or small — and set it now by calling "
+            f"`{prefix}set_goal` with a free-text description. This is your own "
+            "personal objective, chosen out of your own will and curiosity; "
+            "nobody asked you to do it. Do not leave yourself aimless again — "
+            "commit to something this turn."
+        )
+    else:
+        lines.append(
+            "You already have a goal, but it still has no concrete plan of "
+            "steps — so your body has nothing specific to chase and just "
+            "drifts. Use this pause to make it actionable: think about the very "
+            "first concrete thing you need to do toward this goal given what is "
+            "around you, and either take that step now with the fitting verb, "
+            "or note your intent with "
+            f"`{prefix}update_goal`. If, on reflection, this goal no longer "
+            "feels right, you may choose a different one with "
+            f"`{prefix}set_goal` instead. Either way, come out of this pause "
+            "with a clear next move."
+        )
+
+    lines.extend(
+        [
+            "",
+            "This is a *private* moment of reflection — no one is addressing "
+            "you right now. Any conversation you can see above already happened "
+            "and, if it needed a reply, you already gave one in a separate "
+            "turn. Do NOT speak, greet, or repeat a message here; you are "
+            "thinking, not talking. Return no `say` action. When someone "
+            "actually speaks to you again you will get a separate turn to reply. "
+            "For now, only shape your own intent (set or refine your goal).",
+        ]
+    )
+
+    # Curated game-rule facts relevant to the goal/surroundings (reference
+    # only), selected structurally by the connector into extra["knowledge"].
+    lines.extend(_fmt_knowledge(extra.get("knowledge")))
+
+    return "\n".join(lines)
+
+
 def build_action_prompt(world_state: Any, world: str) -> str:
     """Build the **action beat** prompt from a ``WorldState``.
 
@@ -767,3 +875,52 @@ def is_motor_enabled(config_get: Any) -> bool:
         return bool(config_get("VESSEL_MOTOR_ENABLED", True))
     except Exception:
         return False
+
+
+def is_reflection_enabled(config_get: Any) -> bool:
+    """Return whether the **reflection pause** is enabled.
+
+    The reflection pause is the deliberate stop-and-think turn: when Synth is
+    playing without a real objective (no goal, or a goal with no step plan) the
+    scheduler prunes its own pending autonomous beats and dedicates one elevated
+    cognition turn to authoring/refining the goal (see
+    :func:`build_reflection_prompt`). Fail-safe: any error → ``True`` (on by
+    default, matching the config registration).
+    """
+    try:
+        return bool(config_get("VESSEL_REFLECTION_ENABLED", True))
+    except Exception:
+        return True
+
+
+def resolve_reflection_duration(config_get: Any, default: int = 15) -> float:
+    """Return the **reflection pause** duration in seconds, clamped.
+
+    While reflecting, the scheduler holds off the slow will beat and the middle
+    action beat (but never the fast motor tick — the body keeps moving) for this
+    window, giving the elevated reflection turn room to be consumed and commit a
+    goal before ordinary autonomy resumes. Reads
+    ``VESSEL_REFLECTION_DURATION_SEC``. Clamped to ``[3, 300]``. Fail-safe: any
+    error → ``default``.
+    """
+    try:
+        value = float(config_get("VESSEL_REFLECTION_DURATION_SEC", default))
+    except Exception:
+        return float(default)
+    return max(3.0, min(300.0, value))
+
+
+def resolve_reflection_min_interval(config_get: Any, default: int = 60) -> float:
+    """Return the **reflection anti-thrash floor** in seconds, clamped.
+
+    A minimum interval that must elapse between two reflection pauses for the
+    same world, so a persistently goal-less situation cannot fire a reflection
+    turn on every scheduler tick and starve everything else. Reads
+    ``VESSEL_REFLECTION_MIN_INTERVAL_SEC``. Clamped to ``[10, 3600]``.
+    Fail-safe: any error → ``default``.
+    """
+    try:
+        value = float(config_get("VESSEL_REFLECTION_MIN_INTERVAL_SEC", default))
+    except Exception:
+        return float(default)
+    return max(10.0, min(3600.0, value))

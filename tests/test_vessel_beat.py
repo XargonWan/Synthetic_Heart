@@ -19,13 +19,17 @@ from typing import Any
 from core.vessel_beat import (
     build_action_prompt,
     build_decision_prompt,
+    build_reflection_prompt,
     build_will_prompt,
     is_action_beat_enabled,
     is_autonomy_enabled,
     is_motor_enabled,
+    is_reflection_enabled,
     resolve_action_interval,
     resolve_beat_interval,
     resolve_motor_interval,
+    resolve_reflection_duration,
+    resolve_reflection_min_interval,
     resolve_will_interval,
     resolve_will_quiet_sec,
     world_state_to_dict,
@@ -492,3 +496,80 @@ def test_knowledge_block_skipped_when_entries_have_no_text() -> None:
     prompt = build_will_prompt(state, "minecraft")
     # Header is dropped when nothing renderable survives.
     assert "Game knowledge" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# Reflection pause — prompt + config helpers
+# ---------------------------------------------------------------------------
+
+
+def test_build_reflection_prompt_frames_intentional_pause() -> None:
+    prompt = build_reflection_prompt(_rich_world_state(), "minecraft")
+    # Explicit "stopped to think" framing, distinct from the idle will beat.
+    assert "stopped moving" in prompt
+    assert "private" in prompt.lower()
+    # It is a thinking turn — must forbid speaking.
+    assert "Do NOT speak" in prompt
+
+
+def test_build_reflection_prompt_pushes_set_goal_when_no_goal() -> None:
+    state = _rich_world_state()
+    state["extra"]["current_goal"] = None
+    prompt = build_reflection_prompt(state, "minecraft")
+    assert "vessel_minecraft_set_goal" in prompt
+    assert "NO goal" in prompt
+
+
+def test_build_reflection_prompt_pushes_update_goal_when_goal_exists() -> None:
+    # A goal exists → make it actionable via update_goal (no plan yet).
+    prompt = build_reflection_prompt(_rich_world_state(), "minecraft")
+    assert "vessel_minecraft_update_goal" in prompt
+
+
+def test_build_reflection_prompt_handles_empty_world_state() -> None:
+    # Fully guarded: an empty state still yields a usable prompt.
+    prompt = build_reflection_prompt({}, "minecraft")
+    assert "vessel_minecraft_set_goal" in prompt
+
+
+def test_is_reflection_enabled_defaults_true_and_reads_flag() -> None:
+    assert is_reflection_enabled(lambda k, d: d) is True
+    assert is_reflection_enabled(lambda k, d: False) is False
+    assert is_reflection_enabled(lambda k, d: True) is True
+
+
+def test_is_reflection_enabled_failsafe_on_error() -> None:
+    def _boom(key: str, default: Any) -> Any:
+        raise RuntimeError("boom")
+
+    assert is_reflection_enabled(_boom) is True
+
+
+def test_resolve_reflection_duration_default_and_clamp() -> None:
+    assert resolve_reflection_duration(lambda k, d: d, default=15) == 15.0
+    # Clamped to [3.0, 300.0].
+    assert resolve_reflection_duration(lambda k, d: 0) == 3.0
+    assert resolve_reflection_duration(lambda k, d: 9999) == 300.0
+    assert resolve_reflection_duration(lambda k, d: 20) == 20.0
+
+
+def test_resolve_reflection_duration_failsafe_on_error() -> None:
+    def _boom(key: str, default: Any) -> Any:
+        raise RuntimeError("boom")
+
+    assert resolve_reflection_duration(_boom, default=15) == 15.0
+
+
+def test_resolve_reflection_min_interval_default_and_clamp() -> None:
+    assert resolve_reflection_min_interval(lambda k, d: d, default=60) == 60.0
+    # Clamped to [10.0, 3600.0].
+    assert resolve_reflection_min_interval(lambda k, d: 0) == 10.0
+    assert resolve_reflection_min_interval(lambda k, d: 99999) == 3600.0
+    assert resolve_reflection_min_interval(lambda k, d: 120) == 120.0
+
+
+def test_resolve_reflection_min_interval_failsafe_on_error() -> None:
+    def _boom(key: str, default: Any) -> Any:
+        raise RuntimeError("boom")
+
+    assert resolve_reflection_min_interval(_boom, default=60) == 60.0

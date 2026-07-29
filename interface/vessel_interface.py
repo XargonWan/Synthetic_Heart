@@ -116,6 +116,18 @@ class VesselInterface:
         # chat turn instead of being swallowed by a "you are alone" prompt.
         # Structural (actor-based), never keyword matching.
         self._last_player_activity_at: float = 0.0
+        # Reflection-pause bookkeeping. When Synth is playing without a real
+        # objective (no goal, or a goal with no step plan) the scheduler stops
+        # to think: it prunes its own pending autonomous beats and dedicates one
+        # elevated cognition turn to authoring/refining the goal. While the pause
+        # is active (``_reflecting`` until ``_reflecting_until``) the slow will
+        # beat and the middle action beat are held off — but never the fast
+        # motor tick (the body keeps moving). ``_last_reflection_at`` throttles
+        # how often a pause may fire (anti-thrash). All monotonic clocks; state,
+        # never keyword logic. See core.vessel_beat and AGENTS.md §5c.
+        self._reflecting: bool = False
+        self._reflecting_until: float = 0.0
+        self._last_reflection_at: float = 0.0
         # Disconnect-grace bookkeeping: environment -> monotonic timestamp when
         # its connector was first observed no longer ``is_connected`` while a
         # session was still active. Once the grace window elapses the session is
@@ -922,7 +934,13 @@ class VesselInterface:
             # so Synth never replies. Structural (event kind + actor presence),
             # never keyword matching.
             is_player_chat = event_type == "chat" and bool(actor)
-            no_compact = is_player_chat
+            # A reflection turn is a deliberate "stop & think about my goal"
+            # cognition turn. It must run standalone (never coalesced) and, via
+            # the queue's ``vessel_reflection`` band, jump ahead of ordinary
+            # in-world player chat while yielding to any real emergency. Purely
+            # structural (event kind), never keyword text.
+            is_reflection = event_type == "reflection"
+            no_compact = is_player_chat or is_reflection
 
             wrapped = SimpleNamespace(
                 message_id=None,
@@ -943,6 +961,12 @@ class VesselInterface:
                 # player chat; every synthetic perception leaves it False.
                 # Structural (event kind + actor presence), never keyword text.
                 _vessel_player_chat=is_player_chat,
+                # Structural signal for the queue: a reflection turn ranks at
+                # PRIORITY_REFLECTION — ahead of ordinary player chat, below any
+                # emergency/urgent — and prunes the older autonomous beats for
+                # this world so it runs unobstructed. Set only for the reflection
+                # perception; everything else leaves it False.
+                _vessel_reflection=is_reflection,
                 chat=SimpleNamespace(
                     id=interface_path,
                     type="vessel",
@@ -1018,7 +1042,12 @@ class VesselInterface:
                 # ``has_active_session()`` true and pile up autonomous beats.
                 await self._close_disconnected_sessions()
                 # Autonomous play: only while a session is active and enabled.
-                # Volition first (may set a fresh goal), then motorics acts on it.
+                # Reflection pause first: if Synth is playing without a real
+                # objective, stop and dedicate one elevated turn to sorting out
+                # the goal. While a pause is in flight the will/action beats are
+                # held off inside their own gates (the motor tick keeps moving).
+                await self._maybe_run_reflection()
+                # Volition (may set a fresh goal), then motorics acts on it.
                 await self._maybe_run_will_beat()
                 # If volition left the goal without a reachable target/destination,
                 # translate the idea into a concrete waypoint out of band (Drone).
@@ -1060,6 +1089,106 @@ class VesselInterface:
             return self._TICK_SEC
         return max(self._MIN_TICK_SEC, min(self._TICK_SEC, motor_interval))
 
+    async def _maybe_run_reflection(self) -> None:
+        """Stop and think when Synth is playing without a real objective.
+
+        The deliberate *pause & reflect* turn (AGENTS.md §5c). When Synth is
+        wandering without a real goal — no active goal at all, or a goal that
+        still has no concrete ``steps`` plan — this fires **one** elevated
+        cognition turn dedicated to sorting out *what to do*: author a fresh
+        goal, or make the current one actionable. It is ranked at
+        :data:`core.message_queue.PRIORITY_REFLECTION` (ahead of ordinary
+        in-world player chat, below any emergency) and, on enqueue, prunes the
+        older pending autonomous beats for this world so it runs unobstructed.
+
+        Fully guarded. Gated: (1) ``VESSEL_AUTONOMY_ENABLED`` on; (2) a session
+        active; (3) ``VESSEL_REFLECTION_ENABLED`` on; (4) not already reflecting;
+        (5) the goal is actually missing or step-less (structural, never keyword
+        text); (6) no player active within the will-quiet window (a player is
+        answered reactively first); (7) the anti-thrash floor
+        ``VESSEL_REFLECTION_MIN_INTERVAL_SEC`` has elapsed.
+
+        Crucially this does NOT gate the fast motor tick — the body keeps moving
+        during the pause; only the slow will beat and middle action beat are
+        held off (inside their own gates) for ``VESSEL_REFLECTION_DURATION_SEC``.
+        On resume the will-beat clock is reset so volition re-enters promptly
+        with the freshly-authored goal.
+        """
+        try:
+            from core import vessel_beat
+        except Exception:
+            return
+
+        def _cfg(key: str, default: Any) -> Any:
+            return config_registry.get_value(
+                key, default, group="vessel", component="vessel"
+            )
+
+        now = asyncio.get_event_loop().time()
+
+        # Clear an expired pause and re-prime volition so it re-enters promptly
+        # with whatever goal the reflection turn just committed.
+        if self._reflecting and now >= self._reflecting_until:
+            self._reflecting = False
+            self._last_will_beat_at = 0.0
+
+        if not vessel_beat.is_autonomy_enabled(_cfg):
+            return
+        if not vessel_beat.is_reflection_enabled(_cfg):
+            return
+
+        manager = get_vessel_session_manager()
+        if not manager.has_active_session():
+            return
+
+        # Already thinking — let the current pause run its course.
+        if self._reflecting and now < self._reflecting_until:
+            return
+
+        # Anti-thrash: never fire two pauses back-to-back.
+        min_interval = vessel_beat.resolve_reflection_min_interval(_cfg)
+        if now - self._last_reflection_at < min_interval:
+            return
+
+        # A player addressing Synth in-world is answered reactively first; do
+        # not pre-empt them with a private reflection. Structural (actor-based),
+        # never keyword matching; ``0`` disables the deferral.
+        quiet_sec = vessel_beat.resolve_will_quiet_sec(_cfg)
+        if quiet_sec > 0 and now - self._last_player_activity_at < quiet_sec:
+            return
+
+        world, world_state = await self._read_active_world_state()
+        if world is None or world_state is None:
+            return
+
+        # Structural trigger: reflect only when there is no real objective yet —
+        # no goal, or a goal with no ordered step plan. Never inspects the goal's
+        # free-text description (no keyword logic).
+        goal = self._goal_from_world_state(world_state)
+        if goal is not None and not self._goal_needs_expansion(goal):
+            return
+
+        interface_path = self._decision_interface_path(world)
+        if interface_path is None:
+            return
+
+        prompt = vessel_beat.build_reflection_prompt(world_state, world)
+        duration = vessel_beat.resolve_reflection_duration(_cfg)
+        self._reflecting = True
+        self._reflecting_until = now + duration
+        self._last_reflection_at = now
+        log_debug(
+            f"[vessel_interface] Reflection pause for '{world}' "
+            f"(duration={duration:.0f}s, "
+            f"goal={'missing' if goal is None else 'step-less'})"
+        )
+        await self._enqueue_perception(
+            interface_path=interface_path,
+            summary=prompt,
+            environment=world,
+            event_type="reflection",
+        )
+
     async def _maybe_run_will_beat(self) -> None:
         """Enqueue a **volition** cognition turn when it is due (slow layer).
 
@@ -1094,8 +1223,15 @@ class VesselInterface:
         if not manager.has_active_session():
             return
 
-        interval = vessel_beat.resolve_will_interval(_cfg)
         now = asyncio.get_event_loop().time()
+        # Hold off volition while a reflection pause is in flight: the elevated
+        # reflection turn is authoring/refining the goal, so a competing "quiet
+        # moment" will beat would only muddy it. The fast motor tick is NOT
+        # gated (the body keeps moving during the pause).
+        if self._reflecting and now < self._reflecting_until:
+            return
+
+        interval = vessel_beat.resolve_will_interval(_cfg)
         if now - self._last_will_beat_at < interval:
             return
 
@@ -1175,8 +1311,14 @@ class VesselInterface:
         if not manager.has_active_session():
             return
 
-        interval = vessel_beat.resolve_action_interval(_cfg)
         now = asyncio.get_event_loop().time()
+        # Same reflection hold-off as the will beat: while Synth is deliberately
+        # thinking about its goal, do not fire a competing "act on your goal"
+        # turn. The motor tick is not gated (the body keeps moving).
+        if self._reflecting and now < self._reflecting_until:
+            return
+
+        interval = vessel_beat.resolve_action_interval(_cfg)
         if now - self._last_action_beat_at < interval:
             return
 
@@ -1361,7 +1503,26 @@ class VesselInterface:
             )
 
             manager = get_agent_loop_manager()
-            result = await manager.run_drone(goal=drone_goal)
+            # Restrict this out-of-band planner Drone to look-and-commit tools
+            # only. It must NEVER speak in-world: an in-world ``vessel_<world>_say``
+            # in its tool set let a broken/hallucinating cortex emit stray chatter
+            # (the "Mirtillo" bug). The allow-list is structural — no keyword
+            # logic — and keeps the Drone to scan/observe/knowledge + goal-commit.
+            result = await manager.run_drone(
+                goal=drone_goal,
+                allowed_tools={
+                    f"vessel_{world}_scan",
+                    f"vessel_{world}_observe",
+                    f"vessel_{world}_lookup_knowledge",
+                    f"vessel_{world}_update_goal",
+                    f"vessel_{world}_set_goal",
+                },
+                # Run on the vessel cortex (VESSEL_CORTEX) — see the goal-expander
+                # rationale below: AGENT_CORTEX often falls back to the slow
+                # browser-driven Base Cortex, which times out on this multi-step
+                # scan → commit turn before the waypoint is ever written.
+                cortex_scope="vessel",
+            )
             if isinstance(result, dict):
                 log_debug(
                     f"[vessel_interface] Drone planner for '{world}' finished: "
@@ -1533,7 +1694,25 @@ class VesselInterface:
             )
 
             manager = get_agent_loop_manager()
-            result = await manager.run_drone(goal=drone_goal)
+            # Restrict this out-of-band expander Drone to knowledge lookup +
+            # goal commit only. It must NEVER speak in-world: leaving an
+            # in-world ``vessel_<world>_say`` in its tool set let a broken/
+            # hallucinating cortex emit stray chatter (the "Mirtillo" bug).
+            # Structural allow-list — no keyword logic.
+            result = await manager.run_drone(
+                goal=drone_goal,
+                allowed_tools={
+                    f"vessel_{world}_lookup_knowledge",
+                    f"vessel_{world}_update_goal",
+                },
+                # Run the expander on the vessel cortex (VESSEL_CORTEX), not the
+                # generic agent cortex. AGENT_CORTEX often falls back to the
+                # browser-driven Base Cortex, which cannot complete this
+                # multi-step tool-calling turn within the Drone budget and times
+                # out at iteration 1 — so steps were never written. The vessel
+                # cortex is the same proper API engine that authors the goals.
+                cortex_scope="vessel",
+            )
             if isinstance(result, dict):
                 log_debug(
                     f"[vessel_interface] Goal expander for '{world}' finished: "

@@ -272,6 +272,57 @@ config_registry.get_value(
     advanced=True,
 )
 config_registry.get_value(
+    "VESSEL_REFLECTION_ENABLED",
+    True,
+    value_type=bool,
+    label="Autonomous Reflection Pause",
+    description=(
+        "When enabled, Synth stops and takes one deliberate 'think about my "
+        "goal' turn whenever it is playing without a real objective (no goal, "
+        "or a goal with no concrete step plan). It prunes its own pending "
+        "autonomous beats and dedicates that turn to authoring or refining the "
+        "goal, so it stops wandering aimlessly. The pause ranks ahead of "
+        "ordinary in-world chat but yields to any urgent/emergency message, and "
+        "never stops the body from moving. Only used when Autonomous In-World "
+        "Play is enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_REFLECTION_DURATION_SEC",
+    15,
+    value_type=int,
+    label="Reflection Pause Duration (s)",
+    description=(
+        "How long a reflection pause holds off the slow will beat and the "
+        "middle action beat so the reflection turn can be consumed and commit a "
+        "goal before ordinary autonomy resumes (clamped to 3–300). The fast "
+        "motor tick is never paused — the body keeps moving. Only used when "
+        "Autonomous In-World Play and Autonomous Reflection Pause are enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_REFLECTION_MIN_INTERVAL_SEC",
+    60,
+    value_type=int,
+    label="Reflection Pause Min Interval (s)",
+    description=(
+        "Minimum seconds between two reflection pauses for the same world "
+        "(clamped to 10–3600). Prevents a persistently goal-less situation from "
+        "firing a reflection turn on every tick and starving everything else. "
+        "Only used when Autonomous In-World Play and Autonomous Reflection "
+        "Pause are enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
     "VESSEL_DRONE_PLAN_INTERVAL_SEC",
     120,
     value_type=int,
@@ -336,6 +387,23 @@ config_registry.get_value(
         "beats always read from cache regardless of this setting, so a beat "
         "never blocks on the network. Only used when the Game Knowledge Base "
         "is enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_KNOWLEDGE_WEB_FALLBACK",
+    True,
+    value_type=bool,
+    label="Game Knowledge: Generic Web Fallback",
+    description=(
+        "When enabled, an explicit knowledge lookup that no declared game wiki "
+        "could answer falls back to a generic web search (the project's "
+        "SearXNG/Tavily stack), summarising and caching the best results like a "
+        "wiki page. When disabled, lookups are limited to the declared game "
+        "wiki(s) and the on-disk cache. Requires Live Wiki Fetch; the automatic "
+        "will/action beats never use the web fallback (they are cache-only)."
     ),
     group="plugins",
     component="vessel_plugin",
@@ -550,6 +618,8 @@ class VesselPlugin(AIPluginBase):
         action: str,
         payload: dict[str, Any],
         connector_name: str | None = None,
+        *,
+        is_reactive_player_chat: bool = False,
     ) -> VesselActionResult:
         """Dispatch a normalized embodiment action to the active connector.
 
@@ -558,6 +628,14 @@ class VesselPlugin(AIPluginBase):
                             prefix (``"say"``, ``"move"``, ``"look"``, ``"use"``).
             payload:        Action fields.
             connector_name: Override the active connector for this call.
+            is_reactive_player_chat: ``True`` when this action belongs to a
+                            reactive turn answering a present in-world player
+                            (structural ``vessel_player_chat`` context flag).
+                            Only genuine reactive ``say`` lines stay in the
+                            conversational history; autonomous-beat monologues
+                            are filed in the perception buffer instead so they
+                            cannot poison the reactive prompt. See
+                            :meth:`_persist_self_speech`.
 
         Returns:
             A :class:`VesselActionResult`. Returns ``ok=False`` when the vessel
@@ -622,7 +700,12 @@ class VesselPlugin(AIPluginBase):
                     result = VesselActionResult(ok=True)
             if result.ok:
                 await self._log_outbound_action(name, action, payload)
-                await self._persist_self_speech(name, action, payload)
+                await self._persist_self_speech(
+                    name,
+                    action,
+                    payload,
+                    is_reactive_player_chat=is_reactive_player_chat,
+                )
             return result
         except Exception as exc:
             log_error(f"[vessel_plugin] act('{action}') error ({name}): {exc}")
@@ -632,30 +715,42 @@ class VesselPlugin(AIPluginBase):
     def _is_repeat_of_last_self_say(environment: str, payload: dict[str, Any]) -> bool:
         """Return ``True`` when this ``say`` repeats Synth's own last line.
 
-        Reads the in-memory world chat context (the same deque
-        :meth:`_persist_self_speech` writes to) and compares the pending text
-        against the most recent ``self``-authored line. The comparison is a
-        trimmed exact-string identity check on Synth's OWN output — never a
-        keyword or semantic match — so it only ever suppresses a byte-for-byte
-        self-repeat and never a genuinely new sentence or a reply to someone
-        else. Fully guarded: any lookup failure returns ``False`` (never blocks
-        a real action).
+        Reads BOTH in-memory world buffers that :meth:`_persist_self_speech`
+        writes to — the conversational deque (reactive replies) and the
+        perception ring (autonomous-beat monologues) — and compares the pending
+        text against the most recent ``self``-authored line in either. Because
+        an autonomous monologue is now filed in the perception ring (see
+        :meth:`_persist_self_speech`), the guard must look there too, otherwise a
+        repeated beat monologue would slip past. The comparison is a trimmed
+        exact-string identity check on Synth's OWN output — never a keyword or
+        semantic match — so it only ever suppresses a byte-for-byte self-repeat
+        and never a genuinely new sentence or a reply to someone else. Fully
+        guarded: any lookup failure returns ``False`` (never blocks a real
+        action).
         """
         text = str(payload.get("text") or "").strip()
         if not text:
             return False
         try:
-            from core.chat_context_manager import get_or_create_chat_context
+            from core.chat_context_manager import (
+                get_or_create_chat_context,
+                get_or_create_perception_context,
+            )
             from core.interface_path_utils import build_interface_path
 
             interface_path = build_interface_path("vessel", environment, None)
-            context = get_or_create_chat_context(interface_path)
-            for msg in reversed(context):
-                if not isinstance(msg, dict):
-                    continue
-                if str(msg.get("username")) != "self":
-                    continue
-                return str(msg.get("text") or "").strip() == text
+            for buffer in (
+                get_or_create_chat_context(interface_path),
+                get_or_create_perception_context(interface_path),
+            ):
+                for msg in reversed(buffer):
+                    if not isinstance(msg, dict):
+                        continue
+                    if str(msg.get("username")) != "self":
+                        continue
+                    if str(msg.get("text") or "").strip() == text:
+                        return True
+                    break
         except Exception as exc:  # pragma: no cover - defensive
             log_warning(f"[vessel_plugin] self-repeat check failed: {exc}")
         return False
@@ -665,6 +760,8 @@ class VesselPlugin(AIPluginBase):
         environment: str,
         action: str,
         payload: dict[str, Any],
+        *,
+        is_reactive_player_chat: bool = False,
     ) -> None:
         """Echo Synth's own in-world *speech* into the world chat history.
 
@@ -682,6 +779,24 @@ class VesselPlugin(AIPluginBase):
         affects the action itself, and it deliberately does **not** re-enqueue
         the line into cognition (that would be a self-reply loop) — it only
         writes to history.
+
+        **Autonomous self-speech goes to the perception buffer, not the
+        conversational deque.** A ``say`` produced by an autonomous turn (a
+        will/action/reflection beat — anything that is NOT a reactive reply to a
+        present player) is Synth talking to itself/the empty world. If those
+        lines land in the bounded *conversational* deque they saturate it with
+        solitary monologues; a weak engine then imitates that dominant pattern
+        and keeps monologuing instead of answering the player who just spoke
+        (history poisoning). We therefore tag an autonomous self-line with the
+        structural ``vessel_perception`` flag — the exact same routing signal
+        used for incoming world perceptions — so
+        :func:`core.chat_context_manager.add_message_to_context` files it in the
+        SEPARATE perception ring buffer. The will beat still sees it (the
+        vessel-focus prompt merges the perception ring), so self-repeat
+        awareness is preserved, but it can never crowd out real player chat.
+        A genuine reactive reply (``is_reactive_player_chat``) stays in the
+        conversational deque as before. Structural (the turn's
+        ``vessel_player_chat`` context flag), never keyword/content matching.
         """
         if action != "say":
             return
@@ -693,11 +808,18 @@ class VesselPlugin(AIPluginBase):
             from core.interface_path_utils import build_interface_path
 
             interface_path = build_interface_path("vessel", environment, None)
+            metadata: dict[str, Any] | None = None
+            if not is_reactive_player_chat:
+                metadata = {
+                    "vessel_perception": True,
+                    "vessel_event_type": "self_monologue",
+                }
             await add_message_to_context(
                 interface_path=interface_path,
                 message_text=text,
                 sender_name="self",
                 sender_id="self",
+                metadata=metadata,
             )
         except Exception as exc:  # pragma: no cover - defensive
             log_warning(f"[vessel_plugin] self-speech persist failed: {exc}")
@@ -1477,8 +1599,18 @@ class VesselPlugin(AIPluginBase):
         return bool(self._connected_world()) or bool(self._enabled_worlds())
 
     async def handle_custom_action(
-        self, action_type: str, payload: dict
+        self, action_type: str, payload: dict, context: dict | None = None
     ) -> dict[str, Any]:
+        # A reactive turn answering a present in-world player carries the
+        # structural ``vessel_player_chat`` flag on its context (set by the
+        # vessel interface from event kind + actor presence, propagated by the
+        # message queue — never from message text). Autonomous will/action/
+        # reflection beats leave it unset. This decides whether Synth's own
+        # ``say`` output stays in the conversational history or is filed in the
+        # perception buffer (see :meth:`_persist_self_speech`).
+        is_reactive_player_chat = bool(
+            isinstance(context, dict) and context.get("vessel_player_chat")
+        )
         verb = self._parse_action_verb(action_type)
         if verb == "connect":
             # The world to enter is chosen via the 'game' field (the enum in the
@@ -1518,7 +1650,10 @@ class VesselPlugin(AIPluginBase):
             "respawn",
         ):
             result = await self.act(
-                verb, payload, connector_name=self._connected_world()
+                verb,
+                payload,
+                connector_name=self._connected_world(),
+                is_reactive_player_chat=is_reactive_player_chat,
             )
             return {
                 "status": "ok" if result.ok else "error",
@@ -1545,7 +1680,10 @@ class VesselPlugin(AIPluginBase):
             # World-specific verb declared by the connected connector's
             # get_world_actions() — dispatch it straight to the connector.
             result = await self.act(
-                verb, payload, connector_name=self._connected_world()
+                verb,
+                payload,
+                connector_name=self._connected_world(),
+                is_reactive_player_chat=is_reactive_player_chat,
             )
             return {
                 "status": "ok" if result.ok else "error",
@@ -1563,7 +1701,7 @@ class VesselPlugin(AIPluginBase):
     ) -> dict[str, Any]:
         action_type = action.get("type", "")
         payload = action.get("payload", {})
-        return await self.handle_custom_action(action_type, payload)
+        return await self.handle_custom_action(action_type, payload, context)
 
     # ------------------------------------------------------------------
     # Config
