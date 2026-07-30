@@ -2281,13 +2281,17 @@ class TelegramInterface:
                 "optional_fields": message_optional,
                 "description": message_description,
             },
-            "audio_telegram_bot": {
-                "required_fields": ["audio", "interface_path"],
-                "optional_fields": [
-                    "chat_name",
-                ],
-                "description": "Send a voice message via Telegram",
-            },
+            # TODO(vessel-whitelist): `audio_telegram_bot` temporarily removed
+            # from the exposed action catalog to keep the global action list lean
+            # (see AGENTS.md §5c). Restore this dict entry AND its validation rule
+            # below to re-enable it.
+            # "audio_telegram_bot": {
+            #     "required_fields": ["audio", "interface_path"],
+            #     "optional_fields": [
+            #         "chat_name",
+            #     ],
+            #     "description": "Send a voice message via Telegram",
+            # },
             "send_file_telegram_bot": {
                 "required_fields": ["path", "interface_path"],
                 "optional_fields": ["chat_name", "caption"],
@@ -2691,13 +2695,17 @@ class TelegramInterface:
                 component_name="telegram_bot",
             )
 
-            # Create validation rules for audio_telegram_bot
-            audio_rule = ValidationRule(
-                action_type="audio_telegram_bot",
-                required_fields=["audio"],
-                custom_validator=validate_telegram_audio,
-                component_name="telegram_bot",
-            )
+            # TODO(vessel-whitelist): `audio_telegram_bot` action temporarily
+            # removed from the exposed catalog (see AGENTS.md §5c). Restore this
+            # validation rule AND the action dict entry above, plus the
+            # `audio_rule` reference in register_component_rules below, to
+            # re-enable it.
+            # audio_rule = ValidationRule(
+            #     action_type="audio_telegram_bot",
+            #     required_fields=["audio"],
+            #     custom_validator=validate_telegram_audio,
+            #     component_name="telegram_bot",
+            # )
 
             def validate_telegram_file(payload):
                 """Enhanced validation for Telegram send_file actions."""
@@ -2735,9 +2743,7 @@ class TelegramInterface:
 
             # Register with validation registry
             registry = get_validation_registry()
-            registry.register_component_rules(
-                "telegram_bot", [message_rule, audio_rule, file_rule]
-            )
+            registry.register_component_rules("telegram_bot", [message_rule, file_rule])
 
             log_debug(
                 "[telegram_bot] Registered custom validation rules with validation registry"

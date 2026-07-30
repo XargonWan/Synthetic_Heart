@@ -589,9 +589,8 @@ class ExternalCortexEngine(AIPluginBase):
                 "invent, combine, or abbreviate names, and never use a payload key as "
                 "a type:\n" + "\n".join(lines)
             )
-            prompt_request.system_instruction = (
-                getattr(prompt_request, "system_instruction", "") or ""
-            ) + block
+            _base = getattr(prompt_request, "system_instruction", "") or ""
+            prompt_request.system_instruction = _base + block
         except Exception as exc:
             log_warning(
                 f"[cortex_bridge:{self._endpoint.name}] action-catalog injection failed: {exc}"

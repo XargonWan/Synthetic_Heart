@@ -55,9 +55,7 @@ async def test_leaked_recon_actions_dropped_before_validation(monkeypatch):
     ]
     original = SimpleNamespace(from_cortex=True)
 
-    await action_parser.run_actions(
-        actions, {}, bot=None, original_message=original
-    )
+    await action_parser.run_actions(actions, {}, bot=None, original_message=original)
 
     # Only the real deliverable action reached validation.
     validated_types = [a.get("type") for a in validated]
@@ -91,8 +89,6 @@ async def test_real_actions_untouched_when_no_recon_keys(monkeypatch):
     ]
     original = SimpleNamespace(from_cortex=True)
 
-    await action_parser.run_actions(
-        actions, {}, bot=None, original_message=original
-    )
+    await action_parser.run_actions(actions, {}, bot=None, original_message=original)
 
     assert [a.get("type") for a in validated] == ["vessel_minecraft_say"]
