@@ -757,7 +757,10 @@ class DiscordInterface:
             "message_discord_bot",
             "join_voice_discord",
             "leave_voice_discord",
-            "audio_discord_bot",
+            # TODO(vessel-whitelist): "audio_discord_bot" temporarily removed
+            # from the exposed action catalog (see AGENTS.md §5c). Restore this
+            # list entry AND the action dict entry below to re-enable it.
+            # "audio_discord_bot",
             "send_file_discord_bot",
         ]
 
@@ -795,11 +798,14 @@ class DiscordInterface:
                 "required_fields": ["guild_id"],
                 "optional_fields": ["interface_path"],
             },
-            "audio_discord_bot": {
-                "description": "Send audio to Discord. Streams if in voice, otherwise sends as file.",
-                "required_fields": ["audio"],
-                "optional_fields": ["interface_path", "channel_id", "caption"],
-            },
+            # TODO(vessel-whitelist): "audio_discord_bot" temporarily removed
+            # from the exposed action catalog (see AGENTS.md §5c). Restore this
+            # dict entry AND the list entry in get_action_types() above.
+            # "audio_discord_bot": {
+            #     "description": "Send audio to Discord. Streams if in voice, otherwise sends as file.",
+            #     "required_fields": ["audio"],
+            #     "optional_fields": ["interface_path", "channel_id", "caption"],
+            # },
             "send_file_discord_bot": {
                 "description": (
                     "Send a file attachment (image, video, audio or document) to a "
