@@ -1876,18 +1876,21 @@ async def start_bot() -> bool:
         _bot_starting = False
         return False
 
-    # Parse trainer ID from configuration
+    # Parse trainer ID from configuration. The trainer ID is NOT required to
+    # start the interface -- it only identifies who the trainer is (for
+    # notifications/privileges). The only hard requirement is BOTFATHER_TOKEN.
     trainer_id = _parse_trainer_id_from_config()
-    if not trainer_id:
-        log_warning(
-            "[telegram_bot] No trainer ID found in TRAINER_IDS - skipping Telegram bot startup"
+    if trainer_id:
+        # Set trainer ID in the registry (interface is already registered at import time)
+        _interface_registry.set_trainer_id("telegram_bot", trainer_id)
+        log_info(
+            f"[telegram_bot] Set trainer ID {trainer_id} for telegram_bot interface"
         )
-        _bot_starting = False
-        return False
-
-    # Set trainer ID in the registry (interface is already registered at import time)
-    _interface_registry.set_trainer_id("telegram_bot", trainer_id)
-    log_info(f"[telegram_bot] Set trainer ID {trainer_id} for telegram_bot interface")
+    else:
+        log_warning(
+            "[telegram_bot] No trainer ID found in TRAINER_IDS - starting anyway "
+            "(trainer-only features will be unavailable until it is configured)"
+        )
 
     def _build_application() -> object:
         log_info("[telegram_bot] Building Telegram application...")
@@ -2133,14 +2136,14 @@ class TelegramInterface:
             log_warning(
                 f"[telegram_interface] Interface loaded in disabled state: {self.disabled_reason}"
             )
-        elif not _parse_trainer_id_from_config():
-            self.disabled_reason = "No trainer ID configured in TRAINER_IDS"
-            log_warning(
-                f"[telegram_interface] Interface loaded in disabled state: {self.disabled_reason}"
-            )
         else:
             self.is_enabled = True
             log_debug("[telegram_interface] Interface enabled")
+            if not _parse_trainer_id_from_config():
+                log_warning(
+                    "[telegram_interface] No trainer ID configured in TRAINER_IDS - "
+                    "interface enabled anyway (trainer-only features unavailable)"
+                )
 
         # Register resolver to fetch chat/thread names automatically
         async def _resolver(chat_id, thread_id, bot_instance=None):
@@ -2209,13 +2212,13 @@ class TelegramInterface:
             )
             return
 
-        trainer_id = _parse_trainer_id_from_config()
-        if not trainer_id:
-            self._disable("No trainer ID configured in TRAINER_IDS")
+        # The trainer ID is optional -- it only identifies the trainer, it is
+        # not required to start polling. Warn if missing but do not disable.
+        if not _parse_trainer_id_from_config():
             log_warning(
-                "[telegram_interface] Telegram interface disabled: no trainer ID"
+                "[telegram_interface] No trainer ID configured in TRAINER_IDS - "
+                "starting anyway (trainer-only features unavailable)"
             )
-            return
 
         # Enable the interface and start the bot
         self.is_enabled = True
@@ -3207,18 +3210,13 @@ def reload_interface():
 # _load_definition_sync a no-op and leaving the bot permanently disabled.
 _botfather_configured = bool(BOTFATHER_TOKEN)
 _under_pytest = "pytest" in sys.modules
-if (
-    not _under_pytest
-    and telegram_interface is None
-    and _botfather_configured
-    and _parse_trainer_id_from_config()
-):
+if not _under_pytest and telegram_interface is None and _botfather_configured:
     log_info("[telegram_bot] Registering interface at import time")
     initialize_interface()
 
     if telegram_interface and telegram_interface.is_enabled:
         log_info(
-            "[telegram_bot] BOTFATHER_TOKEN and trainer ID configured - "
+            "[telegram_bot] BOTFATHER_TOKEN configured - "
             "core_initializer will start the bot"
         )
     else:
