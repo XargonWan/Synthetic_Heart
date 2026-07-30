@@ -936,6 +936,33 @@ async def send_llm_fallback_message(
 
     await _record_failure_event("llm_fallback", failure_reason)
 
+    # Autonomous Rift Vessel cognition turns (will-beats, sightings, reflection,
+    # post-damage appraisal) are purely internal: no human is awaiting a reply.
+    # When the weak vessel/base cortex exhausts the correction loop on such a
+    # turn, speaking the "😵" fallback *in-world* pollutes the player's chat with
+    # a failure emoji for a turn nobody addressed. The failure is still recorded
+    # above for diagnostics; we simply must not voice it. A reactive player chat
+    # (``vessel_player_chat``) is user-facing and keeps its audible fallback.
+    # Structural detection via routing metadata only, never message text.
+    try:
+        from core.interface_path_utils import is_vessel_embodiment_context
+
+        _is_reactive_vessel_chat = bool((context or {}).get("vessel_player_chat"))
+        if (
+            is_vessel_embodiment_context(context or {})
+            and not _is_reactive_vessel_chat
+        ):
+            log_warning(
+                "[message_chain] Suppressing in-world '😵' fallback for autonomous "
+                f"vessel turn (interface_path={interface_path}, reason={failure_reason}); "
+                "failure recorded but not voiced to avoid polluting player chat"
+            )
+            return fallback_text
+    except Exception as exc:  # pragma: no cover - defensive
+        log_warning(
+            f"[message_chain] Autonomous-vessel fallback suppression check failed: {exc}"
+        )
+
     # Clear transient avatar face state so upstream outages do not leave the
     # persona stuck with stale failure-adjacent expressions on reconnect.
     try:
