@@ -807,6 +807,29 @@ class OpenAPIPlugin(AIPluginBase):
             return "OpenAPI Base URL not configured. Please set OPENAPI_BASE_URL in settings."
 
         try:
+            # Pre-built role-separated messages path (agentic / Drone turns).
+            # The agent loop (``core/agent_core.py::_call_engine_direct``) calls
+            # ``generate_response`` with an explicit
+            # ``[{"role": "system", ...}, {"role": "user", ...}]`` list carrying
+            # the agentic system instruction + GOAL/TOOLS. Without this branch
+            # the list falls through to the generic ``str(prompt)`` path below,
+            # which stringifies the Python list into the user turn AND replaces
+            # the agentic system text with ``_build_system_instruction``'s
+            # chat/JSON boilerplate — so a Drone (e.g. the vessel goal expander)
+            # reasons like a chat turn and never commits its tool calls. Forward
+            # the messages verbatim so the roles are preserved. Purely
+            # structural (input shape), no keyword logic.
+            if self._is_role_separated_messages(prompt):
+                model = _catalog.get(self._current_model)
+                max_tokens = (
+                    model.max_completion_tokens
+                    if model
+                    else int(OPENAPI_DEFAULT_MAX_TOKENS)
+                )
+                return await self._openai_chat_completion_from_messages(
+                    list(prompt), [], max_tokens
+                )
+
             # Handle correction prompts
             if isinstance(prompt, dict) and "system_message" in prompt:
                 sm = prompt.get("system_message", {})
@@ -1338,6 +1361,26 @@ class OpenAPIPlugin(AIPluginBase):
     # ------------------------------------------------------------------
     # System instruction
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_role_separated_messages(prompt: Any) -> bool:
+        """True when ``prompt`` is a pre-built OpenAI role-separated message list.
+
+        The agentic loop passes ``generate_response`` a list of
+        ``{"role": ..., "content": ...}`` dicts (system + user). Detect that
+        shape structurally so those turns are forwarded verbatim instead of
+        being stringified through the generic single-blob fallback. Fully
+        guarded; any malformed element makes this return ``False`` so the
+        legacy path still handles it.
+        """
+        if not isinstance(prompt, list) or not prompt:
+            return False
+        for item in prompt:
+            if not isinstance(item, dict):
+                return False
+            if "role" not in item or "content" not in item:
+                return False
+        return True
 
     def _build_system_instruction(self, prompt: Any) -> str:
         """Build the system instruction based on prompt context."""
