@@ -1153,6 +1153,14 @@ class CoreInitializer:
         # Include cortex locations; legacy paths are removed
         search_dirs = ["plugins", "cortex", "interface"]
 
+        # Minimal, fail-safe plugin dependency bookkeeping. A plugin may declare
+        # ``depends_on: [<short_name>, ...]`` in its metadata; after all plugins
+        # are loaded we emit a warning for any dependency that did not load. This
+        # is advisory only — plugins resolve their dependencies lazily at
+        # runtime via PLUGIN_REGISTRY.get(), so a missing dependency never blocks
+        # the load (Golden rule: removing any component must not break the rest).
+        declared_dependencies: dict[str, list[str]] = {}
+
         # If dev components are enabled, also scan dev directories
         if self._enable_dev_components:
             search_dirs.extend(["plugins_dev", "interface_dev"])
@@ -1313,6 +1321,15 @@ class CoreInitializer:
                         meta = instance.get_metadata()
                         if isinstance(meta, dict):
                             declared_category = meta.get("category")
+                            deps = meta.get("depends_on")
+                            if isinstance(deps, (list, tuple)):
+                                clean_deps = [
+                                    str(d).strip() for d in deps if str(d or "").strip()
+                                ]
+                                if clean_deps:
+                                    declared_dependencies[plugin_short_name] = (
+                                        clean_deps
+                                    )
                     except Exception:
                         declared_category = None
 
@@ -1343,6 +1360,19 @@ class CoreInitializer:
                         f"[core_initializer] Failed to start plugin {module_name}: {repr(e)}"
                     )
                     self.startup_errors.append(f"Plugin {module_name}: {e}")
+
+        # Advisory dependency check (fail-safe): warn about any declared
+        # ``depends_on`` target that is not present in PLUGIN_REGISTRY. Never
+        # blocks or unloads anything — plugins degrade gracefully when a
+        # dependency is absent (they resolve it lazily at runtime).
+        for dependent, deps in declared_dependencies.items():
+            for dep in deps:
+                if dep not in PLUGIN_REGISTRY:
+                    log_warning(
+                        f"[core_initializer] Plugin '{dependent}' declares a "
+                        f"dependency on '{dep}', which is not loaded; "
+                        f"'{dependent}' features that rely on it may be inactive."
+                    )
 
     async def _initialize_persona_manager(self):
         """Initialize the core persona manager and await async init."""
