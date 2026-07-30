@@ -176,9 +176,19 @@ CREATE TABLE IF NOT EXISTS vessel_diary (
 -- objectives: `description` is whatever Synth decided to do, in its own words,
 -- and `note` is its own progress reflection. One active goal at a time; Synth
 -- judges its own progress. Never a bare `timestamp` column.
-CREATE TABLE IF NOT EXISTS minecraft_goals (
+-- Goals: Synth's self-directed goal store (extracted from the Minecraft
+-- adapter into the generic `goals` plugin). Scope-aware: a goal is filed under
+-- a three-level scope tuple (`scope`/`game`/`world`, all default 'none').
+-- 'none'/'none'/'none' is a personal life goal; a Minecraft embodiment goal is
+-- filed under 'vessel'/'minecraft'/'none'. At most one row is `active` per
+-- scope tuple. The legacy `minecraft_goals` table is renamed + backfilled by
+-- core/migrations.py::_migrate_goals_table on upgrade.
+CREATE TABLE IF NOT EXISTS goals (
     id INT AUTO_INCREMENT PRIMARY KEY,
     session_id VARCHAR(128),
+    scope VARCHAR(64) DEFAULT 'none',
+    game VARCHAR(64) DEFAULT 'none',
+    world VARCHAR(64) DEFAULT 'none',
     description TEXT NOT NULL,
     note TEXT,
     destination TEXT,
@@ -189,8 +199,9 @@ CREATE TABLE IF NOT EXISTS minecraft_goals (
     status VARCHAR(32) DEFAULT 'active',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    INDEX idx_minecraft_goals_status (status),
-    INDEX idx_minecraft_goals_session (session_id)
+    INDEX idx_goals_status (status),
+    INDEX idx_goals_session (session_id),
+    INDEX idx_goals_scope (scope, game, world)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Web Search Tasks: decoupled background web-search jobs triggered by the
