@@ -106,6 +106,54 @@ class VesselActionResult:
     data: Dict[str, Any] = field(default_factory=dict)
 
 
+# ----------------------------------------------------------------------------
+# Perception durability — telemetry log vs game-experience.
+# ----------------------------------------------------------------------------
+# Not every perceived event is worth persisting to the durable conversational
+# history (``chat_history_cache``). A world streams a constant flow of ambient
+# telemetry — things it *sees*, blocks it *gathers*, entities that come into
+# *proximity*, mobs that *spawn* — which is useful only as live ambient
+# grounding (the in-memory perception ring, capped in the prompt) and never as
+# a lasting record. Persisting it bloats the vessel history with pure log noise
+# and, at scale, drowns the genuinely memorable moments (player conversation,
+# taking damage, dying) and Synth's own volition, while also being re-loaded at
+# every restart.
+#
+# ``EPHEMERAL_EVENT_TYPES`` is the world-agnostic set of event kinds treated as
+# *pure log*: recorded in the activity log and surfaced live via the perception
+# ring, but NOT written to the durable chat history. Any event kind not in this
+# set is treated as *durable game-experience* and persisted normally — a safe
+# default so a new/unknown event kind is never silently lost.
+#
+# Classification is purely STRUCTURAL: it keys off the normalized
+# ``event_type`` (a contract enum on :class:`PerceptionEvent`), never the free
+# text of the summary — so it works identically in any language and any world.
+# A real in-world player ``chat`` carries an actor and is always durable; that
+# distinction is enforced separately at the ingestion point (actor presence).
+EPHEMERAL_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "sighting",  # "you notice a block/entity nearby" — ambient scenery
+        "gather",  # picked up / mined a block — routine motor telemetry
+        "proximity",  # an entity drifted into range — ambient presence
+        "spawn",  # a mob spawned nearby — ambient presence
+        "movement",  # the body moved — pure motor telemetry
+        "status",  # periodic self-status snapshot — pure telemetry
+    }
+)
+
+
+def is_ephemeral_event(event_type: str | None) -> bool:
+    """Return ``True`` for pure-log telemetry that must NOT persist to history.
+
+    Structural classification on the normalized ``event_type`` only (never the
+    summary text), so it is language- and world-agnostic. Unknown/None event
+    kinds default to durable (``False``) so nothing new is silently dropped.
+    """
+    if not event_type:
+        return False
+    return event_type in EPHEMERAL_EVENT_TYPES
+
+
 # Callback the interface passes to the connector so inbound world events can be
 # injected into the message chain. The connector calls it for every perceived
 # event; the interface applies salience filtering + enqueue.
@@ -257,6 +305,39 @@ class VesselConnectorBase(ABC):
         """
         return []
 
+    def get_progression_stage(self) -> Dict[str, Any] | None:
+        """Return the current progression stage + a *typical* next milestone.
+
+        This is the world-agnostic **mechanism** side of the virtual-quest
+        feature (AGENTS.md §5c, the Scope rule): the core asks "what stage am I
+        at, and what usually comes next?" and each world supplies the answer
+        from its own *content* — a game-specific tech-tree (e.g. the Minecraft
+        adapter's ``quests.py``). It exists because worlds without a built-in
+        quest system (like Minecraft) still benefit from a sense of direction
+        toward their natural end-game.
+
+        The return shape mirrors
+        :func:`plugins.rift_vessel.minecraft.quests.detect_stage`::
+
+            {
+                "stage_id": str,
+                "stage_title": str,
+                "next_id": str | None,
+                "next_hint": str,      # plain-language next milestone
+                "query": list[str],    # structural KB-query seed for next step
+                "endgame": str,        # the ultimate-goal framing
+            }
+
+        **Spontaneity rule.** Whatever a world returns here is surfaced to
+        cognition purely as *reference context* — never an engine that executes
+        steps, never a dictated goal. Synth still authors its own goal freely
+        and may skip, reorder or ignore the milestone entirely.
+
+        Optional override. Defaults to ``None`` (the world has no tech-tree, so
+        no progression context is surfaced).
+        """
+        return None
+
     async def lookup_knowledge(
         self, query: str, limit: int = 5, *, cache_only: bool = False
     ) -> List[Dict[str, Any]]:
@@ -363,6 +444,58 @@ class VesselConnectorBase(ABC):
 
         Optional override. Defaults to ``None`` (no world-specific name, so
         only the persona name/aliases apply).
+        """
+        return None
+
+    def get_world_identity(self) -> str | None:
+        """Return a stable structural token identifying the **specific world /
+        server** this connector is currently embodied in.
+
+        A single game (``environment``) can host many distinct worlds/servers —
+        two Minecraft servers, two Skyrim save files, etc. This token
+        distinguishes them so that progression (goals) is scoped per concrete
+        world: when Synth logs back into *the same* server she resumes where she
+        was, and a different server starts its own progression.
+
+        It becomes the ``<world>`` level of the canonical vessel interface path
+        ``vessel/<game>/<world>[/<character>]`` and the ``world`` scope of the
+        goal store. It must be:
+
+        * **structural, not keyword-derived** — a server/level name the world
+          itself reports, or a deterministic slug of the connection target
+          (e.g. ``host_port``); never inferred from chat text;
+        * **stable** across reconnects to the same world so goals resume;
+        * **slug-safe** — no ``/`` (the interface path separator); the caller
+          slugifies defensively, but return a clean token when possible.
+
+        Optional override. Defaults to ``None`` (no per-world identity, so all
+        of this game's worlds share the single ``world="none"`` scope — the
+        legacy behaviour). Fully fail-safe: implementations must never raise.
+        """
+        return None
+
+    def get_progression_context(self) -> list[str] | None:
+        """Return **structural** query tokens describing Synth's current
+        progression stage in this world, or ``None`` when unavailable.
+
+        This is the *starter-goal* hook. In a quest-less game (Minecraft, a
+        sandbox), when Synth logs in with **no active goal** there is nothing to
+        seed the knowledge base with — so the will beat would author a goal
+        blind. This hook lets an adapter surface a small set of structural
+        tokens that describe *where Synth is in the game's progression* (derived
+        from live telemetry only — inventory ids, tier markers, numeric
+        state — **never** from chat text or free-text goal descriptions). Those
+        tokens seed a knowledge-base lookup so the will beat can author a
+        *progression-appropriate* first goal instead of a random one.
+
+        The result is **reference material only**: it orients the suggestion,
+        it is never a scripted objective — Synth still authors and may edit the
+        goal freely (the spontaneity rule, AGENTS.md §5c).
+
+        Optional override. Defaults to ``None`` (no progression signal, so the
+        starter-goal seeding is skipped and the will beat authors from persona
+        alone — the legacy behaviour). Fully fail-safe: implementations must
+        never raise.
         """
         return None
 

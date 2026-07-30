@@ -523,6 +523,9 @@ async def load_activity_lines(session_id: str) -> list[str]:
     if not session_id:
         return []
     lines: list[str] = []
+    # Column order is fixed by the SELECT below; do NOT rely on ``cur.description``
+    # — the PostgresCompatCursor wrapper does not expose it.
+    columns = ["event_type", "summary", "metadata", "created_at"]
     try:
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
@@ -533,7 +536,6 @@ async def load_activity_lines(session_id: str) -> list[str]:
                     (session_id,),
                 )
                 rows = await cur.fetchall()
-                columns = [c[0] for c in (cur.description or [])]
     except Exception as exc:
         log_error(
             f"[vessel_recap] failed to read vessel_activity_log for {session_id}: {exc}"

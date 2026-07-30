@@ -371,6 +371,17 @@ const ATTACKER_MAX_DISTANCE = 6;
 let lastDamage = null;
 const DAMAGE_ATTRIBUTION_WINDOW_MS = 2500;
 
+// Tracks the most recent death so the slow will beat can react to it: the
+// numeric position where the body died plus a monotonic tick counter. This is
+// pure structural telemetry (coordinates + a count), never text. `worldSnapshot`
+// surfaces it as `last_death`; the will prompt uses it to tell Synth "you died
+// HERE — reconsider your approach" so it changes strategy instead of resuming
+// the same goal into the same death loop. Never expires: the death fact stays
+// available until the next death overwrites it.
+/** @type {{ x: number, y: number, z: number, count: number, at: number } | null} */
+let lastDeath = null;
+let deathCount = 0;
+
 // Classify an entity as an attacker source without keyword matching: a mob is
 // hostile game logic, a real player is a person. Falls back to a neutral
 // "entity" when the structural type is unknown.
@@ -584,6 +595,10 @@ function nearbyEntities(maxCount, maxDistance) {
     if (!e || e === self || !e.position) continue;
     const dist = self.position.distanceTo(e.position);
     if (maxDistance && dist > maxDistance) continue;
+    // Structural per-mob combat stats (registry max health + attack damage)
+    // so the reflex can weigh the mob's power against the bot's own. null when
+    // the registry has no value for this build. See mobCombatStats.
+    const stats = mobCombatStats(e.name);
     out.push({
       name: e.username || e.name || e.displayName || 'entity',
       kind: e.type || (e.username ? 'player' : 'entity'),
@@ -599,6 +614,9 @@ function nearbyEntities(maxCount, maxDistance) {
       // Lets the combat reflex engage a mob that hit from range, not only the
       // nearest one. See isTargetingBot.
       is_targeting_me: isTargetingBot(e),
+      // Registry combat power (both null when unavailable, guarded).
+      max_health: stats.max_health,
+      attack_damage: stats.attack_damage,
     });
   }
   out.sort((a, b) => a.distance - b.distance);
@@ -702,6 +720,106 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Structural test: is this entity a dropped item (a collectable ground drop)?
+// Mineflayer tags dropped items with entity.name === 'item' (and, depending on
+// the protocol version, objectType/displayName 'Item'). Purely enum/type based
+// — never a keyword scan of human text — so it holds in any client language.
+function isItemDrop(e) {
+  if (!e || !e.position) return false;
+  const nm = e.name ? String(e.name).toLowerCase() : '';
+  const ot = e.objectType ? String(e.objectType).toLowerCase() : '';
+  const dn = e.displayName ? String(e.displayName).toLowerCase() : '';
+  return nm === 'item' || ot === 'item' || dn === 'item';
+}
+
+// After a dig, walk over the resulting ground drops so they actually land in
+// the inventory, then let physics settle. This REPLACES the old blind
+// `sleep(400)` which only worked when the drop happened to spawn on top of the
+// bot. It deliberately does NOT use `bot.collectBlock.collect()` (its internal
+// digging pathfind explodes the A* open set to ~2.9GB on a buried block and
+// OOM-kills the process — see the 'mine'/resolveTargetBlock notes). Instead it
+// mimics mindcraft's pickupNearbyItems: find the nearest dropped-item entity in
+// a SMALL radius and GoalFollow toward it with a pathfinder that MAY NOT dig
+// (movements.canDig = false), under a short timeout. Fully guarded and bounded;
+// any failure degrades to the plain settle delay so a gather never breaks.
+async function pickupNearbyDrops(radius, timeoutMs) {
+  const reach = Math.min(Math.max(Number(radius) || 6, 1), 12);
+  const budget = Math.min(Math.max(Number(timeoutMs) || 3000, 400), 8000);
+  // Always give physics a first moment so the drop entity actually spawns.
+  await sleep(400);
+  if (!bot || !bot.entities || !bot.entity) return;
+  const canPath =
+    pathfinder && bot.pathfinder && pathfinder.goals && pathfinder.goals.GoalFollow;
+  // A non-digging movements profile so chasing a drop can never trigger the
+  // buried-block digging pathfind that caused the OOM. Rebuilt each call and
+  // restored afterwards so the bot's normal navigation is unaffected.
+  let savedMovements = null;
+  if (canPath && pathfinder.Movements && minecraftData && bot.version) {
+    try {
+      const mcData = minecraftData(bot.version);
+      const noDig = new pathfinder.Movements(bot, mcData);
+      noDig.canDig = false;
+      savedMovements = bot.pathfinder.movements;
+      bot.pathfinder.setMovements(noDig);
+    } catch (e) {
+      savedMovements = null;
+    }
+  }
+  const deadline = Date.now() + budget;
+  try {
+    while (Date.now() < deadline) {
+      // Nearest collectable ground drop within reach (structural item filter).
+      let target = null;
+      let best = Infinity;
+      for (const e of Object.values(bot.entities)) {
+        if (!isItemDrop(e)) continue;
+        const d = bot.entity.position.distanceTo(e.position);
+        if (d < best && d <= reach) {
+          best = d;
+          target = e;
+        }
+      }
+      if (!target) break;
+      if (!canPath) {
+        // No pathfinder: we cannot walk to the drop, just let physics settle.
+        await sleep(300);
+        break;
+      }
+      try {
+        bot.pathfinder.setGoal(new pathfinder.goals.GoalFollow(target, 0), true);
+      } catch (e) {
+        break;
+      }
+      // Walk toward this drop until it is picked up (entity invalidated),
+      // moved out of reach, or a short per-drop deadline passes.
+      const dropDeadline = Math.min(Date.now() + 2000, deadline);
+      while (Date.now() < dropDeadline) {
+        await sleep(150);
+        if (!target.isValid) break;
+        const d = bot.entity.position.distanceTo(target.position);
+        if (d > reach) break;
+      }
+    }
+  } finally {
+    try {
+      if (bot.pathfinder && typeof bot.pathfinder.setGoal === 'function') {
+        bot.pathfinder.setGoal(null);
+      }
+    } catch (e) {
+      /* ignore */
+    }
+    if (savedMovements) {
+      try {
+        bot.pathfinder.setMovements(savedMovements);
+      } catch (e) {
+        /* ignore */
+      }
+    }
+  }
+  // Final settle so the last pickup registers in the inventory delta.
+  await sleep(300);
+}
+
 // --- Weapon perception helpers --------------------------------------------
 // Structural weapon appraisal for combat. Everything here reads canonical
 // game data (minecraft-data item definitions + item ids) — never a keyword
@@ -751,6 +869,119 @@ const _MATERIAL_TIER = {
 };
 const _SWORD_DAMAGE = { wood: 4, stone: 5, iron: 6, diamond: 7, netherite: 8 };
 const _AXE_DAMAGE = { wood: 7, stone: 9, iron: 9, diamond: 9, netherite: 10 };
+
+// Vanilla armor-defense points contributed by each equipped armor piece, keyed
+// on the canonical item id (game enum), NOT display text — like the weapon
+// tables above this is a *game-data table*, not keyword feature routing. Each
+// full armor point halves 4% of incoming damage (the toughness/enchant nuance
+// is ignored: the reflex only needs a coarse survivability signal). Only the
+// four vanilla slots (helmet/chestplate/leggings/boots) across the six tiers
+// are covered; anything absent contributes 0.
+const _ARMOR_DEFENSE = {
+  leather_helmet: 1,
+  leather_chestplate: 3,
+  leather_leggings: 2,
+  leather_boots: 1,
+  golden_helmet: 2,
+  golden_chestplate: 5,
+  golden_leggings: 3,
+  golden_boots: 1,
+  chainmail_helmet: 2,
+  chainmail_chestplate: 5,
+  chainmail_leggings: 4,
+  chainmail_boots: 1,
+  iron_helmet: 2,
+  iron_chestplate: 6,
+  iron_leggings: 5,
+  iron_boots: 2,
+  diamond_helmet: 3,
+  diamond_chestplate: 8,
+  diamond_leggings: 6,
+  diamond_boots: 3,
+  netherite_helmet: 3,
+  netherite_chestplate: 8,
+  netherite_leggings: 6,
+  netherite_boots: 3,
+};
+
+// Sum of the defense points of every armor piece the bot has equipped, 0 when
+// bare. Structural: reads the four armor slots from mineflayer's inventory and
+// maps each item id through the vanilla defense table above — never display
+// text. Guarded so a bad read returns 0.
+function armorPoints() {
+  if (!bot || !bot.inventory || typeof bot.inventory.slots === 'undefined') {
+    return 0;
+  }
+  // Mineflayer maps the equipped armor to fixed inventory slots 5..8
+  // (helmet/chestplate/leggings/boots). Reading them directly avoids any
+  // dependence on a specific inventory API surface.
+  let total = 0;
+  try {
+    for (let slot = 5; slot <= 8; slot += 1) {
+      const it = bot.inventory.slots[slot];
+      if (it && it.name) {
+        total += _ARMOR_DEFENSE[String(it.name).toLowerCase()] || 0;
+      }
+    }
+  } catch (e) {
+    return 0;
+  }
+  return total;
+}
+
+// Structural per-mob combat stats from minecraft-data: max health (hearts*2)
+// and melee attack damage of the given entity NAME (canonical game id). Both
+// come straight from the registry (mobsByName / entitiesByName), never from a
+// keyword scan of display text, so they work in any client language. Returns
+// { max_health: number|null, attack_damage: number|null } — null when the
+// registry has no value for this build, letting the Python side fall back to a
+// cautious moderate default.
+function mobCombatStats(entityName) {
+  const out = { max_health: null, attack_damage: null };
+  if (!entityName) return out;
+  const mcData = mcDataForBot();
+  if (!mcData) return out;
+  const id = String(entityName).toLowerCase();
+  // minecraft-data exposes mob metadata under a few possible maps depending on
+  // the build. Try each structurally; the first that has the id wins.
+  const sources = [
+    mcData.mobsByName,
+    mcData.entitiesByName,
+    mcData.entitiesById,
+  ];
+  let def = null;
+  for (const src of sources) {
+    if (src && src[id]) {
+      def = src[id];
+      break;
+    }
+  }
+  if (!def) return out;
+  try {
+    if (def.hp != null && Number.isFinite(Number(def.hp))) {
+      out.max_health = Number(def.hp);
+    } else if (
+      def.health != null &&
+      Number.isFinite(Number(def.health))
+    ) {
+      out.max_health = Number(def.health);
+    }
+    // Attack damage: minecraft-data does not consistently ship a per-mob attack
+    // stat, so this is often null (the Python side then uses a moderate
+    // default). When present it is read structurally.
+    if (def.attackDamage != null && Number.isFinite(Number(def.attackDamage))) {
+      out.attack_damage = Number(def.attackDamage);
+    } else if (
+      def.attack_damage != null &&
+      Number.isFinite(Number(def.attack_damage))
+    ) {
+      out.attack_damage = Number(def.attack_damage);
+    }
+  } catch (e) {
+    return out;
+  }
+  return out;
+}
 
 // The melee attack damage of an item id (hearts-per-hit). Returns 0 when the
 // item is not a melee weapon (a block, food, non-combat tool, etc.). Structural:
@@ -898,6 +1129,11 @@ function worldSnapshot(opts) {
     // on death; expose a simple structural flag for the reflex.
     is_alive:
       bot && typeof bot.health === 'number' ? bot.health > 0 : null,
+    // The most recent death: numeric position + a monotonic death count, or
+    // null before the first death. Lets the will beat tell Synth "you died at
+    // these coordinates N times — reconsider your approach" so it changes
+    // strategy instead of resuming the same fatal goal. Structural only.
+    last_death: lastDeath,
     // Canonical block ids at the bot's feet and head — lets the reflex detect
     // standing in lava/fire or having its head underwater (drowning).
     block_feet: blockNameAt(0, 0, 0),
@@ -917,6 +1153,10 @@ function worldSnapshot(opts) {
       const w = bestMeleeWeapon();
       return w ? itemAttackDamage(w.name) : 0;
     })(),
+    // Sum of equipped armor defense points (0 bare). Lets the combat reflex
+    // weigh the bot's survivability into the fight-vs-flee power ratio. See
+    // armorPoints — structural, keyed on canonical armor item ids.
+    armor_points: armorPoints(),
     // Whether the most recent hit (within the attribution window) came from a
     // *person* (another player) rather than a creature/environment. Lets the
     // post-damage appraisal respond in character to a player instead of
@@ -1387,12 +1627,28 @@ function wireBotEvents(b) {
   });
 
   b.on('death', () => {
+    // Record the numeric death position so the will beat can steer Synth away
+    // from the spot it keeps dying at (structural — coordinates + a count,
+    // never text). Overwrites the previous death; stays until the next one.
+    deathCount += 1;
+    const p = botPosition();
+    if (p && typeof p.x === 'number') {
+      lastDeath = {
+        x: Math.round(p.x),
+        y: Math.round(p.y),
+        z: Math.round(p.z),
+        count: deathCount,
+        at: Date.now(),
+      };
+    } else {
+      lastDeath = { x: 0, y: 0, z: 0, count: deathCount, at: Date.now() };
+    }
     pushEvent({
       environment: ENVIRONMENT,
       event_type: 'death',
       summary: 'Died in the world. Respawn to come back to life.',
       actor: b.username,
-      data: { dead: true },
+      data: { dead: true, death_count: deathCount, death_position: lastDeath },
     });
   });
 
@@ -2176,12 +2432,34 @@ async function runAction(action, payload) {
             /* best-effort tool select */
           }
         }
+        // Harvest gate: with the (now-equipped) held item, can this block yield
+        // a drop at all? Digging a block we cannot harvest (e.g. ore bare-
+        // handed, which drops nothing) wastes a motor tick and reports a false
+        // "no drop" success. Report a clean, actionable failure instead so the
+        // action/will beat can decide to craft the right tool first. Structural:
+        // block.canHarvest reads minecraft-data harvestTools, never text.
+        if (typeof block.canHarvest === 'function') {
+          try {
+            const held = bot.heldItem;
+            if (!block.canHarvest(held ? held.type : null)) {
+              return {
+                ok: false,
+                detail: `need a better tool to harvest ${blockName}`,
+                data: { block: blockName, reason: 'wrong_tool' },
+              };
+            }
+          } catch (e) {
+            /* canHarvest unavailable for this block — fall through to dig */
+          }
+        }
         if (typeof bot.canDigBlock === 'function' && !bot.canDigBlock(block)) {
           return { ok: false, detail: `cannot dig ${blockName}`, data: {} };
         }
         await bot.dig(block);
-        // Give the physics/pickup a brief moment so the drop delta is visible.
-        await sleep(400);
+        // Walk over the resulting ground drops so they land in the inventory,
+        // then settle — replaces the old blind sleep(400) which only worked
+        // when the drop spawned on top of the bot (OOM-safe, no collectBlock).
+        await pickupNearbyDrops(6, 3000);
         const gained = inventoryDelta(before, inventoryTotals());
         const collected = Object.values(gained).reduce((a, b) => a + b, 0);
         pushEvent({
@@ -2269,12 +2547,27 @@ async function runAction(action, payload) {
               /* best-effort */
             }
           }
+          // Harvest gate (see the 'mine' verb): stop cleanly if the held item
+          // cannot harvest this block, rather than spinning on a "no drop"
+          // round. Structural (minecraft-data harvestTools), never text.
+          if (typeof block.canHarvest === 'function') {
+            try {
+              const held = bot.heldItem;
+              if (!block.canHarvest(held ? held.type : null)) {
+                lastDetail = `need a better tool to harvest ${block.name}`;
+                break;
+              }
+            } catch (e) {
+              /* canHarvest unavailable — fall through to dig */
+            }
+          }
           if (typeof bot.canDigBlock === 'function' && !bot.canDigBlock(block)) {
             lastDetail = `cannot dig ${block.name}`;
             break;
           }
           await bot.dig(block);
-          await sleep(400);
+          // Walk over drops so they land in the inventory (OOM-safe pickup).
+          await pickupNearbyDrops(6, 3000);
         } catch (err) {
           lastDetail = String(err && err.message ? err.message : err);
           break;
@@ -2457,6 +2750,243 @@ async function runAction(action, payload) {
         wanderHeading = (wanderHeading + Math.PI / 2 + Math.random() * (Math.PI / 2)) % (Math.PI * 2);
       }
       return nav;
+    }
+    case 'shelter': {
+      // Make the body safe for the night: either sleep in a reachable bed that
+      // is under cover, or build/dig a small enclosed refuge around the feet so
+      // mobs cannot reach it. A torch alone is NOT enough (mobs still path to an
+      // exposed body) — the point is an actual walled+roofed box. Purely
+      // structural cell math + bot.placeBlock/bot.dig on the cells adjacent to
+      // the feet — NO long pathfind, so it can never trigger the buried-block
+      // OOM (see the 'mine' handler). Fully bounded and fail-safe: any failure
+      // returns a plain result and never crashes the bridge.
+      if (!bot || !bot.entity || !bot.entity.position) {
+        return { ok: false, detail: 'shelter unavailable (no bot position)', data: {} };
+      }
+      const Vec3 = bot.entity.position.constructor;
+
+      // --- 1) Try to sleep in a nearby bed that is under a roof -------------
+      // A bed skips the night entirely, which is the safest outcome. Only use
+      // one that is close (short GoalNear, bounded) and has a solid block above
+      // it (roofed) so we are not sleeping in the open. Structural: bed blocks
+      // are matched by minecraft-data tag, never by a text keyword.
+      let sleptOrEnclosed = false;
+      try {
+        const isNight = (() => {
+          const t = timeOfDay();
+          return t && t.is_day === false;
+        })();
+        if (isNight && typeof bot.findBlock === 'function') {
+          const bed = bot.findBlock({
+            matching: (b) => !!b && typeof b.name === 'string' && b.name.endsWith('_bed'),
+            maxDistance: 12,
+            count: 1,
+          });
+          if (bed) {
+            const above = bot.blockAt(bed.position.offset(0, 1, 0));
+            const roofed = above && above.name !== 'air';
+            if (roofed) {
+              const reach = bot.entity.position.distanceTo(bed.position);
+              if (reach > 2.5 && pathfinder && bot.pathfinder) {
+                const p = bed.position;
+                await navigateToGoal(
+                  new pathfinder.goals.GoalNear(p.x, p.y, p.z, 1),
+                  6000
+                );
+              }
+              try {
+                await bot.sleep(bed);
+                pushEvent({
+                  environment: ENVIRONMENT,
+                  event_type: 'build',
+                  summary: 'Went to sleep in a roofed bed to pass the night',
+                  actor: bot.username,
+                  data: { position: roundVec(bed.position) },
+                });
+                return {
+                  ok: true,
+                  detail: 'sleeping in a roofed bed',
+                  data: { method: 'bed', position: roundVec(bed.position) },
+                };
+              } catch (_sleepErr) {
+                // Cannot sleep right now (monsters nearby / not night for the
+                // server) — fall through to building a box.
+              }
+            }
+          }
+        }
+      } catch (_bedErr) {
+        // Bed search failed — fall through to build/dig a refuge.
+      }
+
+      // --- 2) Wall + roof the body in with blocks it carries ---------------
+      // The two body cells are feet (F) and head (F+1). We enclose by filling
+      // every open cell orthogonally adjacent to those two, plus the ceiling
+      // above the head and the floor below the feet if open. Each fill uses
+      // bot.placeBlock against an already-solid neighbour face — the same logic
+      // as the 'place' verb. We try every solid block held until one places.
+      const held = botInventory();
+      const blockNames = held
+        .map((it) => it.name.toLowerCase())
+        .filter((v, i, a) => v && a.indexOf(v) === i);
+
+      const feet = bot.entity.position.floored();
+      const head = feet.offset(0, 1, 0);
+      // Cells to seal: the 4 horizontal neighbours of feet and of head, the
+      // ceiling above the head, and the floor below the feet.
+      const targets = [
+        feet.offset(1, 0, 0),
+        feet.offset(-1, 0, 0),
+        feet.offset(0, 0, 1),
+        feet.offset(0, 0, -1),
+        head.offset(1, 0, 0),
+        head.offset(-1, 0, 0),
+        head.offset(0, 0, 1),
+        head.offset(0, 0, -1),
+        head.offset(0, 1, 0),
+        feet.offset(0, -1, 0),
+      ];
+      // Candidate solid neighbours to place against, in offset form.
+      const faceDirs = [
+        new Vec3(1, 0, 0),
+        new Vec3(-1, 0, 0),
+        new Vec3(0, 0, 1),
+        new Vec3(0, 0, -1),
+        new Vec3(0, 1, 0),
+        new Vec3(0, -1, 0),
+      ];
+
+      let sealed = 0;
+      const beforeSeal = inventoryTotals();
+      if (blockNames.length) {
+        for (const cell of targets) {
+          try {
+            const existing = bot.blockAt(cell);
+            if (existing && existing.name !== 'air') continue; // already solid
+            // Find a solid neighbour of this cell to place against.
+            let refBlock = null;
+            let faceVec = null;
+            for (const dir of faceDirs) {
+              const refPos = cell.plus(dir);
+              // Do not place against a body cell.
+              if (refPos.equals(feet) || refPos.equals(head)) continue;
+              const rb = bot.blockAt(refPos);
+              if (rb && rb.name !== 'air') {
+                refBlock = rb;
+                // Face vector points from the reference block back to the cell.
+                faceVec = new Vec3(-dir.x, -dir.y, -dir.z);
+                break;
+              }
+            }
+            if (!refBlock || !faceVec) continue;
+            let placed = false;
+            for (const name of blockNames) {
+              const stack = bot.inventory
+                .items()
+                .find((it) => it.name.toLowerCase() === name);
+              if (!stack) continue;
+              try {
+                await bot.equip(stack, 'hand');
+                await bot.placeBlock(refBlock, faceVec);
+                placed = true;
+                break;
+              } catch (_pErr) {
+                // Try the next material.
+              }
+            }
+            if (placed) sealed++;
+          } catch (_cellErr) {
+            // Skip this cell.
+          }
+        }
+      }
+
+      // --- 3) No blocks (or could not fully seal): dig into a solid wall ----
+      // If we still could not enclose ourselves, carve a 1x2 niche into an
+      // adjacent solid wall and then plug the entrance with the dug material.
+      // This mirrors mindcraft's dig-in survival trick and needs no inventory.
+      let dugIn = false;
+      const stillOpen = () => {
+        let open = 0;
+        for (const cell of targets) {
+          const b = bot.blockAt(cell);
+          if (!b || b.name === 'air') open++;
+        }
+        return open;
+      };
+      if (stillOpen() > 2) {
+        for (const dir of faceDirs) {
+          if (dir.y !== 0) continue; // only carve horizontally
+          const nicheFeet = feet.plus(dir);
+          const nicheHead = nicheFeet.offset(0, 1, 0);
+          const bf = bot.blockAt(nicheFeet);
+          const bh = bot.blockAt(nicheHead);
+          // Need a solid 2-tall wall to carve into.
+          if (!bf || bf.name === 'air' || !bh || bh.name === 'air') continue;
+          try {
+            for (const blk of [bh, bf]) {
+              if (typeof bot.canDigBlock === 'function' && !bot.canDigBlock(blk)) continue;
+              if (
+                typeof bot.tool === 'object' &&
+                bot.tool &&
+                typeof bot.tool.equipForBlock === 'function'
+              ) {
+                try {
+                  await bot.tool.equipForBlock(blk, {});
+                } catch (_e) {
+                  /* best-effort */
+                }
+              }
+              await bot.dig(blk);
+            }
+            // Step into the niche, then plug the cell we came from.
+            try {
+              const centre = new Vec3(
+                nicheFeet.x + 0.5,
+                nicheFeet.y,
+                nicheFeet.z + 0.5
+              );
+              await bot.lookAt(centre, true);
+              bot.setControlState('forward', true);
+              await sleep(400);
+              bot.setControlState('forward', false);
+            } catch (_mv) {
+              bot.setControlState('forward', false);
+            }
+            dugIn = true;
+            break;
+          } catch (_dig) {
+            bot.setControlState('forward', false);
+          }
+        }
+      }
+
+      const usedSeal = inventoryDelta(inventoryTotals(), beforeSeal);
+      const openLeft = stillOpen();
+      const enclosed = openLeft <= 2 || sealed > 0 || dugIn;
+      sleptOrEnclosed = enclosed;
+      pushEvent({
+        environment: ENVIRONMENT,
+        event_type: 'build',
+        summary: enclosed
+          ? `Built a night shelter (sealed ${sealed} cells${dugIn ? ', dug in' : ''})`
+          : `Tried to shelter but could not fully enclose (${openLeft} cells open)`,
+        actor: bot.username,
+        data: {
+          sealed,
+          dug_in: dugIn,
+          open_cells: openLeft,
+          used: usedSeal,
+          position: roundVec(bot.entity.position),
+        },
+      });
+      return {
+        ok: enclosed,
+        detail: enclosed
+          ? `sheltered for the night (sealed ${sealed} cells${dugIn ? ', dug in' : ''})`
+          : `could not build a safe shelter (${openLeft} cells still open, no blocks)`,
+        data: { method: dugIn ? 'dig_in' : 'walls', sealed, dug_in: dugIn, open_cells: openLeft },
+      };
     }
     case 'dig_staircase': {
       // Dig a walkable descending staircase so the bot can climb back out on

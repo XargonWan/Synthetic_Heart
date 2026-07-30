@@ -229,10 +229,12 @@ class VesselCompactorPlugin:
                         (session_id,),
                     )
                     row = await cur.fetchone()
-                    columns = [c[0] for c in (cur.description or [])]
         except Exception as exc:
             log_debug(f"[vessel_compactor] _session_facts failed: {exc}")
             return "unknown", None
+        # Column order is fixed by the SELECT above; do NOT rely on
+        # ``cur.description`` — PostgresCompatCursor does not expose it.
+        columns = ["environment", "interface_path"]
         if not row:
             return "unknown", None
         data = row if isinstance(row, dict) else dict(zip(columns, row))

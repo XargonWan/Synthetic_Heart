@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -92,6 +93,25 @@ register_exposed_var(
         "current-chat context. Conversational lines (player chats + Synth's "
         "replies) are always kept. Prevents the perception stream from drowning "
         "a reactive player turn."
+    ),
+    scope="core",
+    component="history_engine",
+    advanced=True,
+)
+
+register_exposed_var(
+    "VESSEL_PERCEPTION_COMPACT_MAX",
+    label="Vessel Perception Compact Max (items)",
+    default=20,
+    value_type=int,
+    description=(
+        "During Rift Vessel embodiment, near-identical autonomous perceptions "
+        "(e.g. repeated 'took damage' / 'collected 1 sand') are collapsed into a "
+        "single line with an occurrence count and summed quantity — e.g. "
+        "'took damage (×5)', 'collected sand (×5, total 23)'. This is the max "
+        "number of such compacted lines kept in the current-chat context. "
+        "Structural digit-masking only, never keyword matching (multi-language "
+        "safe)."
     ),
     scope="core",
     component="history_engine",
@@ -312,6 +332,84 @@ def _entry_to_text_with_source(
 def _dedup_key(text: str) -> str:
     normalized = " ".join((text or "").strip().split()).lower()
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+# Matches a run of digits (optionally with a decimal part). Used only to derive
+# a language-agnostic *shape* for a history line by masking the variable numeric
+# parts (coordinates, quantities); it never inspects any word.
+_NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
+
+
+def _compact_similar_lines(lines: Sequence[str], max_items: int) -> List[str]:
+    """Collapse near-identical history lines, with counts and summed quantities.
+
+    A game world emits highly repetitive perceptions ("took damage",
+    "collected 1 sand", "collected 1 sand", …). Kept verbatim they waste prompt
+    budget and drown the useful signal. This helper groups lines by their
+    *structural shape* — the line with every numeric run masked out — so lines
+    that differ only in coordinates/quantities merge into one. Detection is
+    purely structural (digit masking), never keyword/language matching, so it is
+    multi-language safe.
+
+    For each group we append a ``(×N)`` occurrence count when it repeated, and
+    when every member carries exactly one number we also sum those numbers and
+    surface the total (e.g. ``collected sand (×5, total 23)``). First-appearance
+    order is preserved and the result is capped at ``max_items`` (keeping the
+    most recent groups when the cap bites).
+
+    Args:
+        lines: History lines in chronological (insertion) order.
+        max_items: Maximum number of compacted lines to return (<=0 → no cap).
+
+    Returns:
+        The compacted, order-preserving list of lines.
+    """
+    order: List[str] = []
+    samples: Dict[str, str] = {}
+    counts: Dict[str, int] = {}
+    single_number: Dict[str, bool] = {}
+    totals: Dict[str, float] = {}
+    for raw in lines:
+        line = (raw or "").strip()
+        if not line:
+            continue
+        nums = _NUMBER_RE.findall(line)
+        shape = _NUMBER_RE.sub("#", line)
+        key = " ".join(shape.split()).lower()
+        if key not in counts:
+            samples[key] = line
+            counts[key] = 0
+            single_number[key] = len(nums) == 1
+            totals[key] = 0.0
+            order.append(key)
+        counts[key] += 1
+        # Only maintain a running sum while every seen member has exactly one
+        # number; a single non-conforming member disables the total for safety.
+        if len(nums) == 1 and single_number[key]:
+            try:
+                totals[key] += float(nums[0])
+            except (TypeError, ValueError):
+                single_number[key] = False
+        elif len(nums) != 1:
+            single_number[key] = False
+
+    if max_items > 0 and len(order) > max_items:
+        order = order[-max_items:]
+
+    compacted: List[str] = []
+    for key in order:
+        text = samples[key]
+        count = counts[key]
+        if count <= 1:
+            compacted.append(text)
+            continue
+        if single_number[key]:
+            total = float(totals[key])
+            total_str = str(int(total)) if total.is_integer() else f"{total:g}"
+            compacted.append(f"{text} (×{count}, total {total_str})")
+        else:
+            compacted.append(f"{text} (×{count})")
+    return compacted
 
 
 def _is_vessel_autonomous_perception(entry: HistoryEntry) -> bool:
@@ -630,6 +728,7 @@ class HistoryEngine:
                 # + Synth's own replies) and only the most recent
                 # ``VESSEL_PERCEPTION_CONTEXT_CAP`` perceptions for ambient
                 # grounding. Structural (persisted metadata flag), never keyword.
+                compacted_perception_lines: List[str] = []
                 if vessel_focus:
                     # Drop any stray perceptions still in the conversational
                     # window (older messages persisted before the split) so they
@@ -637,11 +736,20 @@ class HistoryEngine:
                     window = [
                         m for m in window if not _is_vessel_autonomous_perception(m)
                     ]
-                    perception_budget = max(
-                        0, _get_int("VESSEL_PERCEPTION_CONTEXT_CAP", 3)
-                    )
-                    recent_perceptions: List[dict] = []
-                    if perception_budget > 0:
+                    # Compact-then-cap. A world emits highly repetitive
+                    # perceptions ("took damage", "collected 1 sand", …). Rather
+                    # than keeping only a tiny raw tail (the old
+                    # ``VESSEL_PERCEPTION_CONTEXT_CAP`` = 3 grounding lines), we
+                    # read the *whole* recent ring, collapse near-identical lines
+                    # into counted/summed rollups (e.g. "took damage (×5)",
+                    # "collected sand (×5, total 23)"), then cap the number of
+                    # distinct rollups at ``VESSEL_PERCEPTION_COMPACT_MAX``
+                    # (default 20). This keeps far richer ambient grounding in a
+                    # much smaller prompt budget. Compaction is structural
+                    # (digit-masking), never keyword matching (multi-language
+                    # safe).
+                    compact_max = max(0, _get_int("VESSEL_PERCEPTION_COMPACT_MAX", 20))
+                    if compact_max > 0:
                         try:
                             from core.chat_context_manager import (
                                 get_perception_memory as _get_perception_memory,
@@ -665,7 +773,15 @@ class HistoryEngine:
                                 grounding = [
                                     m for m in pbuf if not _is_vessel_beat_perception(m)
                                 ]
-                                recent_perceptions = grounding[-perception_budget:]
+                                perception_texts = [
+                                    _entry_to_text_with_source(
+                                        m, current_interface_path=interface_path
+                                    )
+                                    for m in grounding
+                                ]
+                                compacted_perception_lines = _compact_similar_lines(
+                                    perception_texts, compact_max
+                                )
                         except Exception as _pe:
                             log_debug(
                                 f"[history_engine] Could not read vessel perceptions: {_pe}"
@@ -677,16 +793,17 @@ class HistoryEngine:
                     # turn the player's question is the last conversational entry
                     # and MUST stay last, or a weak embodiment model continues
                     # its own autonomous pattern (mining/observe) instead of
-                    # answering. A prior chronological sort keyed on the string
-                    # timestamp broke this: perceptions carry ``timestamp=None``
-                    # (→ ``"None"``) which sorts AFTER a real ISO player-chat
-                    # timestamp (``"2026-…"``), shoving mining perceptions past
-                    # the player's question and burying it mid-list. Both the
-                    # conversation ``window`` and ``recent_perceptions`` are
-                    # already in insertion (chronological) order, so no re-sort
-                    # is needed — just concatenate perceptions before the
-                    # conversation.
-                    window = list(recent_perceptions) + list(window)
+                    # answering. The compacted perception lines are emitted ahead
+                    # of the conversation ``window`` below.
+
+                # Emit the compacted ambient perceptions first (already plain
+                # text), then the conversational window.
+                for pline in compacted_perception_lines:
+                    k = _dedup_key(pline)
+                    if k in seen_history:
+                        continue
+                    history_current_chat.append(pline)
+                    seen_history.add(k)
 
                 for m in window:
                     if _is_ignored_prompt_history_entry(m):

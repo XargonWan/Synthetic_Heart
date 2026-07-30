@@ -128,7 +128,8 @@ def _rich_world_state() -> dict[str, Any]:
 
 def test_prompt_contains_world_and_verb_namespace() -> None:
     prompt = build_decision_prompt(_rich_world_state(), "minecraft")
-    assert "minecraft world" in prompt
+    # The world name is surfaced via the pragmatic in-game framing.
+    assert "playing minecraft" in prompt
     # The verb namespace cue must be present so Synth picks vessel_<world>_ verbs.
     assert "vessel_minecraft_" in prompt
 
@@ -215,14 +216,17 @@ def test_resolve_beat_interval_failsafe_on_error() -> None:
 def test_build_will_prompt_is_volition_focused() -> None:
     prompt = build_will_prompt(_rich_world_state(), "minecraft")
     # It surfaces the same structured snapshot as the decision prompt…
-    assert "minecraft world" in prompt
+    # Pragmatic, in-game framing that names the world and curbs monologue prose.
+    assert "IN GAME" in prompt
+    assert "playing minecraft" in prompt
+    assert "monologue" in prompt.lower()
     assert "vessel_minecraft_set_goal" in prompt
     assert "vessel_minecraft_update_goal" in prompt
     # …but frames the turn as *will, not motion* and tells Synth its body
     # will move on its own once the goal is clear (motorics is separate).
     lowered = prompt.lower()
     assert "will, not motion" in lowered
-    assert "move toward what you need on its own" in lowered
+    assert "body will walk that way on its own" in lowered
 
 
 def test_build_will_prompt_pushes_set_goal_when_no_goal() -> None:
@@ -233,8 +237,8 @@ def test_build_will_prompt_pushes_set_goal_when_no_goal() -> None:
     state = {"extra": {}}  # no current_goal at all
     prompt = build_will_prompt(state, "minecraft")
     lowered = prompt.lower()
-    assert "no goal at all" in lowered
-    assert "this is the moment to choose one" in lowered
+    assert "you have no goal" in lowered
+    assert "you must author one this turn" in lowered
     assert "vessel_minecraft_set_goal" in prompt
     # The discouraging "only call set_goal when you want a *different*
     # objective" caution belongs to the has-goal branch and must be absent.
@@ -317,6 +321,34 @@ def test_build_will_prompt_no_feedback_line_on_arrived_or_missing() -> None:
     assert "heads up" not in arrived.lower()
     none_prompt = build_will_prompt({"extra": {}}, "minecraft")
     assert "heads up" not in none_prompt.lower()
+
+
+def test_build_will_prompt_surfaces_death_position_and_reconsider() -> None:
+    # When the bridge recorded a numeric death position, the will beat tells
+    # Synth exactly where it died and presses it to reconsider its approach
+    # instead of resuming the same fatal goal (structural — coords + count).
+    prompt = build_will_prompt(
+        {
+            "extra": {
+                "last_death": {"x": -120, "y": 63, "z": 44, "count": 3, "at": 1},
+            }
+        },
+        "minecraft",
+    )
+    lower = prompt.lower()
+    assert "died" in lower
+    assert "x=-120" in prompt
+    assert "z=44" in prompt
+    assert "death #3" in lower
+    assert "reconsider" in lower
+
+
+def test_build_will_prompt_no_death_cue_when_absent_or_malformed() -> None:
+    # No death recorded → no death cue. A malformed entry is ignored too.
+    none_prompt = build_will_prompt({"extra": {}}, "minecraft")
+    assert "you have died here" not in none_prompt.lower()
+    bad_prompt = build_will_prompt({"extra": {"last_death": {"count": 1}}}, "minecraft")
+    assert "you have died here" not in bad_prompt.lower()
 
 
 def test_build_decision_prompt_is_alias_of_will_prompt() -> None:
@@ -436,6 +468,10 @@ def test_build_action_prompt_empty_when_no_goal() -> None:
 def test_build_action_prompt_is_action_focused_and_lists_verbs() -> None:
     prompt = build_action_prompt(_rich_world_state(), "minecraft")
     assert prompt != ""
+    # Pragmatic, in-game framing that names the world and curbs monologue prose.
+    assert "IN GAME" in prompt
+    assert "playing minecraft" in prompt
+    assert "monologue" in prompt.lower()
     # World-namespaced verbs are surfaced so cognition uses the real actions.
     assert "vessel_minecraft_" in prompt
     # The current goal free text is surfaced verbatim.
@@ -509,6 +545,9 @@ def _hurt_world_state(**over: Any) -> dict[str, Any]:
 
 def test_appraisal_combat_framing_lists_attack_verb() -> None:
     prompt = build_damage_appraisal_prompt(_hurt_world_state(), "minecraft")
+    # Pragmatic, in-game framing that names the world and curbs monologue prose.
+    assert "IN GAME" in prompt
+    assert "playing minecraft" in prompt
     # Combat framing when the source is not a player.
     assert "hostile creature hurt you" in prompt
     assert "vessel_minecraft_attack" in prompt
@@ -585,8 +624,11 @@ def test_knowledge_block_skipped_when_entries_have_no_text() -> None:
 
 def test_build_reflection_prompt_frames_intentional_pause() -> None:
     prompt = build_reflection_prompt(_rich_world_state(), "minecraft")
-    # Explicit "stopped to think" framing, distinct from the idle will beat.
-    assert "stopped moving" in prompt
+    # Pragmatic, in-game framing that names the world and curbs monologue prose.
+    assert "IN GAME" in prompt
+    assert "minecraft" in prompt
+    assert "monologue" in prompt.lower()
+    assert "You were drifting" in prompt
     assert "private" in prompt.lower()
     # It is a thinking turn — must forbid speaking.
     assert "Do NOT speak" in prompt

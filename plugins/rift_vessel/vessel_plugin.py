@@ -42,6 +42,12 @@ from core.core_initializer import register_plugin
 from core.logging_utils import log_error, log_info, log_warning
 from core.vessel_registry import VESSEL_REGISTRY
 from plugins.rift_vessel.vessel_base import VesselActionResult, WorldState
+from plugins.rift_vessel.vessel_whitelist import (
+    DEFAULT_RECON_WHITELIST as _DEFAULT_RECON_WHITELIST,
+)
+from plugins.rift_vessel.vessel_whitelist import (
+    DEFAULT_WHITELIST as _DEFAULT_ACTION_WHITELIST,
+)
 
 # ---------------------------------------------------------------------------
 # Config variables (hidden from Settings — the Vessel is configured via the
@@ -72,6 +78,45 @@ config_registry.get_value(
     description=(
         "Inactivity window before a Vessel session is closed and its buffered "
         "experience is compacted (in chunks) into the dedicated vessel_diary."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_ACTION_WHITELIST",
+    _DEFAULT_ACTION_WHITELIST,
+    value_type=str,
+    label="Vessel Action Whitelist (extra core actions)",
+    description=(
+        "Comma/newline-separated fnmatch wildcard patterns of the CORE-EXTRA "
+        "actions visible to SyntH while embodied in a world (e.g. 'message_*, "
+        "event, spawn_drone'). The Vessel's own verbs (vessel_*) and the "
+        "connected world's verbs (e.g. *_minecraft_*) are ALWAYS included and "
+        "cannot be edited here. Keeping the in-world action catalog lean stops "
+        "the system prompt from overrunning the downstream char budget, which "
+        "would otherwise erase the will/reflection prompt and make SyntH author "
+        "trivial goals. Leave empty to fall back to the scope-based default."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_RECON_WHITELIST",
+    _DEFAULT_RECON_WHITELIST,
+    value_type=str,
+    label="Vessel Recon Whitelist (preflight recon keys)",
+    description=(
+        "Comma/newline-separated fnmatch wildcard patterns of the recon KEYS "
+        "allowed to run during an in-world embodiment turn (the preflight "
+        "counterpart of the action whitelist). Only recon plugins whose "
+        "get_recon_key() matches participate in the combined recon LLM call; "
+        "the noisy research-oriented ones (web search, agent-intent, video, "
+        "channel resolver) are excluded so the weaker embodiment model does not "
+        "verbalise a 'do a web search' plan instead of acting in-world. The "
+        "default keeps language/tone hints, memory search, and any vessel_* "
+        "recon key. Leave empty to fall back to the built-in default."
     ),
     group="plugins",
     component="vessel_plugin",
@@ -457,6 +502,24 @@ config_registry.get_value(
     advanced=True,
 )
 config_registry.get_value(
+    "VESSEL_GOAL_EXPAND_RETRY_SEC",
+    300,
+    value_type=int,
+    label="Goal Plan Expansion: Retry Cooldown (s)",
+    description=(
+        "Per-world cooldown before a *failed* goal-expansion Drone is retried "
+        "(clamped to 30–3600). When a Drone exhausts its iteration budget "
+        "without committing a steps plan, the goal is retried after this "
+        "interval instead of on the very next scheduler tick — preventing a "
+        "tight respawn loop that would spin a fresh Drone every tick and burn "
+        "cognition. A *successful* expansion resets the cooldown immediately. "
+        "Only used when Goal Plan Expansion (Drone) is enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
     "VESSEL_SELF_PRESERVATION_ENABLED",
     True,
     value_type=bool,
@@ -596,6 +659,37 @@ config_registry.get_value(
     component="vessel_plugin",
     advanced=True,
 )
+config_registry.get_value(
+    "VESSEL_SP_ENGAGE_RATIO",
+    1.0,
+    value_type=float,
+    label="Self-Preservation: Engage Power Ratio",
+    description=(
+        "Fight/flee threshold on the ratio of Synth's own combat power (weapon "
+        "+ armor + health) to the mob's power (health + attack). At or above "
+        "this ratio an armed Synth engages; below it, it flees. 1.0 means "
+        "engage when at least evenly matched. Lower is braver (engage tougher "
+        "mobs); higher is more cautious. Clamped 0.2–5.0."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_SP_WEAK_MOB_POWER",
+    6.0,
+    value_type=float,
+    label="Self-Preservation: Weak-Mob Power Floor",
+    description=(
+        "A mob whose structural power is below this floor is considered trivial: "
+        "even a disarmed Synth turns and fights it barehanded instead of fleeing "
+        "everything. Raise to make Synth punch out tougher mobs while unarmed; "
+        "lower to make it flee more readily when disarmed."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
 
 
 class VesselPlugin(AIPluginBase):
@@ -622,6 +716,10 @@ class VesselPlugin(AIPluginBase):
             "category": "Vessels",
             "icon": "icon.svg",
             "guide": "guide.md",
+            # Advisory dependency: the generic Goals plugin persists the
+            # self-authored in-world goals the Vessel autonomy loop reads/writes.
+            # Resolved lazily at runtime; absence degrades gracefully.
+            "depends_on": ["goals"],
         }
 
     # ------------------------------------------------------------------
@@ -1057,6 +1155,28 @@ class VesselPlugin(AIPluginBase):
             log_error(f"[vessel_plugin] Cannot load connector '{name}': {exc}")
             return VesselActionResult(ok=False, detail=f"connector_load_failed: {exc}")
 
+        # Seed the connector with this connect's resolved settings *before*
+        # opening the session so its world identity (see get_world_identity)
+        # already reflects any per-connect host/port override — the identity
+        # becomes the <world> path level and goal-store scope.
+        try:
+            setattr(connector, "_connect_settings", dict(settings))
+        except Exception:  # pragma: no cover - defensive
+            pass
+        # Resolve the per-world identity token (stable per concrete server) so
+        # progression (goals) is scoped per world. Guarded: a connector without
+        # the optional hook falls back to the legacy shared scope (None).
+        world_id: str | None = None
+        try:
+            getter = getattr(connector, "get_world_identity", None)
+            if callable(getter):
+                world_id = getter()
+        except Exception as exc:  # pragma: no cover - defensive
+            log_warning(
+                f"[vessel_plugin] get_world_identity failed for '{name}': {exc}"
+            )
+            world_id = None
+
         if getattr(connector, "is_connected", False):
             log_info(f"[vessel_plugin] connect_world: '{name}' already connected")
             # Ensure gameplay verbs are exposed even if the block was cached
@@ -1077,7 +1197,7 @@ class VesselPlugin(AIPluginBase):
                 and not iface.has_local_session(name)
             ):
                 try:
-                    reopened_id = await iface.begin_session(name)
+                    reopened_id = await iface.begin_session(name, world=world_id)
                     log_info(
                         f"[vessel_plugin] connect_world: reopened session for "
                         f"already-connected '{name}' (session={reopened_id})"
@@ -1104,6 +1224,7 @@ class VesselPlugin(AIPluginBase):
                     environment=getattr(event, "environment", name),
                     event_type=getattr(event, "event_type", "event"),
                     summary=getattr(event, "summary", ""),
+                    world=world_id,
                     entity=getattr(event, "actor", None),
                     session_id=session_id,
                     data=getattr(event, "data", None),
@@ -1115,7 +1236,7 @@ class VesselPlugin(AIPluginBase):
         # first event the connector emits during connect().
         if iface is not None and hasattr(iface, "begin_session"):
             try:
-                session_id = await iface.begin_session(name)
+                session_id = await iface.begin_session(name, world=world_id)
             except Exception as exc:
                 log_warning(f"[vessel_plugin] begin_session failed: {exc}")
                 session_id = None
