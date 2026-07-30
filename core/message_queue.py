@@ -66,6 +66,30 @@ def _heap_key(priority_val: int) -> int:
     return -int(priority_val)
 
 
+# Human-readable label for each priority band, keyed by the semantic value.
+# Used only for display (e.g. the WebUI Activity → Queue tab); producers still
+# reference the numeric constants by name. A value not in the map falls back to
+# a plain ``str(priority)`` at the call site.
+_PRIORITY_LABELS: dict[int, str] = {
+    PRIORITY_EMERGENCY: "Emergency",
+    PRIORITY_URGENT: "Urgent",
+    PRIORITY_REFLECTION: "Reflection",
+    PRIORITY_HIGH: "High",
+    PRIORITY_TRAINER: "Trainer",
+    PRIORITY_GENERAL: "General",
+    PRIORITY_AMBIENT: "Ambient",
+    PRIORITY_LOW: "Low",
+}
+
+
+def priority_label(priority_val: int) -> str:
+    """Return a human-readable name for a semantic priority band."""
+    try:
+        return _PRIORITY_LABELS.get(int(priority_val), str(priority_val))
+    except (TypeError, ValueError):
+        return str(priority_val)
+
+
 _queue: asyncio.PriorityQueue | None = None
 _queue_loop: asyncio.AbstractEventLoop | None = None
 _lock: asyncio.Lock | None = None
@@ -316,8 +340,12 @@ def drop_vessel_queue_for_world(world_chat_id: str) -> int:
         is_vessel = (
             isinstance(entry_item, dict) and entry_item.get("interface") == "vessel"
         )
-        same_world = (
-            isinstance(entry_item, dict) and entry_item.get("chat_id") == world_chat_id
+        # Match the exact world scope OR any deeper per-server scope beneath it
+        # (``vessel/<game>`` also purges ``vessel/<game>/<world>``), so a purge
+        # keyed on the game token covers the concrete per-server session scope.
+        entry_chat = entry_item.get("chat_id") if isinstance(entry_item, dict) else None
+        same_world = isinstance(entry_chat, str) and (
+            entry_chat == world_chat_id or entry_chat.startswith(f"{world_chat_id}/")
         )
         if is_vessel and same_world:
             dropped += 1
@@ -342,6 +370,119 @@ def drop_vessel_queue_for_world(world_chat_id: str) -> int:
             f"'{world_chat_id}' at session teardown"
         )
     return dropped
+
+
+def snapshot_queue(limit: int = 500) -> list[dict[str, object]]:
+    """Return a read-only snapshot of the currently PENDING queue items.
+
+    Powers the WebUI Activity → Queue tab. Each entry is a plain, JSON-safe dict
+    describing one queued message — never the live ``item`` (which holds the bot,
+    the raw message object and futures). Items are returned in the order they
+    would be popped by the consumer: most urgent first (highest semantic
+    priority), FIFO within a band (via the monotonic counter).
+
+    The item currently being processed by the consumer has already been
+    ``get``-ed off the heap and is therefore NOT included — this is only the
+    pending backlog.
+
+    Best-effort and fully guarded (mirrors the prune helpers): reads a copy of
+    the internal heap without a lock, so a rare concurrent mutation can only
+    yield a slightly stale snapshot, never an exception. Returns ``[]`` when the
+    queue has not been created yet or on any error.
+
+    Args:
+        limit: Maximum number of items to return (defensive cap for huge
+            backlogs). Clamped to ``[1, 5000]``.
+
+    Returns:
+        A list of dicts, each with: ``position`` (1-based pop order),
+        ``priority`` (int), ``priority_label`` (str), ``interface``,
+        ``interface_path``, ``chat_id``, ``chat_name``, ``thread_name``,
+        ``enqueued_at`` (epoch seconds, float), ``age_seconds`` (float),
+        ``text_preview`` (str, truncated), ``is_priority`` (bool) and the
+        structural vessel flags ``vessel_player_chat`` / ``vessel_reflection`` /
+        ``vessel_appraisal``.
+    """
+    try:
+        cap = max(1, min(5000, int(limit)))
+    except (TypeError, ValueError):
+        cap = 500
+
+    if _queue is None:
+        return []
+
+    try:
+        # Copy the heap before iterating so a concurrent enqueue/prune cannot
+        # mutate it mid-read. Each entry is ``(heap_key, counter, item)``.
+        entries = list(_queue._queue)
+    except Exception:  # pragma: no cover - defensive
+        return []
+
+    # Sort into the exact pop order: min-heap key first (most urgent), then the
+    # monotonic counter (FIFO tie-break).
+    def _sort_key(entry: object) -> tuple[int, int]:
+        try:
+            heap_key, counter_val, _item = entry  # type: ignore[misc]
+            return (int(heap_key), int(counter_val))
+        except (TypeError, ValueError):
+            return (0, 0)
+
+    try:
+        entries.sort(key=_sort_key)
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+    now = time.time()
+    out: list[dict[str, object]] = []
+    for position, entry in enumerate(entries[:cap], start=1):
+        try:
+            heap_key, _counter_val, item = entry
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(item, dict):
+            continue
+
+        priority_val = -int(heap_key)
+
+        # Text preview from the wrapped message object, truncated. Guarded — the
+        # message may be any interface's object; we only want its ``.text``.
+        preview = ""
+        try:
+            raw_text = getattr(item.get("message"), "text", "") or ""
+            preview = str(raw_text).strip().replace("\n", " ")
+            if len(preview) > 240:
+                preview = preview[:240] + "…"
+        except Exception:  # pragma: no cover - defensive
+            preview = ""
+
+        enqueued_at = item.get("timestamp")
+        try:
+            enqueued_at_f = float(enqueued_at) if enqueued_at is not None else None
+        except (TypeError, ValueError):
+            enqueued_at_f = None
+        age_seconds = (now - enqueued_at_f) if enqueued_at_f is not None else None
+
+        out.append(
+            {
+                "position": position,
+                "priority": priority_val,
+                "priority_label": priority_label(priority_val),
+                "interface": item.get("interface"),
+                "interface_path": item.get("interface_path"),
+                "chat_id": item.get("chat_id"),
+                "chat_name": item.get("chat_name"),
+                "thread_name": item.get("message_thread_name"),
+                "enqueued_at": enqueued_at_f,
+                "age_seconds": age_seconds,
+                "text_preview": preview,
+                "is_priority": bool(item.get("priority")),
+                "vessel_player_chat": bool(item.get("vessel_player_chat")),
+                "vessel_reflection": bool(item.get("vessel_reflection")),
+                "vessel_appraisal": bool(item.get("vessel_appraisal")),
+            }
+        )
+
+    return out
 
 
 def _get_lock() -> asyncio.Lock:

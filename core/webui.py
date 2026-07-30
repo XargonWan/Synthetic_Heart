@@ -903,6 +903,7 @@ class SynthWebUIInterface:
         self.app.get("/api/history/dreams")(self.history_dreams)
         self.app.get("/api/history/growth")(self.history_growth)
         self.app.get("/api/history/vessel")(self.history_vessel)
+        self.app.get("/api/history/queue")(self.history_queue)
         self.app.get("/api/history/vessel/goals")(self.history_vessel_goals)
         self.app.delete("/api/history/vessel/goals/{world}/{goal_id}")(
             self.delete_vessel_goal
@@ -910,6 +911,10 @@ class SynthWebUIInterface:
         self.app.post("/api/history/vessel/goals/{world}/clear-abandoned")(
             self.clear_vessel_abandoned_goals
         )
+        # Generic, scope-aware goals API (Goals plugin — vessel + personal/other).
+        self.app.get("/api/goals")(self.list_goals)
+        self.app.delete("/api/goals/{goal_id}")(self.delete_goal)
+        self.app.post("/api/goals/clear-abandoned")(self.clear_abandoned_goals)
         self.app.post("/api/growth/current")(self.update_growth_current)
         self.app.post("/api/growth/revert")(self.revert_growth_state)
         # Per-item delete for History sub-tabs
@@ -8157,6 +8162,58 @@ class SynthWebUIInterface:
             log_error(f"{LOG_PREFIX} Failed to fetch vessel history: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
+    async def history_queue(self, request: Request):
+        """Return a snapshot of the pending message-queue backlog.
+
+        Powers the History > Queue sub-tab. Read-only: it never dequeues or
+        reorders anything, it just reflects what is currently waiting to be
+        processed (most urgent first, FIFO within a band). The single in-flight
+        item being processed by the consumer is not included (it has already
+        left the heap). Optional query filters: ``search`` (substring across
+        interface_path / chat_name / text preview) and ``priority`` (exact
+        numeric priority band).
+        """
+        params = request.query_params
+        search = params.get("search", "").strip().lower()
+        priority_filter = params.get("priority", "").strip()
+
+        try:
+            from core.message_queue import snapshot_queue
+
+            items = snapshot_queue()
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to snapshot message queue: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+        # Exact priority-band filter (numeric). Structural — never text matching.
+        if priority_filter:
+            try:
+                wanted = int(priority_filter)
+                items = [it for it in items if it.get("priority") == wanted]
+            except (TypeError, ValueError):
+                pass
+
+        # Free-text search across the human-facing source/preview fields.
+        if search:
+
+            def _matches(it: dict[str, Any]) -> bool:
+                for key in ("interface_path", "chat_name", "text_preview", "interface"):
+                    val = it.get(key)
+                    if isinstance(val, str) and search in val.lower():
+                        return True
+                return False
+
+            items = [it for it in items if _matches(it)]
+
+        return JSONResponse(
+            {
+                "success": True,
+                "items": items,
+                "total_count": len(items),
+                "generated_at": self._dt_to_utc_iso(datetime.now(timezone.utc)),
+            }
+        )
+
     async def history_vessel_goals(self, request: Request):
         """Return self-authored goals grouped per game/world for the Goals sub-tab.
 
@@ -8305,6 +8362,151 @@ class SynthWebUIInterface:
             result = await clearer()
         except Exception as exc:
             log_error(f"{LOG_PREFIX} clear_vessel_abandoned_goals failed: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+        if (result or {}).get("status") != "ok":
+            return JSONResponse(
+                {"success": False, "error": (result or {}).get("message", "failed")},
+                status_code=500,
+            )
+        return JSONResponse(
+            {"success": True, "deleted_count": result.get("deleted_count", 0)}
+        )
+
+    @staticmethod
+    def _goals_store():
+        """Return the generic Goals plugin store module, or ``None`` if absent.
+
+        Lazily imported and fully fail-safe so removing the Goals plugin never
+        breaks the WebUI. Structural — no keyword/trigger logic.
+        """
+        try:
+            # ``plugins.goals/__init__`` rebinds the package to the ``goals``
+            # module via a sys.modules shim, so ``from plugins.goals import
+            # goals`` fails at runtime. Import the concrete submodule instead.
+            import importlib
+
+            return importlib.import_module("plugins.goals.goals")
+        except Exception:
+            return None
+
+    async def list_goals(self, request: Request):
+        """Return every goal grouped by its ``(scope, game, world)`` bucket.
+
+        Scope-agnostic, generic replacement for the vessel-only Goals view: the
+        Goals plugin owns objectives for the Rift Vessel *and* any other scope
+        (personal life goals, planning, future games). Each group carries its
+        ``scope`` / ``game`` / ``world`` so the frontend can render a scope badge
+        and filter. Fully fail-safe — degrades to an empty list when the plugin
+        is missing/disabled.
+        """
+        del request  # goals are global; the frontend does its own filtering
+        store = self._goals_store()
+        if store is None:
+            return JSONResponse({"success": True, "groups": []})
+        try:
+            goals = await store.list_all_goals(200)
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} list_goals failed: {exc}")
+            goals = []
+
+        buckets: dict[tuple[str, str, str], dict[str, Any]] = {}
+        order: list[tuple[str, str, str]] = []
+        for goal in goals or []:
+            if not isinstance(goal, dict):
+                continue
+            scope = str(goal.get("scope") or "none")
+            game = str(goal.get("game") or "none")
+            world = str(goal.get("world") or "none")
+            key = (scope, game, world)
+            if key not in buckets:
+                buckets[key] = {
+                    "scope": scope,
+                    "game": game,
+                    "world": world,
+                    "player": self._resolve_goal_group_player(game),
+                    "goals": [],
+                }
+                order.append(key)
+            buckets[key]["goals"].append(goal)
+
+        groups = [buckets[key] for key in order]
+        return JSONResponse({"success": True, "groups": groups})
+
+    @staticmethod
+    def _resolve_goal_group_player(game: str) -> str:
+        """Return the in-world character name for a goal group, or ``""``.
+
+        Embodiment goals belong to Synth playing under an in-world nickname; the
+        Goals card shows it next to the world. The name is a config fact (the
+        bot username), not stored on the goal, so it is resolved here fail-safe
+        and works even when no session is live. Only Minecraft ships a concrete
+        identity today; other games/scopes get an empty name (no player line).
+        Structural dispatch — no keyword/trigger logic.
+        """
+        if game != "minecraft":
+            return ""
+        try:
+            from core.config_manager import config_registry
+
+            override = str(
+                config_registry.get_value(
+                    "MINECRAFT_BOT_USERNAME_OVERRIDE",
+                    "",
+                    group="plugins",
+                    component="minecraft_vessel",
+                )
+                or ""
+            ).strip()
+            if override:
+                return override
+            return str(config_registry.get_value("SYNTH_NAME", "") or "").strip()
+        except Exception:  # pragma: no cover - defensive
+            return ""
+
+    async def delete_goal(self, request: Request):
+        """Delete a single non-active goal by id (generic Goals view)."""
+        goal_id_raw = request.path_params.get("goal_id")
+        try:
+            goal_id = int(goal_id_raw)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"success": False, "error": "Invalid goal id"}, status_code=400
+            )
+        store = self._goals_store()
+        if store is None:
+            return JSONResponse(
+                {"success": False, "error": "Goals plugin unavailable"},
+                status_code=404,
+            )
+        try:
+            result = await store.delete_goal(goal_id)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} delete_goal failed: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+        status = (result or {}).get("status")
+        if status != "ok":
+            message = (result or {}).get("message", "delete_failed")
+            code = 400 if message == "cannot_delete_active" else 404
+            return JSONResponse({"success": False, "error": message}, status_code=code)
+        return JSONResponse(
+            {"success": True, "deleted_count": result.get("deleted_count", 0)}
+        )
+
+    async def clear_abandoned_goals(self, request: Request):
+        """Delete every abandoned goal across all scopes (generic Goals view)."""
+        del request
+        store = self._goals_store()
+        if store is None:
+            return JSONResponse(
+                {"success": False, "error": "Goals plugin unavailable"},
+                status_code=404,
+            )
+        try:
+            result = await store.clear_abandoned_goals()
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} clear_abandoned_goals failed: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
         if (result or {}).get("status") != "ok":

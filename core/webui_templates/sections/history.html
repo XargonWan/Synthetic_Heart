@@ -39,6 +39,10 @@
               <span class="icon">🤖</span>
               <span>Agent</span>
             </button>
+            <button class="sub-nav-btn" data-subtab="queue" role="tab" aria-selected="false">
+              <span class="icon">📥</span>
+              <span>Queue</span>
+            </button>
           </nav>
         </header>
 
@@ -189,9 +193,14 @@
       <!-- Goals Sub-Tab -->
       <div class="sub-tab-panel" id="subtab-goals" data-subtab="goals">
         <div class="section-controls">
-          <div style="color: var(--text-soft); font-size: 0.9rem;">
-            Self-directed goals per world — current objective and its steps.
-          </div>
+          <input type="text" id="history-goals-search" placeholder="Search goals..." class="search-input" />
+          <select id="history-goals-status" class="filter-select">
+            <option value="">All Statuses</option>
+          </select>
+          <select id="history-goals-scope" class="filter-select">
+            <option value="">All Scopes</option>
+          </select>
+          <button type="button" id="history-goals-refresh" class="filter-refresh-btn" title="Reload goals">🔄</button>
         </div>
         <div id="history-goals-content" class="history-container">
           <div class="loading-state">
@@ -225,6 +234,31 @@
               <textarea id="agent-msg-input" class="agent-msg-input" rows="1" placeholder="Message the agent… (Enter to send, Shift+Enter for newline)"></textarea>
               <button type="button" id="agent-send-btn" class="agent-send-btn" title="Send">Send</button>
             </form>
+          </div>
+        </div>
+      </div>
+
+      <!-- Queue Sub-Tab -->
+      <div class="sub-tab-panel" id="subtab-queue" data-subtab="queue">
+        <div class="section-controls">
+          <input type="text" id="history-queue-search" placeholder="Search queue..." class="search-input" />
+          <select id="history-queue-priority" class="filter-select">
+            <option value="">All Priorities</option>
+            <option value="11">Emergency</option>
+            <option value="10">Urgent</option>
+            <option value="9">Reflection</option>
+            <option value="8">High</option>
+            <option value="7">Trainer</option>
+            <option value="6">General</option>
+            <option value="4">Ambient</option>
+            <option value="3">Low</option>
+          </select>
+          <button type="button" id="history-queue-refresh" class="filter-refresh-btn" title="Reload queue">🔄</button>
+        </div>
+        <div id="history-queue-content" class="history-container">
+          <div class="loading-state">
+            <div class="loading-spinner"></div>
+            <p>Loading queue...</p>
           </div>
         </div>
       </div>
@@ -360,6 +394,23 @@
 
       .filter-select, .sort-select {
         min-width: 150px;
+      }
+
+      .filter-refresh-btn {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        color: var(--text);
+        cursor: pointer;
+        padding: 0.4rem 0.6rem;
+        font-size: 1rem;
+        line-height: 1;
+        transition: background 0.15s ease, border-color 0.15s ease;
+      }
+
+      .filter-refresh-btn:hover {
+        background: rgba(255, 255, 255, 0.06);
+        border-color: var(--accent);
       }
 
       .control-label {
@@ -590,6 +641,100 @@
         padding: 0.4rem 0.5rem;
       }
 
+      /* Queue sub-tab: pending message-chain backlog (read-only snapshot). */
+      .queue-summary {
+        font-size: 0.82rem;
+        color: var(--text-soft);
+        margin-bottom: 0.75rem;
+      }
+
+      .queue-item {
+        display: flex;
+        align-items: flex-start;
+        gap: 0.7rem;
+        padding: 0.6rem 0.7rem;
+        margin-bottom: 0.5rem;
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid rgba(255, 255, 255, 0.05);
+      }
+
+      .queue-item-pos {
+        font-size: 0.78rem;
+        color: var(--text-soft);
+        min-width: 1.6rem;
+        text-align: right;
+        flex-shrink: 0;
+        padding-top: 0.1rem;
+      }
+
+      .queue-item-body {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .queue-item-top {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        margin-bottom: 0.25rem;
+      }
+
+      .queue-priority-badge {
+        font-size: 0.7rem;
+        font-weight: 600;
+        padding: 0.1rem 0.45rem;
+        border-radius: 999px;
+        background: var(--accent, #4a90d9);
+        color: #fff;
+        white-space: nowrap;
+      }
+
+      .queue-priority-badge.prio-emergency,
+      .queue-priority-badge.prio-urgent {
+        background: #d9534f;
+      }
+
+      .queue-priority-badge.prio-reflection,
+      .queue-priority-badge.prio-high {
+        background: #e0883a;
+      }
+
+      .queue-priority-badge.prio-ambient,
+      .queue-priority-badge.prio-low {
+        background: #6c757d;
+      }
+
+      .queue-item-source {
+        font-size: 0.82rem;
+        color: var(--text);
+        word-break: break-word;
+      }
+
+      .queue-item-time {
+        font-size: 0.72rem;
+        color: var(--text-soft);
+        white-space: nowrap;
+      }
+
+      .queue-item-flags {
+        font-size: 0.7rem;
+        color: var(--text-soft);
+      }
+
+      .queue-item-preview {
+        font-size: 0.88rem;
+        color: var(--text);
+        word-break: break-word;
+        white-space: pre-wrap;
+      }
+
+      .queue-item-preview.empty {
+        color: var(--text-soft);
+        font-style: italic;
+      }
+
       /* Goals sub-tab: per-world groups, each a set of goal cards. */
       .goals-world {
         margin-bottom: 1.75rem;
@@ -606,6 +751,34 @@
         font-size: 1.05rem;
         font-weight: 600;
         color: var(--text);
+      }
+
+      .goals-scope-badge {
+        font-size: 0.66rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        font-weight: 700;
+        padding: 0.15rem 0.55rem;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--text-soft);
+        white-space: nowrap;
+      }
+
+      .goals-scope-badge.goals-scope-vessel {
+        background: color-mix(in srgb, var(--accent) 20%, transparent);
+        color: var(--accent);
+      }
+
+      /* Scope shown as its owning plugin's icon (saves space vs. the text
+         badge). Swapped back to the text badge client-side if it fails to
+         load. */
+      .goals-scope-icon {
+        width: 20px;
+        height: 20px;
+        object-fit: contain;
+        border-radius: 4px;
+        flex-shrink: 0;
       }
 
       .goals-cards {
@@ -632,8 +805,44 @@
       .goal-card-header {
         display: flex;
         align-items: center;
-        justify-content: space-between;
         gap: 0.6rem;
+        flex-wrap: wrap;
+      }
+
+      /* Per-card identity strip (scope badge + world icon + world title),
+         moved out of the group header so each card is self-describing. */
+      .goal-identity {
+        display: flex;
+        align-items: center;
+        gap: 0.45rem;
+        margin-right: auto;
+        min-width: 0;
+      }
+
+      .goal-identity-world {
+        font-size: 0.9rem;
+        font-weight: 600;
+        color: var(--text);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .goal-card-footer {
+        display: flex;
+        align-items: baseline;
+        gap: 0.4rem;
+        margin-top: 0.15rem;
+        padding-top: 0.5rem;
+        border-top: 1px solid var(--border);
+      }
+
+      .goal-updated-label {
+        font-size: 0.68rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--text-soft);
+        font-weight: 600;
       }
 
       .goal-status {
