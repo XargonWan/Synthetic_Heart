@@ -33,6 +33,8 @@ def _make_conn() -> MinecraftConnector:
     conn._sp_use_ranged = True
     conn._sp_ranged_min_dist = float(MinecraftConnector._RANGED_MIN_DIST)
     conn._sp_appraisal_enabled = True
+    conn._sp_engage_ratio = float(MinecraftConnector._ENGAGE_RATIO)
+    conn._sp_weak_mob_power = float(MinecraftConnector._WEAK_MOB_POWER)
     return conn
 
 
@@ -59,6 +61,19 @@ def _state(**extra: Any) -> WorldState:
         flags={"connected": True},
         extra=base,
     )
+
+
+def _armed(**extra: Any) -> WorldState:
+    """A well-equipped body: iron sword + full-ish armor.
+
+    Its structural power comfortably clears the engage ratio against an
+    ordinary mob, so the defend/ranged/melee-selection tests exercise the
+    fight branch instead of tripping the new power-aware flee. Callers may
+    still override ``best_melee_damage``/``armor_points``/``health``.
+    """
+    base: dict[str, Any] = {"best_melee_damage": 7.0, "armor_points": 15.0}
+    base.update(extra)
+    return _state(**base)
 
 
 # ----------------------------------------------------------------------
@@ -165,9 +180,10 @@ def test_fire_at_head_also_burns() -> None:
 
 def test_healthy_hostile_triggers_defend() -> None:
     conn = _make_conn()
-    # Within melee reach (<= 3.5) a healthy body swings; only reachable mobs.
+    # A well-armed, healthy body swings at an ordinary mob (power ratio clears
+    # the engage threshold). Reachability is handled by the bridge ``attack``.
     plan = conn._survival_threat(
-        _state(
+        _armed(
             health=20.0,
             entities=[{"name": "zombie", "hostile": True, "distance": 2.0}],
         )
@@ -206,8 +222,8 @@ def test_fight_back_off_always_flees() -> None:
 
 def test_repeated_fails_escalate_to_flee() -> None:
     conn = _make_conn()
-    # Reachable mob (<= 3.5) so the reflex defends before escalating.
-    hostile_state = _state(
+    # Armed body so the reflex defends before escalating on the fail cap.
+    hostile_state = _armed(
         health=20.0,
         entities=[{"name": "zombie", "hostile": True, "distance": 2.0}],
     )
@@ -374,7 +390,7 @@ def test_aggressive_targets_never_includes_player() -> None:
 def test_multi_mob_fight_picks_nearest_target() -> None:
     conn = _make_conn()
     plan = conn._survival_threat(
-        _state(
+        _armed(
             health=20.0,
             entities=[
                 {"name": "zombie", "hostile": True, "distance": 6.0},
@@ -397,7 +413,7 @@ def test_multi_mob_fight_picks_nearest_target() -> None:
 def test_ranged_weapon_used_at_distance() -> None:
     conn = _make_conn()
     plan = conn._survival_threat(
-        _state(
+        _armed(
             health=20.0,
             has_ranged_weapon=True,
             ranged_ammo=12,
@@ -410,11 +426,39 @@ def test_ranged_weapon_used_at_distance() -> None:
     assert plan["reason"].get("ranged") is True
 
 
+def test_pure_archer_clears_power_gate_and_shoots() -> None:
+    # A body carrying ONLY a bow (no melee weapon) must still be judged capable
+    # of fighting a mob at range: the usable ranged weapon contributes to the
+    # own-power estimate so the power gate passes and the reflex reaches the
+    # shoot branch instead of fleeing. Regression for the archer-always-flees
+    # gap (own-power previously counted melee damage only).
+    conn = _make_conn()
+    plan = conn._survival_threat(
+        _state(
+            health=20.0,
+            best_melee_damage=0.0,
+            armor_points=10.0,
+            has_ranged_weapon=True,
+            ranged_ammo=32,
+            # No per-mob registry stats (this deployment's minecraft-data does
+            # not expose them) → the mob falls back to _DEFAULT_MOB_POWER (12.0).
+            entities=[{"name": "skeleton", "hostile": True, "distance": 7.0}],
+        )
+    )
+    assert plan is not None
+    assert plan["threat"] == "defend"
+    assert plan["verb"] == "shoot"
+    assert plan["reason"].get("ranged") is True
+    assert plan["reason"].get("own_power", 0.0) >= plan["reason"].get(
+        "mob_power", 999.0
+    )
+
+
 def test_ranged_weapon_not_used_up_close() -> None:
     conn = _make_conn()
     # Within RANGED_MIN_DIST (5.0) melee is preferred even with a bow.
     plan = conn._survival_threat(
-        _state(
+        _armed(
             health=20.0,
             has_ranged_weapon=True,
             ranged_ammo=12,
@@ -434,7 +478,7 @@ def test_no_ranged_weapon_reachable_mob_melees_not_flees() -> None:
     # premature ``unreachable -> flee`` branch made her flee every ordinary
     # melee mob and never finish a fight.)
     plan = conn._survival_threat(
-        _state(
+        _armed(
             health=20.0,
             has_ranged_weapon=False,
             ranged_ammo=0,
@@ -448,9 +492,9 @@ def test_no_ranged_weapon_reachable_mob_melees_not_flees() -> None:
 
 def test_no_ranged_weapon_close_attacker_melees() -> None:
     conn = _make_conn()
-    # Same disarmed body, mob within arm's length — swing at it.
+    # Same armed body, mob within arm's length — swing at it.
     plan = conn._survival_threat(
-        _state(
+        _armed(
             health=20.0,
             has_ranged_weapon=False,
             ranged_ammo=0,
@@ -505,15 +549,15 @@ def test_low_health_escalates_before_fail_cap() -> None:
 
 def test_target_change_resets_fail_counter() -> None:
     conn = _make_conn()
-    # Fight zombie, accrue fails.
-    zombie_state = _state(
+    # Fight zombie, accrue fails (armed so it engages).
+    zombie_state = _armed(
         health=20.0,
         entities=[{"name": "zombie", "hostile": True, "distance": 4.0}],
     )
     conn._survival_threat(zombie_state)
     conn._fight_fail_count = 5
     # A different mob becomes the nearest target → counter resets.
-    skeleton_state = _state(
+    skeleton_state = _armed(
         health=20.0,
         entities=[{"name": "skeleton", "hostile": True, "distance": 3.0}],
     )
@@ -521,3 +565,189 @@ def test_target_change_resets_fail_counter() -> None:
     assert plan is not None
     assert plan["threat"] == "defend"
     assert conn._fight_fail_count == 0
+
+
+# ----------------------------------------------------------------------
+# Power-aware fight/flee (VESSEL_SP_ENGAGE_RATIO / VESSEL_SP_WEAK_MOB_POWER)
+# ----------------------------------------------------------------------
+
+
+def test_engage_ratio_default_is_one() -> None:
+    assert MinecraftConnector._ENGAGE_RATIO == 1.0
+
+
+def test_weak_mob_power_default_is_six() -> None:
+    assert MinecraftConnector._WEAK_MOB_POWER == 6.0
+
+
+def test_disarmed_flees_ordinary_mob() -> None:
+    conn = _make_conn()
+    # Bare-handed, no armor: an ordinary mob (default moderate power) is not
+    # worth trading blows — the body flees instead of dying by attrition.
+    plan = conn._survival_threat(
+        _state(
+            health=20.0,
+            entities=[{"name": "zombie", "hostile": True, "distance": 2.0}],
+        )
+    )
+    assert plan is not None
+    assert plan["threat"] == "flee"
+    assert plan["reason"].get("disarmed") is True
+    assert plan["reason"].get("weak_mob") is False
+
+
+def test_disarmed_fights_weak_mob() -> None:
+    conn = _make_conn()
+    # A trivial creature (low structural power, below the weak-mob floor) can
+    # be punched out even bare-handed.
+    plan = conn._survival_threat(
+        _state(
+            health=20.0,
+            entities=[
+                {
+                    "name": "silverfish",
+                    "hostile": True,
+                    "distance": 2.0,
+                    "max_health": 3.0,
+                    "attack_damage": 1.0,
+                }
+            ],
+        )
+    )
+    assert plan is not None
+    assert plan["threat"] == "defend"
+    assert plan["verb"] == "attack"
+    assert plan["reason"].get("mob_power", 999.0) < conn._sp_weak_mob_power
+
+
+def test_armed_high_power_engages_ordinary_mob() -> None:
+    conn = _make_conn()
+    # Iron sword + full armor + full health clears the engage ratio against an
+    # ordinary mob.
+    plan = conn._survival_threat(
+        _armed(
+            health=20.0,
+            armor_points=20.0,
+            best_melee_damage=8.0,
+            entities=[
+                {
+                    "name": "zombie",
+                    "hostile": True,
+                    "distance": 2.0,
+                    "max_health": 13.0,
+                    "attack_damage": 3.0,
+                }
+            ],
+        )
+    )
+    assert plan is not None
+    assert plan["threat"] == "defend"
+    assert plan["reason"].get("ratio", 0.0) >= conn._sp_engage_ratio
+
+
+def test_armed_low_power_flees_strong_mob() -> None:
+    conn = _make_conn()
+    # A weak weapon and no armor against a powerful mob loses the ratio → flee.
+    plan = conn._survival_threat(
+        _state(
+            health=20.0,
+            best_melee_damage=2.0,
+            armor_points=0.0,
+            entities=[
+                {
+                    "name": "ravager",
+                    "hostile": True,
+                    "distance": 2.0,
+                    "max_health": 100.0,
+                    "attack_damage": 12.0,
+                }
+            ],
+        )
+    )
+    assert plan is not None
+    assert plan["threat"] == "flee"
+    assert plan["reason"].get("ratio", 999.0) < conn._sp_engage_ratio
+
+
+def test_armor_flips_flee_to_engage() -> None:
+    conn = _make_conn()
+    mob = {
+        "name": "zombie",
+        "hostile": True,
+        "distance": 2.0,
+        "max_health": 10.0,
+        "attack_damage": 2.0,
+    }
+    # Same sword, no armor → outmatched → flee.
+    bare = conn._survival_threat(
+        _state(health=20.0, best_melee_damage=6.0, armor_points=0.0, entities=[mob])
+    )
+    assert bare is not None
+    assert bare["threat"] == "flee"
+    # Full armor tips the survivability term over the engage ratio → defend.
+    conn2 = _make_conn()
+    armored = conn2._survival_threat(
+        _state(health=20.0, best_melee_damage=6.0, armor_points=20.0, entities=[mob])
+    )
+    assert armored is not None
+    assert armored["threat"] == "defend"
+
+
+# ----------------------------------------------------------------------
+# Per-mob strategy override (§17) — creeper / enderman
+# ----------------------------------------------------------------------
+
+
+def test_resolver_returns_none_for_generic_mob() -> None:
+    from plugins.rift_vessel.vessel_combat_strategy import resolve_combat_strategy
+
+    assert resolve_combat_strategy("minecraft", "zombie") is None
+
+
+def test_resolver_returns_strategy_for_special_mobs() -> None:
+    from plugins.rift_vessel.vessel_combat_strategy import resolve_combat_strategy
+
+    assert resolve_combat_strategy("minecraft", "creeper") is not None
+    assert resolve_combat_strategy("minecraft", "enderman") is not None
+
+
+def test_creeper_keeps_distance_override() -> None:
+    conn = _make_conn()
+    # A creeper must NEVER be chased into melee — the strategy override forces
+    # keep_distance regardless of the body's power.
+    plan = conn._survival_threat(
+        _armed(
+            health=20.0,
+            entities=[{"name": "creeper", "hostile": True, "distance": 4.0}],
+        )
+    )
+    assert plan is not None
+    assert plan["verb"] == "keep_distance"
+    assert plan["reason"].get("strategy") == "creeper_no_chase"
+
+
+def test_enderman_keeps_distance_override() -> None:
+    conn = _make_conn()
+    plan = conn._survival_threat(
+        _armed(
+            health=20.0,
+            entities=[{"name": "enderman", "hostile": True, "distance": 4.0}],
+        )
+    )
+    assert plan is not None
+    assert plan["verb"] == "keep_distance"
+    assert plan["reason"].get("strategy") == "enderman_disengage"
+
+
+def test_generic_hostile_falls_through_to_power_ratio() -> None:
+    conn = _make_conn()
+    # A mob with no registered strategy falls through to the power-ratio gate;
+    # armed + healthy → defend.
+    plan = conn._survival_threat(
+        _armed(
+            health=20.0,
+            entities=[{"name": "spider", "hostile": True, "distance": 2.0}],
+        )
+    )
+    assert plan is not None
+    assert plan["threat"] == "defend"
