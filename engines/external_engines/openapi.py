@@ -32,6 +32,7 @@ from typing import Any
 import requests
 
 from core.ai_plugin_base import AIPluginBase
+from core.beat_utils import is_outbound_beat
 from core.config_manager import config_registry
 from core.cortex_api_logger import log_cortex_request, log_cortex_response
 from core.logging_utils import log_debug, log_error, log_info, log_warning
@@ -46,43 +47,8 @@ _LEGACY_DICT_PROMPT_WARNED = False
 try:
     from core.variables_engine import register_exposed_var
 
-    # Core settings
-    register_exposed_var(
-        "OPENAPI_BASE_URL",
-        label="OpenAPI Base URL",
-        default="http://localhost:8081/v1",
-        value_type=str,
-        ui_type="string",
-        description="Base URL for the OpenAI-compatible endpoint (e.g., http://localhost:8081/v1 for Ollama).",
-        scope="llm",
-        component="openapi",
-        tags=["cortex_engine"],
-        needs_component_reload=True,
-    )
-    register_exposed_var(
-        "OPENAPI_API_KEY",
-        label="API Key (Optional)",
-        default="",
-        value_type=str,
-        ui_type="password",
-        description="Bearer token for authentication (leave empty for local endpoints like Ollama).",
-        scope="llm",
-        component="openapi",
-        tags=["cortex_engine", "sensitive"],
-        needs_component_reload=True,
-    )
-    register_exposed_var(
-        "OPENAPI_DEFAULT_MODEL",
-        label="Default Model",
-        default="llama3",
-        value_type=str,
-        ui_type="combobox",
-        description="Model name to use (e.g., llama3 for Ollama, local-model for LM Studio).",
-        scope="llm",
-        component="openapi",
-        tags=["cortex_engine"],
-        needs_component_reload=False,
-    )
+    # Base URL, API key and default model live in the Engines tab
+    # (external_endpoints), not in Settings.
 
     # Advanced settings
     register_exposed_var(
@@ -236,6 +202,7 @@ OPENAPI_BASE_URL = config_registry.get_var(
     description="Base URL for the OpenAI-compatible endpoint.",
     group="llm",
     component="openapi",
+    hidden=True,
 )
 
 OPENAPI_API_KEY = config_registry.get_var(
@@ -246,6 +213,7 @@ OPENAPI_API_KEY = config_registry.get_var(
     group="llm",
     component="openapi",
     sensitive=True,
+    hidden=True,
 )
 
 OPENAPI_DEFAULT_MODEL = config_registry.get_var(
@@ -255,6 +223,7 @@ OPENAPI_DEFAULT_MODEL = config_registry.get_var(
     description="Model name to use.",
     group="llm",
     component="openapi",
+    hidden=True,
 )
 
 OPENAPI_TIMEOUT = config_registry.get_var(
@@ -787,33 +756,6 @@ class OpenAPIPlugin(AIPluginBase):
             "supports_voice_interaction": False,
             "model_name": self._current_model,
         }
-
-    # --- Agent hooks ---
-    def supports_agent(self) -> bool:
-        return True
-
-    def agent_execute(self, action_dict: dict, context: dict | None = None) -> dict:
-        try:
-            from core.core_initializer import PLUGIN_REGISTRY
-
-            agent_plugin = (
-                PLUGIN_REGISTRY.get("agent")
-                if isinstance(PLUGIN_REGISTRY, dict)
-                else None
-            )
-            if agent_plugin and hasattr(agent_plugin, "execute_action"):
-                res = agent_plugin.execute_action(
-                    action_dict, context or {}, None, None
-                )
-                if hasattr(res, "__await__"):
-                    return {
-                        "status": "pending_async",
-                        "note": "Agent plugin returned coroutine",
-                    }
-                return res or {"status": "ok"}
-        except Exception as exc:
-            log_warning(f"[openapi] agent_execute adapter failed: {exc}")
-        return {"status": "unsupported", "reason": "agent plugin not available"}
 
     # ------------------------------------------------------------------
     # Main entry points
@@ -1446,14 +1388,14 @@ class OpenAPIPlugin(AIPluginBase):
         )
         is_grillo_internal = is_grillo and (
             not isinstance(prompt_dict, dict)
-            or prompt_dict.get("beat_type", "internal") != "outreach"
+            or not is_outbound_beat(prompt_dict.get("beat_type"))
         )
 
         if is_grillo_internal:
             interface_hint = (
                 "CURRENT INTERFACE: grillo (INTERNAL)\n"
                 "This is an internal introspection beat. Do NOT output any message_* actions.\n"
-                "Use ONLY internal actions like 'create_personal_diary_entry', 'set_emotion', etc."
+                "Use ONLY internal actions like 'create_personal_diary_entry', 'update_emotion_state', etc."
             )
         else:
             interface_hint = (

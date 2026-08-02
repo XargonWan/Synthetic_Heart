@@ -1,11 +1,14 @@
 <section id="tab-home" data-tab="home" role="tabpanel" aria-labelledby="home">
     <div class="home-stage">
         <div class="home-content">
-            <button id="chat-toggle" class="chat-toggle-btn" type="button" aria-label="Restore chat" title="Restore Chat" style="display:none;">💬</button>
-
-
             <!-- Mount point for chat window (populated from template by chat-window.mjs) -->
             <section id="chat" aria-label="Chat panel"></section>
+            <!-- Espelli Synth in una finestra Picture-in-Picture separata. Nascosto di default;
+                 pip-window.mjs lo mostra solo se il browser supporta Document Picture-in-Picture. -->
+            <button id="pip-toggle" class="pip-toggle-btn" type="button"
+                    title="Espelli Synth in una finestra separata"
+                    aria-label="Espelli Synth in una finestra separata"
+                    style="display:none;">🖼</button>
             <div class="home-vrm">
                 <canvas id="vrm-canvas"></canvas>
                 <!-- Loading overlay — visible until the VRM model + animations are fully ready -->
@@ -13,8 +16,13 @@
                     <div class="vrm-loading-spinner" aria-hidden="true"></div>
                     <p class="vrm-loading-label">Summoning <span id="vrm-loading-name">SyntH</span>…</p>
                 </div>
+                <!-- Placeholder mostrato quando Synth è stato spostato nella finestra PiP -->
+                <div id="pip-placeholder" class="home-vrm-overlay" style="display:none;">
+                    <span id="pip-placeholder-name">SyntH</span>&nbsp;is in a separate window
+                </div>
             </div>
         </div>
     </div>
-    <script type="module" src="/js/vrm-viewer.mjs?v=20260703-noreset"></script>
+    <script type="module" src="/js/vrm-viewer.mjs?v=20260709-webuicam1"></script>
+    <script type="module" src="/js/pip-window.mjs?v=20260709-webuicam1"></script>
 </section>

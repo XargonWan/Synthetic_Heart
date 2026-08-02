@@ -26,7 +26,7 @@ def test_mobile_auto_restore_comment_present():
     assert ".chat-toggle-btn" in shell_tpl
     assert ".home-stage" in shell_tpl
     assert "var(--topbar-height" in shell_tpl and "calc(100vh -" in shell_tpl
-    assert 'id="chat-toggle"' in home_tpl and 'id="chat"' in home_tpl
+    assert 'id="chat"' in home_tpl
 
     # Mobile navigation overlay behavior lives in base.html now.
     assert "@media (max-width: 768px)" in base_tpl

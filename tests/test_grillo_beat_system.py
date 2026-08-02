@@ -46,6 +46,7 @@ async def test_grillo_beat_types_exist() -> None:
         "self_reflection",
         "curiosity",
         "relationship",
+        "temporal_reflection",
     ]
 
     # Check _select_beat_type returns one of the expected types
@@ -154,26 +155,77 @@ async def test_grillo_set_activity_response_text_with_none_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_grillo_outreach_prompt_generation() -> None:
-    """Test that Grillo outreach generates proper prompts."""
-    from plugins.grillo.grillo_outreach import GrilloOutreachPlugin
+async def test_grillo_observer_proactive_prompt_generation() -> None:
+    """The observer prompt (which now subsumes outreach) must expose the
+    proactive activation-frame instructions and render routable targets."""
+    from plugins.grillo.grillo_chat_observer import GrilloChatObserverPlugin
 
-    plugin = GrilloOutreachPlugin()
+    plugin = GrilloChatObserverPlugin()
 
-    prompt = plugin._build_outreach_prompt(
-        interface="telegram_bot",
-        chat_id="123456",
-        context=["Test context 1", "Test context 2"],
+    targets = [
+        {
+            "interface_path": "telegram_bot/123456",
+            "last_sender": "alice",
+            "age_seconds": 7200,
+            "cooldown_active": False,
+        }
+    ]
+    prompt = plugin._build_observer_prompt(
+        ["(chat:telegram_bot/123456 | sender:alice | ...) hi there"],
+        targets,
+        decay_driven=False,
     )
 
-    assert "SELF-INITIATED OUTREACH" in prompt
-    # Outreach must be framed as a self-initiated impulse, not an inbound reply.
-    assert "NOT a reply" in prompt
-    assert "message_telegram_bot" in prompt
+    # Proactive activation-frame instructions must be present.
+    assert "activation frames" in prompt
+    assert "interface_path" in prompt
     assert "create_personal_diary_entry" in prompt
-    assert "personal_thought" in prompt
-    assert "emotions" in prompt
-    assert "Test context 1" in prompt
+    # The eligible routing target must be rendered so the model can pick it.
+    assert "telegram_bot/123456" in prompt
+    assert "ELIGIBLE TARGETS" in prompt
+
+
+@pytest.mark.asyncio
+async def test_grillo_observer_decay_prompt_when_network_quiet() -> None:
+    """With no fresh snippets but eligible targets, the observer prompt must
+    switch into decay-driven proactive mode."""
+    from plugins.grillo.grillo_chat_observer import GrilloChatObserverPlugin
+
+    plugin = GrilloChatObserverPlugin()
+
+    targets = [
+        {
+            "interface_path": "telegram_bot/999",
+            "last_sender": "bob",
+            "age_seconds": 90000,
+            "cooldown_active": False,
+        }
+    ]
+    prompt = plugin._build_observer_prompt([], targets, decay_driven=True)
+
+    assert "no fresh snippets" in prompt
+    assert "no fresh incoming traffic" in prompt.lower()
+    assert "telegram_bot/999" in prompt
+
+
+@pytest.mark.asyncio
+async def test_grillo_observer_cooldown_target_marked_off_limits() -> None:
+    """Targets on self-cooldown must be rendered as OFF-LIMITS in the prompt."""
+    from plugins.grillo.grillo_chat_observer import GrilloChatObserverPlugin
+
+    plugin = GrilloChatObserverPlugin()
+
+    targets = [
+        {
+            "interface_path": "telegram_bot/555",
+            "last_sender": "self",
+            "age_seconds": 3600,
+            "cooldown_active": True,
+        }
+    ]
+    prompt = plugin._build_observer_prompt(["some snippet"], targets, False)
+
+    assert "OFF-LIMITS" in prompt
 
 
 @pytest.mark.asyncio
@@ -356,68 +408,3 @@ async def test_plugin_instance_grillo_response_records_empty_response_marker() -
     finally:
         core.db.get_conn_ctx = original_get_conn_ctx
         core.db._get_db_type = original_get_db_type
-
-
-@pytest.mark.asyncio
-async def test_grillo_outreach_uses_last_active_interface(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Test that outreach uses the last active interface instead of random."""
-    from plugins.grillo.grillo_outreach import GrilloOutreachPlugin
-    import core.recent_chats as recent_chats
-
-    # Mock get_last_active_chats to return a specific chat
-    async def mock_get_last_active_chats(n: int = 10) -> list:
-        return [123456, 789012]
-
-    # Mock get_chat_path to return telegram interface
-    def mock_get_chat_path(chat_id: int) -> str:
-        if chat_id == 123456:
-            return "telegram_bot/123456"
-        return "discord_bot/789012"
-
-    monkeypatch.setattr(
-        recent_chats, "get_last_active_chats", mock_get_last_active_chats
-    )
-    monkeypatch.setattr(recent_chats, "get_chat_path", mock_get_chat_path)
-
-    plugin = GrilloOutreachPlugin()
-    # Set allowed interfaces
-    plugin.target_interfaces = "telegram_bot,discord_bot"
-
-    interface, chat_id = await plugin._get_target_interface_and_chat()
-
-    # Should use the first matching recent chat (telegram)
-    assert interface == "telegram_bot"
-    assert chat_id == "123456"
-
-
-@pytest.mark.asyncio
-async def test_grillo_outreach_fallback_when_no_recent_match(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Test that outreach falls back when no recent chats match allowed interfaces."""
-    from plugins.grillo.grillo_outreach import GrilloOutreachPlugin
-    import core.recent_chats as recent_chats
-
-    # Mock get_last_active_chats to return chats with unknown interfaces
-    async def mock_get_last_active_chats(n: int = 10) -> list:
-        return [123456]
-
-    def mock_get_chat_path(chat_id: int) -> str:
-        return "unknown_interface/123456"
-
-    monkeypatch.setattr(
-        recent_chats, "get_last_active_chats", mock_get_last_active_chats
-    )
-    monkeypatch.setattr(recent_chats, "get_chat_path", mock_get_chat_path)
-
-    plugin = GrilloOutreachPlugin()
-    plugin.target_interfaces = "telegram_bot"
-    plugin.target_chat_ids = "999888"
-
-    interface, chat_id = await plugin._get_target_interface_and_chat()
-
-    # Should fall back to first configured interface and chat
-    assert interface == "telegram_bot"
-    assert chat_id == "999888"

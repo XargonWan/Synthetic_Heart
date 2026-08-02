@@ -47,10 +47,10 @@ async def init_chat_history_table() -> None:
                         sender_id VARCHAR(255),
                         message_text LONGTEXT NOT NULL,
                         metadata JSON DEFAULT NULL,
-                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                         INDEX idx_interface_path (interface_path),
-                        INDEX idx_timestamp (timestamp),
-                        UNIQUE KEY uniq_message (interface_path, timestamp)
+                        INDEX idx_created_at (created_at),
+                        UNIQUE KEY uniq_message (interface_path, created_at)
                     )
                 """)
                 # Migration: add metadata column for pre-existing tables.
@@ -111,8 +111,6 @@ async def save_chat_message(
 
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
-                history_limit = _get_history_limit(50)
-
                 # Deduplication: Check for identical message text within last 5 seconds for this interface
                 # This prevents double-logging from different pipeline stages (e.g. generation vs dispatch)
                 try:
@@ -122,7 +120,7 @@ async def save_chat_message(
                         SELECT id FROM chat_history_cache 
                         WHERE interface_path = %s 
                         AND message_text = %s 
-                        AND timestamp > %s
+                        AND created_at > %s
                         LIMIT 1
                         """,
                         (interface_path, message_text, dedup_cutoff),
@@ -145,9 +143,9 @@ async def save_chat_message(
                     await cur.execute(
                         """
                         INSERT INTO chat_history_cache 
-                        (interface_path, sender_name, sender_id, message_text, metadata, timestamp)
+                        (interface_path, sender_name, sender_id, message_text, metadata, created_at)
                         VALUES (%s, %s, %s, %s, %s, %s)
-                        ON DUPLICATE KEY UPDATE timestamp=VALUES(timestamp), metadata=VALUES(metadata)
+                        ON DUPLICATE KEY UPDATE created_at=VALUES(created_at), metadata=VALUES(metadata)
                     """,
                         (
                             interface_path,
@@ -162,9 +160,9 @@ async def save_chat_message(
                     await cur.execute(
                         """
                         INSERT INTO chat_history_cache 
-                        (interface_path, sender_name, sender_id, message_text, metadata, timestamp)
+                        (interface_path, sender_name, sender_id, message_text, metadata, created_at)
                         VALUES (%s, %s, %s, %s, %s, UTC_TIMESTAMP())
-                        ON DUPLICATE KEY UPDATE timestamp=UTC_TIMESTAMP(), metadata=VALUES(metadata)
+                        ON DUPLICATE KEY UPDATE created_at=UTC_TIMESTAMP(), metadata=VALUES(metadata)
                     """,
                         (
                             interface_path,
@@ -175,22 +173,18 @@ async def save_chat_message(
                         ),
                     )
 
-                # Clean up old messages beyond CHAT_HISTORY_LIMIT
-                await cur.execute(
-                    """
-                    DELETE FROM chat_history_cache
-                    WHERE interface_path = %s
-                    AND id NOT IN (
-                        SELECT id FROM (
-                            SELECT id FROM chat_history_cache
-                            WHERE interface_path = %s
-                            ORDER BY timestamp DESC
-                            LIMIT %s
-                        ) AS temp
-                    )
-                """,
-                    (interface_path, interface_path, history_limit),
-                )
+                # NOTE: chat_history_cache is a permanent log, not a rolling
+                # window -- it previously trimmed each interface_path down to
+                # CONTEXT_VERBOSITY rows on every write, which conflated "how
+                # much history to show the LLM per turn" with "how much raw
+                # history to keep at all". A busy chat (e.g. a shared group)
+                # would get evicted to just a handful of rows within seconds,
+                # so cross-chat continuity (group <-> DM) had nothing left to
+                # draw on by the time you switched contexts. Prompt-time
+                # verbosity (CONTEXT_VERBOSITY / LITE_MODE_HISTORY_LIMIT) is
+                # applied purely at read time (see history_engine.py), so
+                # removing the write-time DELETE here doesn't affect how much
+                # gets injected into any given prompt.
 
                 log_debug(
                     f"[chat_history_cache] Saved message for interface_path {interface_path}, sender={sender_name}, timestamp={timestamp}"
@@ -245,13 +239,98 @@ async def save_chat_message(
         return False
 
 
-async def load_chat_history(interface_path: str, limit: int | None = None) -> deque:
+async def update_message_text(
+    interface_path: str,
+    timestamp: datetime | str | None,
+    message_text: str,
+    metadata: dict[str, Any] | None = None,
+) -> bool:
+    """Update the stored text (and optionally metadata) of an existing row.
+
+    Used to persist an enriched version of a message that was already saved
+    (e.g. augmenting an image caption with the Iris vision description) without
+    creating a duplicate row.  The row is matched on the composite key
+    ``(interface_path, timestamp)``, so the *timestamp* must be the one the
+    message was originally saved with.  When ``metadata`` is ``None`` the
+    metadata column is left untouched.
+
+    Returns ``True`` when exactly one row was updated, ``False`` otherwise.
+    """
+    if not interface_path or not message_text or timestamp is None:
+        return False
+
+    try:
+        from datetime import timezone
+
+        if isinstance(timestamp, str):
+            try:
+                timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            except Exception:
+                return False
+
+        if not isinstance(timestamp, datetime):
+            return False
+
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        timestamp = timestamp.astimezone(timezone.utc)
+
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                if metadata is not None:
+                    import json as _json
+
+                    metadata_json = _json.dumps(metadata)
+                    await cur.execute(
+                        """
+                        UPDATE chat_history_cache
+                        SET message_text = %s, metadata = %s
+                        WHERE interface_path = %s AND created_at = %s
+                        """,
+                        (message_text, metadata_json, interface_path, timestamp),
+                    )
+                else:
+                    await cur.execute(
+                        """
+                        UPDATE chat_history_cache
+                        SET message_text = %s
+                        WHERE interface_path = %s AND created_at = %s
+                        """,
+                        (message_text, interface_path, timestamp),
+                    )
+                updated = getattr(cur, "rowcount", 0)
+                log_debug(
+                    f"[chat_history_cache] update_message_text: {updated} row(s) "
+                    f"for {interface_path} @ {timestamp}"
+                )
+                return bool(updated)
+    except Exception as e:
+        log_debug(f"[chat_history_cache] Failed to update message text: {e}")
+        return False
+
+
+async def load_chat_history(
+    interface_path: str,
+    limit: int | None = None,
+    match_chat_level: bool = False,
+) -> deque:
     """Load chat history from cache for a specific interface path.
 
     Args:
         interface_path: The interface path (e.g., telegram_bot/123456/2)
         limit: Optional explicit row limit. When omitted, uses the configured
             history limit for the calling subsystem.
+        match_chat_level: When False (default), matches ``interface_path``
+            exactly -- byte-identical to the original query, so all existing
+            callers are unaffected. When True, also includes rows whose
+            ``interface_path`` is a thread-suffixed variant of the same chat
+            (e.g. ``telegram_bot/123/456`` when loading
+            ``telegram_bot/123``). Some messages in a conversation -- e.g. a
+            Telegram reply-in-thread -- get persisted with a thread-ID suffix
+            appended to the bare chat path, so an exact match alone silently
+            drops otherwise-legitimate turns from that conversation. Uses the
+            same chat-level key convention as ``peer_policy._chat_key``
+            (first two ``/``-separated segments).
 
     Returns:
         deque of message objects in chronological order
@@ -267,20 +346,38 @@ async def load_chat_history(interface_path: str, limit: int | None = None) -> de
                 )
                 # Fetch the most recent N rows, then reorder them chronologically
                 # for downstream consumers such as WebUI replay and prompt context.
-                await cur.execute(
-                    """
-                    SELECT sender_name, sender_id, message_text, timestamp, interface_path, metadata
-                    FROM (
-                        SELECT sender_name, sender_id, message_text, timestamp, interface_path, metadata, id
-                        FROM chat_history_cache
-                        WHERE interface_path = %s
-                        ORDER BY timestamp DESC, id DESC
-                        LIMIT %s
-                    ) AS recent_messages
-                    ORDER BY timestamp ASC, id ASC
-                """,
-                    (interface_path, history_limit),
-                )
+                chat_key_parts = interface_path.split("/")
+                if match_chat_level and len(chat_key_parts) >= 2:
+                    chat_key = "/".join(chat_key_parts[:2])
+                    await cur.execute(
+                        """
+                        SELECT sender_name, sender_id, message_text, created_at, interface_path, metadata
+                        FROM (
+                            SELECT sender_name, sender_id, message_text, created_at, interface_path, metadata, id
+                            FROM chat_history_cache
+                            WHERE (interface_path = %s OR interface_path LIKE %s)
+                            ORDER BY created_at DESC, id DESC
+                            LIMIT %s
+                        ) AS recent_messages
+                        ORDER BY created_at ASC, id ASC
+                    """,
+                        (interface_path, f"{chat_key}/%", history_limit),
+                    )
+                else:
+                    await cur.execute(
+                        """
+                        SELECT sender_name, sender_id, message_text, created_at, interface_path, metadata
+                        FROM (
+                            SELECT sender_name, sender_id, message_text, created_at, interface_path, metadata, id
+                            FROM chat_history_cache
+                            WHERE interface_path = %s
+                            ORDER BY created_at DESC, id DESC
+                            LIMIT %s
+                        ) AS recent_messages
+                        ORDER BY created_at ASC, id ASC
+                    """,
+                        (interface_path, history_limit),
+                    )
 
                 rows = await cur.fetchall()
 
@@ -342,6 +439,27 @@ async def load_chat_history(interface_path: str, limit: int | None = None) -> de
         return deque()
 
 
+def _normalize_interface_path(path: str) -> str:
+    """Collapse duplicate trailing segments produced by the old Telegram DM path format.
+
+    Old code stored private Telegram chats as ``telegram_bot/<chat_id>/<user_id>``
+    where for DMs ``chat_id == user_id``, giving a redundant final segment.  The
+    current format is ``telegram_bot/<chat_id>`` with no thread suffix.  When both
+    formats coexist in the DB, normalising here ensures history_engine treats old
+    entries as belonging to the same conversation as new entries.
+
+    Only collapses when the last two path segments are identical, e.g.:
+        telegram_bot/5551234567/5551234567 → telegram_bot/5551234567
+    Leaves all other paths untouched.
+    """
+    if not path:
+        return path
+    parts = path.split("/")
+    if len(parts) >= 3 and parts[-1] == parts[-2]:
+        parts = parts[:-1]
+    return "/".join(parts)
+
+
 async def load_global_chat_history(limit: int = 10) -> deque:
     """Load global chat history from cache across all interface paths.
 
@@ -356,9 +474,9 @@ async def load_global_chat_history(limit: int = 10) -> deque:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """
-                    SELECT sender_name, sender_id, message_text, timestamp, interface_path
+                    SELECT sender_name, sender_id, message_text, created_at, interface_path
                     FROM chat_history_cache
-                    ORDER BY timestamp DESC
+                    ORDER BY created_at DESC
                     LIMIT %s
                     """,
                     (limit,),
@@ -370,15 +488,15 @@ async def load_global_chat_history(limit: int = 10) -> deque:
                 unique_paths = set()
                 for row in rows:
                     try:
-                        sender_name, sender_id, message_text, timestamp, ipath = row
+                        sender_name, sender_id, message_text, created_at, ipath = row
                         msg = {
                             "sender_name": sender_name,
                             "sender_id": sender_id,
                             "text": message_text,
-                            "timestamp": timestamp.isoformat()
-                            if isinstance(timestamp, datetime)
-                            else str(timestamp),
-                            "interface_path": ipath,
+                            "timestamp": created_at.isoformat()
+                            if isinstance(created_at, datetime)
+                            else str(created_at),
+                            "interface_path": _normalize_interface_path(ipath),
                         }
                         messages.append(msg)
                         unique_paths.add(ipath)
@@ -420,15 +538,15 @@ async def load_global_chat_history_since(
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
                 query = """
-                    SELECT sender_name, sender_id, message_text, timestamp, interface_path
+                    SELECT sender_name, sender_id, message_text, created_at, interface_path
                     FROM chat_history_cache
                     WHERE interface_path NOT LIKE 'discord_live_%%'
                 """
                 params: list[Any] = []
                 if since:
-                    query += "\n AND timestamp > %s"
+                    query += "\n AND created_at > %s"
                     params.append(since)
-                query += "\n ORDER BY timestamp ASC, id ASC\n LIMIT %s"
+                query += "\n ORDER BY created_at ASC, id ASC\n LIMIT %s"
                 params.append(limit)
 
                 await cur.execute(query, tuple(params))
@@ -437,16 +555,16 @@ async def load_global_chat_history_since(
                 messages: list[dict[str, Any]] = []
                 for row in rows:
                     try:
-                        sender_name, sender_id, message_text, timestamp, ipath = row
+                        sender_name, sender_id, message_text, created_at, ipath = row
                         messages.append(
                             {
                                 "sender_name": sender_name,
                                 "sender_id": sender_id,
                                 "text": message_text,
                                 "timestamp": (
-                                    timestamp.isoformat()
-                                    if hasattr(timestamp, "isoformat")
-                                    else str(timestamp)
+                                    created_at.isoformat()
+                                    if hasattr(created_at, "isoformat")
+                                    else str(created_at)
                                 ),
                                 "interface_path": ipath,
                             }
@@ -494,15 +612,15 @@ async def load_chat_history_for_guild(
             async with conn.cursor() as cur:
                 # Build the base query
                 query = """
-                    SELECT sender_name, sender_id, message_text, timestamp, interface_path
+                    SELECT sender_name, sender_id, message_text, created_at, interface_path
                     FROM chat_history_cache
                     WHERE interface_path LIKE %s
                 """
                 params: list[Any] = [f"discord_{guild_id}_%"]
                 if since:
-                    query += "\n AND timestamp > %s"
+                    query += "\n AND created_at > %s"
                     params.append(since)
-                query += "\n ORDER BY timestamp ASC, id ASC\n LIMIT %s"
+                query += "\n ORDER BY created_at ASC, id ASC\n LIMIT %s"
                 params.append(limit)
 
                 await cur.execute(query, tuple(params))
@@ -511,14 +629,14 @@ async def load_chat_history_for_guild(
                 messages = deque()
                 for row in rows:
                     try:
-                        sender_name, sender_id, message_text, timestamp, ipath = row
+                        sender_name, sender_id, message_text, created_at, ipath = row
                         msg = {
                             "sender_name": sender_name,
                             "sender_id": sender_id,
                             "text": message_text,
-                            "timestamp": timestamp.isoformat()
-                            if hasattr(timestamp, "isoformat")
-                            else str(timestamp),
+                            "timestamp": created_at.isoformat()
+                            if hasattr(created_at, "isoformat")
+                            else str(created_at),
                             "interface_path": ipath,
                         }
                         messages.append(msg)
@@ -585,7 +703,7 @@ async def get_cache_stats() -> dict:
 
                 # Oldest and newest messages
                 await cur.execute("""
-                    SELECT MIN(timestamp), MAX(timestamp) FROM chat_history_cache
+                    SELECT MIN(created_at), MAX(created_at) FROM chat_history_cache
                 """)
                 result = await cur.fetchone()
                 oldest, newest = result if result else (None, None)

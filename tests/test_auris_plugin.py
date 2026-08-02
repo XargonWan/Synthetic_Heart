@@ -430,6 +430,80 @@ async def test_vosk_autodownload_skipped(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# VOSK_MODEL explicit override
+# ---------------------------------------------------------------------------
+
+
+def test_vosk_model_override_prevails_over_language() -> None:
+    """When VOSK_MODEL is set it must win over the language-derived model."""
+    from plugins import auris_engines  # noqa: F401  (ensure package importable)
+    from plugins.auris_engines import vosk_engine
+
+    captured: dict[str, str] = {}
+
+    def _side_effect(key, default=None, **kwargs):
+        mapping = {
+            "VOSK_MODEL": "vosk-en-us-large",
+            "VOSK_LANGUAGE": "it-it",
+            "VOSK_MODEL_PATH": "",
+        }
+        return mapping.get(key, default)
+
+    def _model_dir(mid):
+        captured["model_id"] = mid
+        return __import__("pathlib").Path(f"/models/{mid}")
+
+    with (
+        patch.object(
+            __import__(
+                "core.config_manager", fromlist=["config_registry"]
+            ).config_registry,
+            "get_value",
+            side_effect=_side_effect,
+        ),
+        patch.object(vosk_engine.MODEL_MANAGER, "model_dir", side_effect=_model_dir),
+    ):
+        result = vosk_engine._default_model_path()
+
+    assert captured["model_id"] == "vosk-en-us-large"
+    assert str(result) == "/models/vosk-en-us-large"
+
+
+def test_vosk_model_empty_falls_back_to_language() -> None:
+    """With VOSK_MODEL empty the language-derived model is used."""
+    from plugins.auris_engines import vosk_engine
+
+    captured: dict[str, str] = {}
+
+    def _side_effect(key, default=None, **kwargs):
+        mapping = {
+            "VOSK_MODEL": "",
+            "VOSK_LANGUAGE": "it-it",
+            "VOSK_MODEL_PATH": "",
+        }
+        return mapping.get(key, default)
+
+    def _model_dir(mid):
+        captured["model_id"] = mid
+        return __import__("pathlib").Path(f"/models/{mid}")
+
+    with (
+        patch.object(
+            __import__(
+                "core.config_manager", fromlist=["config_registry"]
+            ).config_registry,
+            "get_value",
+            side_effect=_side_effect,
+        ),
+        patch.object(vosk_engine.MODEL_MANAGER, "model_dir", side_effect=_model_dir),
+    ):
+        result = vosk_engine._default_model_path()
+
+    assert captured["model_id"] == "vosk-it-it"
+    assert str(result) == "/models/vosk-it-it"
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 

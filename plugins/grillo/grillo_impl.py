@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from typing import Optional, Any, List, Dict
 
 from core.ai_plugin_base import AIPluginBase
-from core.logging_utils import log_debug, log_info, log_error
+from core.logging_utils import log_debug, log_info, log_error, log_warning
 from core.config_manager import config_registry
 
 
@@ -48,7 +48,7 @@ class GrilloPlugin(AIPluginBase):
                 1800,
                 value_type=int,
                 group="grillo",
-                component="grillo",
+                component="grillo_impl",
             )
         )
         self.history_evaluator = None
@@ -60,6 +60,7 @@ class GrilloPlugin(AIPluginBase):
         return {}
 
     async def start(self):
+        self._running = True
         log_info("[grillo] starting lightweight scheduler")
         # Try to locate history_evaluator if available
         try:
@@ -84,6 +85,17 @@ class GrilloPlugin(AIPluginBase):
                 "[grillo] PLUGIN_REGISTRY unavailable or history_evaluator missing"
             )
 
+        # Start the LLM-failure recovery plugin (polls llm_failure_log and
+        # regenerates the proper reply for failed turns).
+        try:
+            from .grillo_llm_failure_recovery import GrilloLLMFailureRecoveryPlugin
+
+            self.recovery_plugin = GrilloLLMFailureRecoveryPlugin()
+            await self.recovery_plugin.start()
+            log_info("[grillo] LLM-failure recovery plugin started")
+        except Exception as e:
+            log_warning(f"[grillo] Failed to start recovery plugin: {e}")
+
         if GrilloPlugin._scheduler_task and not GrilloPlugin._scheduler_task.done():
             log_debug("[grillo] scheduler already running")
             return
@@ -93,6 +105,7 @@ class GrilloPlugin(AIPluginBase):
 
     async def stop(self):
         log_info("[grillo] stopping scheduler")
+        self._running = False
         GrilloPlugin._scheduler_running = False
         if GrilloPlugin._scheduler_task and not GrilloPlugin._scheduler_task.done():
             GrilloPlugin._scheduler_task.cancel()
@@ -100,6 +113,14 @@ class GrilloPlugin(AIPluginBase):
                 await GrilloPlugin._scheduler_task
             except Exception:
                 pass
+        # Stop the LLM-failure recovery plugin if it was started.
+        recovery = getattr(self, "recovery_plugin", None)
+        if recovery is not None:
+            try:
+                await recovery.stop()
+                log_info("[grillo] LLM-failure recovery plugin stopped")
+            except Exception as e:
+                log_debug(f"[grillo] recovery plugin stop failed: {e}")
 
     def _select_beat_type(self) -> str:
         types = list(self.BEAT_TYPES.keys())
@@ -260,18 +281,16 @@ class GrilloPlugin(AIPluginBase):
         history_snippet = None
         if self.history_evaluator:
             try:
-                import core.recent_chats as recent_chats
+                from core.interface_paths import get_recent_interface_paths
 
                 # Try a few recent chats and pick the first public/active one
-                last = await recent_chats.get_last_active_chats_verbose(5)
-                if last:
-                    for chat_id, _ in last:
-                        chat_path = (
-                            recent_chats.get_chat_path(chat_id)
-                            or f"telegram_bot/{chat_id}"
-                        )
+                recent = await get_recent_interface_paths(5)
+                if recent:
+                    for item in recent:
+                        chat_path = item.get("interface_path")
                         if not chat_path:
                             continue
+                        chat_path = str(chat_path)
                         # Skip chats where last message is synth unless exempt
                         try:
                             ok = await self._is_public_active_chat(chat_path)
@@ -340,18 +359,16 @@ class GrilloPlugin(AIPluginBase):
         history_snippet = None
         if self.history_evaluator:
             try:
-                import core.recent_chats as recent_chats
+                from core.interface_paths import get_recent_interface_paths
 
                 # Try multiple recent chats and pick the first public/active one
-                last = await recent_chats.get_last_active_chats_verbose(5)
-                if last:
-                    for chat_id, _ in last:
-                        chat_path = (
-                            recent_chats.get_chat_path(chat_id)
-                            or f"telegram_bot/{chat_id}"
-                        )
+                recent = await get_recent_interface_paths(5)
+                if recent:
+                    for item in recent:
+                        chat_path = item.get("interface_path")
                         if not chat_path:
                             continue
+                        chat_path = str(chat_path)
                         try:
                             ok = await self._is_public_active_chat(chat_path)
                             if not ok:

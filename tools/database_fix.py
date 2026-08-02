@@ -88,10 +88,10 @@ TABLE_DEFINITIONS: list[tuple[str, str]] = [
             sender_name VARCHAR(255),
             sender_id VARCHAR(255),
             message_text LONGTEXT NOT NULL,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             INDEX idx_interface_path (interface_path),
-            INDEX idx_timestamp (timestamp),
-            UNIQUE KEY uniq_message (interface_path, timestamp)
+            INDEX idx_created_at (created_at),
+            UNIQUE KEY uniq_message (interface_path, created_at)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         """,
     ),
@@ -131,14 +131,14 @@ TABLE_DEFINITIONS: list[tuple[str, str]] = [
             personal_thought TEXT COMMENT 'synth personal reflection about the interaction',
             emotions TEXT DEFAULT '[]' COMMENT 'synth emotions about this interaction',
             interaction_summary TEXT COMMENT 'Brief summary of what happened',
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             interface VARCHAR(50),
             chat_id VARCHAR(255),
             thread_id VARCHAR(255),
             user_message TEXT COMMENT 'What the user said that triggered this response',
             context_tags TEXT DEFAULT '[]' COMMENT 'Tags about the context/topic',
             involved_users TEXT DEFAULT '[]' COMMENT 'JSON list of users involved in the interaction',
-            INDEX idx_timestamp (timestamp),
+            INDEX idx_created_at (created_at),
             INDEX idx_interface_chat (interface, chat_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         """,
@@ -152,14 +152,14 @@ TABLE_DEFINITIONS: list[tuple[str, str]] = [
             personal_thought TEXT COMMENT 'synth personal reflection about the interaction',
             emotions TEXT DEFAULT '[]' COMMENT 'synth emotions about this interaction',
             interaction_summary TEXT COMMENT 'Brief summary of what happened',
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             interface VARCHAR(50),
             chat_id VARCHAR(255),
             thread_id VARCHAR(255),
             user_message TEXT COMMENT 'What the user said that triggered this response',
             context_tags TEXT DEFAULT '[]' COMMENT 'Tags about the context/topic',
             involved_users TEXT DEFAULT '[]' COMMENT 'JSON list of users involved in the interaction',
-            INDEX idx_timestamp (timestamp)
+            INDEX idx_created_at (created_at)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         """,
     ),
@@ -170,10 +170,10 @@ TABLE_DEFINITIONS: list[tuple[str, str]] = [
             id INT AUTO_INCREMENT PRIMARY KEY,
             emotion_name VARCHAR(100) NOT NULL,
             intensity FLOAT NOT NULL DEFAULT 5.0,
-            timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             INDEX idx_emotion_name (emotion_name),
-            INDEX idx_timestamp (timestamp)
+            INDEX idx_created_at (created_at)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         """,
     ),
@@ -190,8 +190,8 @@ TABLE_DEFINITIONS: list[tuple[str, str]] = [
             trigger_condition VARCHAR(255),
             decision_logic TEXT,
             next_check DATETIME,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_timestamp (timestamp)
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_created_at (created_at)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         """,
     ),
@@ -200,7 +200,7 @@ TABLE_DEFINITIONS: list[tuple[str, str]] = [
         """
         CREATE TABLE IF NOT EXISTS memories (
             id INT AUTO_INCREMENT PRIMARY KEY,
-            timestamp DATETIME NOT NULL,
+            created_at DATETIME NOT NULL,
             content TEXT NOT NULL,
             author VARCHAR(100),
             source VARCHAR(100),
@@ -246,23 +246,11 @@ TABLE_DEFINITIONS: list[tuple[str, str]] = [
             description TEXT NOT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             delivered BOOLEAN DEFAULT 0,
-            created_by VARCHAR(100) DEFAULT 'synth'
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-        """,
-    ),
-    (
-        "chatlink",
-        """
-        CREATE TABLE IF NOT EXISTS chatlink (
-            int_id INT AUTO_INCREMENT PRIMARY KEY,
-            interface VARCHAR(32) NOT NULL,
-            chat_id TEXT NOT NULL,
-            thread_id TEXT DEFAULT NULL,
-            chat_name TEXT DEFAULT NULL,
-            message_thread_name TEXT DEFAULT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            UNIQUE KEY unique_chat (interface, chat_id(255))
+            created_by VARCHAR(100) DEFAULT 'synth',
+            uid VARCHAR(255),
+            rrule VARCHAR(255),
+            tzid VARCHAR(100),
+            source VARCHAR(100) DEFAULT 'synth'
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         """,
     ),
@@ -273,7 +261,7 @@ TABLE_DEFINITIONS: list[tuple[str, str]] = [
             trainer_message_id INTEGER PRIMARY KEY,
             chat_id BIGINT NOT NULL,
             message_id INTEGER NOT NULL,
-            timestamp DOUBLE
+            created_at DOUBLE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         """,
     ),
@@ -284,18 +272,6 @@ TABLE_DEFINITIONS: list[tuple[str, str]] = [
             user_id BIGINT PRIMARY KEY,
             reason TEXT,
             blocked_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-        """,
-    ),
-    (
-        "recent_chats",
-        """
-        CREATE TABLE IF NOT EXISTS recent_chats (
-            chat_id VARCHAR(255) PRIMARY KEY,
-            last_active DOUBLE NOT NULL,
-            metadata TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_last_active (last_active)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         """,
     ),
@@ -352,48 +328,7 @@ TABLE_DEFINITIONS: list[tuple[str, str]] = [
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         """,
     ),
-    # ── agent tables ─────────────────────────────────────────────
-    # NOTE: agent_activity_log and agent_action_execs schemas are the
-    # union of columns used by BOTH agent_plugin.py and agent_core.py,
-    # which reference slightly different column sets.
-    (
-        "agent_activity_log",
-        """
-        CREATE TABLE IF NOT EXISTS agent_activity_log (
-            id BIGINT AUTO_INCREMENT PRIMARY KEY,
-            command JSON,
-            proposer VARCHAR(255),
-            status ENUM('proposed','approved','rejected','executed','cancelled') NOT NULL DEFAULT 'proposed',
-            trainer_id VARCHAR(100),
-            request_ts DATETIME DEFAULT CURRENT_TIMESTAMP,
-            response_ts DATETIME,
-            response_text LONGTEXT,
-            result LONGTEXT,
-            metadata JSON,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-        """,
-    ),
-    (
-        "agent_action_execs",
-        """
-        CREATE TABLE IF NOT EXISTS agent_action_execs (
-            id BIGINT AUTO_INCREMENT PRIMARY KEY,
-            activity_log_id BIGINT NOT NULL,
-            action_index INT NOT NULL DEFAULT 0,
-            action_type VARCHAR(150) DEFAULT NULL,
-            command TEXT,
-            payload JSON,
-            status ENUM('pending','processed','executed','failed') NOT NULL DEFAULT 'pending',
-            error_text TEXT,
-            result JSON,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            INDEX idx_activity_log_id (activity_log_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-        """,
-    ),
+    # ── agent task table (Agentic Runtime 2.0) ──────────────────
     (
         "agent_tasks",
         """
@@ -494,7 +429,7 @@ EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("sender_name", "sender_name VARCHAR(255)"),
         ("sender_id", "sender_id VARCHAR(255)"),
         ("message_text", "message_text LONGTEXT NOT NULL"),
-        ("timestamp", "`timestamp` DATETIME DEFAULT CURRENT_TIMESTAMP"),
+        ("created_at", "`created_at` DATETIME DEFAULT CURRENT_TIMESTAMP"),
     ],
     "chat_session_meta": [
         ("interface_path", "interface_path VARCHAR(512) NOT NULL"),
@@ -531,7 +466,7 @@ EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
             "interaction_summary",
             "interaction_summary TEXT COMMENT 'Brief summary of what happened'",
         ),
-        ("timestamp", "`timestamp` TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+        ("created_at", "`created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
         ("interface", "interface VARCHAR(50)"),
         ("chat_id", "chat_id VARCHAR(255)"),
         ("thread_id", "thread_id VARCHAR(255)"),
@@ -566,7 +501,7 @@ EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
             "interaction_summary",
             "interaction_summary TEXT COMMENT 'Brief summary of what happened'",
         ),
-        ("timestamp", "`timestamp` TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+        ("created_at", "`created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
         ("interface", "interface VARCHAR(50)"),
         ("chat_id", "chat_id VARCHAR(255)"),
         ("thread_id", "thread_id VARCHAR(255)"),
@@ -587,7 +522,7 @@ EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("id", "id INT AUTO_INCREMENT PRIMARY KEY"),
         ("emotion_name", "emotion_name VARCHAR(100) NOT NULL"),
         ("intensity", "intensity FLOAT NOT NULL DEFAULT 5.0"),
-        ("timestamp", "`timestamp` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+        ("created_at", "`created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP"),
         (
             "updated_at",
             "updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
@@ -603,11 +538,11 @@ EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("trigger_condition", "trigger_condition VARCHAR(255)"),
         ("decision_logic", "decision_logic TEXT"),
         ("next_check", "next_check DATETIME"),
-        ("timestamp", "`timestamp` DATETIME DEFAULT CURRENT_TIMESTAMP"),
+        ("created_at", "`created_at` DATETIME DEFAULT CURRENT_TIMESTAMP"),
     ],
     "memories": [
         ("id", "id INT AUTO_INCREMENT PRIMARY KEY"),
-        ("timestamp", "`timestamp` DATETIME NOT NULL"),
+        ("created_at", "`created_at` DATETIME NOT NULL"),
         ("content", "content TEXT NOT NULL"),
         ("author", "author VARCHAR(100)"),
         ("source", "source VARCHAR(100)"),
@@ -646,35 +581,16 @@ EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("delivered", "delivered BOOLEAN DEFAULT 0"),
         ("created_by", "created_by VARCHAR(100) DEFAULT 'synth'"),
     ],
-    "chatlink": [
-        ("int_id", "int_id INT AUTO_INCREMENT PRIMARY KEY"),
-        ("interface", "interface VARCHAR(32) NOT NULL"),
-        ("chat_id", "chat_id TEXT NOT NULL"),
-        ("thread_id", "thread_id TEXT DEFAULT NULL"),
-        ("chat_name", "chat_name TEXT DEFAULT NULL"),
-        ("message_thread_name", "message_thread_name TEXT DEFAULT NULL"),
-        ("created_at", "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
-        (
-            "last_updated",
-            "last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
-        ),
-    ],
     "message_map": [
         ("trainer_message_id", "trainer_message_id INTEGER NOT NULL"),
         ("chat_id", "chat_id BIGINT NOT NULL"),
         ("message_id", "message_id INTEGER NOT NULL"),
-        ("timestamp", "`timestamp` DOUBLE"),
+        ("created_at", "`created_at` DOUBLE"),
     ],
     "blocklist": [
         ("user_id", "user_id BIGINT NOT NULL"),
         ("reason", "reason TEXT"),
         ("blocked_at", "blocked_at DATETIME DEFAULT CURRENT_TIMESTAMP"),
-    ],
-    "recent_chats": [
-        ("chat_id", "chat_id VARCHAR(255) NOT NULL"),
-        ("last_active", "last_active DOUBLE NOT NULL"),
-        ("metadata", "metadata TEXT"),
-        ("created_at", "created_at DATETIME DEFAULT CURRENT_TIMESTAMP"),
     ],
     # ── grillo ───────────────────────────────────────────────────
     "grillo_activity_log": [
@@ -718,47 +634,7 @@ EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
             "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
         ),
     ],
-    # ── agent ────────────────────────────────────────────────────
-    # Union of columns from agent_plugin.py and agent_core.py
-    "agent_activity_log": [
-        ("id", "id BIGINT AUTO_INCREMENT PRIMARY KEY"),
-        ("command", "command JSON"),
-        ("proposer", "proposer VARCHAR(255)"),
-        (
-            "status",
-            "status ENUM('proposed','approved','rejected','executed','cancelled') NOT NULL DEFAULT 'proposed'",
-        ),
-        ("trainer_id", "trainer_id VARCHAR(100)"),
-        ("request_ts", "request_ts DATETIME DEFAULT CURRENT_TIMESTAMP"),
-        ("response_ts", "response_ts DATETIME"),
-        ("response_text", "response_text LONGTEXT"),
-        ("result", "`result` LONGTEXT"),
-        ("metadata", "metadata JSON"),
-        ("created_at", "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
-        (
-            "updated_at",
-            "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
-        ),
-    ],
-    "agent_action_execs": [
-        ("id", "id BIGINT AUTO_INCREMENT PRIMARY KEY"),
-        ("activity_log_id", "activity_log_id BIGINT NOT NULL"),
-        ("action_index", "action_index INT NOT NULL DEFAULT 0"),
-        ("action_type", "action_type VARCHAR(150) DEFAULT NULL"),
-        ("command", "command TEXT"),
-        ("payload", "payload JSON"),
-        (
-            "status",
-            "status ENUM('pending','processed','executed','failed') NOT NULL DEFAULT 'pending'",
-        ),
-        ("error_text", "error_text TEXT"),
-        ("result", "`result` JSON"),
-        ("created_at", "created_at DATETIME DEFAULT CURRENT_TIMESTAMP"),
-        (
-            "updated_at",
-            "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
-        ),
-    ],
+    # ── agent (Agentic Runtime 2.0) ─────────────────────────────
     "agent_tasks": [
         ("id", "id BIGINT AUTO_INCREMENT PRIMARY KEY"),
         ("engine", "engine VARCHAR(64)"),

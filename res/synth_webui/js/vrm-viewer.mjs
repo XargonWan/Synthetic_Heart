@@ -47,6 +47,55 @@ let __synthKnockAudio = null; // legacy fallback
 let __synthKnockSfx = { buffer: null, loading: null };
 let __synthLastKnockAt = 0;
 let __synthKnockLook = { activeUntil: 0, startedAt: 0, durationMs: 520, maxStrength: 0.32 };
+// Follow-mouse gaze: on any tap, Synth follows the cursor with her gaze (and
+// slight head movement) for a random 3-6s, then eases back to neutral.
+let __synthFollowMouse = {
+    active: false,
+    startedAt: 0,
+    activeUntil: 0,
+    fadeMs: 1100,
+    ndcX: 0,
+    ndcY: 0,
+    maxStrength: 0.85,
+    // While the user is actively dragging the camera the gaze stays pinned at
+    // full strength (no ease-in restarts, no fade) so the head tracks smoothly
+    // instead of stuttering. Released on drag end, which starts the fade.
+    sustaining: false,
+};
+let __synthTmpFollow = null;
+// Head-turn follow: additive head/neck rotation applied AFTER the animation
+// mixer + VRM update so the head visibly turns toward the follow target (VRM
+// lookAt alone only moves the eyes). Populated by the eye-gaze block each frame.
+let __synthHeadFollow = { active: false, worldTarget: null, strength: 0, forward: null };
+let __synthTmpHeadDir = null;
+let __synthTmpHeadQuatParent = null;
+let __synthTmpHeadDesiredQuat = null;
+let __synthTmpHeadMat = null;
+// Soft limit for casual head-follow: beyond this yaw angle from the avatar's
+// neutral forward, the head stops tracking and eases back to neutral (we want a
+// relaxed "glance at something passing by", not an eager owl-like snap).
+const __synthHeadYawLimitRad = 0.62; // ~35deg
+// A cursor far in front only subtends a few geometric degrees at the head, so
+// we amplify the raw yaw to make the glance read clearly, then clamp to the
+// comfortable cone above so it still looks relaxed.
+const __synthHeadYawGain = 3.0;
+// Vertical (pitch) equivalents so the head visibly looks up/down, not only
+// left/right. Pitch is naturally more restrained than yaw for a relaxed glance.
+const __synthHeadPitchLimitRad = 0.42; // ~24deg up/down
+const __synthHeadPitchGain = 2.4;
+// Follow "disengage" radius: when the camera/target moves so far around the
+// avatar that the *geometric* head->target yaw exceeds this cone, the head
+// stops trying to follow and eases back to neutral. Prevents the jerk/snap
+// when dragging the camera behind her back (the target flips from one side to
+// the other as it crosses the rear line). Full follow inside the inner angle,
+// a smooth (smoothstep) fade to zero between inner and outer, none beyond.
+const __synthHeadFollowInnerRad = 1.40; // ~80deg: full follow up to here
+const __synthHeadFollowOuterRad = 2.10; // ~120deg: fully disengaged past here
+let __synthTmpHeadPitchQuat = null;
+// Scratch quaternion used to strip the previously applied additive glance off
+// the head bone, so the additive rotation never accumulates into a spin.
+let __synthTmpHeadUndoQuat = null;
+let __synthTmpRight = null;
 const __synthTouchOverlayContextId = '__webui_touch_overlay';
 const __synthTouchOverlayPriority = 11;
 
@@ -381,6 +430,16 @@ function initVRMViewer() {
     __synthTmpHeadPos = new THREE.Vector3();
     __synthTmpDir = new THREE.Vector3();
     __synthTmpUp = new THREE.Vector3(0, 1, 0);
+    __synthTmpFollow = new THREE.Vector3();
+    __synthHeadFollow.worldTarget = new THREE.Vector3();
+    __synthHeadFollow.forward = new THREE.Vector3(0, 0, -1);
+    __synthTmpHeadDir = new THREE.Vector3();
+    __synthTmpHeadQuatParent = new THREE.Quaternion();
+    __synthTmpHeadDesiredQuat = new THREE.Quaternion();
+    __synthTmpHeadPitchQuat = new THREE.Quaternion();
+    __synthTmpHeadUndoQuat = new THREE.Quaternion();
+    __synthTmpRight = new THREE.Vector3(1, 0, 0);
+    __synthTmpHeadMat = new THREE.Matrix4();
 
     // Neutral gaze is avatar-forward (does not track the camera).
     // Knock temporarily blends gaze towards the camera.
@@ -426,7 +485,43 @@ runWhenInitialized(() => {
 
     // Camera change debounce logic: wait 10s after the last change to save camera state
     let cameraStateDebounce = null;
+    // When the user moves the camera, Synth glances toward it. While a drag is
+    // in progress the gaze is *sustained* at full strength (OrbitControls fires
+    // 'start' on grab and 'end' on release), so the head tracks the moving
+    // viewpoint smoothly instead of stuttering from per-'change' ease-in
+    // restarts. Non-drag changes (wheel zoom, which fire only 'change') fall
+    // back to a throttled one-shot glance.
+    let __synthLastCamGaze = 0;
+    let __synthCamDragging = false;
+    controls.addEventListener('start', () => {
+        try {
+            __synthCamDragging = true;
+            if (typeof window.__synthBeginFollowCameraGaze === 'function') {
+                window.__synthBeginFollowCameraGaze();
+            }
+        } catch (_e) { /* ignore */ }
+    });
+    controls.addEventListener('end', () => {
+        try {
+            __synthCamDragging = false;
+            if (typeof window.__synthEndFollowCameraGaze === 'function') {
+                window.__synthEndFollowCameraGaze();
+            }
+        } catch (_e) { /* ignore */ }
+    });
     controls.addEventListener('change', () => {
+        try {
+            // During an active drag the sustained follow already tracks the
+            // viewpoint every frame; don't restart the one-shot glance.
+            if (!__synthCamDragging) {
+                const now = Date.now();
+                if (now - __synthLastCamGaze > 900
+                    && typeof window.__synthTriggerFollowCameraGaze === 'function') {
+                    __synthLastCamGaze = now;
+                    window.__synthTriggerFollowCameraGaze();
+                }
+            }
+        } catch (_e) { /* ignore */ }
         const sessionId = getSessionId();
         if (!sessionId) return;
         try {
@@ -1494,29 +1589,73 @@ class AnimationHandler {
     // emotions read as subtle micro-expressions instead of a maxed-out face.
     // While speaking (talk / lipsync) the full value is preserved so Synth can
     // be more expressive. Gating is purely action-state based (no keywords).
+    // Emotion presets whose VRM blendshape opens/stretches the mouth. While
+    // speaking these stack on top of the lipsync visemes and leave the mouth
+    // gaping, so their intensity is capped during audio playback. This is
+    // per-blendshape calibration (mouth-affecting presets on this model), not
+    // keyword/intent detection: the same cap applies regardless of language.
+    _mouthOpeningEmotionCap(key) {
+        // Maps a lowercased emotion preset name -> max intensity allowed while
+        // speaking. Presets not listed here keep full intensity (they do not
+        // move the mouth). null => not a mouth-opening preset.
+        switch (key) {
+            case 'relaxed':
+            case 'happy':
+            case 'joy':
+            case 'fun':
+            case 'surprised':
+            case 'surprise':
+            case 'excited':
+            case 'laugh':
+                return 0.12;
+            default:
+                return null;
+        }
+    }
+
     _scaleRemoteEmotionForState(name, value) {
         try {
             const v = Math.max(0, Math.min(1, Number(value) || 0));
             if (v <= 0) return v;
             if (this._isNonEmotionalFaceKey(name)) return v;
 
-            const currentActionKey = (this.currentActionName && typeof this.currentActionName === 'string')
-                ? String(this.currentActionName).toLowerCase()
-                : (this.currentActionKey ? String(this.currentActionKey).toLowerCase() : null);
-            const isSpeaking = !!this._lipsyncEnabled || currentActionKey === 'talk';
+            // The face is driven ONLY by real lipsync + the emotion engine. The
+            // 'talk' body animation moves the BODY, not the face, so it must not
+            // force a "speaking" face on its own. Expressiveness is unlocked when
+            // the voice is actually audible in the browser — the same signal that
+            // drives the mouth visemes — OR when the server flags lipsync active.
+            // Using __synthIsLipSyncing keeps the full-intensity face aligned to
+            // real audio playback (not the earlier body 'talk' clip nor a
+            // possibly-desynced server flag), restoring lipsync accuracy.
+            const audioSpeaking = (typeof window !== 'undefined' && !!window.__synthIsLipSyncing);
+            const isSpeaking = audioSpeaking || !!this._lipsyncEnabled;
 
-            // Speaking: keep full expressiveness so Synth can emote while talking.
-            if (isSpeaking) return v;
+            // Speaking: keep full expressiveness so Synth can emote while talking,
+            // EXCEPT mouth-opening emotion presets (relaxed/happy/surprised/...),
+            // which open the mouth on this model and therefore stack on top of
+            // the lipsync visemes. At full intensity they leave the mouth gaping
+            // open during speech, so cap them to a moderate value while the voice
+            // is audible — the visemes still drive the actual mouth motion, the
+            // emotion just adds a slight, natural openness. Non-mouth presets
+            // (sad, angry, fear, ...) keep full intensity.
+            if (isSpeaking) {
+                const speakKey = String(name || '').toLowerCase();
+                const cap = this._mouthOpeningEmotionCap(speakKey);
+                if (cap !== null) return Math.min(v, cap);
+                return v;
+            }
             // Every non-speaking state (idle, think, write, touch, ...) shows the
             // base emotion only as a subtle micro-expression. Passing the full
             // value through for non-idle states (e.g. 'write') let 'relaxed' open
             // the mouth at full intensity, producing an unnatural face while typing.
 
             // Micro-expression: keep the emotion perceptible but subtle.
-            // 'relaxed' partially opens the mouth on this model, so cap it lower.
+            // Mouth-opening presets partially open the mouth on this model, so
+            // cap them lower even at rest to avoid an unnatural resting face.
             const k = String(name || '').toLowerCase();
-            const subtleCeil = (k === 'relaxed') ? 0.06 : 0.18;
-            const subtleFloor = (k === 'relaxed') ? 0.02 : 0.05;
+            const opensMouth = this._mouthOpeningEmotionCap(k) !== null;
+            const subtleCeil = opensMouth ? 0.06 : 0.18;
+            const subtleFloor = opensMouth ? 0.02 : 0.05;
             return Math.min(subtleCeil, subtleFloor + v * (subtleCeil - subtleFloor));
         } catch (e) {
             return Math.max(0, Math.min(1, Number(value) || 0));
@@ -1720,7 +1859,12 @@ class AnimationHandler {
                     : null);
             const hasExplicitFacialExpression = this._hasActiveFacialExpressionSource();
             const isIdleLikeAction = !currentActionKey || currentActionKey === 'idle';
-            const suppressBaseEmotionLayers = hasExplicitFacialExpression || this._lipsyncEnabled || currentActionKey === 'talk';
+            // The face is owned by lipsync + the emotion engine. The 'talk' body
+            // animation must NOT suppress the base emotion layer on its own — only
+            // an explicit facial expression, active lipsync, or real audio playback
+            // (the signal that also drives the mouth visemes) does.
+            const audioSpeaking = (typeof window !== 'undefined' && !!window.__synthIsLipSyncing);
+            const suppressBaseEmotionLayers = hasExplicitFacialExpression || this._lipsyncEnabled || audioSpeaking;
 
             // Background emotional expression: idle only, subtle only, and never while
             // a speech-tag expression or lipsync is actively driving the face.
@@ -5797,6 +5941,90 @@ let idleTimeout = null;
 
 const clock = new THREE.Clock();
 
+// Distanza camera "base" lungo l'asse di vista dal target (0,1.2,0):
+// la posa iniziale è (0,1.4,2.2) con target (0,1.2,0) → distanza ≈ 2.21.
+// La memorizziamo per poterla riscalare in base all'aspect ratio.
+const BASE_CAMERA_DISTANCE = 2.21;
+const CAMERA_TARGET_Y = 1.2;
+
+// Adatta il framing (distanza camera) all'aspect ratio corrente. In una
+// finestra portrait/stretta (es. il PiP a 360×640) il FOV verticale fisso a
+// 30° non basta a contenere tutto il corpo, quindi il modello risulta
+// "tranciato". Indietreggiando la camera aumentiamo la porzione verticale
+// visibile e l'intero corpo rientra nel frame.
+// Target verticale per il framing portrait a figura intera. Il modello va
+// da ~1.5 (testa, orecchie/antenne incluse) a 0 (piedi): alziamo un po' il
+// target (~0.79) e arretriamo quanto basta (scaleCap 1.52) per contenere
+// l'INTERA testa — orecchie comprese — vicino al bordo alto e i piedi vicino
+// al bordo basso, con margini minimi e senza tagliare nulla.
+const PORTRAIT_TARGET_Y = 0.79;
+
+function fitFramingForAspect() {
+    try {
+        if (!camera || typeof camera.aspect !== 'number') return;
+        const aspect = camera.aspect;
+        // Riposizioniamo la camera SOLO in portrait (finestra più alta che
+        // larga, tipicamente il PiP). In landscape/quadrato non tocchiamo la
+        // camera così da preservare lo zoom/rotazione impostati dall'utente
+        // tramite gli OrbitControls nella WebUI principale.
+        if (aspect >= 1) return;
+        // Override live per tuning (impostabile da console): {targetY, scaleCap}
+        const ov = (typeof window !== 'undefined' && window.__vrmFramingOverride) || null;
+        const targetY = ov && typeof ov.targetY === 'number' ? ov.targetY : PORTRAIT_TARGET_Y;
+        const scaleCap = ov && typeof ov.scaleCap === 'number' ? ov.scaleCap : 1.52;
+        // Con FOV verticale fisso, per contenere l'intera figura in una
+        // finestra stretta dobbiamo indietreggiare in proporzione a quanto la
+        // finestra è più alta che larga.
+        const scale = Math.min(scaleCap, 1 / aspect);
+        const dist = BASE_CAMERA_DISTANCE * scale;
+        // Vista quasi frontale verso il centro corpo (targetY).
+        const dirY = 0.05;
+        const dirZ = 2.2;
+        const dirLen = Math.hypot(dirY, dirZ) || 1;
+        camera.position.set(
+            0,
+            targetY + (dirY / dirLen) * dist,
+            (dirZ / dirLen) * dist,
+        );
+        if (controls && controls.target) {
+            controls.target.set(0, targetY, 0);
+            controls.update();
+        }
+        camera.lookAt(0, targetY, 0);
+        camera.updateProjectionMatrix();
+    } catch (e) {
+        console.warn('[synth_webui] fitFramingForAspect failed:', e);
+    }
+}
+window.fitVRMFramingForAspect = fitFramingForAspect; // Esposto per il PiP.
+
+// Salva/ripristina la posa della camera (posizione). Usato dal PiP per
+// preservare lo zoom/rotazione della WebUI principale mentre in portrait la
+// camera viene indietreggiata per mostrare tutto il corpo.
+window.saveVRMCameraPose = function saveVRMCameraPose() {
+    try {
+        if (!camera) return null;
+        const pose = { x: camera.position.x, y: camera.position.y, z: camera.position.z };
+        if (controls && controls.target) {
+            pose.tx = controls.target.x;
+            pose.ty = controls.target.y;
+            pose.tz = controls.target.z;
+        }
+        return pose;
+    } catch (e) { return null; }
+};
+window.restoreVRMCameraPose = function restoreVRMCameraPose(pose) {
+    try {
+        if (!camera || !pose) return;
+        camera.position.set(pose.x, pose.y, pose.z);
+        if (controls && controls.target && typeof pose.tx === 'number') {
+            controls.target.set(pose.tx, pose.ty, pose.tz);
+            controls.update();
+        }
+        camera.updateProjectionMatrix();
+    } catch (e) { /* ignore */ }
+};
+
 function resizeRenderer() {
     const width = canvas.clientWidth;
     const height = canvas.clientHeight || 1;
@@ -5804,6 +6032,12 @@ function resizeRenderer() {
         renderer.setSize(width, height, false);
         camera.aspect = width / height;
         camera.updateProjectionMatrix();
+        // NB: NON adattiamo qui il framing all'aspect. Il riframing a figura
+        // intera serve solo alla finestra PiP (portrait), che lo richiede
+        // esplicitamente via window.fitVRMFramingForAspect(). Sulla WebUI
+        // principale la camera deve restare quella di default / impostata
+        // dall'utente (OrbitControls), anche se il canvas è transitoriamente
+        // stretto durante lo spostamento DOM del PiP.
     }
 }
 window.addEventListener('resize', resizeRenderer);
@@ -6631,9 +6865,47 @@ function _sampleVisemeTimeline(timeline, currentTime) {
     };
 }
 
-function render() {
-    requestAnimationFrame(render);
-    const delta = clock.getDelta();
+// Generazione del render loop. Serve a poter "riavviare" il loop quando lo
+// scheduler PiP muore (chiusura della finestra Picture-in-Picture): i frame
+// già schedulati sul rAF della finestra PiP morta non scatteranno più, quindi
+// alla chiusura riavviamo il loop sulla finestra principale. Il token di
+// generazione garantisce che al massimo un solo loop resti attivo (i frame di
+// generazioni precedenti terminano da soli).
+let renderGeneration = 0;
+
+function render(generation) {
+    // Frame appartenente a una generazione superata (es. dopo un kick di
+    // riavvio): interrompi silenziosamente questo loop.
+    if (generation !== renderGeneration) {
+        return;
+    }
+    // Schedule the next frame. When Synth is ejected into a Document
+    // Picture-in-Picture window, pip-window.mjs sets __synthRafScheduler to
+    // that window's requestAnimationFrame. The PiP window is a real, always
+    // on-screen window, so its rAF keeps firing at full frame rate even when
+    // the opener tab loses focus or is hidden — this keeps the avatar
+    // rendering while the browser is in the background. When not in PiP we
+    // fall back to the normal window.requestAnimationFrame.
+    const gen = generation;
+    try {
+        const scheduler = window.__synthRafScheduler;
+        if (typeof scheduler === 'function') {
+            scheduler(() => render(gen));
+        } else {
+            requestAnimationFrame(() => render(gen));
+        }
+    } catch (e) {
+        requestAnimationFrame(() => render(gen));
+    }
+    // Clamp the frame delta. When the Home tab is hidden (e.g. the user
+    // navigates to Activity and back) the browser throttles/suspends
+    // requestAnimationFrame, so on resume clock.getDelta() returns the entire
+    // elapsed time (potentially many seconds). Feeding that huge delta into
+    // currentVRM.update()/currentMixer.update() jumps the expression manager,
+    // blink/lookAt state and mixer far ahead in a single frame, which is what
+    // leaves the eyes in a "strange" state after switching tabs. A single ~2
+    // frame budget (0.05s) keeps animation advancing normally on resume.
+    const delta = Math.min(clock.getDelta(), 0.05);
 
     // Update Karada v2 Animation Engine
     updateEngine();
@@ -6657,15 +6929,25 @@ function render() {
                 for (let i = lo; i <= hi; i++) voiceSum += data[i];
                 const voiceVolume = voiceSum / ((hi - lo + 1) * 255.0);
 
-                // Gain curve: moderate threshold + controlled multiplier.
-                // Caps at ~0.7 to avoid the oversized "frog mouth" effect.
-                const rawMouth = Math.max(0, (voiceVolume - 0.02) * 3.0);
-                const mouthOpen = Math.max(0, Math.min(0.7, rawMouth));
+                // The FFT amplitude is used ONLY as a voice-activity GATE
+                // (mouth open while there is voice, closed on silence). The
+                // actual mouth OPENING amount is a FIXED value we choose, not
+                // derived from the volume — the audio decides the *shape*
+                // (which viseme), we decide *how open*. This avoids the mouth
+                // amplitude tracking loudness spikes and looking erratic.
+                const LIPSYNC_FIXED_OPEN = 0.42; // fixed mouth aperture while speaking
+                const rawMouth = Math.max(0, (voiceVolume - 0.06) * 3.2);
+                // Binary-ish gate: any voice above the gate → full fixed open.
+                const gate = rawMouth > 0 ? LIPSYNC_FIXED_OPEN : 0;
 
-                // Per-frame smoothing (lerp α ≈ 0.35) for natural motion.
+                // Per-frame smoothing so the fixed aperture ramps in/out
+                // gently instead of snapping. Fast release (close quickly) +
+                // slightly slower attack for natural motion.
                 if (!window.__synthLipSyncPrev) window.__synthLipSyncPrev = 0;
-                const alpha = 0.35;
-                const smoothed = window.__synthLipSyncPrev + (mouthOpen - window.__synthLipSyncPrev) * alpha;
+                const alpha = gate < window.__synthLipSyncPrev ? 0.6 : 0.4;
+                const lerped = window.__synthLipSyncPrev + (gate - window.__synthLipSyncPrev) * alpha;
+                // Hard-snap tiny residuals to zero so the mouth truly closes.
+                const smoothed = lerped < 0.03 ? 0 : lerped;
                 window.__synthLipSyncPrev = smoothed;
 
                 // ── Text-based viseme shape selection ───────────────────
@@ -6770,6 +7052,11 @@ function render() {
                 __synthTmpForward.set(0, 0, -1).applyQuaternion(__synthTmpQuat).normalize();
                 // slight "avoid eye contact" offset (secondary mood)
                 __synthTmpForward.applyAxisAngle(__synthTmpUp, __synthNeutralGaze.yawOffsetRad);
+                // Snapshot the avatar's neutral forward (world space) for the
+                // head-turn yaw-limit check below (before we scale it into a target).
+                if (__synthHeadFollow && __synthHeadFollow.forward) {
+                    __synthHeadFollow.forward.copy(__synthTmpForward);
+                }
 
                 const headY = __synthTmpHeadPos.y;
                 const defaultTarget = __synthDefaultLookAtTarget.position;
@@ -6797,6 +7084,71 @@ function render() {
                     __synthTmpDesired.copy(__synthTmpHeadPos).add(__synthTmpDir.multiplyScalar(__synthNeutralGaze.distance));
                     __synthTmpDesired.y = headY;
                     desiredTarget.lerp(__synthTmpDesired, strength);
+                }
+
+                // Follow-mouse gaze: blend towards a world point derived from the
+                // current cursor NDC, projected onto a plane in front of the head.
+                if (__synthFollowMouse && __synthFollowMouse.active) {
+                    const fnow = now;
+                    let fStrength = __synthFollowMouse.maxStrength;
+                    if (__synthFollowMouse.sustaining) {
+                        // Active camera drag: hold full strength, no ease-in
+                        // restart and no fade, so the head tracks the moving
+                        // viewpoint smoothly instead of pulsing.
+                        fStrength = __synthFollowMouse.maxStrength;
+                    } else if (fnow >= __synthFollowMouse.activeUntil) {
+                        // Fade-out window past the active period.
+                        const overshoot = fnow - __synthFollowMouse.activeUntil;
+                        const fade = Math.max(0, 1 - overshoot / Math.max(1, __synthFollowMouse.fadeMs));
+                        fStrength = __synthFollowMouse.maxStrength * fade;
+                        if (fade <= 0) {
+                            __synthFollowMouse.active = false;
+                            fStrength = 0;
+                        }
+                    } else {
+                        // Gentle ease-in at the start.
+                        const inP = Math.min(1, (fnow - __synthFollowMouse.startedAt) / 400);
+                        fStrength = __synthFollowMouse.maxStrength * (0.4 + 0.6 * inP);
+                    }
+                    if (fStrength > 0) {
+                        if (__synthFollowMouse.sustaining) {
+                            // Active camera drag: look at the camera itself (the
+                            // viewer's position), NOT the mouse cursor. Unprojecting
+                            // the live cursor NDC here would make the head chase the
+                            // pointer during the drag; instead aim straight at the
+                            // camera world position so Synth tracks the moving
+                            // viewpoint (where the user notionally is).
+                            __synthTmpDir.copy(__synthTmpCamPos).sub(__synthTmpHeadPos);
+                        } else {
+                            // Unproject the cursor NDC to a point in front of the camera,
+                            // then aim at it from the head, keeping the neutral distance.
+                            __synthTmpFollow.set(__synthFollowMouse.ndcX, __synthFollowMouse.ndcY, 0.5);
+                            __synthTmpFollow.unproject(camera);
+                            __synthTmpDir.copy(__synthTmpFollow).sub(__synthTmpHeadPos);
+                        }
+                        // Keep most of the vertical component so the head can
+                        // actually look up/down (a light dampen still avoids an
+                        // exaggerated nod).
+                        __synthTmpDir.y *= 0.85;
+                        if (__synthTmpDir.lengthSq() < 1e-6) __synthTmpDir.set(0, 0, -1);
+                        __synthTmpDir.normalize();
+                        __synthTmpDesired.copy(__synthTmpHeadPos).add(__synthTmpDir.multiplyScalar(__synthNeutralGaze.distance));
+                        desiredTarget.lerp(__synthTmpDesired, fStrength);
+                        // Hand the same world target + strength to the head-turn
+                        // block (applied post-mixer) so the head visibly turns,
+                        // not just the eyes.
+                        if (__synthHeadFollow.worldTarget) {
+                            __synthHeadFollow.active = true;
+                            __synthHeadFollow.strength = fStrength;
+                            __synthHeadFollow.worldTarget.copy(__synthTmpDesired);
+                        }
+                    } else if (__synthHeadFollow) {
+                        __synthHeadFollow.active = false;
+                        __synthHeadFollow.strength = 0;
+                    }
+                } else if (__synthHeadFollow) {
+                    __synthHeadFollow.active = false;
+                    __synthHeadFollow.strength = 0;
                 }
 
                 // Smoothly move our explicit target to avoid snapping.
@@ -6904,11 +7256,241 @@ function render() {
             }
         }
     }
+
+    // Additive head-turn toward the follow target (applied AFTER the mixer has
+    // written the animated head pose). VRM lookAt only rotates the eyes, so this
+    // makes the head visibly turn toward the cursor / camera.
+    //
+    // Behaviour: a relaxed, casual glance — the head yaws toward the target only
+    // while the target stays within a comfortable cone (__synthHeadYawLimitRad).
+    // The moment the target drifts past that soft limit the tracking strength
+    // fades to zero and the head eases back to its neutral animated pose, so
+    // Synth never strains to follow the cursor to an extreme angle.
+    try {
+        if (currentVRM && currentVRM.humanoid && __synthHeadFollow && __synthHeadFollow.worldTarget && __synthHeadFollow.forward) {
+            const headNode = currentVRM.humanoid.getNormalizedBoneNode
+                ? currentVRM.humanoid.getNormalizedBoneNode('head')
+                : null;
+            if (headNode) {
+                if (!headNode.userData) headNode.userData = {};
+                // Recover the animation's CLEAN local head rotation before we
+                // blend the additive glance onto it. CRITICAL: we cannot simply
+                // read headNode.quaternion here, because the frame before we may
+                // have written `base * additive` into it. The animation mixer
+                // only overwrites the head bone when the ACTIVE clip has a head
+                // track *at full weight* — the base idle sits at a low floor
+                // weight (~0.12), so the head bone often retains the additive
+                // rotation from the previous frame. Caching that as the new base
+                // makes the glance accumulate every frame and the head spins
+                // without bound (observed: base yaw diverging past ±180°). Undo
+                // the previously applied additive (if any) to reconstruct the
+                // true animated pose, then cache THAT as the base.
+                //
+                // CRUCIAL: the mixer may or may not overwrite the head bone on
+                // any given frame, depending on whether the active clip carries
+                // a full-weight head track. We therefore MUST detect which case
+                // we are in instead of blindly stripping the previous additive:
+                //   - If headNode.quaternion still equals what WE wrote last
+                //     frame (base_prev * additive_prev), the mixer left the bone
+                //     alone -> strip additive_prev to recover the clean pose.
+                //   - If it differs, the mixer already re-wrote a fresh, clean
+                //     animated pose this frame -> use it as-is. Stripping the
+                //     additive here would drive the base toward -additive, which
+                //     cancels the glance (observed: additive +21deg, base -21deg,
+                //     net head yaw ~0 -> "follow-gaze looks disabled").
+                const baseQuat = (headNode.userData.__synthBaseQuat ||= headNode.quaternion.clone());
+                const prevAdditive = headNode.userData.__synthAppliedAdditive;
+                const lastComposed = headNode.userData.__synthLastComposedQuat;
+                const mixerLeftBoneUntouched = !!(prevAdditive && lastComposed
+                    && Math.abs(headNode.quaternion.x - lastComposed.x) < 1e-6
+                    && Math.abs(headNode.quaternion.y - lastComposed.y) < 1e-6
+                    && Math.abs(headNode.quaternion.z - lastComposed.z) < 1e-6
+                    && Math.abs(headNode.quaternion.w - lastComposed.w) < 1e-6);
+                if (mixerLeftBoneUntouched) {
+                    // Bone unchanged since our last write: it still holds
+                    // base_prev * additive_prev. Strip additive_prev⁻¹ to get
+                    // the clean animated pose back.
+                    __synthTmpHeadUndoQuat.copy(prevAdditive).invert();
+                    baseQuat.copy(headNode.quaternion).multiply(__synthTmpHeadUndoQuat);
+                } else {
+                    // Mixer re-wrote a fresh clean pose (or first frame): trust it.
+                    baseQuat.copy(headNode.quaternion);
+                }
+
+                const dt = Number.isFinite(delta) ? delta : 0.016;
+                // Lazy, non-robotic smoothing: a low time-constant so the head
+                // drifts toward the target with a soft, unhurried motion rather
+                // than snapping frame-to-frame. Separate (faster) constant for
+                // the target position so cursor jitter is filtered without
+                // adding perceptible lag on top of the strength/angle easing.
+                const followAlpha = 1 - Math.exp(-3.5 * dt);
+                const targetAlpha = 1 - Math.exp(-6 * dt);
+
+                // Low-pass the world target itself so per-frame cursor jumps do
+                // not translate into head stutter ("scatti"). We ease a cached
+                // smoothed target toward the raw one, then aim at the smoothed
+                // point.
+                if (!headNode.userData.__synthSmoothTarget) {
+                    headNode.userData.__synthSmoothTarget = __synthHeadFollow.worldTarget.clone();
+                }
+                const smoothTarget = headNode.userData.__synthSmoothTarget;
+                if (__synthHeadFollow.active) {
+                    smoothTarget.lerp(__synthHeadFollow.worldTarget, targetAlpha);
+                } else {
+                    // When inactive, let it drift back toward the raw (neutral)
+                    // target so re-engaging starts from a sane point.
+                    smoothTarget.lerp(__synthHeadFollow.worldTarget, targetAlpha);
+                }
+
+                headNode.getWorldPosition(__synthTmpHeadPos);
+
+                // Horizontal (yaw) angle between the avatar's neutral forward and
+                // the direction to the follow target, both flattened onto the XZ
+                // plane. This is the amount the head would have to turn.
+                let yaw = 0;
+                __synthTmpHeadDir.copy(smoothTarget).sub(__synthTmpHeadPos);
+                __synthTmpHeadDir.y = 0;
+                __synthTmpDir.copy(__synthHeadFollow.forward);
+                __synthTmpDir.y = 0;
+                if (__synthTmpHeadDir.lengthSq() > 1e-6 && __synthTmpDir.lengthSq() > 1e-6) {
+                    __synthTmpHeadDir.normalize();
+                    __synthTmpDir.normalize();
+                    const dot = Math.max(-1, Math.min(1, __synthTmpDir.dot(__synthTmpHeadDir)));
+                    yaw = Math.acos(dot);
+                    // Signed yaw via the vertical component of the cross product
+                    // (forward × targetDir): positive = target to avatar's left.
+                    const cross = __synthTmpDir.x * __synthTmpHeadDir.z - __synthTmpDir.z * __synthTmpHeadDir.x;
+                    if (cross < 0) yaw = -yaw;
+                }
+
+                // Vertical (pitch) angle: elevation of the direction to the
+                // target relative to the horizontal plane. Positive = target
+                // above the head (Synth looks up).
+                let pitch = 0;
+                __synthTmpHeadDir.copy(smoothTarget).sub(__synthTmpHeadPos);
+                if (__synthTmpHeadDir.lengthSq() > 1e-6) {
+                    const horiz = Math.hypot(__synthTmpHeadDir.x, __synthTmpHeadDir.z);
+                    pitch = Math.atan2(__synthTmpHeadDir.y, horiz);
+                }
+
+                // Amplify the tiny geometric yaw (a distant cursor only subtends
+                // a few degrees at the head) into a readable glance angle.
+                const amplifiedYaw = yaw * __synthHeadYawGain;
+                const amplifiedPitch = pitch * __synthHeadPitchGain;
+
+                // NOTE: do NOT zero the strength when the amplified yaw exceeds
+                // the cone. The angle itself is already clamped to the cone
+                // below (THREE.MathUtils.clamp), so beyond the limit the head
+                // simply *holds* at the edge of the comfortable cone. The old
+                // limitFactor drove the strength to 0 past the limit, which made
+                // the head snap back to neutral the instant the target moved
+                // slightly too far ("segue poi torna subito in loco"): the eased
+                // strength collapsed even though the target was still there. By
+                // keeping full strength the head rests at the limit for as long
+                // as the follow window is active, and only eases home when the
+                // follow window itself ends.
+                // Follow-disengage by geometric radius: the head-turn CONE
+                // (above) clamps the *applied* angle, but the target keeps
+                // moving; once the camera/target swings behind her the raw yaw
+                // approaches +/-180deg and, crossing the rear line, flips sign
+                // abruptly -> a visible jerk. So fade the follow strength out
+                // by the *geometric* yaw magnitude: full inside the inner cone,
+                // smoothstep down to 0 by the outer cone, none beyond. Because
+                // this depends smoothly on the camera position (not on a
+                // strength cutoff), disengaging and re-engaging is continuous
+                // and does not snap.
+                let followRadiusFactor = 1;
+                {
+                    const absYaw = Math.abs(yaw);
+                    if (absYaw >= __synthHeadFollowOuterRad) {
+                        followRadiusFactor = 0;
+                    } else if (absYaw > __synthHeadFollowInnerRad) {
+                        const t = (absYaw - __synthHeadFollowInnerRad)
+                            / (__synthHeadFollowOuterRad - __synthHeadFollowInnerRad);
+                        // smoothstep(1 -> 0)
+                        followRadiusFactor = 1 - (t * t * (3 - 2 * t));
+                    }
+                }
+
+                const targetStrength = (__synthHeadFollow.active ? __synthHeadFollow.strength : 0) * followRadiusFactor;
+                if (typeof __synthHeadFollow._eased !== 'number') __synthHeadFollow._eased = 0;
+                __synthHeadFollow._eased += (targetStrength - __synthHeadFollow._eased) * followAlpha;
+                const s = __synthHeadFollow._eased;
+
+                if (s > 0.001 && (Math.abs(amplifiedYaw) > 1e-4 || Math.abs(amplifiedPitch) > 1e-4)) {
+                    // Turn the head toward the target around the local up axis, on
+                    // top of the animated base pose. Clamp to the comfortable cone
+                    // so it stays casual and never over-rotates.
+                    const desiredYaw = THREE.MathUtils.clamp(
+                        amplifiedYaw,
+                        -__synthHeadYawLimitRad,
+                        __synthHeadYawLimitRad
+                    );
+                    const desiredPitch = THREE.MathUtils.clamp(
+                        amplifiedPitch,
+                        -__synthHeadPitchLimitRad,
+                        __synthHeadPitchLimitRad
+                    );
+                    const appliedYaw = desiredYaw * s;
+                    const appliedPitch = desiredPitch * s;
+                    // Yaw about the head's local up axis. Negate: rotation about
+                    // the local up axis has the opposite handedness to the
+                    // geometric signed yaw, so a positive geometric yaw (target
+                    // to the left) must map to a negative rotation for the head
+                    // to actually face left.
+                    __synthTmpHeadDesiredQuat.setFromAxisAngle(__synthTmpUp, -appliedYaw);
+                    // Pitch about the head's local right (+X) axis. Empirically
+                    // (verified via head world-forward.y sampling) a target above
+                    // the head requires a POSITIVE rotation about +X for the face
+                    // to actually tip up; the opposite sign inverted the gaze.
+                    __synthTmpHeadPitchQuat.setFromAxisAngle(__synthTmpRight, appliedPitch);
+                    // Compose on top of the animated base pose: base * yaw * pitch.
+                    // Record the composed additive (yaw * pitch) so the next frame
+                    // can strip it back off and recover the clean animated pose,
+                    // preventing the base from accumulating into a spin.
+                    const applied = (headNode.userData.__synthAppliedAdditive ||= __synthTmpHeadDesiredQuat.clone());
+                    applied.copy(__synthTmpHeadDesiredQuat).multiply(__synthTmpHeadPitchQuat);
+                    headNode.quaternion.copy(baseQuat).multiply(applied);
+                    // Snapshot exactly what we wrote, so next frame can tell
+                    // whether the mixer overwrote the bone (fresh clean pose) or
+                    // left our composed value in place (needs additive stripped).
+                    if (!headNode.userData.__synthLastComposedQuat) {
+                        headNode.userData.__synthLastComposedQuat = headNode.quaternion.clone();
+                    } else {
+                        headNode.userData.__synthLastComposedQuat.copy(headNode.quaternion);
+                    }
+                } else {
+                    // Neutral: keep the animated pose (baseQuat already applied)
+                    // and clear the recorded additive so the next frame reads the
+                    // pose as-is without stripping anything.
+                    headNode.quaternion.copy(baseQuat);
+                    headNode.userData.__synthAppliedAdditive = null;
+                    headNode.userData.__synthLastComposedQuat = null;
+                }
+            }
+        }
+    } catch (e) { /* ignore head-turn errors */ }
+
     controls.update();
     resizeRenderer();
     renderer.render(scene, camera);
 }
-render();
+render(renderGeneration);
+
+// Riavvia il render loop sulla finestra principale. Usato dal PiP alla
+// chiusura: quando la finestra Picture-in-Picture viene chiusa, l'ultimo frame
+// era stato schedulato sul suo requestAnimationFrame (ora morto), quindi il
+// loop si fermerebbe. Incrementando la generazione avviamo un nuovo loop
+// pulito sulla finestra principale (i frame della vecchia generazione, se mai
+// scattassero, terminano subito).
+window.kickVRMRenderLoop = function kickVRMRenderLoop() {
+    try {
+        renderGeneration += 1;
+        render(renderGeneration);
+    } catch (e) {
+        console.warn('[synth_webui] kickVRMRenderLoop failed:', e);
+    }
+};
 
 // Expose animation functions globally for message chain integration
 window.VRMAnimations = {
@@ -7713,9 +8295,177 @@ try {
             } catch (e) { /* ignore */ }
         }
 
+        // On any tap, Synth follows the cursor with her gaze (and slight head
+        // movement) for a random 3-6s, then eases back to neutral. The current
+        // cursor NDC is captured at trigger time and kept fresh by a passive
+        // pointermove listener while the follow window is active.
+        function _triggerFollowMouseGaze(clientX, clientY) {
+            try {
+                if (!currentVRM || !camera || !canvas) return;
+                const rect = canvas.getBoundingClientRect();
+                if (!rect.width || !rect.height) return;
+                const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
+                const ndcY = -((clientY - rect.top) / rect.height) * 2 + 1;
+                const now = Date.now();
+                const durationMs = 3000 + Math.floor(Math.random() * 3000); // 3-6s
+                __synthFollowMouse.active = true;
+                __synthFollowMouse.startedAt = now;
+                __synthFollowMouse.activeUntil = now + durationMs;
+                __synthFollowMouse.ndcX = ndcX;
+                __synthFollowMouse.ndcY = ndcY;
+            } catch (e) { /* ignore */ }
+        }
+        // When the user moves the camera, Synth glances toward it. The camera
+        // sits at NDC (0,0) from its own viewpoint, so aiming the follow gaze at
+        // the canvas centre makes her look toward the viewer. Shorter window than
+        // a tap so it feels like a quick acknowledging glance.
+        function _triggerFollowCameraGaze() {
+            try {
+                if (!currentVRM || !camera || !canvas) return;
+                const rect = canvas.getBoundingClientRect();
+                if (!rect.width || !rect.height) return;
+                const now = Date.now();
+                const durationMs = 1600 + Math.floor(Math.random() * 900); // 1.6-2.5s
+                __synthFollowMouse.active = true;
+                __synthFollowMouse.startedAt = now;
+                __synthFollowMouse.activeUntil = now + durationMs;
+                __synthFollowMouse.ndcX = 0;
+                __synthFollowMouse.ndcY = 0;
+            } catch (e) { /* ignore */ }
+        }
+        // Camera drag start: pin the gaze at the viewer (canvas centre) at full
+        // strength and keep it there until the drag ends, so the head tracks the
+        // moving viewpoint smoothly (no per-'change' ease-in restarts → no
+        // stutter). Only sets startedAt when not already following, so an
+        // in-progress glance is upgraded to a sustained follow without a jump.
+        function _beginFollowCameraGaze() {
+            try {
+                if (!currentVRM || !camera || !canvas) return;
+                const now = Date.now();
+                if (!__synthFollowMouse.active) __synthFollowMouse.startedAt = now;
+                __synthFollowMouse.active = true;
+                __synthFollowMouse.sustaining = true;
+                __synthFollowMouse.activeUntil = now; // irrelevant while sustaining
+                __synthFollowMouse.ndcX = 0;
+                __synthFollowMouse.ndcY = 0;
+            } catch (e) { /* ignore */ }
+        }
+        // Camera drag end: release the sustain and start the normal fade-out
+        // window so the head eases back to neutral after a short hold.
+        function _endFollowCameraGaze() {
+            try {
+                if (!__synthFollowMouse.sustaining) return;
+                const now = Date.now();
+                const holdMs = 1600 + Math.floor(Math.random() * 900); // 1.6-2.5s
+                __synthFollowMouse.sustaining = false;
+                __synthFollowMouse.activeUntil = now + holdMs;
+            } catch (e) { /* ignore */ }
+        }
+        // Expose for cross-module callers (e.g. main.js window-tap listener).
+        try { window.__synthTriggerFollowMouseGaze = _triggerFollowMouseGaze; } catch (_e) { /* ignore */ }
+        try { window.__synthTriggerFollowCameraGaze = _triggerFollowCameraGaze; } catch (_e) { /* ignore */ }
+        try { window.__synthBeginFollowCameraGaze = _beginFollowCameraGaze; } catch (_e) { /* ignore */ }
+        try { window.__synthEndFollowCameraGaze = _endFollowCameraGaze; } catch (_e) { /* ignore */ }
+        // Expose a helper to send interaction events over the main avatar WS so
+        // other modules (main.js window-tap listener) can record UI interactions.
+        try {
+            window.__synthSendInteraction = (subtype, source) => {
+                const msg = JSON.stringify({ type: 'interaction', subtype: subtype || 'window_tap', source: source || 'webui.window_tap' });
+                // Prefer the avatar WS if open, otherwise fall back to the shared
+                // WebUI socket (window.chatWs) which serves the same /ws endpoint.
+                try {
+                    if (typeof ws !== 'undefined' && ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(msg);
+                        return true;
+                    }
+                } catch (_e) { /* ignore */ }
+                try {
+                    if (window.chatWs && window.chatWs.readyState === WebSocket.OPEN) {
+                        window.chatWs.send(msg);
+                        return true;
+                    }
+                } catch (_e) { /* ignore */ }
+                return false;
+            };
+        } catch (_e) { /* ignore */ }
+
+        // Keep the follow target aligned with the live cursor while active.
+        try {
+            window.addEventListener('pointermove', (ev) => {
+                if (!__synthFollowMouse || !__synthFollowMouse.active) return;
+                if (!canvas) return;
+                const rect = canvas.getBoundingClientRect();
+                if (!rect.width || !rect.height) return;
+                __synthFollowMouse.ndcX = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
+                __synthFollowMouse.ndcY = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
+            }, { passive: true });
+        } catch (_e) { /* ignore */ }
+
         // Map raw node/mesh names to human-friendly body part labels.
         // Heuristics: strip common suffixes like (merged), baked, numeric suffixes,
         // then match common tokens via ordered regex rules. Returns { label, confidence }.
+        // --- Precise touch-zone catalog -----------------------------------
+        // Loaded once from the shared JSON catalog (single source of truth,
+        // also consumed by the Python backend). Maps a raycast hit point,
+        // converted to VRM 'hips'-local space, to a precise anatomical zone id
+        // (e.g. 'right_breast'). This is the PRIMARY resolution; the mesh-name
+        // heuristic (mapTouchedNodeToHuman) is only the fallback when no zone
+        // matches. See res/synth_webui/data/karada_touch_zones.json.
+        let __synthTouchZones = null;      // array of zone descriptors
+        let __synthTouchZonesLoaded = false;
+        async function _synthLoadTouchZones() {
+            if (__synthTouchZonesLoaded) return __synthTouchZones;
+            __synthTouchZonesLoaded = true;
+            try {
+                const resp = await fetch('/data/karada_touch_zones.json', { cache: 'force-cache' });
+                if (resp && resp.ok) {
+                    const data = await resp.json();
+                    __synthTouchZones = Array.isArray(data.zones) ? data.zones : [];
+                    console.log('[synth_webui] Loaded', __synthTouchZones.length, 'touch zones');
+                } else {
+                    console.warn('[synth_webui] Touch-zone catalog fetch failed:', resp ? resp.status : 'no-response');
+                    __synthTouchZones = [];
+                }
+            } catch (err) {
+                console.warn('[synth_webui] Failed to load touch-zone catalog:', err);
+                __synthTouchZones = [];
+            }
+            return __synthTouchZones;
+        }
+        // Kick off the load early (non-blocking).
+        try { _synthLoadTouchZones(); } catch (_e) { /* ignore */ }
+
+        // Resolve a world-space hit point to a precise zone id, or null.
+        function resolveTouchZone(worldPoint) {
+            if (!worldPoint || !__synthTouchZones || !__synthTouchZones.length) return null;
+            if (!currentVRM || !currentVRM.humanoid) return null;
+            const humanoid = currentVRM.humanoid;
+            const hipsNode = (typeof humanoid.getNormalizedBoneNode === 'function')
+                ? (humanoid.getNormalizedBoneNode('hips') || humanoid.getNormalizedBoneNode('Hips'))
+                : null;
+            if (!hipsNode) return null;
+            // Convert the world hit point into hips-local space.
+            let local;
+            try {
+                hipsNode.updateWorldMatrix(true, false);
+                local = hipsNode.worldToLocal(worldPoint.clone());
+            } catch (_e) {
+                return null;
+            }
+            // hips-local: X = model left/right, Y = height, Z = front(+)/back(-).
+            const x = local.x;
+            const y = local.y;
+            const front = local.z >= 0;
+            for (const zone of __synthTouchZones) {
+                if (x < zone.x_min || x > zone.x_max) continue;
+                if (y < zone.y_min || y > zone.y_max) continue;
+                if (zone.front === true && !front) continue;
+                if (zone.front === false && front) continue;
+                return zone.id;
+            }
+            return null;
+        }
+
         function mapTouchedNodeToHuman(rawName) {
             if (!rawName) return { label: 'unknown', confidence: 0 };
             let name = String(rawName).toLowerCase();
@@ -7816,6 +8566,17 @@ try {
                     // Empty space tap: play knock SFX and turn towards the camera.
                     _playScreenKnockSfx();
                     _triggerSoftLookTowardCamera();
+                    // Follow the cursor with gaze for a few seconds.
+                    _triggerFollowMouseGaze(ev.clientX, ev.clientY);
+                    // Record a low-value environment interaction (backend filters/batches).
+                    // Deferred off the tap frame to avoid a micro-stutter (see body-tap note).
+                    setTimeout(() => {
+                        try {
+                            if (typeof window.__synthSendInteraction === 'function') {
+                                window.__synthSendInteraction('environment_tap', 'webui.env_tap');
+                            }
+                        } catch (_e) { /* ignore */ }
+                    }, 0);
                     return;
                 }
 
@@ -7829,14 +8590,29 @@ try {
                 }
                 if (!touchedPart) touchedPart = intersect.object.name || 'unknown';
 
+                // PRIMARY: resolve the exact hit point to a precise anatomical
+                // zone id via the shared catalog. Falls back to the mesh-name
+                // heuristic below when no zone matches (or the catalog is not
+                // yet loaded / the model has no usable humanoid).
+                let preciseZoneId = null;
+                try {
+                    preciseZoneId = resolveTouchZone(intersect.point);
+                } catch (_e) { preciseZoneId = null; }
+
                 // Map raw node name to a human-friendly label and expose both
                 const mapped = (typeof mapTouchedNodeToHuman === 'function') ? mapTouchedNodeToHuman(touchedPart) : { label: touchedPart || 'unknown', confidence: 0 };
-                console.log('[synth_webui] Model tapped - touched part:', touchedPart, 'mapped:', mapped);
+                console.log('[synth_webui] Model tapped - touched part:', touchedPart, 'mapped:', mapped, 'zone:', preciseZoneId);
                 window.lastTouchedPart = { part: touchedPart, at: Date.now() };
-                window.lastTouchedPartHuman = { part: mapped.label, raw: touchedPart, confidence: mapped.confidence, at: Date.now(), method: 'heuristic' };
+                window.lastTouchedPartHuman = { part: mapped.label, raw: touchedPart, confidence: mapped.confidence, at: Date.now(), method: preciseZoneId ? 'zone' : 'heuristic', zone: preciseZoneId };
+
+                // Follow the cursor with gaze for a few seconds after a body tap.
+                _triggerFollowMouseGaze(ev.clientX, ev.clientY);
 
                 const touchPayload = {
                     type: 'touch',
+                    // Precise catalog zone id takes precedence downstream; the raw
+                    // node name is kept for debugging / heuristic fallback.
+                    precise_id: preciseZoneId,
                     part: touchedPart,
                     mapped_part: window.lastTouchedPartHuman ? window.lastTouchedPartHuman.part : null,
                     mapped_confidence: window.lastTouchedPartHuman ? window.lastTouchedPartHuman.confidence : null,
@@ -7845,50 +8621,64 @@ try {
                     priority: __synthTouchOverlayPriority,
                 };
 
-                let deliveredToServer = false;
-                try {
-                    if (typeof ws !== 'undefined' && ws && ws.readyState === WebSocket.OPEN) {
-                        try {
-                            ws.send(JSON.stringify(touchPayload));
-                            deliveredToServer = true;
-                        } catch (err) {
-                            console.warn('[synth_webui] Failed to send touch payload:', err);
-                        }
-                    }
-                } catch (err) {
-                    console.warn('[synth_webui] Failed to notify backend of touch:', err);
-                }
-
-                if (!deliveredToServer) {
+                // Defer network delivery off the tap frame. The raycast above is the
+                // only work that must happen synchronously (it needs the exact pointer
+                // state); the WS send / fetch fallback do not, and running them inline
+                // on the same frame as the OrbitControls damping update caused a
+                // perceptible micro-stutter. A macrotask lets the browser paint first.
+                setTimeout(async () => {
+                    let deliveredToServer = false;
                     try {
-                        const resp = await fetch('/api/animation_state', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            cache: 'no-store',
-                            body: JSON.stringify({
-                                state: 'touch',
-                                loop: false,
-                                context_id: __synthTouchOverlayContextId,
-                                priority: __synthTouchOverlayPriority,
-                                source: 'webui.touch',
-                                part: touchedPart,
-                                mapped_part: window.lastTouchedPartHuman ? window.lastTouchedPartHuman.part : null,
-                                mapped_confidence: window.lastTouchedPartHuman ? window.lastTouchedPartHuman.confidence : null,
-                            }),
-                        });
-                        if (resp && resp.ok) {
-                            deliveredToServer = true;
-                        } else {
-                            console.warn('[synth_webui] Touch animation state request failed:', resp ? resp.status : 'no-response');
+                        let sock = null;
+                        if (typeof ws !== 'undefined' && ws && ws.readyState === WebSocket.OPEN) {
+                            sock = ws;
+                        } else if (window.chatWs && window.chatWs.readyState === WebSocket.OPEN) {
+                            sock = window.chatWs;
+                        }
+                        if (sock) {
+                            try {
+                                sock.send(JSON.stringify(touchPayload));
+                                deliveredToServer = true;
+                            } catch (err) {
+                                console.warn('[synth_webui] Failed to send touch payload:', err);
+                            }
                         }
                     } catch (err) {
-                        console.warn('[synth_webui] Failed to POST touch animation state:', err);
+                        console.warn('[synth_webui] Failed to notify backend of touch:', err);
                     }
-                }
 
-                if (deliveredToServer) {
-                    console.log('[synth_webui] Dispatched authoritative touch state to server');
-                }
+                    if (!deliveredToServer) {
+                        try {
+                            const resp = await fetch('/api/animation_state', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                cache: 'no-store',
+                                body: JSON.stringify({
+                                    state: 'touch',
+                                    loop: false,
+                                    context_id: __synthTouchOverlayContextId,
+                                    priority: __synthTouchOverlayPriority,
+                                    source: 'webui.touch',
+                                    precise_id: preciseZoneId,
+                                    part: touchedPart,
+                                    mapped_part: window.lastTouchedPartHuman ? window.lastTouchedPartHuman.part : null,
+                                    mapped_confidence: window.lastTouchedPartHuman ? window.lastTouchedPartHuman.confidence : null,
+                                }),
+                            });
+                            if (resp && resp.ok) {
+                                deliveredToServer = true;
+                            } else {
+                                console.warn('[synth_webui] Touch animation state request failed:', resp ? resp.status : 'no-response');
+                            }
+                        } catch (err) {
+                            console.warn('[synth_webui] Failed to POST touch animation state:', err);
+                        }
+                    }
+
+                    if (deliveredToServer) {
+                        console.log('[synth_webui] Dispatched authoritative touch state to server');
+                    }
+                }, 0);
 
             } catch (err) {
                 console.warn('[synth_webui] touch handler error:', err);

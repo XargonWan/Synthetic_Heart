@@ -1,0 +1,16 @@
+#!/command/with-contenv bash
+set -e
+
+# Launch the in-container SearXNG instance on 127.0.0.1:8888.
+# It is queried only by the web_search plugin as the preferred backend and is
+# never exposed outside the container (bind address is enforced in settings.yml).
+
+export SEARXNG_SETTINGS_PATH="${SEARXNG_SETTINGS_PATH:-/etc/searxng/settings.yml}"
+
+echo "[S6 searxng] Avvio SearXNG (127.0.0.1:8888)..."
+cd /app/searxng
+exec /app/searxng-venv/bin/granian \
+  --interface wsgi \
+  --host 127.0.0.1 \
+  --port 8888 \
+  searx.webapp:application

@@ -3,6 +3,7 @@
 import os
 import json
 import asyncio
+import time
 
 from core.variables_engine import register_exposed_var as _register_exposed_var
 
@@ -26,6 +27,7 @@ except Exception:
 
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.config_manager import config_registry
+from core.languages import normalize_lang
 
 """
 notify_trainer(chat_id: int, message: str) -> None
@@ -118,7 +120,7 @@ def get_trainer_display_name() -> str:
 
 BASE_CORTEX = config_registry.get_var(
     "BASE_CORTEX",
-    "manual",
+    "",
     label="Base Cortex",
     description="Default cortex engine used system-wide unless overridden by scope.",
     group="core",
@@ -162,6 +164,17 @@ LIVE_CORTEX = config_registry.get_var(
     allow_env_override=False,
 )
 
+AGENT_CORTEX = config_registry.get_var(
+    "AGENT_CORTEX",
+    "Default",
+    label="Agent Cortex",
+    description="Cortex engine used for the agentic loop (Default means Base Cortex). Lets the agent use an LLM better suited for agent/tool-calling work.",
+    group="core",
+    component="cortex",
+    hidden=True,  # Managed via the Cortex Engines scope selectors
+    allow_env_override=False,
+)
+
 # LLM generation request timeout. Caps how long the synth waits for a single
 # cortex generation before aborting. On slow hardware a long reply can exceed a
 # short timeout, which aborts the HTTP request and makes llama.cpp cancel the
@@ -198,6 +211,7 @@ LIVE_SYNC_CHAT_HISTORY = config_registry.get_var(
     group="core",
     component="live",
     value_type=bool,
+    advanced=True,
 )
 
 LIVE_HISTORY_SYNC_INTERVAL = config_registry.get_var(
@@ -211,6 +225,7 @@ LIVE_HISTORY_SYNC_INTERVAL = config_registry.get_var(
     group="core",
     component="live",
     value_type=int,
+    advanced=True,
 )
 
 # ----------------------------------------------------------------------
@@ -287,6 +302,7 @@ _register_exposed_var(
         "Umbriel",
         "Zubenelgenubi",
     ],
+    hidden=True,
 )
 
 _register_exposed_var(
@@ -302,6 +318,7 @@ _register_exposed_var(
     ),
     scope="live",
     component="cortex_live",
+    hidden=True,
 )
 
 # Live session feature toggles
@@ -383,35 +400,72 @@ LIVE_AUDIO_MIN_RMS = config_registry.get_var(
 )
 
 # --- LogChat configuration (use config_registry so exposed-variable APIs are consistent)
-LOG_CHAT_INTERFACE = config_registry.get_var(
-    "LOG_CHAT_INTERFACE",
-    "",
-    label="Log Chat Interface",
-    description="Interface used for system/trainer log messages.",
-    group="core",
-    component="logchat",
-    hidden=True,
-)
-LOG_CHAT_ID = config_registry.get_var(
+# The LogChat target is stored as a single canonical interface_path
+# (e.g. "telegram_bot/-28475648/6"), following the same "interface-path"
+# standard used by other routing config vars. The interface name, chat id
+# and (optional) thread id are derived from this single value.
+_register_exposed_var(
     "LOG_CHAT_ID",
-    "",
-    label="Log Chat ID",
-    description="Chat ID used for system/trainer notifications.",
-    group="core",
+    label="Log Chat",
+    default="",
+    value_type=str,
+    ui_type="interface-path",
+    description=(
+        "Interface path of the chat used for system/trainer notifications "
+        "(e.g. telegram_bot/-28475648/6)."
+    ),
+    scope="core",
     component="logchat",
-    value_type=int,
-    hidden=True,
 )
-LOG_CHAT_THREAD_ID = config_registry.get_var(
-    "LOG_CHAT_THREAD_ID",
-    "",
-    label="Log Chat Thread ID",
-    description="Thread ID for the log chat (if supported by interface).",
-    group="core",
-    component="logchat",
-    value_type=int,
-    hidden=True,
-)
+
+
+# ---------------------------------------------------------------------------
+# Cortex scope value (engine + optional model) storage helpers
+# ---------------------------------------------------------------------------
+# Each scope config key (BASE_CORTEX, AGENT_CORTEX, GRILLO_CORTEX,
+# TRAINER_CORTEX, LIVE_CORTEX) stores either:
+#   - a bare engine name string (legacy): the endpoint's default_model is used;
+#   - a JSON object {"engine": "...", "model": "..."}: the model overrides the
+#     endpoint default for that scope only.
+# These helpers parse/serialize both forms so the rest of the system can move
+# to per-scope model selection without breaking existing string values.
+
+
+def parse_cortex_scope_value(raw: str | None) -> tuple[str, str | None]:
+    """Split a raw scope config value into ``(engine, model)``.
+
+    Accepts a bare engine-name string (legacy) or a JSON object with
+    ``engine``/``model`` keys. ``model`` is ``None`` when unset, so callers
+    fall back to the endpoint's ``default_model``.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return "", None
+    if text.startswith("{"):
+        try:
+            data = json.loads(text)
+        except Exception:
+            return text, None
+        if isinstance(data, dict):
+            engine = str(data.get("engine") or "").strip()
+            model_raw = data.get("model")
+            model = str(model_raw).strip() if model_raw else ""
+            return engine, (model or None)
+        return text, None
+    return text, None
+
+
+def serialize_cortex_scope_value(engine: str, model: str | None = None) -> str:
+    """Serialize an ``(engine, model)`` selection for storage.
+
+    Returns a bare engine string when ``model`` is empty (keeps legacy values
+    tidy and retrocompatible), otherwise a compact JSON object.
+    """
+    engine = str(engine or "").strip()
+    model = str(model or "").strip()
+    if not model:
+        return engine
+    return json.dumps({"engine": engine, "model": model})
 
 
 async def get_active_cortex_engine(scope: str | None = None) -> str:
@@ -421,7 +475,7 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
     in the Cortex registry, otherwise a ValueError is raised.
     """
     try:
-        base = config_registry.get_value("BASE_CORTEX", "")
+        base, _ = parse_cortex_scope_value(config_registry.get_value("BASE_CORTEX", ""))
         override_key: str | None = None
         if scope == "grillo":
             override_key = "GRILLO_CORTEX"
@@ -429,14 +483,19 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
             override_key = "TRAINER_CORTEX"
         elif scope == "live":
             override_key = "LIVE_CORTEX"
+        elif scope == "agent":
+            override_key = "AGENT_CORTEX"
         else:
             override_key = None
 
-        override = (
+        override_raw = (
             config_registry.get_value(override_key, "Default")
             if override_key is not None
             else "Default"
         )
+        override, _ = parse_cortex_scope_value(override_raw)
+        if not override:
+            override = "Default"
 
         use_override = override_key is not None and override not in (
             None,
@@ -453,7 +512,58 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
 
         reg = get_cortex_registry()
         available = set(reg.get_available_engines())
+
+        # "anthropic" is a real, always-registered built-in engine, so the
+        # staleness check below never fires for it -- but without
+        # ANTHROPIC_API_KEY configured it doesn't raise, it silently returns a
+        # fixed "not configured" string as if it were a genuine completion.
+        # The JSON corrector then retries against the same broken engine and
+        # loops forever on that identical string (see FIXED_ISSUES.md:
+        # "BASE_CORTEX silently reverted to anthropic"). Treat it as
+        # unavailable whenever no key is configured so the self-heal path
+        # below runs instead of quietly returning a guaranteed-broken engine.
+        if (
+            "anthropic" in available
+            and not str(
+                config_registry.get_value("ANTHROPIC_API_KEY", "") or ""
+            ).strip()
+        ):
+            available.discard("anthropic")
+
         if chosen not in available:
+            # Before treating this as a genuinely stale/removed engine, check
+            # whether it's a still-configured external endpoint (e.g. Venice2)
+            # that simply hasn't (re)registered into the in-memory
+            # CortexRegistry yet -- this happens transiently around startup or
+            # endpoint edits. Persisting the fallback below in that case would
+            # silently and *permanently* discard the user's real selection,
+            # since get_default_engine() just returns whichever built-in engine
+            # module sorts first on disk (currently "anthropic") -- not a
+            # meaningful default. See AGENTS.md SS12 for the incident this guards
+            # against (BASE_CORTEX kept reverting to anthropic).
+            try:
+                from core.external_endpoints.registry import (
+                    get_external_endpoint_registry,
+                )
+
+                endpoints = await get_external_endpoint_registry().list_endpoints(
+                    enabled_only=True
+                )
+                if chosen in {ep.engine_name() for ep in endpoints}:
+                    log_warning(
+                        f"[config] ⚠️ Cortex engine '{chosen}' is a configured "
+                        "external endpoint not yet registered in the CortexRegistry "
+                        "-- keeping it instead of silently switching away."
+                    )
+                    log_debug(
+                        f"[config] 🧠 Active Cortex ({scope or 'base'}): {chosen}"
+                    )
+                    return chosen
+            except Exception as ext_exc:
+                log_warning(
+                    f"[config] Failed to check external endpoints for '{chosen}': {ext_exc}"
+                )
+
             # Stale engine name in DB (e.g. removed engine from a previous branch).
             # Fall back to the registry default rather than leaving the system broken.
             updates: list[tuple[str, str]] = []
@@ -465,6 +575,26 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
                     fallback = reg.get_default_engine()
                 except ValueError:
                     raise ValueError(f"Cortex engine '{chosen}' is not registered")
+                if fallback == "anthropic":
+                    # get_default_engine() has no concept of credential
+                    # availability -- it just returns whichever built-in
+                    # engine module sorts first on disk, which is
+                    # "anthropic". If no key is configured this is a
+                    # guaranteed-broken pick. Reuse whichever engine is
+                    # already validly configured for the sibling
+                    # trainer/grillo scope on this same instance instead of
+                    # guessing at an arbitrary external endpoint.
+                    for sibling_key in ("TRAINER_CORTEX", "GRILLO_CORTEX"):
+                        sibling, _ = parse_cortex_scope_value(
+                            config_registry.get_value(sibling_key, "Default")
+                        )
+                        if (
+                            sibling
+                            and sibling not in ("Default", "None")
+                            and sibling in available
+                        ):
+                            fallback = sibling
+                            break
                 if use_override and override_key is not None:
                     updates.append((override_key, "Default"))
                 if base != fallback:
@@ -494,6 +624,73 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
         raise
 
 
+async def get_active_cortex_scope(scope: str | None = None) -> tuple[str, str | None]:
+    """Resolve the effective ``(engine, model)`` for a given scope.
+
+    The engine is resolved via :func:`get_active_cortex_engine` (which owns the
+    self-heal / fallback logic and returns a bare engine name). The model is the
+    per-scope override stored alongside the engine; it is only honoured when the
+    resolved engine actually matches the scope's configured engine — if a
+    fallback kicked in (stale/removed engine) the stored model no longer applies
+    and ``None`` is returned so the endpoint's ``default_model`` is used.
+
+    Resolution order for the model:
+      1. the scope override key's model (e.g. ``AGENT_CORTEX``), if the scope's
+         configured engine survived resolution;
+      2. otherwise the base ``BASE_CORTEX`` model, if the resolved engine equals
+         the base engine;
+      3. otherwise ``None`` (endpoint default).
+    """
+    engine = await get_active_cortex_engine(scope=scope)
+
+    override_key: str | None = None
+    if scope == "grillo":
+        override_key = "GRILLO_CORTEX"
+    elif scope == "trainer":
+        override_key = "TRAINER_CORTEX"
+    elif scope == "live":
+        override_key = "LIVE_CORTEX"
+    elif scope == "agent":
+        override_key = "AGENT_CORTEX"
+
+    if override_key is not None:
+        ov_engine, ov_model = parse_cortex_scope_value(
+            config_registry.get_value(override_key, "Default")
+        )
+        if ov_engine and ov_engine not in ("Default", "None") and ov_engine == engine:
+            return engine, ov_model
+
+    base_engine, base_model = parse_cortex_scope_value(
+        config_registry.get_value("BASE_CORTEX", "")
+    )
+    if base_engine and base_engine == engine:
+        return engine, base_model
+
+    return engine, None
+
+
+def scope_model_override(engine_instance: object, model: str | None):
+    """Return a context manager applying a per-scope ``model`` to ``engine_instance``.
+
+    Scope-aware call sites resolve ``(engine_name, model)`` via
+    :func:`get_active_cortex_scope`, load the engine instance from the cortex
+    registry, then wrap the generation call with this helper. When the instance
+    is an external ``CortexBridge`` it delegates to the bridge's own
+    ``scope_model_override`` (transient, per-call); for built-in engines (which
+    have no per-call model concept) it is a no-op. This keeps the ``isinstance``
+    detail in one place instead of every call site.
+    """
+    override = getattr(engine_instance, "scope_model_override", None)
+    if callable(override) and model:
+        try:
+            return override(model)
+        except Exception as exc:  # pragma: no cover - defensive
+            log_warning(f"[config] scope_model_override failed: {exc}")
+    from contextlib import nullcontext
+
+    return nullcontext()
+
+
 def derive_cortex_scope(context: dict | None) -> str | None:
     """Return the scope string implied by *context*, or ``None`` for the base engine.
 
@@ -520,27 +717,31 @@ def derive_cortex_scope(context: dict | None) -> str | None:
     return None
 
 
-async def set_base_cortex(name: str) -> None:
-    """Persist the base cortex engine selection."""
+async def set_base_cortex(name: str, model: str | None = None) -> None:
+    """Persist the base cortex engine selection (with an optional model)."""
+    value = serialize_cortex_scope_value(name, model)
     try:
-        await config_registry.set_value("BASE_CORTEX", name)
-        log_info(f"[config] 💾 Saved base cortex to database: {name}")
+        await config_registry.set_value("BASE_CORTEX", value)
+        log_info(f"[config] 💾 Saved base cortex to database: {value}")
     except Exception as e:
         log_error(f"[config] ❌ Error saving BASE_CORTEX to database: {repr(e)}")
         raise
 
 
-async def set_scope_cortex(scope: str, name: str) -> None:
-    """Persist a scope-specific cortex override."""
+async def set_scope_cortex(scope: str, name: str, model: str | None = None) -> None:
+    """Persist a scope-specific cortex override (with an optional model)."""
     if scope == "grillo":
         key = "GRILLO_CORTEX"
     elif scope == "live":
         key = "LIVE_CORTEX"
+    elif scope == "agent":
+        key = "AGENT_CORTEX"
     else:
         key = "TRAINER_CORTEX"
+    value = serialize_cortex_scope_value(name, model)
     try:
-        await config_registry.set_value(key, name)
-        log_info(f"[config] 💾 Saved {key} to database: {name}")
+        await config_registry.set_value(key, value)
+        log_info(f"[config] 💾 Saved {key} to database: {value}")
     except Exception as e:
         log_error(f"[config] ❌ Error saving {key} to database: {repr(e)}")
         raise
@@ -584,6 +785,105 @@ async def get_active_cortex_for_path(
         log_debug(f"[config] 🧠 Per-path cortex ({interface_path}): {engine}")
         return engine
     return await get_active_cortex_engine(scope=scope)
+
+
+# ---------------------------------------------------------------------------
+# Vox per-language engine overrides
+# ---------------------------------------------------------------------------
+# A single global JSON map (VOX_LANGUAGE_OVERRIDES) routes TTS to a different
+# engine/model/voice depending on the detected language of the text, e.g.
+# {"it": {"engine": "fish-audio", "model": "s2.1-pro", "voice": "maria"},
+#  "en": {"engine": "kitten", "model": "", "voice": "luna"}}.
+# When a language is not present (or its engine is "disabled") the caller falls
+# back to the normal ACTIVE_VOX_ENGINE / VOX_DEFAULT_MODEL / <ENGINE>_VOICE flow.
+
+
+def get_vox_language_override(language: str | None) -> dict | None:
+    """Return the Vox override entry for ``language``, or ``None``.
+
+    The lookup key is normalised (region stripped, lowercased) so ``it-it``
+    matches an ``"it"`` entry. Returns ``None`` when there is no override for
+    the language, when the map is empty/invalid, or when the matched entry's
+    engine is ``"disabled"`` (explicit opt-out → use the default engine).
+
+    NOTE: this is the synchronous, cache-only variant. It reads the value that
+    was loaded into the registry at startup (``load_all_from_db``). Because the
+    registry deliberately skips DB loads inside a running event loop, callers
+    running inside ``async`` code (e.g. ``VoxPlugin.speak``) must use
+    :func:`get_vox_language_override_async` instead, which reads the persisted
+    DB value directly.
+    """
+    norm = normalize_lang(language)
+    if not norm:
+        return None
+    try:
+        raw = config_registry.get_value("VOX_LANGUAGE_OVERRIDES", "{}", value_type=str)
+        mapping = json.loads(raw) if raw else {}
+    except Exception as exc:
+        log_warning(f"[config] VOX_LANGUAGE_OVERRIDES parse failed: {exc}")
+        return None
+    if not isinstance(mapping, dict):
+        return None
+    entry = mapping.get(norm)
+    if not isinstance(entry, dict):
+        return None
+    engine = entry.get("engine")
+    if engine == "disabled":
+        return None
+    return entry
+
+
+# In-memory cache so we don't hit the DB on every single TTS call. The cache is
+# invalidated whenever the override map is written (see ``_invalidate_vox_lang_override_cache``).
+_vox_lang_override_cache: dict | None = None
+_vox_lang_override_cache_at: float = 0.0
+_VOX_LANG_OVERRIDE_CACHE_TTL_S = 5.0
+
+
+def _invalidate_vox_lang_override_cache() -> None:
+    """Drop the cached override map (called after a successful write)."""
+    global _vox_lang_override_cache, _vox_lang_override_cache_at
+    _vox_lang_override_cache = None
+    _vox_lang_override_cache_at = 0.0
+
+
+async def get_vox_language_override_async(language: str | None) -> dict | None:
+    """Async variant of :func:`get_vox_language_override`.
+
+    Reads the persisted ``VOX_LANGUAGE_OVERRIDES`` value directly from the DB
+    (via ``get_persisted_value``, which is safe inside a running event loop),
+    bypassing the registry's "skip DB load in async context" behaviour. Results
+    are cached in-memory for a short TTL to avoid a query per TTS call.
+    """
+    norm = normalize_lang(language)
+    if not norm:
+        return None
+    global _vox_lang_override_cache, _vox_lang_override_cache_at
+    now = time.time()
+    mapping = _vox_lang_override_cache
+    if (
+        mapping is None
+        or (now - _vox_lang_override_cache_at) > _VOX_LANG_OVERRIDE_CACHE_TTL_S
+    ):
+        try:
+            raw = await config_registry.get_persisted_value(
+                "VOX_LANGUAGE_OVERRIDES", "{}"
+            )
+            mapping = json.loads(raw) if raw else {}
+        except Exception as exc:
+            log_warning(f"[config] VOX_LANGUAGE_OVERRIDES parse failed: {exc}")
+            mapping = {}
+        if not isinstance(mapping, dict):
+            mapping = {}
+        _vox_lang_override_cache = mapping
+        _vox_lang_override_cache_at = now
+    entry = mapping.get(norm)
+    if not isinstance(entry, dict):
+        return None
+    engine = entry.get("engine")
+    if engine == "disabled":
+        return None
+    return entry
 
 
 async def switch_active_cortex_engine(name: str, use_hot_swap: bool = True):
@@ -696,143 +996,130 @@ async def switch_active_cortex_engine(name: str, use_hot_swap: bool = True):
             log_debug(f"[config] 🔓 Released Cortex switch lock for '{name}'")
 
 
-_log_chat_id: int | None = None  # cached log chat ID
-_log_chat_thread_id: int | None = None  # cached log chat thread ID
-_log_chat_interface: str | None = None  # cached log chat interface
+# The LogChat target is stored as a single canonical interface_path in the
+# `LOG_CHAT_ID` config key (e.g. "telegram_bot/-28475648/6"). The cache holds
+# that raw path; the interface name, chat id and thread id are derived from it.
+_log_chat_path: str | None = None  # cached log chat interface_path
+
+
+def _parse_log_chat_path(path: str | None) -> tuple[str | None, int | None, int | None]:
+    """Split a LogChat interface_path into (interface, chat_id, thread_id).
+
+    Returns (None, None, None) when the path is empty. chat_id/thread_id are
+    returned as int when numeric, otherwise None.
+    """
+    if not path:
+        return (None, None, None)
+
+    from core.interface_path_utils import extract_legacy_ids
+
+    parts = extract_legacy_ids(path)
+    interface = parts.get("interface") or None
+
+    def _to_int(value: str | None) -> int | None:
+        if value is None or value == "":
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    return (interface, _to_int(parts.get("chat_id")), _to_int(parts.get("thread_id")))
+
+
+def _load_log_chat_path() -> str | None:
+    """Load and cache the raw LogChat interface_path from config_registry."""
+    global _log_chat_path
+    if _log_chat_path is None:
+        try:
+            raw = config_registry.get_value("LOG_CHAT_ID", "")
+            _log_chat_path = raw if raw else None
+            log_debug(
+                f"[config] 📥 Loaded LOG_CHAT_ID (path) via config_registry: {_log_chat_path}"
+            )
+        except Exception as e:
+            log_error(f"[config] ❌ Error in _load_log_chat_path(): {repr(e)}")
+    return _log_chat_path
+
+
+def _on_log_chat_id_changed(new_value: object) -> None:
+    """Invalidate the cached path when LOG_CHAT_ID changes from any source.
+
+    The WebUI writes LOG_CHAT_ID directly via config_registry.set_value (the
+    generic exposed-var endpoint), bypassing set_log_chat_id_and_thread, so the
+    module-level cache must be refreshed on every change.
+    """
+    global _log_chat_path
+    _log_chat_path = str(new_value) if new_value else None
+
+
+try:
+    config_registry.add_listener("LOG_CHAT_ID", _on_log_chat_id_changed)
+except Exception as e:  # pragma: no cover - registry not ready
+    log_debug(f"[config] Could not register LOG_CHAT_ID listener: {repr(e)}")
 
 
 async def get_log_chat_id() -> int | None:
-    """Return the configured log chat ID, if any (via config_registry `LOG_CHAT_ID`)."""
-    global _log_chat_id
-    if _log_chat_id is None:
-        try:
-            raw = config_registry.get_value("LOG_CHAT_ID", "")
-            if raw is None or raw == "":
-                _log_chat_id = None
-            else:
-                try:
-                    _log_chat_id = int(raw)
-                except Exception:
-                    _log_chat_id = None
-            log_debug(
-                f"[config] 📥 Loaded LOG_CHAT_ID via config_registry: {_log_chat_id}"
-            )
-        except Exception as e:
-            log_error(f"[config] ❌ Error in get_log_chat_id(): {repr(e)}")
-    return _log_chat_id
+    """Return the configured log chat ID, derived from the `LOG_CHAT_ID` path."""
+    _, chat_id, _ = _parse_log_chat_path(_load_log_chat_path())
+    return chat_id
 
 
 async def get_log_chat_interface() -> str | None:
-    """Return the configured log chat interface, if any (via config_registry `LOG_CHAT_INTERFACE`)."""
-    global _log_chat_interface
-    if _log_chat_interface is None:
-        try:
-            raw = config_registry.get_value("LOG_CHAT_INTERFACE", "")
-            _log_chat_interface = raw if raw else None
-            log_debug(
-                f"[config] 📥 Loaded LOG_CHAT_INTERFACE via config_registry: {_log_chat_interface}"
-            )
-        except Exception as e:
-            log_error(f"[config] ❌ Error in get_log_chat_interface(): {repr(e)}")
-    return _log_chat_interface
-
-
-async def set_log_chat_id(chat_id: int) -> None:
-    """Persist and cache the log chat ID via `config_registry`."""
-    global _log_chat_id
-    _log_chat_id = chat_id
-    try:
-        await config_registry.set_value("LOG_CHAT_ID", str(chat_id))
-        log_debug(f"[config] 💾 Saved LOG_CHAT_ID via config_registry: {chat_id}")
-    except Exception as e:
-        log_error(f"[config] ❌ Error in set_log_chat_id(): {repr(e)}")
+    """Return the configured log chat interface, derived from the `LOG_CHAT_ID` path."""
+    interface, _, _ = _parse_log_chat_path(_load_log_chat_path())
+    return interface
 
 
 async def get_log_chat_thread_id() -> int | None:
-    """Return the configured log chat thread ID, if any (via config_registry `LOG_CHAT_THREAD_ID`)."""
-    global _log_chat_thread_id
-    if _log_chat_thread_id is None:
-        try:
-            raw = config_registry.get_value("LOG_CHAT_THREAD_ID", "")
-            if raw is None or raw == "":
-                _log_chat_thread_id = None
-            else:
-                try:
-                    _log_chat_thread_id = int(raw)
-                except Exception:
-                    _log_chat_thread_id = None
-            log_debug(
-                f"[config] 📥 Loaded LOG_CHAT_THREAD_ID via config_registry: {_log_chat_thread_id}"
-            )
-        except Exception as e:
-            log_error(f"[config] ❌ Error in get_log_chat_thread_id(): {repr(e)}")
-    return _log_chat_thread_id
+    """Return the configured log chat thread ID, derived from the `LOG_CHAT_ID` path."""
+    _, _, thread_id = _parse_log_chat_path(_load_log_chat_path())
+    return thread_id
+
+
+async def set_log_chat_id(chat_id: int) -> None:
+    """Persist and cache the log chat as a bare chat id (no interface/thread)."""
+    await set_log_chat_id_and_thread(chat_id)
 
 
 async def set_log_chat_id_and_thread(
     chat_id: int, thread_id: int | None = None, interface: str = "webui"
 ) -> None:
-    """Persist and cache the log chat ID, thread ID, and interface via config_registry."""
-    global _log_chat_id, _log_chat_thread_id, _log_chat_interface
-    _log_chat_id = chat_id
-    _log_chat_thread_id = thread_id
-    _log_chat_interface = interface
+    """Compose and persist the LogChat target as a single interface_path.
+
+    The interface, chat id and optional thread id are joined into one canonical
+    interface_path (e.g. "telegram_bot/-28475648/6") stored in `LOG_CHAT_ID`.
+    """
+    global _log_chat_path
+
+    from core.interface_path_utils import build_interface_path_from_legacy
+
+    path = build_interface_path_from_legacy(interface, chat_id, thread_id)
+    _log_chat_path = path
 
     try:
-        await config_registry.set_value("LOG_CHAT_INTERFACE", interface)
-        await config_registry.set_value("LOG_CHAT_ID", str(chat_id))
-        await config_registry.set_value(
-            "LOG_CHAT_THREAD_ID", str(thread_id) if thread_id is not None else ""
-        )
-        log_debug(
-            f"[config] 💾 Saved LOG_CHAT (id/thread/interface) via config_registry: {chat_id}, {thread_id}, {interface}"
-        )
+        await config_registry.set_value("LOG_CHAT_ID", path)
+        log_debug(f"[config] 💾 Saved LOG_CHAT_ID (path) via config_registry: {path}")
     except Exception as e:
         log_error(f"[config] ❌ Error in set_log_chat_id_and_thread(): {repr(e)}")
 
 
 def get_log_chat_id_sync() -> int | None:
-    """Synchronous helper to fetch cached log chat ID, loading from DB if needed."""
-    global _log_chat_id
-    if _log_chat_id is not None:
-        return _log_chat_id
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if loop and loop.is_running():
-        # Cannot perform blocking DB fetch; return None until explicitly loaded
-        return _log_chat_id
-    return asyncio.run(get_log_chat_id())
+    """Synchronous helper to fetch the cached log chat ID."""
+    _, chat_id, _ = _parse_log_chat_path(_load_log_chat_path())
+    return chat_id
 
 
 def get_log_chat_interface_sync() -> str | None:
-    """Synchronous helper to fetch cached log chat interface."""
-    global _log_chat_interface
-    if _log_chat_interface is not None:
-        return _log_chat_interface
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if loop and loop.is_running():
-        # Cannot perform blocking DB fetch; return None until explicitly loaded
-        return _log_chat_interface
-    return asyncio.run(get_log_chat_interface())
+    """Synchronous helper to fetch the cached log chat interface."""
+    interface, _, _ = _parse_log_chat_path(_load_log_chat_path())
+    return interface
 
 
 def get_log_chat_thread_id_sync() -> int | None:
-    """Synchronous helper to fetch cached log chat thread ID."""
-    global _log_chat_thread_id
-    if _log_chat_thread_id is not None:
-        return _log_chat_thread_id
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if loop and loop.is_running():
-        return _log_chat_thread_id
-    return asyncio.run(get_log_chat_thread_id())
+    """Synchronous helper to fetch the cached log chat thread ID."""
+    _, _, thread_id = _parse_log_chat_path(_load_log_chat_path())
+    return thread_id
 
 
 def list_available_llms():

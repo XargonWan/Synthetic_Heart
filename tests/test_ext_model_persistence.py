@@ -266,7 +266,7 @@ def test_handle_incoming_message_prefers_prompt_request_rendering(monkeypatch):
             Turn(role="assistant", content="old-assistant"),
         ],
         current_text="latest turn",
-        runtime_ctx=RuntimeContext(username="scarlet"),
+        runtime_ctx=RuntimeContext(username="alice"),
         mode="chat",
     )
 
@@ -302,7 +302,7 @@ def test_handle_incoming_message_forwards_image_parts_with_selected_model() -> N
     req = PromptRequest(
         system_instruction="SYSTEM RULES",
         current_text="",
-        runtime_ctx=RuntimeContext(username="scarlet"),
+        runtime_ctx=RuntimeContext(username="alice"),
         attachments=[Attachment(mime_type="image/png", data="AAAA")],
         mode="chat",
     )
@@ -327,7 +327,7 @@ def test_handle_incoming_message_downgrades_pdf_to_document_note() -> None:
     req = PromptRequest(
         system_instruction="SYSTEM RULES",
         current_text="Can you read this manual?",
-        runtime_ctx=RuntimeContext(username="scarlet"),
+        runtime_ctx=RuntimeContext(username="alice"),
         attachments=[
             Attachment(
                 mime_type="application/pdf",
@@ -363,7 +363,7 @@ def test_handle_incoming_message_forwards_scanned_pdf_page_images() -> None:
     req = PromptRequest(
         system_instruction="SYSTEM RULES",
         current_text="Can you read this scanned manual?",
-        runtime_ctx=RuntimeContext(username="scarlet"),
+        runtime_ctx=RuntimeContext(username="alice"),
         attachments=[
             Attachment(
                 mime_type="application/pdf",
@@ -409,6 +409,7 @@ async def test_run_auto_probe_uses_300_second_default(monkeypatch):
         status="success",
         capabilities={"cortex": True},
         models=["gemini-3-flash-preview"],
+        models_metadata=[],
         ping_echo="pong",
         error_message="",
     )
@@ -434,6 +435,7 @@ async def test_run_auto_probe_uses_300_second_default(monkeypatch):
         status="success",
         capabilities={"cortex": True},
         models=["gemini-3-flash-preview"],
+        models_metadata=[],
     )
 
 

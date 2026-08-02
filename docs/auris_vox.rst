@@ -246,6 +246,13 @@ Configuration (all WebUI-configurable):
    * - ``ACTIVE_VOX_ENGINE``
      - ``kitten``
      - Name of the active TTS engine.  Set to ``disabled`` to disable the Vox subsystem.
+   * - ``VOX_LANGUAGE_OVERRIDES``
+     - ``{}``
+     - JSON map of ISO-639-1 language code → ``{"engine", "model", "voice"}``
+       used to route TTS to a different engine / model / voice per detected
+       language.  Languages not present in the map use ``ACTIVE_VOX_ENGINE``
+       (and its default model / ``<ENGINE>_VOICE``).  An entry whose ``engine``
+       is ``"disabled"`` is treated as "use the default engine".
    * - ``VOX_ENGINE_SETTINGS``
      - ``{}``
      - JSON string forwarded to the engine at load time.
@@ -284,6 +291,40 @@ wish to supply short example clips.
 
 These helpers are used internally by ``res/synth_webui/js/main.js`` to
 populate the Kitten voice selector and play sample audio.
+
+Per-language engine overrides
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+By default every message is spoken with the single ``ACTIVE_VOX_ENGINE`` (and
+its configured model / ``<ENGINE>_VOICE``).  To use a *different* engine,
+model, or voice depending on the language of the text, set the
+``VOX_LANGUAGE_OVERRIDES`` config key to a JSON map:
+
+.. code-block:: json
+
+   {
+     "it": {"engine": "fish-audio", "model": "s2.1-pro", "voice": "maria"},
+     "en": {"engine": "kitten",     "model": "",         "voice": "luna"}
+   }
+
+* The map key is an ISO-639-1 language code (``it``, ``en``, ``fr`` …).  Region
+  variants are normalised, so ``it-it`` matches the ``"it"`` entry.
+* ``engine`` is required and selects the TTS engine for that language.  Use
+  ``"disabled"`` to opt a language back out to the default engine.
+* ``model`` and ``voice`` are optional.  When set they are forwarded as
+  explicit per-call values, so they take priority over the engine's default
+  model (``VOX_DEFAULT_MODEL``) and the ``<ENGINE>_VOICE`` config key.  Leave
+  them as empty strings to keep the engine's defaults.
+* Language is detected from the cleaned reply text via ``lingua`` inside
+  ``VoxPlugin.speak()``; the override is applied only when no explicit
+  per-call ``engine_name`` was supplied.
+
+The **Engines** tab exposes this through an *Add language override* editor
+(both the classic WebUI and the Vue frontend): pick a language from the full
+ISO-639-1 list, then choose engine → model → voice exactly as for the default
+engine.  The selection is persisted to ``VOX_LANGUAGE_OVERRIDES`` via
+``POST /api/config``.  A read-only ``GET /api/languages`` endpoint serves the
+language catalogue used to populate the combo box.
 
 Public API:
 
@@ -365,7 +406,13 @@ Available Vox engines
      - Notes
    * - ``http``
      - ``vox_engines/http.py``
-     - Legacy built-in HTTP TTS engine. Supports ``TTS_ENDPOINTS`` compatibility and is intended for backward-compatible deployments only. For new external HTTP TTS integrations, prefer adding a custom external endpoint and mapping it to ``vox``.
+     - Generic HTTP TTS engine. Posts to one or more external TTS servers
+       with failover, in either the legacy ``{text, voice_wav}`` payload
+       style or the reference-id style used by
+       Fish Audio's ``/v1/tts``. Fully configurable from the WebUI Engines
+       tab (Vox → http box) — see the key table below. The legacy
+       ``TTS_ENDPOINTS`` / ``TTS_TIMEOUT_SECONDS`` keys are still honoured
+       as fallbacks.
    * - ``kitten``
      - ``vox_engines/kitten.py``
      - Neural KittenTTS engine; requires the ``kittentts`` package or uses
@@ -375,6 +422,68 @@ Available Vox engines
        pydub``) for audio output to work.  Without them the engine will fall
        back to text and log an informative error.  Produces higher-quality
        audio than the legacy system-voice implementation.
+
+HTTP engine configuration
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+All keys are editable in the WebUI: Engines tab → Vox → select ``http`` →
+expand the *http* box → **Configuration**.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 15 55
+
+   * - Key
+     - Default
+     - Purpose
+   * - ``HTTP_TTS_ENDPOINTS``
+     - *(empty)*
+     - Comma-separated endpoint URLs, tried in order (failover). Fish
+       Audio: ``https://api.fish.audio/v1/tts``. Falls back to the legacy
+       ``TTS_ENDPOINTS`` key when empty.
+   * - ``HTTP_TTS_API_KEY``
+     - *(empty)*
+     - Sent as ``Authorization: Bearer <key>``. Required by Fish Audio.
+   * - ``HTTP_TTS_MODEL``
+     - *(empty)*
+     - Sent as a ``model`` HTTP header when set (Fish Audio tiers:
+       ``s2.1-pro-free``, ``s2.1-pro``, ``s1``).
+   * - ``HTTP_TTS_REFERENCE_ID``
+     - *(empty)*
+     - Voice ``reference_id`` (Fish Audio cloned/library voice). Setting it
+       switches the payload to the Fish-style
+       ``{text, reference_id, format}`` schema; empty keeps the legacy
+       ``{text, voice_wav, use_emo_text}`` schema.
+   * - ``HTTP_TTS_FORMAT``
+     - ``pcm``
+     - Audio format returned by the server (``pcm`` or ``wav``). Use
+       ``wav`` for Fish Audio. Also sent as the payload ``format`` field in
+       reference-id mode.
+   * - ``HTTP_TTS_SAMPLE_RATE``
+     - ``22050``
+     - Sample rate used to wrap raw PCM responses into WAV (Fish Audio pcm
+       is 44100 Hz). Ignored for ``wav``.
+   * - ``HTTP_TTS_VOICE_WAV``
+     - *(empty)*
+     - Server-side reference-voice WAV path for legacy payload mode;
+       omitted from the payload when empty.
+   * - ``HTTP_TTS_EXTRA_HEADERS``
+     - ``{}``
+     - JSON object merged into the request headers.
+   * - ``HTTP_TTS_EXTRA_PARAMS``
+     - ``{}``
+     - JSON object merged into the request payload (e.g. Fish Audio
+       prosody controls such as ``temperature`` / ``top_p``).
+   * - ``HTTP_TTS_TIMEOUT_SECONDS``
+     - ``0``
+     - Per-request timeout; ``0`` falls back to the legacy
+       ``TTS_TIMEOUT_SECONDS`` key (default 300).
+
+Example — Fish Audio ``s2.1-pro-free``: set the endpoint to
+``https://api.fish.audio/v1/tts``, paste your API key, set the model to
+``s2.1-pro-free``, set the reference ID to your cloned/library voice id and
+the format to ``wav``, then select ``http`` as the active Vox engine.
+
 Lip-sync Integration
 ---------------------
 

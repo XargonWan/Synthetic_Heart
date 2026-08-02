@@ -365,7 +365,35 @@ def extract_json_from_text(
     sanitized = _remove_control_chars(text)
     stripped_noise = _strip_stacktraces_and_addresses(text)
 
+    # Pre-parse repairs: fix LLM patterns that break standard JSON parsing.
+    # Pass 0 normalizes curly/smart quotes so a mistaken string closer is
+    # recognized; Pass 1 fixes literal \n escape sequences outside a string;
+    # Pass 2 repairs apostrophe-closed sibling-key runs (both escaped-quote
+    # and single-quoted Python-dict style); Pass 3 re-escapes unescaped
+    # speech-marker quotes inside text-heavy fields. All are cheap string
+    # scans — only the repaired variant is inserted when it differs from
+    # the cleaned original.
+    try:
+        from core.json_utils import (
+            _normalize_smart_quotes as _repair_p0,
+            _repair_premature_string_close as _repair_p1,
+            _repair_apostrophe_closed_escaped_tail as _repair_p2,
+            _repair_apostrophe_closed_single_quoted_tail as _repair_p2b,
+            _repair_json_string_speech_quotes as _repair_p3,
+        )
+
+        _pre_repaired = _repair_p0(cleaned_text)
+        _pre_repaired = _repair_p1(_pre_repaired)
+        _pre_repaired = _repair_p2(_pre_repaired)
+        _pre_repaired = _repair_p2b(_pre_repaired)
+        _pre_repaired = _repair_p3(_pre_repaired)
+    except Exception:
+        _pre_repaired = cleaned_text
+
     texts_to_try: list[str] = []
+    if _pre_repaired and _pre_repaired != cleaned_text:
+        texts_to_try.append(_pre_repaired)
+
     for candidate in (
         cleaned_text,
         stripped_noise.strip(),
@@ -417,10 +445,15 @@ def extract_json_from_text(
                 # Calculate total extra characters
                 extra_chars = len(prefix) + len(suffix)
 
-                # Skip if prefix looks like explanatory text (common LLM patterns)
+                # Detect explanatory prefixes (common LLM patterns like a bare
+                # "JSON" token or "Here is the JSON:" before the object).  These
+                # are NOT real extra content, so their length must not penalise
+                # the candidate — otherwise the full top-level object (preceded
+                # by e.g. "JSON") loses to a smaller *nested* sub-object that
+                # happens to have no explanatory prefix, silently dropping keys.
                 if (
                     prefix and len(prefix.split()) <= 3
-                ):  # Skip prefixes like "json", "here is", etc.
+                ):  # Prefixes like "json", "here is", etc.
                     prefix_lower = prefix.lower().strip()
                     if prefix_lower in [
                         "json",
@@ -433,9 +466,11 @@ def extract_json_from_text(
                         ("here is", "the json", "json:", "output:")
                     ):
                         log_debug(
-                            f"[extract_json_from_text] Skipping JSON with explanatory prefix: '{prefix}'"
+                            f"[extract_json_from_text] Ignoring explanatory prefix '{prefix}' when scoring candidate"
                         )
-                        continue
+                        # Discount the explanatory prefix so this candidate is
+                        # scored purely on its suffix (real trailing content).
+                        extra_chars = len(suffix)
 
                 # Prefer clean JSON (no extra text)
                 if extra_chars == 0:

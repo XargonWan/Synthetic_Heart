@@ -56,7 +56,6 @@
                     <div id="cortex-login-warning" class="meta" style="display:none; margin-top:8px; max-width:560px;">
                         <div style="font-weight:600;">If the login button is not working please:</div>
                         <ul style="margin:6px 0 0 18px;">
-                            <li>browse <span id="cortex-login-warning-selkies">https://{host}:{port}</span></li>
                             <li>open the "Synth Browser" from the application menu</li>
                             <li>browse to: <span id="cortex-login-warning-url">{login_url}</span></li>
                             <li>login to the selected service</li>
@@ -95,10 +94,19 @@
                     <!-- model picker shown when the active engine/endpoint exposes multiple models -->
                     <select id="vox-model-select" style="min-width:200px; display:none;" title="Select the model used by the active Vox engine">
                     </select>
+                    <!-- generic voice selector shown for any (non-Kitten) engine that exposes speakers -->
+                    <select id="vox-voice-select" style="min-width:200px; display:none;" title="Select the voice used by the active Vox engine">
+                    </select>
+                    <button id="vox-voice-play-btn" title="Preview voice" style="display:none; padding:8px 12px; font-weight:600;">▶</button>
+                    <!-- downloaded-model selector shown when the Kitten engine is active -->
+                    <select id="kitten-model-select" title="Kitten TTS — Model" style="min-width:200px; display:none;">
+                    </select>
                     <!-- speaker selector shown when a Kitten model is active -->
                     <select id="kitten-speaker-select" title="Kitten TTS — Speaker voice" style="min-width:160px; display:none;">
                     </select>
                     <button id="kitten-play-btn" title="Play sample" style="display:none; padding:8px 12px; font-weight:600;">▶</button>
+                    <!-- voice manager shown for engines that support adding voices by URL (e.g. Fish Audio) -->
+                    <button id="vox-manage-voices-btn" class="pill secondary" title="Add voices by URL and manage the voice list" style="display:none; padding:8px 14px; font-weight:600;">🎙 Manage Voices</button>
                     <button id="vox-manage-models-btn" class="pill secondary" title="Download, update or remove TTS models" style="padding:8px 14px; font-weight:600;">🗂 Manage Models</button>
                     <div id="vox-engine-info" class="meta" style="min-width:260px; display:none;">
                         <div style="font-weight:600;" id="vox-engine-label">—</div>
@@ -106,6 +114,43 @@
                     </div>
                 </div>
                 <div class="components-list" id="components-vox-list"><div class="meta">Loading…</div></div>
+
+                <!-- Per-language engine overrides -->
+                <div style="margin-top:20px; padding-top:16px; border-top:1px dashed var(--border,#444);">
+                    <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
+                        <h4 style="margin:0; font-size:0.95rem; color:var(--text);">Language overrides</h4>
+                        <button id="vox-add-lang-override-btn" class="pill secondary" style="padding:6px 12px; font-weight:600;">＋ Add language override</button>
+                    </div>
+                    <div class="meta" style="margin-bottom:10px;">Route TTS to a different engine / model / voice per detected language. Languages not listed use the default engine above.</div>
+                    <div id="vox-lang-overrides-list" class="components-list"><div class="meta">No overrides configured.</div></div>
+
+                    <!-- Editor (hidden until "Add" / edit) -->
+                    <div id="vox-lang-override-editor" style="display:none; margin-top:12px; padding:14px; border:1px solid var(--border,#444); border-radius:8px; background:var(--background,#1a1a22);">
+                        <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end;">
+                            <div style="display:flex; flex-direction:column; gap:3px;">
+                                <label style="font-size:0.82rem; font-weight:600;">Language</label>
+                                <select id="vox-lang-override-lang" style="min-width:220px;"></select>
+                            </div>
+                            <div style="display:flex; flex-direction:column; gap:3px;">
+                                <label style="font-size:0.82rem; font-weight:600;">Engine</label>
+                                <select id="vox-lang-override-engine" style="min-width:200px;"></select>
+                            </div>
+                            <div style="display:flex; flex-direction:column; gap:3px;">
+                                <label style="font-size:0.82rem; font-weight:600;">Model</label>
+                                <select id="vox-lang-override-model" style="min-width:200px;"></select>
+                            </div>
+                            <div style="display:flex; flex-direction:column; gap:3px;">
+                                <label style="font-size:0.82rem; font-weight:600;">Voice</label>
+                                <select id="vox-lang-override-voice" style="min-width:200px;"></select>
+                            </div>
+                        </div>
+                        <div style="margin-top:12px; display:flex; gap:10px;">
+                            <button id="vox-lang-override-save" class="pill primary" style="padding:7px 16px; font-weight:600;">Save</button>
+                            <button id="vox-lang-override-cancel" class="pill secondary" style="padding:7px 16px; font-weight:600;">Cancel</button>
+                            <button id="vox-lang-override-delete" class="pill danger" style="display:none; padding:7px 16px; font-weight:600;">Delete</button>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <!-- ── Auris ───────────────────────────────────────────────────── -->
@@ -118,8 +163,8 @@
                     <!-- model picker shown when the active engine/endpoint exposes multiple models -->
                     <select id="auris-model-select" style="min-width:200px; display:none;" title="Select the model used by the active Auris engine">
                     </select>
-                    <!-- Vosk model picker populated from MODEL_MANAGER catalog (shows download status) -->
-                    <select id="auris-vosk-language" style="min-width:240px; display:none;">
+                    <!-- Vosk active-model selector: lists ALL catalog models (downloaded or not) -->
+                    <select id="auris-vosk-model-select" style="min-width:240px; display:none;" title="Select the active Vosk model (downloads on select if missing)">
                     </select>
                     <button id="auris-manage-models-btn" class="pill secondary" title="Download, update or remove STT models" style="padding:8px 14px; font-weight:600;">🗂 Manage Models</button>
                     <div id="auris-engine-info" class="meta" style="min-width:260px; display:none;">
@@ -235,7 +280,7 @@
             <!-- ── Scope Overrides ──────────────────────────────────────── -->
             <div style="margin-top:28px; padding-top:20px; border-top:1px solid var(--border,#444);">
                 <h3 style="margin:0 0 6px; font-size:1rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em;">Scope Overrides</h3>
-                <div class="meta" style="margin-bottom:10px;">Override the active engine for specific contexts (Grillo, Trainer, Live). "Default" uses the global Cortex selection.</div>
+                <div class="meta" style="margin-bottom:10px;">Override the engine <em>and</em> model for specific contexts (Grillo, Trainer, Agent, Live). Each selector is a single <strong>engine / model</strong> combo — e.g. <code>harmonyai / qwen-3.5b</code>. Pick a bare engine to use its default model, or "Default" to inherit the global Cortex selection.</div>
                 <div id="cortex-scopes" style="display:flex; gap:16px; align-items:center; flex-wrap:wrap;">
                     <!-- scope override selectors (Grillo / Trainer / Live) populated by JS -->
                 </div>
@@ -245,7 +290,7 @@
     </div>
 
     <!-- ── Add / Edit modal (2-step wizard) ───────────────────────────── -->
-    <div id="ext-ep-modal" style="display:none; position:fixed; inset:0; z-index:9000; background:rgba(0,0,0,0.6); align-items:center; justify-content:center;">
+    <div id="ext-ep-modal" style="display:none; position:fixed; inset:0; z-index:60000; background:rgba(0,0,0,0.6); align-items:center; justify-content:center;">
         <div style="background:var(--bg-card,#1a1a2e); border:1px solid var(--border,#444); border-radius:14px; padding:28px 32px; min-width:440px; max-width:640px; width:93%; max-height:92vh; overflow-y:auto; box-shadow:0 8px 32px rgba(0,0,0,0.5);">
             <h3 id="ext-ep-modal-title" style="margin:0 0 6px;">Add External Endpoint</h3>
             <div id="ext-ep-modal-error" style="display:none; margin-bottom:14px; padding:10px 14px; background:rgba(192,57,43,0.15); border:1px solid var(--danger,#c0392b); border-radius:8px; color:var(--danger,#c0392b); font-size:0.9rem;"></div>
@@ -297,6 +342,9 @@
                         </div>
                     </div>
 
+                    <!-- Provider-specific fields (from the preset's extra_fields) -->
+                    <div id="ext-ep-extra-fields"></div>
+
                     <!-- Name + Label — collapsible "Identity" section -->
                     <details id="ext-ep-identity-details" style="margin-bottom:14px;">
                         <summary style="cursor:pointer; font-weight:600; font-size:0.95rem; margin-bottom:8px; user-select:none;">Identity <span style="color:var(--muted); font-weight:400; font-size:0.85rem;">(name &amp; display label)</span></summary>
@@ -310,8 +358,8 @@
                         </div>
                     </details>
 
-                    <!-- Capabilities — collapsible override -->
-                    <details style="margin-bottom:14px;">
+                    <!-- Capabilities — collapsible override (edit mode only; on add they are auto-probed) -->
+                    <details id="ext-ep-capabilities-details" style="margin-bottom:14px;">
                         <summary style="cursor:pointer; font-weight:600; font-size:0.95rem; margin-bottom:8px; user-select:none;">Capabilities <span style="color:var(--muted); font-weight:400; font-size:0.85rem;">(which subsystems can use this endpoint)</span></summary>
                         <div id="ext-ep-form-capabilities" style="display:flex; gap:20px; flex-wrap:wrap; padding-top:8px;">
                             <label style="display:flex; align-items:center; gap:6px; font-size:0.9rem; cursor:pointer;">
@@ -332,22 +380,11 @@
                         </div>
                     </details>
 
-                    <!-- Advanced — protocol -->
-                    <details style="margin-bottom:22px;">
-                        <summary style="cursor:pointer; font-weight:600; font-size:0.95rem; margin-bottom:8px; user-select:none;">Advanced</summary>
-                        <div style="padding-top:8px;">
-                            <label style="display:block; margin-bottom:4px; font-weight:600;">Protocol</label>
-                            <select id="ext-ep-form-protocol"
-                                style="width:100%; padding:9px 12px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:8px;">
-                                <option value="openai">OpenAI-compatible (Ollama, OpenRouter, …)</option>
-                                <option value="gemini">Google Gemini</option>
-                                <option value="anthropic">Anthropic Claude</option>
-                                <option value="custom">Custom</option>
-                            </select>
-                        </div>
-                    </details>
+                    <!-- Protocol is fixed by the selected provider and must not be edited by the user. -->
+                    <input type="hidden" id="ext-ep-form-protocol" value="openai">
 
-                    <div style="display:flex; gap:10px; justify-content:flex-end;">
+                    <div style="display:flex; gap:10px; align-items:center; justify-content:flex-end;">
+                        <span id="ext-ep-modal-status" class="meta" style="flex:1; font-size:0.85rem; color:var(--muted);"></span>
                         <button type="button" id="ext-ep-modal-cancel" class="pill secondary">Cancel</button>
                         <button type="submit" id="ext-ep-modal-save" class="pill">Save</button>
                     </div>
@@ -358,7 +395,7 @@
 </section>
 
 <!-- ── Manage Models modal (shared by Vox / Auris / Iris) ──────────────── -->
-<div id="model-manager-modal" style="display:none; position:fixed; inset:0; z-index:9000; background:rgba(0,0,0,0.6); align-items:center; justify-content:center;">
+<div id="model-manager-modal" style="display:none; position:fixed; inset:0; z-index:60000; background:rgba(0,0,0,0.6); align-items:center; justify-content:center;">
     <div style="background:var(--bg-card,#1a1a2e); border:1px solid var(--border,#444); border-radius:14px; padding:24px 28px; min-width:460px; max-width:720px; width:93%; max-height:88vh; overflow-y:auto; box-shadow:0 8px 32px rgba(0,0,0,0.5);">
         <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
             <h3 id="model-manager-title" style="margin:0; flex:1;">Manage Models</h3>
@@ -371,6 +408,39 @@
         </div>
     </div>
 </div>
+
+<!-- ── Manage Voices modal (Vox engines that support adding voices by URL) ── -->
+<div id="voice-manager-modal" style="display:none; position:fixed; inset:0; z-index:60000; background:rgba(0,0,0,0.6); align-items:center; justify-content:center;">
+    <div style="background:var(--bg-card,#1a1a2e); border:1px solid var(--border,#444); border-radius:14px; padding:24px 28px; min-width:460px; max-width:720px; width:93%; max-height:88vh; overflow-y:auto; box-shadow:0 8px 32px rgba(0,0,0,0.5);">
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
+            <h3 id="voice-manager-title" style="margin:0; flex:1;">Manage Voices</h3>
+            <button type="button" id="voice-manager-close" class="pill secondary" style="padding:5px 12px; font-size:0.85rem;">Close</button>
+        </div>
+        <div class="meta" id="voice-manager-subtitle" style="margin-bottom:16px; color:var(--muted);">Paste a voice URL to add it to the list. Manually-added voices appear first in the picker.</div>
+        <div style="display:flex; gap:10px; margin-bottom:16px; flex-wrap:wrap;">
+            <input type="text" id="voice-manager-url" placeholder="https://fish.audio/app/text-to-speech/?modelId=…" style="flex:1; min-width:260px; padding:9px 12px; border-radius:8px; border:1px solid var(--border,#444); background:var(--bg,#101018); color:inherit;" />
+            <button type="button" id="voice-manager-add-btn" class="pill" style="padding:8px 16px; font-weight:600;">Add Voice</button>
+        </div>
+        <div id="voice-manager-error" style="display:none; margin-bottom:14px; padding:10px 14px; background:rgba(192,57,43,0.15); border:1px solid var(--danger,#c0392b); border-radius:8px; color:var(--danger,#c0392b); font-size:0.9rem;"></div>
+        <div id="voice-manager-list" style="display:flex; flex-direction:column; gap:10px;">
+            <div class="meta">Loading…</div>
+        </div>
+    </div>
+</div>
+
+<!-- ── Voice row template (cloned by JS in the Manage Voices modal) ────── -->
+<template id="voice-manager-row-tpl">
+    <div class="vm-row" style="border:1px solid var(--border,#444); border-radius:10px; padding:12px 14px; background:var(--bg-card,#1a1a2e); display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+        <div style="flex:1; min-width:200px;">
+            <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                <span class="vm-name" style="font-weight:700;"></span>
+                <span class="vm-lang badge" style="font-size:0.7rem; padding:2px 8px; border-radius:12px; background:var(--primary,#7b61ff); color:#fff;"></span>
+            </div>
+            <div class="vm-id" style="font-size:0.78rem; color:var(--muted); margin-top:3px;"></div>
+        </div>
+        <button class="vm-delete-btn pill" style="padding:5px 12px; font-size:0.85rem; background:var(--danger,#c0392b); color:#fff;">Remove</button>
+    </div>
+</template>
 
 <!-- ── Model row template (cloned by JS in the Manage Models modal) ────── -->
 <template id="model-manager-row-tpl">
@@ -409,11 +479,15 @@
 
         <div style="color:var(--muted); font-size:0.85rem; margin-bottom:10px;" class="ext-ep-url"></div>
 
-        <!-- Capabilities + subsystem mapping -->
-        <div style="display:flex; gap:18px; flex-wrap:wrap; margin-bottom:12px;">
+        <!-- Capabilities (auto-detected) + Overrides (manual) -->
+        <div style="margin-bottom:12px;">
+            <div style="margin-bottom:12px;">
+                <div style="font-size:0.8rem; text-transform:uppercase; letter-spacing:0.06em; color:var(--muted); margin-bottom:6px;">Capabilities <span style="text-transform:none; letter-spacing:0; font-size:0.75rem;">(auto-detected)</span></div>
+                <div class="ext-ep-capabilities" style="display:flex; gap:8px; flex-wrap:wrap;"></div>
+            </div>
             <div>
-                <div style="font-size:0.8rem; text-transform:uppercase; letter-spacing:0.06em; color:var(--muted); margin-bottom:6px;">Subsystem Mapping</div>
-                <div class="ext-ep-subsystems" style="display:flex; gap:8px; flex-wrap:wrap;"></div>
+                <div style="font-size:0.8rem; text-transform:uppercase; letter-spacing:0.06em; color:var(--muted); margin-bottom:6px;">Overrides <span style="text-transform:none; letter-spacing:0; font-size:0.75rem;">(force a subsystem on)</span></div>
+                <div class="ext-ep-overrides" style="display:flex; gap:16px; flex-wrap:wrap;"></div>
             </div>
         </div>
 

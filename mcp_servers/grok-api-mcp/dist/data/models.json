@@ -1,0 +1,127 @@
+{
+  "models": [
+    {
+      "id": "grok-4-1-fast-reasoning",
+      "name": "Grok 4.1 Fast Reasoning",
+      "description": "Optimized for agentic tool calling with reasoning. Available in xAI Enterprise API.",
+      "contextLength": 2000000,
+      "capabilities": ["chat", "function-calling", "reasoning", "agentic"],
+      "knowledgeCutoff": "November 2024",
+      "pricing": { "input": 0.20, "output": 0.50 }
+    },
+    {
+      "id": "grok-4-1-fast-non-reasoning",
+      "name": "Grok 4.1 Fast Non-Reasoning",
+      "description": "Fast variant without extended reasoning, optimized for speed and high throughput.",
+      "contextLength": 2000000,
+      "capabilities": ["chat", "function-calling"],
+      "knowledgeCutoff": "November 2024",
+      "pricing": { "input": 0.20, "output": 0.50 }
+    },
+    {
+      "id": "grok-code-fast-1",
+      "name": "Grok Code Fast 1",
+      "description": "Lightweight agentic model optimized for coding tasks. Designed to excel as a pair-programmer in coding tools.",
+      "contextLength": 256000,
+      "capabilities": ["chat", "code-generation", "function-calling"],
+      "knowledgeCutoff": "November 2024",
+      "pricing": { "input": 0.20, "output": 1.50 }
+    },
+    {
+      "id": "grok-4-fast-reasoning",
+      "name": "Grok 4 Fast Reasoning",
+      "description": "Fast variant with reasoning capabilities enabled.",
+      "contextLength": 2000000,
+      "capabilities": ["chat", "function-calling", "reasoning"],
+      "knowledgeCutoff": "November 2024",
+      "pricing": { "input": 0.20, "output": 0.50 }
+    },
+    {
+      "id": "grok-4-fast-non-reasoning",
+      "name": "Grok 4 Fast Non-Reasoning",
+      "description": "Fast variant without extended reasoning for high throughput simple tasks.",
+      "contextLength": 2000000,
+      "capabilities": ["chat", "function-calling"],
+      "knowledgeCutoff": "November 2024",
+      "pricing": { "input": 0.20, "output": 0.50 }
+    },
+    {
+      "id": "grok-4-0709",
+      "name": "Grok 4 (July 2024 Release)",
+      "description": "Specific dated release of Grok 4.",
+      "contextLength": 256000,
+      "capabilities": ["chat", "function-calling", "reasoning", "image-understanding"],
+      "knowledgeCutoff": "November 2024",
+      "pricing": { "input": 3.00, "output": 15.00 }
+    },
+    {
+      "id": "grok-3-mini",
+      "name": "Grok 3 Mini",
+      "description": "Smaller, faster variant of Grok 3 for simpler tasks.",
+      "contextLength": 131072,
+      "capabilities": ["chat", "function-calling"],
+      "knowledgeCutoff": "November 2024",
+      "pricing": { "input": 0.30, "output": 0.50 }
+    },
+    {
+      "id": "grok-3",
+      "name": "Grok 3",
+      "description": "Previous generation flagship model. Supports presencePenalty, frequencyPenalty, and stop parameters.",
+      "contextLength": 131072,
+      "capabilities": ["chat", "function-calling"],
+      "knowledgeCutoff": "November 2024",
+      "pricing": { "input": 3.00, "output": 15.00 }
+    },
+    {
+      "id": "grok-2-vision-1212",
+      "name": "Grok 2 Vision",
+      "description": "Vision-capable model for image understanding tasks.",
+      "contextLength": 32768,
+      "capabilities": ["chat", "image-understanding"],
+      "knowledgeCutoff": "November 2024",
+      "pricing": { "input": 2.00, "output": 10.00 }
+    },
+    {
+      "id": "grok-imagine-image",
+      "name": "Grok Imagine Image",
+      "description": "Image generation model for creating images from text prompts.",
+      "contextLength": null,
+      "capabilities": ["image-generation"],
+      "pricing": { "perImage": 0.02 }
+    },
+    {
+      "id": "grok-2-image-1212",
+      "name": "Grok 2 Image",
+      "description": "Previous generation image generation model.",
+      "contextLength": null,
+      "capabilities": ["image-generation"],
+      "pricing": { "perImage": 0.07 }
+    },
+    {
+      "id": "grok-imagine-video",
+      "name": "Grok Imagine Video",
+      "description": "Latest video-audio generation model. Supports 10-second videos at 720p with native audio, image-to-video, text-to-video, restyling, and motion control.",
+      "contextLength": null,
+      "capabilities": ["video-generation", "audio-generation", "image-to-video"],
+      "pricing": { "perSecond": 0.05 }
+    }
+  ],
+  "aliases": {
+    "description": "Model aliases help with automatic migration",
+    "formats": [
+      {"pattern": "<modelname>", "description": "Latest stable version"},
+      {"pattern": "<modelname>-latest", "description": "Latest version for newest features"},
+      {"pattern": "<modelname>-<date>", "description": "Specific model release"}
+    ]
+  },
+  "recommendedModels": {
+    "complexReasoning": "grok-4-0709",
+    "balanced": "grok-4-fast-reasoning",
+    "highThroughput": "grok-4-1-fast-non-reasoning",
+    "coding": "grok-code-fast-1",
+    "agentic": "grok-4-1-fast-reasoning",
+    "imageGeneration": "grok-imagine-image",
+    "videoGeneration": "grok-imagine-video",
+    "vision": "grok-2-vision-1212"
+  }
+}

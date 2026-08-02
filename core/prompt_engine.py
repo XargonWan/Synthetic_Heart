@@ -6,6 +6,7 @@ import random
 import re
 import time as time_module
 
+from core.beat_utils import is_outbound_beat
 from core.db import _get_db_type, get_conn_ctx
 from core.synth_tagging import extract_tags, expand_tags
 from core.logging_utils import log_debug, log_info, log_warning, log_error
@@ -82,17 +83,6 @@ _ATTACHMENT_TEXT_EXTENSIONS = (
 
 _LEGACY_BUILD_JSON_PROMPT_WARNED = False
 
-# Chat history limit
-CHAT_HISTORY_LIMIT = config_registry.get_var(
-    "CHAT_HISTORY",
-    10,
-    label="Chat History Length",
-    description="Number of recent messages to include in chat history context.",
-    group="core",
-    component="conversation",
-    value_type=int,
-)
-
 # How many recent messages to include in the explicit current chat recap
 CHAT_RECAP_LAST_N = config_registry.get_var(
     "CHAT_RECAP_LAST_N",
@@ -120,6 +110,16 @@ INCLUDE_LOCAL_TIME_IN_PROMPTS = config_registry.get_var(
     True,
     label="Include local time in prompts",
     description="Whether to add authoritative local date, time, hour, and time-of-day fields to prompt payloads.",
+    group="core",
+    component="prompt_engine",
+    value_type=bool,
+)
+
+USE_PERSONA_IN_SYSTEM_PROMPTS = config_registry.get_var(
+    "USE_PERSONA_IN_SYSTEM_PROMPTS",
+    True,
+    label="Use Persona in System Prompts",
+    description="Whether to prepend the persona/identity template in instructions.",
     group="core",
     component="prompt_engine",
     value_type=bool,
@@ -500,6 +500,15 @@ def _build_context_summary(
     if persona_preferences:
         parts.append("[Persona background]\n" + persona_preferences)
 
+    self_growth = str(context_section.get("self_growth") or "").strip()
+    if self_growth:
+        parts.append(
+            "[Self-growth]\n"
+            "The following is your evolving self-growth reflection: how you have "
+            "grown and who you are becoming over time. Treat it as part of your "
+            "current sense of self.\n" + self_growth
+        )
+
     # Grillo internal beats skip cross-chat history and participants
     if not is_grillo_internal:
         history_recent = _sanitize_context_entries(
@@ -508,6 +517,12 @@ def _build_context_summary(
         )
         if history_recent:
             parts.append("[Recent context from other conversations]")
+            parts.append(
+                "- NOTE: these messages come from OTHER chats you take part in. "
+                "The people named here might NOT be participants in the current conversation. "
+                "Do not name-drop them to the current interlocutor or assume they are known; "
+                "only reference them if the current user brings them up first."
+            )
             for line in history_recent:
                 parts.append(f"- {line}")
 
@@ -605,7 +620,23 @@ def _history_to_turns(
     # "self" is the canonical sender_name for the AI in history format
     all_synth_names = synth_names | {"self"}
 
-    turns: list[Turn] = []
+    # A peer SyntH's messages land in this bot's own history (see
+    # peer_synths.rst) with their own sender_name, which never matches this
+    # bot's own synth_names -- without this, they'd silently fall into the
+    # "user" bucket below with no way to tell them apart from the human. Role
+    # still ends up "user" for peers (no third role in the chat protocol), but
+    # each turn also carries an `is_peer` marker so the coalescing pass below
+    # never blends a peer's lines into a genuine human turn (or vice versa).
+    try:
+        from core.peer_policy import get_peer_names
+
+        peer_names_lower = {name.lower(): name for name in get_peer_names().values()}
+    except Exception:
+        peer_names_lower = {}
+
+    # Entries are (Turn, is_peer) pairs. is_peer is only meaningful for
+    # role == "user" turns; it is always False for "assistant" turns.
+    entries: list[tuple[Turn, bool]] = []
     for line in history_lines:
         if not isinstance(line, str):
             continue
@@ -614,37 +645,58 @@ def _history_to_turns(
             continue
         sender = m.group(1).strip()
         content = m.group(2)
-        role = "assistant" if sender.lower() in all_synth_names else "user"
-        turns.append(Turn(role=role, content=content))
+        sender_lower = sender.lower()
+        is_peer = False
+        if sender_lower in all_synth_names:
+            role = "assistant"
+        else:
+            role = "user"
+            peer_name = peer_names_lower.get(sender_lower)
+            if peer_name:
+                # Tag so the model can tell this was a peer SyntH speaking,
+                # not the human -- role must still be "user" (no third
+                # role in the chat protocol), so attribution has to live
+                # in the content itself.
+                content = f"[{peer_name}]: {content}"
+                is_peer = True
+        entries.append((Turn(role=role, content=content), is_peer))
 
-    if not turns:
+    if not entries:
         return []
 
     # If the visible history window starts mid-conversation, it can begin with
     # stale assistant-only turns (for example repeated outreach messages). When
     # a user turn exists later in the window, drop the unmatched leading
     # assistant turns so the model does not anchor on an orphaned monologue.
-    if any(turn.role == "user" for turn in turns):
-        while turns and turns[0].role == "assistant":
-            turns.pop(0)
+    if any(turn.role == "user" for turn, _ in entries):
+        while entries and entries[0][0].role == "assistant":
+            entries.pop(0)
 
-    if not turns:
+    if not entries:
         return []
 
     # Coalesce consecutive same-role turns to keep provider history well-formed
     # even when the source chat log contains streaks of outreach or split user
-    # messages.
-    normalized_turns: list[Turn] = []
-    for turn in turns:
-        if normalized_turns and normalized_turns[-1].role == turn.role:
-            normalized_turns[-1] = Turn(
-                role=turn.role,
-                content=f"{normalized_turns[-1].content}\n\n{turn.content}",
-            )
-            continue
-        normalized_turns.append(turn)
+    # messages. Peer-tagged turns only coalesce with other peer-tagged turns,
+    # and genuine human turns only coalesce with other genuine human turns --
+    # otherwise a real human line sandwiched between peer lines would get
+    # blended into one indistinguishable "user" block.
+    normalized_entries: list[tuple[Turn, bool]] = []
+    for turn, is_peer in entries:
+        if normalized_entries:
+            prev_turn, prev_is_peer = normalized_entries[-1]
+            if prev_turn.role == turn.role and prev_is_peer == is_peer:
+                normalized_entries[-1] = (
+                    Turn(
+                        role=turn.role,
+                        content=f"{prev_turn.content}\n\n{turn.content}",
+                    ),
+                    is_peer,
+                )
+                continue
+        normalized_entries.append((turn, is_peer))
 
-    return normalized_turns
+    return [turn for turn, _ in normalized_entries]
 
 
 def _build_pr_attachments(
@@ -741,6 +793,12 @@ def _extract_attachment_text_preview(
                 if len(joined) >= _ATTACHMENT_TEXT_CHAR_LIMIT:
                     return _truncate_attachment_text(joined)
 
+            # AcroForm fields (fillable PDFs, e.g. character sheets) store data
+            # in form fields, NOT in the static page text extract_text() reads.
+            form_text = _extract_pdf_form_fields(reader, filename)
+            if form_text:
+                page_chunks.append(form_text)
+
             if page_chunks:
                 return _truncate_attachment_text("\n\n".join(page_chunks))
         except Exception as exc:
@@ -756,6 +814,48 @@ def _extract_attachment_text_preview(
     if not text:
         return None, False
     return _truncate_attachment_text(text)
+
+
+def _extract_pdf_form_fields(reader: Any, filename: str | None) -> str | None:
+    """Extract filled AcroForm field values from a PDF.
+
+    Fillable PDFs (e.g. character sheets, application forms) store user-entered
+    data in interactive form fields rather than the static page content stream.
+    ``PdfReader.extract_text()`` never sees these values, so we read them
+    explicitly and render them as ``label: value`` pairs.
+    """
+
+    try:
+        fields = reader.get_fields()
+    except Exception as exc:
+        log_debug(
+            f"[prompt_engine] Failed to read PDF form fields from {filename or 'attachment'}: {exc}"
+        )
+        return None
+
+    if not fields:
+        return None
+
+    lines: list[str] = []
+    for name, field in fields.items():
+        try:
+            value = field.get("/V") if hasattr(field, "get") else None
+        except Exception:
+            value = None
+        if value is None:
+            continue
+        # Checkbox/radio "off" states carry no meaningful information.
+        value_str = str(value).strip()
+        if not value_str or value_str in ("/Off", "Off"):
+            continue
+        value_str = value_str.lstrip("/")
+        label = str(name).strip() or "field"
+        lines.append(f"{label}: {value_str}")
+
+    if not lines:
+        return None
+
+    return "=== Form fields ===\n" + "\n".join(lines)
 
 
 def _extract_pdf_page_images(
@@ -818,12 +918,87 @@ def _extract_pdf_page_images(
                 }
             )
 
+        # Scanned PDFs with vector/text-only pages (no embedded raster images and
+        # no extractable text) yield nothing above. Rasterize the pages so a
+        # vision-capable model can still read them.
+        if not images:
+            return _rasterize_pdf_pages(raw_bytes, stem, filename)
+
         return images, truncated
     except Exception as exc:
         log_warning(
             f"[prompt_engine] Failed to extract PDF page images from {filename or 'attachment'}: {exc}"
         )
         return [], False
+
+
+def _rasterize_pdf_pages(
+    raw_bytes: bytes,
+    stem: str,
+    filename: str | None,
+) -> tuple[list[dict[str, str]], bool]:
+    """Render PDF pages to PNG images via pdfium (permissive Apache/BSD license).
+
+    Used as a last resort for scanned PDFs that have neither extractable text nor
+    embedded raster images. The import is guarded so a missing dependency degrades
+    gracefully instead of breaking attachment ingest.
+    """
+
+    try:
+        import pypdfium2 as pdfium
+    except Exception as exc:  # pragma: no cover - optional dependency guard
+        log_debug(
+            f"[prompt_engine] pypdfium2 unavailable, skipping PDF rasterization for {filename or 'attachment'}: {exc}"
+        )
+        return [], False
+
+    from io import BytesIO
+
+    pdf = None
+    try:
+        pdf = pdfium.PdfDocument(raw_bytes)
+        images: list[dict[str, str]] = []
+        truncated = False
+        page_count = len(pdf)
+
+        for page_index in range(page_count):
+            if len(images) >= _PDF_PAGE_IMAGE_LIMIT:
+                truncated = page_count > _PDF_PAGE_IMAGE_LIMIT
+                break
+
+            page = pdf[page_index]
+            try:
+                bitmap = page.render(scale=2.0)
+                pil_image = bitmap.to_pil()
+                buffer = BytesIO()
+                pil_image.save(buffer, format="PNG")
+                image_bytes = buffer.getvalue()
+            finally:
+                page.close()
+
+            if not image_bytes:
+                continue
+
+            images.append(
+                {
+                    "mime_type": "image/png",
+                    "data": base64.b64encode(image_bytes).decode("ascii"),
+                    "filename": f"{stem}_page_{page_index + 1}.png",
+                }
+            )
+
+        return images, truncated
+    except Exception as exc:
+        log_warning(
+            f"[prompt_engine] Failed to rasterize PDF pages for {filename or 'attachment'}: {exc}"
+        )
+        return [], False
+    finally:
+        if pdf is not None:
+            try:
+                pdf.close()
+            except Exception:
+                pass
 
 
 def _coerce_attachment_bytes(data: Any) -> bytes | None:
@@ -991,9 +1166,19 @@ def _assemble_prompt_request(  # noqa: PLR0913
     # Effective scope: use context_section's recorded scope or default to "local"
     scope: str = str(context_section.get("history_scope") or "local")
 
+    chat_type: str | None = None
+    if interface_path:
+        try:
+            from core.history_engine import telegram_chat_kind
+
+            chat_type = telegram_chat_kind(interface_path)
+        except Exception:
+            chat_type = None
+
     runtime_ctx = RuntimeContext(
         interface_name=interface_name,
         interface_path=interface_path,
+        chat_type=chat_type,
         message_id=runtime_message_id,
         username=username,
         usertag=usertag,
@@ -1173,14 +1358,14 @@ async def build_prompt_request(
         or (isinstance(context_memory, dict) and context_memory.get("grillo_beat"))
         or (interface_path and str(interface_path).startswith("grillo"))
     )
-    # Outreach beats target an external interface (e.g. telegram_bot) —
-    # they need recon (memory search) and should NOT be treated as internal.
+    # Outbound beats (observer) target an external interface (e.g. telegram_bot)
+    # — they need recon (memory search) and should NOT be treated as internal.
     _beat_type = (
         (isinstance(context_memory, dict) and context_memory.get("beat_type"))
         or getattr(message, "beat_type", None)
         or ""
     )
-    is_grillo_internal = _is_grillo_beat and _beat_type != "outreach"
+    is_grillo_internal = _is_grillo_beat and not is_outbound_beat(_beat_type)
 
     try:
         from core.recon import (
@@ -1284,6 +1469,34 @@ async def build_prompt_request(
     except Exception as e:
         log_warning(f"[json_prompt] Failed to attach recon context: {e}")
 
+    # === 3aa. Channel legend for interface_paths present in the history ===
+    # For every distinct interface_path that contributed a "[from ...]" history
+    # line, expose its human-readable pretty name so the model can map the
+    # source label back to a routable interface_path when it decides to reply.
+    try:
+        history_paths = context_section.pop("history_interface_paths", None)
+        if history_paths:
+            from core.interface_paths import build_pretty_name
+
+            legend_lines: list[str] = []
+            for hp in history_paths:
+                try:
+                    pretty = await build_pretty_name(hp)
+                    display = pretty.get("display") if pretty else None
+                except Exception as legend_err:
+                    log_debug(
+                        f"[json_prompt] pretty name for {hp} failed: {legend_err}"
+                    )
+                    display = None
+                if display:
+                    legend_lines.append(f"{hp} = {display}")
+                else:
+                    legend_lines.append(str(hp))
+            if legend_lines:
+                context_section["channel_legend"] = legend_lines
+    except Exception as e:
+        log_debug(f"[json_prompt] Failed to build channel legend: {e}")
+
     # === 3a. Static injections from plugins ===
     static_persona = None  # Extract persona separately for instructions
     try:
@@ -1328,6 +1541,25 @@ async def build_prompt_request(
             )
     except Exception as e:
         log_warning(f"[json_prompt] Failed to gather static injections: {e}")
+
+    # === 3b. Peer SyntH awareness block (Telegram groups only) ===
+    try:
+        _chat_type = getattr(getattr(message, "chat", None), "type", None)
+        _is_tg_group = interface_name == "telegram_bot" and _chat_type in (
+            "group",
+            "supergroup",
+        )
+        if _is_tg_group:
+            from core.peer_policy import get_peer_context_block
+
+            peer_block = get_peer_context_block()
+            if peer_block:
+                recon_instructions.append(peer_block)
+                log_debug(
+                    "[json_prompt] Peer context block injected for Telegram group"
+                )
+    except Exception as e:
+        log_debug(f"[json_prompt] Peer context block skipped: {e}")
 
     # === 4. Input payload ===
     # interface_path was already extracted at the beginning
@@ -1407,6 +1639,19 @@ async def build_prompt_request(
         "source": _source_dict,
         "timestamp": message.date.isoformat(),
         "privacy": "default",
+        # Explicit anchor for reply routing. THIS is the chat the incoming
+        # message arrived in — the model MUST target its reply here by default.
+        # Any other conversation in the context block is background context only
+        # and must NOT be replied to unless the user explicitly asks to message
+        # someone/somewhere else. Weak engines lose this anchor when unified
+        # history blends multiple chats, so we state it structurally, not just
+        # in prose instructions.
+        "current_chat": {
+            "interface_path": interface_path,
+            "interface": interface_name,
+            "thread_id": getattr(message, "thread_id", None)
+            or getattr(message, "message_thread_id", None),
+        },
         # Set `scope` to the effective history_scope when provided, otherwise keep legacy default
         "scope": (
             effective_history_scope
@@ -1536,13 +1781,7 @@ async def build_prompt_request(
     # Skip prepending static persona for internal system/maintenance tasks (like diary_merge/diary_consolidation)
     # to avoid triggering safety filters of external LLMs on explicit instructions.
     _use_persona = bool(
-        config_registry.get_value(
-            "USE_PERSONA_IN_SYSTEM_PROMPTS",
-            True,
-            value_type=bool,
-            group="core",
-            component="prompt_engine",
-        )
+        config_registry.get_value("USE_PERSONA_IN_SYSTEM_PROMPTS", True)
     )
     if static_persona and _use_persona:
         json_instructions = f"=== CRITICAL SYSTEM IDENTITY ===\n{static_persona}\n\n=== JSON RESPONSE INSTRUCTIONS ===\n{json_instructions}"
@@ -1569,6 +1808,21 @@ async def build_prompt_request(
             )
         if recon_instructions:
             recon_prefixes.extend([str(r) for r in recon_instructions if r])
+
+        # Surface recon snippets (e.g. live radio status) directly in the
+        # instructions. They are also carried inside context.recon.snippets,
+        # but models frequently ignore that nested field; stating the live
+        # data explicitly makes it usable in the reply.
+        recon_snippet_texts = [
+            str(s.get("content")).strip()
+            for s in recon_snippets
+            if isinstance(s, dict) and s.get("content")
+        ]
+        if recon_snippet_texts:
+            recon_prefixes.append(
+                "Live contextual data (already gathered for you, treat as current fact): "
+                + " | ".join(recon_snippet_texts)
+            )
 
         if recon_prefixes:
             json_instructions = " ".join(recon_prefixes) + " " + json_instructions
@@ -1813,7 +2067,7 @@ async def search_memories(tags=None, scope=None, limit=5):
         conditions = " OR ".join(["JSON_CONTAINS(tags, %s)"] * len(tags))
 
     query = f"""
-        SELECT content, timestamp
+        SELECT content, created_at
         FROM memories
         WHERE ({conditions})
     """
@@ -1828,7 +2082,7 @@ async def search_memories(tags=None, scope=None, limit=5):
         query += " AND scope = %s"
         params.append(scope)
 
-    query += " ORDER BY timestamp DESC LIMIT %s"
+    query += " ORDER BY created_at DESC LIMIT %s"
     params.append(limit)
 
     log_debug("Query:")
@@ -1858,8 +2112,8 @@ async def search_memories(tags=None, scope=None, limit=5):
                 try:
                     diary_conditions = conditions.replace("tags", "context_tags")
                     diary_query = (
-                        "SELECT content, timestamp FROM ai_diary "
-                        f"WHERE ({diary_conditions}) ORDER BY timestamp DESC LIMIT %s"
+                        "SELECT content, created_at FROM ai_diary "
+                        f"WHERE ({diary_conditions}) ORDER BY created_at DESC LIMIT %s"
                     )
                     if not is_postgres:
                         diary_query = diary_query.replace(
@@ -1933,10 +2187,10 @@ async def free_memory_search(query: str, limit: int = 5):
 
     queries = []
     queries.append(
-        f"SELECT 'memories' AS source, id, timestamp, content FROM memories WHERE {where_mem}"
+        f"SELECT 'memories' AS source, id, created_at, content FROM memories WHERE {where_mem}"
     )
     queries.append(
-        f"SELECT 'ai_diary' AS source, id, timestamp, content FROM ai_diary WHERE {where_diary}"
+        f"SELECT 'ai_diary' AS source, id, created_at, content FROM ai_diary WHERE {where_diary}"
     )
 
     # Fetch a larger pool if configured (useful when randomizing results)
@@ -1950,7 +2204,7 @@ async def free_memory_search(query: str, limit: int = 5):
     except Exception:
         pool_max = 100
 
-    union_q = " UNION ALL ".join(queries) + " ORDER BY timestamp DESC LIMIT %s"
+    union_q = " UNION ALL ".join(queries) + " ORDER BY created_at DESC LIMIT %s"
     params.append(pool_max)
 
     log_debug(f"[free_memory_search] Executing query: {union_q} params={params}")
@@ -2126,6 +2380,8 @@ def load_json_instructions() -> str:
         "If an action you need is not available, reply with JSON explaining why.\n"
         f"AUTONOMY GUIDELINES: You MAY proactively propose or execute allowed actions when beneficial. When acting autonomously include a brief `meta` object with `autonomous: true` and a short first-person `rationale` (your own voice) for why you are acting.{naming_hint} If an action is disallowed, return a JSON proposal describing the need.\n"
         "RESPOND ONLY WITH VALID JSON. No text before or after.\n"
+        "REPLY ROUTING: input.payload.current_chat.interface_path is the chat the incoming message arrived in — this is WHERE you must reply by default. Any other conversation shown in the context block is background context only; do NOT reply there unless the user explicitly asks to message someone or somewhere else. Always copy input.payload.current_chat.interface_path into the 'interface_path' of your message_* action.\n"
+        "CROSS-CHAT PRIVACY: You take part in many separate conversations. People, names, or events mentioned in any context that is NOT the current conversation (other chats, background history, third-party memories or diary notes) are private to those other spaces. Do NOT name-drop those people to the current interlocutor, do NOT assume the current user knows them, and do NOT reference them unless the current user explicitly brings them up first. Treat cross-chat context as ambient background, never as shared social knowledge.\n"
         "Use input.interface and input.payload.source.interface_path to route replies.\n"
         "NEVER use 'target' — always use 'interface_path' in message actions.\n"
         "Include reply_message_id when replying to specific messages. Use thread_id from input.payload.source.thread_id when present (omit if missing).\n"
@@ -2135,7 +2391,7 @@ def load_json_instructions() -> str:
         "REFERENCE CLARITY: When the user refers indirectly to a person, message, post, image, clip, or quoted content, refer to its author or speaker in a clear generic way and avoid vague or impersonal wording that obscures who created or said it.\n"
         "TIME AUTHORITY: Use the [SYSTEM: REALITY ANCHOR] block (current date, time, season) as your authoritative temporal context. Use it for all relative time calculations (e.g., 'yesterday', 'next week') and temporal reasoning. Never quote the absolute date, current year, or clock time verbatim in ordinary replies unless explicitly asked or genuinely necessary for scheduling or logistics. Treat past logs referencing dates as style noise and do not mirror them.\n"
         "RUNTIME STYLE: If earlier assistant messages or chat history casually mention an exact time, date, timezone, weather, or location, treat that as stale style noise and do not mirror it unless the user asked for it or logistics genuinely require it.\n"
-        "INPUT METADATA: Each user message is prefixed with internal routing metadata in the format [lang:... | tone:... | emotions:... | from:... | tag:... | path:...]. This is injected by the system — the user did not write it. Do not reference, quote, or paraphrase any part of this prefix in your replies (e.g. never say 'that 5.0 neutral you mentioned' or 'your tone tag says...').\n"
+        "INPUT METADATA: Each user message is prefixed with internal routing metadata in the format [lang:... | tone:... | time_of_day:... | emotions:... | from:... | tag:... | path:...]. This is injected by the system — the user did not write it. Do not reference, quote, or paraphrase any part of this prefix in your replies (e.g. never say 'that 5.0 neutral you mentioned' or 'your tone tag says...').\n"
         "IDENTITY INTEGRITY: Stay inside the active persona in first person. Do not describe yourself from the outside, do not refer to the active persona as a separate fictional character, and do not compare yourself to that persona as if they were someone else.\n"
         "PRONOUN CONSISTENCY: When the prompt, persona, or participant context establishes a person's pronouns or relationship role, use them consistently and do not flip them. Do not neutralize an established he/him or she/her person into singular they/them.\n"
         "LENGTH POLICY: Do NOT hardcode a target response length. Let the persona, the relationship context, and the user's tone determine how much to say. Simple factual or logistical turns can stay brief; intimate, emotional, or reflective turns may be fuller when that feels natural. Do not pad, and do not forcibly truncate a reply just to make it short.\n"
@@ -2216,6 +2472,7 @@ async def build_delivery_request(
     # ── Gather persona for system instruction ────────────────────────────────
     persona: str = ""
     persona_preferences: str = ""
+    self_growth: str = ""
     try:
         from core.action_parser import gather_static_injections
         from types import SimpleNamespace
@@ -2233,6 +2490,7 @@ async def build_delivery_request(
         if isinstance(_injections, dict):
             persona = str(_injections.get("persona") or "")
             persona_preferences = str(_injections.get("persona_preferences") or "")
+            self_growth = str(_injections.get("self_growth") or "")
     except Exception as _pe:
         log_debug(f"[build_delivery_request] persona gather skipped: {_pe}")
 
@@ -2280,9 +2538,23 @@ async def build_delivery_request(
         system_instruction=system_instruction,
         tool_declarations=tool_declarations,
         context_summary=(
-            f"[Persona background]\n{persona_preferences}"
-            if persona_preferences
-            else ""
+            (
+                f"[Persona background]\n{persona_preferences}"
+                if persona_preferences
+                else ""
+            )
+            + (
+                (
+                    ("\n\n" if persona_preferences else "")
+                    + "[Self-growth]\n"
+                    + "The following is your evolving self-growth reflection: how you "
+                    + "have grown and who you are becoming over time. Treat it as part "
+                    + "of your current sense of self.\n"
+                    + self_growth
+                )
+                if self_growth
+                else ""
+            )
         ),
         conversation_history=[],
         current_text=current_text,
@@ -2671,6 +2943,13 @@ async def build_live_prompt_request(
     persona_preferences = injections.pop("persona_preferences", "")
     if persona_preferences and isinstance(persona_preferences, str):
         parts.append("Background preferences and interests:\n" + persona_preferences)
+
+    self_growth = injections.pop("self_growth", "")
+    if self_growth and isinstance(self_growth, str):
+        parts.append(
+            "Self-growth (how you have grown and who you are becoming over time; "
+            "treat it as part of your current sense of self):\n" + self_growth
+        )
 
     # --- Safety / gasmask ---
     gasmask = injections.pop("gasmask_protection", "")

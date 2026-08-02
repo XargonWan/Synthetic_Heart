@@ -15,10 +15,10 @@ async def init_radio_tables() -> None:
 
     if is_postgres:
         id_col = "id SERIAL PRIMARY KEY"
-        ts_col = "timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP"
+        ts_col = "created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP"
     else:
         id_col = "id INT AUTO_INCREMENT PRIMARY KEY"
-        ts_col = "timestamp DATETIME DEFAULT CURRENT_TIMESTAMP"
+        ts_col = "created_at DATETIME DEFAULT CURRENT_TIMESTAMP"
 
     async with get_conn_ctx() as conn:
         try:
@@ -40,7 +40,7 @@ async def init_radio_tables() -> None:
                 if is_postgres:
                     await cur.execute("""
                         ALTER TABLE radio_activity_log
-                        ADD COLUMN IF NOT EXISTS timestamp TIMESTAMPTZ
+                        ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ
                         DEFAULT CURRENT_TIMESTAMP
                     """)
                 else:
@@ -50,7 +50,7 @@ async def init_radio_tables() -> None:
                         SELECT COUNT(*) FROM information_schema.COLUMNS
                         WHERE TABLE_SCHEMA = DATABASE()
                           AND TABLE_NAME  = 'radio_activity_log'
-                          AND COLUMN_NAME = 'timestamp'
+                          AND COLUMN_NAME = 'created_at'
                     """)
                     row = await cur.fetchone()
                     if (
@@ -60,12 +60,12 @@ async def init_radio_tables() -> None:
                     ):
                         await cur.execute(
                             "ALTER TABLE radio_activity_log "
-                            "ADD COLUMN timestamp DATETIME DEFAULT CURRENT_TIMESTAMP"
+                            "ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP"
                         )
                 # Separate index DDL; both backends support this form.
                 await cur.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_radio_timestamp
-                    ON radio_activity_log (timestamp)
+                    CREATE INDEX IF NOT EXISTS idx_radio_created_at
+                    ON radio_activity_log (created_at)
                 """)
                 await conn.commit()
             _table_initialized = True
@@ -89,7 +89,7 @@ async def trim_old_audio(keep: int = 30) -> list[str]:
                 await cur.execute(
                     "SELECT id, banter_audio_file FROM radio_activity_log "
                     "WHERE banter_audio_file IS NOT NULL AND banter_audio_file != '' "
-                    "ORDER BY timestamp DESC"
+                    "ORDER BY created_at DESC"
                 )
                 rows = await cur.fetchall()
                 to_remove = rows[keep:]

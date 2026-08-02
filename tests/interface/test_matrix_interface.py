@@ -297,3 +297,79 @@ async def test_config_update_triggers_global_instance_reload_listener(monkeypatc
     await asyncio.sleep(0.01)
 
     assert called == [True]
+
+
+# ---------------------------------------------------------------------------
+# _send_matrix_message delivery-outcome contract (Bug #1 regression)
+#
+# The method must return a real bool: True only when matrix-nio confirms an
+# event_id, False when the send fails (matrix-nio returns an ErrorResponse
+# instead of raising) or raises. It must never mask a failed send as success.
+# ---------------------------------------------------------------------------
+
+
+def _make_matrix_instance(monkeypatch):
+    monkeypatch.setattr(mi, "AsyncClient", DummyClient)
+    monkeypatch.setattr(
+        asyncio, "get_running_loop", lambda: (_ for _ in ()).throw(RuntimeError())
+    )
+    monkeypatch.setattr(
+        asyncio, "get_event_loop", lambda: (_ for _ in ()).throw(Exception())
+    )
+    return mi.MatrixInterface("https://matrix.org/homeserver", "@tester:matrix.org")
+
+
+@pytest.mark.asyncio
+async def test_send_matrix_message_returns_true_on_event_id(monkeypatch):
+    inst = _make_matrix_instance(monkeypatch)
+
+    class OkResponse:
+        event_id = "$evt:matrix.org"
+
+    async def fake_room_send(**kwargs):
+        return OkResponse()
+
+    inst.client.room_send = fake_room_send
+
+    ok = await inst._send_matrix_message("!room:matrix.org", "hello")
+    assert ok is True
+
+
+@pytest.mark.asyncio
+async def test_send_matrix_message_returns_false_on_error_response(monkeypatch):
+    inst = _make_matrix_instance(monkeypatch)
+
+    class ErrorResponse:
+        # matrix-nio ErrorResponse has no truthy event_id
+        event_id = None
+        message = "M_FORBIDDEN"
+
+    async def fake_room_send(**kwargs):
+        return ErrorResponse()
+
+    inst.client.room_send = fake_room_send
+
+    ok = await inst._send_matrix_message("!room:matrix.org", "hello")
+    assert ok is False
+
+
+@pytest.mark.asyncio
+async def test_send_matrix_message_returns_false_on_exception(monkeypatch):
+    inst = _make_matrix_instance(monkeypatch)
+
+    async def fake_room_send(**kwargs):
+        raise RuntimeError("network down")
+
+    inst.client.room_send = fake_room_send
+
+    ok = await inst._send_matrix_message("!room:matrix.org", "hello")
+    assert ok is False
+
+
+@pytest.mark.asyncio
+async def test_send_matrix_message_returns_false_without_client(monkeypatch):
+    inst = _make_matrix_instance(monkeypatch)
+    inst.client = None
+
+    ok = await inst._send_matrix_message("!room:matrix.org", "hello")
+    assert ok is False

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import time
 from collections.abc import Callable
 from enum import Enum
 from typing import Dict, List, Optional, TYPE_CHECKING, Any
@@ -53,6 +54,17 @@ ANIMATION_STATE_PRIORITIES = {
     AnimationState.TOUCH: 11,  # Touch reaction - temporary overlay above think/write/talk
     AnimationState.SKIN_CHANGE: 15,  # Skin change - always plays, overrides everything
 }
+
+# Maximum lifetime for an explicit overlay context (touch/emote) before it is
+# considered orphaned. Explicit contexts (e.g. a WebUI touch reaction) are
+# released by an explicit ``stop_animation`` call, but if that release never
+# arrives (lost client event, preload timeout, disconnect) the context would
+# otherwise pin ``_current_context_id`` forever and defer every subsequent
+# conversational lifecycle phase (think/talk/write) behind a dead overlay,
+# freezing the avatar. After this many seconds an explicit overlay is treated
+# as expired and no longer blocks the auto lifecycle lane. Overlay animations
+# are short (a few seconds), so a generous ceiling still self-heals quickly.
+_OVERLAY_CONTEXT_TTL_S = 30.0
 
 
 class KaradaStateServer:
@@ -144,7 +156,23 @@ class KaradaStateServer:
         self._current_audio_duration_s: Optional[float] = None
         self._current_audio_lipsync: Optional[Dict] = None
         self._current_audio_started_at: Optional[datetime] = None
+        self._current_audio_turn_id: Optional[str] = None
         self._audio_clear_task: Optional[asyncio.Task] = None
+        # Talk animation: driven strictly by the audio lifecycle so the "talk"
+        # animation plays *during* the actual speech (i.e. while the TTS audio
+        # is playing), never before it starts nor after it ends. The return task
+        # transitions the avatar back to idle when the clip finishes.
+        self._talk_return_task: Optional[asyncio.Task] = None
+        # Explicit one-shot overlay contexts (e.g. a WebUI touch reaction) are
+        # played with ``loop=False`` and an explicit ``context_id`` but the
+        # trigger (webui/plugin) does not always issue a matching
+        # ``stop_animation``. Without a release the overlay stays dominant (its
+        # priority sits above think/talk/write) and defers every subsequent
+        # lifecycle phase until the orphan TTL expires, freezing the avatar on
+        # the clip's final frame. We therefore auto-schedule a release per
+        # overlay context, keyed by ``context_id`` so a renewed touch cancels
+        # and reschedules its own release instead of piling up.
+        self._overlay_release_tasks: Dict[str, asyncio.Task] = {}
         # Face state: authoritative snapshot of the last face values broadcast
         # to clients. Keys are normalized blendshape/emotion values in the 0..1
         # range and reused for reconnect/full-state sync.
@@ -410,6 +438,7 @@ class KaradaStateServer:
             "animation_file": animation_file,
             "resume_section": resume_section,
             "sequence": self._context_sequence,
+            "created_at": time.monotonic(),
         }
 
     def _forget_active_context(self, context_id: Optional[str]) -> None:
@@ -417,6 +446,26 @@ class KaradaStateServer:
         if not context_id:
             return
         self._active_context_meta.pop(context_id, None)
+
+    def _is_overlay_context_expired(self, context_id: Optional[str]) -> bool:
+        """Return True if an explicit overlay context has outlived its TTL.
+
+        The auto lifecycle lane (``_KARADA_AUTO_CTX``) never expires — its
+        phases (think/talk/write/idle) supersede one another naturally. Only
+        explicit overlay contexts (touch/emote registered via the Karada API)
+        are subject to the TTL, so an orphaned overlay whose ``stop_animation``
+        release never arrived cannot pin the avatar forever.
+        """
+        if not context_id or context_id == "__karada_auto":
+            return False
+        meta = self._active_context_meta.get(context_id)
+        if not meta:
+            # No metadata: cannot prove it's alive, so don't treat as blocking.
+            return True
+        created_at = meta.get("created_at")
+        if not isinstance(created_at, (int, float)):
+            return False
+        return (time.monotonic() - created_at) > _OVERLAY_CONTEXT_TTL_S
 
     def _select_restore_context_locked(
         self, excluded_context_id: Optional[str] = None
@@ -427,6 +476,9 @@ class KaradaStateServer:
             if context_id == excluded_context_id:
                 continue
             if context_id not in self._active_tasks:
+                continue
+            if self._is_overlay_context_expired(context_id):
+                # Don't resume onto an orphaned overlay that outlived its TTL.
                 continue
             priority = self._active_tasks.get(context_id)
             if not isinstance(priority, int):
@@ -1574,9 +1626,27 @@ class KaradaStateServer:
                 and self._current_context_id
                 and self._current_context_id in self._active_tasks
             ):
-                current_priority = self._active_tasks.get(self._current_context_id) or 0
-                if priority < current_priority:
-                    should_update_state = False
+                # An explicit overlay context (touch/emote) is currently
+                # dominant. Before deferring behind it, verify it hasn't been
+                # orphaned: if its explicit ``stop_animation`` release never
+                # arrived (lost client event, preload timeout, disconnect) and
+                # it is older than the overlay TTL, treat it as dead and clear
+                # it so the incoming lifecycle phase can take over. Otherwise a
+                # dead overlay would freeze the avatar on the previous state.
+                dominant_id = self._current_context_id
+                if self._is_overlay_context_expired(dominant_id):
+                    log_debug(
+                        "[KaradaStateServer] Clearing orphaned overlay context "
+                        f"'{dominant_id}' (TTL exceeded); allowing "
+                        f"{resolved_state.value} to proceed"
+                    )
+                    self._active_tasks.pop(dominant_id, None)
+                    self._forget_active_context(dominant_id)
+                    self._current_context_id = None
+                else:
+                    current_priority = self._active_tasks.get(dominant_id) or 0
+                    if priority < current_priority:
+                        should_update_state = False
 
             # Create context metadata with FINALIZED resolved_state
             context_meta = {
@@ -1587,6 +1657,7 @@ class KaradaStateServer:
                 "source": source,
                 "animation_file": selected_animation,
                 "sequence": getattr(self, "_context_sequence", 0),
+                "created_at": time.monotonic(),
             }
             self._context_sequence = getattr(self, "_context_sequence", 0) + 1
 
@@ -1674,6 +1745,28 @@ class KaradaStateServer:
                 await self._start_rotation_task(session_id, resolved_state, context_id)
             else:
                 await self._stop_rotation_task(session_id, resolved_state)
+
+            # Step 10: Auto-release one-shot explicit overlays.
+            #
+            # An explicit overlay (``context_id`` set) that does not loop is a
+            # transient reaction (e.g. a WebUI touch). The trigger frequently
+            # never issues a matching ``stop_animation``, so without this the
+            # overlay would stay dominant and defer every later lifecycle phase
+            # until the orphan TTL. Mirror the ``_talk_return_task`` pattern:
+            # schedule a release sized to the clip so the context frees itself
+            # right after the animation finishes. Keyed by ``context_id`` so a
+            # renewed touch cancels and reschedules instead of leaking tasks.
+            if (
+                context_id
+                and not loop
+                and should_update_state
+                and resolved_state != AnimationState.IDLE
+            ):
+                self._schedule_overlay_release(
+                    context_id,
+                    session_id,
+                    self._estimate_overlay_duration(self._current_animation_descriptor),
+                )
 
         # Background: pre-load idle for non-idle animations
         if resolved_state != AnimationState.IDLE:
@@ -2055,22 +2148,267 @@ class KaradaStateServer:
     # Audio state tracking (for late-joining clients)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _derive_audio_url(audio_path: str) -> str:
+        """Derive a client-accessible URL from a generated-audio filesystem path.
+
+        Delegates to :func:`core.media_url_utils.derive_audio_url`, which serves
+        in-image audio under ``/static`` and audio living outside the ``static``
+        tree (e.g. a persistent ``VOX_OUTPUT_DIR`` volume like
+        ``/config/media/tts``) under the alternate ``/media`` mount. This avoids
+        the previous HTTP 404 when ``VOX_OUTPUT_DIR`` pointed off the ``/static``
+        tree.
+        """
+        from core.media_url_utils import derive_audio_url
+
+        return derive_audio_url(audio_path)
+
+    async def broadcast_audio(
+        self,
+        audio_path: str,
+        lipsync_data: Optional[Dict] = None,
+        audio_duration_s: Optional[float] = None,
+        text: Optional[str] = None,
+        turn_id: Optional[str] = None,
+    ) -> None:
+        """Broadcast a TTS audio-play command to *every* connected client.
+
+        This is the **single source of truth** for "the avatar is speaking".
+        The audio-play action is performed here on the server and distributed
+        to all registered transports (WebUI today, an Android app or XR headset
+        tomorrow — every client is just another transport).  It also records
+        the state via :meth:`set_current_audio` so clients that connect while
+        the clip is still playing catch up automatically.
+
+        Callers (e.g. the Vox plugin) must NOT iterate individual client
+        connections themselves — they hand the audio to this method and the
+        server fans it out.  Best-effort; never raises.
+
+        Args:
+            audio_path:       Filesystem path to the generated audio file.
+            lipsync_data:     Optional phoneme/timing dict for the animator.
+            audio_duration_s: Duration of the clip in seconds.
+            text:             Optional caption (forwarded in the payload; the
+                              chat-bubble persistence is an interface concern,
+                              handled separately by the originating interface).
+            turn_id:          Optional identifier shared by every chunk of one
+                              sentence-streamed reply (see
+                              ``VoxPlugin._speak_chunked``). Forwarded as-is in
+                              the payload so clients can group same-turn chunks
+                              for gapless queued playback instead of each one
+                              interrupting the last; omitted for single-shot
+                              replies (each is its own turn from the client's
+                              point of view).
+        """
+        url = self._derive_audio_url(audio_path)
+
+        payload: Dict[str, Any] = {"type": "tts-play", "url": url}
+        if text is not None:
+            payload["text"] = text
+        if lipsync_data:
+            payload["lipsync"] = lipsync_data
+        if audio_duration_s is not None:
+            payload["audio_duration_s"] = audio_duration_s
+        if turn_id is not None:
+            payload["turn_id"] = turn_id
+
+        if self._has_any_transport():
+            for transport in self._transports:
+                try:
+                    await transport.broadcast_audio(payload)
+                except Exception as exc:  # pragma: no cover - best effort
+                    log_warning(
+                        f"[KaradaStateServer] failed to broadcast audio via "
+                        f"{type(transport).__name__}: {exc}"
+                    )
+
+        # Record for late-joining clients (auto-clears after the clip ends).
+        try:
+            self.set_current_audio(url, audio_duration_s, lipsync_data, turn_id)
+        except Exception:
+            pass
+
+        # Drive the TALK animation for the exact span of the audio: start it now
+        # (the clip is playing) and schedule the return to idle when the clip
+        # ends. This guarantees the talk animation runs *during* the speech,
+        # not before it starts nor after it finishes.
+        try:
+            self._start_talk_animation(audio_duration_s)
+        except Exception:
+            pass
+
+    def _start_talk_animation(self, audio_duration_s: Optional[float]) -> None:
+        """Play the TALK animation for the duration of the current audio clip.
+
+        Anchored to :meth:`broadcast_audio` — the single choke point where
+        "the avatar is speaking" begins. The animation starts synchronously with
+        the audio broadcast and is scheduled to return to idle after
+        ``audio_duration_s`` so it lines up with the end of the speech. Uses the
+        auto-context (``context_id=None``) so it shares the same lifecycle lane
+        as the think -> write -> idle phases and is superseded by any explicit
+        higher-priority overlay (e.g. a touch/emote context). Best-effort.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        # Cancel a pending return from a previous clip so overlapping broadcasts
+        # keep the avatar in TALK rather than snapping back to idle mid-speech.
+        if self._talk_return_task and not self._talk_return_task.done():
+            self._talk_return_task.cancel()
+            self._talk_return_task = None
+
+        loop.create_task(self.play_animation(AnimationState.TALK, session_id=None))
+
+        if audio_duration_s and audio_duration_s > 0:
+            self._talk_return_task = loop.create_task(
+                self._return_from_talk(audio_duration_s)
+            )
+
+    async def _return_from_talk(self, delay: float) -> None:
+        """Return the avatar to idle when the talk audio finishes."""
+        try:
+            await asyncio.sleep(delay)
+            # Only leave TALK if we're still in it (an explicit overlay or a
+            # newer lifecycle phase may have taken over in the meantime).
+            if self.current_state == AnimationState.TALK:
+                await self.play_animation(AnimationState.IDLE, session_id=None)
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:  # pragma: no cover - best effort
+            log_debug(f"[KaradaStateServer] _return_from_talk error: {exc}")
+
+    def _estimate_overlay_duration(self, descriptor: Optional[Dict[str, Any]]) -> float:
+        """Estimate how long a one-shot overlay clip runs, in seconds.
+
+        Derived from the descriptor's frame ranges and fps when available. The
+        result is clamped well below ``_OVERLAY_CONTEXT_TTL_S`` so a released
+        overlay never lingers long enough to matter, and floored to a small
+        minimum so a missing/degenerate descriptor still frees the context
+        promptly instead of pinning the lifecycle. Best-effort: any parsing
+        issue falls back to the default.
+        """
+        default = 4.0
+        min_duration = 1.5
+        # Keep the release comfortably under the orphan TTL so it always wins.
+        max_duration = max(min_duration, _OVERLAY_CONTEXT_TTL_S - 5.0)
+
+        if not descriptor or not isinstance(descriptor, dict):
+            return default
+
+        try:
+            fps = descriptor.get("fps")
+            fps_val = float(fps) if fps else 30.0
+            if fps_val <= 0:
+                fps_val = 30.0
+
+            # Prefer the widest declared frame span across structured sections;
+            # fall back to any explicit single-clip start/end frames.
+            max_end = 0
+            min_start: Optional[int] = None
+            for section in ("intro", "loop", "outro"):
+                sec = descriptor.get(section)
+                if isinstance(sec, dict):
+                    start = sec.get("start_frame")
+                    end = sec.get("end_frame")
+                    if isinstance(end, (int, float)):
+                        max_end = max(max_end, int(end))
+                    if isinstance(start, (int, float)):
+                        min_start = (
+                            int(start)
+                            if min_start is None
+                            else min(min_start, int(start))
+                        )
+
+            if max_end <= 0:
+                start = descriptor.get("start_frame")
+                end = descriptor.get("end_frame")
+                if isinstance(end, (int, float)):
+                    max_end = int(end)
+                if isinstance(start, (int, float)):
+                    min_start = int(start)
+
+            if max_end <= 0:
+                return default
+
+            frame_span = max_end - (min_start or 0)
+            if frame_span <= 0:
+                return default
+
+            duration = frame_span / fps_val
+            return max(min_duration, min(duration, max_duration))
+        except Exception:
+            return default
+
+    def _schedule_overlay_release(
+        self, context_id: str, session_id: Optional[str], delay: float
+    ) -> None:
+        """(Re)schedule the auto-release of an explicit one-shot overlay.
+
+        Cancels any pending release for the same ``context_id`` so a renewed
+        touch reschedules rather than stacking tasks. Best-effort: silently
+        no-ops when there is no running loop.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        prior = self._overlay_release_tasks.pop(context_id, None)
+        if prior and not prior.done():
+            prior.cancel()
+
+        self._overlay_release_tasks[context_id] = loop.create_task(
+            self._release_overlay_after(context_id, session_id, delay)
+        )
+
+    async def _release_overlay_after(
+        self, context_id: str, session_id: Optional[str], delay: float
+    ) -> None:
+        """Release a one-shot overlay context after its clip finishes."""
+        try:
+            await asyncio.sleep(delay)
+            # Only release if this overlay is still the tracked context; a newer
+            # overlay or an explicit stop may already have taken over.
+            if context_id in self._active_tasks:
+                await self.stop_animation(context_id, session_id)
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:  # pragma: no cover - best effort
+            log_debug(
+                f"[KaradaStateServer] _release_overlay_after error "
+                f"(context={context_id}): {exc}"
+            )
+        finally:
+            self._overlay_release_tasks.pop(context_id, None)
+
     def set_current_audio(
         self,
         url: Optional[str],
         duration_s: Optional[float] = None,
         lipsync_data: Optional[Dict] = None,
+        turn_id: Optional[str] = None,
     ) -> None:
         """Record the currently-playing TTS audio for catch-up.
 
         Called by ``SynthWebUIInterface.send_tts_audio()`` after broadcast.
         A background task automatically clears the state after *duration_s*
         seconds so that late joiners don't replay stale audio.
+
+        *turn_id* identifies the reply this clip belongs to (shared by every
+        chunk of a sentence-streamed reply). It is echoed back to late-joining
+        clients so their playback scheduler recognises the replayed clip as
+        part of a turn it may already be playing, instead of treating it as a
+        brand-new turn and re-playing it — which is what caused the
+        chunk-streamed (e.g. Fish Audio) duplicate-voice on a mid-utterance
+        reconnect/remount.
         """
         self._current_audio_url = url
         self._current_audio_duration_s = duration_s
         self._current_audio_lipsync = lipsync_data
         self._current_audio_started_at = datetime.now(tz=timezone.utc)
+        self._current_audio_turn_id = turn_id
 
         # Cancel previous auto-clear task
         if self._audio_clear_task and not self._audio_clear_task.done():
@@ -2093,6 +2431,7 @@ class KaradaStateServer:
             self._current_audio_duration_s = None
             self._current_audio_lipsync = None
             self._current_audio_started_at = None
+            self._current_audio_turn_id = None
         except asyncio.CancelledError:
             pass
 
@@ -2106,13 +2445,16 @@ class KaradaStateServer:
         dur = self._current_audio_duration_s or 0
         if dur > 0 and elapsed >= dur:
             return None
-        return {
+        result: Dict[str, Any] = {
             "type": "tts-play",
             "url": self._current_audio_url,
             "audio_duration_s": dur,
             "lipsync": self._current_audio_lipsync,
             "offset_s": elapsed,
         }
+        if self._current_audio_turn_id:
+            result["turn_id"] = self._current_audio_turn_id
+        return result
 
     # ------------------------------------------------------------------
     # Priority registration

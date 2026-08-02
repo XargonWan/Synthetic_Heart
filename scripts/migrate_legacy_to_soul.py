@@ -281,10 +281,10 @@ class LegacyToSoulMigrator:
         print("\n[1/3] Migrating chat_history_cache ...")
         since = datetime.now() - timedelta(days=self.config.days)
         query = (
-            "SELECT id, interface_path, sender_name, sender_id, message_text, timestamp "
+            "SELECT id, interface_path, sender_name, sender_id, message_text, created_at "
             "FROM chat_history_cache "
-            "WHERE timestamp >= %s "
-            "ORDER BY timestamp ASC"
+            "WHERE created_at >= %s "
+            "ORDER BY created_at ASC"
         )
         async with maria_conn.cursor() as cur:
             await cur.execute(query, (since,))
@@ -319,7 +319,7 @@ class LegacyToSoulMigrator:
                 atomic_facts=atomic_facts,
                 emotional_tag=_build_emotional_tag([], intensity=0.1, valence=0.0),
                 foresight_signals=[],
-                timestamp=_as_utc(row.get("timestamp")),
+                event_timestamp=_as_utc(row.get("created_at")),
                 embedding=None,
                 explicit_importance=0.1,
             )
@@ -335,10 +335,10 @@ class LegacyToSoulMigrator:
         print("\n[2/3] Migrating memories ...")
         since = datetime.now() - timedelta(days=self.config.days)
         query = (
-            "SELECT id, timestamp, content, author, source, tags, scope, emotion, intensity "
+            "SELECT id, created_at, content, author, source, tags, scope, emotion, intensity "
             "FROM memories "
-            "WHERE timestamp >= %s "
-            "ORDER BY timestamp ASC"
+            "WHERE created_at >= %s "
+            "ORDER BY created_at ASC"
         )
         async with maria_conn.cursor() as cur:
             await cur.execute(query, (since,))
@@ -390,7 +390,7 @@ class LegacyToSoulMigrator:
                     labels, intensity=intensity, valence=0.0
                 ),
                 foresight_signals=[],
-                timestamp=_as_utc(row.get("timestamp")),
+                event_timestamp=_as_utc(row.get("created_at")),
                 embedding=None,
                 explicit_importance=0.4,
             )
@@ -406,11 +406,11 @@ class LegacyToSoulMigrator:
         print("\n[3/3] Migrating ai_diary ...")
         since = datetime.now() - timedelta(days=self.config.days)
         query = (
-            "SELECT id, timestamp, content, user_message, interaction_summary, emotions, "
+            "SELECT id, created_at, content, user_message, interaction_summary, emotions, "
             "context_tags, interface, chat_id, thread_id "
             "FROM ai_diary "
-            "WHERE timestamp >= %s "
-            "ORDER BY timestamp ASC"
+            "WHERE created_at >= %s "
+            "ORDER BY created_at ASC"
         )
         async with maria_conn.cursor() as cur:
             await cur.execute(query, (since,))
@@ -466,7 +466,7 @@ class LegacyToSoulMigrator:
                     valence=0.0,
                 ),
                 foresight_signals=[],
-                timestamp=_as_utc(row.get("timestamp")),
+                event_timestamp=_as_utc(row.get("created_at")),
                 embedding=None,
                 explicit_importance=0.5,
             )

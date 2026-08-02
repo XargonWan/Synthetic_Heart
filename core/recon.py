@@ -5,6 +5,7 @@ import time
 from typing import Any, Dict, List, Tuple
 from core.logging_utils import log_debug, log_info, log_warning
 from core.config_manager import config_registry
+from core.beat_utils import is_outbound_beat
 
 _RECON_HINT_CACHE: dict[str, dict[str, Any]] = {}
 _lingua_detector: Any | None = None
@@ -356,6 +357,16 @@ async def _build_recon_history_texts_async(
     global_lines: list[str] = []
 
     interface_path = getattr(message, "interface_path", None)
+    # Resolve the raw incoming path the same way messages are resolved when
+    # persisted (alias/link map + Unified Lane), so the local-history lookup
+    # keys line up with how the rows were stored.
+    if interface_path:
+        try:
+            from core.chat_context_manager import _resolve_context_path
+
+            interface_path = _resolve_context_path(interface_path)
+        except Exception:
+            pass
     try:
         if isinstance(context_memory, dict) and interface_path in context_memory:
             raw = list(context_memory.get(interface_path, []))
@@ -380,7 +391,13 @@ async def _build_recon_history_texts_async(
         )
 
         if interface_path:
-            cached = await load_chat_history(interface_path)
+            # match_chat_level=True: after a restart the in-memory context is
+            # empty, so this DB read is the only source of local history. An
+            # exact-path match silently drops thread-suffixed turns of the same
+            # chat (e.g. Telegram reply-in-thread), leaving local history empty
+            # while global history (unfiltered) survives. Chat-level matching
+            # keeps the two consistent across restarts.
+            cached = await load_chat_history(interface_path, match_chat_level=True)
             for item in list(cached)[-6:]:
                 sender = item.get("sender_name") or "unknown"
                 content = item.get("text") or ""
@@ -559,18 +576,17 @@ async def gather_recon_contributions(
         message=message, context_memory=context_memory
     )
 
-    # For outreach beats the "text" is an internal Grillo prompt (in English)
-    # which would mislead language detection.  Use only local chat history.
-    _is_outreach = (
-        isinstance(context_memory, dict)
-        and context_memory.get("beat_type") == "outreach"
+    # For outbound beats (observer) the "text" is an internal Grillo prompt (in
+    # English) which would mislead language detection.  Use only local history.
+    _is_outbound = isinstance(context_memory, dict) and is_outbound_beat(
+        context_memory.get("beat_type")
     )
-    if _is_outreach:
+    if _is_outbound:
         user_message_section = (
-            "(System-generated outreach prompt — ignore for language detection)"
+            "(System-generated proactive prompt — ignore for language detection)"
         )
         log_debug(
-            "[recon] Outreach beat detected: excluding prompt text from "
+            "[recon] Outbound beat detected: excluding prompt text from "
             "language detection"
         )
     else:
@@ -595,13 +611,14 @@ async def gather_recon_contributions(
     local_language = None
     if use_local_precheck:
         local_language = _detect_language_locally(user_message_section)
-        if not local_language and _is_outreach:
+        if not local_language and _is_outbound:
             local_language = _detect_language_locally(local_text)
 
     keys_set = set(keys)
     needs_language = "language_hint" in keys_set
     needs_tone = "tone_hint" in keys_set
 
+    llm_text = None
     parsed: dict[str, Any] | None = None
     cached_hint = _get_cached_hint(cache_key)
     if cached_hint:
@@ -632,15 +649,20 @@ async def gather_recon_contributions(
     if parsed is None:
         # Single LLM call
         engine = None
+        scope_model: str | None = None
         try:
-            from core.config import derive_cortex_scope, get_active_cortex_engine
+            from core.config import (
+                derive_cortex_scope,
+                get_active_cortex_engine,
+                get_active_cortex_scope,
+            )
             from core.cortex_registry import get_cortex_registry
 
             scope = derive_cortex_scope(
                 context_memory if isinstance(context_memory, dict) else None
             )
             try:
-                active_cortex = await get_active_cortex_engine(scope=scope)
+                active_cortex, scope_model = await get_active_cortex_scope(scope=scope)
             except TypeError:
                 # Backward/test compatibility: some monkeypatched helpers still
                 # expose the older no-kwargs signature.
@@ -662,15 +684,18 @@ async def gather_recon_contributions(
         llm_text = None
         if parsed is None and engine is not None:
             try:
-                llm_text = await asyncio.wait_for(
-                    engine.generate_response(
-                        [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt},
-                        ]
-                    ),
-                    timeout=timeout,
-                )
+                from core.config import scope_model_override
+
+                with scope_model_override(engine, scope_model):
+                    llm_text = await asyncio.wait_for(
+                        engine.generate_response(
+                            [
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_prompt},
+                            ]
+                        ),
+                        timeout=timeout,
+                    )
                 log_debug(f"[recon] LLM response:\n{llm_text}")
             except Exception as e:
                 log_warning(f"[recon] Combined Recon LLM call failed: {e}")

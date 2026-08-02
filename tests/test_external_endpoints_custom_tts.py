@@ -132,3 +132,141 @@ def test_external_vox_engine_uses_tts_extra_config():
     assert engine.output_format == "pcm"
     assert engine.sample_rate == 16000
     assert engine.channels == 2
+
+
+class _RecordingTTSAdapter:
+    """Adapter stub that records the kwargs forwarded to ``generate_tts``."""
+
+    def __init__(self) -> None:
+        self.captured_kwargs: dict[str, object] = {}
+        self._engine_label = ""
+
+    async def generate_tts(
+        self, text: str, voice: object = None, **kwargs: object
+    ) -> bytes:
+        self.captured_kwargs = {"voice": voice, **kwargs}
+        return b"audio"
+
+
+def test_endpoint_tts_language_overrides_caller_language():
+    """A pinned ``tts_language`` must override the caller's auto-detected language.
+
+    Regression: single-speaker models (e.g. kitten-tts-nano) accept only a fixed
+    language set. The endpoint's configured ``tts_language`` is a hard model
+    constraint and must win over the language the caller detected from the text.
+    """
+    endpoint = ExternalEndpoint(
+        id=3,
+        name="pinned_lang_tts",
+        display_label="Pinned Language TTS",
+        protocol=EndpointProtocol.CUSTOM,
+        base_url="http://example.com/tts",
+        api_key_enc=None,
+        enabled=True,
+        capabilities={},
+        subsystem_map={"vox": True},
+        available_models=[],
+        default_model=None,
+        probe_status="never",
+        last_probe_at=None,
+        extra_config={"tts_language": "default", "tts_model": "kitten-tts-nano"},
+    )
+
+    adapter = _RecordingTTSAdapter()
+    engine = ExternalVoxEngine(endpoint, adapter=adapter)
+
+    # Caller auto-detected Italian; the endpoint pins "default".
+    result = engine.generate_tts("Ciao", language="it")
+
+    assert result == b"audio"
+    assert adapter.captured_kwargs["language"] == "default"
+    assert adapter.captured_kwargs["model"] == "kitten-tts-nano"
+
+
+def test_runtime_vox_default_model_overrides_extra_config(monkeypatch):
+    """The WebUI Vox model selection (``VOX_DEFAULT_MODEL``) must win over the
+    ``extra_config.tts_model`` pin, provided it is one of the endpoint's models.
+
+    Regression: the WebUI saved the user's pick to the ``VOX_DEFAULT_MODEL``
+    config key, but the bridge only read ``extra_config.tts_model`` — so picking
+    ``chatterbox_multilingual`` in the UI was silently ignored and the pinned
+    ``kitten-tts-nano`` was used instead.
+    """
+    from core.config_manager import config_registry
+
+    monkeypatch.setattr(
+        config_registry,
+        "get_value",
+        lambda key, default=None: (
+            "chatterbox_multilingual" if key == "VOX_DEFAULT_MODEL" else default
+        ),
+    )
+
+    endpoint = ExternalEndpoint(
+        id=4,
+        name="multimodal_tts",
+        display_label="Multimodal TTS",
+        protocol=EndpointProtocol.CUSTOM,
+        base_url="http://example.com/tts",
+        api_key_enc=None,
+        enabled=True,
+        capabilities={},
+        subsystem_map={"vox": True},
+        available_models=["kitten-tts-nano", "chatterbox_multilingual"],
+        default_model="voicefixer",
+        probe_status="never",
+        last_probe_at=None,
+        extra_config={"tts_language": "default", "tts_model": "kitten-tts-nano"},
+    )
+
+    adapter = _RecordingTTSAdapter()
+    engine = ExternalVoxEngine(endpoint, adapter=adapter)
+
+    result = engine.generate_tts("Ciao", language="it")
+
+    assert result == b"audio"
+    # The runtime model wins over the pinned tts_model.
+    assert adapter.captured_kwargs["model"] == "chatterbox_multilingual"
+    # The pinned "default" language belongs to the pinned model; once the user
+    # switches to a different (multilingual) model the caller's language is kept.
+    assert adapter.captured_kwargs["language"] == "it"
+
+
+def test_runtime_vox_default_model_ignored_when_not_available(monkeypatch):
+    """A ``VOX_DEFAULT_MODEL`` that isn't in the endpoint's ``available_models``
+    belongs to a different Vox engine and must be ignored here."""
+    from core.config_manager import config_registry
+
+    monkeypatch.setattr(
+        config_registry,
+        "get_value",
+        lambda key, default=None: (
+            "some-other-engine-model" if key == "VOX_DEFAULT_MODEL" else default
+        ),
+    )
+
+    endpoint = ExternalEndpoint(
+        id=5,
+        name="pinned_only_tts",
+        display_label="Pinned Only TTS",
+        protocol=EndpointProtocol.CUSTOM,
+        base_url="http://example.com/tts",
+        api_key_enc=None,
+        enabled=True,
+        capabilities={},
+        subsystem_map={"vox": True},
+        available_models=["kitten-tts-nano"],
+        default_model="voicefixer",
+        probe_status="never",
+        last_probe_at=None,
+        extra_config={"tts_language": "default", "tts_model": "kitten-tts-nano"},
+    )
+
+    adapter = _RecordingTTSAdapter()
+    engine = ExternalVoxEngine(endpoint, adapter=adapter)
+
+    result = engine.generate_tts("Ciao", language="it")
+
+    assert result == b"audio"
+    assert adapter.captured_kwargs["model"] == "kitten-tts-nano"
+    assert adapter.captured_kwargs["language"] == "default"

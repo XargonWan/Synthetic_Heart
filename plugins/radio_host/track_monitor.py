@@ -191,7 +191,9 @@ class TrackMonitor:
             # Re-capture now — the verification sleep above made the original stale
             now = time.time()
 
-            # Fetch the full queue ahead so we can pre-generate multiple transitions
+            # Fetch the full queue ahead so we can pre-generate multiple transitions.
+            # Skip jingles, bumpers, and other non-musical content: pre-generated
+            # banter must only ever name real songs, never a station ID/jingle.
             queue_ahead: list[dict[str, str]] = []
             try:
                 queue_data = await self._client.get_station_queue(self._station_id)
@@ -199,8 +201,16 @@ class TrackMonitor:
                     song = item.get("song", {}) or {}
                     q_title = str(song.get("title", ""))
                     q_artist = str(song.get("artist", ""))
-                    if q_title and q_artist:
-                        queue_ahead.append({"title": q_title, "artist": q_artist})
+                    if not (q_title and q_artist):
+                        continue
+                    q_playlist = str(item.get("playlist", "") or "").lower()
+                    q_duration = float(item.get("duration", 0) or 0)
+                    is_jingle_playlist = "jingle" in q_playlist
+                    is_bumper_playlist = "bumper" in q_playlist
+                    is_short = 0 < q_duration < _JINGLE_MAX_DURATION_S
+                    if is_jingle_playlist or is_bumper_playlist or is_short:
+                        continue
+                    queue_ahead.append({"title": q_title, "artist": q_artist})
             except Exception:
                 pass
 

@@ -180,7 +180,7 @@
   function buildSetupCard() {
     return (
       '<div class="setup-card">' +
-      '<h3>📻 Radio Host</h3>' +
+      '<h3>📻 AzuraCast Radio DJ</h3>' +
       "<p>Synth can be your AI radio DJ, automatically generating spoken transitions between songs on your AzuraCast station.</p>" +
       "<hr style='margin: 20px 0; border-color: var(--border-color);'>" +
       "<div style='text-align: left;'>" +

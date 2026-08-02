@@ -8,10 +8,10 @@ CREATE TABLE IF NOT EXISTS emotion_state (
     id INT AUTO_INCREMENT PRIMARY KEY,
     emotion_name VARCHAR(100) NOT NULL,
     intensity FLOAT NOT NULL DEFAULT 5.0,
-    timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_emotion_name (emotion_name),
-    INDEX idx_timestamp (timestamp)
+    INDEX idx_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- G.R.I.L.L.O. Beat Tracking Table
@@ -64,36 +64,43 @@ CREATE TABLE IF NOT EXISTS grillo_action_execs (
     FOREIGN KEY (activity_log_id) REFERENCES grillo_activity_log(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Agent Activity Log Table (for Agent plugin proposals/approvals/executions)
-CREATE TABLE IF NOT EXISTS agent_activity_log (
+-- G.R.I.L.L.O. Self-Growth States Table
+-- Rolling history (max 10 rows) of SyntH's evolving self-growth reflection.
+-- Exactly one row has is_current = 1. Older rows beyond the newest 10 are pruned.
+CREATE TABLE IF NOT EXISTS growth_states (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    command TEXT NOT NULL,
-    proposer VARCHAR(100),
-    status ENUM('proposed','approved','rejected','executed') NOT NULL DEFAULT 'proposed',
-    trainer_id VARCHAR(100),
-    request_ts DATETIME DEFAULT CURRENT_TIMESTAMP,
-    response_ts DATETIME,
-    result LONGTEXT,
-    metadata JSON,
-    INDEX idx_status (status),
-    INDEX idx_proposer (proposer)
+    content LONGTEXT NOT NULL,
+    created_by VARCHAR(64) NOT NULL DEFAULT 'grillo_growth',
+    source VARCHAR(64) NOT NULL DEFAULT 'weekly',
+    is_current BOOLEAN NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_growth_current (is_current),
+    INDEX idx_growth_created_at (created_at DESC)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Tracks executions related to agent_activity_log
-CREATE TABLE IF NOT EXISTS agent_action_execs (
+-- Karada Touch Events Table
+-- Records WebUI 3D-interaction events (environment/window taps and touches on
+-- the Synth avatar) so Synth is aware of physical interaction with her Karada.
+-- Environment/window rows are transient (~10 min TTL); synth_touch rows are
+-- retained for a sliding 24h window for later reflection.
+CREATE TABLE IF NOT EXISTS karada_touch_events (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    activity_log_id INT NOT NULL,
-    command TEXT NOT NULL,
-    status ENUM('pending','executed','failed') NOT NULL DEFAULT 'pending',
-    error_text TEXT,
-    result JSON,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    INDEX idx_activity_log_id (activity_log_id),
-    FOREIGN KEY (activity_log_id) REFERENCES agent_activity_log(id) ON DELETE CASCADE
+    interface_path VARCHAR(255) NOT NULL,
+    session_id VARCHAR(255),
+    event_type VARCHAR(50) NOT NULL,
+    body_part VARCHAR(100),
+    raw_part VARCHAR(100),
+    username VARCHAR(255),
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME NOT NULL,
+    flushed BOOLEAN NOT NULL DEFAULT 0,
+    attached BOOLEAN NOT NULL DEFAULT 0,
+    INDEX idx_kte_expires (expires_at),
+    INDEX idx_kte_flushed (flushed, event_type),
+    INDEX idx_kte_iface (interface_path)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Agent tasks table: persistent record of agent loop tasks and their iterations
+-- Agent tasks table: persistent record of Agentic Runtime turns and their iterations
 CREATE TABLE IF NOT EXISTS agent_tasks (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     engine VARCHAR(64),
@@ -109,6 +116,24 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     INDEX idx_agent_created (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Web Search Tasks: decoupled background web-search jobs triggered by the
+-- recon web-search plugin. Recon fires a search and returns immediately; the
+-- orchestrator runs the searches off the message pipeline, synthesises an
+-- aseptic result via the cortex, and delivers it back as a second turn.
+CREATE TABLE IF NOT EXISTS web_search_tasks (
+    id VARCHAR(64) PRIMARY KEY,
+    interface_path TEXT,
+    queries TEXT,
+    search_context TEXT,
+    status VARCHAR(16) NOT NULL DEFAULT 'pending',
+    result_text LONGTEXT,
+    error TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_web_search_status (status),
+    INDEX idx_web_search_created (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- External Endpoints: user-defined external AI service endpoints
 -- (OpenAI-compatible, Gemini, Anthropic, custom)
 CREATE TABLE IF NOT EXISTS external_endpoints (
@@ -122,6 +147,7 @@ CREATE TABLE IF NOT EXISTS external_endpoints (
     capabilities JSON,
     subsystem_map JSON,
     available_models JSON,
+    models_metadata JSON,
     default_model VARCHAR(255),
     probe_status VARCHAR(50) NOT NULL DEFAULT 'never',
     last_probe_at DATETIME,

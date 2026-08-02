@@ -24,6 +24,7 @@ from typing import Any
 import requests
 
 from core.ai_plugin_base import AIPluginBase
+from core.beat_utils import is_outbound_beat
 from core.config_manager import config_registry
 from core.cortex_api_logger import log_cortex_request, log_cortex_response
 from core.logging_utils import log_debug, log_error, log_info, log_warning
@@ -103,44 +104,8 @@ DEFAULT_MODEL = "grok-4-1-fast-reasoning"
 try:
     from core.variables_engine import register_exposed_var
 
-    register_exposed_var(
-        "XAI_API_KEY",
-        label="xAI API Key",
-        default="",
-        value_type=str,
-        ui_type="password",
-        description="API key for xAI Grok (https://console.x.ai/).",
-        scope="llm",
-        component="xai_grok",
-        tags=["cortex_engine", "sensitive"],
-        needs_component_reload=True,
-    )
-    register_exposed_var(
-        "XAI_BASE_URL",
-        label="xAI Base URL",
-        default="https://api.x.ai",
-        value_type=str,
-        ui_type="string",
-        description="Base URL for the xAI API (change only for proxies).",
-        scope="llm",
-        component="xai_grok",
-        tags=["cortex_engine"],
-        advanced=True,
-        needs_component_reload=True,
-    )
-    register_exposed_var(
-        "XAI_DEFAULT_MODEL",
-        label="Default Model",
-        default=DEFAULT_MODEL,
-        value_type=str,
-        ui_type="combobox",
-        options=list(MODEL_CONFIGS.keys()),
-        description="Default Grok model to use when no scope/action override matches.",
-        scope="llm",
-        component="xai_grok",
-        tags=["cortex_engine"],
-        needs_component_reload=False,
-    )
+    # API key, base URL and default model live in the Engines tab
+    # (external_endpoints), not in Settings.
     register_exposed_var(
         "XAI_MAX_TOKENS",
         label="Max Output Tokens",
@@ -162,21 +127,23 @@ except Exception:
 XAI_API_KEY = config_registry.get_var(
     "XAI_API_KEY",
     "",
-    label="xAI API Key",
+    label="XAI API Key",
     description="API key for xAI Grok.",
     group="llm",
     component="xai_grok",
     sensitive=True,
+    hidden=True,
 )
 
 XAI_BASE_URL = config_registry.get_var(
     "XAI_BASE_URL",
     "https://api.x.ai",
-    label="xAI Base URL",
+    label="XAI Base URL",
     description="Base URL for the xAI API.",
     group="llm",
     component="xai_grok",
     advanced=True,
+    hidden=True,
 )
 
 XAI_DEFAULT_MODEL = config_registry.get_var(
@@ -186,6 +153,7 @@ XAI_DEFAULT_MODEL = config_registry.get_var(
     description="Default Grok model.",
     group="llm",
     component="xai_grok",
+    hidden=True,
 )
 
 XAI_MAX_TOKENS = config_registry.get_var(
@@ -286,25 +254,6 @@ class XaiGrokPlugin(AIPluginBase):
             "supports_voice_interaction": False,
             "model_name": self._current_model,
         }
-
-    def supports_agent(self) -> bool:
-        return True
-
-    def agent_execute(
-        self, action_dict: dict[str, Any], context: dict[str, Any] | None = None
-    ) -> dict[str, Any]:
-        try:
-            from core.core_initializer import PLUGIN_REGISTRY
-
-            agent_plugin = PLUGIN_REGISTRY.get("agent") if PLUGIN_REGISTRY else None
-            if agent_plugin and hasattr(agent_plugin, "execute_action"):
-                res = agent_plugin.execute_action(action_dict, context=context)
-                if isinstance(res, dict):
-                    return res
-                return {"success": True, "result": res}
-        except Exception as exc:
-            log_warning(f"[xai_grok] agent_execute delegation failed: {exc}")
-        return {"success": False, "error": "agent plugin unavailable"}
 
     async def handle_incoming_message(self, bot: Any, message: Any, prompt: Any) -> str:
         """Process a message using a pre-built prompt and return the response."""
@@ -748,14 +697,14 @@ class XaiGrokPlugin(AIPluginBase):
         )
         is_grillo_internal = is_grillo and (
             not isinstance(prompt_dict, dict)
-            or prompt_dict.get("beat_type", "internal") != "outreach"
+            or not is_outbound_beat(prompt_dict.get("beat_type"))
         )
 
         if is_grillo_internal:
             interface_hint = (
                 "CURRENT INTERFACE: grillo (INTERNAL)\n"
                 "This is an internal introspection beat. Do NOT output any message_* actions.\n"
-                "Use ONLY internal actions like 'create_personal_diary_entry', 'set_emotion', etc."
+                "Use ONLY internal actions like 'create_personal_diary_entry', 'update_emotion_state', etc."
             )
         else:
             interface_hint = (

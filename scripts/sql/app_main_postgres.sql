@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS external_endpoints (
     capabilities TEXT,
     subsystem_map TEXT,
     available_models TEXT,
+    models_metadata TEXT,
     default_model TEXT,
     probe_status TEXT NOT NULL DEFAULT 'never',
     last_probe_at TIMESTAMPTZ,
@@ -33,11 +34,11 @@ CREATE TABLE IF NOT EXISTS chat_history_cache (
     sender_id TEXT,
     message_text TEXT NOT NULL,
     metadata TEXT,
-    timestamp TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (interface_path, timestamp)
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (interface_path, created_at)
 );
 CREATE INDEX IF NOT EXISTS idx_chat_history_cache_interface_path ON chat_history_cache (interface_path);
-CREATE INDEX IF NOT EXISTS idx_chat_history_cache_timestamp ON chat_history_cache (timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_chat_history_cache_created_at ON chat_history_cache (created_at DESC);
 
 CREATE TABLE IF NOT EXISTS chat_session_meta (
     interface_path TEXT PRIMARY KEY,
@@ -63,7 +64,7 @@ CREATE TABLE IF NOT EXISTS ai_diary (
     personal_thought TEXT,
     emotions TEXT DEFAULT '[]',
     interaction_summary TEXT,
-    timestamp TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     interface TEXT,
     chat_id TEXT,
     thread_id TEXT,
@@ -71,7 +72,7 @@ CREATE TABLE IF NOT EXISTS ai_diary (
     context_tags TEXT DEFAULT '[]',
     involved_users TEXT DEFAULT '[]'
 );
-CREATE INDEX IF NOT EXISTS idx_ai_diary_timestamp ON ai_diary (timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_ai_diary_created_at ON ai_diary (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ai_diary_interface_chat ON ai_diary (interface, chat_id);
 
 CREATE TABLE IF NOT EXISTS ai_diary_archive (
@@ -80,7 +81,7 @@ CREATE TABLE IF NOT EXISTS ai_diary_archive (
     personal_thought TEXT,
     emotions TEXT DEFAULT '[]',
     interaction_summary TEXT,
-    timestamp TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     interface TEXT,
     chat_id TEXT,
     thread_id TEXT,
@@ -88,11 +89,11 @@ CREATE TABLE IF NOT EXISTS ai_diary_archive (
     context_tags TEXT DEFAULT '[]',
     involved_users TEXT DEFAULT '[]'
 );
-CREATE INDEX IF NOT EXISTS idx_ai_diary_archive_timestamp ON ai_diary_archive (timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_ai_diary_archive_created_at ON ai_diary_archive (created_at DESC);
 
 CREATE TABLE IF NOT EXISTS memories (
     id BIGSERIAL PRIMARY KEY,
-    timestamp TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
     content TEXT NOT NULL,
     author TEXT,
     source TEXT,
@@ -102,17 +103,17 @@ CREATE TABLE IF NOT EXISTS memories (
     intensity INTEGER,
     emotion_state TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_memories_timestamp ON memories (timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_created_at ON memories (created_at DESC);
 
 CREATE TABLE IF NOT EXISTS emotion_state (
     id BIGSERIAL PRIMARY KEY,
     emotion_name TEXT NOT NULL,
     intensity DOUBLE PRECISION NOT NULL DEFAULT 5.0,
-    timestamp TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_emotion_state_name ON emotion_state (emotion_name);
-CREATE INDEX IF NOT EXISTS idx_emotion_state_timestamp ON emotion_state (timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_emotion_state_created_at ON emotion_state (created_at DESC);
 
 CREATE SEQUENCE IF NOT EXISTS emotion_diary_id_seq;
 CREATE TABLE IF NOT EXISTS emotion_diary (
@@ -126,9 +127,9 @@ CREATE TABLE IF NOT EXISTS emotion_diary (
     trigger_condition TEXT,
     decision_logic TEXT,
     next_check TIMESTAMPTZ,
-    timestamp TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE INDEX IF NOT EXISTS idx_emotion_diary_timestamp ON emotion_diary (timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_emotion_diary_created_at ON emotion_diary (created_at DESC);
 
 CREATE TABLE IF NOT EXISTS bio (
     id TEXT PRIMARY KEY,
@@ -148,13 +149,13 @@ CREATE TABLE IF NOT EXISTS bio (
     user_name TEXT
 );
 
-CREATE TABLE IF NOT EXISTS recent_chats (
-    chat_id TEXT PRIMARY KEY,
-    last_active DOUBLE PRECISION NOT NULL,
-    metadata TEXT,
+CREATE TABLE IF NOT EXISTS interface_paths (
+    interface_path TEXT PRIMARY KEY,
+    last_used DOUBLE PRECISION NOT NULL,
+    segment_labels TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE INDEX IF NOT EXISTS idx_recent_chats_last_active ON recent_chats (last_active DESC);
+CREATE INDEX IF NOT EXISTS idx_interface_paths_last_used ON interface_paths (last_used DESC);
 
 CREATE TABLE IF NOT EXISTS scheduled_events (
     id BIGSERIAL PRIMARY KEY,
@@ -165,7 +166,11 @@ CREATE TABLE IF NOT EXISTS scheduled_events (
     description TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     delivered BOOLEAN DEFAULT FALSE,
-    created_by TEXT DEFAULT 'synth'
+    created_by TEXT DEFAULT 'synth',
+    uid TEXT,
+    rrule TEXT,
+    tzid TEXT,
+    source TEXT DEFAULT 'synth'
 );
 CREATE INDEX IF NOT EXISTS idx_scheduled_events_next_run ON scheduled_events (next_run);
 
@@ -173,18 +178,6 @@ CREATE TABLE IF NOT EXISTS blocklist (
     user_id BIGINT PRIMARY KEY,
     reason TEXT,
     blocked_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS chatlink (
-    int_id BIGSERIAL PRIMARY KEY,
-    interface TEXT NOT NULL,
-    chat_id TEXT NOT NULL,
-    thread_id TEXT,
-    chat_name TEXT,
-    message_thread_name TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    last_updated TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (interface, chat_id)
 );
 
 CREATE TABLE IF NOT EXISTS message_map (
@@ -234,31 +227,18 @@ CREATE TABLE IF NOT EXISTS grillo_action_execs (
 );
 CREATE INDEX IF NOT EXISTS idx_grillo_action_execs_activity_log_id ON grillo_action_execs (activity_log_id);
 
-CREATE TABLE IF NOT EXISTS agent_activity_log (
+-- Rolling history (max 10 rows) of SyntH's evolving self-growth reflection.
+-- Exactly one row has is_current = TRUE. Older rows beyond the newest 10 are pruned.
+CREATE TABLE IF NOT EXISTS growth_states (
     id BIGSERIAL PRIMARY KEY,
-    command TEXT NOT NULL,
-    proposer TEXT,
-    status TEXT NOT NULL DEFAULT 'proposed' CHECK (status IN ('proposed', 'approved', 'rejected', 'executed', 'cancelled')),
-    trainer_id TEXT,
-    request_ts TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    response_ts TIMESTAMPTZ,
-    result TEXT,
-    metadata TEXT
+    content TEXT NOT NULL,
+    created_by TEXT NOT NULL DEFAULT 'grillo_growth',
+    source TEXT NOT NULL DEFAULT 'weekly',
+    is_current BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-CREATE INDEX IF NOT EXISTS idx_agent_activity_log_status ON agent_activity_log (status);
-CREATE INDEX IF NOT EXISTS idx_agent_activity_log_proposer ON agent_activity_log (proposer);
-
-CREATE TABLE IF NOT EXISTS agent_action_execs (
-    id BIGSERIAL PRIMARY KEY,
-    activity_log_id BIGINT NOT NULL REFERENCES agent_activity_log(id) ON DELETE CASCADE,
-    command TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'executed', 'failed')),
-    error_text TEXT,
-    result TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS idx_agent_action_execs_activity_log_id ON agent_action_execs (activity_log_id);
+CREATE INDEX IF NOT EXISTS idx_growth_states_current ON growth_states (is_current);
+CREATE INDEX IF NOT EXISTS idx_growth_states_created_at ON growth_states (created_at DESC);
 
 CREATE TABLE IF NOT EXISTS agent_tasks (
     id BIGSERIAL PRIMARY KEY,

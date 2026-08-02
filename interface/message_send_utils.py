@@ -51,6 +51,18 @@ _COOLDOWN_PROCESSOR_RUNNING = False
 max_message_preview_len = 100
 
 
+def _is_thread_or_chat_not_found(error_message: str) -> bool:
+    """True if ``error_message`` is a stale thread/chat id, not a real network problem.
+
+    python-telegram-bot's ``BadRequest`` is a ``NetworkError`` subclass, so these
+    errors would otherwise trigger the same chat-wide cooldown as genuine
+    connectivity/flood issues, even though they are immediately retried by the
+    caller (``send_with_thread_fallback``) without the offending thread id.
+    """
+    lowered = error_message.lower()
+    return "thread not found" in lowered or "chat not found" in lowered
+
+
 def _get_telegram_trainer_id() -> int | None:
     """Resolve the Telegram trainer id from config for failure alerts."""
     try:
@@ -264,7 +276,14 @@ async def _send_with_retry(
                         int(seconds) if seconds else DEFAULT_COOLDOWN_SECONDS
                     )
                     _CHAT_COOLDOWNS[chat_id] = cooldown
-                elif isinstance(e, NetworkError):
+                elif isinstance(e, NetworkError) and not _is_thread_or_chat_not_found(
+                    error_message
+                ):
+                    # BadRequest is a NetworkError subclass in python-telegram-bot,
+                    # but "thread/chat not found" is a stale-id data problem, not a
+                    # connectivity issue — don't cooldown the whole chat for it, since
+                    # the caller (send_with_thread_fallback) retries immediately without
+                    # the thread and would otherwise walk straight into this cooldown.
                     _CHAT_COOLDOWNS[chat_id] = time.time() + DEFAULT_COOLDOWN_SECONDS
             except Exception:
                 pass
@@ -297,7 +316,9 @@ async def _send_with_retry(
                             _CHAT_COOLDOWNS[chat_id] = time.time() + (
                                 int(seconds) if seconds else DEFAULT_COOLDOWN_SECONDS
                             )
-                        elif isinstance(e2, NetworkError):
+                        elif isinstance(
+                            e2, NetworkError
+                        ) and not _is_thread_or_chat_not_found(str(e2)):
                             _CHAT_COOLDOWNS[chat_id] = (
                                 time.time() + DEFAULT_COOLDOWN_SECONDS
                             )

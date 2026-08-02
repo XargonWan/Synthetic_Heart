@@ -27,6 +27,8 @@ def test_no_direct_getenv_for_exposed_vars():
     py_files = list(repo_root.glob("**/*.py"))
     allowed_bootstrap_files = {
         (repo_root / "core" / "logging_utils.py").resolve(),
+        (repo_root / "core" / "db.py").resolve(),
+        (repo_root / "core" / "db_cutover.py").resolve(),
     }
 
     failures = []

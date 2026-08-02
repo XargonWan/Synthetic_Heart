@@ -516,3 +516,50 @@ async def delete_failure_entry(entry_id: int) -> bool:
     if not deleted:
         log_warning(f"[llm_failure_log] Failure entry {entry_id} not found for delete")
     return deleted
+
+
+async def mark_failure_processed(entry_id: int) -> bool:
+    """Mark a failure entry as processed by the recovery plugin.
+
+    Sets ``metadata.processed_by_recovery = True`` so the recovery plugin does
+    not revisit it on the next scan. Works for both DB and in-memory entries.
+    This is the anti-loop guarantee: once a failure has been handed to recovery
+    (whether or not the regeneration succeeded), it must never be picked up
+    again, otherwise the plugin would spam new messages forever.
+    """
+    if entry_id < 0:
+        # In-memory entry: patch the dict directly.
+        for e in _in_memory_failure_entries:
+            if e.get("id") == entry_id:
+                meta = e.get("metadata") or {}
+                meta["processed_by_recovery"] = True
+                e["metadata"] = meta
+                return True
+        return False
+
+    from core.db import get_conn_ctx
+
+    await ensure_failure_log_table()
+
+    async with get_conn_ctx() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT metadata FROM llm_failure_log WHERE id = %s", [entry_id]
+            )
+            row = await cur.fetchone()
+            if row is None:
+                return False
+            raw = row[0] if row else None
+            meta = _parse_metadata(raw) or {}
+            meta["processed_by_recovery"] = True
+            import json
+
+            await cur.execute(
+                "UPDATE llm_failure_log SET metadata = %s WHERE id = %s",
+                (json.dumps(meta, ensure_ascii=False), entry_id),
+            )
+        try:
+            await conn.commit()
+        except Exception:
+            pass
+    return True

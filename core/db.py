@@ -1,7 +1,6 @@
 # core/db.py
 
 from datetime import datetime, timezone, timedelta
-import calendar
 import asyncio
 import time
 from pathlib import Path
@@ -1456,6 +1455,71 @@ async def ensure_core_tables() -> None:
             _db_initialized = True
 
 
+# Grillo audit tables. MariaDB dialect: on Postgres these are run through the
+# compat cursor, whose DDL translator rewrites AUTO_INCREMENT/JSON/ENUM/ENGINE
+# and strips the inline INDEX lines (see db_backends._translate_create_table),
+# so the equivalent indexes are created explicitly in init_grillo_tables().
+_GRILLO_ACTIVITY_LOG_DDL = """
+    CREATE TABLE IF NOT EXISTS grillo_activity_log (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        beat_type VARCHAR(50) NOT NULL,
+        prompt_text TEXT NOT NULL,
+        response_text LONGTEXT,
+        diary_entry_id INT,
+        executed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        metadata JSON,
+        suppressed_count INT DEFAULT 0,
+        INDEX idx_executed_at (executed_at),
+        INDEX idx_beat_type (beat_type),
+        INDEX idx_diary_entry (diary_entry_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    """
+
+_GRILLO_ACTION_EXECS_DDL = """
+    CREATE TABLE IF NOT EXISTS grillo_action_execs (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        activity_log_id INT NOT NULL,
+        action_index INT NOT NULL,
+        action_type VARCHAR(150) NOT NULL,
+        payload JSON,
+        status ENUM('pending','processed','failed') NOT NULL DEFAULT 'pending',
+        error_text TEXT,
+        result JSON,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_activity_log_id (activity_log_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    """
+
+_GRILLO_PG_INDEX_DDL: tuple[str, ...] = (
+    "CREATE INDEX IF NOT EXISTS idx_grillo_activity_executed_at"
+    " ON grillo_activity_log (executed_at)",
+    "CREATE INDEX IF NOT EXISTS idx_grillo_activity_beat_type"
+    " ON grillo_activity_log (beat_type)",
+    "CREATE INDEX IF NOT EXISTS idx_grillo_activity_diary_entry"
+    " ON grillo_activity_log (diary_entry_id)",
+    "CREATE INDEX IF NOT EXISTS idx_grillo_execs_activity_log_id"
+    " ON grillo_action_execs (activity_log_id)",
+)
+
+
+async def init_grillo_tables() -> None:
+    """Create the grillo audit tables (idempotent, MariaDB and Postgres).
+
+    grillo_activity_log is the audit trail for autonomous beats (WebUI
+    History > Grillo, dream recall, diary linking, suppression notes);
+    grillo_action_execs tracks per-action execution status per beat.
+    """
+    async with get_conn_ctx() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(_GRILLO_ACTIVITY_LOG_DDL)
+            await cur.execute(_GRILLO_ACTION_EXECS_DDL)
+            if _get_db_type() == "postgres":
+                for index_sql in _GRILLO_PG_INDEX_DDL:
+                    await cur.execute(index_sql)
+            await conn.commit()
+
+
 async def ensure_plugin_tables() -> None:
     """Ensure plugin-managed tables exist (idempotent).
 
@@ -1469,9 +1533,9 @@ async def ensure_plugin_tables() -> None:
             init_fns: list[tuple[str, str]] = [
                 ("plugins.ai_diary", "init_diary_table"),
                 ("plugins.blocklist", "init_blocklist_table"),
-                ("plugins.recent_chats", "init_recent_chats_table"),
                 ("plugins.message_map", "init_message_map_table"),
                 ("plugins.bio_manager", "init_bio_table"),
+                ("core.interface_paths", "init_interface_paths_table"),
             ]
             for module_name, attr_name in init_fns:
                 try:
@@ -1483,6 +1547,24 @@ async def ensure_plugin_tables() -> None:
                     log_warning(
                         f"[db] Postgres preflight init skipped for {module_name}.{attr_name}: {init_err}"
                     )
+            # The grillo audit tables' DDL lives in the MariaDB-only block
+            # below, which this branch never reaches — without this call the
+            # Postgres runtime has no grillo_activity_log/grillo_action_execs
+            # and every beat runs as an unauditable black box.
+            try:
+                await init_grillo_tables()
+            except Exception as init_err:
+                log_warning(
+                    f"[db] Postgres preflight init skipped for grillo tables: {init_err}"
+                )
+            # Idempotent one-shot schema migrations (backup+verify+drop of
+            # legacy tables, etc.) — applied automatically on every deploy.
+            try:
+                from core.migrations import run_startup_migrations
+
+                await run_startup_migrations()
+            except Exception as _mig_err:
+                log_warning(f"[db] startup migrations skipped: {_mig_err}")
             log_debug("[db] ensure_plugin_tables completed (postgres path)")
             return
 
@@ -1564,8 +1646,8 @@ async def ensure_plugin_tables() -> None:
                             CREATE TABLE IF NOT EXISTS ai_diary (
                                 id INT AUTO_INCREMENT PRIMARY KEY,
                                 content LONGTEXT,
-                                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                                INDEX idx_timestamp (timestamp)
+                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                INDEX idx_created_at (created_at)
                             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
                         """)
 
@@ -1573,8 +1655,8 @@ async def ensure_plugin_tables() -> None:
                             CREATE TABLE IF NOT EXISTS ai_diary_archive (
                                 id INT AUTO_INCREMENT PRIMARY KEY,
                                 content LONGTEXT,
-                                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                                INDEX idx_timestamp (timestamp)
+                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                INDEX idx_created_at (created_at)
                             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
                         """)
                     try:
@@ -1612,89 +1694,26 @@ async def ensure_plugin_tables() -> None:
                     """
                 )
 
-                # recent_chats (plugin)
+                # interface_paths (canonical target registry: last-used + pretty labels)
                 await cur.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS recent_chats (
-                        chat_id VARCHAR(255) PRIMARY KEY,
-                        last_active DOUBLE NOT NULL,
-                        metadata TEXT,
+                    CREATE TABLE IF NOT EXISTS interface_paths (
+                        interface_path VARCHAR(512) PRIMARY KEY,
+                        last_used DOUBLE NOT NULL,
+                        segment_labels TEXT,
                         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        INDEX idx_last_active (last_active)
-                    )
-                    """
-                )
-
-                # grillo tables (init-db.sql + plugin may expect them)
-                await cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS grillo_activity_log (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        beat_type VARCHAR(50) NOT NULL,
-                        prompt_text TEXT NOT NULL,
-                        response_text LONGTEXT,
-                        diary_entry_id INT,
-                        executed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        metadata JSON,
-                        suppressed_count INT DEFAULT 0,
-                        INDEX idx_executed_at (executed_at),
-                        INDEX idx_beat_type (beat_type),
-                        INDEX idx_diary_entry (diary_entry_id)
+                        INDEX idx_interface_paths_last_used (last_used)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
                     """
                 )
 
-                await cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS grillo_action_execs (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        activity_log_id INT NOT NULL,
-                        action_index INT NOT NULL,
-                        action_type VARCHAR(150) NOT NULL,
-                        payload JSON,
-                        status ENUM('pending','processed','failed') NOT NULL DEFAULT 'pending',
-                        error_text TEXT,
-                        result JSON,
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                        INDEX idx_activity_log_id (activity_log_id)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-                    """
-                )
+                # grillo tables (init-db.sql + plugin may expect them);
+                # shared DDL constants, also used by init_grillo_tables()
+                # for the Postgres preflight path above.
+                await cur.execute(_GRILLO_ACTIVITY_LOG_DDL)
+                await cur.execute(_GRILLO_ACTION_EXECS_DDL)
 
-                # agent tables (init-db.sql)
-                await cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS agent_activity_log (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        command TEXT NOT NULL,
-                        proposer VARCHAR(100),
-                        status ENUM('proposed','approved','rejected','executed') NOT NULL DEFAULT 'proposed',
-                        trainer_id VARCHAR(100),
-                        request_ts DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        response_ts DATETIME,
-                        result LONGTEXT,
-                        metadata JSON
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-                    """
-                )
-
-                await cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS agent_action_execs (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        activity_log_id INT NOT NULL,
-                        command TEXT NOT NULL,
-                        status ENUM('pending','executed','failed') NOT NULL DEFAULT 'pending',
-                        error_text TEXT,
-                        result JSON,
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                        INDEX idx_activity_log_id (activity_log_id)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-                    """
-                )
-
+                # agent task table (init-db.sql) — Agentic Runtime 2.0
                 await cur.execute(
                     """
                     CREATE TABLE IF NOT EXISTS agent_tasks (
@@ -1726,6 +1745,7 @@ async def ensure_plugin_tables() -> None:
                         capabilities JSON,
                         subsystem_map JSON,
                         available_models JSON,
+                        models_metadata JSON,
                         default_model VARCHAR(255),
                         probe_status VARCHAR(50) NOT NULL DEFAULT 'never',
                         last_probe_at DATETIME,
@@ -1767,6 +1787,14 @@ async def ensure_plugin_tables() -> None:
                     await conn.commit()
                 except Exception:
                     pass
+        # Idempotent one-shot schema migrations (backup+verify+drop of legacy
+        # tables, etc.) — applied automatically on every deploy.
+        try:
+            from core.migrations import run_startup_migrations
+
+            await run_startup_migrations()
+        except Exception as _mig_err:
+            log_warning(f"[db] startup migrations skipped: {_mig_err}")
         log_debug("[db] ensure_plugin_tables completed")
     except Exception as e:
         log_warning(f"[db] ensure_plugin_tables failed: {e}")
@@ -1794,7 +1822,7 @@ async def insert_memory(
             async with conn.cursor() as cur:
                 await cur.execute(
                     """
-                    INSERT INTO memories (timestamp, content, author, source, tags, scope, emotion, intensity, emotion_state)
+                    INSERT INTO memories (created_at, content, author, source, tags, scope, emotion, intensity, emotion_state)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
@@ -1930,8 +1958,8 @@ async def get_recent_responses(since_timestamp: str) -> list[dict]:
                 await cur.execute(
                     """
                     SELECT * FROM memories
-                    WHERE source = 'synth' AND timestamp >= %s
-                    ORDER BY timestamp DESC
+                    WHERE source = 'synth' AND created_at >= %s
+                    ORDER BY created_at DESC
                     """,
                     (since_timestamp,),
                 )
@@ -1954,6 +1982,8 @@ async def insert_scheduled_event(
     original_context: str | None = None,
     conversation_user_message: str | None = None,
     conversation_llm_response: str | None = None,
+    tzid: str | None = None,
+    source: str | None = None,
 ) -> None:
     """Insert a new scheduled event using local time and store next_run in UTC.
 
@@ -1966,6 +1996,11 @@ async def insert_scheduled_event(
         original_context: Original context from conversation (optional, for user-initiated events)
         conversation_user_message: Original user message that triggered event creation (optional)
         conversation_llm_response: Original LLM response that created the event (optional)
+        tzid: Explicit IANA timezone id for the event. ``None`` means the event
+            inherits the system ``TZ`` (and its wall-clock shifts when ``TZ``
+            changes); a concrete value anchors the event to that timezone.
+        source: Provenance tag stored in the ``source`` column ("synth"/"user"/
+            "external:<id>"). Defaults are derived from ``created_by`` when omitted.
     """
 
     if not time:
@@ -1973,28 +2008,43 @@ async def insert_scheduled_event(
 
     await ensure_core_tables()
     try:
+        from core.time_zone_utils import get_local_timezone
+        from core.calendar_utils import recurrence_to_rrule
+        from zoneinfo import ZoneInfo
+
+        # Resolve the effective timezone used to convert the wall-clock time to
+        # UTC. ``tzid`` NULL -> inherit the current system TZ.
+        if tzid:
+            try:
+                event_tz = ZoneInfo(tzid)
+            except Exception:
+                log_warning(
+                    f"[insert_scheduled_event] Invalid tzid '{tzid}', inheriting system TZ"
+                )
+                event_tz = get_local_timezone()
+        else:
+            event_tz = get_local_timezone()
+
+        try:
+            dt_local = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M")
+            next_run_utc = dt_local.replace(tzinfo=event_tz).astimezone(ZoneInfo("UTC"))
+        except Exception as e:
+            log_warning(
+                f"[insert_scheduled_event] Invalid date/time: {date} {time} - {e}"
+            )
+            return
+
+        rrule = recurrence_to_rrule(recurrence_type)
+        if source is None:
+            source = (
+                "synth"
+                if (created_by or "synth").lower() in ("synth", "weather_plugin")
+                else "user"
+            )
+
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
-                try:
-                    from core.time_zone_utils import parse_local_to_utc
-
-                    next_run_utc = parse_local_to_utc(date, time)
-                except Exception as e:
-                    log_warning(
-                        f"[insert_scheduled_event] Invalid date/time: {date} {time} - {e}"
-                    )
-                    return
-
                 is_postgres = _get_db_type() == "postgres"
-                # NOTE: The canonical ``scheduled_events`` schema (see
-                # ``event_plugin.ensure_table_exists`` and
-                # ``scripts/sql/app_main_postgres.sql``) only defines the columns
-                # below. The ``original_context`` /
-                # ``conversation_user_message`` / ``conversation_llm_response``
-                # parameters are accepted for backward compatibility but are not
-                # persisted because those columns do not exist in the live table
-                # on any backend. Do not add them back without also shipping a
-                # migration.
                 date_col = "date" if is_postgres else "`date`"
                 time_col = "time" if is_postgres else "`time`"
 
@@ -2024,9 +2074,9 @@ async def insert_scheduled_event(
                     f"""
                     INSERT INTO scheduled_events (
                         {date_col}, {time_col}, next_run, recurrence_type,
-                        description, created_by
+                        description, created_by, rrule, tzid, source
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         date_value,
@@ -2035,11 +2085,134 @@ async def insert_scheduled_event(
                         recurrence_type or "none",
                         description,
                         created_by,
+                        rrule,
+                        tzid,
+                        source,
                     ),
                     ensure_fn=ensure_core_tables,
                 )
     except Exception as e:
         log_error(f"[insert_scheduled_event] Error: {e}")
+
+
+async def update_scheduled_event(
+    event_id: int,
+    date: str,
+    time: str | None,
+    recurrence_type: str,
+    description: str,
+    tzid: str | None = None,
+    delivered: bool | None = None,
+) -> bool:
+    """Update an existing scheduled event and recompute its next_run/rrule.
+
+    Mirrors :func:`insert_scheduled_event` for the mutable user-editable fields
+    (date, time, recurrence, description). Returns ``True`` when a row was updated.
+
+    Args:
+        event_id: Primary key of the event to update.
+        date: New event date (YYYY-MM-DD).
+        time: New event time (HH:MM); ``None``/empty falls back to "00:00".
+        recurrence_type: Recurrence pattern (none, daily, weekly, monthly, always).
+        description: New event description.
+        tzid: Explicit IANA timezone id; ``None`` inherits the system TZ.
+        delivered: Explicit processed flag. When ``None`` (default) the event is
+            reset to not-delivered so a rescheduled event fires again; pass
+            ``True``/``False`` to set the flag explicitly from the editor.
+    """
+
+    if not time:
+        time = "00:00"
+
+    await ensure_core_tables()
+    try:
+        from core.time_zone_utils import get_local_timezone
+        from core.calendar_utils import recurrence_to_rrule
+        from zoneinfo import ZoneInfo
+
+        if tzid:
+            try:
+                event_tz = ZoneInfo(tzid)
+            except Exception:
+                log_warning(
+                    f"[update_scheduled_event] Invalid tzid '{tzid}', inheriting system TZ"
+                )
+                event_tz = get_local_timezone()
+        else:
+            event_tz = get_local_timezone()
+
+        try:
+            dt_local = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M")
+            next_run_utc = dt_local.replace(tzinfo=event_tz).astimezone(ZoneInfo("UTC"))
+        except Exception as e:
+            log_warning(
+                f"[update_scheduled_event] Invalid date/time: {date} {time} - {e}"
+            )
+            return False
+
+        rrule = recurrence_to_rrule(recurrence_type)
+
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                is_postgres = _get_db_type() == "postgres"
+                date_col = "date" if is_postgres else "`date`"
+                time_col = "time" if is_postgres else "`time`"
+
+                if is_postgres:
+                    try:
+                        date_value: object = datetime.strptime(date, "%Y-%m-%d").date()
+                    except ValueError:
+                        log_warning(
+                            f"[update_scheduled_event] Invalid date format: {date}"
+                        )
+                        return False
+                    try:
+                        time_value: object = datetime.strptime(time, "%H:%M").time()
+                    except ValueError:
+                        time_value = datetime.strptime(time, "%H:%M:%S").time()
+                    next_run_value: object = next_run_utc
+                    if delivered is None:
+                        delivered_reset = "delivered = FALSE"
+                    else:
+                        delivered_reset = (
+                            "delivered = TRUE" if delivered else "delivered = FALSE"
+                        )
+                else:
+                    date_value = date
+                    time_value = time
+                    next_run_value = next_run_utc.strftime("%Y-%m-%d %H:%M:%S")
+                    if delivered is None:
+                        delivered_reset = "delivered = 0"
+                    else:
+                        delivered_reset = (
+                            "delivered = 1" if delivered else "delivered = 0"
+                        )
+
+                await safe_db_execute(
+                    cur,
+                    f"""
+                    UPDATE scheduled_events
+                    SET {date_col} = %s, {time_col} = %s, next_run = %s,
+                        recurrence_type = %s, description = %s, rrule = %s,
+                        {delivered_reset}
+                    WHERE id = %s
+                    """,
+                    (
+                        date_value,
+                        time_value,
+                        next_run_value,
+                        recurrence_type or "none",
+                        description,
+                        rrule,
+                        event_id,
+                    ),
+                    ensure_fn=ensure_core_tables,
+                )
+                rowcount = getattr(cur, "rowcount", 0) or 0
+                return rowcount > 0
+    except Exception as e:
+        log_error(f"[update_scheduled_event] Error: {e}")
+        return False
 
 
 async def get_due_events(
@@ -2155,7 +2328,8 @@ async def mark_event_delivered(event_id: int) -> bool:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await safe_db_execute(
                     cur,
-                    "SELECT recurrence_type, next_run FROM scheduled_events WHERE id = %s",
+                    "SELECT recurrence_type, next_run, rrule, tzid "
+                    "FROM scheduled_events WHERE id = %s",
                     (event_id,),
                     ensure_fn=ensure_core_tables,
                 )
@@ -2169,6 +2343,8 @@ async def mark_event_delivered(event_id: int) -> bool:
 
             repeat_type = (row.get("recurrence_type") or "none").lower()
             next_run_val = row.get("next_run")
+            event_rrule = row.get("rrule")
+            event_tzid = row.get("tzid")
 
             # Process event update based on recurrence type
             async with conn.cursor(aiomysql.DictCursor) as cur:
@@ -2225,22 +2401,29 @@ async def mark_event_delivered(event_id: int) -> bool:
                         )
                         return False
 
-                    if repeat_type == "daily":
-                        new_dt = next_run_dt + timedelta(days=1)
-                    elif repeat_type == "weekly":
-                        new_dt = next_run_dt + timedelta(days=7)
-                    elif repeat_type == "monthly":
-                        year = next_run_dt.year + (next_run_dt.month // 12)
-                        month = next_run_dt.month % 12 + 1
-                        day = min(next_run_dt.day, calendar.monthrange(year, month)[1])
-                        new_dt = next_run_dt.replace(year=year, month=month, day=day)
-                    else:
+                    # Compute the next occurrence via the iCalendar RRULE helper
+                    # so recurrence is evaluated in the event's own timezone
+                    # (correct DST / month-length handling). Fall back to the
+                    # legacy ``recurrence_type`` as an RRULE when the ``rrule``
+                    # column is empty (pre-migration rows).
+                    from core.calendar_utils import (
+                        advance_next_run_by_rrule,
+                        recurrence_to_rrule,
+                    )
+                    from core.time_zone_utils import get_local_timezone
+
+                    effective_rrule = event_rrule or recurrence_to_rrule(repeat_type)
+                    new_dt_utc = advance_next_run_by_rrule(
+                        next_run_dt,
+                        effective_rrule,
+                        tzid=event_tzid,
+                        system_tz=get_local_timezone(),
+                    )
+                    if new_dt_utc is None:
                         log_warning(
                             f"[db] Unknown recurrence type '{repeat_type}' for event {event_id}"
                         )
                         return False
-
-                    new_dt_utc = new_dt.astimezone(timezone.utc)
                     # Postgres' ``next_run`` is a timestamp column and its driver
                     # rejects string literals; pass a real datetime. MySQL accepts
                     # either, so a datetime is safe for both backends.
@@ -2263,6 +2446,107 @@ async def mark_event_delivered(event_id: int) -> bool:
     except Exception as e:
         log_error(f"[mark_event_delivered] Error: {e}")
         return False
+
+
+async def recompute_all_next_runs() -> int:
+    """Recompute ``next_run`` for events that inherit the system timezone.
+
+    Only rows with ``tzid IS NULL`` (inherited) are affected: their wall-clock
+    ``date``/``time`` is reinterpreted in the *current* system TZ and the UTC
+    ``next_run`` is rewritten. Events with an explicit ``tzid`` are anchored and
+    left untouched.
+
+    Intended to be triggered whenever the ``TZ`` config value changes.
+
+    Returns:
+        Number of rows updated (0 on error or when nothing matched).
+    """
+    await ensure_core_tables()
+
+    from core.time_zone_utils import get_local_timezone
+    from zoneinfo import ZoneInfo
+
+    system_tz = get_local_timezone()
+    is_postgres = _get_db_type() == "postgres"
+    date_col = "date" if is_postgres else "`date`"
+    time_col = "time" if is_postgres else "`time`"
+
+    updated = 0
+    try:
+        async with get_conn_ctx() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await safe_db_execute(
+                    cur,
+                    f"SELECT id, {date_col} AS date, {time_col} AS time "
+                    "FROM scheduled_events "
+                    "WHERE tzid IS NULL AND delivered = "
+                    f"{'FALSE' if is_postgres else '0'}",
+                    (),
+                    ensure_fn=ensure_core_tables,
+                )
+                rows = await cur.fetchall()
+
+            if not rows:
+                return 0
+
+            async with conn.cursor() as cur:
+                for r in rows:
+                    event_id = r.get("id")
+                    date_val = r.get("date")
+                    time_val = r.get("time")
+                    if event_id is None or date_val is None:
+                        continue
+
+                    # Normalise date/time values to strings.
+                    if isinstance(date_val, datetime):
+                        date_str = date_val.date().isoformat()
+                    elif hasattr(date_val, "isoformat"):
+                        date_str = date_val.isoformat()
+                    else:
+                        date_str = str(date_val)
+
+                    if time_val is None:
+                        time_str = "00:00"
+                    elif hasattr(time_val, "strftime"):
+                        time_str = time_val.strftime("%H:%M")
+                    else:
+                        time_str = str(time_val)[:5]
+
+                    try:
+                        dt_local = datetime.strptime(
+                            f"{date_str} {time_str}", "%Y-%m-%d %H:%M"
+                        )
+                        next_run_utc = dt_local.replace(tzinfo=system_tz).astimezone(
+                            ZoneInfo("UTC")
+                        )
+                    except Exception as e:
+                        log_warning(
+                            f"[recompute_all_next_runs] Skipping event {event_id}: {e}"
+                        )
+                        continue
+
+                    new_run_val: datetime | str = (
+                        next_run_utc
+                        if is_postgres
+                        else next_run_utc.strftime("%Y-%m-%d %H:%M:%S")
+                    )
+                    await safe_db_execute(
+                        cur,
+                        "UPDATE scheduled_events SET next_run = %s WHERE id = %s",
+                        (new_run_val, event_id),
+                        ensure_fn=ensure_core_tables,
+                    )
+                    updated += 1
+
+        if updated:
+            log_info(
+                f"[recompute_all_next_runs] Recomputed next_run for {updated} "
+                "inherited-timezone event(s) after TZ change"
+            )
+        return updated
+    except Exception as e:
+        log_error(f"[recompute_all_next_runs] Error: {e}")
+        return 0
 
 
 async def delete_scheduled_events_by_created_by(created_by: str) -> int:

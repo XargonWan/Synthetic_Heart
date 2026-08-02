@@ -164,11 +164,11 @@ def test_build_initial_kick_text_uses_summon_text():
     kick = live_session_manager._build_initial_kick_text(
         is_reconnect=False,
         initial_user_message="come here, I need you in voice",
-        initial_user_name="Scarlet",
+        initial_user_name="Alice",
     )
 
     assert "come here, I need you in voice" in kick
-    assert "Scarlet" in kick
+    assert "Alice" in kick
     assert "generic greeting" in kick
 
 

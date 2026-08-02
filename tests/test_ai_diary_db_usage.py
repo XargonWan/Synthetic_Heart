@@ -135,10 +135,10 @@ def test_get_entries_with_person_uses_postgres_jsonb(monkeypatch):
     monkeypatch.setattr(ai_diary, "_fetchall", fake_fetchall)
     monkeypatch.setattr(ai_diary, "_run", lambda coro: asyncio.run(coro))
 
-    assert ai_diary.get_entries_with_person("Scar", limit=5) == []
+    assert ai_diary.get_entries_with_person("Alice", limit=5) == []
     assert "::jsonb ? %s" in str(captured["query"])
     assert "JSON_CONTAINS" not in str(captured["query"])
-    assert captured["params"] == ("Scar", 5)
+    assert captured["params"] == ("Alice", 5)
 
 
 def test_clip_for_column_noop_when_under_limit():
@@ -198,7 +198,7 @@ async def test_upsert_retries_insert_when_user_message_overflows(monkeypatch):
         async def fetchone(self):
             if "INFORMATION_SCHEMA.COLUMNS" in self._last_query:
                 return ("varchar", 255)
-            if "FROM ai_diary WHERE DATE(timestamp) = CURDATE()" in self._last_query:
+            if "FROM ai_diary WHERE DATE(created_at) = CURDATE()" in self._last_query:
                 return None
             return None
 
@@ -260,7 +260,7 @@ async def test_upsert_refreshes_origin_fields_from_real_message_context(monkeypa
         async def fetchone(self):
             if "INFORMATION_SCHEMA.COLUMNS" in self._last_query:
                 return ("text", None)
-            if "FROM ai_diary WHERE DATE(timestamp) = CURDATE()" in self._last_query:
+            if "FROM ai_diary WHERE DATE(created_at) = CURDATE()" in self._last_query:
                 return (
                     99,
                     "existing content",
@@ -339,7 +339,7 @@ async def test_upsert_does_not_replace_real_interface_with_diary_merge(monkeypat
         async def fetchone(self):
             if "INFORMATION_SCHEMA.COLUMNS" in self._last_query:
                 return ("text", None)
-            if "FROM ai_diary WHERE DATE(timestamp) = CURDATE()" in self._last_query:
+            if "FROM ai_diary WHERE DATE(created_at) = CURDATE()" in self._last_query:
                 return (
                     99,
                     "existing content",
@@ -455,7 +455,7 @@ async def test_update_diary_entry_archives_merged_source_rows(monkeypatch):
     assert result["success"] is True
     assert executed == [
         (
-            "UPDATE ai_diary SET content=%s, timestamp=%s WHERE id=%s",
+            "UPDATE ai_diary SET content=%s, created_at=%s WHERE id=%s",
             ("merged prose", datetime.fromisoformat("2026-04-18T21:00:00+00:00"), 42),
         )
     ]

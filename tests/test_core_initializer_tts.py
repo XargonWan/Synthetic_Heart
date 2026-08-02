@@ -159,9 +159,9 @@ def test_real_plugin_actions_follow_runtime_enablement(monkeypatch) -> None:
 
         assert "tts_speak" in available
         assert "stt_transcribe" in available
-        assert "vision_describe" in available
+        assert "vision_describe" not in available
         assert "memory_search" in available
-        assert "soul_force_compile" in available
+        assert "soul_force_compile" not in available
 
     PLUGIN_REGISTRY.clear()
     PLUGIN_REGISTRY.update(original_registry)

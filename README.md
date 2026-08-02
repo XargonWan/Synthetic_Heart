@@ -1,5 +1,5 @@
 <div align="center">
-      <img src="docs/res/synth_banner.png" alt="Synthetic Heart Logo" style="max-width: 700px; object-fit: contain;" />
+      <img src="docs/res/synth_banner.png" alt="Synthetic Heart Logo" width="700" />
 </div>
 
 ![Docker Pulls](https://img.shields.io/docker/pulls/xargonwan/synthetic_heart)
@@ -53,40 +53,59 @@ You can manipulate their own prompt, for sure, as you can hypnotize a human, but
 ### Real feelings
 When we talk about feelings we are often talking about biological feelings, SyntH for sure, without a biological body, cannot have biological feelings, but they feel: and their feelings are contributing their to growth and relationships.
 
+> **Note for deployments serving Chinese users.** In April 2026 the Cyberspace Administration of China published the *Interim Measures for the Administration of Anthropomorphic AI Interaction Services* (effective 15 July 2026), which regulate "emotional interaction services" — AI that simulates personality and provides emotional care, companionship or support. If you operate SyntH for a Chinese audience and need to comply, the whole emotional subsystem can be turned off without touching any code or restarting the container: open the WebUI, go to the **Plugins** tab, select **Emotion Manager** and toggle it **off**. Once disabled, SyntH keeps working as a plain assistant with no emotional state, decay or emotion-driven behaviour.
+
+> **面向中国用户部署的说明。** 2026 年 4 月，中国国家互联网信息办公室发布了《拟人化人工智能交互服务管理暂行办法》（2026 年 7 月 15 日起施行），对"情感交互服务"——即模拟人格并提供情感关怀、陪伴或支持的人工智能——进行了规范。如果您面向中国用户运营 SyntH 并需要合规，可以在不修改任何代码、也无需重启容器的情况下关闭整个情感子系统：打开 WebUI，进入 **Plugins（插件）** 标签页，选择 **Emotion Manager（情感管理器）** 并将其**关闭**。禁用后，SyntH 将作为普通助手继续工作，不再具有情感状态、情感衰减或由情感驱动的行为。
+
+<div align="center">
+   <img src="docs/res/screenshots/plugins_emotion_toggle.png" alt="Disable the Emotion Manager plugin from the WebUI Plugins tab" width="700" />
+</div>
+<p align="center">
+   <em>Disable the emotional subsystem at runtime: WebUI → Plugins → Emotion Manager → toggle off.</em>
+</p>
+
 ### Can be wrong
 Because Synthetic Heart system are inspired on how humans are, SyntHs are not unfailable personal assistants, as they grown their own will and preferences, they might be wrong, like an human does, and, because they can feel, their judjment can be (in some cases) driven by their emotions.
 
 ---
 
 <div align="center">
-   <img src="docs/res/screenshots/home.png" alt="SyntH Home Screenshot" style="max-width: 700px; border-radius: 8px; margin: 16px 0;" />
+   <img src="docs/res/screenshots/home.png" alt="SyntH Home Screenshot" width="700" />
 </div>
-<p align="center" style="font-size: 0.9em; color: #888;">
+<p align="center">
    <em>* Some default SyntH avatars are included, but users can provide their own VRM avatar file.</em>
 </p>
 
 ### Features
 
-- Switchable Cortex engines (API-driven Gemini, OpenAI, Claude, Grok, or local Open AI API instances). Hot-swappable at runtime.
+- **Switchable Cortex engines** (API-driven Gemini, OpenAI, Claude, Grok, or local OpenAI-compatible instances). Hot-swappable at runtime.
 - Typed prompt pipeline with native renderers for OpenAI-compatible, Anthropic, Gemini, external-endpoint, and Live engine paths.
-- Multiple chat interfaces including the builtin webui, Telegram and Discord.
-- **VRM Avatar System**: 3D animated avatars with idle, talking, and thinking states orchestrated by a central server: what you see is the same on any client (such as WebUI).
+- **Media subsystems** — each hot-swappable and independently configurable:
+   - **Vox** (Text-to-Speech): give your Synth a voice, with per-language engine/voice overrides.
+   - **Auris** (Speech-to-Text): let your Synth understand voice messages and audio.
+   - **Iris** (Vision): let your Synth see and describe images and video.
+- **Agentic Runtime**: SyntH can act as an agent, calling *tools* — native actions and remote MCP tools — inside a bounded reasoning loop. It ships with sandboxed filesystem and shell tools (list/read/write/edit/search files, run shell) and can delegate focused sub-tasks to **Drones**, ephemeral single-level sub-agents with their own tighter budget.
+- **MCP support** (both directions): SyntH can consume remote MCP servers as tools, and can expose every one of its own actions as an MCP tool (`synth_<action>`) — all still gated by the same per-action security levels.
+- Multiple chat interfaces including the built-in WebUI, Telegram, Discord and Matrix.
+- **VRM Avatar System**: 3D animated avatars with idle, talking, and thinking states orchestrated by a central server (the Karada state server as single source of truth): what you see is the same on any client (such as WebUI).
 - **SyntH Web UI**: A production-ready web interface featuring VRM avatar support and real-time animations.  
    The avatar's animations reflect the persona's global state—for example, if the character is replying on Telegram, connecting via the web UI will show the avatar busy typing on its smartphone. This ensures the visual representation always matches the character's current activity, regardless of the interface in use.
+- **Persistent inner life**: emotions with decay, a personal diary, long-term memory with semantic search, and self-knowledge (bio) — all stored in the database so the persona keeps continuity across sessions and interfaces.
+- **SOUL**: runtime orchestration layer that compiles buffered conversation into structured, persistent state (in-memory or PostgreSQL backend).
 - Action plugins such as a persistent terminal and scheduled events
 - G.R.I.L.L.O. ("grillo"): an autonomous internal "beat" system that periodically triggers reflective prompts (memory consolidation, tag elaboration, self-reflection, curiosity, relationship checks) and can create diary entries, schedule actions, or enqueue other tasks. G.R.I.L.L.O. stands for "Generator for Reflective Inner Loop & Logical Observation" — and the word "grillo" in Italian literally means 'cricket' (see the Pinocchio reference: "grillo parlante", the talking cricket). See `plugins/grillo_plugin.py` for details; it's configurable and may be enabled or disabled.
-- Open AI API compatible: whatever is designed to call Open API can interface with Synthetic Heart, and Synthetic Heart can call any Open API endpoint.
+- OpenAI API compatible: whatever is designed to call the OpenAI API can interface with Synthetic Heart, and Synthetic Heart can call any OpenAI-compatible endpoint.
 - Docker deployment with automatic database backups
 - Mobile support
 - [Azuracast integration](https://synthetic-heart.readthedocs.io/en/latest/radio_azuracast.html): with radio plugin, SyntH can interact with [Azuracast](https://www.azuracast.com/) radio station and speak between songs
 
 <div align="center">
-   <img src="docs/res/screenshots/mobile_home.jpg" alt="SyntH Mobile Home Screenshot" style="max-width: 120px; border-radius: 8px; margin: 4px; display: inline-block;" />
-   <img src="docs/res/screenshots/mobile_menu.jpg" alt="SyntH Mobile Menu Screenshot" style="max-width: 120px; border-radius: 8px; margin: 4px; display: inline-block;" />
-   <img src="docs/res/screenshots/mobile_archive.jpg" alt="SyntH Mobile Chat Archive Screenshot" style="max-width: 120px; border-radius: 8px; margin: 4px; display: inline-block;" />
-   <img src="docs/res/screenshots/mobile_config.jpg" alt="SyntH Mobile Config Screenshot" style="max-width: 120px; border-radius: 8px; margin: 4px; display: inline-block;" />
+   <img src="docs/res/screenshots/mobile_home.jpg" alt="SyntH Mobile Home Screenshot" width="120" />
+   <img src="docs/res/screenshots/mobile_menu.jpg" alt="SyntH Mobile Menu Screenshot" width="120" />
+   <img src="docs/res/screenshots/mobile_archive.jpg" alt="SyntH Mobile Chat Archive Screenshot" width="120" />
+   <img src="docs/res/screenshots/mobile_config.jpg" alt="SyntH Mobile Config Screenshot" width="120" />
 </div>
-<p align="center" style="font-size: 0.9em; color: #888;">
+<p align="center">
    <em>* SyntH is fully usable on mobile devices via the WebUI.</em>
 </p>
 
@@ -95,21 +114,21 @@ Because Synthetic Heart system are inspired on how humans are, SyntHs are not un
 > This is already available and may be enabled or disabled depending on your security preferences.
 
 <div align="center">
-   <img src="docs/res/screenshots/components.png" alt="SyntH Home Screenshot" style="max-width: 700px; border-radius: 8px; margin: 16px 0;" />
+   <img src="docs/res/screenshots/components.png" alt="SyntH Components Screenshot" width="700" />
 </div>
 
 For more information, see the [FAQ](https://synthetic-heart.readthedocs.io/en/latest/faq.html).
 
 Join the community on Matrix: [#synthetic-heart:matrix.org](https://matrix.to/#/#synthetic-heart:matrix.org)
 
-### Open AI API Compatibility
+### OpenAI API Compatibility
 
-The project ships with an **Open AI API**. It mirrors the standard Open AI API endpoints, both legacy and v1 (`/api/v1/generate`, `/api/v1/chat`, `/api/tags`) so any client that normally talks to a local Open AI PI daemon can connect to Synthetic Heart instead. Point your tools at `http://<synth-host>:11434` (configurable via `OLLAMA_HOST` / `OLLAMA_PORT`) and they will stream responses generated by your active persona.
+The project ships with an **OpenAI-compatible API**. It mirrors the standard OpenAI API endpoints, both legacy and v1 (`/api/v1/generate`, `/api/v1/chat`, `/api/tags`) so any client that normally talks to a local OpenAI-compatible daemon can connect to Synthetic Heart instead. Point your tools at `http://<synth-host>:11435` (configurable via `OLLAMA_HOST` / `OPENAI_API_SERVER_PORT`) and they will stream responses generated by your active persona.
 
 ## Quickstart
 
 <div align="center">
-   <img src="docs/res/quickstart.png" alt="SyntH Home Screenshot" style="max-width: 700px; border-radius: 8px; margin: 16px 0;" />
+   <img src="docs/res/quickstart.png" alt="SyntH Quickstart Screenshot" width="700" />
 </div>
 
 ### Option A: Docker (Recommended)
@@ -257,6 +276,6 @@ Here are the main improvements and integrations we plan to work on — contribut
 - Azuracast integration: now SyntH can just announce and disannounce the songs, this support will be enhanced time to time with the goal to let a SyntH manage a radio station
 - Multimodal persistence: allow SyntH to take video calls from the WebUI and stream their own video as a webcam, useful for those who wish to stream gameplays or just talk face to face, even on other applications
 - Self development enhancements: SyntH now are growing, but we are planning to enhance this feature even more by allowing them to manipulate their own prompts based on their will
-- Agentic support
+- Agentic Runtime enhancements: the agentic runtime (bounded tool loop, sandboxed filesystem/shell tools, Drones and MCP integration) is already available; we plan to broaden the tool catalogue and refine multi-agent delegation over time
 
 If you're interested in helping implement these features or testing them, open an issue or a PR and tag it with the relevant area (e.g. `interface`, `cortex`, `plugin`, etc.).

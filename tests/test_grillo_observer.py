@@ -276,7 +276,7 @@ async def test_observer_db_check_updates_and_advances_last_run_ts(monkeypatch):
         query: str, params: tuple[object, ...] = ()
     ) -> list[dict[str, object]]:
         # This corresponds to the COUNT/MAX query used in _run_observer()
-        if "SELECT COUNT(*) as cnt, MAX(timestamp) as max_ts" in query:
+        if "SELECT COUNT(*) as cnt, MAX(created_at) as max_ts" in query:
             assert params
             assert params[0] == datetime.fromtimestamp(1000.0, tz=timezone.utc)
             return [{"cnt": 1, "max_ts": expected_max_ts}]
@@ -322,7 +322,9 @@ async def test_observer_db_check_updates_and_advances_last_run_ts(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_observer_skips_when_no_updates(monkeypatch):
+async def test_observer_is_decay_driven_when_no_updates(monkeypatch):
+    """The proactive observer is decay-driven: even without new messages it
+    still collects eligible targets and enqueues a beat (no passive early exit)."""
     plugin = gco.GrilloChatObserverPlugin()
 
     async def fake_execute_query(*args, **kwargs):
@@ -340,7 +342,7 @@ async def test_observer_skips_when_no_updates(monkeypatch):
 
     monkeypatch.setattr("core.chat_update_checker.check_for_updates_once", fake_check)
 
-    # Spy on collect and enqueue to ensure they are NOT executed
+    # Spy on collect and enqueue to confirm the proactive path runs.
     called = {}
 
     async def fake_collect(limit: int) -> list[str]:
@@ -348,6 +350,12 @@ async def test_observer_skips_when_no_updates(monkeypatch):
         return ["test snippet"]
 
     monkeypatch.setattr(plugin, "_collect_recent_snippets", fake_collect)
+
+    async def fake_collect_targets(limit: int) -> list[dict]:
+        called["targets"] = True
+        return [{"path": "telegram_bot/123", "eligible": True}]
+
+    monkeypatch.setattr(plugin, "_collect_eligible_targets", fake_collect_targets)
 
     async def fake_enqueue(
         bot, message, context_memory=None, interface_id=None, original_message=None
@@ -361,5 +369,6 @@ async def test_observer_skips_when_no_updates(monkeypatch):
     plugin._last_run_ts = 1.0
     await plugin._run_observer()
 
-    assert "collected" not in called
-    assert "enqueued" not in called
+    # Proactive design: targets are collected and a beat is enqueued.
+    assert called.get("targets") is True
+    assert called.get("enqueued") is True

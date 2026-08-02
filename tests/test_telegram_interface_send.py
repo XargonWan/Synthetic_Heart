@@ -19,8 +19,8 @@ async def test_send_message_chat_not_found_notifies_corrector(monkeypatch) -> No
     notify = AsyncMock(return_value=None)
 
     monkeypatch.setattr(
-        tbot.chat_link_store,
-        "update_names_from_resolver",
+        tbot,
+        "resolve_and_touch",
         AsyncMock(return_value=None),
     )
     monkeypatch.setattr(

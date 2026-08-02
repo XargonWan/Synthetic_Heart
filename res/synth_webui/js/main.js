@@ -16,7 +16,55 @@
         } catch (e) { /* ignore */ }
     };
 
+    // Wrap a masked (type="password") input in a relative container with an
+    // "eye" toggle button that reveals/hides the value in place. Returns the
+    // wrapper element to append instead of the bare input.
+    // Exposed on window so it is reachable from every IIFE scope in this file
+    // (settings, plugin-detail rendering, etc.).
+    window.wrapPasswordWithToggle = function wrapPasswordWithToggle(input) {
+        try {
+            const wrap = document.createElement('div');
+            wrap.className = 'password-field';
+            wrap.style.cssText = 'position:relative; display:inline-flex; align-items:center; width:100%; max-width:400px;';
 
+            // Ensure the input leaves room for the icon on its right edge.
+            input.style.width = '100%';
+            input.style.paddingRight = '34px';
+            input.style.boxSizing = 'border-box';
+
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'password-toggle';
+            btn.setAttribute('aria-label', 'Show value');
+            btn.title = 'Show / hide value';
+            btn.tabIndex = -1;
+            btn.style.cssText = 'position:absolute; right:6px; top:50%; transform:translateY(-50%); background:none; border:none; cursor:pointer; padding:2px; line-height:0; color:var(--text,#ccc); opacity:0.75;';
+
+            const eyeOpen = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+            const eyeClosed = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+            btn.innerHTML = eyeOpen;
+
+            btn.addEventListener('click', (ev) => {
+                ev.preventDefault();
+                ev.stopPropagation();
+                if (input.type === 'password') {
+                    input.type = 'text';
+                    btn.innerHTML = eyeClosed;
+                    btn.setAttribute('aria-label', 'Hide value');
+                } else {
+                    input.type = 'password';
+                    btn.innerHTML = eyeOpen;
+                    btn.setAttribute('aria-label', 'Show value');
+                }
+            });
+
+            wrap.appendChild(input);
+            wrap.appendChild(btn);
+            return wrap;
+        } catch (e) {
+            return input;
+        }
+    };
 
     // Generic section loader. Fetches /templates/<section>.html and injects into the tab panel.
     async function loadSection(section) {
@@ -307,6 +355,10 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
         try {
             const _initial = (localStorage && localStorage.getItem && localStorage.getItem(TAB_KEY)) || (document.querySelector && document.querySelector('.nav-btn.active') && document.querySelector('.nav-btn.active').getAttribute('data-tab')) || 'home';
             window.activeTab = window.activeTab || _initial;
+            // Seed <body data-active-tab> at init so tab-scoped CSS (e.g. the
+            // home-only minimized-window dock bar) is correct before the first
+            // navigation, and matches window.activeTab.
+            try { document.body.setAttribute('data-active-tab', window.activeTab); } catch (e) { /* ignore */ }
             // Create a global var for non-module scripts
             if (typeof activeTab === 'undefined') {
                 // eslint-disable-next-line no-unused-vars
@@ -454,6 +506,14 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 if (!entry || !entry.winbox) return;
                 const isMax = !!(entry.winbox.max || entry.winbox.maximized);
                 if (!isMax) return;
+                // WinBox stores the pre-maximize geometry so restore() can bring
+                // the window back. Passing keep=true to resize()/move() applies the
+                // change to the DOM ONLY, without updating WinBox's internal
+                // width/height/x/y. This is essential: without keep the maximize
+                // adjustment would overwrite the stored "normal" geometry, so a
+                // later restore would snap to the maximized size instead of the
+                // user's original size.
+                const KEEP = true;
                 try {
                     // Prefer using the dedicated desktop root size when available so
                     // maximized windows fill the exact desktop area (no right/bottom gaps).
@@ -464,8 +524,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         const top = Math.round(r.top || getTopbarHeight() || 0);
                         const width = Math.max(120, Math.round(r.width || entry.winbox.width || 0));
                         const height = Math.max(120, Math.round(r.height || entry.winbox.height || 0));
-                        try { entry.winbox.move(left, top); } catch (e) { /* ignore */ }
-                        try { entry.winbox.resize(width, height); } catch (e) { /* ignore */ }
+                        try { entry.winbox.move(left, top, KEEP); } catch (e) { /* ignore */ }
+                        try { entry.winbox.resize(width, height, KEEP); } catch (e) { /* ignore */ }
                         // Compensate if the DOM rect is still smaller than requested (rounding/border issues)
                         try {
                             const winEl = entry.winbox.window || entry.winbox.dom || entry.winbox.g || null;
@@ -474,7 +534,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 const dw = width - Math.round(rect.width || 0);
                                 const dh = height - Math.round(rect.height || 0);
                                 if ((dw > 0) || (dh > 0)) {
-                                    try { entry.winbox.resize(width + (dw > 0 ? 1 : 0), height + (dh > 0 ? 1 : 0)); } catch (e) { /* ignore */ }
+                                    try { entry.winbox.resize(width + (dw > 0 ? 1 : 0), height + (dh > 0 ? 1 : 0), KEEP); } catch (e) { /* ignore */ }
                                 }
                             }
                         } catch (e) { /* ignore */ }
@@ -487,8 +547,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 const viewport = getViewportSize();
                 const width = viewport.width || entry.winbox.width || 0;
                 const height = Math.max(120, (viewport.height || entry.winbox.height || 0) - top);
-                try { entry.winbox.move(0, top); } catch (e) { /* ignore */ }
-                try { entry.winbox.resize(width, height); } catch (e) { /* ignore */ }
+                try { entry.winbox.move(0, top, KEEP); } catch (e) { /* ignore */ }
+                try { entry.winbox.resize(width, height, KEEP); } catch (e) { /* ignore */ }
                 try {
                     const winEl = entry.winbox.window || entry.winbox.dom || entry.winbox.g || null;
                     if (winEl && winEl.getBoundingClientRect) {
@@ -496,7 +556,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         const dw = width - Math.round(rect.width || 0);
                         const dh = height - Math.round(rect.height || 0);
                         if ((dw > 0) || (dh > 0)) {
-                            try { entry.winbox.resize(width + (dw > 0 ? 1 : 0), height + (dh > 0 ? 1 : 0)); } catch (e) { /* ignore */ }
+                            try { entry.winbox.resize(width + (dw > 0 ? 1 : 0), height + (dh > 0 ? 1 : 0), KEEP); } catch (e) { /* ignore */ }
                         }
                     }
                 } catch (e) { /* ignore */ }
@@ -630,10 +690,15 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     const minWidth = 260;
                     const minHeight = 120;
 
-                    let newWidth = Math.round(rect.width || entry.winbox.width || minWidth);
-                    let newHeight = Math.round(rect.height || entry.winbox.height || minHeight);
-                    let newLeft = Math.round(rect.left || (entry.winbox.x || 0));
-                    let newTop = Math.round(rect.top || (entry.winbox.y || 0));
+                    // Prefer WinBox's internal geometry as the source of truth.
+                    // The DOM getBoundingClientRect() can be stale immediately
+                    // after a resize()/move() (e.g. during restoreState), which
+                    // would otherwise cause the clamp to snap the window back to
+                    // its previous/default geometry.
+                    let newWidth = Math.round(entry.winbox.width || rect.width || minWidth);
+                    let newHeight = Math.round(entry.winbox.height || rect.height || minHeight);
+                    let newLeft = Math.round(typeof entry.winbox.x === 'number' ? entry.winbox.x : (rect.left || 0));
+                    let newTop = Math.round(typeof entry.winbox.y === 'number' ? entry.winbox.y : (rect.top || 0));
 
                     // If window is wider/taller than viewport, shrink it (respecting min)
                     if (newWidth > viewport.width) newWidth = Math.max(minWidth, viewport.width - 40);
@@ -816,15 +881,20 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 if (!entry || !entry.winbox) return;
                 try {
                     const { stableStateKey, stableRectKey, sessionStateKey, sessionRectKey } = getWindowStorageKeys(id);
+                    // Detect minimize from BOTH our internal flag and WinBox's native
+                    // state: the window can be minimized via WinBox's own title-bar
+                    // control (which does not go through our minimize(id) helper and so
+                    // never sets entry.minimized). Trust winbox.min as source of truth.
+                    const isMinimized = !!(entry.minimized || entry.winbox.min);
                     let state = 'normal';
-                    if (entry.minimized) state = 'minimized';
+                    if (isMinimized) state = 'minimized';
                     else if (entry.winbox.max) state = 'maximized';
                     try { localStorage.setItem(stableStateKey, state); } catch (e) { /* ignore */ }
                     if (sessionStateKey) {
                         try { localStorage.setItem(sessionStateKey, state); } catch (e) { /* ignore */ }
                     }
 
-                    const storedRect = (entry.winbox.max || entry.minimized) ? entry.lastNormalRect : null;
+                    const storedRect = (entry.winbox.max || isMinimized) ? entry.lastNormalRect : null;
                     const payload = {
                         left: Math.round((storedRect && storedRect.x) || entry.winbox.x || 0),
                         top: Math.round((storedRect && storedRect.y) || entry.winbox.y || 0),
@@ -896,7 +966,38 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     } else {
                         entry.minimized = false;
                         entry.winbox.show();
-                        entry.winbox.restore();
+                        // Only call restore() when the window was actually
+                        // maximized/minimized. For a window that is already in
+                        // its normal state, restore() reapplies WinBox's stored
+                        // (default) geometry and clobbers the rect we just
+                        // applied above.
+                        if (entry.winbox.max || entry.winbox.min) {
+                            entry.winbox.restore();
+                        }
+                        // Re-apply the saved rect AFTER show()/restore() so the
+                        // restored geometry wins, then clamp only to keep it
+                        // inside the viewport.
+                        if (rectRaw) {
+                            try {
+                                const savedRect = JSON.parse(rectRaw);
+                                const hasW = typeof savedRect.width === 'number' && savedRect.width >= 260;
+                                const hasH = typeof savedRect.height === 'number' && savedRect.height >= 180;
+                                if (hasW && hasH) {
+                                    entry.winbox.resize(savedRect.width, savedRect.height);
+                                } else if (hasW) {
+                                    entry.winbox.resize(savedRect.width, entry.winbox.height);
+                                } else if (hasH) {
+                                    entry.winbox.resize(entry.winbox.width, savedRect.height);
+                                }
+                                if (typeof savedRect.left === 'number' || typeof savedRect.top === 'number') {
+                                    const topbar2 = getTopbarHeight() || 0;
+                                    const left2 = typeof savedRect.left === 'number' ? savedRect.left : entry.winbox.x;
+                                    let top2 = typeof savedRect.top === 'number' ? savedRect.top : entry.winbox.y;
+                                    if (top2 < topbar2) top2 = topbar2;
+                                    entry.winbox.move(left2, top2);
+                                }
+                            } catch (e) { /* ignore */ }
+                        }
                         try { clampEntryToViewport(entry); } catch (e) { /* ignore */ }
                     }
                 } catch (e) { /* ignore */ }
@@ -953,7 +1054,35 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         try { applyMaximizeConstraints(entry); } catch (e) { /* ignore */ }
                         try { saveState(opts.id); } catch (e) { /* ignore */ }
                     },
+                    onminimize: function() {
+                        // Persist the minimized state when the user minimizes via
+                        // WinBox's own title-bar control (bypasses our minimize helper).
+                        try { entry.minimized = true; } catch (e) { /* ignore */ }
+                        // Surface a dock button in the minimized stack so the window
+                        // remains recoverable (WinBox's native minimize does not go
+                        // through our minimize(id) helper, so without this the window
+                        // would be hidden with no way to bring it back).
+                        try {
+                            const dock = ensureDock();
+                            const btn = ensureDockButton(entry);
+                            if (btn) {
+                                btn.style.display = 'flex';
+                                if (dock) dock.appendChild(btn);
+                            }
+                        } catch (e) { /* ignore */ }
+                        try { saveState(opts.id); } catch (e) { /* ignore */ }
+                    },
                     onrestore: function() {
+                        try { entry.minimized = false; } catch (e) { /* ignore */ }
+                        // Hide/remove the dock button now that the window is visible again.
+                        try {
+                            if (entry.dockButton) {
+                                entry.dockButton.style.display = 'none';
+                                if (entry.dockButton.parentElement) {
+                                    entry.dockButton.parentElement.removeChild(entry.dockButton);
+                                }
+                            }
+                        } catch (e) { /* ignore */ }
                         // Defer all post-restore work so WinBox fully completes its own restore
                         // sequence before we touch resize/move (avoids re-entrant freeze).
                         setTimeout(() => {
@@ -1049,6 +1178,12 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 try { applyViewportInsets(entry); } catch (e) { /* ignore */ }
                 try { clampEntryToViewport(entry); } catch (e) { /* ignore */ }
                 try { captureNormalRect(entry); } catch (e) { /* ignore */ }
+                // Restore the persisted geometry AND window state (normal /
+                // maximized / minimized) saved in localStorage. Without this the
+                // window always opens in its default normal state after a refresh,
+                // so a window the user had minimized would reappear un-minimized.
+                // Deferred so WinBox finishes its own creation sequence first.
+                setTimeout(() => { try { restoreState(opts.id); } catch (e) { /* ignore */ } }, 0);
                 return winbox;
             }
 
@@ -1341,6 +1476,106 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             fileWrap.appendChild(uploadBtn);
 
                             inputEl = fileWrap;
+
+                        // --- Peer SyntH list: repeatable [Bot ID, Display Name] rows ---
+                        } else if (item.ui_type === 'peer-list') {
+                            const wrap = document.createElement('div');
+                            wrap.className = 'repeatable-list';
+                            skipAutoSave = true;
+
+                            const parsePeers = () => {
+                                if (Array.isArray(value)) return value.filter((row) => row && typeof row === 'object');
+                                if (typeof value === 'string' && value.trim()) {
+                                    try {
+                                        const parsed = JSON.parse(value);
+                                        if (Array.isArray(parsed)) return parsed.filter((row) => row && typeof row === 'object');
+                                    } catch (e) {}
+                                }
+                                return [];
+                            };
+
+                            let peers = parsePeers();
+                            const list = document.createElement('div');
+                            list.className = 'repeatable-list-rows';
+
+                            const emptyNote = document.createElement('div');
+                            emptyNote.className = 'meta';
+                            emptyNote.textContent = 'Add the bot ID + display name of each peer SyntH.';
+
+                            const addBtn = document.createElement('button');
+                            addBtn.type = 'button';
+                            addBtn.className = 'btn-ghost';
+                            addBtn.textContent = '+ Add peer SyntH';
+                            addBtn.disabled = !isEditable;
+
+                            const serializePeers = () => peers.filter((p) => p && p.id !== '' && p.id !== null && p.id !== undefined);
+
+                            const renderRows = () => {
+                                list.innerHTML = '';
+                                if (!peers.length) {
+                                    list.appendChild(emptyNote);
+                                }
+                                peers.forEach((peer, idx) => {
+                                    const rowEl = document.createElement('div');
+                                    rowEl.className = 'repeatable-row';
+
+                                    const idInput = document.createElement('input');
+                                    idInput.type = 'text';
+                                    idInput.inputMode = 'numeric';
+                                    idInput.autocomplete = 'off';
+                                    idInput.placeholder = 'Bot ID (e.g. 8243553794)';
+                                    idInput.value = peer && peer.id !== undefined && peer.id !== null ? String(peer.id) : '';
+                                    idInput.disabled = !isEditable;
+
+                                    const nameInput = document.createElement('input');
+                                    nameInput.type = 'text';
+                                    nameInput.autocomplete = 'off';
+                                    nameInput.placeholder = 'Display name (e.g. Aria)';
+                                    nameInput.value = peer && peer.name ? peer.name : '';
+                                    nameInput.disabled = !isEditable;
+
+                                    const removeBtn = document.createElement('button');
+                                    removeBtn.type = 'button';
+                                    removeBtn.className = 'btn-ghost';
+                                    removeBtn.textContent = 'Remove';
+                                    removeBtn.disabled = !isEditable;
+
+                                    const commit = () => {
+                                        const rawId = idInput.value.trim();
+                                        const parsedId = rawId && /^-?\d+$/.test(rawId) ? parseInt(rawId, 10) : rawId;
+                                        peers[idx] = { id: parsedId, name: nameInput.value.trim() };
+                                        persistValue(serializePeers(), [idInput, nameInput, removeBtn, addBtn]);
+                                    };
+
+                                    idInput.addEventListener('blur', commit);
+                                    nameInput.addEventListener('blur', commit);
+
+                                    removeBtn.addEventListener('click', () => {
+                                        peers.splice(idx, 1);
+                                        renderRows();
+                                        persistValue(serializePeers(), [idInput, nameInput, removeBtn, addBtn]);
+                                    });
+
+                                    rowEl.appendChild(idInput);
+                                    rowEl.appendChild(nameInput);
+                                    rowEl.appendChild(removeBtn);
+                                    list.appendChild(rowEl);
+                                });
+                            };
+
+                            addBtn.addEventListener('click', () => {
+                                peers.push({ id: '', name: '' });
+                                renderRows();
+                                const lastInput = list.querySelector('.repeatable-row:last-child input');
+                                try { if (lastInput) { lastInput.focus(); } } catch (e) {}
+                                // Do NOT persist until the user fills in an ID (persist happens on blur)
+                            });
+
+                            renderRows();
+                            wrap.appendChild(list);
+                            wrap.appendChild(addBtn);
+                            inputEl = wrap;
+
                         } else if (item.ui_type === 'textarea' || (item.value_type === 'json' && item.ui_type !== 'tags' && item.ui_type !== 'tag-combobox')) {
                             const textarea = document.createElement('textarea');
                             textarea.rows = 3;
@@ -1924,47 +2159,139 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             wrap.appendChild(input);
                             inputEl = wrap;
 
+                        } else if (item.ui_type === 'interface-path') {
+                            skipAutoSave = true;
+                            const currentValue = typeof value === 'string' ? value : (value ? String(value) : '');
+
+                            // Editable combo box: free-text <input> backed by a <datalist>
+                            // of known interface paths. The user can either pick a suggestion
+                            // (shown as "Pretty Name (interface/path)") or type an arbitrary path.
+                            const wrap = document.createElement('div');
+                            wrap.style.width = '100%';
+
+                            const listId = `ifpath-list-${item.key || Math.random().toString(36).slice(2)}`;
+                            const input = document.createElement('input');
+                            input.type = 'text';
+                            input.autocomplete = 'off';
+                            input.setAttribute('list', listId);
+                            input.placeholder = 'telegram_bot/-28475648/6';
+                            input.value = currentValue;
+                            input.disabled = !isEditable;
+                            input.style.width = '100%';
+
+                            const datalist = document.createElement('datalist');
+                            datalist.id = listId;
+
+                            // Map raw path -> pretty label so we can display/parse either form.
+                            const labelByPath = new Map();
+
+                            const populate = (paths) => {
+                                datalist.innerHTML = '';
+                                labelByPath.clear();
+                                const seen = new Set();
+                                paths.forEach(e => {
+                                    const p = e.interface_path || '';
+                                    if (!p || seen.has(p)) return;
+                                    seen.add(p);
+                                    const label = e.label || p;
+                                    labelByPath.set(p, label);
+                                    const opt = document.createElement('option');
+                                    // The option VALUE is what gets inserted into the input when
+                                    // picked; show the pretty label so the dropdown is readable.
+                                    opt.value = label;
+                                    datalist.appendChild(opt);
+                                });
+                                // Display the pretty label for the currently-saved raw path,
+                                // if we have a match. Free-text values are left as typed.
+                                if (currentValue && labelByPath.has(currentValue)) {
+                                    input.value = labelByPath.get(currentValue);
+                                }
+                            };
+
+                            // Extract the raw "interface/path" from a possibly pretty value.
+                            // Accepts either "Pretty Name (interface/path)" or a bare path.
+                            const toRawPath = (raw) => {
+                                const v = (raw || '').trim();
+                                if (!v) return '';
+                                const m = v.match(/\(([^()]+)\)\s*$/);
+                                if (m) return m[1].trim();
+                                return v;
+                            };
+
+                            fetch('/api/history/interface-paths')
+                                .then(r => r.json())
+                                .then(data => {
+                                    const paths = (data && data.success && Array.isArray(data.interface_paths))
+                                        ? data.interface_paths : [];
+                                    populate(paths);
+                                })
+                                .catch(() => { populate([]); });
+
+                            if (isEditable) {
+                                const save = () => { persistValue(toRawPath(input.value), [input]); };
+                                input.addEventListener('change', save);
+                                input.addEventListener('keydown', (ev) => {
+                                    if (ev.key === 'Enter' && !ev.shiftKey && !ev.ctrlKey && !ev.metaKey) {
+                                        ev.preventDefault();
+                                        save();
+                                    }
+                                });
+                                input.addEventListener('blur', save);
+                            }
+
+                            wrap.appendChild(input);
+                            wrap.appendChild(datalist);
+                            inputEl = wrap;
                         } else {
                             const input = document.createElement('input');
                             input.type = item.ui_type === 'password' ? 'password' : (item.value_type === 'int' || item.value_type === 'float' || item.ui_type === 'number' ? 'number' : 'text');
                             input.autocomplete = item.ui_type === 'password' ? 'new-password' : 'off';
                             input.value = typeof value === 'string' ? value : JSON.stringify(value);
                             input.disabled = !isEditable;
-                            inputEl = input;
+                            if (item.ui_type === 'password') {
+                                inputEl = window.wrapPasswordWithToggle(input);
+                            } else {
+                                inputEl = input;
+                            }
                         }
 
                         if (inputEl) inputWrap.appendChild(inputEl);
                         if (extraEl) inputWrap.appendChild(extraEl);
 
                         // Attach save handlers for editable inputs so pressing Enter or changing
-                        // selects/checkboxes persists values via the /api/config endpoint
-                        if (isEditable && inputEl && !skipAutoSave) {
+                        // selects/checkboxes persists values via the /api/config endpoint.
+                        // Password fields are wrapped in a container with an eye toggle,
+                        // so resolve the real <input> before binding handlers.
+                        const saveTarget = (inputEl && inputEl.classList && inputEl.classList.contains('password-field'))
+                            ? inputEl.querySelector('input')
+                            : inputEl;
+                        if (isEditable && saveTarget && !skipAutoSave) {
                             // Checkbox
-                            if (inputEl.tagName && inputEl.tagName.toLowerCase() === 'input' && inputEl.type === 'checkbox') {
-                                inputEl.addEventListener('change', () => { persistValue(inputEl.checked, [inputEl]); });
-                            } else if (inputEl.tagName && inputEl.tagName.toLowerCase() === 'select') {
-                                inputEl.addEventListener('change', () => { persistValue(inputEl.value, [inputEl]); });
-                            } else if (inputEl.tagName && inputEl.tagName.toLowerCase() === 'textarea') {
+                            if (saveTarget.tagName && saveTarget.tagName.toLowerCase() === 'input' && saveTarget.type === 'checkbox') {
+                                saveTarget.addEventListener('change', () => { persistValue(saveTarget.checked, [saveTarget]); });
+                            } else if (saveTarget.tagName && saveTarget.tagName.toLowerCase() === 'select') {
+                                saveTarget.addEventListener('change', () => { persistValue(saveTarget.value, [saveTarget]); });
+                            } else if (saveTarget.tagName && saveTarget.tagName.toLowerCase() === 'textarea') {
                                 // Ctrl+Enter to submit JSON/textarea; blur to auto-save
                                 let debounced = null;
-                                inputEl.addEventListener('keydown', (ev) => {
+                                saveTarget.addEventListener('keydown', (ev) => {
                                     if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) {
                                         ev.preventDefault();
-                                        persistValue(inputEl.value, [inputEl]);
+                                        persistValue(saveTarget.value, [saveTarget]);
                                     }
                                     // simple debounce to avoid excessive saves on blur
                                     if (debounced) clearTimeout(debounced);
                                 });
-                                inputEl.addEventListener('blur', () => { debounced = setTimeout(() => persistValue(inputEl.value, [inputEl]), 150); });
+                                saveTarget.addEventListener('blur', () => { debounced = setTimeout(() => persistValue(saveTarget.value, [saveTarget]), 150); });
                             } else {
                                 // Default: single-line inputs — Enter to save, blur to save
-                                inputEl.addEventListener('keydown', (ev) => {
+                                saveTarget.addEventListener('keydown', (ev) => {
                                     if (ev.key === 'Enter' && !ev.shiftKey && !ev.ctrlKey && !ev.metaKey) {
                                         ev.preventDefault();
-                                        persistValue(inputEl.value, [inputEl]);
+                                        persistValue(saveTarget.value, [saveTarget]);
                                     }
                                 });
-                                inputEl.addEventListener('blur', () => { persistValue(inputEl.value, [inputEl]); });
+                                saveTarget.addEventListener('blur', () => { persistValue(saveTarget.value, [saveTarget]); });
                             }
                         }
 
@@ -2254,6 +2581,36 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
         window.refreshConfigWithRetries = window.refreshConfigWithRetries || refreshConfigWithRetries;
 
         // -----------------------------------------------------------------------------
+        // -----------------------------------------------------------------------------
+        // WinBox window taps: make Synth glance at the cursor + record the
+        // low-value interaction. Delegated document-level listener because WinBox
+        // windows are created dynamically and sit above the 3D canvas.
+        // -----------------------------------------------------------------------------
+        (function(){
+            'use strict';
+            try {
+                let __lastWinTap = 0;
+                document.addEventListener('pointerdown', (ev) => {
+                    try {
+                        const target = ev.target;
+                        if (!target || typeof target.closest !== 'function') return;
+                        if (!target.closest('.winbox')) return;
+                        const now = Date.now();
+                        // Debounce so dragging/resizing a window does not spam.
+                        if (now - __lastWinTap < 800) return;
+                        __lastWinTap = now;
+                        if (typeof window.__synthTriggerFollowMouseGaze === 'function') {
+                            window.__synthTriggerFollowMouseGaze(ev.clientX, ev.clientY);
+                        }
+                        if (typeof window.__synthSendInteraction === 'function') {
+                            window.__synthSendInteraction('window_tap', 'webui.window_tap');
+                        }
+                    } catch (_e) { /* ignore */ }
+                }, { passive: true, capture: true });
+            } catch (_e) { /* ignore */ }
+        })();
+
+        // -----------------------------------------------------------------------------
         // Core UI wiring (navigation + chat controls + WebSocket)
         // -----------------------------------------------------------------------------
         (function(){
@@ -2264,12 +2621,14 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     const componentsCortexSummaryEl = document.getElementById('components-cortex-summary');
                     const componentsCortexListEl = document.getElementById('components-cortex-list');
                     const componentsInterfacesListEl = document.getElementById('components-interfaces-list');
+                    // Classic vertical plugins list (legacy) OR the new two-column banner list.
                     const componentsPluginsListEl = document.getElementById('components-plugins-list');
+                    const pluginsBannerListEl = document.getElementById('plugins-banner-list');
                     const componentsVoxListEl = document.getElementById('components-vox-list');
                     const componentsAurisListEl = document.getElementById('components-auris-list');
                     const componentsLiveListEl = document.getElementById('components-live-list');
                     const componentsIrisListEl = document.getElementById('components-iris-list');
-                    if (!componentsCortexListEl && !componentsInterfacesListEl && !componentsPluginsListEl && !componentsVoxListEl && !componentsAurisListEl && !componentsLiveListEl && !componentsIrisListEl) return;
+                    if (!componentsCortexListEl && !componentsInterfacesListEl && !componentsPluginsListEl && !pluginsBannerListEl && !componentsVoxListEl && !componentsAurisListEl && !componentsLiveListEl && !componentsIrisListEl) return;
                     const [res, cfgRes] = await Promise.all([
                         fetch('/api/components'),
                         fetch('/api/config').catch(() => null),
@@ -2701,6 +3060,178 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         }
                     }
 
+                    // Shared config-row builder used by both the classic details list and
+                    // the two-column plugins detail pane. `item` supplies optional context
+                    // (e.g. supported_models for combobox inputs).
+                    const makeCfgRow = (ci, item) => {
+                        item = item || {};
+                        const row = document.createElement('div');
+                        row.style.cssText = 'display:flex; flex-direction:column; gap:3px; margin-bottom:10px;';
+
+                        const lbl = document.createElement('label');
+                        lbl.style.cssText = 'font-size:0.88rem; font-weight:600; color:var(--text);';
+                        lbl.textContent = ci.label || ci.key;
+                        row.appendChild(lbl);
+
+                        if (ci.description) {
+                            const helpText = document.createElement('div');
+                            helpText.style.cssText = 'font-size:0.78rem; color:var(--muted); margin-bottom:2px;';
+                            helpText.textContent = ci.description;
+                            row.appendChild(helpText);
+                        }
+
+                        const val = ci.value === null || ci.value === undefined ? '' : ci.value;
+                        const editable = !!ci.editable && !ci.env_override;
+
+                        const saveCfg = async (newVal, el) => {
+                            try {
+                                if (el) el.disabled = true;
+                                const r = await fetch('/api/config', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ key: ci.key, value: newVal })
+                                });
+                                if (!r.ok) {
+                                    const t = await r.text();
+                                    window.showToast && window.showToast('Save failed: ' + t, true);
+                                } else {
+                                    const out = await r.json();
+                                    window.showToast && window.showToast('Saved', false);
+                                    if (out && out.requires_reload) {
+                                        window.showToast && window.showToast(out.message || 'Reload recommended', false);
+                                    }
+                                }
+                            } catch (e) {
+                                window.showToast && window.showToast('Save failed', true);
+                            } finally {
+                                if (el) el.disabled = !editable;
+                            }
+                        };
+
+                        let inputEl = null;
+
+                        if (ci.ui_type === 'bool' || ci.value_type === 'bool') {
+                            const wrap = document.createElement('div');
+                            wrap.style.cssText = 'display:flex; align-items:center; gap:8px;';
+                            const cb = document.createElement('input');
+                            cb.type = 'checkbox';
+                            cb.checked = val === true || val === 1 || val === '1' || val === 'true';
+                            cb.disabled = !editable;
+                            cb.id = `comp-cfg-${ci.key}`;
+                            const toggleLbl = document.createElement('label');
+                            toggleLbl.className = 'toggle-switch';
+                            toggleLbl.setAttribute('for', cb.id);
+                            const slider = document.createElement('span');
+                            slider.className = 'toggle-slider';
+                            toggleLbl.appendChild(slider);
+                            cb.addEventListener('change', () => saveCfg(cb.checked, cb));
+                            wrap.appendChild(cb);
+                            wrap.appendChild(toggleLbl);
+                            inputEl = wrap;
+                        } else if (ci.ui_type === 'select' && Array.isArray(ci.options) && ci.options.length) {
+                            const sel = document.createElement('select');
+                            sel.style.cssText = 'padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:6px; font-size:0.88rem; max-width:400px;';
+                            ci.options.forEach(opt => {
+                                const o = document.createElement('option');
+                                o.value = opt; o.textContent = opt;
+                                if (String(val) === String(opt)) o.selected = true;
+                                sel.appendChild(o);
+                            });
+                            sel.disabled = !editable;
+                            sel.addEventListener('change', () => saveCfg(sel.value, sel));
+                            inputEl = sel;
+                        } else if (ci.ui_type === 'textarea' || (ci.value_type === 'json' && ci.ui_type !== 'tags')) {
+                            const ta = document.createElement('textarea');
+                            ta.rows = 3;
+                            ta.style.cssText = 'width:100%; max-width:500px; padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:6px; font-family:monospace; font-size:0.85rem; resize:vertical;';
+                            ta.value = typeof val === 'string' ? val : JSON.stringify(val, null, 2);
+                            ta.disabled = !editable;
+                            ta.addEventListener('keydown', (ev) => {
+                                if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); saveCfg(ta.value, ta); }
+                            });
+                            ta.addEventListener('blur', () => saveCfg(ta.value, ta));
+                            inputEl = ta;
+                        } else if (ci.ui_type === 'combobox') {
+                            // Searchable dropdown with free-text fallback
+                            const models = (item && Array.isArray(item.supported_models)) ? item.supported_models : [];
+                            const wrap = document.createElement('div');
+                            wrap.style.cssText = 'position:relative; max-width:400px; width:100%;';
+                            const inp = document.createElement('input');
+                            inp.type = 'text';
+                            inp.autocomplete = 'off';
+                            inp.style.cssText = 'padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:6px; font-size:0.88rem; width:100%; box-sizing:border-box;';
+                            inp.value = typeof val === 'string' ? val : JSON.stringify(val);
+                            inp.disabled = !editable;
+                            inp.placeholder = models.length ? `Search ${models.length} models…` : '';
+                            wrap.appendChild(inp);
+
+                            if (models.length) {
+                                const dd = document.createElement('div');
+                                dd.style.cssText = 'display:none; position:absolute; top:100%; left:0; right:0; max-height:220px; overflow-y:auto; border:1px solid var(--border,#444); border-radius:6px; background:var(--bg-card,#1a1a2e); z-index:999; margin-top:2px;';
+                                const MAX_SHOW = 60;
+                                const renderDd = (filter) => {
+                                    dd.innerHTML = '';
+                                    const q = (filter || '').toLowerCase();
+                                    let count = 0;
+                                    for (const m of models) {
+                                        if (q && !m.toLowerCase().includes(q)) continue;
+                                        if (++count > MAX_SHOW) {
+                                            const more = document.createElement('div');
+                                            more.style.cssText = 'padding:0.3rem 0.6rem; color:var(--muted); font-size:0.78rem;';
+                                            more.textContent = `${models.length - MAX_SHOW}+ more — refine search`;
+                                            dd.appendChild(more);
+                                            break;
+                                        }
+                                        const rowEl = document.createElement('div');
+                                        rowEl.textContent = m;
+                                        rowEl.style.cssText = 'padding:0.35rem 0.6rem; cursor:pointer; font-size:0.85rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;';
+                                        if (m === val) rowEl.style.fontWeight = '700';
+                                        rowEl.addEventListener('mouseenter', () => { rowEl.style.background = 'var(--accent-dim, rgba(107,254,254,0.12))'; });
+                                        rowEl.addEventListener('mouseleave', () => { rowEl.style.background = ''; });
+                                        rowEl.addEventListener('mousedown', (ev) => {
+                                            ev.preventDefault();
+                                            inp.value = m;
+                                            dd.style.display = 'none';
+                                            saveCfg(m, inp);
+                                        });
+                                        dd.appendChild(rowEl);
+                                    }
+                                    if (count === 0) {
+                                        const empty = document.createElement('div');
+                                        empty.style.cssText = 'padding:0.4rem 0.6rem; color:var(--muted); font-size:0.82rem;';
+                                        empty.textContent = 'No matching models';
+                                        dd.appendChild(empty);
+                                    }
+                                };
+                                inp.addEventListener('focus', () => { renderDd(inp.value); dd.style.display = ''; });
+                                inp.addEventListener('input', () => { renderDd(inp.value); });
+                                inp.addEventListener('blur', () => { setTimeout(() => { dd.style.display = 'none'; }, 180); });
+                                wrap.appendChild(dd);
+                            }
+                            inp.addEventListener('keydown', (ev) => {
+                                if (ev.key === 'Enter') { ev.preventDefault(); saveCfg(inp.value, inp); }
+                            });
+                            inputEl = wrap;
+                        } else {
+                            // Default: text / password / number input
+                            const inp = document.createElement('input');
+                            inp.type = ci.ui_type === 'password' ? 'password'
+                                : (ci.value_type === 'int' || ci.value_type === 'float' || ci.ui_type === 'number') ? 'number' : 'text';
+                            inp.autocomplete = ci.ui_type === 'password' ? 'new-password' : 'off';
+                            inp.style.cssText = 'padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:6px; font-size:0.88rem; max-width:400px; width:100%;';
+                            inp.value = typeof val === 'string' ? val : JSON.stringify(val);
+                            inp.disabled = !editable;
+                            inp.addEventListener('keydown', (ev) => {
+                                if (ev.key === 'Enter') { ev.preventDefault(); saveCfg(inp.value, inp); }
+                            });
+                            inp.addEventListener('blur', () => saveCfg(inp.value, inp));
+                            inputEl = ci.ui_type === 'password' ? window.wrapPasswordWithToggle(inp) : inp;
+                        }
+
+                        if (inputEl) row.appendChild(inputEl);
+                        return row;
+                    };
+
                     const renderDetailsList = (items, container) => {
                         container.innerHTML = '';
                         if (!items || !items.length) {
@@ -2799,6 +3330,65 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 }
                             } catch (e) { /* ignore UI helper errors */ }
 
+                            // Metadata-driven "Run Now" button. A component declares
+                            // `runnable: true` in its metadata (optionally with a custom
+                            // `run_label` / `run_action`) to expose an on-demand trigger.
+                            // This replaces the previous hardcoded, name-keyed buttons so
+                            // any component can opt in without touching the UI.
+                            try {
+                                if (item && item.runnable) {
+                                    const runBtn = document.createElement('button');
+                                    runBtn.className = 'pill';
+                                    runBtn.textContent = item.run_label || 'Run Now';
+                                    runBtn.title = item.run_title || 'Trigger this component now';
+                                    runBtn.style.marginLeft = '8px';
+                                    const runAction = item.run_action || 'run_now';
+                                    const runName = item.name || '';
+                                    runBtn.addEventListener('click', async (ev) => {
+                                        ev.stopPropagation();
+                                        ev.preventDefault();
+                                        runBtn.disabled = true;
+                                        const originalText = runBtn.textContent;
+                                        runBtn.textContent = 'Running…';
+                                        try {
+                                            const resp = await fetch('/api/components/run', {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({ name: runName, action: runAction })
+                                            });
+                                            let body = null;
+                                            try { body = await resp.json(); } catch (e) { /* ignore */ }
+                                            const result = (body && body.result) || {};
+                                            const st = result.status;
+                                            if (resp.ok && (st === 'done' || st === 'scheduled' || st === 'ok')) {
+                                                runBtn.textContent = st === 'scheduled' && result.priority != null
+                                                    ? `Scheduled (priority ${result.priority})`
+                                                    : 'Done';
+                                            } else if (st === 'empty') {
+                                                runBtn.textContent = 'Nothing to do';
+                                            } else if (st === 'disabled') {
+                                                runBtn.textContent = 'Disabled';
+                                            } else {
+                                                const msg = (result && result.message) || (body && body.detail) || 'Failed';
+                                                runBtn.textContent = 'Error';
+                                                console.error('[synth_webui] Run Now failed:', msg);
+                                                if (window.showToast) window.showToast('Run Now failed: ' + msg, true);
+                                            }
+                                        } catch (err) {
+                                            console.error('[synth_webui] Run Now request failed', err);
+                                            runBtn.textContent = 'Error';
+                                            if (window.showToast) window.showToast('Run Now request failed', true);
+                                        } finally {
+                                            setTimeout(() => {
+                                                runBtn.textContent = originalText;
+                                                runBtn.disabled = false;
+                                            }, 4000);
+                                        }
+                                    });
+                                    summaryActions.appendChild(runBtn);
+                                }
+                            } catch (e) { /* ignore UI helper errors */ }
+
                             summary.appendChild(summaryActions);
                             details.appendChild(summary);
 
@@ -2880,173 +3470,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 const normalCfg = cfgItems.filter(ci => !ci.advanced);
                                 const advancedCfg = cfgItems.filter(ci => ci.advanced);
 
-                                const buildCfgRow = (ci) => {
-                                    const row = document.createElement('div');
-                                    row.style.cssText = 'display:flex; flex-direction:column; gap:3px; margin-bottom:10px;';
-
-                                    const lbl = document.createElement('label');
-                                    lbl.style.cssText = 'font-size:0.88rem; font-weight:600; color:var(--text);';
-                                    lbl.textContent = ci.label || ci.key;
-                                    row.appendChild(lbl);
-
-                                    if (ci.description) {
-                                        const helpText = document.createElement('div');
-                                        helpText.style.cssText = 'font-size:0.78rem; color:var(--muted); margin-bottom:2px;';
-                                        helpText.textContent = ci.description;
-                                        row.appendChild(helpText);
-                                    }
-
-                                    const val = ci.value === null || ci.value === undefined ? '' : ci.value;
-                                    const editable = !!ci.editable && !ci.env_override;
-
-                                    const saveCfg = async (newVal, el) => {
-                                        try {
-                                            if (el) el.disabled = true;
-                                            const r = await fetch('/api/config', {
-                                                method: 'POST',
-                                                headers: { 'Content-Type': 'application/json' },
-                                                body: JSON.stringify({ key: ci.key, value: newVal })
-                                            });
-                                            if (!r.ok) {
-                                                const t = await r.text();
-                                                window.showToast && window.showToast('Save failed: ' + t, true);
-                                            } else {
-                                                const out = await r.json();
-                                                window.showToast && window.showToast('Saved', false);
-                                                if (out && out.requires_reload) {
-                                                    window.showToast && window.showToast(out.message || 'Reload recommended', false);
-                                                }
-                                            }
-                                        } catch (e) {
-                                            window.showToast && window.showToast('Save failed', true);
-                                        } finally {
-                                            if (el) el.disabled = !editable;
-                                        }
-                                    };
-
-                                    let inputEl = null;
-
-                                    if (ci.ui_type === 'bool' || ci.value_type === 'bool') {
-                                        const wrap = document.createElement('div');
-                                        wrap.style.cssText = 'display:flex; align-items:center; gap:8px;';
-                                        const cb = document.createElement('input');
-                                        cb.type = 'checkbox';
-                                        cb.checked = val === true || val === 1 || val === '1' || val === 'true';
-                                        cb.disabled = !editable;
-                                        cb.id = `comp-cfg-${ci.key}`;
-                                        const toggleLbl = document.createElement('label');
-                                        toggleLbl.className = 'toggle-switch';
-                                        toggleLbl.setAttribute('for', cb.id);
-                                        const slider = document.createElement('span');
-                                        slider.className = 'toggle-slider';
-                                        toggleLbl.appendChild(slider);
-                                        cb.addEventListener('change', () => saveCfg(cb.checked, cb));
-                                        wrap.appendChild(cb);
-                                        wrap.appendChild(toggleLbl);
-                                        inputEl = wrap;
-                                    } else if (ci.ui_type === 'select' && Array.isArray(ci.options) && ci.options.length) {
-                                        const sel = document.createElement('select');
-                                        sel.style.cssText = 'padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:6px; font-size:0.88rem; max-width:400px;';
-                                        ci.options.forEach(opt => {
-                                            const o = document.createElement('option');
-                                            o.value = opt; o.textContent = opt;
-                                            if (String(val) === String(opt)) o.selected = true;
-                                            sel.appendChild(o);
-                                        });
-                                        sel.disabled = !editable;
-                                        sel.addEventListener('change', () => saveCfg(sel.value, sel));
-                                        inputEl = sel;
-                                    } else if (ci.ui_type === 'textarea' || (ci.value_type === 'json' && ci.ui_type !== 'tags')) {
-                                        const ta = document.createElement('textarea');
-                                        ta.rows = 3;
-                                        ta.style.cssText = 'width:100%; max-width:500px; padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:6px; font-family:monospace; font-size:0.85rem; resize:vertical;';
-                                        ta.value = typeof val === 'string' ? val : JSON.stringify(val, null, 2);
-                                        ta.disabled = !editable;
-                                        ta.addEventListener('keydown', (ev) => {
-                                            if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); saveCfg(ta.value, ta); }
-                                        });
-                                        ta.addEventListener('blur', () => saveCfg(ta.value, ta));
-                                        inputEl = ta;
-                                    } else if (ci.ui_type === 'combobox') {
-                                        // Searchable dropdown with free-text fallback
-                                        const models = (item && Array.isArray(item.supported_models)) ? item.supported_models : [];
-                                        const wrap = document.createElement('div');
-                                        wrap.style.cssText = 'position:relative; max-width:400px; width:100%;';
-                                        const inp = document.createElement('input');
-                                        inp.type = 'text';
-                                        inp.autocomplete = 'off';
-                                        inp.style.cssText = 'padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:6px; font-size:0.88rem; width:100%; box-sizing:border-box;';
-                                        inp.value = typeof val === 'string' ? val : JSON.stringify(val);
-                                        inp.disabled = !editable;
-                                        inp.placeholder = models.length ? `Search ${models.length} models…` : '';
-                                        wrap.appendChild(inp);
-
-                                        if (models.length) {
-                                            const dd = document.createElement('div');
-                                            dd.style.cssText = 'display:none; position:absolute; top:100%; left:0; right:0; max-height:220px; overflow-y:auto; border:1px solid var(--border,#444); border-radius:6px; background:var(--bg-card,#1a1a2e); z-index:999; margin-top:2px;';
-                                            const MAX_SHOW = 60;
-                                            const renderDd = (filter) => {
-                                                dd.innerHTML = '';
-                                                const q = (filter || '').toLowerCase();
-                                                let count = 0;
-                                                for (const m of models) {
-                                                    if (q && !m.toLowerCase().includes(q)) continue;
-                                                    if (++count > MAX_SHOW) {
-                                                        const more = document.createElement('div');
-                                                        more.style.cssText = 'padding:0.3rem 0.6rem; color:var(--muted); font-size:0.78rem;';
-                                                        more.textContent = `${models.length - MAX_SHOW}+ more — refine search`;
-                                                        dd.appendChild(more);
-                                                        break;
-                                                    }
-                                                    const row = document.createElement('div');
-                                                    row.textContent = m;
-                                                    row.style.cssText = 'padding:0.35rem 0.6rem; cursor:pointer; font-size:0.85rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;';
-                                                    if (m === val) row.style.fontWeight = '700';
-                                                    row.addEventListener('mouseenter', () => { row.style.background = 'var(--accent-dim, rgba(107,254,254,0.12))'; });
-                                                    row.addEventListener('mouseleave', () => { row.style.background = ''; });
-                                                    row.addEventListener('mousedown', (ev) => {
-                                                        ev.preventDefault();
-                                                        inp.value = m;
-                                                        dd.style.display = 'none';
-                                                        saveCfg(m, inp);
-                                                    });
-                                                    dd.appendChild(row);
-                                                }
-                                                if (count === 0) {
-                                                    const empty = document.createElement('div');
-                                                    empty.style.cssText = 'padding:0.4rem 0.6rem; color:var(--muted); font-size:0.82rem;';
-                                                    empty.textContent = 'No matching models';
-                                                    dd.appendChild(empty);
-                                                }
-                                            };
-                                            inp.addEventListener('focus', () => { renderDd(inp.value); dd.style.display = ''; });
-                                            inp.addEventListener('input', () => { renderDd(inp.value); });
-                                            inp.addEventListener('blur', () => { setTimeout(() => { dd.style.display = 'none'; }, 180); });
-                                            wrap.appendChild(dd);
-                                        }
-                                        inp.addEventListener('keydown', (ev) => {
-                                            if (ev.key === 'Enter') { ev.preventDefault(); saveCfg(inp.value, inp); }
-                                        });
-                                        inputEl = wrap;
-                                    } else {
-                                        // Default: text / password / number input
-                                        const inp = document.createElement('input');
-                                        inp.type = ci.ui_type === 'password' ? 'password'
-                                            : (ci.value_type === 'int' || ci.value_type === 'float' || ci.ui_type === 'number') ? 'number' : 'text';
-                                        inp.autocomplete = ci.ui_type === 'password' ? 'new-password' : 'off';
-                                        inp.style.cssText = 'padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:6px; font-size:0.88rem; max-width:400px; width:100%;';
-                                        inp.value = typeof val === 'string' ? val : JSON.stringify(val);
-                                        inp.disabled = !editable;
-                                        inp.addEventListener('keydown', (ev) => {
-                                            if (ev.key === 'Enter') { ev.preventDefault(); saveCfg(inp.value, inp); }
-                                        });
-                                        inp.addEventListener('blur', () => saveCfg(inp.value, inp));
-                                        inputEl = inp;
-                                    }
-
-                                    if (inputEl) row.appendChild(inputEl);
-                                    return row;
-                                };
+                                const buildCfgRow = (ci) => makeCfgRow(ci, item);
 
                                 normalCfg.forEach(ci => cfgBody.appendChild(buildCfgRow(ci)));
 
@@ -3086,14 +3510,823 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         });
                     };
 
+                    // ── Two-column plugins renderer (banner list + detail pane) ────
+                    // Minimal, dependency-free Markdown → HTML for guide.md content.
+                    // Supports headings, bold/italic, inline code, fenced code blocks,
+                    // links, unordered lists and paragraphs. All raw HTML is escaped
+                    // first, so injected markup cannot execute.
+                    const renderGuideMarkdown = (md) => {
+                        const esc = (s) => s
+                            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                        const inline = (s) => esc(s)
+                            .replace(/`([^`]+)`/g, (m, c) => `<code>${c}</code>`)
+                            .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+                            .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+                            .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+                                '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+                        // A line that is nothing but a raw HTML block (an <img> logo,
+                        // an HTML comment, a <div>/<br> etc.) is not Markdown. The mini
+                        // parser cannot safely render arbitrary HTML, and many guides
+                        // carry a decorative `<img src="X.png" align="right" />` header
+                        // that points at an asset the WebUI does not serve. Rather than
+                        // escaping it into visible tag soup, skip such stand-alone HTML
+                        // lines entirely — the plugin icon is already shown in the
+                        // detail pane header.
+                        const isRawHtmlLine = (s) => {
+                            const t = s.trim();
+                            if (!t) return false;
+                            if (t.startsWith('<!--') && t.endsWith('-->')) return true;
+                            return /^<\/?(img|div|br|p|span|hr|figure|picture|source)\b[^>]*>?$/i.test(t);
+                        };
+                        const lines = String(md || '').replace(/\r\n/g, '\n').split('\n');
+                        const out = [];
+                        let inCode = false;
+                        let codeBuf = [];
+                        let listBuf = [];
+                        let paraBuf = [];
+                        let tableBuf = [];
+                        const flushPara = () => {
+                            if (paraBuf.length) { out.push('<p>' + inline(paraBuf.join(' ')) + '</p>'); paraBuf = []; }
+                        };
+                        const flushList = () => {
+                            if (listBuf.length) {
+                                out.push('<ul>' + listBuf.map(li => '<li>' + inline(li) + '</li>').join('') + '</ul>');
+                                listBuf = [];
+                            }
+                        };
+                        // Split a GitHub-flavored table row into cell strings, honouring
+                        // leading/trailing pipes and trimming surrounding whitespace.
+                        const splitRow = (s) => s.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map(c => c.trim());
+                        // A separator row is like |---|:--:|---:| (dashes with optional colons).
+                        const isSep = (s) => /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?\s*$/.test(s) && s.includes('-');
+                        const flushTable = () => {
+                            if (!tableBuf.length) return;
+                            const header = splitRow(tableBuf[0]);
+                            const bodyRows = tableBuf.slice(2);
+                            let html = '<table><thead><tr>' +
+                                header.map(c => '<th>' + inline(c) + '</th>').join('') +
+                                '</tr></thead><tbody>';
+                            for (const r of bodyRows) {
+                                const cells = splitRow(r);
+                                html += '<tr>' + cells.map(c => '<td>' + inline(c) + '</td>').join('') + '</tr>';
+                            }
+                            html += '</tbody></table>';
+                            out.push(html);
+                            tableBuf = [];
+                        };
+                        const looksLikeRow = (s) => s.trim().includes('|');
+                        for (let i = 0; i < lines.length; i++) {
+                            const line = lines[i];
+                            if (line.trim().startsWith('```')) {
+                                if (inCode) { out.push('<pre><code>' + esc(codeBuf.join('\n')) + '</code></pre>'); codeBuf = []; inCode = false; }
+                                else { flushPara(); flushList(); flushTable(); inCode = true; }
+                                continue;
+                            }
+                            if (inCode) { codeBuf.push(line); continue; }
+                            // Stand-alone raw HTML line (decorative logo, comment,
+                            // block tag): drop it instead of rendering escaped tags.
+                            if (isRawHtmlLine(line)) { flushPara(); flushList(); flushTable(); continue; }
+                            // Table: a header row immediately followed by a separator row.
+                            if (looksLikeRow(line) && i + 1 < lines.length && isSep(lines[i + 1])) {
+                                flushPara(); flushList(); flushTable();
+                                tableBuf.push(line, lines[i + 1]);
+                                i += 1;
+                                while (i + 1 < lines.length && looksLikeRow(lines[i + 1]) && lines[i + 1].trim() !== '') {
+                                    tableBuf.push(lines[i + 1]);
+                                    i += 1;
+                                }
+                                flushTable();
+                                continue;
+                            }
+                            const h = line.match(/^(#{1,6})\s+(.*)$/);
+                            if (h) { flushPara(); flushList(); flushTable(); const lvl = h[1].length; out.push(`<h${lvl}>${inline(h[2])}</h${lvl}>`); continue; }
+                            const li = line.match(/^\s*[-*]\s+(.*)$/);
+                            if (li) { flushPara(); flushTable(); listBuf.push(li[1]); continue; }
+                            if (line.trim() === '') { flushPara(); flushList(); flushTable(); continue; }
+                            flushList();
+                            paraBuf.push(line.trim());
+                        }
+                        if (inCode) out.push('<pre><code>' + esc(codeBuf.join('\n')) + '</code></pre>');
+                        flushPara();
+                        flushList();
+                        flushTable();
+                        return out.join('\n');
+                    };
+
+                    const LOGO_FALLBACK = '/static/synth_logo_bg.png';
+                    // Preferred category ordering; unknown categories fall after these.
+                    const CATEGORY_ORDER = ['Core', 'Interfaces', 'Grillo', 'Vessels', 'Agent', 'Recon', 'Various'];
+
+                    // Human-readable descriptions shown in the detail pane when a
+                    // category header is selected. Keys must match plugin category names.
+                    const CATEGORY_DESCRIPTIONS = {
+                        'Core': 'Core plugins provide the essential building blocks of SyntH: the message chain, action parsing, validation, memory, emotions and other subsystems the rest of the system depends on. These are usually required and cannot be disabled.',
+                        'Interfaces': 'Interfaces connect SyntH to the outside world (Telegram, Discord, Matrix, the OpenAI-compatible API and more). They forward incoming messages into the single message chain and deliver outgoing responses back to each platform.',
+                        'Grillo': 'G.R.I.L.L.O. (Generator for Reflective Inner Loop & Logical Observation) is SyntH\u2019s autonomous "inner life". Instead of only reacting to messages, it periodically generates "beats" \u2014 self-reflection, memory consolidation, curiosity, dreams and relationship check-ins \u2014 giving the persona unprompted moments to think, remember and act on its own. The name nods to Pinocchio\u2019s talking cricket ("grillo parlante").',
+                        'Vessels': 'Vessels are embodiment and presence plugins \u2014 avatars, voice and the ways SyntH inhabits a body or space. They handle how the persona is seen and heard rather than what it thinks.',
+                        'Agent': 'Agent plugins expose SyntH\u2019s agentic tools \u2014 reading and writing files, searching, running shell commands and spawning drones \u2014 within a bounded reasoning loop. They let the persona take multi-step actions to accomplish tasks.',
+                        'Recon': 'Recon plugins gather and evaluate external information \u2014 search, lookup and debrief \u2014 so SyntH can ground its answers in current context.',
+                        'Various': 'Miscellaneous plugins that don\u2019t belong to a specific category. Small utilities and extras that extend SyntH in focused ways.',
+                    };
+
+                    const renderPluginDetail = (item, pane, onBack) => {
+                        pane.innerHTML = '';
+
+                        // Mobile-only "back to list" button (top-left, accent colour).
+                        // Hidden on desktop via CSS; on mobile it returns to the list.
+                        if (typeof onBack === 'function') {
+                            const backBtn = document.createElement('button');
+                            backBtn.type = 'button';
+                            backBtn.className = 'plugin-detail-back';
+                            const arrow = document.createElement('span');
+                            arrow.className = 'plugin-detail-back-arrow';
+                            arrow.textContent = '\u2190';
+                            backBtn.appendChild(arrow);
+                            backBtn.appendChild(document.createTextNode('Plugins'));
+                            backBtn.addEventListener('click', () => onBack());
+                            pane.appendChild(backBtn);
+                        }
+
+                        const title = document.createElement('div');
+                        title.className = 'plugin-detail-title';
+                        const img = document.createElement('img');
+                        img.src = item.icon_url || `/api/plugins/${encodeURIComponent(item.name)}/icon`;
+                        img.alt = '';
+                        img.onerror = () => { img.onerror = null; img.src = LOGO_FALLBACK; };
+                        title.appendChild(img);
+                        const h = document.createElement('h3');
+                        h.style.margin = '0';
+                        h.textContent = item.display_name || item.name || 'Plugin';
+                        title.appendChild(h);
+                        pane.appendChild(title);
+
+                        if (item.is_mcp) {
+                            const note = document.createElement('div');
+                            note.className = 'plugin-mcp-note';
+                            note.textContent = 'MCP server (read-only)';
+                            pane.appendChild(note);
+                        }
+
+                        // Prefer the human-readable description over the technical
+                        // "Loaded from: <path>" status string. The backend puts the
+                        // module path in `details` for plugins, which used to shadow the
+                        // real description here; show the description first, then the
+                        // path as a small muted metadata line when present.
+                        const descText = item.description || '';
+                        if (descText) {
+                            const desc = document.createElement('div');
+                            desc.className = 'plugin-detail-desc';
+                            desc.textContent = descText;
+                            pane.appendChild(desc);
+                        }
+                        const detailsText = item.details || '';
+                        if (detailsText && detailsText !== descText) {
+                            const meta = document.createElement('div');
+                            meta.className = 'plugin-detail-meta';
+                            meta.textContent = detailsText;
+                            pane.appendChild(meta);
+                        }
+
+                        if (item.error) {
+                            const err = document.createElement('div');
+                            err.className = 'component-error';
+                            err.textContent = item.error;
+                            pane.appendChild(err);
+                        }
+
+                        // Optional metadata-driven "Run Now" button.
+                        if (item.runnable && !item.is_mcp) {
+                            const runBtn = document.createElement('button');
+                            runBtn.className = 'pill';
+                            runBtn.textContent = item.run_label || 'Run Now';
+                            runBtn.title = item.run_title || 'Trigger this plugin now';
+                            runBtn.style.marginTop = '6px';
+                            const runAction = item.run_action || 'run_now';
+                            const runName = item.name || '';
+                            runBtn.addEventListener('click', async () => {
+                                runBtn.disabled = true;
+                                const originalText = runBtn.textContent;
+                                runBtn.textContent = 'Running…';
+                                try {
+                                    const resp = await fetch('/api/components/run', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ name: runName, action: runAction })
+                                    });
+                                    let body = null;
+                                    try { body = await resp.json(); } catch (e) { /* ignore */ }
+                                    const result = (body && body.result) || {};
+                                    const st = result.status;
+                                    if (resp.ok && (st === 'done' || st === 'scheduled' || st === 'ok')) {
+                                        runBtn.textContent = st === 'scheduled' && result.priority != null
+                                            ? `Scheduled (priority ${result.priority})` : 'Done';
+                                    } else if (st === 'empty') { runBtn.textContent = 'Nothing to do'; }
+                                    else if (st === 'disabled') { runBtn.textContent = 'Disabled'; }
+                                    else {
+                                        const msg = (result && result.message) || (body && body.detail) || 'Failed';
+                                        runBtn.textContent = 'Error';
+                                        if (window.showToast) window.showToast('Run Now failed: ' + msg, true);
+                                    }
+                                } catch (err) {
+                                    runBtn.textContent = 'Error';
+                                    if (window.showToast) window.showToast('Run Now request failed', true);
+                                } finally {
+                                    setTimeout(() => { runBtn.textContent = originalText; runBtn.disabled = false; }, 4000);
+                                }
+                            });
+                            pane.appendChild(runBtn);
+                        }
+
+                        // Guide (Markdown → HTML) when provided by the plugin.
+                        // Long guides are collapsed to their first block (preview) with a
+                        // "▶ More" toggle (styled like the Advanced section) that expands
+                        // the rest inline. Short guides render in full with no toggle.
+                        if (item.guide) {
+                            const guideWrap = document.createElement('div');
+                            guideWrap.className = 'plugin-detail-guide';
+
+                            const GUIDE_COLLAPSE_THRESHOLD = 600; // chars of raw markdown
+                            const fullMd = String(item.guide || '');
+
+                            // Split the raw markdown into a short preview (up to the first
+                            // blank line after some content) and the remainder.
+                            const splitGuidePreview = (md) => {
+                                const rawLines = md.replace(/\r\n/g, '\n').split('\n');
+                                let i = 0;
+                                // skip leading blank lines
+                                while (i < rawLines.length && rawLines[i].trim() === '') i++;
+                                const previewLines = [];
+                                let inFence = false;
+                                for (; i < rawLines.length; i++) {
+                                    const ln = rawLines[i];
+                                    if (ln.trim().startsWith('```')) inFence = !inFence;
+                                    if (!inFence && ln.trim() === '' && previewLines.length) { i++; break; }
+                                    previewLines.push(ln);
+                                }
+                                const rest = rawLines.slice(i).join('\n').trim();
+                                return { preview: previewLines.join('\n').trim(), rest };
+                            };
+
+                            if (fullMd.length > GUIDE_COLLAPSE_THRESHOLD) {
+                                const { preview, rest } = splitGuidePreview(fullMd);
+                                if (rest) {
+                                    const previewEl = document.createElement('div');
+                                    previewEl.innerHTML = renderGuideMarkdown(preview);
+                                    guideWrap.appendChild(previewEl);
+
+                                    const restEl = document.createElement('div');
+                                    restEl.style.display = 'none';
+                                    restEl.innerHTML = renderGuideMarkdown(rest);
+
+                                    const moreHeader = document.createElement('div');
+                                    moreHeader.style.cssText = 'display:flex; align-items:center; gap:6px; margin-top:8px; margin-bottom:6px; cursor:pointer; user-select:none;';
+                                    const moreIcon = document.createElement('span');
+                                    moreIcon.textContent = '▶';
+                                    moreIcon.style.cssText = 'font-size:0.65rem; transition:transform 0.2s;';
+                                    const moreLabel = document.createElement('span');
+                                    moreLabel.style.cssText = 'font-size:0.8rem; font-weight:600; text-transform:uppercase; letter-spacing:0.06em; color:var(--muted);';
+                                    moreLabel.textContent = 'More';
+                                    moreHeader.appendChild(moreIcon);
+                                    moreHeader.appendChild(moreLabel);
+                                    moreHeader.addEventListener('click', () => {
+                                        const open = restEl.style.display !== 'none';
+                                        restEl.style.display = open ? 'none' : '';
+                                        moreIcon.style.transform = open ? '' : 'rotate(90deg)';
+                                        moreLabel.textContent = open ? 'More' : 'Less';
+                                    });
+                                    guideWrap.appendChild(moreHeader);
+                                    guideWrap.appendChild(restEl);
+                                } else {
+                                    guideWrap.innerHTML = renderGuideMarkdown(fullMd);
+                                }
+                            } else {
+                                guideWrap.innerHTML = renderGuideMarkdown(fullMd);
+                            }
+                            pane.appendChild(guideWrap);
+                        }
+
+                        // Exposed variables (basic + Advanced collapsible), reusing the
+                        // shared config-row builder and the same /api/config wiring.
+                        // WEBUI_ACCENT_COLOR is intentionally hidden here: it already has
+                        // a dedicated control in the Settings tab, so showing it in the
+                        // plugin detail pane would be a confusing duplicate.
+                        const cfgItems = (_componentConfigMap[item.name] || []).filter(ci =>
+                            !(ci && ((ci.key === 'WEBUI_ACCENT_COLOR') || (ci.label && /accent\s*color/i.test(ci.label))))
+                        );
+                        if (cfgItems.length) {
+                            const section = document.createElement('div');
+                            section.className = 'plugin-vars-section';
+                            const normalCfg = cfgItems.filter(ci => !ci.advanced);
+                            const advancedCfg = cfgItems.filter(ci => ci.advanced);
+
+                            if (normalCfg.length) {
+                                const hh = document.createElement('div');
+                                hh.style.cssText = 'font-size:0.8rem; font-weight:600; text-transform:uppercase; letter-spacing:0.06em; color:var(--muted); margin-bottom:8px;';
+                                hh.textContent = 'Settings';
+                                section.appendChild(hh);
+                                normalCfg.forEach(ci => section.appendChild(makeCfgRow(ci, item)));
+                            }
+
+                            if (advancedCfg.length) {
+                                const advHeader = document.createElement('div');
+                                advHeader.style.cssText = 'display:flex; align-items:center; gap:6px; margin-top:8px; margin-bottom:6px; cursor:pointer; user-select:none;';
+                                const advIcon = document.createElement('span');
+                                advIcon.textContent = '▶';
+                                advIcon.style.cssText = 'font-size:0.65rem; transition:transform 0.2s;';
+                                const advLabel = document.createElement('span');
+                                advLabel.style.cssText = 'font-size:0.8rem; font-weight:600; text-transform:uppercase; letter-spacing:0.06em; color:var(--muted);';
+                                advLabel.textContent = 'Advanced';
+                                advHeader.appendChild(advIcon);
+                                advHeader.appendChild(advLabel);
+                                const advBody = document.createElement('div');
+                                advBody.style.display = 'none';
+                                advancedCfg.forEach(ci => advBody.appendChild(makeCfgRow(ci, item)));
+                                advHeader.addEventListener('click', () => {
+                                    const open = advBody.style.display !== 'none';
+                                    advBody.style.display = open ? 'none' : '';
+                                    advIcon.style.transform = open ? '' : 'rotate(90deg)';
+                                });
+                                section.appendChild(advHeader);
+                                section.appendChild(advBody);
+                            }
+                            pane.appendChild(section);
+                        }
+
+                        // Registered actions: a separator followed by the Synth
+                        // actions this plugin registers and their auto-exposed MCP
+                        // tools (each action is exposed as `synth_<action>`).
+                        const regActions = Array.isArray(item.actions) ? item.actions : [];
+                        const hasReconHook = item.has_recon === true;
+                        const hasDebriefHook = item.has_debrief === true;
+                        if (regActions.length || hasReconHook || hasDebriefHook) {
+                            const actSection = document.createElement('div');
+                            actSection.className = 'plugin-actions-section';
+                            actSection.style.cssText = 'margin-top:14px; padding-top:12px; border-top:1px solid var(--border, #444);';
+
+                            const secTitle = document.createElement('div');
+                            secTitle.style.cssText = 'font-size:0.8rem; font-weight:600; text-transform:uppercase; letter-spacing:0.06em; color:var(--muted); margin-bottom:10px;';
+                            secTitle.textContent = 'Registered actions';
+                            actSection.appendChild(secTitle);
+
+                            const makeSubGroup = (label, names) => {
+                                const grp = document.createElement('div');
+                                grp.style.cssText = 'margin-bottom:10px;';
+                                const gl = document.createElement('div');
+                                gl.style.cssText = 'font-size:0.72rem; font-weight:600; color:var(--muted); margin-bottom:4px;';
+                                gl.textContent = label;
+                                grp.appendChild(gl);
+                                names.forEach((n) => {
+                                    const code = document.createElement('code');
+                                    code.textContent = n;
+                                    code.style.cssText = 'display:block; font-size:0.82rem; padding:2px 0;';
+                                    grp.appendChild(code);
+                                });
+                                return grp;
+                            };
+
+                            const actionNames = regActions
+                                .map(a => a.type || a.name)
+                                .filter(Boolean);
+
+                            // Synth Actions
+                            if (actionNames.length) {
+                                actSection.appendChild(makeSubGroup('Synth Actions', actionNames));
+                            }
+
+                            // MCP tools — only for real plugins. MCP servers expose
+                            // their tools remotely and are not re-wrapped as synth_*.
+                            if (!item.is_mcp && actionNames.length) {
+                                const mcpNames = actionNames.map(n => `synth_${n}`);
+                                actSection.appendChild(makeSubGroup('MCP tools', mcpNames));
+                            }
+
+                            // Recon / debrief hooks — not actions from
+                            // get_supported_actions() but structural capabilities the
+                            // plugin registers (recon = get_recon_contributions or the
+                            // get_recon_key/instruction/parse trio; debrief = on_debrief).
+                            const hookNames = [];
+                            if (hasReconHook) hookNames.push('recon (brief)');
+                            if (hasDebriefHook) hookNames.push('debrief');
+                            if (hookNames.length) {
+                                actSection.appendChild(makeSubGroup('Hooks', hookNames));
+                            }
+
+                            pane.appendChild(actSection);
+                        }
+                    };
+
+                    // Renders a category "detail" (title + description) into the detail
+                    // pane, mirroring the look of a plugin detail so the two feel unified.
+                    const renderCategoryDetail = (cat, pane, onBack) => {
+                        pane.innerHTML = '';
+
+                        if (typeof onBack === 'function') {
+                            const backBtn = document.createElement('button');
+                            backBtn.type = 'button';
+                            backBtn.className = 'plugin-detail-back';
+                            const arrow = document.createElement('span');
+                            arrow.className = 'plugin-detail-back-arrow';
+                            arrow.textContent = '\u2190';
+                            backBtn.appendChild(arrow);
+                            backBtn.appendChild(document.createTextNode('Plugins'));
+                            backBtn.addEventListener('click', () => onBack());
+                            pane.appendChild(backBtn);
+                        }
+
+                        const title = document.createElement('div');
+                        title.className = 'plugin-detail-title';
+                        const h = document.createElement('h3');
+                        h.style.margin = '0';
+                        h.textContent = cat;
+                        title.appendChild(h);
+                        pane.appendChild(title);
+
+                        const descText = CATEGORY_DESCRIPTIONS[cat]
+                            || 'A group of related plugins.';
+                        const desc = document.createElement('div');
+                        desc.className = 'plugin-detail-desc';
+                        desc.textContent = descText;
+                        pane.appendChild(desc);
+                    };
+
+                    const renderPluginsTwoCol = (plugins, listEl) => {
+                        listEl.innerHTML = '';
+                        const detailContent = document.getElementById('plugin-detail-content');
+                        const detailEmpty = document.getElementById('plugin-detail-empty');
+                        if (!plugins || !plugins.length) {
+                            const empty = document.createElement('div');
+                            empty.className = 'meta';
+                            empty.textContent = 'No plugins found.';
+                            listEl.appendChild(empty);
+                            return;
+                        }
+
+                        // Group by category, honoring the preferred ordering.
+                        const groups = {};
+                        plugins.forEach((p) => {
+                            const cat = p.category || 'Various';
+                            (groups[cat] = groups[cat] || []).push(p);
+                        });
+                        const cats = Object.keys(groups).sort((a, b) => {
+                            const ia = CATEGORY_ORDER.indexOf(a);
+                            const ib = CATEGORY_ORDER.indexOf(b);
+                            if (ia === -1 && ib === -1) return a.localeCompare(b);
+                            if (ia === -1) return 1;
+                            if (ib === -1) return -1;
+                            return ia - ib;
+                        });
+
+                        const twoColEl = document.getElementById('plugins-two-col');
+                        // On mobile the list and the detail pane never show together:
+                        // opening a plugin flips the container into "detail" mode; the
+                        // back button (rendered inside the detail pane) flips it back.
+                        const showMobileList = () => {
+                            if (twoColEl) twoColEl.classList.remove('mobile-detail-open');
+                        };
+
+                        const clearSelection = () => {
+                            listEl.querySelectorAll('.plugin-banner.selected, .plugin-category-header.selected')
+                                .forEach(el => el.classList.remove('selected'));
+                        };
+
+                        const selectPlugin = (item, bannerEl, openDetail = true) => {
+                            clearSelection();
+                            if (bannerEl) bannerEl.classList.add('selected');
+                            if (detailEmpty) detailEmpty.hidden = true;
+                            if (detailContent) {
+                                detailContent.hidden = false;
+                                renderPluginDetail(item, detailContent, showMobileList);
+                            }
+                            // Only a real user selection navigates to the detail view on
+                            // mobile; the initial auto-select must leave the list visible.
+                            if (openDetail && twoColEl) twoColEl.classList.add('mobile-detail-open');
+                        };
+
+                        // Selecting a category header shows its description in the detail
+                        // pane (same layout style as a plugin), and navigates to it on mobile.
+                        const selectCategory = (cat, headerEl) => {
+                            clearSelection();
+                            if (headerEl) headerEl.classList.add('selected');
+                            if (detailEmpty) detailEmpty.hidden = true;
+                            if (detailContent) {
+                                detailContent.hidden = false;
+                                renderCategoryDetail(cat, detailContent, showMobileList);
+                            }
+                            if (twoColEl) twoColEl.classList.add('mobile-detail-open');
+                        };
+
+                        let firstBanner = null;
+                        let firstItem = null;
+                        cats.forEach((cat) => {
+                            const header = document.createElement('div');
+                            header.className = 'plugin-category-header';
+
+                            const caret = document.createElement('span');
+                            caret.className = 'plugin-category-caret';
+                            caret.textContent = '\u25be'; // ▾ (expanded by default)
+
+                            const label = document.createElement('span');
+                            label.className = 'plugin-category-label';
+                            label.textContent = cat;
+
+                            header.appendChild(caret);
+                            header.appendChild(label);
+                            header.setAttribute('role', 'button');
+                            header.tabIndex = 0;
+                            listEl.appendChild(header);
+
+                            // Wrapper holds all banners in this category so they can be
+                            // collapsed/expanded together.
+                            const groupWrap = document.createElement('div');
+                            groupWrap.className = 'plugin-category-group';
+                            listEl.appendChild(groupWrap);
+
+                            const setCollapsed = (collapsed) => {
+                                groupWrap.style.display = collapsed ? 'none' : '';
+                                caret.textContent = collapsed ? '\u25b8' : '\u25be'; // ▸ / ▾
+                                header.classList.toggle('collapsed', collapsed);
+                            };
+
+                            // Clicking the caret only toggles collapse; clicking the label
+                            // (or elsewhere on the header) selects the category description.
+                            caret.addEventListener('click', (ev) => {
+                                ev.stopPropagation();
+                                setCollapsed(groupWrap.style.display !== 'none');
+                            });
+                            header.addEventListener('click', () => selectCategory(cat, header));
+                            header.addEventListener('keydown', (ev) => {
+                                if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); selectCategory(cat, header); }
+                            });
+
+                            groups[cat].forEach((item) => {
+                                const banner = document.createElement('div');
+                                banner.className = 'plugin-banner';
+                                banner.setAttribute('role', 'option');
+                                banner.tabIndex = 0;
+
+                                const icon = document.createElement('img');
+                                icon.className = 'plugin-banner-icon';
+                                icon.src = item.icon_url || `/api/plugins/${encodeURIComponent(item.name)}/icon`;
+                                icon.alt = '';
+                                icon.onerror = () => { icon.onerror = null; icon.src = LOGO_FALLBACK; };
+                                banner.appendChild(icon);
+
+                                const nameEl = document.createElement('span');
+                                nameEl.className = 'plugin-banner-name';
+                                nameEl.textContent = item.display_name || item.name || 'Plugin';
+                                banner.appendChild(nameEl);
+
+                                const controls = document.createElement('span');
+                                controls.className = 'plugin-banner-controls';
+
+                                // Run marker: a blue play arrow shown for plugins that can
+                                // be launched manually (runnable, non-MCP), e.g. G.R.I.L.L.O.
+                                // Diary Consolidation. Clicking it triggers the plugin's run
+                                // action directly (same endpoint as the detail-pane button)
+                                // without opening the detail pane.
+                                if (item.runnable && !item.is_mcp) {
+                                    const runBtn = document.createElement('button');
+                                    runBtn.type = 'button';
+                                    runBtn.className = 'plugin-banner-run';
+                                    runBtn.title = item.run_title || item.run_label || 'Run this plugin now';
+                                    runBtn.setAttribute('aria-label', runBtn.title);
+                                    runBtn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>';
+                                    const runAction = item.run_action || 'run_now';
+                                    const runName = item.name || '';
+                                    runBtn.addEventListener('click', async (ev) => {
+                                        ev.stopPropagation();
+                                        runBtn.disabled = true;
+                                        runBtn.classList.add('running');
+                                        try {
+                                            const resp = await fetch('/api/components/run', {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({ name: runName, action: runAction })
+                                            });
+                                            let body = null;
+                                            try { body = await resp.json(); } catch (e) { /* ignore */ }
+                                            const result = (body && body.result) || {};
+                                            const st = result.status;
+                                            if (resp.ok && (st === 'done' || st === 'scheduled' || st === 'ok')) {
+                                                if (window.showToast) window.showToast((item.display_name || item.name) + ': ' + (st === 'scheduled' ? 'scheduled' : 'done'));
+                                            } else if (st === 'empty') {
+                                                if (window.showToast) window.showToast((item.display_name || item.name) + ': nothing to do');
+                                            } else {
+                                                const msg = (result && result.message) || (body && body.detail) || 'Failed';
+                                                if (window.showToast) window.showToast('Run failed: ' + msg, true);
+                                            }
+                                        } catch (err) {
+                                            if (window.showToast) window.showToast('Run request failed', true);
+                                        } finally {
+                                            runBtn.classList.remove('running');
+                                            runBtn.disabled = false;
+                                        }
+                                    });
+                                    controls.appendChild(runBtn);
+                                }
+
+                                // Toggle: hidden for MCP servers and for plugins that
+                                // cannot be disabled (core). POSTs to /api/components/toggle.
+                                if (!item.is_mcp && item.disable_allowed !== false) {
+                                    const toggle = document.createElement('label');
+                                    toggle.className = 'plugin-toggle';
+                                    const cb = document.createElement('input');
+                                    cb.type = 'checkbox';
+                                    cb.checked = item.enabled !== false;
+                                    const slider = document.createElement('span');
+                                    slider.className = 'slider';
+                                    toggle.appendChild(cb);
+                                    toggle.appendChild(slider);
+                                    toggle.addEventListener('click', (ev) => ev.stopPropagation());
+                                    cb.addEventListener('change', async (ev) => {
+                                        ev.stopPropagation();
+                                        cb.disabled = true;
+                                        const desired = cb.checked;
+                                        try {
+                                            const resp = await fetch('/api/components/toggle', {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({ name: item.name, enabled: desired })
+                                            });
+                                            if (!resp.ok) {
+                                                let detail = 'HTTP ' + resp.status;
+                                                try { const b = await resp.json(); detail = b.detail || detail; } catch (e) { /* ignore */ }
+                                                throw new Error(detail);
+                                            }
+                                            if (window.showToast) window.showToast((desired ? 'Enabled ' : 'Disabled ') + (item.display_name || item.name));
+                                            await loadComponentsSummary();
+                                        } catch (err) {
+                                            cb.checked = !desired;
+                                            if (window.showToast) window.showToast('Toggle failed: ' + err.message, true);
+                                        } finally {
+                                            cb.disabled = false;
+                                        }
+                                    });
+                                    controls.appendChild(toggle);
+                                }
+
+                                const led = document.createElement('span');
+                                const ledColor = ['green', 'red', 'orange', 'grey'].includes(item.led) ? item.led : 'grey';
+                                led.className = 'plugin-led ' + ledColor;
+                                led.title = 'Status: ' + ledColor;
+                                controls.appendChild(led);
+
+                                banner.appendChild(controls);
+
+                                banner.addEventListener('click', () => selectPlugin(item, banner));
+                                banner.addEventListener('keydown', (ev) => {
+                                    if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); selectPlugin(item, banner); }
+                                });
+
+                                groupWrap.appendChild(banner);
+                                if (!firstBanner) { firstBanner = banner; firstItem = item; }
+                            });
+                        });
+
+                        // Auto-select the first plugin so the detail pane is never blank
+                        // on desktop. Pass openDetail=false so mobile stays on the list.
+                        if (firstBanner && firstItem) selectPlugin(firstItem, firstBanner, false);
+                    };
+
                     // Render engine list for the selected cortex kind
                     const toRenderKind = initialKind || 'llm_provider';
                     const byCortex = (data.cortex && data.cortex.by_cortex) || {};
                     let toRenderEngines = byCortex[toRenderKind] || [];
                     if (toRenderKind === 'llm_provider') toRenderEngines = toRenderEngines.filter(e => e.is_external);
                     if (componentsCortexListEl) renderDetailsList(toRenderEngines, componentsCortexListEl);
-                    if (componentsInterfacesListEl) renderDetailsList(data.interfaces || [], componentsInterfacesListEl);
-                    if (componentsPluginsListEl) renderDetailsList(data.plugins || [], componentsPluginsListEl);
+                    // Interfaces are now rendered inside the plugins two-column grid
+                    // (grouped under the "Interfaces" category), so there is no
+                    // separate Interfaces card to populate here.
+                    // Plugins: prefer the new two-column banner layout; fall back to the
+                    // legacy vertical details list if the new markup is not present.
+                    if (pluginsBannerListEl) {
+                        const allPlugins = data.plugins || [];
+
+                        // Matches a plugin against the free-text query: name /
+                        // display name / any exposed config variable key or label
+                        // (NOT descriptions — too verbose to be useful search targets).
+                        const matchesQuery = (p, q) => {
+                            if (!q) return true;
+                            const name = (p.name || '').toLowerCase();
+                            const disp = (p.display_name || '').toLowerCase();
+                            if (name.includes(q) || disp.includes(q)) return true;
+                            const cfgItems = _componentConfigMap[p.name] || [];
+                            return cfgItems.some((ci) => {
+                                const key = (ci && ci.key ? String(ci.key) : '').toLowerCase();
+                                const label = (ci && ci.label ? String(ci.label) : '').toLowerCase();
+                                return key.includes(q) || label.includes(q);
+                            });
+                        };
+
+                        // Filter control elements (may be absent in the legacy layout).
+                        const enabledEl = document.getElementById('plugins-filter-enabled');
+                        const statusEl = document.getElementById('plugins-filter-status');
+                        const categoryEl = document.getElementById('plugins-filter-category');
+                        const reconEl = document.getElementById('plugins-filter-recon');
+                        const debriefEl = document.getElementById('plugins-filter-debrief');
+                        const runnableEl = document.getElementById('plugins-filter-runnable');
+                        const resetEl = document.getElementById('plugins-filter-reset');
+
+                        // Populate the category dropdown from the actual plugin data so
+                        // no category name is hardcoded. Preserve the current selection.
+                        if (categoryEl) {
+                            const prev = categoryEl.value;
+                            const seen = new Set();
+                            const cats = [];
+                            allPlugins.forEach((p) => {
+                                const c = p.category || 'Various';
+                                if (!seen.has(c)) { seen.add(c); cats.push(c); }
+                            });
+                            cats.sort((a, b) => {
+                                const ia = CATEGORY_ORDER.indexOf(a);
+                                const ib = CATEGORY_ORDER.indexOf(b);
+                                if (ia === -1 && ib === -1) return a.localeCompare(b);
+                                if (ia === -1) return 1;
+                                if (ib === -1) return -1;
+                                return ia - ib;
+                            });
+                            categoryEl.innerHTML = '<option value="">All categories</option>';
+                            cats.forEach((c) => {
+                                const opt = document.createElement('option');
+                                opt.value = c;
+                                opt.textContent = c;
+                                categoryEl.appendChild(opt);
+                            });
+                            if (prev && cats.includes(prev)) categoryEl.value = prev;
+                        }
+
+                        // Combined filter: search text AND enabled-state AND status LED
+                        // AND category AND has-recon AND has-debrief (all AND semantics).
+                        const filterPlugins = () => {
+                            const searchEl = document.getElementById('plugins-search');
+                            const q = (searchEl ? searchEl.value : '').trim().toLowerCase();
+                            const enabledMode = enabledEl ? enabledEl.value : '';
+                            const statusMode = statusEl ? statusEl.value : '';
+                            const catMode = categoryEl ? categoryEl.value : '';
+                            const reconOnly = reconEl ? reconEl.checked : false;
+                            const debriefOnly = debriefEl ? debriefEl.checked : false;
+                            const runnableOnly = runnableEl ? runnableEl.checked : false;
+
+                            return allPlugins.filter((p) => {
+                                if (!matchesQuery(p, q)) return false;
+                                const isEnabled = p.enabled !== false;
+                                if (enabledMode === 'enabled' && !isEnabled) return false;
+                                if (enabledMode === 'disabled' && isEnabled) return false;
+                                if (statusMode) {
+                                    const led = ['green', 'red', 'orange', 'grey'].includes(p.led) ? p.led : 'grey';
+                                    if (led !== statusMode) return false;
+                                }
+                                if (catMode && (p.category || 'Various') !== catMode) return false;
+                                if (reconOnly && !p.has_recon) return false;
+                                if (debriefOnly && !p.has_debrief) return false;
+                                if (runnableOnly && !p.runnable) return false;
+                                return true;
+                            });
+                        };
+
+                        const applyFilters = () => {
+                            renderPluginsTwoCol(filterPlugins(), pluginsBannerListEl);
+                        };
+
+                        renderPluginsTwoCol(allPlugins, pluginsBannerListEl);
+
+                        const searchEl = document.getElementById('plugins-search');
+                        if (searchEl && !searchEl.dataset.bound) {
+                            searchEl.dataset.bound = '1';
+                            searchEl.addEventListener('input', applyFilters);
+                        }
+                        [enabledEl, statusEl, categoryEl].forEach((el) => {
+                            if (el && !el.dataset.bound) {
+                                el.dataset.bound = '1';
+                                el.addEventListener('change', applyFilters);
+                            }
+                        });
+                        [reconEl, debriefEl, runnableEl].forEach((el) => {
+                            if (el && !el.dataset.bound) {
+                                el.dataset.bound = '1';
+                                el.addEventListener('change', applyFilters);
+                            }
+                        });
+                        if (resetEl && !resetEl.dataset.bound) {
+                            resetEl.dataset.bound = '1';
+                            resetEl.addEventListener('click', () => {
+                                if (searchEl) searchEl.value = '';
+                                if (enabledEl) enabledEl.value = '';
+                                if (statusEl) statusEl.value = '';
+                                if (categoryEl) categoryEl.value = '';
+                                if (reconEl) reconEl.checked = false;
+                                if (debriefEl) debriefEl.checked = false;
+                                if (runnableEl) runnableEl.checked = false;
+                                applyFilters();
+                            });
+                        }
+
+                        // Re-apply any active filters after a data refresh so the list
+                        // doesn't silently reset to "show all" on toggle/reload.
+                        applyFilters();
+                    } else if (componentsPluginsListEl) {
+                        renderDetailsList(data.plugins || [], componentsPluginsListEl);
+                    }
 
                     // ── Audio registry selectors (Vox / Auris / Live) ──────────────
                     const setupRegistrySelect = (selectId, infoId, labelId, descId, engines, configKey) => {
@@ -3150,6 +4383,65 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     setupRegistrySelect('iris-engine-select', 'iris-engine-info', 'iris-engine-label', 'iris-engine-description',  data.iris || [], 'ACTIVE_IRIS_ENGINE');
                     setupRegistrySelect('live-engine-select', 'live-engine-info', 'live-engine-label', 'live-engine-description',  data.live || [], 'LIVE_CORTEX');  // persist selected live engine via LIVE_CORTEX config
 
+                    // ── Per-model metadata helpers (capability filter + language flags) ──
+                    // Deterministic language-code → flag emoji map. Codes coming from
+                    // speech_options.languages[].code may be lower- or uppercase
+                    // (OpenVoice uses EN/ZH/…). We normalize to lowercase and map the
+                    // language to a representative regional flag. No keyword matching —
+                    // this is a fixed lookup on a structured ISO-ish code.
+                    const LANG_FLAG_MAP = {
+                        en: '🇬🇧', it: '🇮🇹', zh: '🇨🇳', ja: '🇯🇵', ko: '🇰🇷',
+                        es: '🇪🇸', fr: '🇫🇷', de: '🇩🇪', pt: '🇵🇹', ru: '🇷🇺',
+                        ar: '🇸🇦', hi: '🇮🇳', nl: '🇳🇱', pl: '🇵🇱', tr: '🇹🇷',
+                        sv: '🇸🇪', no: '🇳🇴', da: '🇩🇰', fi: '🇫🇮', cs: '🇨🇿',
+                        el: '🇬🇷', he: '🇮🇱', th: '🇹🇭', vi: '🇻🇳', id: '🇮🇩',
+                        uk: '🇺🇦', ro: '🇷🇴', hu: '🇭🇺',
+                    };
+                    const MAX_FLAGS = 6;
+                    const langCodeToFlag = (code) => {
+                        if (!code) return '';
+                        const key = String(code).trim().toLowerCase().split(/[-_]/)[0];
+                        return LANG_FLAG_MAP[key] || '';
+                    };
+                    // Build the "<name> 🇬🇧🇮🇹…(+X)" label suffix from a model's metadata.
+                    const modelFlagSuffix = (meta) => {
+                        if (!meta || !Array.isArray(meta.languages) || !meta.languages.length) return '';
+                        const flags = [];
+                        const seen = new Set();
+                        for (const lang of meta.languages) {
+                            const code = (lang && (lang.code || lang)) || '';
+                            const flag = langCodeToFlag(code);
+                            if (flag && !seen.has(flag)) { seen.add(flag); flags.push(flag); }
+                        }
+                        if (!flags.length) return '';
+                        if (flags.length <= MAX_FLAGS) return ' ' + flags.join('');
+                        return ' ' + flags.slice(0, MAX_FLAGS).join('') + ' +' + (flags.length - MAX_FLAGS);
+                    };
+                    // Filter a model list to those whose metadata reports a given
+                    // capability true. Models without metadata are kept (permissive)
+                    // so endpoints that never returned rich metadata still list models.
+                    const filterModelsByCapability = (models, metaList, capKey) => {
+                        const metaById = new Map();
+                        (metaList || []).forEach((m) => {
+                            if (m && (m.id || m.model_id)) metaById.set(m.id || m.model_id, m);
+                        });
+                        // If no metadata at all, keep everything.
+                        if (!metaById.size) return models.map((m) => ({ id: m, meta: null }));
+                        return models
+                            .map((m) => ({ id: m, meta: metaById.get(m) || null }))
+                            .filter(({ meta }) => {
+                                if (!meta) return true; // permissive for unknown models
+                                const caps = meta.capabilities || {};
+                                // Permissive when the endpoint declares no
+                                // capabilities for this model (common for TTS
+                                // models whose metadata reports an empty
+                                // capabilities object, e.g. Harmony's kitten /
+                                // openvoice / chatterbox_multilingual entries).
+                                if (!Object.keys(caps).length) return true;
+                                return !!caps[capKey];
+                            });
+                    };
+
                     // ── Iris model selector ──────────────────────────────────
                     const irisModelSel = document.getElementById('iris-model-select');
                     const irisEngineSel = document.getElementById('iris-engine-select');
@@ -3157,22 +4449,25 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     const populateIrisModelSelect = (engineName) => {
                         if (!irisModelSel) return;
                         const engine = (data.iris || []).find((e) => e.name === engineName);
-                        const models = (engine && engine.available_models) ? engine.available_models : [];
-                        if (!models.length) {
+                        const allModels = (engine && engine.available_models) ? engine.available_models : [];
+                        const metaList = (engine && engine.models_meta) ? engine.models_meta : [];
+                        const entries = filterModelsByCapability(allModels, metaList, 'vision');
+                        if (!entries.length) {
                             irisModelSel.style.display = 'none';
                             irisModelSel.innerHTML = '';
                             return;
                         }
                         irisModelSel.innerHTML = '';
-                        models.forEach((m) => {
+                        entries.forEach(({ id, meta }) => {
                             const opt = document.createElement('option');
-                            opt.value = m;
-                            opt.textContent = m;
+                            opt.value = id;
+                            opt.textContent = id + modelFlagSuffix(meta);
                             irisModelSel.appendChild(opt);
                         });
+                        const ids = entries.map((e) => e.id);
                         // Pre-select: prefer the saved global IRIS_DEFAULT_MODEL, then engine default
                         const saved = data.iris_current_model || (engine && engine.default_model) || '';
-                        irisModelSel.value = models.includes(saved) ? saved : models[0];
+                        irisModelSel.value = ids.includes(saved) ? saved : ids[0];
                         irisModelSel.style.display = '';
                     };
 
@@ -3204,28 +4499,36 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     // ────────────────────────────────────────────────────────
 
                     // ── Vox / Auris model selectors (generic, mirrors Iris) ───
-                    const setupAudioModelSelect = (modelSelId, engineSelId, engineList, currentModel, configKey, boundFlag) => {
+                    // The chosen model is persisted into the external endpoint's
+                    // extra_config (tts_model / stt_model) via
+                    // /api/components/<subsystem>/model — the legacy
+                    // VOX_DEFAULT_MODEL / AURIS_DEFAULT_MODEL config keys are dead
+                    // (never read by the bridges) and are no longer written here.
+                    const setupAudioModelSelect = (modelSelId, engineSelId, engineList, currentModel, saveUrl, boundFlag, capKey) => {
                         const modelSel = document.getElementById(modelSelId);
                         const engineSel = document.getElementById(engineSelId);
                         if (!modelSel) return;
 
                         const populate = (engineName) => {
                             const engine = (engineList || []).find((e) => e.name === engineName);
-                            const models = (engine && engine.available_models) ? engine.available_models : [];
-                            if (!models.length) {
+                            const allModels = (engine && engine.available_models) ? engine.available_models : [];
+                            const metaList = (engine && engine.models_meta) ? engine.models_meta : [];
+                            const entries = filterModelsByCapability(allModels, metaList, capKey);
+                            if (!entries.length) {
                                 modelSel.style.display = 'none';
                                 modelSel.innerHTML = '';
                                 return;
                             }
                             modelSel.innerHTML = '';
-                            models.forEach((m) => {
+                            entries.forEach(({ id, meta }) => {
                                 const opt = document.createElement('option');
-                                opt.value = m;
-                                opt.textContent = m;
+                                opt.value = id;
+                                opt.textContent = id + modelFlagSuffix(meta);
                                 modelSel.appendChild(opt);
                             });
+                            const ids = entries.map((e) => e.id);
                             const saved = currentModel || (engine && engine.default_model) || '';
-                            modelSel.value = models.includes(saved) ? saved : models[0];
+                            modelSel.value = ids.includes(saved) ? saved : ids[0];
                             modelSel.style.display = '';
                         };
 
@@ -3239,16 +4542,21 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                         if (!modelSel.dataset.bound) {
                             modelSel.addEventListener('change', async () => {
+                                const engineName = engineSel ? engineSel.value : '';
+                                if (!engineName) {
+                                    window.showToast && window.showToast('Select an engine first', true);
+                                    return;
+                                }
                                 try {
-                                    const r = await fetch('/api/config', {
+                                    const r = await fetch(saveUrl, {
                                         method: 'POST',
                                         headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({ key: configKey, value: modelSel.value }),
+                                        body: JSON.stringify({ engine: engineName, model: modelSel.value }),
                                     });
                                     if (!r.ok) throw new Error('HTTP ' + r.status);
                                     window.showToast && window.showToast('Model set to ' + modelSel.value);
                                 } catch (e) {
-                                    console.error('[synth_webui] Failed to set ' + configKey, e);
+                                    console.error('[synth_webui] Failed to set model via ' + saveUrl, e);
                                     window.showToast && window.showToast('Failed to save model', true);
                                 }
                             });
@@ -3256,8 +4564,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         }
                     };
 
-                    setupAudioModelSelect('vox-model-select', 'vox-engine-select', data.vox || [], data.vox_current_model || '', 'VOX_DEFAULT_MODEL', 'voxModelBound');
-                    setupAudioModelSelect('auris-model-select', 'auris-engine-select', data.auris || [], data.auris_current_model || '', 'AURIS_DEFAULT_MODEL', 'aurisModelBound');
+                    setupAudioModelSelect('vox-model-select', 'vox-engine-select', data.vox || [], data.vox_current_model || '', '/api/components/vox/model', 'voxModelBound', 'vox');
+                    setupAudioModelSelect('auris-model-select', 'auris-engine-select', data.auris || [], data.auris_current_model || '', '/api/components/auris/model', 'aurisModelBound', 'auris');
                     // ────────────────────────────────────────────────────────
 
                     // ── Live voice configuration ──────────────────────────────
@@ -3368,8 +4676,54 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                     // ── Kitten TTS speaker selector ───────────────────────────
                     const kittenSpeakerSelect = document.getElementById('kitten-speaker-select');
+                    const kittenModelSelect = document.getElementById('kitten-model-select');
                     const kittenPlayBtn = document.getElementById('kitten-play-btn');
                     let kittenSpeakerList = [];
+                    let kittenModelList = [];
+
+                    function populateKittenModels(currentValue) {
+                        if (!kittenModelSelect) return;
+                        kittenModelSelect.innerHTML = '';
+                        if (!kittenModelList.length) {
+                            const opt = document.createElement('option');
+                            opt.value = '';
+                            opt.textContent = 'No downloaded models';
+                            opt.disabled = true;
+                            opt.selected = true;
+                            kittenModelSelect.appendChild(opt);
+                            return;
+                        }
+                        let matched = false;
+                        kittenModelList.forEach(m => {
+                            const opt = document.createElement('option');
+                            opt.value = m.model_id;
+                            opt.textContent = m.display_name || m.model_id;
+                            if (String(currentValue) === m.model_id) {
+                                opt.selected = true;
+                                matched = true;
+                            }
+                            kittenModelSelect.appendChild(opt);
+                        });
+                        if (!matched && kittenModelSelect.options.length) {
+                            kittenModelSelect.selectedIndex = 0;
+                        }
+                    }
+
+                    async function loadKittenModels() {
+                        try {
+                            const r = await fetch('/api/models?plugin_id=vox_kitten');
+                            if (r.ok) {
+                                const data = await r.json();
+                                const models = Array.isArray(data.models) ? data.models : [];
+                                kittenModelList = models.filter(m => m.downloaded === true);
+                            } else {
+                                kittenModelList = [];
+                            }
+                        } catch (e) {
+                            console.error('[synth_webui] failed to load kitten models', e);
+                            kittenModelList = [];
+                        }
+                    }
 
                     function populateKittenSpeakers(currentValue) {
                         if (!kittenSpeakerSelect) return;
@@ -3400,25 +4754,31 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         if (!kittenSpeakerSelect) return;
                         const voxSel = document.getElementById('vox-engine-select');
                         if (voxSel && voxSel.value === 'kitten') {
-                            // ensure we have the speaker list before populating
+                            // ensure we have the speaker + model lists before populating
                             await loadKittenSpeakers();
+                            await loadKittenModels();
+                            if (kittenModelSelect) kittenModelSelect.style.display = '';
                             kittenSpeakerSelect.style.display = '';
                             kittenPlayBtn.style.display = '';
                             try {
                                 const r = await fetch('/api/config');
                                 if (r.ok) {
                                     const cfg = await r.json();
-                                    const item = Array.isArray(cfg.items)
-                                        ? cfg.items.find(i => i.key === 'KITTEN_VOICE')
-                                        : null;
-                                    populateKittenSpeakers(item && item.value ? item.value : 'en_1');
+                                    const items = Array.isArray(cfg.items) ? cfg.items : [];
+                                    const voiceItem = items.find(i => i.key === 'KITTEN_VOICE');
+                                    populateKittenSpeakers(voiceItem && voiceItem.value ? voiceItem.value : 'en_1');
+                                    const modelItem = items.find(i => i.key === 'KITTEN_MODEL');
+                                    populateKittenModels(modelItem && modelItem.value ? modelItem.value : 'builtin');
                                 } else {
                                     populateKittenSpeakers('en_1');
+                                    populateKittenModels('builtin');
                                 }
                             } catch (e) {
                                 populateKittenSpeakers('en_1');
+                                populateKittenModels('builtin');
                             }
                         } else {
+                            if (kittenModelSelect) kittenModelSelect.style.display = 'none';
                             kittenSpeakerSelect.style.display = 'none';
                             if (kittenPlayBtn) kittenPlayBtn.style.display = 'none';
                         }
@@ -3440,6 +4800,24 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         });
                         kittenSpeakerSelect.dataset.bound = '1';
                     }
+                    if (kittenModelSelect && !kittenModelSelect.dataset.bound) {
+                        kittenModelSelect.addEventListener('change', async () => {
+                            const model = kittenModelSelect.value;
+                            if (!model) return;
+                            try {
+                                await fetch('/api/config', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ key: 'KITTEN_MODEL', value: model })
+                                });
+                                window.showToast && window.showToast('Kitten model set to ' + model);
+                            } catch (e) {
+                                console.error('[synth_webui] Failed to set KITTEN_MODEL', e);
+                                window.showToast && window.showToast('Failed to save model', true);
+                            }
+                        });
+                        kittenModelSelect.dataset.bound = '1';
+                    }
                     if (kittenPlayBtn && !kittenPlayBtn.dataset.bound) {
                         kittenPlayBtn.addEventListener('click', () => {
                             const code = kittenSpeakerSelect.value;
@@ -3448,6 +4826,9 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         });
                         kittenPlayBtn.dataset.bound = '1';
                     }
+                    // Expose a refresh hook so the Manage-Models modal can rebuild the
+                    // downloaded-model combo after a download/delete without a page reload.
+                    window.refreshKittenModelSelect = updateKittenControlsVisibility;
                     // show kitten controls now + wire engine change event
                     updateKittenControlsVisibility();
                     const voxEngineSel = document.getElementById('vox-engine-select');
@@ -3455,73 +4836,668 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         voxEngineSel.addEventListener('change', updateKittenControlsVisibility);
                     }
 
-                    // ── Vosk language selector ─────────────────────────────────
-                    const voskLangSelect = document.getElementById('auris-vosk-language');
-                    const VOSK_LANGUAGES = [
-                        {code:'en-us', label:'English (US)'},
-                        {code:'it-it', label:'Italiano'},
-                        {code:'fr-fr', label:'Français'},
-                        {code:'es-es', label:'Español'},
-                    ];
-                    function populateVoskLanguages(){
-                        if(!voskLangSelect) return;
-                        voskLangSelect.innerHTML = '';
-                        VOSK_LANGUAGES.forEach(l=>{
+                    // ── Vosk active-model selector (local Auris engine) ──
+                    // Mirrors the Kitten model picker: lists only downloaded Vosk
+                    // models and persists the choice into the VOSK_MODEL config key.
+                    const aurisVoskModelSelect = document.getElementById('auris-vosk-model-select');
+                    let aurisVoskModelList = [];
+
+                    function populateAurisModels(currentValue) {
+                        if (!aurisVoskModelSelect) return;
+                        aurisVoskModelSelect.innerHTML = '';
+                        if (!aurisVoskModelList.length) {
                             const opt = document.createElement('option');
-                            opt.value = l.code;
-                            opt.textContent = l.label;
-                            voskLangSelect.appendChild(opt);
+                            opt.value = '';
+                            opt.textContent = 'No models available';
+                            opt.disabled = true;
+                            opt.selected = true;
+                            aurisVoskModelSelect.appendChild(opt);
+                            return;
+                        }
+                        let matched = false;
+                        aurisVoskModelList.forEach(m => {
+                            const opt = document.createElement('option');
+                            opt.value = m.model_id;
+                            let label = m.display_name || m.model_id;
+                            if (m.downloaded === true) {
+                                // nothing extra — ready to use
+                            } else if (m.downloading) {
+                                label += ' (downloading…)';
+                            } else {
+                                label += ' (not downloaded — select to download)';
+                            }
+                            opt.textContent = label;
+                            opt.dataset.downloaded = m.downloaded === true ? '1' : '0';
+                            if (String(currentValue) === m.model_id) {
+                                opt.selected = true;
+                                matched = true;
+                            }
+                            aurisVoskModelSelect.appendChild(opt);
                         });
-                    }
-                    async function updateVoskLangVisibility(){
-                        if(!voskLangSelect) return;
-                        const aurisSel = document.getElementById('auris-engine-select');
-                        if(aurisSel && aurisSel.value === 'vosk'){
-                            voskLangSelect.style.display = '';
-                            populateVoskLanguages();
-                            // fetch current config value
-                            try{
-                                const r = await fetch('/api/config');
-                                if(r.ok){
-                                    const cfg = await r.json();
-                                    const item = Array.isArray(cfg.items)? cfg.items.find(i=>i.key==='VOSK_LANGUAGE') : null;
-                                    if(item && item.value) voskLangSelect.value = item.value;
-                                }
-                            } catch (e) { /* ignore */ }
-                        } else {
-                            voskLangSelect.style.display = 'none';
+                        if (!matched && aurisVoskModelSelect.options.length) {
+                            aurisVoskModelSelect.selectedIndex = 0;
                         }
                     }
-                    if (voskLangSelect && !voskLangSelect.dataset.bound) {
-                        voskLangSelect.addEventListener('change', async () => {
-                            const lang = voskLangSelect.value;
+
+                    async function loadAurisModels() {
+                        try {
+                            const r = await fetch('/api/models?plugin_id=auris_vosk');
+                            if (r.ok) {
+                                const data = await r.json();
+                                // List ALL catalog models (downloaded or not) so the user
+                                // picks the MODEL directly — not a language.  Non-downloaded
+                                // models are selectable and trigger a download on change.
+                                const models = Array.isArray(data.models) ? data.models : [];
+                                aurisVoskModelList = models;
+                            } else {
+                                aurisVoskModelList = [];
+                            }
+                        } catch (e) {
+                            console.error('[synth_webui] failed to load auris vosk models', e);
+                            aurisVoskModelList = [];
+                        }
+                    }
+
+                    async function updateAurisModelVisibility() {
+                        if (!aurisVoskModelSelect) return;
+                        const aurisSel = document.getElementById('auris-engine-select');
+                        if (aurisSel && aurisSel.value === 'vosk') {
+                            await loadAurisModels();
+                            aurisVoskModelSelect.style.display = '';
+                            try {
+                                const r = await fetch('/api/config');
+                                if (r.ok) {
+                                    const cfg = await r.json();
+                                    const items = Array.isArray(cfg.items) ? cfg.items : [];
+                                    const modelItem = items.find(i => i.key === 'VOSK_MODEL');
+                                    populateAurisModels(modelItem && modelItem.value ? modelItem.value : '');
+                                } else {
+                                    populateAurisModels('');
+                                }
+                            } catch (e) {
+                                populateAurisModels('');
+                            }
+                        } else {
+                            aurisVoskModelSelect.style.display = 'none';
+                        }
+                    }
+                    if (aurisVoskModelSelect && !aurisVoskModelSelect.dataset.bound) {
+                        aurisVoskModelSelect.addEventListener('change', async () => {
+                            const model = aurisVoskModelSelect.value;
+                            const opt = aurisVoskModelSelect.options[aurisVoskModelSelect.selectedIndex];
+                            const alreadyDownloaded = opt && opt.dataset.downloaded === '1';
                             try {
                                 await fetch('/api/config', {
                                     method: 'POST',
                                     headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ key: 'VOSK_LANGUAGE', value: lang })
+                                    body: JSON.stringify({ key: 'VOSK_MODEL', value: model })
                                 });
-                                const r2 = await fetch('/api/auris/vosk/download', {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                                    body: `language=${encodeURIComponent(lang)}`
-                                });
-                                if (!r2.ok) throw new Error('download failed');
-                                window.showToast && window.showToast('Vosk language set to ' + lang + ', model download started');
+                                if (alreadyDownloaded) {
+                                    window.showToast && window.showToast('Vosk model set to ' + (model || '(default)'));
+                                } else {
+                                    window.showToast && window.showToast('Vosk model set to ' + (model || '(default)') + ' — starting download…');
+                                    await fetch('/api/models/' + encodeURIComponent(model) + '/download', { method: 'POST' });
+                                    // Refresh the combo so the option flips to "downloaded"
+                                    // once the download finishes (poll via the Manage-Models hook).
+                                    if (typeof window.refreshAurisModelSelect === 'function') {
+                                        window.refreshAurisModelSelect();
+                                    }
+                                }
                             } catch (e) {
-                                console.error('[synth_webui] Vosk language update failed', e);
-                                window.showToast && window.showToast('Failed to set Vosk language', true);
+                                console.error('[synth_webui] Failed to set VOSK_MODEL', e);
+                                window.showToast && window.showToast('Failed to save model', true);
                             }
                         });
-                        voskLangSelect.dataset.bound = '1';
+                        aurisVoskModelSelect.dataset.bound = '1';
                     }
-                    // ensure visibility reflects current engine choice
-                    updateVoskLangVisibility();
-                    // re-run when auris engine selection changes
-                    const aurisSel = document.getElementById('auris-engine-select');
-                    if(aurisSel){
-                        aurisSel.addEventListener('change', updateVoskLangVisibility);
+                    // Expose a refresh hook so the Manage-Models modal can rebuild the
+                    // downloaded-model combo after a download/delete without a page reload.
+                    window.refreshAurisModelSelect = updateAurisModelVisibility;
+                    // show auris controls now + wire engine change event
+                    updateAurisModelVisibility();
+                    const aurisEngineSel = document.getElementById('auris-engine-select');
+                    if (aurisEngineSel) {
+                        aurisEngineSel.addEventListener('change', updateAurisModelVisibility);
                     }
+
+                    // ── Generic Vox voice selector (any engine exposing speakers) ──
+                    // Engines other than Kitten (which has its own dedicated picker
+                    // above) get a generic voice dropdown + preview here whenever
+                    // /api/vox/speakers returns entries for the active engine. The
+                    // choice is persisted into the <ENGINE>_VOICE config key when the
+                    // key exists (registered dynamically for external endpoints that
+                    // expose list_speakers — see registry._register_voice_config_key).
+                    const voxVoiceSelect = document.getElementById('vox-voice-select');
+                    const voxVoicePlayBtn = document.getElementById('vox-voice-play-btn');
+                    let voxVoiceList = [];
+
+                    const voxVoiceConfigKey = (engine) => engine ? `${engine.toUpperCase()}_VOICE` : null;
+
+                    async function loadVoxVoices(engine) {
+                        try {
+                            const r = await fetch(`/api/vox/speakers?engine=${encodeURIComponent(engine)}`);
+                            voxVoiceList = r.ok ? await r.json() : [];
+                        } catch (e) {
+                            console.error('[synth_webui] failed to load vox voices', e);
+                            voxVoiceList = [];
+                        }
+                    }
+
+                    function populateVoxVoices(currentValue) {
+                        if (!voxVoiceSelect) return;
+                        voxVoiceSelect.innerHTML = '';
+                        // Group voices into <optgroup> blocks by tier label so the
+                        // hierarchy (Manually added → My Voices → Bookmarks →
+                        // Default Voices) is visible. The adapter already returns
+                        // entries pre-sorted by tier and alphabetically within it,
+                        // so we only need to split on the tier boundary.
+                        const hasTiers = voxVoiceList.some(s => s.tier_label);
+                        if (!hasTiers) {
+                            voxVoiceList.forEach(s => {
+                                const opt = document.createElement('option');
+                                opt.value = s.code;
+                                opt.textContent = s.name || s.code;
+                                if (String(currentValue) === s.code) opt.selected = true;
+                                voxVoiceSelect.appendChild(opt);
+                            });
+                            return;
+                        }
+                        let currentGroup = null;
+                        let currentLabel = null;
+                        voxVoiceList.forEach(s => {
+                            const label = s.tier_label || 'Voices';
+                            if (label !== currentLabel) {
+                                currentLabel = label;
+                                currentGroup = document.createElement('optgroup');
+                                currentGroup.label = label;
+                                voxVoiceSelect.appendChild(currentGroup);
+                            }
+                            const opt = document.createElement('option');
+                            opt.value = s.code;
+                            opt.textContent = s.name || s.code;
+                            if (String(currentValue) === s.code) opt.selected = true;
+                            currentGroup.appendChild(opt);
+                        });
+                    }
+
+                    async function updateVoxVoiceVisibility() {
+                        if (!voxVoiceSelect) return;
+                        const engine = voxEngineSel ? voxEngineSel.value : '';
+                        // Kitten has its own dedicated speaker picker; hide the generic
+                        // one for it and when no engine / a disabled engine is active.
+                        if (!engine || engine === 'kitten' || engine === 'disabled') {
+                            voxVoiceSelect.style.display = 'none';
+                            if (voxVoicePlayBtn) voxVoicePlayBtn.style.display = 'none';
+                            // Drop any voices loaded for a previous (external) engine so
+                            // they can never leak into the hidden selector when Kitten or
+                            // a disabled engine is active again.
+                            voxVoiceList = [];
+                            return;
+                        }
+                        await loadVoxVoices(engine);
+                        if (!voxVoiceList.length) {
+                            voxVoiceSelect.style.display = 'none';
+                            if (voxVoicePlayBtn) voxVoicePlayBtn.style.display = 'none';
+                            return;
+                        }
+                        // Resolve the currently saved voice (if the config key exists).
+                        let saved = '';
+                        const key = voxVoiceConfigKey(engine);
+                        try {
+                            const r = await fetch('/api/config');
+                            if (r.ok) {
+                                const cfg = await r.json();
+                                const items = Array.isArray(cfg.items) ? cfg.items : [];
+                                const item = items.find(i => i.key === key);
+                                if (item && item.value) saved = String(item.value);
+                            }
+                        } catch (e) { /* ignore — preview still works */ }
+                        populateVoxVoices(saved || (voxVoiceList[0] && voxVoiceList[0].code));
+                        voxVoiceSelect.style.display = '';
+                        if (voxVoicePlayBtn) voxVoicePlayBtn.style.display = '';
+                    }
+
+                    if (voxVoiceSelect && !voxVoiceSelect.dataset.bound) {
+                        voxVoiceSelect.addEventListener('change', async () => {
+                            const engine = voxEngineSel ? voxEngineSel.value : '';
+                            const key = voxVoiceConfigKey(engine);
+                            if (!key) return;
+                            try {
+                                const r = await fetch('/api/config', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ key, value: voxVoiceSelect.value })
+                                });
+                                if (!r.ok) throw new Error('HTTP ' + r.status);
+                                window.showToast && window.showToast('Voice set to ' + voxVoiceSelect.value);
+                            } catch (e) {
+                                console.error('[synth_webui] Failed to set ' + key, e);
+                                window.showToast && window.showToast('Failed to save voice', true);
+                            }
+                        });
+                        voxVoiceSelect.dataset.bound = '1';
+                    }
+                    if (voxVoicePlayBtn && !voxVoicePlayBtn.dataset.bound) {
+                        voxVoicePlayBtn.addEventListener('click', () => {
+                            const engine = voxEngineSel ? voxEngineSel.value : '';
+                            const code = voxVoiceSelect ? voxVoiceSelect.value : '';
+                            if (!engine || !code) return;
+                            const audio = new Audio(
+                                `/api/vox/sample?engine=${encodeURIComponent(engine)}&speaker=${encodeURIComponent(code)}`
+                            );
+                            audio.play().catch(() => { /* no sample available — ignore */ });
+                        });
+                        voxVoicePlayBtn.dataset.bound = '1';
+                    }
+                    // ── Voice manager (add voices by URL — e.g. Fish Audio) ──
+                    // The picker's tier metadata (tier_label) is the signal that
+                    // the active engine supports a manually-managed voice list, so
+                    // the "Manage Voices" button is only shown for those engines.
+                    const voxManageVoicesBtn = document.getElementById('vox-manage-voices-btn');
+                    const voiceManagerModal = document.getElementById('voice-manager-modal');
+                    const voiceManagerClose = document.getElementById('voice-manager-close');
+                    const voiceManagerUrl = document.getElementById('voice-manager-url');
+                    const voiceManagerAddBtn = document.getElementById('voice-manager-add-btn');
+                    const voiceManagerError = document.getElementById('voice-manager-error');
+                    const voiceManagerList = document.getElementById('voice-manager-list');
+                    const voiceManagerRowTpl = document.getElementById('voice-manager-row-tpl');
+
+                    function voiceManagerShowError(msg) {
+                        if (!voiceManagerError) return;
+                        if (!msg) { voiceManagerError.style.display = 'none'; voiceManagerError.textContent = ''; return; }
+                        voiceManagerError.textContent = msg;
+                        voiceManagerError.style.display = '';
+                    }
+
+                    function renderVoiceManagerList() {
+                        if (!voiceManagerList || !voiceManagerRowTpl) return;
+                        voiceManagerList.innerHTML = '';
+                        // Only manually-added voices (tier 1) can be removed here.
+                        const manual = voxVoiceList.filter(s => Number(s.tier) === 1);
+                        if (!manual.length) {
+                            const empty = document.createElement('div');
+                            empty.className = 'meta';
+                            empty.textContent = 'No voices added yet. Paste a voice URL above to add one.';
+                            voiceManagerList.appendChild(empty);
+                            return;
+                        }
+                        manual.forEach(s => {
+                            const row = voiceManagerRowTpl.content.firstElementChild.cloneNode(true);
+                            row.querySelector('.vm-name').textContent = s.name || s.code;
+                            const langEl = row.querySelector('.vm-lang');
+                            if (s.language) { langEl.textContent = s.language; }
+                            else { langEl.style.display = 'none'; }
+                            row.querySelector('.vm-id').textContent = s.code;
+                            const delBtn = row.querySelector('.vm-delete-btn');
+                            delBtn.addEventListener('click', async () => {
+                                const engine = voxEngineSel ? voxEngineSel.value : '';
+                                if (!engine) return;
+                                delBtn.disabled = true;
+                                voiceManagerShowError('');
+                                try {
+                                    const r = await fetch('/api/vox/voices', {
+                                        method: 'DELETE',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ engine, reference_id: s.code })
+                                    });
+                                    if (!r.ok) {
+                                        const err = await r.json().catch(() => ({}));
+                                        throw new Error(err.error || err.detail || ('HTTP ' + r.status));
+                                    }
+                                    await refreshVoiceManager();
+                                } catch (e) {
+                                    voiceManagerShowError('Failed to remove voice: ' + e.message);
+                                    delBtn.disabled = false;
+                                }
+                            });
+                            voiceManagerList.appendChild(row);
+                        });
+                    }
+
+                    async function refreshVoiceManager() {
+                        const engine = voxEngineSel ? voxEngineSel.value : '';
+                        if (!engine) return;
+                        await loadVoxVoices(engine);
+                        renderVoiceManagerList();
+                        // Refresh the inline picker too so a newly-added voice shows.
+                        await updateVoxVoiceVisibility();
+                    }
+
+                    // Exposed so other UI code can re-pull the voice list after edits.
+                    window.refreshVoxVoices = refreshVoiceManager;
+
+                    async function updateVoxManageVoicesVisibility() {
+                        if (!voxManageVoicesBtn) return;
+                        const engine = voxEngineSel ? voxEngineSel.value : '';
+                        if (!engine || engine === 'kitten' || engine === 'disabled') {
+                            voxManageVoicesBtn.style.display = 'none';
+                            return;
+                        }
+                        // Tiered voices (tier_label present) mark an engine that
+                        // supports a manually-managed voice list.
+                        const supported = voxVoiceList.some(s => s.tier_label);
+                        voxManageVoicesBtn.style.display = supported ? '' : 'none';
+                    }
+
+                    if (voxManageVoicesBtn && !voxManageVoicesBtn.dataset.bound) {
+                        voxManageVoicesBtn.addEventListener('click', async () => {
+                            if (!voiceManagerModal) return;
+                            voiceManagerShowError('');
+                            if (voiceManagerUrl) voiceManagerUrl.value = '';
+                            voiceManagerModal.style.display = 'flex';
+                            await refreshVoiceManager();
+                        });
+                        voxManageVoicesBtn.dataset.bound = '1';
+                    }
+                    if (voiceManagerClose && !voiceManagerClose.dataset.bound) {
+                        voiceManagerClose.addEventListener('click', () => {
+                            if (voiceManagerModal) voiceManagerModal.style.display = 'none';
+                        });
+                        voiceManagerClose.dataset.bound = '1';
+                    }
+                    if (voiceManagerModal && !voiceManagerModal.dataset.bound) {
+                        voiceManagerModal.addEventListener('click', (e) => {
+                            if (e.target === voiceManagerModal) voiceManagerModal.style.display = 'none';
+                        });
+                        voiceManagerModal.dataset.bound = '1';
+                    }
+                    if (voiceManagerAddBtn && !voiceManagerAddBtn.dataset.bound) {
+                        voiceManagerAddBtn.addEventListener('click', async () => {
+                            const engine = voxEngineSel ? voxEngineSel.value : '';
+                            const url = voiceManagerUrl ? voiceManagerUrl.value.trim() : '';
+                            if (!engine || !url) { voiceManagerShowError('Paste a voice URL first.'); return; }
+                            voiceManagerAddBtn.disabled = true;
+                            voiceManagerShowError('');
+                            try {
+                                const r = await fetch('/api/vox/voices', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ engine, url })
+                                });
+                                if (!r.ok) {
+                                    const err = await r.json().catch(() => ({}));
+                                    throw new Error(err.error || err.detail || ('HTTP ' + r.status));
+                                }
+                                if (voiceManagerUrl) voiceManagerUrl.value = '';
+                                await refreshVoiceManager();
+                                window.showToast && window.showToast('Voice added');
+                            } catch (e) {
+                                voiceManagerShowError('Failed to add voice: ' + e.message);
+                            } finally {
+                                voiceManagerAddBtn.disabled = false;
+                            }
+                        });
+                        voiceManagerAddBtn.dataset.bound = '1';
+                    }
+
+                    // Keep the Manage Voices button visibility in sync with the
+                    // picker: both react to the active engine's voice list.
+                    async function updateVoxVoiceControls() {
+                        await updateVoxVoiceVisibility();
+                        await updateVoxManageVoicesVisibility();
+                    }
+
+                    updateVoxVoiceControls();
+                    if (voxEngineSel) {
+                        voxEngineSel.addEventListener('change', updateVoxVoiceControls);
+                    }
+
+                    // ── Vox per-language engine overrides ──────────────────────
+                    // Global map VOX_LANGUAGE_OVERRIDES: { "<iso639-1>": {engine, model, voice} }.
+                    // The editor lets the user add an override per language, choosing
+                    // engine → model → voice exactly like the default Vox controls, but
+                    // scoped to a language. Models/voices are read in read-only mode
+                    // (no global POST) so the default engine is never disturbed.
+                    const voxLangOverrideBtn = document.getElementById('vox-add-lang-override-btn');
+                    const voxLangOverrideEditor = document.getElementById('vox-lang-override-editor');
+                    const voxLangOverrideLang = document.getElementById('vox-lang-override-lang');
+                    const voxLangOverrideEngine = document.getElementById('vox-lang-override-engine');
+                    const voxLangOverrideModel = document.getElementById('vox-lang-override-model');
+                    const voxLangOverrideVoice = document.getElementById('vox-lang-override-voice');
+                    const voxLangOverrideSave = document.getElementById('vox-lang-override-save');
+                    const voxLangOverrideCancel = document.getElementById('vox-lang-override-cancel');
+                    const voxLangOverrideDelete = document.getElementById('vox-lang-override-delete');
+                    const voxLangOverridesList = document.getElementById('vox-lang-overrides-list');
+
+                    let voxLangOverrideMap = {};
+                    let voxLangOverrideEditing = null; // language code being edited, or null for new
+                    let voxLangList = [];
+
+                    async function loadVoxLanguageOverrides() {
+                        try {
+                            const r = await fetch('/api/config');
+                            if (r.ok) {
+                                const cfg = await r.json();
+                                const items = Array.isArray(cfg.items) ? cfg.items : [];
+                                const item = items.find(i => i.key === 'VOX_LANGUAGE_OVERRIDES');
+                                voxLangOverrideMap = (item && item.value) ? JSON.parse(item.value) : {};
+                            } else {
+                                voxLangOverrideMap = {};
+                            }
+                        } catch (e) {
+                            console.error('[synth_webui] failed to load VOX_LANGUAGE_OVERRIDES', e);
+                            voxLangOverrideMap = {};
+                        }
+                        renderVoxLanguageOverrides();
+                    }
+
+                    function renderVoxLanguageOverrides() {
+                        if (!voxLangOverridesList) return;
+                        const codes = Object.keys(voxLangOverrideMap);
+                        if (!codes.length) {
+                            voxLangOverridesList.innerHTML = '<div class="meta">No overrides configured.</div>';
+                            return;
+                        }
+                        voxLangOverridesList.innerHTML = '';
+                        codes.forEach(code => {
+                            const entry = voxLangOverrideMap[code] || {};
+                            const engine = entry.engine || '—';
+                            const model = entry.model ? ` · model ${entry.model}` : '';
+                            const voice = entry.voice ? ` · voice ${entry.voice}` : '';
+                            const row = document.createElement('div');
+                            row.className = 'component-item';
+                            row.style.marginBottom = '6px';
+                            row.style.padding = '8px 10px';
+                            row.style.border = '1px solid var(--border,#444)';
+                            row.style.borderRadius = '6px';
+                            row.innerHTML =
+                                `<div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">` +
+                                `<div><span style="font-weight:600;">${code}</span>` +
+                                `<span class="meta" style="margin-left:8px;">${engine}${model}${voice}</span></div>` +
+                                `<div style="display:flex; gap:8px;">` +
+                                `<button class="pill secondary vox-lo-edit" style="padding:4px 10px; font-weight:600;">Edit</button>` +
+                                `<button class="pill danger vox-lo-remove" style="padding:4px 10px; font-weight:600;">Remove</button>` +
+                                `</div></div>`;
+                            row.querySelector('.vox-lo-edit').addEventListener('click', () => openVoxLangOverrideEditor(code));
+                            row.querySelector('.vox-lo-remove').addEventListener('click', () => deleteVoxLangOverride(code));
+                            voxLangOverridesList.appendChild(row);
+                        });
+                    }
+
+                    async function populateVoxLangOverrideLanguages() {
+                        if (!voxLangOverrideLang) return;
+                        try {
+                            const r = await fetch('/api/languages');
+                            voxLangList = r.ok ? await r.json() : { languages: [] };
+                            voxLangList = voxLangList.languages || [];
+                        } catch (e) {
+                            console.error('[synth_webui] failed to load languages', e);
+                            voxLangList = [];
+                        }
+                        voxLangOverrideLang.innerHTML = '';
+                        voxLangList.forEach(l => {
+                            const opt = document.createElement('option');
+                            opt.value = l.code;
+                            opt.textContent = `${l.it || l.en || l.code} (${l.code})`;
+                            voxLangOverrideLang.appendChild(opt);
+                        });
+                    }
+
+                    function populateVoxLangOverrideEngines() {
+                        if (!voxLangOverrideEngine) return;
+                        // Mirror the engine dropdown options from the default Vox controls.
+                        voxLangOverrideEngine.innerHTML = '';
+                        const src = document.getElementById('vox-engine-select');
+                        if (src) {
+                            Array.from(src.options).forEach(o => {
+                                const opt = document.createElement('option');
+                                opt.value = o.value;
+                                opt.textContent = o.textContent;
+                                voxLangOverrideEngine.appendChild(opt);
+                            });
+                        }
+                    }
+
+                    async function populateVoxLangOverrideModels(engine) {
+                        if (!voxLangOverrideModel) return;
+                        voxLangOverrideModel.innerHTML = '<option value="">(default)</option>';
+                        if (!engine || engine === 'disabled') return;
+                        // Read available models for this engine from /api/components (read-only).
+                        try {
+                            const r = await fetch('/api/components');
+                            if (r.ok) {
+                                const data = await r.json();
+                                const vox = (data.vox || []).find(e => e.name === engine);
+                                const models = (vox && vox.available_models) || [];
+                                models.forEach(m => {
+                                    const opt = document.createElement('option');
+                                    opt.value = m;
+                                    opt.textContent = m;
+                                    voxLangOverrideModel.appendChild(opt);
+                                });
+                            }
+                        } catch (e) { /* ignore */ }
+                    }
+
+                    async function populateVoxLangOverrideVoices(engine) {
+                        if (!voxLangOverrideVoice) return;
+                        voxLangOverrideVoice.innerHTML = '<option value="">(default)</option>';
+                        if (!engine || engine === 'disabled' || engine === 'kitten') return;
+                        try {
+                            const r = await fetch(`/api/vox/speakers?engine=${encodeURIComponent(engine)}`);
+                            const list = r.ok ? await r.json() : [];
+                            list.forEach(s => {
+                                const opt = document.createElement('option');
+                                opt.value = s.code;
+                                opt.textContent = s.name || s.code;
+                                voxLangOverrideVoice.appendChild(opt);
+                            });
+                        } catch (e) { /* ignore */ }
+                    }
+
+                    async function openVoxLangOverrideEditor(lang) {
+                        voxLangOverrideEditing = lang || null;
+                        if (!voxLangOverrideEditor) return;
+                        voxLangOverrideEditor.style.display = '';
+                        await populateVoxLangOverrideLanguages();
+                        populateVoxLangOverrideEngines();
+                        if (lang && voxLangOverrideMap[lang]) {
+                            const entry = voxLangOverrideMap[lang];
+                            if (voxLangOverrideLang) voxLangOverrideLang.value = lang;
+                            voxLangOverrideLang.disabled = true;
+                            if (voxLangOverrideEngine) voxLangOverrideEngine.value = entry.engine || '';
+                            await populateVoxLangOverrideModels(entry.engine || '');
+                            if (voxLangOverrideModel) voxLangOverrideModel.value = entry.model || '';
+                            await populateVoxLangOverrideVoices(entry.engine || '');
+                            if (voxLangOverrideVoice) voxLangOverrideVoice.value = entry.voice || '';
+                            if (voxLangOverrideDelete) voxLangOverrideDelete.style.display = '';
+                        } else {
+                            if (voxLangOverrideLang) voxLangOverrideLang.disabled = false;
+                            if (voxLangOverrideEngine) voxLangOverrideEngine.value = '';
+                            await populateVoxLangOverrideModels('');
+                            if (voxLangOverrideModel) voxLangOverrideModel.value = '';
+                            await populateVoxLangOverrideVoices('');
+                            if (voxLangOverrideVoice) voxLangOverrideVoice.value = '';
+                            if (voxLangOverrideDelete) voxLangOverrideDelete.style.display = 'none';
+                        }
+                    }
+
+                    function closeVoxLangOverrideEditor() {
+                        if (voxLangOverrideEditor) voxLangOverrideEditor.style.display = 'none';
+                        voxLangOverrideEditing = null;
+                    }
+
+                    async function saveVoxLangOverride() {
+                        const lang = voxLangOverrideLang ? voxLangOverrideLang.value : '';
+                        const engine = voxLangOverrideEngine ? voxLangOverrideEngine.value : '';
+                        if (!lang || !engine || engine === 'disabled') {
+                            window.showToast && window.showToast('Select a language and a non-disabled engine', true);
+                            return;
+                        }
+                        const model = voxLangOverrideModel ? voxLangOverrideModel.value : '';
+                        const voice = voxLangOverrideVoice ? voxLangOverrideVoice.value : '';
+                        voxLangOverrideMap[lang] = {
+                            engine,
+                            model: model || '',
+                            voice: voice || '',
+                        };
+                        try {
+                            const r = await fetch('/api/config', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ key: 'VOX_LANGUAGE_OVERRIDES', value: JSON.stringify(voxLangOverrideMap) })
+                            });
+                            if (!r.ok) throw new Error('HTTP ' + r.status);
+                            window.showToast && window.showToast('Language override saved');
+                            closeVoxLangOverrideEditor();
+                            renderVoxLanguageOverrides();
+                        } catch (e) {
+                            console.error('[synth_webui] failed to save VOX_LANGUAGE_OVERRIDES', e);
+                            window.showToast && window.showToast('Failed to save override', true);
+                        }
+                    }
+
+                    async function deleteVoxLangOverride(lang) {
+                        if (!(lang in voxLangOverrideMap)) return;
+                        delete voxLangOverrideMap[lang];
+                        try {
+                            const r = await fetch('/api/config', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ key: 'VOX_LANGUAGE_OVERRIDES', value: JSON.stringify(voxLangOverrideMap) })
+                            });
+                            if (!r.ok) throw new Error('HTTP ' + r.status);
+                            window.showToast && window.showToast('Language override removed');
+                            if (voxLangOverrideEditing === lang) closeVoxLangOverrideEditor();
+                            renderVoxLanguageOverrides();
+                        } catch (e) {
+                            console.error('[synth_webui] failed to delete VOX_LANGUAGE_OVERRIDES', e);
+                            window.showToast && window.showToast('Failed to remove override', true);
+                        }
+                    }
+
+                    if (voxLangOverrideBtn && !voxLangOverrideBtn.dataset.bound) {
+                        voxLangOverrideBtn.addEventListener('click', () => openVoxLangOverrideEditor(null));
+                        voxLangOverrideBtn.dataset.bound = '1';
+                    }
+                    if (voxLangOverrideSave && !voxLangOverrideSave.dataset.bound) {
+                        voxLangOverrideSave.addEventListener('click', saveVoxLangOverride);
+                        voxLangOverrideSave.dataset.bound = '1';
+                    }
+                    if (voxLangOverrideCancel && !voxLangOverrideCancel.dataset.bound) {
+                        voxLangOverrideCancel.addEventListener('click', closeVoxLangOverrideEditor);
+                        voxLangOverrideCancel.dataset.bound = '1';
+                    }
+                    if (voxLangOverrideDelete && !voxLangOverrideDelete.dataset.bound) {
+                        voxLangOverrideDelete.addEventListener('click', () => {
+                            if (voxLangOverrideEditing) deleteVoxLangOverride(voxLangOverrideEditing);
+                        });
+                        voxLangOverrideDelete.dataset.bound = '1';
+                    }
+                    if (voxLangOverrideEngine && !voxLangOverrideEngine.dataset.bound) {
+                        voxLangOverrideEngine.addEventListener('change', async () => {
+                            const engine = voxLangOverrideEngine.value;
+                            await populateVoxLangOverrideModels(engine);
+                            await populateVoxLangOverrideVoices(engine);
+                        });
+                        voxLangOverrideEngine.dataset.bound = '1';
+                    }
+                    loadVoxLanguageOverrides();
+
+                    // ── Vosk model selector (replaces the old language selector) ──
+                    // The user now picks the MODEL directly via #auris-vosk-model-select
+                    // (see the block above).  VOSK_MODEL wins over VOSK_LANGUAGE in the
+                    // engine, so the language selector is intentionally removed.
 
                     if (componentsVoxListEl)   renderDetailsList(data.vox   || [], componentsVoxListEl);
                     if (componentsAurisListEl) renderDetailsList(data.auris || [], componentsAurisListEl);
@@ -3545,26 +5521,59 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 lbl.textContent = scope.label + ':';
                                 const sel = document.createElement('select');
                                 sel.style.cssText = 'padding:5px 10px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:8px; font-size:0.88rem;';
-                                (scope.options || []).forEach((opt) => {
+
+                                // Build a single "engine / model" combo. Each option
+                                // encodes {engine, model} as JSON in its value. The
+                                // model map (engine -> [models]) comes from the API.
+                                const modelsByEngine = scope.models || {};
+                                const curEngine = scope.value_engine || 'Default';
+                                const curModel = scope.value_model || '';
+
+                                const addOpt = (label, engine, model) => {
                                     const o = document.createElement('option');
-                                    o.value = opt;
-                                    o.textContent = opt;
-                                    if (opt === scope.value) o.selected = true;
+                                    o.value = JSON.stringify({ engine: engine, model: model || '' });
+                                    o.textContent = label;
+                                    if (engine === curEngine && (model || '') === curModel) {
+                                        o.selected = true;
+                                    }
                                     sel.appendChild(o);
+                                };
+
+                                (scope.options || []).forEach((engineName) => {
+                                    if (engineName === 'Default' || engineName === 'disabled') {
+                                        // Special sentinels carry no model.
+                                        addOpt(engineName, engineName, '');
+                                        return;
+                                    }
+                                    const models = modelsByEngine[engineName] || [];
+                                    // Base "engine" entry (uses the endpoint default model).
+                                    addOpt(engineName, engineName, '');
+                                    // One entry per selectable model: "engine / model".
+                                    models.forEach((m) => {
+                                        addOpt(engineName + ' / ' + m, engineName, m);
+                                    });
                                 });
+
+                                const revertValue = JSON.stringify({ engine: curEngine, model: curModel });
                                 sel.addEventListener('change', async () => {
+                                    let parsed;
+                                    try {
+                                        parsed = JSON.parse(sel.value);
+                                    } catch (_e) {
+                                        parsed = { engine: sel.value, model: '' };
+                                    }
                                     try {
                                         const res = await fetch('/api/config', {
                                             method: 'POST',
                                             headers: { 'Content-Type': 'application/json' },
-                                            body: JSON.stringify({ key: scope.key, value: sel.value })
+                                            body: JSON.stringify({ key: scope.key, value: parsed })
                                         });
                                         if (!res.ok) throw new Error('HTTP ' + res.status);
                                         window.showToast && window.showToast(scope.label + ' cortex updated');
                                     } catch (e) {
                                         console.error('[synth_webui] Failed to update scope cortex', e);
                                         window.showToast && window.showToast('Failed to update ' + scope.label + ' cortex', true);
-                                        sel.value = scope.value; // revert
+                                        sel.value = revertValue; // revert
                                     }
                                 });
                                 wrap.appendChild(lbl);
@@ -3605,6 +5614,10 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
             function setActiveTab(tab) {
                 if (!tab) return;
+                // Expose the active tab on <body> so CSS can scope surfaces to a
+                // specific view (e.g. the minimized-window dock bar shows on home
+                // only). Kept in sync with window.activeTab / localStorage.
+                try { document.body.setAttribute('data-active-tab', tab); } catch (e) { /* ignore */ }
                 const buttons = document.querySelectorAll('.nav-btn[data-tab]');
                 const panels = document.querySelectorAll('.tab-panel[data-tab]');
                 buttons.forEach(btn => {
@@ -3685,10 +5698,14 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         const gapVal = headerStyle ? (headerStyle.columnGap || headerStyle.gap || '0') : '0';
                         const headerGap = Number.parseFloat(gapVal) || 0;
 
-                        // Reset states and ensure nav is closed by default
-                        header.classList.remove('topbar--compact', 'topbar--wrap', 'nav-open');
+                        // Remember whether the user has the collapsed menu open, so a layout
+                        // recompute (e.g. triggered by the ResizeObserver when the open nav
+                        // changes the header size) does not silently snap the menu shut.
+                        const wasNavOpen = header.classList.contains('nav-open');
                         const hamburger = header.querySelector('.hamburger');
-                        if (hamburger) hamburger.setAttribute('aria-expanded', 'false');
+
+                        // Reset layout states. nav-open is restored below only if still compact.
+                        header.classList.remove('topbar--compact', 'topbar--wrap', 'nav-open');
 
                         const headerWidth = header.getBoundingClientRect().width || 0;
                         const brandWidth = brand.getBoundingClientRect().width || 0;
@@ -3711,7 +5728,21 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         if (compact && brandText) {
                             header.classList.add('topbar--compact');
                             // avoid adding wrap when compact: we prefer hamburger + collapsed nav
+                            // Preserve a menu the user had open: re-apply nav-open instead of
+                            // letting an incidental ResizeObserver recompute close it.
+                            if (wasNavOpen) {
+                                header.classList.add('nav-open');
+                                if (nav) nav.classList.add('open');
+                                if (hamburger) hamburger.setAttribute('aria-expanded', 'true');
+                            } else {
+                                if (nav) nav.classList.remove('open');
+                                if (hamburger) hamburger.setAttribute('aria-expanded', 'false');
+                            }
                         } else {
+                            // No longer compact: the hamburger is hidden, so fully close the
+                            // collapsed menu state to avoid a stale open panel.
+                            if (nav) nav.classList.remove('open');
+                            if (hamburger) hamburger.setAttribute('aria-expanded', 'false');
                             const brandWidthCompact = brand.getBoundingClientRect().width || 0;
                             const availableCompact = Math.max(0, headerWidth - paddingLeft - paddingRight - brandWidthCompact - headerGap);
                             const wrap = navRequired > (availableCompact + tolerance);
@@ -3736,17 +5767,17 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     } catch (e) { /* ignore */ return null; }
                 }
 
-                // Helper to toggle page-level scrolling for long document-style tabs
-                function _adjustPageScroll(tab) {
+                // Keep document-level scrolling disabled for every tab. Content-heavy
+                // panels (settings, plugins, engines, about, skins) scroll *inside*
+                // themselves via the shell's `.tab-panel[...].active { overflow-y:auto }`
+                // rules, so the top bar stays fixed. Previously Settings (and
+                // components/about) were special-cased to enable page-level scroll and
+                // call scrollIntoView, which shifted the top bar up on tab switch — the
+                // divergent behaviour every other content tab did not have.
+                function _adjustPageScroll(_tab) {
                     try {
-                        if (['settings', 'components', 'about'].includes(tab)) {
-                            document.documentElement.style.overflow = 'auto';
-                            document.body.style.overflow = 'auto';
-                            try { const targetPanel = document.querySelector(`[data-tab="${tab}"]`); if (targetPanel) targetPanel.scrollIntoView({ behavior: 'auto', block: 'start' }); } catch (e) { /* ignore */ }
-                        } else {
-                            document.documentElement.style.overflow = 'hidden';
-                            document.body.style.overflow = 'hidden';
-                        }
+                        document.documentElement.style.overflow = 'hidden';
+                        document.body.style.overflow = 'hidden';
                     } catch (e) { /* ignore */ }
                 }
 
@@ -3755,11 +5786,12 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         const tab = btn.getAttribute('data-tab');
                         if (!tab) return;
                         try {
-                            setActiveTab(tab);
                             try { window.activeTab = tab; if (localStorage && localStorage.setItem) localStorage.setItem('synth-webui-active-tab', tab); } catch (e) { /* ignore */ }
 
                             // If the desktop is embedded in an iframe, post a message to request a section load
                             if (window.SynthConfig && window.SynthConfig.DESKTOP_IFRAME) {
+                                // Reveal immediately for the iframe shell; it manages its own content.
+                                setActiveTab(tab);
                                 try {
                                     const iframe = document.getElementById('desktop-iframe');
                                     if (iframe && iframe.contentWindow) {
@@ -3767,9 +5799,12 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                     }
                                 } catch (e) { /* ignore */ }
                             } else {
+                                // Load the section content BEFORE revealing the panel, so the user
+                                // never sees an empty panel on the first click of a lazy tab.
                                 if (window.SynthWebUI && typeof window.SynthWebUI.loadSection === 'function') {
                                     await window.SynthWebUI.loadSection(tab);
                                 }
+                                setActiveTab(tab);
                             }
 
                             if (tab === 'history' && window.SynthWebUI && typeof window.SynthWebUI.initHistoryTab === 'function') {
@@ -3780,6 +5815,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             _adjustPageScroll(tab);
                         } catch (e) {
                             console.warn('[synth_webui] tab switch failed', e);
+                            // On failure, still reveal the panel so the user isn't stuck on a stale tab.
+                            try { setActiveTab(tab); } catch (_) { /* ignore */ }
                         }
                     });
                 });
@@ -3825,24 +5862,33 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 } catch (e) { /* ignore */ }
 
                 // Restore last active tab and load its section once.
+                let restoredTab = 'home';
                 try {
                     const saved = (localStorage && localStorage.getItem && localStorage.getItem('synth-webui-active-tab')) || 'home';
+                    restoredTab = saved;
                     setActiveTab(saved);
                     try { setupDesktopIframe(saved); } catch (e) { /* ignore */ }
                     // Ensure page scroll state matches the restored tab (fix for settings not scrollable)
                     try { _adjustPageScroll(saved); } catch (e) { /* ignore */ }
                 } catch (e) {
+                    restoredTab = 'home';
                     setActiveTab('home');
                     try { setupDesktopIframe('home'); } catch (e) { /* ignore */ }
                 }
 
                 try {
                     if (window.SynthWebUI && typeof window.SynthWebUI.loadSection === 'function') {
+                        // Always warm the history tab (chat history is needed early).
                         window.SynthWebUI.loadSection('history').then(() => {
                             if (window.SynthWebUI && typeof window.SynthWebUI.initHistoryTab === 'function') {
                                 window.SynthWebUI.initHistoryTab();
                             }
                         });
+                        // Also load the restored active tab so a page reload lands on visible content
+                        // instead of an empty panel (only 'history' was warmed before).
+                        if (restoredTab && restoredTab !== 'history' && restoredTab !== 'home') {
+                            window.SynthWebUI.loadSection(restoredTab).catch(() => { /* ignore */ });
+                        }
                     }
                 } catch (e) { /* ignore */ }
 
@@ -3910,6 +5956,15 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     const resetBtn = document.getElementById('reset-window-positions');
                     const backupBtn = document.getElementById('create-database-backup');
                     const backupStatus = document.getElementById('database-backup-status');
+
+                    // Reveal the "SyntH Stage" switch card only when the Stage
+                    // frontend is actually mounted at /stage (see core/webui.py).
+                    try {
+                        const stageCard = document.getElementById('stage-switch-card');
+                        if (stageCard && window.__SYNTH_CONFIG && window.__SYNTH_CONFIG.STAGE_AVAILABLE) {
+                            stageCard.style.display = '';
+                        }
+                    } catch (e) { /* ignore */ }
                     if (resetBtn) {
                         resetBtn.addEventListener('click', () => {
                             try {
@@ -3980,8 +6035,87 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 refreshConfig();
             }
 
+            // ── Draggable column resizer between the plugin list and detail pane ──
+            // Mirrors the Agent/Tasks page resizer (agent.js). Idempotent: safe to
+            // call on every plugins-tab (re-)init; bindings are guarded per-element.
+            function setupPluginsColResizer() {
+                const layout = document.getElementById('plugins-two-col');
+                const leftPane = document.getElementById('plugins-banner-list');
+                const resizer = document.getElementById('plugins-col-resizer');
+                if (!layout || !leftPane || !resizer) return;
+
+                const LS_KEY = 'synth.plugins.leftPaneWidth';
+                const MIN_LEFT = 200;   // px
+                const MIN_RIGHT = 320;  // px reserved for the detail pane
+                const RESIZER_W = 6;    // px, keep in sync with CSS
+
+                const isNarrow = () => window.innerWidth <= 860;
+
+                const applyLayout = () => {
+                    if (isNarrow()) {
+                        layout.style.removeProperty('--plugins-left-w');
+                        return;
+                    }
+                    const stored = parseFloat(localStorage.getItem(LS_KEY) || '');
+                    if (stored && !Number.isNaN(stored)) {
+                        const maxLeft = Math.max(MIN_LEFT, layout.clientWidth - MIN_RIGHT - RESIZER_W);
+                        const w = Math.min(Math.max(stored, MIN_LEFT), maxLeft);
+                        layout.style.setProperty('--plugins-left-w', w + 'px');
+                    } else {
+                        layout.style.removeProperty('--plugins-left-w');
+                    }
+                };
+                applyLayout();
+
+                if (!resizer.__pluginsBound) {
+                    let dragging = false;
+                    const onMove = (ev) => {
+                        if (!dragging) return;
+                        const rect = layout.getBoundingClientRect();
+                        const clientX = (ev.touches && ev.touches[0]) ? ev.touches[0].clientX : ev.clientX;
+                        let w = clientX - rect.left;
+                        const maxLeft = Math.max(MIN_LEFT, layout.clientWidth - MIN_RIGHT - RESIZER_W);
+                        w = Math.min(Math.max(w, MIN_LEFT), maxLeft);
+                        layout.style.setProperty('--plugins-left-w', w + 'px');
+                        if (ev.cancelable) ev.preventDefault();
+                    };
+                    const onUp = () => {
+                        if (!dragging) return;
+                        dragging = false;
+                        resizer.classList.remove('dragging');
+                        document.body.classList.remove('plugins-col-resizing');
+                        const cur = layout.style.getPropertyValue('--plugins-left-w');
+                        const px = parseFloat(cur);
+                        if (px && !Number.isNaN(px)) localStorage.setItem(LS_KEY, String(Math.round(px)));
+                        document.removeEventListener('mousemove', onMove);
+                        document.removeEventListener('mouseup', onUp);
+                        document.removeEventListener('touchmove', onMove);
+                        document.removeEventListener('touchend', onUp);
+                    };
+                    const onDown = (ev) => {
+                        if (isNarrow()) return;
+                        dragging = true;
+                        resizer.classList.add('dragging');
+                        document.body.classList.add('plugins-col-resizing');
+                        document.addEventListener('mousemove', onMove);
+                        document.addEventListener('mouseup', onUp);
+                        document.addEventListener('touchmove', onMove, { passive: false });
+                        document.addEventListener('touchend', onUp);
+                        if (ev.cancelable) ev.preventDefault();
+                    };
+                    resizer.addEventListener('mousedown', onDown);
+                    resizer.addEventListener('touchstart', onDown, { passive: false });
+                    if (!resizer.__pluginsResizeListener) {
+                        window.addEventListener('resize', applyLayout);
+                        resizer.__pluginsResizeListener = true;
+                    }
+                    resizer.__pluginsBound = true;
+                }
+            }
+
             function initPluginsTab() {
                 loadComponentsSummary();
+                setupPluginsColResizer();
             }
             // Also expose as initEnginesTab so that the Engines tab triggers the engine selector UI
             function initEnginesTab() {
@@ -3990,8 +6124,13 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
             }
 
             // ── Manage Models modal (shared by Vox / Auris / Iris) ──────────
+            // NOTE: this must be idempotent and re-run every time the Engines
+            // section is (re-)rendered — the section HTML is re-injected on each
+            // navigation, producing fresh button/modal DOM nodes. A global
+            // "initialized" guard would leave the new buttons unbound and make
+            // them appear broken. All internal bindings are guarded per-element
+            // via dataset.bound, so re-running is safe.
             function initModelManager() {
-                if (window.__synth_model_manager_initialized) return;
                 const modal = document.getElementById('model-manager-modal');
                 const listEl = document.getElementById('model-manager-list');
                 const titleEl = document.getElementById('model-manager-title');
@@ -4069,12 +6208,29 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         try {
                             const r = await fetch('/api/models/' + encodeURIComponent(modelId) + '/progress');
                             if (!r.ok) throw new Error('HTTP ' + r.status);
-                            const m = await r.json();
+                            const raw = await r.json();
+                            // The /progress endpoint reports `in_progress` and `progress`,
+                            // while setDownloadingState expects `downloading` and
+                            // `download_progress`. Normalise the field names here.
+                            const m = {
+                                downloaded: raw.downloaded,
+                                downloading: raw.in_progress,
+                                download_progress: raw.progress,
+                            };
                             setDownloadingState(row, m);
                             if (!m.downloading) {
                                 clearInterval(pollTimers[modelId]);
                                 delete pollTimers[modelId];
                                 window.showToast && window.showToast(m.downloaded ? 'Model downloaded' : 'Download stopped');
+                                // Refresh the Kitten downloaded-model combo so a freshly
+                                // downloaded model appears without a page reload.
+                                if (m.downloaded && typeof window.refreshKittenModelSelect === 'function') {
+                                    window.refreshKittenModelSelect();
+                                }
+                                // Same for the Vosk active-model combo.
+                                if (m.downloaded && typeof window.refreshAurisModelSelect === 'function') {
+                                    window.refreshAurisModelSelect();
+                                }
                             }
                         } catch (e) {
                             clearInterval(pollTimers[modelId]);
@@ -4121,6 +6277,15 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             model.downloaded = false;
                             setDownloadingState(row, model);
                             window.showToast && window.showToast('Model removed');
+                            // Refresh the Kitten downloaded-model combo so the removed
+                            // model disappears without a page reload.
+                            if (typeof window.refreshKittenModelSelect === 'function') {
+                                window.refreshKittenModelSelect();
+                            }
+                            // Same for the Vosk active-model combo.
+                            if (typeof window.refreshAurisModelSelect === 'function') {
+                                window.refreshAurisModelSelect();
+                            }
                         } catch (e) {
                             showError('Failed to delete model: ' + e.message);
                             delBtn.disabled = false;
@@ -4145,7 +6310,10 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         const models = (Array.isArray(data) ? data : (data.models || [])).filter((m) => belongsToSubsystem(m, sub));
                         listEl.innerHTML = '';
                         if (!models.length) {
-                            listEl.innerHTML = '<div class="meta">No locally-managed models available for this subsystem.</div>';
+                            const emptyMsg = sub === 'iris'
+                                ? 'Iris has no locally-managed models — vision runs through external endpoints only (e.g. selenium-llm-engine). Configure it in the External Engines section.'
+                                : 'No locally-managed models available for this subsystem.';
+                            listEl.innerHTML = '<div class="meta">' + emptyMsg + '</div>';
                             return;
                         }
                         models.forEach((m) => {
@@ -4168,8 +6336,6 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         btn.dataset.bound = '1';
                     }
                 });
-
-                window.__synth_model_manager_initialized = true;
             }
 
             function initLogsTab() {
@@ -4483,24 +6649,24 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
             async function initAboutTab() {
                 if (window.__synth_about_initialized) return;
                 const uptimeEl = document.getElementById('stats-uptime');
-                const sessionsEl = document.getElementById('stats-sessions');
                 const componentsEl = document.getElementById('stats-components');
-                const messagesEl = document.getElementById('stats-messages');
                 const versionEl = document.getElementById('system-version');
+                const versionDetailEl = document.getElementById('system-version-detail');
                 const pythonEl = document.getElementById('system-python');
                 const platformEl = document.getElementById('system-platform');
                 const databaseEl = document.getElementById('system-database');
-                if (!uptimeEl && !sessionsEl && !versionEl) return;
+                if (!uptimeEl && !versionEl && !componentsEl) return;
 
                 try {
                     const res = await fetch('/api/about');
                     if (res.ok) {
                         const data = await res.json();
                         if (uptimeEl && data.uptime !== undefined) uptimeEl.textContent = formatUptime(data.uptime);
-                        if (sessionsEl && data.sessions !== undefined) sessionsEl.textContent = String(data.sessions);
                         if (componentsEl && data.components !== undefined) componentsEl.textContent = String(data.components);
-                        if (messagesEl && data.messages_today !== undefined && data.messages_today !== null) messagesEl.textContent = String(data.messages_today);
-                        if (versionEl && data.version) versionEl.textContent = data.version;
+                        if (data.version) {
+                            if (versionEl) versionEl.textContent = data.version;
+                            if (versionDetailEl) versionDetailEl.textContent = data.version;
+                        }
                         if (pythonEl && data.python) pythonEl.textContent = data.python;
                         if (platformEl && data.platform) platformEl.textContent = data.platform;
                         if (databaseEl && data.database) databaseEl.textContent = data.database;

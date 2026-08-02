@@ -25,7 +25,7 @@ async def test_history_engine_ignores_cortex_switch_notifications(
                     "interface_path": current_path,
                 },
                 {
-                    "sender_name": "Scar",
+                    "sender_name": "Alice",
                     "text": "hello there",
                     "timestamp": "2026-04-19T00:08:01+00:00",
                     "interface_path": current_path,
@@ -50,7 +50,7 @@ async def test_history_engine_ignores_cortex_switch_notifications(
                         "interface_path": "synth_webui/other",
                     },
                     {
-                        "sender_name": "Scar",
+                        "sender_name": "Alice",
                         "text": "cross chat line",
                         "timestamp": "2026-04-19T00:05:00+00:00",
                         "interface_path": "synth_webui/other",
@@ -101,7 +101,7 @@ async def test_history_engine_ignores_cortex_scope_override_notifications(
                     "interface_path": current_path,
                 },
                 {
-                    "sender_name": "Scar",
+                    "sender_name": "Alice",
                     "text": "alright, done",
                     "timestamp": "2026-05-08T10:00:02+00:00",
                     "interface_path": current_path,

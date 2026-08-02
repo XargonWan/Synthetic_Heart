@@ -1297,7 +1297,7 @@ async def test_mirror_gated_on_local_flags(monkeypatch):
     monkeypatch.setattr(cfg, "get_active_cortex_engine", fake_active)
 
     plugin = MessagePlugin()
-    msg = SimpleNamespace(chat_id=5208932647)
+    msg = SimpleNamespace(chat_id=5551234567)
 
     flagged = ExternalCortexEngine(
         _openai_endpoint({"disable_tools": True}), cast(Any, SimpleNamespace())

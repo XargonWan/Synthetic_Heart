@@ -25,6 +25,8 @@ API compatibility:
 # - `tag-combobox` → tag-list with suggestion support (uses `options`)
 # - `file`    → file upload control
 # - `color`   → color picker with optional preset swatches
+# - `interface-path` → interface-path picker (opens the WebUI picker modal;
+#                     value persisted as a string interface_path)
 #
 # When registering exposed variables prefer setting `value_type` to a native
 # Python type (e.g. `int`, `bool`, or the special string `'json'`) so the API
@@ -115,7 +117,11 @@ class ExposedVarDefinition:
         # For file-backed variables we accept a string path or dict metadata; skip casting
         if self.ui_type == "file":
             return
-        if self.value_type is not None and not callable(self.value_type):
+        # Interface-path variables are opaque string paths (e.g. "telegram_bot/123");
+        # skip casting so they are stored verbatim.
+        if self.ui_type == "interface-path":
+            return
+        if isinstance(self.value_type, type):
             try:
                 # Attempt simple cast for primitives
                 _ = self.value_type(value)
@@ -127,9 +133,9 @@ class ExposedVarDefinition:
         # Validator can be a dict describing rules or a callable
         if self.validator is None:
             return
-        if callable(self.validator):
+        if isinstance(self.validator, Callable):
             try:
-                ok = self.validator(value)
+                ok = self.validator(value)  # type: ignore
             except Exception as e:
                 raise ValidationError(f"Validator for {self.key} raised: {e}")
             if not ok:
@@ -427,6 +433,7 @@ def register_all():
         scope="synth",
         component="animation",
         readonly=True,
+        hidden=True,
     )
 
     # WebUI accent color (picker + presets)
@@ -777,17 +784,6 @@ def register_all():
     )
 
     register_exposed_var(
-        "CHAT_HISTORY",
-        label="Chat History Length",
-        default=10,
-        value_type=int,
-        ui_type="number",
-        description="Number of recent messages to include in chat history context.",
-        scope="core",
-        component="conversation",
-    )
-
-    register_exposed_var(
         "LOG_LLM_TRAFFIC_ENABLED",
         label="Log LLM Traffic",
         default=False,
@@ -887,6 +883,120 @@ def register_all():
         ),
         scope="grillo",
         component="grillo",
+    )
+
+    # --- Multi-instance peer coordination ---
+    register_exposed_var(
+        "SYNTH_PEERS",
+        label="Peer SyntHs",
+        default=[],
+        value_type="json",
+        ui_type="peer-list",
+        description=(
+            "The other SyntH instances that share groups with this one. Each row is "
+            "the peer's Telegram bot user ID (not @username) and the display name to "
+            "use for them in the prompt instruction block. Messages from these bot IDs "
+            "are handled according to SYNTH_PEER_POLICY to prevent infinite response "
+            "cascades. NOTE: for a peer's messages to reach this instance at all, "
+            "'Bot-to-Bot Communication Mode' must be enabled for both bots in BotFather, "
+            "AND this bot needs Group Privacy Mode disabled (or admin rights) in the "
+            "shared group -- see docs/peer_synths.rst. "
+            'Stored as JSON, e.g. [{"id": 8243553794, "name": "Aria"}].'
+        ),
+        scope="interface",
+        component="peer_policy",
+        tags=["multi-instance"],
+    )
+
+    register_exposed_var(
+        "SYNTH_PEER_POLICY",
+        label="Peer SyntH Response Policy",
+        default="silent",
+        value_type=str,
+        ui_type="select",
+        description=(
+            "Policy 'silent' never responds to peer messages (default); 'observe' is an alias for silent; "
+            "'mention_only' responds when this bot's username or any alias appears "
+            "in the peer message, but never in a reply chain."
+        ),
+        scope="interface",
+        component="peer_policy",
+        options=["silent", "observe", "mention_only"],
+        tags=["multi-instance"],
+    )
+
+    register_exposed_var(
+        "SYNTH_PEER_TURN_FLOOR_SECONDS",
+        label="Peer Turn Floor (seconds)",
+        default=0.0,
+        value_type=float,
+        ui_type="number",
+        description=(
+            "Turn-coordination floor for shared Telegram groups. "
+            "Set to 0 on the primary instance (responds immediately). "
+            "Set to a value greater than your typical LLM response time on every "
+            "secondary instance — e.g. 20 for a 7-12s LLM. The secondary waits this "
+            "many seconds, then checks whether the primary already responded; if so it "
+            "suppresses its own turn. Requires each instance to have its own value set."
+        ),
+        scope="interface",
+        component="peer_policy",
+        tags=["multi-instance"],
+    )
+
+    register_exposed_var(
+        "SYNTH_PEER_RELAY_TIMEOUT_SECONDS",
+        label="Peer Relay Timeout (seconds)",
+        default=60.0,
+        value_type=float,
+        ui_type="number",
+        description=(
+            "Mention-order turn relay: when a message addresses multiple SyntHs in "
+            "sequence (e.g. 'SynthA, ... SynthB, ...'), the later-addressed instance waits up "
+            "to this many seconds for the earlier one to actually post its reply before "
+            "generating its own -- so the earlier reply is already in this instance's "
+            "own chat history by the time it responds. Set to 0 to disable relay "
+            "waiting entirely. Fails open: if the earlier peer never replies within "
+            "this window, this instance proceeds anyway rather than staying silent."
+        ),
+        scope="interface",
+        component="peer_policy",
+        tags=["multi-instance"],
+    )
+
+    register_exposed_var(
+        "SYNTH_PEER_MENTION_COOLDOWN_SECONDS",
+        label="Peer Mention Cooldown (seconds)",
+        default=20.0,
+        value_type=float,
+        ui_type="number",
+        description=(
+            "Under 'mention_only' policy: how long after this instance's own last "
+            "message in a chat to suppress a new mention_only trigger from a peer. "
+            "A human message and a peer's message often land seconds apart and each "
+            "independently mention this bot's alias, which without this would produce "
+            "two replies back-to-back for what reads as one conversational beat. "
+            "Set to 0 to disable."
+        ),
+        scope="interface",
+        component="peer_policy",
+        tags=["multi-instance"],
+    )
+
+    register_exposed_var(
+        "SYNTH_PEER_ENABLED",
+        label="Enable Peer SyntH Mode",
+        default=False,
+        value_type=bool,
+        ui_type="bool",
+        description=(
+            "Enable peer-awareness mode for shared group spaces. When on, peer SyntH "
+            "messages are filtered per SYNTH_PEER_POLICY and an instruction block is "
+            "injected into every prompt so this instance knows who the other SyntHs are."
+        ),
+        scope="interface",
+        component="peer_policy",
+        tags=["multi-instance"],
     )
 
     log_info("[variables_engine] Completed explicit exposed var registrations")

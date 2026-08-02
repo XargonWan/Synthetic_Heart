@@ -133,7 +133,19 @@ The Synthetic Heart uses an **asyncio.PriorityQueue** for processing messages in
 
 **Priority Levels**:
 - **HIGH_PRIORITY (0)**: Scheduled events, urgent notifications
-- **NORMAL_PRIORITY (1)**: Regular chat messages
+- **NORMAL_PRIORITY (1)**: User messages, radio speech — user-facing traffic
+- **AGENT_PRIORITY (2)**: Agentic turns / tool work — below user traffic, above autonomous beats
+- **LOW_PRIORITY (3)**: Autonomous G.R.I.L.L.O. beats, processed only when the queue is idle
+
+**Agentic turns run detached**: When the Fast/Agent router routes a turn to the
+Agent Lane, the reasoning loop is launched as a *detached* ``asyncio`` task
+rather than executed inline inside the consumer lock. This means a long
+multi-step agent turn never freezes Synth — user messages queued while the agent
+is working are still answered promptly, and the agent turn interleaves with them
+cooperatively at the event-loop level. Each turn is persisted to the
+``agent_tasks`` table from the moment it starts (status ``running``) so it is
+durable across a container restart; the startup recovery sweep reconciles any
+turn left ``running`` by a previous process.
 
 **PriorityQueue Fix**: To prevent ``TypeError`` when comparing messages with identical priorities, the queue uses a **monotonic counter** as tiebreaker. Each message is stored as ``(priority, counter, item)`` instead of ``(priority, item)``, ensuring consistent ordering even when priorities are equal.
 
@@ -249,3 +261,14 @@ to improve continuity across interfaces and sessions.
        Unified history entries coming from other chats are now prefixed with
        ``[from <interface_path>]`` to make it explicit they are not part of the
        current conversation.
+
+    .. note::
+       Cross-chat context is treated as ambient background, not shared social
+       knowledge. The synth is instructed (via the ``CROSS-CHAT PRIVACY``
+       directive in the master chat instructions and a per-block note on the
+       ``[Recent context from other conversations]`` section) never to
+       name-drop people from other chats to the current interlocutor, never to
+       assume the current user knows them, and never to reference them unless
+       the current user brings them up first. This applies to any non-current
+       context (other chats, third-party memories, diary notes), not only to
+       unified history.

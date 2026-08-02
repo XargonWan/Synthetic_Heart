@@ -52,6 +52,18 @@ _restart_event = None
 # Global flag to preserve dev components state across restarts
 _dev_components_enabled = False
 
+# Set by signal_handler, awaited by the main loop to perform an orderly shutdown.
+# Deliberately NOT handled by raising SystemExit inside the raw OS signal frame:
+# uvicorn (interface/openai_api_server/openai_api_server.py) installs its own SIGINT/SIGTERM capture
+# around `await server.serve()` and re-raises the signal to whatever handler was
+# previously registered once it unwinds, so a synchronous sys.exit() here fires deep
+# inside that task's stack. SystemExit is a BaseException, so it isn't caught by
+# asyncio's per-task handling and blows straight out of run_forever() instead of
+# letting asyncio.run()'s normal _cancel_all_tasks() sweep cancel every background
+# task in one clean, orderly pass.
+_shutdown_event = None
+_main_event_loop = None
+
 
 def request_restart():
     """Request a graceful restart of the application."""
@@ -100,15 +112,48 @@ def cleanup_components():
         log_warning(f"[main] Component cleanup failed: {e}")
 
 
+async def stop_interfaces() -> None:
+    """Give each interface a chance to stop its own background tasks in an
+    orderly, isolated sequence before asyncio.run()'s blanket task cancellation
+    fires. Without this, an interface's own cleanup (e.g. python-telegram-bot's
+    app.stop() awaiting its internal fetcher task) races against that same
+    blanket sweep independently cancelling the same tasks, producing noisy but
+    harmless CancelledError tracebacks. A per-interface timeout keeps one stuck
+    interface from stalling the rest of shutdown.
+    """
+    import inspect
+
+    from core.core_initializer import INTERFACE_REGISTRY
+
+    for name, interface_instance in list(INTERFACE_REGISTRY.items()):
+        stop_method = getattr(interface_instance, "stop", None)
+        if not callable(stop_method):
+            continue
+        try:
+            result = stop_method()
+            if inspect.isawaitable(result):
+                await asyncio.wait_for(result, timeout=10)
+            log_debug(f"[main] Stopped interface: {name}")
+        except TimeoutError:
+            log_warning(f"[main] Interface '{name}' did not stop within 10s")
+        except Exception as e:
+            log_warning(f"[main] Error stopping interface '{name}': {e}")
+
+
 def signal_handler(signum, frame):
-    """Handle termination signals gracefully."""
-    log_info(f"[main] Received signal {signum}, shutting down gracefully...")
+    """Request a graceful shutdown; never blocks or exits from this raw signal frame.
 
-    # Clean up all components generically
-    cleanup_components()
+    See the `_shutdown_event` comment above for why this can't just call
+    cleanup_components()/sys.exit() directly.
+    """
+    log_info(f"[main] Received signal {signum}, requesting graceful shutdown...")
 
-    log_info("[main] Shutdown complete")
-    sys.exit(0)
+    if _main_event_loop is not None and _shutdown_event is not None:
+        _main_event_loop.call_soon_threadsafe(_shutdown_event.set)
+    else:
+        # Signal arrived before the event loop was up (e.g. during early startup) -
+        # nothing async is running yet, so an immediate exit is safe here.
+        sys.exit(0)
 
 
 async def initialize_database():
@@ -182,6 +227,32 @@ async def initialize_database():
         return False
 
 
+def _quiet_proactor_connection_reset(
+    loop: asyncio.AbstractEventLoop, context: dict
+) -> None:
+    """Silence a known-benign Windows asyncio artifact instead of dumping a traceback.
+
+    ProactorEventLoop's _call_connection_lost unconditionally calls
+    socket.shutdown() while tearing down a transport. If the remote peer
+    already forcibly reset the connection (a stage browser tab closed or
+    reloaded, or a lingering WebSocket force-cancelled by uvicorn's bounded
+    graceful shutdown), that raises ConnectionResetError ([WinError 10054])
+    from inside a bare loop callback that no application-level try/except
+    can reach, so asyncio's default handler prints a full traceback to
+    stderr for something already handled correctly at the application
+    layer. See https://github.com/python/cpython/issues/83413.
+    """
+    exc = context.get("exception")
+    if (
+        isinstance(exc, ConnectionResetError)
+        and getattr(exc, "winerror", None) == 10054
+        and "_call_connection_lost" in repr(context.get("handle"))
+    ):
+        log_debug(f"[main] Ignored benign Proactor connection reset: {exc}")
+        return
+    loop.default_exception_handler(context)
+
+
 if __name__ == "__main__":
     # Set up signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
@@ -199,7 +270,7 @@ if __name__ == "__main__":
 
     async def start_application():
         """Start the application and handle restart requests."""
-        global _restart_requested, _restart_event
+        global _restart_requested, _restart_event, _shutdown_event, _main_event_loop
 
         # Test DB connectivity and initialize tables with retry mechanism
         # This must be done in the main event loop to avoid creating separate pools
@@ -208,7 +279,11 @@ if __name__ == "__main__":
         from core.notifier import _set_main_loop
 
         loop = asyncio.get_running_loop()
+        if sys.platform == "win32":
+            loop.set_exception_handler(_quiet_proactor_connection_reset)
         _set_main_loop(loop)
+        _main_event_loop = loop
+        _shutdown_event = asyncio.Event()
 
         max_retries = 30
         retry_delay = 2
@@ -372,8 +447,25 @@ if __name__ == "__main__":
                 "[main] Application startup completed successfully - entering main loop"
             )
             try:
-                # Wait for restart event or keyboard interrupt
-                await _restart_event.wait()
+                # Wait for a restart request or a graceful shutdown request,
+                # whichever comes first.
+                restart_wait = asyncio.create_task(_restart_event.wait())
+                shutdown_wait = asyncio.create_task(_shutdown_event.wait())
+                try:
+                    done, pending = await asyncio.wait(
+                        {restart_wait, shutdown_wait},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    for task in pending:
+                        task.cancel()
+
+                if shutdown_wait in done:
+                    log_info("[main] Shutdown requested - cleaning up...")
+                    await stop_interfaces()
+                    cleanup_components()
+                    log_info("[main] Shutdown cleanup complete - exiting...")
+                    break
 
                 if _restart_requested:
                     log_info(
@@ -404,6 +496,8 @@ if __name__ == "__main__":
 
             except KeyboardInterrupt:
                 log_info("[main] Received shutdown signal, exiting...")
+                await stop_interfaces()
+                cleanup_components()
                 break
 
     # Run the async application

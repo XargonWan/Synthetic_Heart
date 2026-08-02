@@ -10,7 +10,8 @@ from typing import Any, cast
 import traceback
 from types import SimpleNamespace
 
-from core import plugin_instance, rate_limit, recent_chats
+from core import plugin_instance, rate_limit
+from core.beat_utils import is_outbound_beat
 from core.logging_utils import log_debug, log_error, log_warning, log_info
 from core.mention_utils import is_message_for_bot
 from core.reaction_handler import react_when_mentioned, get_reaction_emoji
@@ -22,14 +23,19 @@ from core.session_meta import (
     get_session_meta as get_session_meta_fn,
 )
 from plugins.blocklist import is_user_blocked
-from plugins.chat_link import ChatLinkStore
+from core.interface_paths import get_name_resolver
 from core.user_utils import ensure_message_user_fields
 
-# Use a priority queue so events can be processed before regular messages
-HIGH_PRIORITY = 0
-NORMAL_PRIORITY = 1
+# Use a priority queue so events can be processed before regular messages.
+# Lower value = processed first. The agent lane sits BETWEEN user-facing traffic
+# (messages / radio) and the generic autonomous beats: an agentic turn must yield
+# to real user messages and radio speech, but take precedence over background
+# G.R.I.L.L.O. beats.
+HIGH_PRIORITY = 0  # Scheduled events, urgent notifications
+NORMAL_PRIORITY = 1  # User messages, radio speech — user-facing traffic
+AGENT_PRIORITY = 2  # Agentic turns / tool work — below user traffic, above beats
 LOW_PRIORITY = (
-    2  # For autonomous beats (G.R.I.L.L.O.) - processed only when queue is idle
+    3  # For autonomous beats (G.R.I.L.L.O.) - processed only when queue is idle
 )
 
 _queue: asyncio.PriorityQueue | None = None
@@ -66,7 +72,7 @@ def _should_cancel_low_priority_on_user_message(context: object) -> bool:
     context_dict = cast(dict[str, object], context)
     return not (
         bool(context_dict.get("grillo_beat"))
-        and context_dict.get("beat_type") == "outreach"
+        and is_outbound_beat(context_dict.get("beat_type"))
     )
 
 
@@ -288,6 +294,26 @@ async def enqueue(
             # If anything goes wrong, fall back to original directed decision
             pass
 
+        # Refresh the alias-triggered attention window (no-op unless
+        # CHAT_ATTENTION_WINDOW_SECONDS > 0). Deliberately excludes private
+        # chats (irrelevant there) and bot senders (peer SyntH messages must
+        # never seed or extend this chat's attention window).
+        if directed:
+            try:
+                from core.chat_attention import mark_engaged
+
+                sender = getattr(message, "from_user", None)
+                sender_is_bot = bool(getattr(sender, "is_bot", False))
+                chat_type = (
+                    getattr(message.chat, "type", None)
+                    if hasattr(message, "chat")
+                    else None
+                )
+                if not sender_is_bot and chat_type != "private":
+                    mark_engaged(getattr(message, "chat_id", None))
+            except Exception:
+                pass
+
         if not directed:
             log_debug("[QUEUE] DEBUG: Message not directed to bot - ignoring")
             if reason == "missing_human_count":
@@ -476,12 +502,9 @@ async def enqueue(
         _resolve_message_animation_state("received")
     )
 
-    meta = message.chat.title or message.chat.username or message.chat.first_name
-    # Persist last-active chat, but don't let DB failures abort enqueueing
-    try:
-        await recent_chats.track_chat(chat_id, meta)
-    except Exception as e:
-        log_warning(f"[QUEUE] recent_chats.track_chat failed but continuing: {e}")
+    # Last-active tracking is handled centrally by
+    # ``core.interface_paths.touch_interface_path`` from the chat-context and
+    # outbound message paths, so no explicit per-enqueue tracking is needed.
 
     # Extract thread_id - unified field name, check both Telegram and generic names
     # DEBUG: let's see what telegram message actually contains
@@ -513,8 +536,7 @@ async def enqueue(
     chat_name = None
     message_thread_name = None
     try:
-        store = ChatLinkStore()
-        resolver = store.get_name_resolver(interface)
+        resolver = get_name_resolver(interface)
         if resolver:
             log_debug(f"[QUEUE] Resolving names for chat {chat_id}, thread {thread_id}")
             names = await resolver(chat_id, thread_id, bot)
@@ -646,8 +668,7 @@ async def enqueue_low_priority(
     chat_name = None
     message_thread_name = None
     try:
-        store = ChatLinkStore()
-        resolver = store.get_name_resolver(interface_id)
+        resolver = get_name_resolver(interface_id)
         if resolver:
             names = await resolver(chat_id, thread_id, bot)
             if names:
@@ -823,25 +844,6 @@ async def _consumer_loop() -> None:
                     f"[QUEUE] Processing message from chat {final.get('chat_id')}"
                 )
 
-            # Ensure chat exists with resolved names
-            chat_name = final.get("chat_name")
-            message_thread_name = final.get("message_thread_name")
-            if chat_name or message_thread_name:
-                try:
-                    store = ChatLinkStore()
-                    await store.ensure_chat_exists(
-                        chat_id=final.get("chat_id"),
-                        thread_id=final.get("thread_id"),
-                        interface=final.get("interface"),
-                        chat_name=chat_name,
-                        message_thread_name=message_thread_name,
-                    )
-                    log_debug(
-                        f"[QUEUE] Updated chat record with names: chat='{chat_name}', thread='{message_thread_name}'"
-                    )
-                except Exception as e:
-                    log_warning(f"[QUEUE] Failed to update chat names: {e}")
-
             plugin = plugin_instance.get_plugin()
             if not plugin:
                 # For grillo internal beats, attempt a one-time auto-load from config
@@ -1007,9 +1009,17 @@ async def _consumer_loop() -> None:
                         _queued_msg = final.get("message")
                         if getattr(_queued_msg, "is_voice_input", False):
                             context["is_voice_input"] = True
+                            # For voice-originated input there is no textual
+                            # "writing" phase — the reply is spoken. Keep the
+                            # avatar in THINK during generation instead of
+                            # switching to WRITE (transcription is not a write).
+                            context.setdefault(
+                                "animation_state_on_generation_start", "think"
+                            )
                         else:
                             # remove stale flag if present
                             context.pop("is_voice_input", None)
+                            context.pop("animation_state_on_generation_start", None)
 
                         # Propagate explicit request_tts flag (e.g. from handle_media_live wrap)
                         if getattr(_queued_msg, "request_tts", False):

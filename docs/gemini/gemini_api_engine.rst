@@ -603,30 +603,6 @@ internal actions (e.g., ``create_personal_diary_entry``). Internal beats should
 never produce user-facing messages.
 
 
-Agentic Hooks
--------------
-
-The engine supports the optional Agent plugin integration with these methods:
-
-.. list-table::
-   :header-rows: 1
-   :widths: 30 70
-
-   * - Method
-     - Behavior
-   * - ``supports_agent()``
-     - Always returns ``True``.
-   * - ``attach_agent(plugin)``
-     - Stores reference as ``self._agent_plugin``, sets ``self.agent_enabled = True``.
-   * - ``detach_agent(plugin)``
-     - Removes reference, sets ``self.agent_enabled = False``.
-   * - ``agent_execute(action, ctx)``
-     - Lazy-imports ``PLUGIN_REGISTRY``, finds the ``"agent"`` plugin, calls ``execute_action()``. Returns ``{"status": "ok"}``, ``{"status": "pending_async"}``, or ``{"status": "unsupported"}``.
-
-These hooks are lightweight adapters. The Agent plugin does the real work; the
-engine just provides a forwarding path.
-
-
 Rate Limiting
 -------------
 
@@ -732,10 +708,6 @@ File Structure Summary
        ├── set_current_model()                   — Model setter with validation
        ├── get_rate_limit()                      — (60, 60, 0.5)
        ├── get_interface_limits()                — Dynamic caps per model
-       │
-       ├── supports_agent()                      — Returns True
-       ├── attach_agent() / detach_agent()       — Lifecycle hooks
-       ├── agent_execute()                       — Forwarding adapter
        │
        ├── handle_live_processing()              — GenAI SDK media processing
        ├── _extract_frames()                     — Video → JPEG frames (ffmpeg)

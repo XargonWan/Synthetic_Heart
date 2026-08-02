@@ -4,7 +4,7 @@ from typing import Any
 import pytest
 
 from core.debrief import run_debrief
-from plugins.debrief_action_intent import DebriefActionIntentPlugin
+from plugins.debrief.debrief_action_intent import DebriefActionIntentPlugin
 
 
 def _plugin_config_value(
@@ -28,7 +28,7 @@ async def test_debrief_action_intent_uses_corrector_for_invalid_json(
 ) -> None:
     plugin = DebriefActionIntentPlugin()
     monkeypatch.setattr(
-        "plugins.debrief_action_intent.config_registry.get_value",
+        "plugins.debrief.debrief_action_intent.config_registry.get_value",
         _plugin_config_value,
     )
 
@@ -97,7 +97,7 @@ async def test_debrief_action_intent_uses_corrector_for_invalid_json(
         "core.cortex_registry.get_cortex_registry", lambda: DummyRegistry()
     )
     monkeypatch.setattr(
-        "plugins.debrief_action_intent.run_corrector_middleware", fake_corrector
+        "plugins.debrief.debrief_action_intent.run_corrector_middleware", fake_corrector
     )
 
     original_message = SimpleNamespace(

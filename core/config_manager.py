@@ -205,6 +205,25 @@ class ConfigRegistry:
             self._load_definition_sync(definition)
         return definition.value
 
+    async def get_persisted_value(self, key: str, default: Any) -> Any:
+        """Return the value actually persisted in the DB, bypassing any getter.
+
+        ``get_value()`` runs a registered getter (if any) instead of reading the
+        database — correct for runtime reads, but wrong for bootstrapping code
+        whose own getter reflects state that bootstrap call is responsible for
+        populating in the first place (e.g. PersonaManager.load_persona() reading
+        SYNTH_NAME/SYNTH_ALIASES/SYNTH_LIKES/SYNTH_DISLIKES via getters that read
+        PersonaManager._current_persona, which doesn't exist yet on first load).
+        Use this instead of get_value() in that situation.
+        """
+        definition = self._definitions.get(key)
+        raw_value = await self._load_from_db(key)
+        if raw_value is None:
+            return default
+        if definition is None:
+            return raw_value
+        return self._convert_value(definition, raw_value)
+
     def get_var(
         self,
         key: str,
@@ -1049,9 +1068,18 @@ class ConfigRegistry:
         if definition.value_type is int:
             if raw == "":
                 return ""
+            # JSON booleans arrive as Python bool; str(False)=="False" not "0"
+            if isinstance(value, bool):
+                return str(int(value))
             return str(int(raw))
         if definition.value_type is float:
             return str(float(raw))
+        # dict/list used as value_type should be serialised as JSON, not via
+        # dict(str_value) which throws when the string isn't an iterable of pairs.
+        if definition.value_type is dict or definition.value_type is list:
+            import json
+
+            return json.dumps(value)
         if callable(definition.value_type) and definition.value_type not in (
             bool,
             int,
@@ -1083,6 +1111,14 @@ class ConfigRegistry:
                 import json
 
                 if not raw_value or raw_value.strip() == "":
+                    return definition.default
+                return json.loads(raw_value)
+            # dict/list used as value_type: deserialize as JSON, same as "json" type.
+            # Calling dict(raw_string) or list(raw_string) fails on arbitrary strings.
+            if definition.value_type is dict or definition.value_type is list:
+                import json
+
+                if not raw_value or str(raw_value).strip() == "":
                     return definition.default
                 return json.loads(raw_value)
             if callable(definition.value_type) and definition.value_type not in (

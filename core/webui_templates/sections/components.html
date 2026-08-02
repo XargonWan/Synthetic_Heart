@@ -32,7 +32,6 @@
                     <div id="cortex-login-warning" class="meta" style="display:none; margin-top:8px; max-width:560px;">
                         <div style="font-weight:600;">If the login button is not working please:</div>
                         <ul style="margin:6px 0 0 18px;">
-                            <li>browse <span id="cortex-login-warning-selkies">https://{host}:{port}</span></li>
                             <li>open the "Synth Browser" from the application menu</li>
                             <li>browse to: <span id="cortex-login-warning-url">{login_url}</span></li>
                             <li>login to the selected service</li>
@@ -74,8 +73,8 @@
                 <div id="auris-controls" style="display:flex; gap:12px; align-items:flex-start; margin-bottom:12px; flex-wrap:wrap;">
                     <select id="auris-engine-select" style="padding:8px 12px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; font-size:1rem; min-width:220px;">
                     </select>
-                    <!-- Vosk model picker populated from MODEL_MANAGER catalog (shows download status) -->
-                    <select id="auris-vosk-language" style="padding:8px 12px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; font-size:1rem; min-width:240px; display:none;">
+                    <!-- Vosk active-model selector: lists ALL catalog models (downloaded or not) -->
+                    <select id="auris-vosk-model-select" style="padding:8px 12px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; font-size:1rem; min-width:240px; display:none;" title="Select the active Vosk model (downloads on select if missing)">
                     </select>
                     <button id="auris-manage-models-btn" class="pill secondary" title="Download, update or remove STT models" style="padding:8px 14px; font-weight:600;">🗂 Manage Models</button>
                     <div id="auris-engine-info" class="meta" style="min-width:260px; display:none;">

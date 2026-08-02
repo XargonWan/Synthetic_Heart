@@ -16,6 +16,7 @@ Supports multimodal inputs:
 from __future__ import annotations
 
 from core.ai_plugin_base import AIPluginBase
+from core.beat_utils import is_outbound_beat
 from core.config_manager import config_registry
 from core.cortex_api_logger import log_cortex_request, log_cortex_response
 from core.genai_client_utils import harden_genai_client_for_async_close
@@ -47,39 +48,8 @@ except ImportError:
     )
 
 
-# Register Gemini API Key configuration (always visible so it can be set before activation)
-try:
-    from core.variables_engine import register_exposed_var
-
-    register_exposed_var(
-        "GEMINI_API_KEY",
-        label="Gemini API Key",
-        default="",
-        value_type=str,
-        ui_type="password",
-        description="API key for Google Gemini models.",
-        scope="llm",
-        component="gemini_api",
-        tags=["cortex_engine", "sensitive"],
-        needs_component_reload=True,
-    )
-    register_exposed_var(
-        "GEMINI_API_BASE_URL",
-        label="Gemini API Base URL",
-        default="https://generativelanguage.googleapis.com",
-        value_type=str,
-        ui_type="string",
-        description="Base URL for the Gemini REST API.",
-        scope="llm",
-        component="gemini_api",
-        tags=["cortex_engine"],
-        advanced=True,
-        needs_component_reload=True,
-    )
-except Exception:
-    # Fail silently during import-time if variables engine isn't ready
-    pass
-
+# Gemini API key and base URL live in the Engines tab (external_endpoints),
+# not in Settings. They remain readable via config_registry / env.
 GEMINI_API_KEY = config_registry.get_var(
     "GEMINI_API_KEY",
     "",
@@ -88,6 +58,7 @@ GEMINI_API_KEY = config_registry.get_var(
     group="llm",
     component="gemini_api",
     sensitive=True,
+    hidden=True,
 )
 
 GEMINI_API_BASE_URL = config_registry.get_var(
@@ -100,6 +71,7 @@ GEMINI_API_BASE_URL = config_registry.get_var(
     component="gemini_api",
     tags=["cortex_engine"],
     advanced=True,
+    hidden=True,
 )
 
 # Model configuration — Gemini 3.x family (April 2026)
@@ -292,25 +264,8 @@ def _set_gemini_model(value: str) -> None:
     set_current_model(model)
 
 
-try:
-    from core.variables_engine import register_exposed_var
-
-    register_exposed_var(
-        "GEMINI_MODEL",
-        label="Gemini Model",
-        default=DEFAULT_MODEL,
-        value_type=str,
-        ui_type="select",
-        options=list(MODEL_CONFIGS.keys()),
-        description="Active Gemini model used by gemini_api.",
-        scope="llm",
-        component="gemini_api",
-        tags=["cortex_engine"],
-        needs_component_reload=False,
-    )
-except Exception:
-    pass
-
+# The active Gemini model lives in the Engines tab (external_endpoints),
+# not in Settings. It remains readable via config_registry / env.
 GEMINI_MODEL = config_registry.get_var(
     "GEMINI_MODEL",
     DEFAULT_MODEL,
@@ -320,8 +275,7 @@ GEMINI_MODEL = config_registry.get_var(
     group="llm",
     component="gemini_api",
     tags=["cortex_engine"],
-    # We remove static choices to allow dynamic discovery to reflect in the UI
-    # The WebUI Engines tab uses get_supported_models() which is dynamic.
+    hidden=True,
     getter=_get_gemini_model,
     setter=_set_gemini_model,
 )
@@ -436,78 +390,6 @@ class GeminiAPIPlugin(AIPluginBase):
     def get_current_model(self) -> str:
         """Return the currently active model."""
         return self._current_model
-
-    # --- Agentic hooks (optional) ---
-    def supports_agent(self) -> bool:
-        """Return True if this engine provides optional agentic extensions.
-
-        Default: False. Engines that implement richer agentic behavior should
-        override this and implement `attach_agent`, `detach_agent` and
-        `agent_execute` as appropriate.
-        This implementation advertises support and provides a minimal adapter
-        that forwards agent execution requests to the central Agent plugin
-        when available (best-effort, non-fatal).
-        """
-        return True
-
-    def agent_execute(self, action_dict: dict, context: dict | None = None) -> dict:
-        """Engine-level execution helper that attempts to delegate to the Agent plugin.
-
-        This is a best-effort adapter: if the Agent plugin is loaded in the
-        core (`core.core_initializer.PLUGIN_REGISTRY['agent']`) it will call
-        its `execute_action` method synchronously if available.
-        """
-        try:
-            # Lazy import to avoid cycles
-            from core.core_initializer import PLUGIN_REGISTRY
-
-            agent_plugin = (
-                PLUGIN_REGISTRY.get("agent")
-                if isinstance(PLUGIN_REGISTRY, dict)
-                else None
-            )
-            if agent_plugin and hasattr(agent_plugin, "execute_action"):
-                # execute_action may be async; try to call safely
-                res = agent_plugin.execute_action(
-                    action_dict, context or {}, None, None
-                )
-                # If coroutine, return a placeholder since engine API is sync in some callers
-                if hasattr(res, "__await__"):
-                    # Can't await here; indicate async and let callers handle it
-                    return {
-                        "status": "pending_async",
-                        "note": "Agent plugin returned coroutine",
-                    }
-                return res or {"status": "ok"}
-        except Exception as e:
-            log_warning(f"[gemini_api] agent_execute adapter failed: {e}")
-        return {
-            "status": "unsupported",
-            "reason": "agent plugin not available or execution failed",
-        }
-
-    def attach_agent(self, agent_plugin) -> None:
-        """Attach an Agent plugin instance to the engine.
-
-        Default behavior: store reference and set an attribute. Engines with
-        more complex integration can override this method.
-        """
-        try:
-            setattr(self, "_agent_plugin", agent_plugin)
-            setattr(self, "agent_enabled", True)
-            log_info("[gemini_api] Agent attached (no-op adapter)")
-        except Exception as e:
-            log_warning(f"[gemini_api] attach_agent failed: {e}")
-
-    def detach_agent(self, agent_plugin) -> None:
-        """Detach previously attached Agent plugin instance."""
-        try:
-            if hasattr(self, "_agent_plugin"):
-                delattr(self, "_agent_plugin")
-            setattr(self, "agent_enabled", False)
-            log_info("[gemini_api] Agent detached (no-op adapter)")
-        except Exception as e:
-            log_warning(f"[gemini_api] detach_agent failed: {e}")
 
     def set_current_model(self, name: str):
         """Set the active model and update the configuration."""
@@ -1169,14 +1051,14 @@ class GeminiAPIPlugin(AIPluginBase):
         )
         is_grillo_internal = is_grillo and (
             not isinstance(prompt_dict, dict)
-            or prompt_dict.get("beat_type", "internal") != "outreach"
+            or not is_outbound_beat(prompt_dict.get("beat_type"))
         )
 
         if is_grillo_internal:
             interface_hint = (
                 "CURRENT INTERFACE: grillo (INTERNAL)\n"
                 "This is an internal introspection beat. Do NOT output any message_* actions.\n"
-                "Use ONLY internal actions like 'create_personal_diary_entry', 'set_emotion', etc."
+                "Use ONLY internal actions like 'create_personal_diary_entry', 'update_emotion_state', etc."
             )
         else:
             interface_hint = (

@@ -259,7 +259,7 @@ async def _grillo_recent_same_message(
             WHERE interface_path = %s
               AND COALESCE(sender_id,'') IN (%s,%s)
               AND message_text = %s
-              AND timestamp > %s
+              AND created_at > %s
             """,
             (interface_path, "self", "synth", text, threshold),
         )
@@ -358,13 +358,22 @@ def _load_interface_actions() -> Dict[str, str]:
         return _INTERFACE_ACTIONS
 
     try:
-        from core.core_initializer import INTERFACE_REGISTRY
+        from core.core_initializer import INTERFACE_REGISTRY, core_initializer
+
+        active_interfaces = set(core_initializer.active_interfaces)
     except Exception as e:  # pragma: no cover - registry unavailable
         log_warning(f"[action_parser] Unable to access INTERFACE_REGISTRY: {e}")
         INTERFACE_REGISTRY = {}
+        active_interfaces = set()
 
     actions: Dict[str, str] = {}
     for name, iface in INTERFACE_REGISTRY.items():
+        # Only interfaces the loader actually activated contribute actions to the
+        # prompt. An interface missing its required config (see
+        # ``core_initializer._missing_required_config_vars``) is never added to
+        # ``active_interfaces``, so its schemas stay out of the LLM prompt.
+        if name not in active_interfaces:
+            continue
         try:
             if hasattr(iface, "get_supported_actions"):
                 supported = iface.get_supported_actions()
@@ -459,8 +468,8 @@ def _get_builtin_interface_message_action_types() -> set[str]:
 
 
 # ID-style fields coerced to *int* only — a chat/user/message id is never a
-# float, and a quoted id like ``"5208932647"`` must become an int for DB lookups.
-_INT_ID_FIELDS = {"chat_id", "user_id", "message_id", "animation_state"}
+# float, and a quoted id like ``"5551234567"`` must become an int for DB lookups.
+_INT_ID_FIELDS = {"chat_id", "user_id", "message_id"}
 
 # Numeric *parameter* fields (counts, limits, time windows). Coerced to int when
 # integral, float otherwise. Grammar-constrained local models routinely quote
@@ -498,6 +507,36 @@ _NUMERIC_PARAM_FIELDS = {
 }
 
 
+# Field names small/local models substitute for the required ``text`` field
+# on message_* actions (telegram, discord, matrix, reddit, x, ...). Order is
+# priority — first match wins if a model somehow emits more than one.
+_TEXT_FIELD_ALIASES = ("message_text", "content", "message", "reply", "speech", "body")
+
+
+def _normalize_text_field_alias(action_type: str, payload: dict) -> None:
+    """Rename a misnamed text field to ``text`` in-place for message_* actions.
+
+    Local models frequently emit ``message_text``/``content``/``message`` instead
+    of the required ``text`` key. The JSON itself is valid, so this isn't a parse
+    error — it's a field-naming mismatch that would otherwise round-trip through
+    a full LLM correction call just to rename a key. Fixing it here avoids that
+    wasted correction turn.
+    """
+    if not action_type.startswith("message_"):
+        return
+    if payload.get("text"):
+        return
+    for alias in _TEXT_FIELD_ALIASES:
+        value = payload.get(alias)
+        if isinstance(value, str) and value.strip():
+            payload["text"] = payload.pop(alias)
+            log_debug(
+                f"[action_parser] Normalized {action_type}.payload: "
+                f"renamed '{alias}' -> 'text'"
+            )
+            return
+
+
 def _normalize_payload(action_type: str, payload: dict) -> None:
     """Normalize a payload in-place so quoted numbers become real numbers.
 
@@ -515,6 +554,8 @@ def _normalize_payload(action_type: str, payload: dict) -> None:
     Non-numeric strings, already-numeric values, and string-typed fields such as
     the Telegram ``target`` id are left untouched.
     """
+
+    _normalize_text_field_alias(action_type, payload)
 
     def _coerce_int(value):
         """Convert a clean integer string to ``int``; otherwise return as-is."""
@@ -931,12 +972,20 @@ def _plugins_for(action_type: str) -> List[Any]:
                 break
 
     try:
-        from core.core_initializer import INTERFACE_REGISTRY
+        from core.core_initializer import INTERFACE_REGISTRY, core_initializer
+
+        _active_interfaces = set(core_initializer.active_interfaces)
     except Exception as e:  # pragma: no cover - defensive
         log_error(f"[action_parser] Error loading INTERFACE_REGISTRY: {e}")
         INTERFACE_REGISTRY = {}
+        _active_interfaces = set()
 
     for name, iface in INTERFACE_REGISTRY.items():
+        # Skip interfaces the loader never activated (e.g. missing required
+        # config). Their actions were withheld from the prompt, so they must not
+        # be dispatchable either.
+        if name not in _active_interfaces:
+            continue
         try:
             if hasattr(iface, "get_supported_action_types"):
                 action_types = iface.get_supported_action_types()
@@ -1145,13 +1194,15 @@ async def _handle_plugin_action(
                         payload, original_message=original_message
                     )
                     if inspect.iscoroutine(result):
-                        await result
-                    return None
+                        result = await result
+                    # Propagate the delivery result so callers (agent router,
+                    # agent tool executor) can observe success/failure.
+                    return {"ok": bool(result), "result": result}
                 except Exception as e:
                     log_error(
                         f"[action_parser] ❌ Error executing {action_type} via interface {iface_name}: {repr(e)}"
                     )
-                return
+                    return {"ok": False, "error": str(e)}
         except Exception as e:  # pragma: no cover - defensive
             log_warning(f"[action_parser] Interface dispatch failed: {e}")
 
@@ -1207,7 +1258,20 @@ async def _handle_plugin_action(
                     clean_text, events = parse_facial_expressions(original_text)
                     if clean_text != original_text:
                         payload["text"] = clean_text
-                    if events and get_karada_state_server().has_connected_clients():
+                    # When the reply is delivered as voice (send_as_voice=true),
+                    # do NOT schedule the expression timeline here: Vox.speak()
+                    # will schedule it using the *real* synthesised audio
+                    # duration, which is engine-independent (Vox repairs the WAV
+                    # header for every engine before measuring). Scheduling a
+                    # second, char-estimate-based timeline here would race the
+                    # audio-driven one and make the avatar's face differ between
+                    # Vox engines for the same emotion tag.
+                    is_voice_reply = bool(payload.get("send_as_voice"))
+                    if (
+                        events
+                        and not is_voice_reply
+                        and get_karada_state_server().has_connected_clients()
+                    ):
                         # find our plugin instance (if loaded)
                         expr_plugin = None
                         from core.core_initializer import PLUGIN_REGISTRY
@@ -1313,16 +1377,27 @@ async def _handle_plugin_action(
                 )
                 result = plugin.send_message(payload, original_message=original_message)
                 if inspect.iscoroutine(result):
-                    await result
-                log_info(
-                    f"[action_parser] ✅ Successfully executed message action via {plugin_iface}"
-                )
-                return None
+                    result = await result
+                # Propagate the delivery outcome so callers (agent router,
+                # agent tool executor) can observe success/failure instead of
+                # always assuming success. This is the path actually used in
+                # production, where interfaces are registered as plugins.
+                delivered_ok = bool(result)
+                if delivered_ok:
+                    log_info(
+                        f"[action_parser] ✅ Successfully executed message action via {plugin_iface}"
+                    )
+                else:
+                    log_error(
+                        f"[action_parser] ❌ Message action via {plugin_iface} reported failure "
+                        f"(send_message returned {result!r})"
+                    )
+                return {"ok": delivered_ok, "result": result}
             except Exception as e:
                 log_error(
                     f"[action_parser] ❌ Error executing {action_type} via interface {plugin_iface}: {repr(e)}"
                 )
-                continue
+                return {"ok": False, "error": str(e)}
 
         if hasattr(plugin, "execute_action"):
             try:
@@ -1738,20 +1813,6 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
                 except Exception as e:
                     log_debug(f"[action_parser] Grillo dedupe check failed: {e}")
 
-                # Block agent actions (propose_action, agent_execute, etc.)
-                # from grillo beats — outreach should deliver directly to the
-                # target interface, never route through the agent approval flow.
-                if action_type in (
-                    "propose_action",
-                    "agent_execute",
-                    "approve_action",
-                    "start_task",
-                ):
-                    log_warning(
-                        f"[action_parser] Dropping '{action_type}' from grillo beat — agent actions not allowed in grillo context"
-                    )
-                    continue
-
             if is_from_cortex:
                 try:
                     # Centralized safety decision
@@ -1764,7 +1825,7 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
                         # Safety/policy blocks are unfixable — the LLM cannot
                         # change the system configuration, so asking the
                         # corrector to "fix" these only produces workarounds
-                        # like propose_action that bypass the intended policy.
+                        # that bypass the intended policy.
                         error_msg = f"Action '{action.get('type')}' blocked by safety policy: {reason}"
                         log_info(f"[action_parser] {error_msg}")
                         collected_errors.append(error_msg)

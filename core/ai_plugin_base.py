@@ -52,45 +52,36 @@ class AIPluginBase:
         """Return True when this plugin should expose actions in the prompt."""
         return True
 
-    # --- Agent hooks (optional) ---
-    def supports_agent(self) -> bool:
-        """Return True if this engine/plugin supports agentic extensions.
+    def get_metadata(self) -> dict:
+        """Return declarative plugin metadata for the WebUI and docs pipeline.
 
-        Default: False. Engines that support agent flows should override this.
-        """
-        return False
-
-    def attach_agent(self, agent_plugin) -> None:
-        """Attach an Agent plugin instance to this engine (optional)."""
-        # Default: store reference and set attribute for convenience
-        try:
-            setattr(self, "_agent_plugin", agent_plugin)
-            setattr(self, "agent_enabled", True)
-        except Exception:
-            pass
-
-    def detach_agent(self, agent_plugin) -> None:
-        """Detach a previously attached Agent plugin instance (optional)."""
-        try:
-            if hasattr(self, "_agent_plugin"):
-                delattr(self, "_agent_plugin")
-            setattr(self, "agent_enabled", False)
-        except Exception:
-            pass
-
-    def agent_prepare_prompt(self, context: dict | None = None) -> dict | None:
-        """Optional hook: provide extra prompt preamble or structured context for agent loops."""
-        return None
-
-    def agent_execute(self, action_dict: dict, context: dict | None = None) -> dict:
-        """Optional engine-level execution helper for agentic actions.
-
-        Default implementation returns an unsupported payload so callers can fall back.
+        See :meth:`core.plugin_base.PluginBase.get_metadata` for the full list
+        of supported keys. The default implementation derives values
+        reflectively so existing engines keep working without changes.
         """
         return {
-            "status": "unsupported",
-            "reason": "engine does not implement agent_execute",
+            "name": self.get_display_name(),
+            "display_name": self.get_display_name(),
+            "description": self._reflective_description(),
         }
+
+    def get_display_name(self) -> str:
+        """Return a human-friendly name for this plugin."""
+        for attr in ("display_name", "friendly_name", "name"):
+            value = getattr(self, attr, None)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return self.__class__.__name__
+
+    def _reflective_description(self) -> str:
+        """Best-effort description derived from attributes/docstring."""
+        candidate = getattr(self, "description", None)
+        if isinstance(candidate, str) and candidate.strip():
+            return " ".join(candidate.split())
+        doc = (self.__class__.__doc__ or "").strip()
+        if doc:
+            return " ".join(doc.split())
+        return ""
 
     async def handle_custom_action(self, action_type: str, payload: dict):
         """Handle a plugin-defined custom action."""

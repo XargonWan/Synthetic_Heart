@@ -27,9 +27,7 @@ Available Action Plugins
 
 * ``ai_diary`` – Personal memory system for synth. Records conversations, thoughts, and emotions. See :doc:`ai_diary_personal_memory` for details.
 * ``bio_manager`` – Manage persistent user biographies. Uses database settings ``DB_HOST``, ``DB_USER``, ``DB_PASS`` and ``DB_NAME``.
-* ``get_logs`` – Return the last N lines from a log file (default: ``synth.log``, default lines: 30). Useful to provide the LLM or operators with recent runtime output for diagnostics.
-* ``search_logs`` – Search logs for keywords or regular expressions (queries can be a string or list). Optional parameters: ``regex`` (bool), ``context`` (surrounding lines), ``lines`` (how many tail lines to search). Results are delivered back to the invoking interface.
-* ``radio_host`` – AI radio DJ plugin. Monitors an AzuraCast station, generates spoken transitions between songs using Synth's full context pipeline (persona, emotions, diary, SOUL), and injects them into the stream. See :doc:`plugins/radio_host` for details.
+* ``radio_host`` – AI radio DJ plugin. Monitors an AzuraCast station, generates spoken transitions between songs using Synth's full context pipeline (persona, emotions, diary, SOUL), and injects them into the stream. See its plugin guide under :doc:`plugins/generated_index` for details.
 
 Bio Manager Plugin
 ------------------
@@ -166,9 +164,6 @@ The engine supports a comprehensive whitelist including Ekman's basic emotions (
 - ``static_inject``: Inject current emotional state into LLM context
 - ``get_emotion_state``: Get current emotional state with decay applied
 - ``update_emotion_from_tags``: Extract and apply emotions from LLM message tags like ``{emotion intensity}``
-- ``set_emotion``: Set a single emotion intensity directly
-- ``decay_emotions``: Apply decay to all emotions and remove low-intensity ones
-- ``sync_emotions_from_all_sources``: Synchronize emotions from ai_diary, message tags, and emotion_state DB
 
 **LLM Integration:**
 
@@ -193,7 +188,6 @@ The emotional state is exposed to the WebUI for real-time visualization and can 
 
 * ``emotion_manager`` – Centralized emotional state management with decay and balancing.
 * ``blocklist`` – User blocking/unblocking functionality (no configuration).
-* ``chat_link`` – Cross-platform chat linking and message forwarding.
 * ``message_map`` – Message threading and conversation tracking.
 * ``message_plugin`` – Send text across registered interfaces (no configuration).
 * ``recent_chats`` – Access to recent conversation history.
@@ -205,7 +199,7 @@ The emotional state is exposed to the WebUI for real-time visualization and can 
     - ``TTS_ENABLED`` (boolean): enable/disable the legacy plugin from the WebUI
     - ``TTS_FALLBACK_TO_TEXT`` (boolean): when true, sends a text-only fallback if TTS generation fails
   - Legacy compatibility: the built-in ``http`` Vox engine still supports ``TTS_ENDPOINTS`` and the same payload contract, but this is not the recommended configuration path for new installations.
-* ``vox_plugin`` – **Vox** TTS & lip-sync subsystem. Unified pipeline: text cleaning → engine generation → WAV/PCM file write → lip-sync extraction → cross-interface dispatch. Replaces ``tts_lipsync`` as the recommended TTS path. Supports pluggable engines (``http``, ``kitten``); development-only stubs such as ``chatterbox`` live in ``plugins/_dev/vox_engines`` and are not imported by default. Select the active engine via ``ACTIVE_VOX_ENGINE`` (choose ``disabled`` to turn off). See :doc:`auris_vox`.
+* ``vox_plugin`` – **Vox** TTS & lip-sync subsystem. Unified pipeline: text cleaning → engine generation → WAV/PCM file write → lip-sync extraction → cross-interface dispatch. Replaces ``tts_lipsync`` as the recommended TTS path. Supports pluggable engines (``http``, ``kitten``); additional TTS models are available through external endpoints (e.g. Harmony). Select the active engine via ``ACTIVE_VOX_ENGINE`` (choose ``disabled`` to turn off). See :doc:`auris_vox`.
 * ``auris_plugin`` – **Auris** STT subsystem. Unified transcription entry-point for voice notes and audio files. Supports pluggable engines; the built-in local default is ``vosk`` and external Auris providers can be added through the External Endpoints UI and mapped to ``auris``. Select the active engine via ``ACTIVE_AURIS_ENGINE`` (choose ``disabled`` to turn off). See :doc:`auris_vox`.
 
 
@@ -226,7 +220,6 @@ The ``recent_chats`` plugin manages conversation activity tracking and provides 
 **Available Actions:**
 
 - ``get_recent_chats``: Retrieve the most recently active chats
-- ``cleanup_old_chats``: Remove chat records older than specified days
 
 **Database Schema:**
 
@@ -329,6 +322,108 @@ Developing Plugins
 ------------------
 
 Creating a new plugin is straightforward. All plugins should extend ``AIPluginBase`` and follow these patterns:
+
+Plugin Layout, Metadata and WebUI Presentation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. versionadded:: 1.1
+   Declarative ``get_metadata()`` contract, per-plugin ``icon.png`` /
+   ``guide.md`` assets, macro-categories, and centralized runtime
+   enable/disable.
+
+A plugin may live either as a single ``plugins/my_plugin.py`` file or, when it
+ships assets, as a self-contained package folder::
+
+   plugins/my_plugin/
+       __init__.py
+       my_plugin.py        # the plugin module (exports PLUGIN_CLASS)
+       icon.<ext>          # optional icon (png/svg/webp/jpg/jpeg/gif) for the WebUI banner
+       guide.md            # optional Markdown guide (single source of truth)
+
+The folder layout is preferred for anything that ships an icon or a guide,
+because both assets are resolved relative to the plugin's on-disk directory.
+
+**The get_metadata() contract**
+
+Every plugin may override ``get_metadata()`` to declare how it appears in the
+classic WebUI *Plugins* tab and how it is documented. All keys are optional;
+the loader derives sensible defaults reflectively when a key is omitted.
+
+.. code-block:: python
+
+   def get_metadata(self) -> dict:
+       return {
+           "name": "my_plugin",
+           "display_name": "My Plugin",
+           "description": "One-line summary shown in the detail pane.",
+           "category": "Various",   # WebUI grouping (see below)
+           "icon": "icon.<ext>",    # relative to the plugin directory
+           "guide": "guide.md",     # relative to the plugin directory
+           # Optional "Run Now" button in the detail pane:
+           "runnable": True,
+           "run_action": "run_now",     # action POSTed to /api/components/run
+           "run_label": "Run Now",      # button caption
+           "run_title": "Trigger a one-shot run",  # tooltip
+           # Runtime toggling:
+           "disable_allowed": True,     # False keeps the plugin always-on
+       }
+
+**Macro-categories**
+
+Plugins are grouped in the WebUI under one of these macro-categories:
+``Core``, ``Interfaces``, ``Grillo``, ``Vessels``, ``Agent``, ``Recon``,
+``Various``. An explicit ``category`` in ``get_metadata()`` always wins. When
+omitted the loader auto-derives it from the plugin location (e.g. anything under
+``interface/`` → *Interfaces*, under ``grillo/`` → *Grillo*) or from the
+structural ``recon_*`` module-name convention (→ *Recon*), falling back to
+*Various*. Derivation is deterministic and language-independent — it never
+matches on message content.
+
+**Icons**
+
+Place an ``icon.<ext>`` (recommended 256×256) alongside the plugin. The
+plugin/interface manager — not the plugin itself — discovers the icon by
+scanning the plugin's on-disk directory for an ``icon.<ext>`` file, accepting
+any of ``png``, ``svg``, ``webp``, ``jpg``, ``jpeg``, ``gif`` (resolved in that
+priority order) and deriving the MIME type automatically. The WebUI serves it
+from ``/api/plugins/<name>/icon`` (path-confined to the plugin directory).
+Plugins without an icon automatically fall back to the SyntH logo.
+
+A third-party brand/trademark logo may be committed **only** if the owner's
+licence, trademark policy, or press kit **explicitly permits** using the mark to
+refer to that software/service. When permitted, use it **unmodified**, solely to
+refer to the original project (never as SyntH's own branding), and record the
+grant in ``LICENSE_EXTERNAL.md`` at the repo root. If the licence does not grant
+this, ship an original non-branded glyph or rely on the SyntH logo fallback.
+
+**Guides (single source of truth)**
+
+Ship a ``guide.md`` alongside the plugin. It is the *single source of truth*
+for that plugin's documentation and is consumed in two places:
+
+- the WebUI renders it at runtime in the plugin detail pane;
+- the Sphinx build collects every ``plugins/*/guide.md`` **and** every
+  ``plugins/*.guide.md`` into ``docs/plugins/generated/`` (via the
+  ``_collect_plugin_guides`` hook in ``docs/conf.py``) and lists them under
+  :doc:`plugins/generated_index`.
+
+Folder plugins keep the guide as ``plugins/<name>/guide.md``. **Single-file
+plugins** (a bare ``plugins/<name>.py`` with no folder) ship the guide as a
+sibling file ``plugins/<name>.guide.md`` — the WebUI's ``_read_plugin_guide``
+falls back to that path and the Sphinx collector globs it too.
+
+Write the guide once next to the plugin — never duplicate it as a separate
+``.rst`` under ``docs/``.
+
+**Centralized runtime enable/disable**
+
+Plugins can be toggled at runtime from the WebUI (``POST
+/api/components/toggle``) without a restart. Disabling performs a true unload
+and leaves a *ghost* record so the plugin still appears greyed-out in the list;
+re-enabling reloads and re-registers its actions. Set
+``disable_allowed: False`` for message-chain-critical plugins that must never
+be turned off. The status LED reflects state: green = loaded and active,
+red = loaded but broken, grey = disabled.
 
 Action Plugin
 ~~~~~~~~~~~~~

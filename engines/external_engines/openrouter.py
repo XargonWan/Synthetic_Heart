@@ -26,6 +26,7 @@ from typing import Any
 import requests
 
 from core.ai_plugin_base import AIPluginBase
+from core.beat_utils import is_outbound_beat
 from core.config_manager import config_registry
 from core.cortex_api_logger import log_cortex_request, log_cortex_response
 from core.logging_utils import log_debug, log_error, log_info, log_warning
@@ -40,43 +41,8 @@ _LEGACY_DICT_PROMPT_WARNED = False
 try:
     from core.variables_engine import register_exposed_var
 
-    register_exposed_var(
-        "OPENROUTER_API_KEY",
-        label="OpenRouter API Key",
-        default="",
-        value_type=str,
-        ui_type="password",
-        description="API key for OpenRouter (https://openrouter.ai/keys).",
-        scope="llm",
-        component="openrouter",
-        tags=["cortex_engine", "sensitive"],
-        needs_component_reload=True,
-    )
-    register_exposed_var(
-        "OPENROUTER_BASE_URL",
-        label="OpenRouter Base URL",
-        default="https://openrouter.ai/api/v1",
-        value_type=str,
-        ui_type="string",
-        description="Base URL for the OpenRouter API.",
-        scope="llm",
-        component="openrouter",
-        tags=["cortex_engine"],
-        advanced=True,
-        needs_component_reload=True,
-    )
-    register_exposed_var(
-        "OPENROUTER_DEFAULT_MODEL",
-        label="Default Model",
-        default="x-ai/grok-4.1-fast",
-        value_type=str,
-        ui_type="combobox",
-        description="Default OpenRouter model used when no scope/action override matches.",
-        scope="llm",
-        component="openrouter",
-        tags=["cortex_engine"],
-        needs_component_reload=False,
-    )
+    # API key, base URL and default model live in the Engines tab
+    # (external_endpoints), not in Settings.
     register_exposed_var(
         "OPENROUTER_DISABLE_TOOLS",
         label="Disable Tools",
@@ -155,6 +121,7 @@ OPENROUTER_API_KEY = config_registry.get_var(
     group="llm",
     component="openrouter",
     sensitive=True,
+    hidden=True,
 )
 
 OPENROUTER_BASE_URL = config_registry.get_var(
@@ -165,6 +132,7 @@ OPENROUTER_BASE_URL = config_registry.get_var(
     group="llm",
     component="openrouter",
     advanced=True,
+    hidden=True,
 )
 
 OPENROUTER_DEFAULT_MODEL = config_registry.get_var(
@@ -174,6 +142,7 @@ OPENROUTER_DEFAULT_MODEL = config_registry.get_var(
     description="Default OpenRouter model.",
     group="llm",
     component="openrouter",
+    hidden=True,
 )
 
 OPENROUTER_DISABLE_TOOLS = config_registry.get_var(
@@ -536,33 +505,6 @@ class OpenRouterPlugin(AIPluginBase):
             "supports_voice_interaction": False,
             "model_name": self._current_model,
         }
-
-    # --- Agent hooks ---
-    def supports_agent(self) -> bool:
-        return True
-
-    def agent_execute(self, action_dict: dict, context: dict | None = None) -> dict:
-        try:
-            from core.core_initializer import PLUGIN_REGISTRY
-
-            agent_plugin = (
-                PLUGIN_REGISTRY.get("agent")
-                if isinstance(PLUGIN_REGISTRY, dict)
-                else None
-            )
-            if agent_plugin and hasattr(agent_plugin, "execute_action"):
-                res = agent_plugin.execute_action(
-                    action_dict, context or {}, None, None
-                )
-                if hasattr(res, "__await__"):
-                    return {
-                        "status": "pending_async",
-                        "note": "Agent plugin returned coroutine",
-                    }
-                return res or {"status": "ok"}
-        except Exception as exc:
-            log_warning(f"[openrouter] agent_execute adapter failed: {exc}")
-        return {"status": "unsupported", "reason": "agent plugin not available"}
 
     # ------------------------------------------------------------------
     # Model resolution
@@ -1447,14 +1389,14 @@ class OpenRouterPlugin(AIPluginBase):
         # actions to reach the target interface (e.g. telegram_bot).
         is_grillo_internal = is_grillo and (
             not isinstance(prompt_dict, dict)
-            or prompt_dict.get("beat_type", "internal") != "outreach"
+            or not is_outbound_beat(prompt_dict.get("beat_type"))
         )
 
         if is_grillo_internal:
             interface_hint = (
                 "CURRENT INTERFACE: grillo (INTERNAL)\n"
                 "This is an internal introspection beat. Do NOT output any message_* actions.\n"
-                "Use ONLY internal actions like 'create_personal_diary_entry', 'set_emotion', etc."
+                "Use ONLY internal actions like 'create_personal_diary_entry', 'update_emotion_state', etc."
             )
         else:
             interface_hint = (

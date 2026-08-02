@@ -17,11 +17,12 @@ Key concepts
 - Debrief: postflight hook for plugins (``on_debrief``) to inspect processed
   and failed actions and optionally return recovery actions.
 - Plugins: implement ``get_recon_contributions()`` and/or ``on_debrief()``.
-  Recon and Debrief plugins should each live in their own file under the
-  ``plugins/`` directory (e.g. ``recon_language_evaluator.py`` or
-  ``debrief_action_intent.py``) and register themselves via the normal plugin
-  registry. Core code only handles orchestration; individual plugin logic
-  belongs in the ``plugins/`` folder.
+  Recon and Debrief plugins each live in their own file under the dedicated
+  ``plugins/recon/`` and ``plugins/debrief/`` subpackages (e.g.
+  ``plugins/recon/recon_language_evaluator.py`` or
+  ``plugins/debrief/debrief_action_intent.py``) and register themselves via the
+  normal plugin registry. Core code only handles orchestration; individual
+  plugin logic belongs in the ``plugins/`` folder.
 - Language/Tone detectors: implemented as plugins or as Recon contributions.
   Language detector plugins should only consider the user message and recent
   history from the same ``interface_path`` when making a decision; global chat or
@@ -36,7 +37,7 @@ Plugin hooks and schemas
 - ``get_recon_contributions(self, *, message, context_memory, text, tags=None, keywords=None, max_results=5)``
   Return list of normalized contributions. Contribution ``type`` values:
   ``memory``, ``snippet``, ``instruction``, ``language_hint``,
-  ``tone_hint``, ``log_flag``.
+  ``tone_hint``.
 
   Contribution example::
 
@@ -100,14 +101,58 @@ Examples
 --------
 - Implement a small Recon plugin that returns a `language_hint` and an
   `instruction` to be injected into the prompt (see `plugins/` for
-  examples like `recon_log_reader.py`).
+  examples like `recon_tone_evaluator.py`).
+
+Video transcription (Recon Video Transcriber)
+---------------------------------------------
+The ``recon_video_transcriber`` plugin (``plugins/recon/recon_video_transcriber.py``)
+transcribes videos referenced in a conversation and attaches the result to the
+prompt as a ``snippet`` contribution (the only recon type surfaced by the
+prompt engine besides ``memory`` and ``instruction``).
+
+How it works:
+
+1. The shared Recon LLM call is asked (via ``get_recon_instruction``) to
+   reconstruct a list of *canonical* YouTube watch URLs from the user's
+   message. This handles bare video IDs (e.g. ``aoP81h68Xkk``) and malformed
+   links (e.g. ``htps:/youtube.com/watch?v=...``) — no keyword or regex
+   intent matching is used, so it works in any language.
+2. ``parse_recon_response`` validates each candidate URL *structurally* with
+   :func:`core.media_extract.is_youtube_url`, and also looks for a local video
+   file referenced on the incoming message's ``raw_data`` (keys
+   ``media_path`` / ``file_path`` / ``attachment_path`` / ``video_path``).
+3. For each source it obtains a transcript:
+
+   - YouTube → existing subtitles (fast path) or downloaded audio → Auris STT.
+   - Local file → audio extracted via ``ffmpeg`` → Auris STT.
+   - Optionally a visual description via Iris (local files only).
+
+Because URL reconstruction runs on the message *text*, the primary use case
+("transcribe this YouTube video") works on **every** interface (Telegram,
+Discord, WebUI, OpenAI-compatible API) with no interface-specific changes. Local video
+visual passes require the interface to expose the downloaded file path on the
+message's ``raw_data`` and keep the file alive until Recon runs.
+
+Configuration flags:
+
+- ``RECON_VIDEO_TRANSCRIBER_RECON_ENABLED`` (bool, default: True)
+- ``RECON_VIDEO_MAX_SECONDS`` (int, default: 1800; 0 = no limit) — skip videos
+  longer than this to stay within ``RECON_TIMEOUT``.
+- ``RECON_VIDEO_INCLUDE_VISION`` (bool, default: True) — also run an Iris
+  visual description for local video files.
+- ``RECON_VIDEO_SNIPPET_MAX_CHARS`` (int, default: 12000; 0 = no limit) —
+  truncate each transcript to avoid bloating the prompt.
+
+Dependencies: ``yt-dlp`` (YouTube fetch + subtitles) and ``ffmpeg`` (audio
+extraction). The subtitle fast-path avoids downloading/transcoding audio when
+captions are available.
 
 Testing & compatibility
 ------------------------
 - Recon contributions are optional; if no recon-capable plugins are
   registered the system skips Recon automatically.
 - Debrief hooks are fail-safe: plugin exceptions are logged and ignored.
-- The action-intent Debrief plugin (see `plugins/debrief_action_intent.py`) can
+- The action-intent Debrief plugin (see `plugins/debrief/debrief_action_intent.py`) can
   propose recovery actions when the assistant implied or promised an action
   but did not execute it. Typical examples are reminders or follow-up actions
   promised in natural language but omitted from the main JSON reply.

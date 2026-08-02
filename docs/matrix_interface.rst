@@ -14,9 +14,9 @@ Overview
   are installed and the environment variables are present.
 - Fully decoupled from the core: removing ``interface/matrix_interface.py`` or
   skipping the configuration does not affect other interfaces.
-- Uses the shared ``message_queue`` and ``ChatLinkStore`` so prompt context,
-  diary entries, and thread metadata flow through the same path as Telegram or
-  Discord.
+- Uses the shared ``message_queue`` and the ``interface_paths`` name-resolver
+  registry so prompt context, diary entries, and thread metadata flow through
+  the same path as Telegram or Discord.
 
 Prerequisites
 -------------
@@ -92,6 +92,21 @@ Checking Delivery
   ``matrix_chat`` during mention detection or rate-limit checks.
 - Outgoing replies use the ``message_matrix_chat`` action. You can confirm by
   searching for the action name in the debug logs.
+
+Sending Files
+-------------
+
+Synth can push a local file to a room with the ``send_file_matrix_chat`` action
+(``required_fields: ["path", "target"]``, ``optional_fields: ["caption",
+"thread_event_id"]``, ``security_level: "medium"``,
+``external_effects: ["filesystem"]``). The source ``path`` is confined to the
+Agent sandbox roots by ``core/outbound_file_utils.py`` — traversal, missing
+files, and directories are rejected. The media kind is auto-detected from the
+MIME type (image / audio / video / document) and mapped to the corresponding
+Matrix msgtype; audio is delivered as a playable ``m.audio`` message rather than
+an inert ``m.file`` attachment. A ``caption`` longer than the interface limit is
+sent as a follow-up text message. This action mirrors ``send_file_telegram_bot``
+and ``send_file_discord_bot`` on the other interfaces.
 
 Troubleshooting
 ---------------

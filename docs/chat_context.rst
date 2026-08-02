@@ -191,7 +191,6 @@ The ``plugins/recent_chats.py`` plugin provides additional functionality for man
 **Available Actions:**
 
 - ``get_recent_chats``: Retrieve most recently active chats
-- ``cleanup_old_chats``: Remove old chat records
 
 **Database Schema:**
 

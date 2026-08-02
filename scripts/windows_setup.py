@@ -313,7 +313,7 @@ def _write_env(values: dict[str, str]) -> None:
         ),
         (
             "Trainer / notifications",
-            ["TRAINER_CHAT_ID", "LOG_CHAT_ID", "LOG_CHAT_INTERFACE"],
+            ["TRAINER_CHAT_ID", "LOG_CHAT_ID"],
         ),
         (
             "WebUI",
@@ -739,15 +739,9 @@ def stage_env(args: argparse.Namespace, db_conf: dict[str, str]) -> bool:
         ),
         _Step(
             "LOG_CHAT_ID",
-            "Log chat ID",
+            "Log chat",
             existing.get("LOG_CHAT_ID", ""),
-            "Where to send system log messages. Same format as trainer ID.",
-        ),
-        _Step(
-            "LOG_CHAT_INTERFACE",
-            "Log chat interface",
-            existing.get("LOG_CHAT_INTERFACE", ""),
-            "Interface name for the log channel, e.g. telegram_bot.",
+            "Interface path for system log messages, e.g. telegram_bot/-28475648/6.",
         ),
     ]
     group_d = _run_steps(d_steps, existing, args.non_interactive)

@@ -414,22 +414,7 @@ async def handle_incoming_message(
                 "[plugin_instance] No LLM plugin loaded! Cannot handle incoming message."
             )
             log_error(f"[plugin_instance] Available plugins: {dir()}")
-            # Try to load manual plugin as fallback
-            try:
-                log_warning(
-                    "[plugin_instance] Attempting to load manual plugin as fallback..."
-                )
-                await load_plugin("manual")
-                if plugin is None:
-                    raise ValueError("Manual plugin failed to load")
-                log_info(
-                    "[plugin_instance] Manual plugin loaded successfully as fallback"
-                )
-            except Exception as fallback_e:
-                log_error(
-                    f"[plugin_instance] Fallback plugin loading failed: {fallback_e}"
-                )
-                raise ValueError("No LLM plugin loaded and fallback failed")
+            raise ValueError("No LLM plugin loaded")
 
         # Normalize message user/date fields to avoid AttributeErrors later
         try:
@@ -665,24 +650,84 @@ async def handle_incoming_message(
                 if iris_result is not None:
                     try:
                         original_text = getattr(message, "text", "") or ""
-                        # Build a structured block with all available metadata.
+                        # Build a first-person "current perception" block.  The
+                        # description is what the synth is *seeing right now* in
+                        # the image the user just shared — framing it as live
+                        # perception (rather than a neutral "[Iris vision: ...]"
+                        # metadata record) stops the model from treating a fresh
+                        # image as a distant/faded memory ("old analysis logs").
+                        # Kept language-neutral: static English framing text, no
+                        # keyword/phrase detection on the user's message.
                         parts: list[str] = [iris_result.description]
                         if iris_result.language:
                             parts.append(f"language: {iris_result.language}")
                         if iris_result.confidence is not None:
                             parts.append(f"confidence: {iris_result.confidence:.2f}")
-                        description_block = "[Iris vision: " + " | ".join(parts) + "]"
+                        description_block = (
+                            "[Image the user just shared with you — this is what "
+                            "you can see in it right now: " + " | ".join(parts) + "]"
+                        )
                         if original_text:
-                            setattr(
-                                message,
-                                "text",
-                                f"{original_text}\n\n{description_block}",
-                            )
+                            augmented_text = f"{original_text}\n\n{description_block}"
                         else:
-                            setattr(message, "text", description_block)
+                            augmented_text = description_block
+                        setattr(message, "text", augmented_text)
                         log_info(
                             "[plugin_instance] Appended Iris vision analysis to prompt text"
                         )
+
+                        # Persist the enriched text into the already-saved
+                        # chat-history row so the description survives across
+                        # turns (the raw caption was saved upstream by the
+                        # interface).  Also record the durable cache path in
+                        # metadata so the synth can re-inspect the media later.
+                        try:
+                            msg_iface = getattr(message, "interface_path", None)
+                            raw_ts = getattr(message, "date", None) or getattr(
+                                message, "timestamp", None
+                            )
+                            msg_ts = (
+                                raw_ts.isoformat()
+                                if hasattr(raw_ts, "isoformat")
+                                else raw_ts
+                            )
+                            if msg_iface and msg_ts:
+                                update_meta: dict | None = None
+                                if getattr(iris_result, "cached_path", None):
+                                    _cached_mime = None
+                                    for _att in attachments:
+                                        _m = str(
+                                            _att.get("mime_type")
+                                            or _att.get("content_type")
+                                            or _att.get("type")
+                                            or ""
+                                        )
+                                        if _m.startswith(("image/", "video/")):
+                                            _cached_mime = _m
+                                            break
+                                    update_meta = {
+                                        "iris_cached_path": iris_result.cached_path,
+                                        "iris_cached_mime": _cached_mime,
+                                    }
+                                from core.chat_context_manager import (
+                                    update_message_in_context,
+                                )
+
+                                await update_message_in_context(
+                                    interface_path=msg_iface,
+                                    timestamp=msg_ts,
+                                    message_text=augmented_text,
+                                    metadata=update_meta,
+                                )
+                            else:
+                                log_debug(
+                                    "[plugin_instance] Iris persist skipped: missing "
+                                    f"interface_path/timestamp (iface={msg_iface!r}, ts={msg_ts!r})"
+                                )
+                        except Exception as exc:
+                            log_warning(
+                                f"[plugin_instance] Could not persist Iris description to history: {exc}"
+                            )
                     except Exception as exc:
                         log_warning(
                             f"[plugin_instance] Could not append Iris description to message text: {exc}"
@@ -867,8 +912,9 @@ async def handle_incoming_message(
     # derive_cortex_scope() is the single authoritative mapping from context
     # flags (is_trainer, grillo_beat) to scope strings.
     effective_plugin = plugin
+    _scope_model: str | None = None
     try:
-        from core.config import derive_cortex_scope, get_active_cortex_engine
+        from core.config import derive_cortex_scope, get_active_cortex_scope
 
         _scope = derive_cortex_scope(
             context_memory_or_prompt
@@ -882,7 +928,7 @@ async def handle_incoming_message(
             f"global_plugin={plugin.__class__.__name__ if plugin else None}"
         )
 
-        active_engine_name = await get_active_cortex_engine(scope=_scope)
+        active_engine_name, _scope_model = await get_active_cortex_scope(scope=_scope)
         reg = get_cortex_registry()
         resolved = reg.get_engine(active_engine_name)
         if resolved is None:
@@ -891,7 +937,7 @@ async def handle_incoming_message(
             effective_plugin = resolved
             log_info(
                 f"[plugin_instance] Engine resolved from registry: '{active_engine_name}' "
-                f"(scope={_scope!r})"
+                f"(scope={_scope!r}, model={_scope_model!r})"
             )
     except Exception as scope_exc:
         log_warning(
@@ -908,9 +954,12 @@ async def handle_incoming_message(
             getattr(effective_plugin, "supports_prompt_request", False)
         ):
             prompt_for_engine = prompt_request_obj
-        result = await effective_plugin.handle_incoming_message(
-            bot, message, prompt_for_engine
-        )
+        from core.config import scope_model_override
+
+        with scope_model_override(effective_plugin, _scope_model):
+            result = await effective_plugin.handle_incoming_message(
+                bot, message, prompt_for_engine
+            )
         try:
             _log_llm_traffic(prompt, result, interface)
         except Exception as e:
@@ -1600,22 +1649,34 @@ async def _describe_attachment_images_with_iris(
         if not image_bytes:
             continue
 
-        suffix = ""
-        if "/" in mime_type:
-            suffix = f".{mime_type.split('/', 1)[1].split(';')[0]}"
-
-        tmp_path = None
+        # Persist the media into the Iris durable cache instead of an
+        # immediately-deleted temp file, so the synth can re-inspect it on
+        # later turns via the vision_describe action.  Cache management (naming,
+        # TTL pruning) lives at the Iris subsystem level.
+        cached_path = None
         try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(image_bytes)
-                tmp_path = tmp.name
+            cached_path = iris.cache_media_bytes(image_bytes, mime_type)
+        except Exception as exc:
+            log_warning(f"[plugin_instance] Iris cache write failed: {exc}")
+
+        analysis_path = cached_path
+        fallback_tmp = None
+        try:
+            if analysis_path is None:
+                suffix = ""
+                if "/" in mime_type:
+                    suffix = f".{mime_type.split('/', 1)[1].split(';')[0]}"
+                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                    tmp.write(image_bytes)
+                    fallback_tmp = tmp.name
+                analysis_path = fallback_tmp
 
             log_info(
                 f"[plugin_instance] Iris: calling describe_media for {mime_type} ({len(image_bytes)} bytes)"
             )
             try:
                 result = await asyncio.wait_for(
-                    iris.describe_media(tmp_path, mime_type, prompt),
+                    iris.describe_media(analysis_path, mime_type, prompt),
                     timeout=120.0,
                 )
             except asyncio.TimeoutError:
@@ -1624,6 +1685,9 @@ async def _describe_attachment_images_with_iris(
                 )
                 result = None
             if result and result.description:
+                # Record the durable cache location on the result so callers can
+                # persist it into chat-history metadata for re-inspection.
+                result.cached_path = cached_path
                 log_info(
                     f"[plugin_instance] Iris: got description ({len(result.description)} chars)"
                 )
@@ -1634,9 +1698,11 @@ async def _describe_attachment_images_with_iris(
         except Exception as exc:
             log_warning(f"[plugin_instance] Iris description failed: {exc}")
         finally:
-            if tmp_path:
+            # Only the transient fallback temp file is removed; the durable
+            # cache copy is intentionally retained (pruned by TTL).
+            if fallback_tmp:
                 try:
-                    os.remove(tmp_path)
+                    os.remove(fallback_tmp)
                 except Exception:
                     pass
 

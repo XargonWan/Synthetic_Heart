@@ -35,7 +35,7 @@ async def execute_command(name: str, *args: Any, **kwargs: Any) -> str:
 
 async def handle_command_message(
     command_text: str,
-    user_id: int | None = None,
+    user_id: int | str | None = None,
     interface_id: str | None = None,
     interface_context=None,
 ) -> str | None:
@@ -137,11 +137,15 @@ async def help_command() -> str:
         "`/wake` – Enable normal routing in this chat\n"
         "`/sleep` – Ignore non-command messages in this chat\n"
         "`/status` – Show wake/sleep status for this chat\n"
+        "`/get_interface_path` – Show the interface_path of the current chat\n"
         "`/diary [days]` – View synth's diary entries (default: 7 days)\n"
         "`/purge_map [days]` – Purge old mappings\n"
-        "`/clean_chat_link <chat_id>` – Remove the link between a chat and conversation.\n"
         "`/logchat` – Set the current chat as the log chat\n"
         "`/splitprompt [on|off]` – Enable/disable double-prompt mode (PART1/PART2)\n"
+        "`/task` – List recent agent tasks\n"
+        "`/task resume <id>` – Resume a paused (pending) agent task\n"
+        "`/plugins` – List plugins and their state\n"
+        "`/plugin enable|disable <name>` – Enable or disable a plugin\n"
     )
     return help_text
 
@@ -283,10 +287,53 @@ async def status_command(interface_context=None) -> str:
     return f"🤖 Status: {status_text}"
 
 
+async def get_interface_path_command(interface_context=None) -> str:
+    """Report the interface_path of the chat where the command was issued."""
+    from core.interface_path_utils import build_interface_path
+
+    interface_id, update, _context = await _resolve_interface_context(interface_context)
+
+    if interface_id == "telegram_bot" and update:
+        chat = getattr(update, "effective_chat", None)
+        message = getattr(update, "effective_message", None)
+        chat_id = chat.id if chat else None
+        if chat_id is None:
+            return "⚠️ Unable to determine chat."
+        thread_id = getattr(message, "message_thread_id", None) if message else None
+        interface_path = build_interface_path(
+            "telegram_bot",
+            str(chat_id),
+            str(thread_id) if thread_id else None,
+        )
+        return f"📍 Interface path: `{interface_path}`"
+
+    if isinstance(interface_context, dict):
+        interaction = interface_context.get("discord_interaction")
+        if interaction is not None:
+            guild = getattr(interaction, "guild", None)
+            channel = getattr(interaction, "channel", None)
+            guild_id = getattr(guild, "id", None)
+            channel_id = getattr(channel, "id", None)
+            if guild_id:
+                interface_path = build_interface_path(
+                    "discord_bot",
+                    str(guild_id),
+                    str(channel_id) if channel_id else None,
+                )
+            else:
+                user = getattr(interaction, "user", None)
+                user_id = getattr(user, "id", None)
+                interface_path = build_interface_path("discord_bot", str(user_id))
+            return f"📍 Interface path: `{interface_path}`"
+
+    return "📍 Interface path unavailable for this interface."
+
+
 register_command("wake", wake_command)
 register_command("awake", wake_command)
 register_command("sleep", sleep_command)
 register_command("status", status_command)
+register_command("get_interface_path", get_interface_path_command)
 
 
 async def _resolve_cortex_choice(choice_raw: str) -> str:
@@ -361,13 +408,89 @@ async def _resolve_cortex_choice(choice_raw: str) -> str:
         raise ValueError(f"❌ Cortex `{choice}` not found.")
 
 
+def _get_engine_models(engine_name: str) -> list[str]:
+    """Return the list of models supported by *engine_name*.
+
+    Returns an empty list when the engine is not loaded or does not expose
+    model selection.
+    """
+    from core.cortex_registry import get_cortex_registry
+
+    try:
+        instance = get_cortex_registry().get_engine(engine_name)
+    except Exception:
+        return []
+    if instance is None or not hasattr(instance, "get_supported_models"):
+        return []
+    try:
+        return list(instance.get_supported_models() or [])
+    except Exception:
+        return []
+
+
+def _get_engine_current_model(engine_name: str) -> str | None:
+    """Return the currently selected model for *engine_name*, or ``None``."""
+    from core.cortex_registry import get_cortex_registry
+
+    try:
+        instance = get_cortex_registry().get_engine(engine_name)
+    except Exception:
+        return None
+    if instance is None or not hasattr(instance, "get_current_model"):
+        return None
+    try:
+        return instance.get_current_model()
+    except Exception:
+        return None
+
+
+async def _apply_cortex_model(engine_name: str, model_name: str) -> str:
+    """Set *model_name* as the active model for *engine_name* and persist it.
+
+    Returns the applied model name. Raises ``ValueError`` with a
+    user-friendly message on failure.
+    """
+    from core.cortex_registry import get_cortex_registry
+
+    instance = get_cortex_registry().get_engine(engine_name)
+    if instance is None:
+        raise ValueError(f"❌ Engine `{engine_name}` is not loaded.")
+    if not hasattr(instance, "set_current_model"):
+        raise ValueError(f"❌ Engine `{engine_name}` does not support model selection.")
+    try:
+        instance.set_current_model(model_name)
+    except ValueError as exc:
+        raise ValueError(f"❌ {exc}") from exc
+
+    # Persist model selection to the DB for external endpoint engines.
+    try:
+        from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+
+        if isinstance(instance, ExternalCortexEngine):
+            from core.external_endpoints.registry import (
+                get_external_endpoint_registry,
+            )
+
+            await get_external_endpoint_registry().set_default_model(
+                instance._endpoint.id, model_name
+            )
+    except Exception:
+        # Non-fatal: the runtime model is set even if DB persistence fails.
+        pass
+
+    return model_name
+
+
 async def cortex_command(*args) -> str:
     """Handle Cortex switching command.
 
     Usage:
       `/cortex` -> list registered cortex kinds and their engines (kind/engine)
+      `/cortex list` -> list every engine grouped by kind with its models
+      `/cortex list <engine>` -> list only the models of that engine
       `/cortex <kind>/<engine>` -> set by fully-qualified name
       `/cortex <engine>` -> set by short name if unambiguous
+      `/cortex <engine> <model>` -> set the engine and its active model
 
     If the short name is ambiguous across cortex kinds, the command will ask
     the user to disambiguate using the fully-qualified form.  When invoked
@@ -382,10 +505,33 @@ async def cortex_command(*args) -> str:
     )
     from core.cortex_registry import get_cortex_registry
 
-    # resolve active engines across scopes
-    base = await get_active_cortex_engine(None)
-    grillo = await get_active_cortex_engine("grillo")
-    trainer = await get_active_cortex_engine("trainer")
+    async def _safe_active(scope: str | None) -> str:
+        """Resolve the active engine for *scope*, degrading gracefully.
+
+        ``get_active_cortex_engine`` re-raises when the configured engine is
+        unresolvable (e.g. a stale ``BASE_CORTEX`` pointing at an engine that
+        is no longer registered).  We must never let that abort the command:
+        otherwise listing (``/cortex``, ``/cortex list``) would break exactly
+        when the user needs it most to fix the broken setting.  Fall back to
+        the raw configured value, or a placeholder, so listing still renders.
+        """
+        try:
+            return await get_active_cortex_engine(scope)
+        except Exception:
+            from core.config import config_registry
+
+            key = {
+                None: "BASE_CORTEX",
+                "grillo": "GRILLO_CORTEX",
+                "trainer": "TRAINER_CORTEX",
+            }.get(scope, "BASE_CORTEX")
+            raw = config_registry.get_value(key, "Default")
+            return f"{raw} (unresolved)" if raw not in (None, "") else "unresolved"
+
+    # resolve active engines across scopes (degrade gracefully on failure)
+    base = await _safe_active(None)
+    grillo = await _safe_active("grillo")
+    trainer = await _safe_active("trainer")
 
     reg = get_cortex_registry()
 
@@ -411,6 +557,46 @@ async def cortex_command(*args) -> str:
         )
         reverse_map.setdefault(eng, []).append(k or "unknown")
 
+    # `/cortex list` and `/cortex list <engine>` -> show engines with models.
+    if args and str(args[0]).strip().lower() == "list":
+        if len(args) >= 2:
+            # single-engine listing
+            try:
+                engine_name = await _resolve_cortex_choice(str(args[1]).strip())
+            except ValueError as ve:
+                return str(ve)
+            models = _get_engine_models(engine_name)
+            current = _get_engine_current_model(engine_name)
+            lines = [f"*Models for `{engine_name}` (Cortex):*"]
+            if not models:
+                lines.append("_No models available for this engine._")
+            else:
+                for m in models:
+                    marker = " ✅" if m == current else ""
+                    lines.append(f"• `{m}`{marker}")
+            lines.append("")
+            lines.append(f"To switch: `/cortex {engine_name} <model>`")
+            return "\n".join(lines)
+
+        # full listing: every engine grouped by kind with its models
+        lines = ["*Available Cortex Engines and models:*"]
+        for k in sorted(kind_map.keys()):
+            engines = kind_map.get(k) or []
+            if not engines:
+                continue
+            lines.append(f"\n{k}:")
+            for e in sorted(engines):
+                current = _get_engine_current_model(e)
+                lines.append(f"• `{k}/{e}`")
+                models = _get_engine_models(e)
+                if models:
+                    for m in models:
+                        marker = " ✅" if m == current else ""
+                        lines.append(f"    - `{m}`{marker}")
+                else:
+                    lines.append("    - _no models available_")
+        return "\n".join(lines)
+
     # No-arg -> list by kind/engine with scope info.  We display the
     # *raw* override value for grillo/trainer so that when the setting is
     # "Default" (i.e. no override) the output reads "Default" instead of
@@ -429,12 +615,6 @@ async def cortex_command(*args) -> str:
         grillo_display = _fmt_override("grillo", grillo)
         trainer_display = _fmt_override("trainer", trainer)
 
-        lines: list[str] = ["*Active Cortex engines:*"]
-        # show base engine separately from any live override
-        lines.append(f"• base: `{base}`")
-        # trainer and grillo overrides always shown (even if Default)
-        lines.append(f"• trainer override: `{trainer_display}`")
-        lines.append(f"• grillo override: `{grillo_display}`")
         # optionally show live override when configured and different from base
         try:
             from core.config import config_registry
@@ -442,28 +622,41 @@ async def cortex_command(*args) -> str:
             live_override = config_registry.get_value("LIVE_CORTEX", "Default")
         except Exception:
             live_override = "Default"
+
+        lines: list[str] = [
+            f"*Active Cortex engine:* `{base}`",
+            f"• trainer override: `{trainer_display}`",
+            f"• grillo override: `{grillo_display}`",
+        ]
         if (
             live_override
             and live_override not in ("Default", "", None)
             and live_override != base
         ):
             lines.append(f"• live override: `{live_override}`")
-        lines.append("\n*Available Cortex Engines:*")
+
+        lines.append("")
+        lines.append("*Available Cortex engines:*")
+        has_engines = False
         for k in sorted(kind_map.keys()):
             engines = kind_map.get(k) or []
             if not engines:
                 continue
-            lines.append(f"\n{k}:")
+            has_engines = True
             for e in sorted(engines):
-                lines.append(f"• `{k}/{e}`")
-        lines.append(
-            "\nTo change base: `/cortex <kind>/<engine>` or `/cortex <engine>` (if unambiguous)"
-        )
+                marker = " ✅" if e == base else ""
+                lines.append(f"• `{k}/{e}`{marker}")
+        if not has_engines:
+            lines.append("_No engines registered._")
+
+        lines.append("")
+        lines.append("To switch: `/cortex <engine>` or `/cortex <engine> <model>`")
         lines.append("To override grillo: `/cortex_grillo <engine>`")
         lines.append("To override trainer: `/cortex_trainer <engine>`")
         return "\n".join(lines)
 
     choice_raw = str(args[0]).strip()
+    model_arg = str(args[1]).strip() if len(args) >= 2 else None
 
     try:
         selected_engine = await _resolve_cortex_choice(choice_raw)
@@ -478,9 +671,31 @@ async def cortex_command(*args) -> str:
         from core.config import switch_active_cortex_engine
 
         await switch_active_cortex_engine(selected_engine, use_hot_swap=True)
-        return f"✅ Cortex engine dynamically updated to `{selected_engine}`."
     except Exception as e:
         return f"❌ Error loading plugin: {e}"
+
+    # Optionally apply a specific model on the newly-selected engine.
+    if model_arg:
+        try:
+            applied_model = await _apply_cortex_model(selected_engine, model_arg)
+        except ValueError as ve:
+            return (
+                f"✅ Cortex engine dynamically updated to `{selected_engine}`, "
+                f"but the model was not changed.\n{ve}"
+            )
+        return (
+            f"✅ Cortex engine dynamically updated to `{selected_engine}` "
+            f"model `{applied_model}`."
+        )
+
+    # No explicit model: include the engine's current/default model when known.
+    current_model = _get_engine_current_model(selected_engine)
+    if current_model:
+        return (
+            f"✅ Cortex engine dynamically updated to `{selected_engine}` "
+            f"model `{current_model}`."
+        )
+    return f"✅ Cortex engine dynamically updated to `{selected_engine}`."
 
 
 # Register cortex command after function is defined
@@ -574,6 +789,251 @@ register_command("cortex_grillo", cortex_grillo_command)
 register_command("cortex_trainer", cortex_trainer_command)
 
 
+# ---------------------------------------------------------------------------
+# Media subsystem commands: /vox /auris /iris /live
+#
+# All four mirror the /cortex UX:
+#   /<cmd>                    -> list every registered engine (active marked)
+#   /<cmd> <engine>           -> list that engine's models (current marked)
+#   /<cmd> <engine> <model>   -> switch the active engine AND its model
+#
+# Engines come from the per-subsystem registry (VOX/AURIS/IRIS/LIVE_REGISTRY).
+# Models come from the external-endpoint registry (available_models); local
+# engines that are not external endpoints simply expose no models.
+# ---------------------------------------------------------------------------
+
+
+async def _media_endpoint_models(engine_name: str) -> tuple[list[str], str | None]:
+    """Return ``(available_models, default_model)`` for an external endpoint.
+
+    Returns ``([], None)`` when *engine_name* is not an external endpoint
+    (e.g. a bundled local engine) or on any lookup failure.
+    """
+    try:
+        from core.external_endpoints.registry import get_external_endpoint_registry
+
+        endpoint = await get_external_endpoint_registry().get_endpoint_by_name(
+            engine_name
+        )
+    except Exception:
+        return [], None
+    if endpoint is None:
+        return [], None
+    return list(endpoint.available_models or []), endpoint.default_model
+
+
+async def _media_set_endpoint_model(engine_name: str, model: str) -> None:
+    """Persist *model* as the default for external endpoint *engine_name*.
+
+    Silently no-ops when the engine is not an external endpoint.
+    """
+    try:
+        from core.external_endpoints.registry import get_external_endpoint_registry
+
+        registry = get_external_endpoint_registry()
+        endpoint = await registry.get_endpoint_by_name(engine_name)
+        if endpoint is not None:
+            await registry.set_default_model(endpoint.id, model)
+    except Exception:
+        pass
+
+
+async def _media_command(
+    label: str,
+    config_key: str,
+    engines: list[str],
+    default_engine: str,
+    args: tuple,
+) -> str:
+    """Shared handler for the /vox /auris /iris /live commands.
+
+    Args:
+        label:          Human-readable subsystem name for headings.
+        config_key:     Config registry key holding the active engine.
+        engines:        Registered engine names for this subsystem.
+        default_engine: Fallback value if the config key is unset.
+        args:           Raw command arguments.
+    """
+    from core.config import config_registry
+
+    try:
+        active = str(
+            config_registry.get_value(config_key, default_engine, value_type=str)
+        )
+    except Exception:
+        active = default_engine
+
+    # No-arg -> list every registered engine, marking the active one.
+    if not args:
+        lines = [
+            f"*Active {label} engine:* `{active}`",
+            "",
+            f"*Available {label} engines:*",
+        ]
+        if not engines:
+            lines.append("_No engines registered._")
+        else:
+            for name in sorted(engines):
+                marker = " ✅" if name == active else ""
+                lines.append(f"• `{name}`{marker}")
+        lines.append("")
+        lines.append(
+            f"To switch: `/{label.lower()} <engine>` or `/{label.lower()} <engine> <model>`"
+        )
+        return "\n".join(lines)
+
+    engine_arg = str(args[0]).strip()
+    model_arg = str(args[1]).strip() if len(args) >= 2 else None
+
+    # Resolve the engine name (exact, else case-insensitive substring).
+    if engine_arg in engines:
+        engine_name = engine_arg
+    else:
+        candidates = [e for e in engines if engine_arg.lower() in e.lower()]
+        exact = [e for e in candidates if e.lower() == engine_arg.lower()]
+        if len(exact) == 1:
+            engine_name = exact[0]
+        elif len(candidates) == 1:
+            engine_name = candidates[0]
+        elif len(candidates) > 1:
+            hint = "\n".join(f"/{label.lower()} {c}" for c in sorted(candidates))
+            return (
+                f"❌ Found multiple matching {label} engines for "
+                f"'{engine_arg}'. Which one did you mean?\n{hint}"
+            )
+        else:
+            avail = ", ".join(f"`{e}`" for e in sorted(engines)) or "_(none)_"
+            return f"❌ {label} engine `{engine_arg}` not found. Available: {avail}"
+
+    models, current_model = await _media_endpoint_models(engine_name)
+
+    # `/<cmd> <engine>` with no model argument.
+    if model_arg is None:
+        # Engines without selectable models (e.g. bundled local engines like
+        # kitten) have nothing to pick, so switch directly instead of showing
+        # an empty model list that would otherwise be a dead end.
+        if not models:
+            try:
+                await config_registry.set_value(config_key, engine_name)
+            except Exception as exc:
+                return f"❌ Failed to switch {label} engine: {exc}"
+            return (
+                f"✅ {label} engine switched to `{engine_name}`.\n"
+                f"_Note: media engines are applied on next use; a restart guarantees a full re-sync._"
+            )
+
+        # Engine has selectable models -> list them for the user to choose.
+        lines = [f"*Models for `{engine_name}` ({label}):*"]
+        for m in models:
+            marker = " ✅" if m == current_model else ""
+            lines.append(f"• `{m}`{marker}")
+        lines.append("")
+        lines.append(f"To switch: `/{label.lower()} {engine_name} <model>`")
+        return "\n".join(lines)
+
+    # `/<cmd> <engine> <model>` -> switch active engine AND model.
+    if models and model_arg not in models:
+        avail = ", ".join(f"`{m}`" for m in models)
+        return (
+            f"❌ Model `{model_arg}` not available for `{engine_name}`. "
+            f"Available: {avail}"
+        )
+
+    try:
+        await config_registry.set_value(config_key, engine_name)
+    except Exception as exc:
+        return f"❌ Failed to switch {label} engine: {exc}"
+
+    await _media_set_endpoint_model(engine_name, model_arg)
+
+    return (
+        f"✅ {label} engine switched to `{engine_name}` model `{model_arg}`.\n"
+        f"_Note: media engines are applied on next use; a restart guarantees a full re-sync._"
+    )
+
+
+async def vox_command(*args) -> str:
+    """Show or switch the active Vox (TTS) engine and model.
+
+    Usage:
+      `/vox`                    -> list registered TTS engines (active marked)
+      `/vox <engine>`           -> list that engine's models
+      `/vox <engine> <model>`   -> switch active engine and model
+    """
+    from core.vox_registry import VOX_REGISTRY
+
+    return await _media_command(
+        label="Vox",
+        config_key="ACTIVE_VOX_ENGINE",
+        engines=VOX_REGISTRY.get_available_engines(),
+        default_engine="disabled",
+        args=args,
+    )
+
+
+async def auris_command(*args) -> str:
+    """Show or switch the active Auris (STT) engine and model.
+
+    Usage:
+      `/auris`                    -> list registered STT engines (active marked)
+      `/auris <engine>`           -> list that engine's models
+      `/auris <engine> <model>`   -> switch active engine and model
+    """
+    from core.auris_registry import AURIS_REGISTRY
+
+    return await _media_command(
+        label="Auris",
+        config_key="ACTIVE_AURIS_ENGINE",
+        engines=AURIS_REGISTRY.get_available_engines(),
+        default_engine="disabled",
+        args=args,
+    )
+
+
+async def iris_command(*args) -> str:
+    """Show or switch the active Iris (vision) engine and model.
+
+    Usage:
+      `/iris`                    -> list registered vision engines (active marked)
+      `/iris <engine>`           -> list that engine's models
+      `/iris <engine> <model>`   -> switch active engine and model
+    """
+    from core.iris_registry import IRIS_REGISTRY
+
+    return await _media_command(
+        label="Iris",
+        config_key="ACTIVE_IRIS_ENGINE",
+        engines=IRIS_REGISTRY.get_available_engines(),
+        default_engine="disabled",
+        args=args,
+    )
+
+
+async def live_command(*args) -> str:
+    """Show or switch the active Live (real-time audio) engine and model.
+
+    Usage:
+      `/live`                    -> list registered live engines (active marked)
+      `/live <engine>`           -> list that engine's models
+      `/live <engine> <model>`   -> switch active engine and model
+    """
+    from core.live_registry import LIVE_REGISTRY
+
+    return await _media_command(
+        label="Live",
+        config_key="LIVE_CORTEX",
+        engines=LIVE_REGISTRY.get_available_engines(),
+        default_engine="disabled",
+        args=args,
+    )
+
+
+register_command("vox", vox_command)
+register_command("auris", auris_command)
+register_command("iris", iris_command)
+register_command("live", live_command)
+
+
 async def model_command(*args) -> str:
     """Handle model switching command."""
     import core.plugin_instance as plugin_instance
@@ -606,16 +1066,26 @@ async def model_command(*args) -> str:
 
 async def last_chats_command(*args) -> str:
     """Get last active chats."""
-    from core import recent_chats
+    from core.interface_paths import build_pretty_name, get_recent_interface_paths
 
-    # Note: This is interface-agnostic but needs context from interface
-    # The interface should handle the formatting
-    entries = await recent_chats.get_last_active_chats_verbose(10, None)
+    entries = await get_recent_interface_paths(10)
     if not entries:
         return "⚠️ No recent chat found."
 
-    lines = [f"{name} — `{cid}`" for cid, name in entries]
-    return "🕔 Last active chats:\n" + "\n".join(lines)
+    lines = []
+    for item in entries:
+        path = item.get("interface_path")
+        # Re-derive the pretty name fresh: stored segment labels may have been
+        # updated after the row was last touched, and cached labels can be stale.
+        display = path
+        if path:
+            try:
+                pretty = await build_pretty_name(path, use_cache=False)
+                display = pretty.get("display") or path
+            except Exception:
+                display = item.get("display") or path
+        lines.append(f"{display} — `{path}`")
+    return "🕔 Last active chats:\n\n" + "\n".join(lines)
 
 
 async def context_command(*args) -> str:
@@ -675,57 +1145,6 @@ async def splitprompt_command(*args) -> str:
 
 
 register_command("splitprompt", splitprompt_command)
-
-
-async def agent_command(*args, interface_context=None) -> str:
-    """Handle agent subcommands (trainer-only).
-
-    Usage:
-      /agent approve <proposal_id>
-    """
-    if not args:
-        return "Usage: /agent approve <proposal_id>"
-
-    sub = args[0].lower()
-    if sub == "approve":
-        if len(args) < 2:
-            return "❌ Use: /agent approve <proposal_id>"
-        try:
-            proposal_id = int(args[1])
-        except ValueError:
-            return "❌ proposal_id must be an integer"
-
-        # Extract possible trainer info from interface_context
-        trainer_id = None
-        try:
-            if interface_context and isinstance(interface_context, dict):
-                update = interface_context.get("update")
-                if update and getattr(update, "effective_user", None):
-                    trainer_id = getattr(update.effective_user, "id", None)
-        except Exception:
-            trainer_id = None
-
-        try:
-            from core.core_initializer import PLUGIN_REGISTRY
-
-            plugin = PLUGIN_REGISTRY.get("agent")
-            if not plugin:
-                return "❌ Agent plugin not available"
-            original_message = {"sender_id": trainer_id}
-            res = await plugin.execute_action(
-                {"type": "approve_action", "payload": {"proposal_id": proposal_id}},
-                {},
-                None,
-                original_message,
-            )
-            return f"✅ Approval result: {res}"
-        except Exception as e:
-            return f"❌ Error approving proposal: {e}"
-
-    return "❌ Unknown agent subcommand. Use: /agent approve <proposal_id>"
-
-
-register_command("agent", agent_command)
 
 
 async def block_command(*args) -> str:
@@ -879,43 +1298,298 @@ async def cancel_command(*args, interface_context=None) -> str:
         return f"❌ Error cancelling operations: {e}"
 
 
-register_command("cancel", cancel_command)
-register_command("logchat", logchat_command)
-
-
-async def clean_chat_link_command(*args: str, interface_context: Any = None) -> str:
-    """Remove the path link between a chat_id and its conversation folder.
+async def task_command(*args, interface_context=None) -> str:
+    """List agent tasks, or resume a paused one.
 
     Usage:
-      /clean_chat_link <chat_id>  – Remove the mapping for the given chat_id.
-      /clean_chat_link            – Remove the mapping for the *current* chat
-                                    (requires interface_context).
+        /task                 – list the most recent agent tasks
+        /task list            – same as above
+        /task resume <id>     – resume the paused (pending) task <id>
     """
-    from core.recent_chats import clear_chat_path, get_chat_path
+    from core.agent_core import AgentLoopManager
 
-    # Resolve target chat_id
-    if args:
+    manager = AgentLoopManager()
+
+    sub = args[0].lower() if args else "list"
+
+    # --- Resume a specific task -------------------------------------------
+    if sub == "resume":
+        if len(args) < 2:
+            return "❌ Usage: `/task resume <id>`"
         try:
-            target_id: int | str = int(args[0])
-        except ValueError:
-            return "❌ Use: `/clean_chat_link <chat_id>` where chat_id is an integer."
-    else:
-        # Try to infer from interface context
-        target_id_raw: int | str | None = None
-        if interface_context and isinstance(interface_context, dict):
-            update = interface_context.get("update")
-            if update and getattr(update, "effective_chat", None):
-                target_id_raw = update.effective_chat.id
-        if target_id_raw is None:
-            return "❌ Use: `/clean_chat_link <chat_id>` or run inside a chat."
-        target_id = target_id_raw
+            task_id = int(args[1])
+        except (TypeError, ValueError):
+            return f"❌ Invalid task id: `{args[1]}`"
 
-    existing = get_chat_path(target_id)
-    if existing is None:
-        return f"⚠️ No chat link found for `{target_id}`."
+        resumable = await manager.find_task_by_id(task_id)
+        if not resumable:
+            return (
+                f"⚠️ Task `{task_id}` is not resumable "
+                "(unknown id or not in `pending` state)."
+            )
 
-    clear_chat_path(target_id)
-    return f"✅ Chat link removed for `{target_id}` (was: `{existing}`)."
+        # Derive interface_path so the resumed turn's final reply is delivered
+        # back to the interface that issued the command.
+        interface_path = None
+        interface_name = None
+        bot = None
+        message = None
+        if isinstance(interface_context, dict):
+            interface_path = interface_context.get("interface_path")
+            interface_name = interface_context.get("interface_id")
+            bot = interface_context.get("bot")
+            message = interface_context.get("message")
+
+        context: Dict[str, Any] = {}
+        if interface_path:
+            context["interface_path"] = interface_path
+        if interface_name:
+            context["interface_id"] = interface_name
+
+        from core.agent_router import start_task_resume
+
+        scheduled = start_task_resume(
+            task_id, context=context, bot=bot, message=message
+        )
+        if not scheduled:
+            return f"❌ Could not schedule resume for task `{task_id}`."
+        goal = resumable.get("goal") or ""
+        preview = (goal[:120] + "…") if len(goal) > 120 else goal
+        return (
+            f"▶️ Resuming task `{task_id}`. It runs in the background and its "
+            f"result will be delivered here when ready.\n_Goal:_ {preview}"
+        )
+
+    # --- List recent tasks -------------------------------------------------
+    tasks = await manager.list_recent_tasks(limit=15)
+    if not tasks:
+        return "📭 No agent tasks found."
+
+    status_icon = {
+        "pending": "⏸️",
+        "running": "▶️",
+        "waiting_for_approval": "⏳",
+        "paused": "⏸️",
+        "completed": "✅",
+        "failed": "❌",
+        "cancelled": "🚫",
+    }
+
+    def _truncate(text: str, limit: int = 80) -> str:
+        text = " ".join(str(text).split())
+        return text[: limit - 1] + "…" if len(text) > limit else text
+
+    lines = ["🗂️ *Agent tasks* (newest first)\n"]
+    has_resumable = False
+    for t in tasks:
+        icon = status_icon.get(t["status"], "•")
+        if t.get("resumable"):
+            has_resumable = True
+
+        # Header: id + icon + status.
+        header = f"`{t['task_id']}` {icon} *{t['status']}*"
+        lines.append(header)
+
+        # Description: best human-readable label. Fall back to a short reason
+        # for failed tasks, else a neutral placeholder.
+        label = _truncate(t.get("name") or "")
+        if not label:
+            if t["status"] == "failed" and t.get("stop_reason"):
+                label = f"_{_truncate(t['stop_reason'], 60)}_"
+            else:
+                label = "_(no description)_"
+        lines.append(f"    {label}")
+
+        # Metrics line, only when we have concrete numbers.
+        actions = t.get("actions_executed")
+        iters = t.get("iterations")
+        metrics: list[str] = []
+        if isinstance(actions, int) and actions > 0:
+            metrics.append(f"{actions} action{'s' if actions != 1 else ''}")
+        if isinstance(iters, int) and iters > 0:
+            metrics.append(f"{iters} iteration{'s' if iters != 1 else ''}")
+        if metrics:
+            lines.append(f"    _{' · '.join(metrics)}_")
+
+        lines.append("")  # blank spacer between tasks
+
+    if has_resumable:
+        lines.append("_Use_ `/task resume <id>` _to continue a paused task._")
+    return "\n".join(lines).rstrip()
 
 
-register_command("clean_chat_link", clean_chat_link_command)
+def _iter_plugin_components() -> list:
+    """Return the ComponentInfo records tracked as plugins.
+
+    Interfaces, cortex engines and core meta-components are excluded so the
+    listing matches the WebUI *Plugins* tab.
+    """
+    from core.core_initializer import core_initializer
+
+    plugins = []
+    for info in core_initializer.components.values():
+        if getattr(info, "type", "") == "plugin":
+            plugins.append(info)
+    return plugins
+
+
+def _plugin_display_label(short_name: str) -> str:
+    """Best-effort human-readable name for a plugin short name.
+
+    Prefers the live instance's ``display_name`` / ``get_metadata`` name, then
+    falls back to a prettified short name so listings stay readable even for
+    disabled (ghost) plugins whose instance is gone.
+    """
+    from core.core_initializer import PLUGIN_REGISTRY
+
+    instance = PLUGIN_REGISTRY.get(short_name)
+    if instance is not None:
+        getter = getattr(instance, "get_metadata", None)
+        if callable(getter):
+            try:
+                meta = getter()
+                if isinstance(meta, dict):
+                    label = meta.get("display_name")
+                    if isinstance(label, str) and label.strip():
+                        return label.strip()
+            except Exception:
+                pass
+        label = getattr(instance, "display_name", None)
+        if isinstance(label, str) and label.strip():
+            return label.strip()
+    return short_name.replace("_", " ").title()
+
+
+def _resolve_plugin_short_name(user_name: str) -> str | None:
+    """Map a user-supplied plugin name to its canonical short name.
+
+    A plugin's runtime short name is its module stem (e.g. ``radio_host_plugin``
+    for ``plugins/radio_host/radio_host_plugin.py``) — but a user may type the
+    registration alias (``radio_host``), the module stem, or the display name.
+    Resolution order (all case-insensitive): exact short name → ``<name>_plugin``
+    → registry alias whose instance matches a tracked plugin → display name.
+    Returns ``None`` if nothing matches.
+    """
+    from core.core_initializer import PLUGIN_REGISTRY
+
+    if not user_name:
+        return None
+    target = user_name.strip().lower()
+
+    tracked = {
+        info.name.lower(): info.name
+        for info in _iter_plugin_components()
+        if getattr(info, "name", "")
+    }
+
+    # 1) Exact short name.
+    if target in tracked:
+        return tracked[target]
+
+    # 2) <name>_plugin module-stem convention.
+    if f"{target}_plugin" in tracked:
+        return tracked[f"{target}_plugin"]
+
+    # 3) Registry alias → matching tracked plugin instance.
+    alias_instance = PLUGIN_REGISTRY.get(user_name.strip()) or PLUGIN_REGISTRY.get(
+        target
+    )
+    if alias_instance is not None:
+        for short_name in tracked.values():
+            if PLUGIN_REGISTRY.get(short_name) is alias_instance:
+                return short_name
+
+    # 4) Display name match.
+    for short_name in tracked.values():
+        if _plugin_display_label(short_name).lower() == target:
+            return short_name
+
+    return None
+
+
+async def plugin_command(*args, interface_context=None) -> str:
+    """List plugins or enable/disable one at runtime.
+
+    Usage:
+        /plugin                       – list all plugins with their state
+        /plugins                      – same as above (alias)
+        /plugin list                  – same as above
+        /plugin enable <name>         – enable a plugin (no restart)
+        /plugin disable <name>        – disable a plugin (no restart)
+    """
+    from core.core_initializer import core_initializer, PLUGIN_REGISTRY
+
+    sub = args[0].lower() if args else "list"
+
+    # --- List -------------------------------------------------------------
+    if sub in ("list", "ls"):
+        plugins = _iter_plugin_components()
+        if not plugins:
+            return "🧩 No plugins are currently tracked."
+
+        rows = []
+        for info in sorted(plugins, key=lambda i: getattr(i, "name", "")):
+            short_name = getattr(info, "name", "")
+            enabled = short_name in PLUGIN_REGISTRY
+            led = "✅" if enabled else "🔻"
+            core_tag = (
+                " _(core)_" if core_initializer.is_core_plugin(short_name) else ""
+            )
+            label = _plugin_display_label(short_name)
+            rows.append(f"{led} `{short_name}` – {label}{core_tag}")
+
+        enabled_count = sum(
+            1 for i in plugins if getattr(i, "name", "") in PLUGIN_REGISTRY
+        )
+        header = (
+            f"🧩 *Plugins* ({enabled_count}/{len(plugins)} enabled)\n"
+            "_Use_ `/plugin enable|disable <name>` _to manage them._\n\n"
+        )
+        return header + "\n".join(rows)
+
+    # --- Enable / Disable -------------------------------------------------
+    if sub in ("enable", "disable"):
+        if len(args) < 2:
+            return f"❌ Usage: `/plugin {sub} <name>`"
+
+        user_name = " ".join(args[1:]).strip()
+        short_name = _resolve_plugin_short_name(user_name)
+        if not short_name:
+            return (
+                f"⚠️ Unknown plugin: `{user_name}`. "
+                "Use `/plugin list` to see available plugins."
+            )
+
+        if core_initializer.is_core_plugin(short_name):
+            return f"❌ Plugin `{short_name}` is a core plugin and cannot be disabled."
+
+        try:
+            if sub == "enable":
+                result = await core_initializer.enable_plugin(short_name)
+            else:
+                result = await core_initializer.disable_plugin(short_name)
+        except Exception as exc:
+            log_debug(f"[command_registry] plugin {sub} failed for {short_name}: {exc}")
+            return f"❌ Error toggling plugin `{short_name}`: {exc}"
+
+        if not result.get("ok"):
+            reason = result.get("error", "toggle_failed")
+            return f"⚠️ Could not {sub} `{short_name}`: {reason}"
+
+        state = "enabled ✅" if result.get("enabled") else "disabled 🔻"
+        label = _plugin_display_label(short_name)
+        return f"🧩 Plugin `{short_name}` ({label}) is now {state}."
+
+    return (
+        "❌ Usage:\n"
+        "`/plugin` or `/plugin list` – list plugins\n"
+        "`/plugin enable <name>` – enable a plugin\n"
+        "`/plugin disable <name>` – disable a plugin"
+    )
+
+
+register_command("cancel", cancel_command)
+register_command("logchat", logchat_command)
+register_command("task", task_command)
+register_command("plugin", plugin_command)
+register_command("plugins", plugin_command)

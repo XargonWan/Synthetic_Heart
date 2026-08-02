@@ -221,6 +221,41 @@
         .chat-toggle-btn:active {
             transform: scale(0.95);
         }
+        .pip-toggle-btn {
+            position: absolute;
+            bottom: clamp(1.2rem, 2vw, 1.6rem);
+            right: clamp(1.2rem, 2vw, 1.6rem);
+            z-index: 50;
+            width: 56px;
+            height: 56px;
+            border-radius: 50%;
+            border: 2px solid transparent;
+            border-image: linear-gradient(90deg, var(--accent), var(--accent-dark)) 1;
+            background: rgba(12, 12, 20, 0.95);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            color: var(--accent);
+            font-size: 1.4rem;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+            transition: all 0.25s ease;
+        }
+        .pip-toggle-btn:hover {
+            transform: scale(1.1);
+            background: rgba(var(--accent-r,255), var(--accent-g,107), var(--accent-b,214), 0.15);
+            border-color: var(--accent);
+            box-shadow: 0 12px 32px rgba(var(--accent-r,255), var(--accent-g,107), var(--accent-b,214), 0.4);
+        }
+        .pip-toggle-btn:active {
+            transform: scale(0.95);
+        }
+        .pip-toggle-btn.active {
+            background: rgba(var(--accent-r,255), var(--accent-g,107), var(--accent-b,214), 0.25);
+            border-color: var(--accent);
+        }
         .home-vrm canvas {
             position: absolute;
             inset: 0;
@@ -231,14 +266,17 @@
         .home-vrm-overlay {
             position: absolute;
             inset: 0;
+            z-index: 40;
             display: flex;
             align-items: center;
             justify-content: center;
             pointer-events: none;
-            color: rgba(245, 245, 255, 0.6);
-            font-size: 0.95rem;
+            color: rgba(245, 245, 255, 0.85);
+            font-size: 1rem;
             text-transform: uppercase;
             letter-spacing: 0.08em;
+            text-align: center;
+            padding: 1rem;
         }
         .logs-wrapper {
             background: var(--surface);
@@ -505,6 +543,17 @@
         /* Toggle Switch for Boolean Settings */
         .config-input input[type="checkbox"] {
             display: none; /* Hide default checkbox */
+        }
+        /* Also hide any native checkbox that drives a .toggle-switch outside of
+           .config-input (the slider is the visible control). The checkbox stays
+           in the DOM as the adjacent sibling the :checked + label rules need. */
+        input[type="checkbox"]:has(+ .toggle-switch) {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            opacity: 0;
+            margin: 0;
+            pointer-events: none;
         }
         .toggle-switch {
             position: relative;

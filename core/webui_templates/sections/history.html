@@ -3,17 +3,25 @@
         <header class="section-header">
           <h2>Activity</h2>
           <nav class="sub-nav" role="tablist">
-            <button class="sub-nav-btn active" data-subtab="interactions" role="tab" aria-selected="true">
-              <span class="icon">🗂️</span>
-              <span>Interactions</span>
-            </button>
-            <button class="sub-nav-btn" data-subtab="diary" role="tab" aria-selected="false">
+            <button class="sub-nav-btn active" data-subtab="diary" role="tab" aria-selected="true">
               <span class="icon">📔</span>
               <span>Diary</span>
             </button>
             <button class="sub-nav-btn" data-subtab="grillo" role="tab" aria-selected="false">
               <span class="icon">🦗</span>
               <span>Grillo</span>
+            </button>
+            <button class="sub-nav-btn" data-subtab="calendar" role="tab" aria-selected="false">
+              <span class="icon">📅</span>
+              <span>Calendar</span>
+            </button>
+            <button class="sub-nav-btn" data-subtab="dreams" role="tab" aria-selected="false">
+              <span class="icon">🌙</span>
+              <span>Dreams</span>
+            </button>
+            <button class="sub-nav-btn" data-subtab="growth" role="tab" aria-selected="false">
+              <span class="icon">🌱</span>
+              <span>Self-Growth</span>
             </button>
             <button class="sub-nav-btn" data-subtab="chat" role="tab" aria-selected="false">
               <span class="icon">💬</span>
@@ -28,30 +36,8 @@
 
         <div class="sub-tabs-container">
 
-      <!-- Interactions Sub-Tab -->
-      <div class="sub-tab-panel active" id="subtab-interactions" data-subtab="interactions">
-        <div class="section-controls">
-          <input type="text" id="history-interactions-search" placeholder="Search interactions..." class="search-input" />
-          <select id="history-interactions-sort" class="sort-select">
-            <option value="desc">Newest First</option>
-            <option value="asc">Oldest First</option>
-          </select>
-          <label class="control-label">
-            <input type="checkbox" id="history-interactions-archived" />
-            Show Archived
-          </label>
-        </div>
-        <div id="history-interactions-content" class="history-container">
-          <div class="loading-state">
-            <div class="loading-spinner"></div>
-            <p>Loading interactions...</p>
-          </div>
-        </div>
-        <div id="history-interactions-pagination" class="pagination-controls"></div>
-      </div>
-
       <!-- Diary Sub-Tab -->
-      <div class="sub-tab-panel" id="subtab-diary" data-subtab="diary">
+      <div class="sub-tab-panel active" id="subtab-diary" data-subtab="diary">
         <div class="section-controls">
           <input type="text" id="history-diary-search" placeholder="Search diary..." class="search-input" />
           <select id="history-diary-sort" class="sort-select">
@@ -94,6 +80,62 @@
         <div id="history-grillo-pagination" class="pagination-controls"></div>
       </div>
 
+      <!-- Calendar Sub-Tab -->
+      <div class="sub-tab-panel" id="subtab-calendar" data-subtab="calendar">
+        <div class="section-controls calendar-controls">
+          <div class="calendar-nav">
+            <button type="button" id="calendar-prev" class="calendar-nav-btn" title="Previous month">←</button>
+            <span id="calendar-title" class="calendar-title">—</span>
+            <button type="button" id="calendar-next" class="calendar-nav-btn" title="Next month">→</button>
+            <button type="button" id="calendar-today" class="calendar-nav-btn calendar-today-btn">Today</button>
+          </div>
+          <div class="calendar-actions">
+            <button type="button" id="calendar-new-event" class="calendar-action-btn">＋ New event</button>
+            <a href="/calendar.ics" id="calendar-download-ics" class="calendar-action-btn" download="synth-calendar.ics" title="Download all events as an .ics file">⬇ Download .ics</a>
+            <button type="button" id="calendar-subscribe" class="calendar-action-btn" title="Subscribe from Google Calendar, Apple Calendar, Thunderbird, ...">🔗 Subscribe</button>
+          </div>
+        </div>
+        <div id="history-calendar-content" class="history-container calendar-container">
+          <div class="loading-state">
+            <div class="loading-spinner"></div>
+            <p>Loading calendar...</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Dreams Sub-Tab -->
+      <div class="sub-tab-panel" id="subtab-dreams" data-subtab="dreams">
+        <div class="section-controls">
+          <input type="text" id="history-dreams-search" placeholder="Search dreams..." class="search-input" />
+          <select id="history-dreams-sort" class="sort-select">
+            <option value="desc">Newest First</option>
+            <option value="asc">Oldest First</option>
+          </select>
+        </div>
+        <div id="history-dreams-content" class="history-container">
+          <div class="loading-state">
+            <div class="loading-spinner"></div>
+            <p>Loading dreams...</p>
+          </div>
+        </div>
+        <div id="history-dreams-pagination" class="pagination-controls"></div>
+      </div>
+
+      <!-- Self-Growth Sub-Tab -->
+      <div class="sub-tab-panel" id="subtab-growth" data-subtab="growth">
+        <div class="section-controls">
+          <div style="color: var(--text-soft); font-size: 0.9rem;">
+            Synth's evolving self-growth reflection. Edit it directly, or revert to a previous state (last 10 kept).
+          </div>
+        </div>
+        <div id="history-growth-content" class="history-container">
+          <div class="loading-state">
+            <div class="loading-spinner"></div>
+            <p>Loading self-growth...</p>
+          </div>
+        </div>
+      </div>
+
       <!-- Chat Sub-Tab -->
       <div class="sub-tab-panel" id="subtab-chat" data-subtab="chat">
         <div class="section-controls">
@@ -118,11 +160,29 @@
       <!-- Agent Sub-Tab -->
       <div class="sub-tab-panel" id="subtab-agent" data-subtab="agent">
         <div class="section-controls">
-          <div style="color: var(--text-soft); font-size: 0.9rem;">Agent tasks and proposals</div>
+          <div style="color: var(--text-soft); font-size: 0.9rem;">Agent workspace</div>
         </div>
-        <div id="agent-tasks-list">Loading tasks...</div>
-        <div id="agent-proposals-list" style="margin-top: 1rem;">Loading proposals...</div>
-        <div id="agent-task-detail" style="margin-top: 1rem;"></div>
+        <div id="agent-legacy-layout" style="display:grid;grid-template-columns:var(--agent-left-w, minmax(0,34%)) 6px minmax(0,1fr);gap:0;align-items:start;overflow:hidden;height:100%;">
+          <div id="agent-left-pane" style="display:grid;gap:1rem;overflow-y:auto;overflow-x:hidden;min-width:0;height:100%;padding-right:1rem;">
+            <div style="min-width:0;">
+              <h3 style="margin:0 0 0.5rem 0;">Tasks</h3>
+              <div id="agent-tasks-list" style="min-width:0;">Loading tasks...</div>
+            </div>
+          </div>
+          <div id="agent-col-resizer" class="agent-col-resizer" role="separator" aria-orientation="vertical" title="Drag to resize"></div>
+          <div id="agent-right-pane" style="display:flex;flex-direction:column;overflow:hidden;height:100%;padding-left:1rem;">
+            <div id="agent-task-meta" class="agent-meta-bar">Select a task from the left pane.</div>
+            <div id="agent-conversation" class="agent-conversation">
+              <div class="agent-empty">Select a task from the left pane.</div>
+            </div>
+            <!-- Proposals render inline inside the conversation stream; this list is kept hidden for compatibility -->
+            <div id="agent-proposals-list" style="display:none;"></div>
+            <form id="agent-composer" class="agent-composer" onsubmit="return false;">
+              <textarea id="agent-msg-input" class="agent-msg-input" rows="1" placeholder="Message the agent… (Enter to send, Shift+Enter for newline)"></textarea>
+              <button type="button" id="agent-send-btn" class="agent-send-btn" title="Send">Send</button>
+            </form>
+          </div>
+        </div>
       </div>
         </div><!-- .sub-tabs-container -->
       </div><!-- .history-wrapper -->
@@ -131,9 +191,13 @@
       .history-wrapper {
         display: flex;
         flex-direction: column;
-        height: 100%;
         width: 100%;
-        min-height: calc(100vh - var(--topbar-height, 120px));
+        /* Anchor the wrapper to the viewport height so the absolutely-positioned
+           .sub-tab-panel (and its pagination footer) have a resolved height to
+           fill. Using min-height alone let the wrapper grow with long content,
+           pushing the pagination controls below the visible area ("tagliata"). */
+        height: calc(100vh - var(--topbar-height, 120px));
+        min-height: 0;
       }
 
       .section-header {
@@ -143,6 +207,7 @@
       /* Sub-navigation styles */
       .sub-nav {
         display: flex;
+        flex-wrap: nowrap;
         gap: 0.5rem;
         margin-top: 1rem;
         padding: 0.5rem;
@@ -150,6 +215,15 @@
         border-radius: 8px;
         border: 1px solid transparent;
         border-image: linear-gradient(90deg, var(--accent), var(--accent-dark)) 1;
+        overflow-x: auto;
+        overflow-y: hidden;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+        -ms-overflow-style: none;
+      }
+
+      .sub-nav::-webkit-scrollbar {
+        display: none;
       }
 
       .sub-nav-btn {
@@ -164,6 +238,8 @@
         cursor: pointer;
         transition: all 0.2s ease;
         font-size: 0.9rem;
+        flex-shrink: 0;
+        white-space: nowrap;
       }
 
       .sub-nav-btn:hover {
@@ -220,6 +296,8 @@
         border-bottom: 1px solid transparent;
         border-image: linear-gradient(90deg, var(--accent), var(--accent-dark)) 1;
         flex-wrap: wrap;
+        /* Fixed header row; only .history-container scrolls between it and the footer. */
+        flex-shrink: 0;
       }
 
       .search-input, .filter-select, .sort-select {
@@ -253,6 +331,12 @@
         flex: 1;
         overflow-y: auto;
         padding: 1rem;
+        scrollbar-width: none;
+        -ms-overflow-style: none;
+      }
+
+      .history-container::-webkit-scrollbar {
+        display: none;
       }
 
       /* Visual highlight when content is populated to aid debugging */
@@ -423,6 +507,8 @@
         color: var(--text);
         word-break: break-word;
         font-size: 0.95rem;
+        /* No inner scroll: the whole day expands and only the outer history
+           list scrolls, so there is a single scrollbar (no nested scroll). */
       }
 
       .diary-day-thought {
@@ -433,6 +519,9 @@
         font-size: 0.85rem;
         color: var(--text-soft);
         font-style: italic;
+        word-break: break-word;
+        /* No inner scroll: expands fully; only the outer history list
+           scrolls, giving a single scrollbar (no nested scroll). */
       }
 
       /* Pre-consolidation fragments within a diary day */
@@ -708,6 +797,8 @@
         align-items: center;
         gap: 0.5rem;
         padding: 1rem;
+        /* Keep the footer pinned and never let the scrolling list squeeze it out. */
+        flex-shrink: 0;
         border-top: 1px solid transparent;
         border-image: linear-gradient(90deg, var(--accent), var(--accent-dark)) 1;
       }
@@ -749,6 +840,599 @@
         margin-bottom: 1rem;
         opacity: 0.5;
       }
+
+      /* Mobile: compact the Activity view to reclaim vertical space. */
+      @media (max-width: 768px) {
+        /* The "Activity" title eats too much space at the top on mobile;
+           hide it. The sub-nav below already makes the section obvious. */
+        .section-header h2 {
+          display: none;
+        }
+
+        /* Keep the controls on a single row: the search field should not
+           stretch to the full width, and the combo box (sort/filter) sits
+           right next to it on the right. */
+        .section-controls {
+          flex-wrap: nowrap;
+          gap: 0.5rem;
+          padding: 0.75rem;
+        }
+
+        .section-controls .search-input {
+          flex: 1 1 auto;
+          min-width: 0;
+        }
+
+        .section-controls .filter-select,
+        .section-controls .sort-select {
+          flex: 0 0 auto;
+          min-width: 0;
+          width: auto;
+        }
+      }
+
+      /* Calendar sub-tab */
+      .calendar-controls {
+        flex-wrap: wrap;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .calendar-nav {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+      .calendar-title {
+        font-weight: 600;
+        font-size: 1rem;
+        min-width: 10rem;
+        text-align: center;
+        color: var(--text);
+      }
+      .calendar-nav-btn,
+      .calendar-action-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        padding: 0.4rem 0.75rem;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: rgba(12, 12, 20, 0.35);
+        color: var(--text-soft);
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.85rem;
+        text-decoration: none;
+        transition: all 0.15s ease;
+        white-space: nowrap;
+      }
+      .calendar-nav-btn:hover,
+      .calendar-action-btn:hover {
+        color: var(--text);
+        border-color: var(--accent);
+        background: rgba(255, 255, 255, 0.06);
+      }
+
+      .history-delete-btn {
+        flex: 0 0 auto;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0.3rem 0.5rem;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: rgba(12, 12, 20, 0.35);
+        color: var(--text-soft);
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.9rem;
+        line-height: 1;
+        transition: all 0.15s ease;
+      }
+      .history-delete-btn:hover {
+        color: #fff;
+        border-color: #e05a5a;
+        background: rgba(224, 90, 90, 0.18);
+      }
+      .growth-proposal-lists {
+        display: flex;
+        gap: 1.25rem;
+        flex-wrap: wrap;
+      }
+      .growth-proposal-col {
+        flex: 1 1 220px;
+        min-width: 200px;
+      }
+      .growth-diff-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+      .growth-item {
+        padding: 0.15rem 0;
+        font-size: 0.85rem;
+      }
+      .growth-item-added {
+        color: #5fd08a;
+      }
+      .growth-item-added::before {
+        content: '+ ';
+        opacity: 0.8;
+      }
+      .growth-item-removed {
+        color: #e05a5a;
+        text-decoration: line-through;
+      }
+      .growth-item-removed::before {
+        content: '- ';
+        opacity: 0.8;
+      }
+      .calendar-actions {
+        display: flex;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+      }
+      .calendar-container {
+        padding: 0.75rem;
+      }
+      .calendar-grid {
+        display: grid;
+        grid-template-columns: repeat(7, 1fr);
+        gap: 2px;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      .calendar-weekday {
+        background: rgba(12, 12, 20, 0.5);
+        color: var(--text-soft);
+        text-align: center;
+        padding: 0.4rem 0;
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+      .calendar-day {
+        background: rgba(12, 12, 20, 0.35);
+        height: 6.5rem;
+        padding: 0.35rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+        cursor: pointer;
+        overflow: hidden;
+        transition: background 0.15s ease;
+      }
+      .calendar-day:hover {
+        background: rgba(255, 255, 255, 0.05);
+      }
+      .calendar-day.other-month {
+        opacity: 0.4;
+      }
+      .calendar-day.today .calendar-day-number {
+        background: var(--accent);
+        color: var(--accent-contrast, #fff);
+        border-radius: 50%;
+        width: 1.6rem;
+        height: 1.6rem;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .calendar-day-number {
+        font-size: 0.8rem;
+        color: var(--text-soft);
+        align-self: flex-start;
+      }
+      .calendar-event {
+        background: var(--accent);
+        color: var(--accent-contrast, #fff);
+        font-size: 0.72rem;
+        line-height: 1.2;
+        padding: 0.15rem 0.35rem;
+        border-radius: 4px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        flex-shrink: 0;
+      }
+      .calendar-event.recurring::before {
+        content: "🔁 ";
+      }
+      .calendar-event.external {
+        background: rgba(120, 120, 140, 0.7);
+        color: #fff;
+      }
+      .calendar-day-more {
+        font-size: 0.7rem;
+        color: var(--text-soft);
+      }
+      /* Simple modal for event creation / details */
+      .calendar-modal-backdrop {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.6);
+        display: flex;
+        align-items: flex-start;
+        justify-content: center;
+        /* Push the modal down so it is not hidden behind the top menu bar */
+        padding: 5.5rem 1rem 1.5rem;
+        box-sizing: border-box;
+        overflow-y: auto;
+        z-index: 47000;
+      }
+      .calendar-modal {
+        background: var(--panel, #12121a);
+        border: 1px solid var(--accent);
+        border-radius: 10px;
+        padding: 1.25rem;
+        /* Wider modal so its content is less tall */
+        width: min(46rem, 96vw);
+        max-height: calc(100vh - 7rem);
+        overflow-y: auto;
+        box-sizing: border-box;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+        margin: 0 auto;
+      }
+      .calendar-modal h3 {
+        margin: 0 0 1rem;
+        color: var(--text);
+      }
+      .calendar-modal label {
+        display: block;
+        font-size: 0.8rem;
+        color: var(--text-soft);
+        margin: 0.75rem 0 0.25rem;
+      }
+      .calendar-modal input,
+      .calendar-modal select,
+      .calendar-modal textarea {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 0.5rem;
+        background: rgba(12, 12, 20, 0.5);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 6px;
+        color: var(--text);
+        font-size: 0.9rem;
+      }
+      .calendar-modal textarea {
+        resize: vertical;
+        min-height: 8rem;
+        line-height: 1.5;
+      }
+      .calendar-modal-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 0.5rem;
+        margin-top: 1.25rem;
+      }
+      .calendar-modal-actions button {
+        padding: 0.5rem 1rem;
+        border-radius: 6px;
+        cursor: pointer;
+        border: 1px solid var(--accent);
+        background: var(--accent);
+        color: var(--accent-contrast, #fff);
+        transition: all 0.15s ease;
+      }
+      .calendar-modal-actions button:hover {
+        filter: brightness(1.12);
+      }
+      .calendar-modal-actions button.primary {
+        background: var(--accent);
+        color: var(--accent-contrast, #fff);
+        border-color: var(--accent);
+      }
+      .ext-cal-del {
+        padding: 0.25rem 0.5rem;
+        border-radius: 5px;
+        cursor: pointer;
+        border: 1px solid #e05a5a;
+        background: rgba(224, 90, 90, 0.18);
+        color: #ff8a8a;
+        font-size: 0.8rem;
+        transition: all 0.15s ease;
+      }
+      .ext-cal-del:hover {
+        background: #e05a5a;
+        color: #fff;
+      }
+      .calendar-edit-event,
+      .calendar-del-event {
+        padding: 0.15rem 0.4rem;
+        border-radius: 5px;
+        cursor: pointer;
+        line-height: 1;
+        border: 1px solid transparent;
+        background: transparent;
+      }
+      .calendar-edit-event {
+        color: var(--accent);
+        border-color: var(--accent);
+      }
+      .calendar-edit-event:hover {
+        background: var(--accent);
+        color: var(--accent-contrast, #fff);
+      }
+      .calendar-del-event {
+        color: #ff5c5c;
+        border-color: #ff5c5c;
+      }
+      .calendar-del-event:hover {
+        background: #ff5c5c;
+        color: #fff;
+      }
+      .calendar-subscribe-url {
+        font-family: monospace;
+        font-size: 0.8rem;
+        word-break: break-all;
+        background: rgba(12, 12, 20, 0.5);
+        padding: 0.5rem;
+        border-radius: 6px;
+        margin-top: 0.5rem;
+      }
+
+      /* ── Draggable column resizer between Tasks list and detail pane ── */
+      .agent-col-resizer {
+        height: 100%;
+        cursor: col-resize;
+        background: var(--border, rgba(255, 255, 255, 0.12));
+        border-radius: 3px;
+        transition: background 0.15s ease;
+        position: relative;
+        user-select: none;
+      }
+      .agent-col-resizer:hover,
+      .agent-col-resizer.dragging {
+        background: var(--accent, #38e0d0);
+      }
+      /* Widen the invisible hit area without changing the visual width. */
+      .agent-col-resizer::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: -5px;
+        right: -5px;
+      }
+      body.agent-col-resizing {
+        cursor: col-resize;
+        user-select: none;
+      }
+
+      /* ── VS Code-style agent conversation ──────────────────────────── */
+      .agent-meta-bar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.5rem 1rem;
+        padding: 0.5rem 0.75rem;
+        font-size: 0.82rem;
+        color: var(--text-soft, #b9b9c9);
+        border-bottom: 1px solid var(--border);
+        flex: 0 0 auto;
+      }
+      .agent-meta-bar strong { color: var(--text, #f5f5ff); }
+      .agent-meta-bar .agent-meta-actions {
+        margin-left: auto;
+        display: flex;
+        gap: 0.35rem;
+      }
+      .agent-meta-bar .agent-meta-actions .pill {
+        padding: 2px 8px;
+        font-size: 0.9rem;
+        line-height: 1.2;
+      }
+      .agent-continue-btn {
+        /* Force the Continue button onto its own row below the status spans so
+           it never overlaps the "status pending" text when the pane is narrow. */
+        flex: 0 0 100%;
+        align-self: flex-start;
+        margin-top: 0.35rem;
+        padding: 3px 12px;
+        font-size: 0.82rem;
+        line-height: 1.3;
+        border: 1px solid var(--accent, #7c5cff);
+        border-radius: 6px;
+        background: var(--accent, #7c5cff);
+        color: var(--accent-contrast, #fff);
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .agent-continue-btn:hover { filter: brightness(1.1); }
+      .agent-continue-btn:disabled { opacity: 0.6; cursor: default; }
+
+      .agent-conversation {
+        flex: 1 1 auto;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 0.6rem;
+        padding: 0.75rem 0.5rem;
+      }
+      .agent-empty {
+        color: var(--text-soft, #8a8a9a);
+        font-size: 0.9rem;
+        text-align: center;
+        margin: auto;
+      }
+
+      .agent-msg {
+        max-width: 88%;
+        padding: 0.55rem 0.8rem;
+        border-radius: 14px;
+        font-size: 0.9rem;
+        line-height: 1.45;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .agent-msg.user {
+        align-self: flex-end;
+        background: var(--accent, #4f8cff);
+        color: var(--accent-contrast, #fff);
+        border-bottom-right-radius: 4px;
+      }
+      .agent-msg.assistant {
+        align-self: flex-start;
+        background: var(--surface, rgba(24, 24, 36, 0.9));
+        border: 1px solid var(--border);
+        border-bottom-left-radius: 4px;
+      }
+      .agent-msg.error {
+        align-self: flex-start;
+        background: rgba(239, 83, 80, 0.12);
+        border: 1px solid rgba(239, 83, 80, 0.4);
+        color: #ef8f8d;
+        font-size: 0.82rem;
+      }
+      .agent-msg pre {
+        white-space: pre-wrap;
+        overflow-x: auto;
+        margin: 0.4rem 0 0 0;
+        background: rgba(12, 12, 20, 0.5);
+        border-radius: 8px;
+        padding: 0.5rem 0.6rem;
+        font-size: 0.82rem;
+      }
+
+      /* Collapsible tool-call rows */
+      .agent-tool {
+        align-self: flex-start;
+        width: 88%;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: rgba(12, 12, 20, 0.35);
+        font-size: 0.85rem;
+        overflow: hidden;
+      }
+      .agent-tool > summary {
+        list-style: none;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.45rem 0.65rem;
+        user-select: none;
+      }
+      .agent-tool > summary::-webkit-details-marker { display: none; }
+      .agent-tool > summary::before {
+        content: "▸";
+        transition: transform 0.15s ease;
+        color: var(--text-soft, #8a8a9a);
+      }
+      .agent-tool[open] > summary::before { transform: rotate(90deg); }
+      .agent-tool .agent-tool-name {
+        font-family: monospace;
+        font-weight: 600;
+      }
+      .agent-tool .agent-tool-badge {
+        margin-left: auto;
+        padding: 1px 8px;
+        border-radius: 999px;
+        font-size: 0.72rem;
+      }
+      .agent-tool .agent-tool-badge.ok { background: rgba(83, 194, 112, 0.2); color: #53c270; }
+      .agent-tool .agent-tool-badge.err { background: rgba(239, 83, 80, 0.2); color: #ef5350; }
+      .agent-tool pre {
+        margin: 0;
+        padding: 0.5rem 0.65rem;
+        border-top: 1px solid var(--border);
+        white-space: pre-wrap;
+        overflow-x: auto;
+        font-size: 0.8rem;
+        background: rgba(0, 0, 0, 0.2);
+      }
+      .agent-tool .agent-tool-err {
+        color: #ef8f8d;
+        padding: 0.35rem 0.65rem;
+        font-size: 0.78rem;
+      }
+
+      /* Inline proposal (Allow / Refuse) */
+      .agent-proposal {
+        align-self: flex-start;
+        width: 88%;
+        border: 1px solid var(--accent, #4f8cff);
+        border-radius: 14px;
+        background: rgba(79, 140, 255, 0.08);
+        padding: 0.6rem 0.75rem;
+        font-size: 0.88rem;
+      }
+      .agent-proposal .agent-proposal-head {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-bottom: 0.4rem;
+        color: var(--text-soft, #b9b9c9);
+        font-size: 0.8rem;
+      }
+      .agent-proposal pre {
+        white-space: pre-wrap;
+        overflow-x: auto;
+        margin: 0 0 0.5rem 0;
+        background: rgba(12, 12, 20, 0.6);
+        border-radius: 8px;
+        padding: 0.5rem 0.6rem;
+        font-size: 0.82rem;
+      }
+      .agent-proposal .agent-proposal-actions {
+        display: flex;
+        gap: 0.5rem;
+      }
+      .agent-proposal .agent-btn-allow,
+      .agent-proposal .agent-btn-refuse {
+        border: none;
+        border-radius: 8px;
+        padding: 0.35rem 0.9rem;
+        font-size: 0.82rem;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .agent-proposal .agent-btn-allow { background: #53c270; color: #06210f; }
+      .agent-proposal .agent-btn-allow:hover { background: #47b063; }
+      .agent-proposal .agent-btn-refuse { background: rgba(239, 83, 80, 0.18); color: #ef5350; }
+      .agent-proposal .agent-btn-refuse:hover { background: rgba(239, 83, 80, 0.3); }
+
+      /* Composer */
+      .agent-composer {
+        flex: 0 0 auto;
+        display: flex;
+        gap: 0.5rem;
+        align-items: flex-end;
+        padding: 0.6rem 0.5rem 0.2rem 0.5rem;
+        border-top: 1px solid var(--border);
+      }
+      .agent-msg-input {
+        flex: 1 1 auto;
+        resize: none;
+        max-height: 140px;
+        min-height: 38px;
+        padding: 0.55rem 0.7rem;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        background: var(--surface, rgba(24, 24, 36, 0.9));
+        color: var(--text, #f5f5ff);
+        font: inherit;
+        font-size: 0.9rem;
+        line-height: 1.4;
+      }
+      .agent-msg-input:focus {
+        outline: none;
+        border-color: var(--accent, #4f8cff);
+      }
+      .agent-send-btn {
+        flex: 0 0 auto;
+        border: none;
+        border-radius: 10px;
+        padding: 0.55rem 1.1rem;
+        background: var(--accent, #4f8cff);
+        color: var(--accent-contrast, #fff);
+        font-weight: 600;
+        cursor: pointer;
+        height: 38px;
+      }
+      .agent-send-btn:hover { filter: brightness(1.08); }
+      .agent-send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
       </style>
 
       <script src="/js/utils.js"></script>

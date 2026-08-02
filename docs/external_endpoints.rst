@@ -23,7 +23,7 @@ Supported endpoint types include:
 - Anthropic
 - OpenRouter
 - GitHub Models / Copilot
-- Ollama local hosts
+- OpenAI-compatible local hosts (e.g. Ollama, LM Studio)
 - Selenium LLM Engine
 - Generic OpenAI-compatible services
 - Legacy HTTP TTS services via ``custom`` mode
@@ -75,6 +75,16 @@ usually does the following:
 The Custom Endpoint preset is also available for any service that is not
 already covered by the built-in presets.
 
+TTS-only providers (e.g. **Fish Audio**) are listed in a dedicated *TTS
+Endpoints* section below the main provider grid. Their presets can define
+provider-specific form fields (``extra_fields`` in the preset JSON) that are
+rendered in the wizard and persisted into the endpoint's ``extra_config`` —
+for Fish Audio: the model tier (``s2.1-pro-free`` by default), the audio
+format (``wav`` recommended), and the ``reference_id`` of the cloned/library
+voice. The API key is sent as an ``Authorization: Bearer`` header
+automatically; requests use the Fish ``{text, reference_id, format}`` payload
+schema with the model tier passed as a ``model`` HTTP header.
+
 Probe status
 ------------
 
@@ -107,6 +117,42 @@ Each endpoint may be mapped to one or more subsystems:
 
 The endpoint card shows the current effective mapping. To change mapping,
 open the endpoint with the **Edit** button and update the capability checkboxes.
+
+Media subsystem models (Vox / Auris / Iris)
+-------------------------------------------
+
+Cortex resolves its model from the endpoint's ``default_model`` / model list, but
+the media subsystems (Vox, Auris, Iris) do **not**: their model — and, for TTS,
+the voice and language — must be supplied explicitly in the endpoint's
+``Extra Config`` JSON. This is required whenever a single endpoint serves both
+cortex and a media subsystem, because ``default_model`` is usually a chat model
+(or, for multi-modal providers such as Harmony, a non-media default like
+``voicefixer``) that the audio/vision route cannot use.
+
+Recognised per-subsystem keys:
+
+- ``stt_model`` (Auris): the speech-to-text model, e.g.
+  ``faster-whisper-large-v3-turbo``.
+- ``tts_model`` (Vox): the text-to-speech model, e.g. ``kitten-tts-nano``.
+- ``tts_voice`` (Vox): the voice name (provider-specific, e.g. ``Luna``).
+- ``tts_language`` (Vox): the language code; single-speaker models such as
+  KittenTTS require ``default``.
+- ``iris_model`` (Iris): the image/video description (vision) model, e.g.
+  ``gemma4-meromero-26b-a4b``. Must be a vision-capable model — a non-vision
+  default (such as the audio-conversion ``voicefixer``) yields no description
+  (observed as Iris failing to see images).
+
+If a media key is absent the bridge falls back to ``default_model``; when that
+default is not a valid media model the provider returns no audio/text/description
+(observed as the *"Transcription returned no text"* error on Auris, or Iris
+failing to describe an image). Example for a Harmony endpoint mapped to cortex
+and every media subsystem::
+
+   {"stt_model": "faster-whisper-large-v3-turbo", "tts_model": "kitten-tts-nano", "tts_voice": "Luna", "tts_language": "default", "iris_model": "gemma4-meromero-26b-a4b"}
+
+After saving, set ``ACTIVE_AURIS_ENGINE`` / ``ACTIVE_VOX_ENGINE`` /
+``ACTIVE_IRIS_ENGINE`` to the endpoint ``Name`` to register it as the active
+STT / TTS / vision engine.
 
 Cortex extra config (advanced)
 ------------------------------

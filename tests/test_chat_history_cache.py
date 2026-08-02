@@ -237,8 +237,55 @@ async def test_save_chat_message_uses_parametrized_dedup_cutoff(monkeypatch):
     dedup_query, dedup_params = executed[0]
     assert "DATE_SUB" not in dedup_query
     assert "UTC_TIMESTAMP()" not in dedup_query
-    assert "timestamp > %s" in dedup_query
+    assert "created_at > %s" in dedup_query
     assert dedup_params is not None
+
+
+@pytest.mark.asyncio
+async def test_save_chat_message_never_evicts_old_rows(monkeypatch):
+    """chat_history_cache is a permanent log, not a rolling window -- a
+    write must never delete older rows for the same interface_path. This
+    used to trim each chat down to CONTEXT_VERBOSITY rows on every message,
+    which silently destroyed cross-chat history (e.g. a busy group chat's
+    log would get evicted to a handful of rows within seconds, leaving
+    nothing for a later group<->DM context merge to draw on)."""
+    executed: list[str] = []
+
+    class DummyCursor:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        async def execute(self, q, params=None):
+            executed.append(q)
+
+        async def fetchone(self):
+            return None
+
+    class DummyConn:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        def cursor(self):
+            return DummyCursor()
+
+    monkeypatch.setattr(chat_history_cache, "get_conn_ctx", lambda: DummyConn())
+
+    result = await chat_history_cache.save_chat_message(
+        interface_path="telegram_bot/-999",
+        message_text="keep me forever",
+        sender_name="Alice",
+        sender_id="alice123",
+        timestamp=datetime.now(UTC),
+    )
+
+    assert result is True
+    assert not any("DELETE" in q.upper() for q in executed)
 
 
 @pytest.mark.asyncio
@@ -293,8 +340,8 @@ async def test_load_chat_history_returns_latest_rows_in_chronological_order(
         f"message-{index}" for index in range(2, 12)
     ]
     query, params = executed[0]
-    assert "ORDER BY timestamp DESC, id DESC" in query
-    assert "ORDER BY timestamp ASC, id ASC" in query
+    assert "ORDER BY created_at DESC, id DESC" in query
+    assert "ORDER BY created_at ASC, id ASC" in query
     assert params == ("synth_webui/webui_default", 10)
 
 
@@ -335,3 +382,138 @@ async def test_load_chat_history_uses_explicit_limit(monkeypatch):
     assert isinstance(history, deque)
     _, params = executed[0]
     assert params == ("synth_webui/webui_default", 37)
+
+
+@pytest.mark.asyncio
+async def test_load_chat_history_default_match_chat_level_false_is_exact_match_only(
+    monkeypatch,
+):
+    """Regression guard: the default behaviour must stay byte-identical to the
+    original exact-match query so the 13 existing callers are unaffected."""
+    executed: list[tuple[str, tuple[object, ...] | None]] = []
+
+    class DummyCursor:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        async def execute(self, query, params=None):
+            executed.append((query, params))
+
+        async def fetchall(self):
+            return []
+
+    class DummyConn:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        def cursor(self):
+            return DummyCursor()
+
+    monkeypatch.setattr(chat_history_cache, "get_conn_ctx", lambda: DummyConn())
+    monkeypatch.setattr(chat_history_cache, "_get_history_limit", lambda default=10: 10)
+
+    await chat_history_cache.load_chat_history("telegram_bot/-100987654321")
+
+    query, params = executed[0]
+    assert "LIKE" not in query
+    assert "WHERE interface_path = %s" in query
+    assert params == ("telegram_bot/-100987654321", 10)
+
+
+@pytest.mark.asyncio
+async def test_load_chat_history_match_chat_level_broadens_to_thread_suffixes(
+    monkeypatch,
+):
+    """With match_chat_level=True, the WHERE clause must also match thread-
+    suffixed variants of the same chat (e.g. telegram_bot/-100987654321/237093590),
+    using the same chat-key convention as peer_policy._chat_key."""
+    executed: list[tuple[str, tuple[object, ...] | None]] = []
+
+    class DummyCursor:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        async def execute(self, query, params=None):
+            executed.append((query, params))
+
+        async def fetchall(self):
+            return []
+
+    class DummyConn:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        def cursor(self):
+            return DummyCursor()
+
+    monkeypatch.setattr(chat_history_cache, "get_conn_ctx", lambda: DummyConn())
+    monkeypatch.setattr(chat_history_cache, "_get_history_limit", lambda default=10: 10)
+
+    await chat_history_cache.load_chat_history(
+        "telegram_bot/-100987654321", match_chat_level=True
+    )
+
+    query, params = executed[0]
+    assert "WHERE (interface_path = %s OR interface_path LIKE %s)" in query
+    assert params == (
+        "telegram_bot/-100987654321",
+        "telegram_bot/-100987654321/%",
+        10,
+    )
+
+
+@pytest.mark.asyncio
+async def test_load_chat_history_match_chat_level_short_path_skips_broadening(
+    monkeypatch,
+):
+    """A path with no chat_id segment (no '/') has no meaningful chat-key to
+    broaden to -- it must fall back to exact-match only, not crash."""
+    executed: list[tuple[str, tuple[object, ...] | None]] = []
+
+    class DummyCursor:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        async def execute(self, query, params=None):
+            executed.append((query, params))
+
+        async def fetchall(self):
+            return []
+
+    class DummyConn:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        def cursor(self):
+            return DummyCursor()
+
+    monkeypatch.setattr(chat_history_cache, "get_conn_ctx", lambda: DummyConn())
+    monkeypatch.setattr(chat_history_cache, "_get_history_limit", lambda default=10: 10)
+
+    history = await chat_history_cache.load_chat_history(
+        "standalone", match_chat_level=True
+    )
+
+    assert isinstance(history, deque)
+    query, params = executed[0]
+    assert "LIKE" not in query
+    assert "WHERE interface_path = %s" in query
+    assert params == ("standalone", 10)

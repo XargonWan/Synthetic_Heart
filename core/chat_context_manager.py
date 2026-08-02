@@ -115,17 +115,6 @@ def get_or_create_chat_context(interface_path: str) -> deque:
     interface_path = _resolve_context_path(interface_path)
 
     if interface_path not in _context_memory:
-        # Keep legacy exposed var for backward compatibility, but prefer the
-        # unified global verbosity setting.
-        config_registry.get_var(
-            "CHAT_HISTORY_LIMIT",
-            10,
-            label="Chat History Limit",
-            description="(Legacy) Number of messages to keep in memory per chat. Prefer CONTEXT_VERBOSITY.",
-            group="core",
-            component="chat_context_manager",
-        )
-
         limit = None
         for key in ("CONTEXT_VERBOSITY", "CHAT_HISTORY", "CHAT_HISTORY_LIMIT"):
             try:
@@ -200,22 +189,13 @@ async def add_message_to_context(
         f"[context_manager] Added message to context for interface_path {interface_path}"
     )
 
-    # Automatically update chat activity (mechanical action, centralized here)
-    # This tracks the last activity time for each chat without requiring LLM reasoning
+    # Automatically update chat activity (mechanical action, centralized here).
+    # Tracks last-used time and refreshes the pretty-name labels for this
+    # interface_path without requiring LLM reasoning.
     try:
-        from plugins.recent_chats import update_chat_activity
+        from core.interface_paths import touch_interface_path
 
-        # Extract chat_id from interface_path (format: interface/chat_id/thread_id)
-        parts = interface_path.split("/")
-        chat_id = parts[1] if len(parts) > 1 else interface_path
-        await update_chat_activity(
-            chat_id=chat_id,
-            metadata={
-                "username": sender_name,
-                "user_id": sender_id,
-                "interface_path": interface_path,
-            },
-        )
+        await touch_interface_path(interface_path)
     except Exception as e:
         log_debug(f"[context_manager] Failed to update chat activity: {e}")
 
@@ -235,6 +215,53 @@ async def add_message_to_context(
         log_warning(f"[context_manager] Failed to persist message to cache: {e}")
 
 
+async def update_message_in_context(
+    interface_path: str,
+    timestamp: Optional[str],
+    message_text: str,
+    metadata: dict[str, Any] | None = None,
+) -> bool:
+    """Update an already-added message's text in memory and in the DB cache.
+
+    Matches the most recent in-memory message for *interface_path* whose
+    ``timestamp`` equals the given one and rewrites its ``text`` (and metadata),
+    then persists the same change to ``chat_history_cache`` keyed on
+    ``(interface_path, timestamp)``.  Keeps the in-memory deque and the DB in
+    sync so a re-hydrated context and a same-process context agree.
+
+    Returns ``True`` when the DB row was updated.
+    """
+    interface_path = _resolve_context_path(interface_path)
+
+    # Update the in-memory deque entry (most recent match wins).
+    try:
+        context = get_or_create_chat_context(interface_path)
+        for msg in reversed(context):
+            if not isinstance(msg, dict):
+                continue
+            if timestamp is not None and msg.get("timestamp") == timestamp:
+                msg["text"] = message_text
+                if metadata is not None:
+                    msg["metadata"] = metadata
+                break
+    except Exception as e:
+        log_debug(f"[context_manager] In-memory update skipped: {e}")
+
+    # Persist to the DB cache.
+    try:
+        from core.chat_history_cache import update_message_text
+
+        return await update_message_text(
+            interface_path=interface_path,
+            timestamp=timestamp,
+            message_text=message_text,
+            metadata=metadata,
+        )
+    except Exception as e:
+        log_warning(f"[context_manager] Failed to persist message update: {e}")
+        return False
+
+
 async def load_chat_history(interface_path: str) -> None:
     """Load persisted chat history into context memory.
 
@@ -248,7 +275,7 @@ async def load_chat_history(interface_path: str) -> None:
         from core.chat_history_cache import load_chat_history as cache_load
 
         interface_path = _resolve_context_path(interface_path)
-        history = await cache_load(interface_path)
+        history = await cache_load(interface_path, match_chat_level=True)
         context = get_or_create_chat_context(interface_path)
         # IMPORTANT: This function is used to rehydrate memory from persistence.
         # It must be idempotent (e.g., WebUI refresh/reconnect calls it again).

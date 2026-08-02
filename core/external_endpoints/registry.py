@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS external_endpoints (
     capabilities JSON,
     subsystem_map JSON,
     available_models JSON,
+    models_metadata JSON,
     default_model VARCHAR(255),
     probe_status VARCHAR(50) NOT NULL DEFAULT 'never',
     last_probe_at DATETIME,
@@ -44,11 +45,22 @@ CREATE TABLE IF NOT EXISTS external_endpoints (
 
 
 async def _ensure_table() -> None:
-    from core.db import get_conn_ctx
+    from core.db import _get_db_type, get_conn_ctx
 
     async with get_conn_ctx() as conn:
         async with conn.cursor() as cur:
             await cur.execute(_CREATE_TABLE_SQL)
+            # Idempotent migration for tables created before models_metadata
+            # existed. Both MariaDB (10.0+) and Postgres support the
+            # IF NOT EXISTS form. Postgres stores JSON in a TEXT column here.
+            col_type = "TEXT" if _get_db_type() == "postgres" else "JSON"
+            try:
+                await cur.execute(
+                    "ALTER TABLE external_endpoints "
+                    f"ADD COLUMN IF NOT EXISTS models_metadata {col_type}"
+                )
+            except Exception as exc:
+                logger.debug("models_metadata column migration skipped/failed: %s", exc)
         try:
             await conn.commit()
         except Exception:
@@ -284,10 +296,19 @@ class ExternalEndpointRegistry:
     async def set_subsystem_map(
         self, endpoint_id: int, mapping: dict[str, bool]
     ) -> None:
-        """Persist a user-defined subsystem mapping and re-sync registries."""
+        """Persist a user-defined subsystem mapping and re-sync registries.
+
+        An override is *force-on only*: it may only turn a subsystem ON that
+        auto-detection missed. Turning a subsystem "off" is expressed by the
+        *absence* of its key (the endpoint then falls back to its probed
+        capabilities). We therefore drop any falsy entries so a stored ``false``
+        can never mask an auto-detected capability.
+        """
         from core.db import get_conn_ctx
 
         await self._ensure()
+
+        cleaned = {k: True for k, v in mapping.items() if v}
 
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
@@ -295,7 +316,7 @@ class ExternalEndpointRegistry:
                     "UPDATE external_endpoints SET subsystem_map = %s, "
                     "updated_at = %s WHERE id = %s",
                     (
-                        json.dumps(mapping),
+                        json.dumps(cleaned),
                         datetime.now(timezone.utc),
                         endpoint_id,
                     ),
@@ -316,6 +337,7 @@ class ExternalEndpointRegistry:
         status: str,
         capabilities: dict[str, bool],
         models: list[str],
+        models_metadata: list[dict] | None = None,
     ) -> None:
         """Persist probe results and sync registries."""
         from core.db import get_conn_ctx
@@ -329,13 +351,14 @@ class ExternalEndpointRegistry:
                     """
                     UPDATE external_endpoints
                     SET probe_status = %s, capabilities = %s, available_models = %s,
-                        last_probe_at = %s, updated_at = %s
+                        models_metadata = %s, last_probe_at = %s, updated_at = %s
                     WHERE id = %s
                     """,
                     (
                         status,
                         json.dumps(capabilities),
                         json.dumps(models),
+                        json.dumps(models_metadata or []),
                         now,
                         now,
                         endpoint_id,
@@ -356,7 +379,7 @@ class ExternalEndpointRegistry:
                     return
             await self._sync_registries(ep)
 
-            # Auto-activate as cortex engine when still on the default "manual"
+            # Auto-activate as cortex engine when no base cortex is set yet
             if status == "success" and ep.effective_subsystem_map().get("cortex"):
                 await self._maybe_auto_activate_cortex(ep.engine_name())
 
@@ -397,8 +420,8 @@ class ExternalEndpointRegistry:
             return  # already active
 
         # Respect any explicitly configured engine — external endpoint or any
-        # registered built-in other than "manual" (the neutral default).
-        if current and current != "manual":
+        # registered built-in. An empty value is the neutral "not set" default.
+        if current:
             try:
                 endpoints = await self.list_endpoints(enabled_only=True)
                 external_names = {ep.engine_name() for ep in endpoints}
@@ -533,6 +556,13 @@ class ExternalEndpointRegistry:
                 vox_bridge = ExternalVoxEngine(ep, adapter)
                 VOX_REGISTRY.register_instance(engine_name, vox_bridge, label=label)
                 log_info(f"[ext_endpoints] '{ep.name}' registered as Vox engine")
+                # Expose a `<ENGINE>_VOICE` config key when the adapter can
+                # list voices, so the WebUI voice picker treats the selection
+                # as persistable (matching the KittenTTS convention). The
+                # value is the speaker code (for Fish, the voice reference_id)
+                # and is honoured at synthesis time by ExternalVoxEngine.
+                if callable(getattr(adapter, "list_speakers", None)):
+                    self._register_voice_config_key(engine_name, label)
             except Exception as exc:
                 log_warning(
                     f"[ext_endpoints] Vox registration failed for '{ep.name}': {exc}"
@@ -590,6 +620,44 @@ class ExternalEndpointRegistry:
                 log_warning(
                     f"[ext_endpoints] Iris registration failed for '{ep.name}': {exc}"
                 )
+
+    def _register_voice_config_key(self, engine_name: str, label: str) -> None:
+        """Expose a ``<ENGINE>_VOICE`` config key for a voice-listing engine.
+
+        The WebUI voice picker (``VoiceSettings.vue``) treats a voice as
+        persistable only when ``<ACTIVE_VOX>_VOICE`` is a known config key, and
+        saves the chosen speaker code there. ``ExternalVoxEngine`` reads the
+        same key at synthesis time. Registering it here (idempotently) closes
+        the gap for external Vox endpoints, mirroring the static ``KITTEN_VOICE``
+        registration for the built-in KittenTTS engine.
+        """
+        key = f"{str(engine_name).upper()}_VOICE"
+        try:
+            from core.variables_engine import exposed_vars, register_exposed_var
+
+            # `register` is idempotent (re-registration is ignored), but skip
+            # early when already present to avoid the noisy debug log.
+            if exposed_vars.get_definition(key) is not None:
+                return
+            register_exposed_var(
+                key,
+                label=f"{label} — Voice",
+                default="",
+                value_type=str,
+                ui_type="select",
+                options=[],
+                description=(
+                    f"Active voice for the '{label}' TTS engine. "
+                    "Populated by the WebUI voice picker from the provider account."
+                ),
+                scope="plugins",
+                component="vox_plugin",
+                advanced=False,
+            )
+        except Exception as exc:
+            log_warning(
+                f"[ext_endpoints] Could not expose voice config key '{key}': {exc}"
+            )
 
     def _unregister_from_all(self, engine_name: str) -> None:
         """Remove an engine from all subsystem registries."""

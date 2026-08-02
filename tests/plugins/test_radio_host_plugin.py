@@ -281,8 +281,15 @@ async def test_announce_disabled_injects_deannounce_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When RADIO_HOST_NEXT_SONG_ANNOUNCEMENT is False, _on_track_change must
-    pre-generate LLM banter for upcoming transitions and skip injection here
-    (de-announce is handled by _on_winding_down instead)."""
+    NOT pre-generate transition banter and must skip injection here.
+
+    De-announce mode never wants pre-generated *transition* banter: the
+    winding-down handler generates its own de-announce on the fly.  Worse,
+    transition banter is keyed by its ``from`` track ``(prev_title,
+    prev_artist)`` — the same key the de-announce generator polls — so a
+    leftover transition entry gets popped and broadcast, airing an
+    announcement of the NEXT song while the current one is still playing.
+    """
     _patch_radio_config(monkeypatch)
 
     plugin = radio_module.RadioHostPlugin()
@@ -316,10 +323,12 @@ async def test_announce_disabled_injects_deannounce_only(
         ],
     )
 
-    # With queue_ahead having 2+ items, _pre_generate_from_queue creates
-    # one LLM pre-generation task per transition (B->C, C->D)
-    assert len(captured_coro) == 2, (
-        f"Expected 2 pre-gen tasks, got {len(captured_coro)}"
+    # In de-announce mode, no transition banter must be pre-generated —
+    # otherwise a transition entry keyed on the current track collides with
+    # the de-announce generator's poll key and gets broadcast, announcing
+    # the NEXT song mid-track.
+    assert len(captured_coro) == 0, (
+        f"Expected 0 pre-gen tasks in de-announce mode, got {len(captured_coro)}"
     )
 
     # _inject_at_track_change must be False so no fallback injection fires
@@ -655,3 +664,191 @@ async def test_first_listener_resets_intermission(
 
     # With no queue_ahead and no next_title, no pre-generation tasks are created
     assert len(captured_coro) == 0, f"Expected 0 tasks, got {len(captured_coro)}"
+
+
+# ---------------------------------------------------------------------------
+# Stale de-announce abandonment
+# ---------------------------------------------------------------------------
+
+
+def _plugin_with_nowplaying(
+    monkeypatch: pytest.MonkeyPatch, now_playing: dict
+) -> radio_module.RadioHostPlugin:
+    _patch_radio_config(monkeypatch)
+    plugin = radio_module.RadioHostPlugin()
+    plugin._enabled = True
+    plugin._running = True
+    plugin._station_id = "1"
+
+    fake_client = MagicMock()
+    fake_client.get_nowplaying = AsyncMock(return_value=now_playing)
+    plugin._client = fake_client
+    return plugin
+
+
+@pytest.mark.asyncio
+async def test_deannounce_target_expired_when_later_track_on_air(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If banter generation outran the winding-down window and a different,
+    full-length song is now on air, the de-announce target is expired and the
+    injection must be abandoned (returns True)."""
+    plugin = _plugin_with_nowplaying(
+        monkeypatch,
+        {
+            "now_playing": {
+                "song": {"title": "Saccio ca putesse"},
+                "playlist": "default",
+                "duration": 180,
+            }
+        },
+    )
+
+    expired = await plugin._deannounce_target_expired("I Tried")
+
+    assert expired is True
+
+
+@pytest.mark.asyncio
+async def test_deannounce_target_not_expired_when_target_still_on_air(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the target song is still the currently-playing track, the
+    de-announce is still valid (returns False)."""
+    plugin = _plugin_with_nowplaying(
+        monkeypatch,
+        {
+            "now_playing": {
+                "song": {"title": "I Tried"},
+                "playlist": "default",
+                "duration": 180,
+            }
+        },
+    )
+
+    expired = await plugin._deannounce_target_expired("I Tried")
+
+    assert expired is False
+
+
+@pytest.mark.asyncio
+async def test_deannounce_target_not_expired_during_short_bumper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A short bumper/jingle bridging the gap must NOT expire the de-announce:
+    the target's transition gap is still the one we want to fill."""
+    plugin = _plugin_with_nowplaying(
+        monkeypatch,
+        {
+            "now_playing": {
+                "song": {"title": "Station Bumper"},
+                "playlist": "jingles",
+                "duration": 12,
+            }
+        },
+    )
+
+    expired = await plugin._deannounce_target_expired("I Tried")
+
+    assert expired is False
+
+
+@pytest.mark.asyncio
+async def test_deannounce_target_not_expired_on_fetch_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient nowplaying fetch failure must never suppress a legitimate
+    de-announce (fail-open: returns False)."""
+    _patch_radio_config(monkeypatch)
+    plugin = radio_module.RadioHostPlugin()
+    plugin._enabled = True
+    plugin._running = True
+    plugin._station_id = "1"
+
+    fake_client = MagicMock()
+    fake_client.get_nowplaying = AsyncMock(side_effect=RuntimeError("api down"))
+    plugin._client = fake_client
+
+    expired = await plugin._deannounce_target_expired("I Tried")
+
+    assert expired is False
+
+
+@pytest.mark.asyncio
+async def test_clean_gap_deferred_past_bumper_in_transition_gap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a short bumper/jingle is bridging the transition gap, the clean
+    gap opens only when it finishes.  The resolved timestamp must be pushed
+    into the future by roughly the bumper's remaining time so the spoken
+    de-announce airs after the jingle, not overlapping it."""
+    import time as _time
+
+    plugin = _plugin_with_nowplaying(
+        monkeypatch,
+        {
+            "now_playing": {
+                "song": {"title": "Station Bumper"},
+                "playlist": "jingles",
+                "duration": 12,
+                "elapsed": 4,
+            }
+        },
+    )
+
+    resolved = await plugin._resolve_clean_gap_end_ts(song_end_ts=0.0)
+
+    # Bumper has ~8s remaining, so the clean gap opens ~8s from now.
+    assert resolved > _time.time() + 6.0
+
+
+@pytest.mark.asyncio
+async def test_clean_gap_is_now_when_real_track_already_on_air(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If a real (non-bumper) track is already on air when we check, the clean
+    gap is now — the resolver targets the current moment rather than waiting."""
+    import time as _time
+
+    plugin = _plugin_with_nowplaying(
+        monkeypatch,
+        {
+            "now_playing": {
+                "song": {"title": "Some Full Song"},
+                "playlist": "default",
+                "duration": 180,
+                "elapsed": 10,
+            }
+        },
+    )
+
+    resolved = await plugin._resolve_clean_gap_end_ts(song_end_ts=0.0)
+
+    assert abs(resolved - _time.time()) < 2.0
+
+
+@pytest.mark.asyncio
+async def test_clean_gap_falls_back_to_song_end_on_fetch_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A persistent nowplaying fetch failure must fail safe: the resolver
+    returns the original song_end_ts so a legitimate de-announce still airs."""
+    _patch_radio_config(monkeypatch)
+    plugin = radio_module.RadioHostPlugin()
+    plugin._enabled = True
+    plugin._running = True
+    plugin._station_id = "1"
+
+    fake_client = MagicMock()
+    fake_client.get_nowplaying = AsyncMock(side_effect=RuntimeError("api down"))
+    plugin._client = fake_client
+
+    async def _instant_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(radio_module.asyncio, "sleep", _instant_sleep)
+
+    fallback = 12345.0
+    resolved = await plugin._resolve_clean_gap_end_ts(song_end_ts=fallback)
+
+    assert resolved == fallback

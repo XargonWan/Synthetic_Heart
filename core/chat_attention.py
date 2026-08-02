@@ -1,3 +1,4 @@
+import time
 from typing import Dict, Union, List
 
 from core.variables_engine import register_exposed_var
@@ -6,6 +7,13 @@ from core.config_manager import config_registry
 # Centralized storage for chat attention (wake/sleep) state.
 # Keys: chat identifier (str or int), Values: bool (True=awake, False=asleep)
 CHAT_ATTENTION_STATE: Dict[Union[str, int], bool] = {}
+
+# Centralized storage for the alias-triggered "engagement" window: the epoch
+# time (time.time()) a chat scope last produced a directed response. While
+# within CHAT_ATTENTION_WINDOW_SECONDS of that timestamp, the chat is treated
+# as an active conversation and subsequent messages don't need to repeat the
+# alias/mention. This is independent of the awake/asleep state above.
+ENGAGEMENT_STATE: Dict[Union[str, int], float] = {}
 
 
 # Register exposed variables so the WebUI can adjust wake/sleep trigger phrases
@@ -28,6 +36,26 @@ register_exposed_var(
     value_type=str,
     ui_type="text",
     description="Comma-separated list of phrases that wake a chat (substring match). Leave empty to disable.",
+    scope="core",
+    component="chat_attention",
+    tags=["interface"],
+)
+
+register_exposed_var(
+    "CHAT_ATTENTION_WINDOW_SECONDS",
+    label="Attention Window (seconds)",
+    default=180,
+    value_type=int,
+    ui_type="number",
+    description=(
+        "After the alias/mention triggers a response, keep replying to this chat "
+        "without requiring the alias again for this many seconds of activity. "
+        "Each directed reply refreshes the window. Set to 0 to disable: "
+        "the alias/mention is then required on every message. Useful "
+        "for multi-turn roleplay so the SyntH doesn't need to be re-addressed on "
+        "every line. Never applies to messages from peer SyntH bots (see peer_policy) "
+        "-- those always require their own explicit peer-policy match."
+    ),
     scope="core",
     component="chat_attention",
     tags=["interface"],
@@ -97,6 +125,39 @@ def get_attention(scope_id: Union[str, int], default: bool = True) -> bool:
     return CHAT_ATTENTION_STATE.get(scope_id, default)
 
 
+def get_attention_window_seconds() -> float:
+    """Return the configured attention window length in seconds (0 = disabled)."""
+    try:
+        return max(
+            0.0, float(config_registry.get_value("CHAT_ATTENTION_WINDOW_SECONDS", 0))
+        )
+    except Exception:
+        return 0.0
+
+
+def mark_engaged(scope_id: Union[str, int]) -> None:
+    """Record that *scope_id* just produced a directed response.
+
+    Call this whenever a chat scope is about to be replied to via an explicit
+    trigger (alias, @mention, reply, persona match, or an already-engaged
+    window). Has no effect if the attention window feature is disabled.
+    """
+    if get_attention_window_seconds() <= 0:
+        return
+    ENGAGEMENT_STATE[scope_id] = time.time()
+
+
+def is_engaged(scope_id: Union[str, int]) -> bool:
+    """Return True if *scope_id* is within its active attention window."""
+    window = get_attention_window_seconds()
+    if window <= 0:
+        return False
+    last = ENGAGEMENT_STATE.get(scope_id)
+    if last is None:
+        return False
+    return (time.time() - last) <= window
+
+
 __all__ = [
     "set_attention",
     "get_attention",
@@ -104,4 +165,8 @@ __all__ = [
     "get_sleep_triggers",
     "get_wake_triggers",
     "evaluate_triggers",
+    "get_attention_window_seconds",
+    "mark_engaged",
+    "is_engaged",
+    "ENGAGEMENT_STATE",
 ]

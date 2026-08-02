@@ -1,12 +1,27 @@
 # 1. Grab uv binary from its official image
 FROM ghcr.io/astral-sh/uv:latest AS uv_source
 
+# 1b. Build the SyntH Stage frontend (Vue 3 SPA) in a dedicated Node stage.
+# The compiled bundle is copied into the final image so the backend can mount
+# it at /stage (see core/webui.py). Kept as a separate stage so the Node/pnpm
+# toolchain never bloats the runtime image.
+FROM node:22-slim AS stage_builder
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+RUN corepack enable
+WORKDIR /build
+# Copy dependency manifests first for layer caching.
+COPY frontend/package.json frontend/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+# Copy the rest of the frontend source and build to /build/dist.
+COPY frontend/ ./
+RUN pnpm build
+
 # 2. Start your actual Base Image (Debian slim)
 # PyTorch official wheels require a glibc-based Python environment.
 FROM python:3.12-slim
 
 ARG TARGETARCH
-ARG GITVERSION_TAG
+ARG GITVERSION_TAG=0.0.0-dev
 ARG BUILD_DATE
 ARG VERSION
 
@@ -20,13 +35,15 @@ ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
 
 # --- [System Dependencies] ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      bash curl wget unzip nano vim \
+      bash curl wget unzip nano vim git \
       ca-certificates \
       openssl \
       htop net-tools iputils-ping \
   ffmpeg mariadb-client libmariadb-dev postgresql-client \
       espeak \
       xz-utils \
+      python3-venv python3-dev build-essential libxml2-dev libxslt1-dev \
+      zlib1g-dev libffi-dev libssl-dev \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -s /bin/bash abc
 
@@ -70,6 +87,26 @@ ENV UV_PROJECT_ENVIRONMENT=/app/venv
 RUN uv sync --frozen --no-cache
 
 
+# --- [SearXNG (self-hosted, in-container) ] ---
+# SearXNG is NOT published as an official pip/uv package (the PyPI "searxng"
+# project is an unrelated pre-alpha MCP client). The canonical install is from
+# source into its own isolated venv so its pinned deps never collide with the
+# SyntH app venv. It runs locally on 127.0.0.1:8888 and is queried by the
+# web_search plugin as the preferred backend (see plugins/web_search).
+ENV SEARXNG_SRC=/app/searxng \
+    SEARXNG_VENV=/app/searxng-venv \
+    SEARXNG_SETTINGS_PATH=/etc/searxng/settings.yml
+RUN mkdir -p /etc/searxng
+COPY container/searxng/settings.yml /etc/searxng/settings.yml
+RUN git clone --depth 1 https://github.com/searxng/searxng.git "$SEARXNG_SRC" && \
+    uv venv "$SEARXNG_VENV" && \
+    VIRTUAL_ENV="$SEARXNG_VENV" uv pip install --python "$SEARXNG_VENV/bin/python" \
+      setuptools wheel -r "$SEARXNG_SRC/requirements.txt" granian && \
+    VIRTUAL_ENV="$SEARXNG_VENV" uv pip install --python "$SEARXNG_VENV/bin/python" \
+      --no-build-isolation -e "$SEARXNG_SRC"
+RUN chown -R abc:abc "$SEARXNG_SRC" "$SEARXNG_VENV" /etc/searxng
+
+
 # --- [App Setup] ---
 # Copy scripts
 COPY automation_tools/container_synth.sh /app/synth.sh
@@ -77,6 +114,11 @@ RUN chmod +x /app/synth.sh
 
 # Copy application code (includes vendor packages)
 COPY . /app
+
+# Copy the pre-built SyntH Stage bundle from the Node build stage. Placed AFTER
+# `COPY . /app` so it is never clobbered; the host has no frontend/dist, this is
+# the sole source of it. With this present, core/webui.py mounts /stage.
+COPY --from=stage_builder /build/dist /app/frontend/dist
 
 # vendored packages are installed by `uv sync` earlier via path sources.
 # Historically we pip-installed them here, but that invoked the system pip
@@ -86,8 +128,11 @@ COPY . /app
 # Cleanup & Permissions
 RUN rm -rf /app/s6-services /app/automation_tools
 ENV PYTHONPATH=/app
-ENV GITVERSION_TAG=$GITVERSION_TAG
-RUN echo "$GITVERSION_TAG" > /app/version.txt
+# Concretize the resolved version into the image so it is available at runtime
+# via os.getenv("SYNTH_VERSION") (read by core/webui.py). GITVERSION_TAG is
+# supplied by CI (GitVersion majorMinorPatch); local builds fall back to the
+# ARG default above.
+ENV SYNTH_VERSION=$GITVERSION_TAG
 
 # S6 Services Setup
 COPY container/s6-services/synth /etc/s6-overlay/s6-rc.d/synth
@@ -95,6 +140,12 @@ RUN chmod +x /etc/s6-overlay/s6-rc.d/synth/run && \
     mkdir -p /etc/s6-overlay/s6-rc.d/user/contents.d && \
     echo synth > /etc/s6-overlay/s6-rc.d/user/contents.d/synth && \
     chown -R abc:abc /etc/s6-overlay/s6-rc.d/synth
+
+# S6 Service: SearXNG (in-container search backend, longrun)
+COPY container/s6-services/searxng /etc/s6-overlay/s6-rc.d/searxng
+RUN chmod +x /etc/s6-overlay/s6-rc.d/searxng/run && \
+    echo searxng > /etc/s6-overlay/s6-rc.d/user/contents.d/searxng && \
+    chown -R abc:abc /etc/s6-overlay/s6-rc.d/searxng
 
 # Final cleanup
 RUN rm -rf /tmp/*

@@ -114,13 +114,13 @@ async def test_diary_uses_llm_rationale_emotions_and_message_id_for_grillo(monke
     ctx = {
         "interface": "telegram_bot",
         "grillo_beat": True,
-        "beat_type": "outreach",
+        "beat_type": "observer",
         "llm_response_text": '{"actions": [{"type": "update_emotion_state", "payload": {"emotions": {"neutral": 0.5, "love": 0.2}}}, {"type": "message_telegram_bot", "payload": {"text": "How have you been holding up?"}}], "meta": {"rationale": "Initiating a natural check-in while feeling quietly attached."}}',
     }
     msg = SimpleNamespace(
         chat_id=123,
-        text="[G.R.I.L.L.O. OUTREACH]",
-        message_id="grillo_outreach_6364",
+        text="[G.R.I.L.L.O. CHAT OBSERVER]",
+        message_id="grillo_observer_6364",
     )
 
     await ap._create_diary_entry_for_actions(actions, ctx, msg)

@@ -123,8 +123,8 @@ async def test_plain_at_symbol_does_not_mark_explicit_trigger(monkeypatch):
         "core.chat_context_manager.add_message_to_context", _fake_add_message_to_context
     )
     monkeypatch.setattr(
-        "interface.discord_interface.chat_link_store.update_names_from_resolver",
-        (lambda *a, **k: _fake_add_message_to_context()),
+        "interface.discord_interface.resolve_and_touch",
+        AsyncMock(return_value=None),
     )
     monkeypatch.setattr("core.message_queue.enqueue", fake_enqueue)
 
@@ -171,8 +171,8 @@ async def test_real_discord_mention_marks_explicit_trigger(monkeypatch):
         "core.chat_context_manager.add_message_to_context", _fake_add_message_to_context
     )
     monkeypatch.setattr(
-        "interface.discord_interface.chat_link_store.update_names_from_resolver",
-        (lambda *a, **k: _fake_add_message_to_context()),
+        "interface.discord_interface.resolve_and_touch",
+        AsyncMock(return_value=None),
     )
     monkeypatch.setattr("core.message_queue.enqueue", fake_enqueue)
 
@@ -1020,7 +1020,7 @@ async def test_start_live_voice_passes_initial_text_to_manager(monkeypatch):
     result = await di._start_live_voice(
         channel_id,
         initial_text="join me in voice",
-        initial_sender="Scarlet",
+        initial_sender="Alice",
         initial_timestamp="2026-04-12T18:14:22.983048+00:00",
     )
 
@@ -1028,7 +1028,7 @@ async def test_start_live_voice_passes_initial_text_to_manager(monkeypatch):
     assert manager_started, "manager.start_session must be called"
     start_kwargs = manager_started[0]
     assert start_kwargs["initial_user_message"] == "join me in voice"
-    assert start_kwargs["initial_user_name"] == "Scarlet"
+    assert start_kwargs["initial_user_name"] == "Alice"
     assert (
         start_kwargs["initial_message_timestamp"] == "2026-04-12T18:14:22.983048+00:00"
     )

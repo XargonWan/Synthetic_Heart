@@ -10,15 +10,12 @@ except Exception:  # pragma: no cover - executed when asyncpg missing
 
 
 _CONFLICT_KEYS: dict[str, tuple[str, ...]] = {
-    "agent_action_execs": ("id",),
-    "agent_activity_log": ("id",),
     "agent_tasks": ("id",),
     "bio": ("id",),
     "blocklist": ("user_id",),
     "chat_archives": ("id",),
-    "chat_history_cache": ("interface_path", "timestamp"),
+    "chat_history_cache": ("interface_path", "created_at"),
     "chat_session_meta": ("interface_path",),
-    "chatlink": ("interface", "chat_id"),
     "config": ("config_key",),
     "emotion_diary": ("id",),
     "emotion_state": ("id",),
@@ -26,10 +23,10 @@ _CONFLICT_KEYS: dict[str, tuple[str, ...]] = {
     "grillo_action_execs": ("id",),
     "grillo_activity_log": ("id",),
     "grillo_beats": ("id",),
+    "interface_paths": ("interface_path",),
     "memories": ("id",),
     "message_logs": ("id",),
     "message_map": ("trainer_message_id",),
-    "recent_chats": ("chat_id",),
     "scheduled_events": ("id",),
     "settings": ("setting_key",),
 }
@@ -233,10 +230,12 @@ def _translate_create_table(sql: str) -> str:
     translated = translated.replace("`", '"')
     translated = re.sub(r"\bLONGTEXT\b", "TEXT", translated, flags=re.IGNORECASE)
     translated = re.sub(r"\bMEDIUMTEXT\b", "TEXT", translated, flags=re.IGNORECASE)
-    translated = re.sub(r"\bDATETIME\b", "TIMESTAMPTZ", translated, flags=re.IGNORECASE)
-    translated = re.sub(
-        r"\bTIMESTAMP\b", "TIMESTAMPTZ", translated, flags=re.IGNORECASE
-    )
+    # Case-sensitive: MariaDB DDL in this codebase always writes type keywords
+    # in UPPERCASE and column names in lowercase (e.g. `timestamp DATETIME`).
+    # Matching case-insensitively here renamed the literal column "timestamp"
+    # to "timestamptz" along with the type, corrupting the schema on Postgres.
+    translated = re.sub(r"\bDATETIME\b", "TIMESTAMPTZ", translated)
+    translated = re.sub(r"\bTIMESTAMP\b", "TIMESTAMPTZ", translated)
     translated = re.sub(
         r"\bDOUBLE\b", "DOUBLE PRECISION", translated, flags=re.IGNORECASE
     )

@@ -25,9 +25,14 @@ Configuration (via exposed vars, all optional)
 ``VOSK_MODEL_PATH``
     Absolute or relative path to override the model directory.
     Leave blank to use the Model Manager's storage.
+``VOSK_MODEL``
+    Explicit Vosk model id to pin (e.g. ``'vosk-it-it'``, ``'vosk-en-us-large'``).
+    When set, it takes precedence over ``VOSK_LANGUAGE`` (even when that is
+    ``'auto'``) and is the authoritative model selection in the WebUI.
+
 ``VOSK_LANGUAGE``
     Language code for the Vosk model to use (e.g. ``'en-us'``, ``'it'``,
-    ``'fr'``).  Default: ``'en-us'``.
+    ``'fr'``).  Default: ``'auto'``.  Ignored when ``VOSK_MODEL`` is set.
 
     Set to ``'auto'`` to detect the spoken language automatically.  When
     ``faster-whisper`` is installed, a Whisper-tiny model (~75 MB,
@@ -462,8 +467,33 @@ def _get_default_language() -> str:
     return lang
 
 
+def _resolve_explicit_model_id() -> str | None:
+    """Return the explicit ``VOSK_MODEL`` selection, or *None* if unset.
+
+    When set, this pinned model_id takes precedence over the language-derived
+    model for every non-``auto`` language configuration.  It lets the user pick
+    a specific downloaded Vosk model (e.g. ``vosk-en-us-large``) from the WebUI
+    without being constrained to the default small model of a language.
+    """
+    try:
+        from core.config_manager import config_registry  # type: ignore[import]
+
+        raw = config_registry.get_value(
+            "VOSK_MODEL", "", group="plugins", component="auris_plugin"
+        )
+        if raw and str(raw).strip() not in ("", "None"):
+            return str(raw).strip()
+    except Exception:
+        pass
+    return None
+
+
 def _default_model_path() -> Path:
     """Return the model path managed by MODEL_MANAGER for the current language."""
+    # Explicit model pin (WebUI model selector) wins over everything else.
+    explicit = _resolve_explicit_model_id()
+    if explicit:
+        return MODEL_MANAGER.model_dir(explicit)
     lang = _get_default_language()
     model_id = _LANG_TO_MODEL_ID.get(lang, f"vosk-{lang}")
     # If explicitly overridden by VOSK_MODEL_PATH, use that.
@@ -535,6 +565,10 @@ class VoskAurisEngine(AurisEngineBase):
     display_name = "Vosk STT (local, offline)"
 
     def _model_path(self) -> Path:
+        # Explicit model pin (WebUI model selector) wins over everything else.
+        explicit = _resolve_explicit_model_id()
+        if explicit:
+            return MODEL_MANAGER.model_dir(explicit)
         try:
             from core.config_manager import config_registry  # type: ignore[import]
 
@@ -564,13 +598,26 @@ class VoskAurisEngine(AurisEngineBase):
         select the appropriate voice or model without re-running language
         detection on the transcribed text.
         """
-        configured_lang = _get_configured_language()
-        if configured_lang == "auto":
-            effective_lang = _resolve_auto_language(audio_path=file_path)
-            model_path = _model_path_from_language(effective_lang)
-        else:
-            effective_lang = configured_lang
+        # A pinned VOSK_MODEL always wins, even when VOSK_LANGUAGE is 'auto'
+        # (the default).  This is what makes the WebUI "select a model"
+        # control authoritative instead of silently falling back to language
+        # detection.  See AGENTS.md §12 (Vosk model-vs-language selector).
+        explicit_model_id = _resolve_explicit_model_id()
+        if explicit_model_id is not None:
+            # A pinned VOSK_MODEL always wins, even when VOSK_LANGUAGE is 'auto'
+            # (the default).  Derive the reported language from the model spec so
+            # downstream TTS routing still gets a valid code.  See AGENTS.md §12.
+            spec = MODEL_MANAGER.get_spec(explicit_model_id)
+            effective_lang = spec.language if spec and spec.language else "en"
             model_path = self._model_path()
+        else:
+            configured_lang = _get_configured_language()
+            if configured_lang == "auto":
+                effective_lang = _resolve_auto_language(audio_path=file_path)
+                model_path = _model_path_from_language(effective_lang)
+            else:
+                effective_lang = configured_lang
+                model_path = self._model_path()
 
         model = _load_model(model_path)
         if model is None:

@@ -15,7 +15,6 @@ from typing import Any, Dict, List, Optional
 from core.logging_utils import log_info, log_debug, log_warning, log_error
 from core.config_manager import config_registry
 from core.db import execute_query
-from core import recent_chats
 
 SELF_SENDER_IDS = {"self", "synth"}
 SELF_SENDER_NAMES = {"self", "synth"}
@@ -117,7 +116,7 @@ class ChatUpdateChecker:
             # Query DB for most recent non-self message timestamp
             rows = await execute_query(
                 """
-                                SELECT MAX(timestamp) as max_ts
+                                SELECT MAX(created_at) as max_ts
                 FROM chat_history_cache
                 WHERE COALESCE(sender_id, '') NOT IN (%s, %s)
                   AND COALESCE(sender_name, '') NOT IN (%s, %s)
@@ -162,12 +161,12 @@ class ChatUpdateChecker:
                         # Get chats that updated since last known ts (non-self only)
                         rows2 = await execute_query(
                             """
-                            SELECT interface_path, sender_name, sender_id, timestamp as ts
+                            SELECT interface_path, sender_name, sender_id, created_at as ts
                             FROM chat_history_cache
-                            WHERE timestamp > %s
+                            WHERE created_at > %s
                               AND COALESCE(sender_id, '') NOT IN (%s, %s)
                               AND COALESCE(sender_name, '') NOT IN (%s, %s)
-                            ORDER BY timestamp ASC
+                            ORDER BY created_at ASC
                             """,
                             (since_dt, "self", "synth", "self", "synth"),
                         )
@@ -218,12 +217,12 @@ class ChatUpdateChecker:
                         )
                         rows2 = await execute_query(
                             """
-                            SELECT interface_path, sender_name, sender_id, timestamp as ts
+                            SELECT interface_path, sender_name, sender_id, created_at as ts
                             FROM chat_history_cache
-                            WHERE timestamp > %s
+                            WHERE created_at > %s
                               AND COALESCE(sender_id, '') NOT IN (%s, %s)
                               AND COALESCE(sender_name, '') NOT IN (%s, %s)
-                            ORDER BY timestamp ASC
+                            ORDER BY created_at ASC
                             """,
                             (since_dt, "self", "synth", "self", "synth"),
                         )
@@ -252,18 +251,20 @@ class ChatUpdateChecker:
                             )
 
         except Exception as e:
-            # DB error - fallback to in-memory recent_chats (best-effort)
+            # DB error - fallback to the interface_paths registry (best-effort)
             log_warning(
-                f"[chat_update_checker] DB query failed, falling back to in-memory check: {e}"
+                f"[chat_update_checker] DB query failed, falling back to interface_paths check: {e}"
             )
             try:
-                active = await recent_chats.get_last_active_chats()
+                from core.interface_paths import list_interface_paths
+
+                active = await list_interface_paths()
                 if len(active) != self._last_count:
                     updated = True
                     self._last_count = len(active)
             except Exception as e2:
                 log_error(
-                    f"[chat_update_checker] Fallback recent_chats check failed: {e2}"
+                    f"[chat_update_checker] Fallback interface_paths check failed: {e2}"
                 )
 
         self._last_checked = now

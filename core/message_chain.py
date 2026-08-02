@@ -30,6 +30,7 @@ from typing import Any, Dict, Optional, cast
 
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.config_manager import config_registry
+from core.beat_utils import is_outbound_beat
 
 # Result constants
 ACTIONS_EXECUTED = "ACTIONS_EXECUTED"
@@ -291,7 +292,7 @@ def _auto_inject_interface_path(actions: list, interface_path: Optional[str]) ->
 
     Args:
         actions: List of action dicts to process
-        interface_path: The interface path from context (e.g., 'telegram_bot/5208932647')
+        interface_path: The interface path from context (e.g., 'telegram_bot/5551234567')
 
     Returns:
         The same list with interface_path injected in-place where missing
@@ -338,6 +339,124 @@ def _auto_inject_interface_path(actions: list, interface_path: Optional[str]) ->
     return actions
 
 
+def _collect_beat_allowed_paths(ctx: Optional[dict]) -> Optional[set[str]]:
+    """Collect the set of interface_paths a Grillo beat is allowed to route to.
+
+    Grillo observer beats present the model with snippets from multiple
+    conversations plus a list of eligible outreach targets. The model must reply
+    to the conversation a snippet came from (or reach out to an eligible target).
+    Because the beat runs with a placeholder context path (``grillo/-1``), a
+    mis-chosen interface_path would otherwise be delivered verbatim to whatever
+    chat the model named, silently landing the reply in the wrong conversation.
+
+    This builds the union of every routable interface_path the beat actually
+    offered the model: the ``chat:`` path embedded in each snippet plus every
+    ``interface_path`` from the eligible-targets list. Returns ``None`` when the
+    context is not a Grillo beat or carries no routable material (in which case
+    no target validation should be applied).
+
+    Args:
+        ctx: The runtime context dict for the current turn.
+
+    Returns:
+        A set of allowed interface_path strings, or ``None`` when validation
+        does not apply.
+    """
+    if not isinstance(ctx, dict) or not ctx.get("grillo_beat"):
+        return None
+
+    allowed: set[str] = set()
+
+    snippets = ctx.get("grillo_snippets")
+    if isinstance(snippets, (list, tuple)):
+        for snippet in snippets:
+            if not isinstance(snippet, str):
+                continue
+            # Snippets are rendered as "(chat:<path> | sender:... | ts) <text>".
+            marker = "chat:"
+            start = snippet.find(marker)
+            if start == -1:
+                continue
+            start += len(marker)
+            end = start
+            # The path ends at the first field separator or closing paren.
+            while end < len(snippet) and snippet[end] not in (" ", "|", ")"):
+                end += 1
+            path = snippet[start:end].strip()
+            if path:
+                allowed.add(path)
+
+    targets = ctx.get("grillo_targets")
+    if isinstance(targets, (list, tuple)):
+        for target in targets:
+            if isinstance(target, dict):
+                path = target.get("interface_path")
+                if isinstance(path, str) and path.strip():
+                    allowed.add(path.strip())
+
+    return allowed or None
+
+
+def _drop_misrouted_beat_actions(actions: list, ctx: Optional[dict]) -> list:
+    """Drop beat actions routed to a conversation the beat never offered.
+
+    For Grillo beats (observer/outreach), any action that carries a concrete
+    ``interface_path`` in its payload must target one of the interface_paths the
+    beat actually presented to the model — the origin of a replied snippet or an
+    eligible outreach target. An action routed to a path outside that set is a
+    routing hallucination and is dropped: not sending is strictly safer than
+    delivering the reply to the wrong conversation. Actions with no concrete
+    ``interface_path`` are left untouched for downstream handling.
+
+    Args:
+        actions: List of action dicts to filter.
+        ctx: The runtime context dict for the current turn.
+
+    Returns:
+        The filtered list of actions.
+    """
+    if not isinstance(actions, list):
+        return actions
+
+    allowed_paths = _collect_beat_allowed_paths(ctx)
+    if not allowed_paths:
+        return actions
+
+    kept: list = []
+    for action in actions:
+        if not isinstance(action, dict):
+            kept.append(action)
+            continue
+
+        payload = action.get("payload")
+        target_path = (
+            payload.get("interface_path") if isinstance(payload, dict) else None
+        )
+        # Only actions that carry a concrete routing target can be misrouted.
+        # Anything without an interface_path (diary entries, non-message actions,
+        # or messages left for downstream injection) is left untouched.
+        if not isinstance(target_path, str) or not target_path.strip():
+            kept.append(action)
+            continue
+
+        if target_path.strip() in allowed_paths:
+            kept.append(action)
+        else:
+            action_type = (
+                action.get("type")
+                or action.get("action")
+                or action.get("command")
+                or action.get("method")
+            )
+            log_warning(
+                f"[message_chain] 🚫 Dropping beat action '{action_type}' routed to "
+                f"'{target_path}' — not among the beat's offered targets "
+                f"{sorted(allowed_paths)}"
+            )
+
+    return kept
+
+
 def _normalize_message_unknown(actions: list, interface_path: Optional[str]) -> list:
     """Normalize 'message_unknown' action types to the correct interface-specific type.
 
@@ -347,7 +466,7 @@ def _normalize_message_unknown(actions: list, interface_path: Optional[str]) -> 
 
     Args:
         actions: List of action dicts to normalize
-        interface_path: The interface path (e.g., 'telegram_bot/5208932647')
+        interface_path: The interface path (e.g., 'telegram_bot/5551234567')
 
     Returns:
         The same list with any 'message_unknown' types corrected in-place
@@ -355,7 +474,7 @@ def _normalize_message_unknown(actions: list, interface_path: Optional[str]) -> 
     if not actions or not interface_path:
         return actions
 
-    # Extract interface prefix from path (e.g., 'telegram_bot' from 'telegram_bot/5208932647')
+    # Extract interface prefix from path (e.g., 'telegram_bot' from 'telegram_bot/5551234567')
     interface_prefix = (
         interface_path.split("/")[0] if "/" in interface_path else interface_path
     )
@@ -651,6 +770,8 @@ async def handle_incoming_message(
     ctx["original_text"] = (
         text  # Track original text in context, not on message (for consistency with immutable Telegram Message objects)
     )
+    if not ctx.get("goal") and isinstance(text, str) and text.strip():
+        ctx["goal"] = text.strip()
     if not ctx.get("original_user_message"):
         try:
             ctx["original_user_message"] = getattr(message, "text", "") or ""
@@ -829,9 +950,9 @@ async def handle_incoming_message(
 
         is_internal_chat = chat_id == -1 or chat_id == "-1" or str(chat_id) == "-1"
 
-        is_grillo_internal = ctx.get("grillo_beat", False) and ctx.get(
-            "beat_type"
-        ) not in ("outreach", None)
+        is_grillo_internal = ctx.get("grillo_beat", False) and not is_outbound_beat(
+            ctx.get("beat_type")
+        )
 
         # Prompt-scoped turns (e.g. vision_describe, delivery prompts) restrict the
         # LLM to specific action types; if no message_* type is allowed, the LLM
@@ -1477,6 +1598,10 @@ async def handle_incoming_message(
                 # Auto-inject interface_path into message actions that are missing it
                 # This prevents validation failures and avoids costly LLM correction calls
                 actions = _auto_inject_interface_path(actions, ctx_interface_path)
+                # For Grillo beats, drop any message action routed to a conversation
+                # the beat never offered (snippet origin or eligible target). This
+                # prevents an observer reply from landing in the wrong chat.
+                actions = _drop_misrouted_beat_actions(actions, ctx)
 
                 # --- New: Validate action types early and trigger corrector for unsupported types ---
                 try:
@@ -1567,6 +1692,7 @@ async def handle_incoming_message(
                             actions = _auto_inject_interface_path(
                                 actions, ctx_interface_path
                             )
+                            actions = _drop_misrouted_beat_actions(actions, ctx)
 
                     unsupported = []
                     for idx, act in enumerate(actions):
@@ -1928,7 +2054,7 @@ async def handle_incoming_message(
                         chat_id = ctx.get("chat_id")
 
                         # interface_path must have a chat_id suffix to be user-facing
-                        # e.g., "telegram_bot/5208932647" not just "telegram_bot"
+                        # e.g., "telegram_bot/5551234567" not just "telegram_bot"
                         is_user_facing = interface_path and any(
                             interface_path.startswith(f"{iface}/")
                             for iface in user_facing_interfaces
@@ -1940,12 +2066,12 @@ async def handle_incoming_message(
                             chat_id == -1 or chat_id == "-1" or str(chat_id) == "-1"
                         )
 
-                        # Check if this is a Grillo internal beat (not outreach)
+                        # Check if this is a Grillo internal beat (not outbound)
                         # Only internal Grillo beats (self_reflection, curiosity, etc.) skip TTS
-                        # Outreach beats ARE user-facing and SHOULD get TTS
-                        is_grillo_internal = ctx.get("grillo_beat", False) and ctx.get(
-                            "beat_type"
-                        ) not in ("outreach", None)
+                        # Outbound beats (observer) ARE user-facing and SHOULD get TTS
+                        is_grillo_internal = ctx.get(
+                            "grillo_beat", False
+                        ) and not is_outbound_beat(ctx.get("beat_type"))
 
                         # Check for autonomous messages (Grillo outreach, dreams, etc.)
                         # These are system-initiated, not user-response, so they shouldn't get TTS
@@ -2114,6 +2240,8 @@ async def handle_incoming_message(
 
                         # For Telegram/Discord, only auto-inject TTS for voice-originated
                         # messages. WebUI, Matrix and Ollama always get TTS when VOX is active.
+                        # VOX_SPEAK_TEXT_REPLIES (opt-in toggle, Engines tab) lifts the
+                        # voice-input requirement so typed text replies also get a clip.
                         _is_voice_input = bool(ctx.get("is_voice_input", False))
                         _iface_tts_prefix = (ctx.get("interface_path") or "").split(
                             "/"
@@ -2122,6 +2250,21 @@ async def handle_incoming_message(
                         tts_allowed = (
                             _iface_tts_prefix not in _voice_only_tts_ifaces
                         ) or _is_voice_input
+                        _speak_text_replies = False
+                        try:
+                            from core.config_manager import config_registry
+
+                            _speak_text_replies = bool(
+                                config_registry.get_value(
+                                    "VOX_SPEAK_TEXT_REPLIES",
+                                    False,
+                                    value_type=bool,
+                                    group="plugins",
+                                    component="vox_plugin",
+                                )
+                            )
+                        except Exception:
+                            pass
 
                         if should_skip_tts:
                             skip_reason = []
@@ -2148,10 +2291,15 @@ async def handle_incoming_message(
                         # WebUI/Matrix/other non-voice interfaces which caused the
                         # synth to speak even though the incoming message was not
                         # audio.  the requirement is that non-audio inputs should not
-                        # trigger spoken replies.
-                        elif (is_user_facing and tts_allowed and _is_voice_input) or (
-                            context and context.get("request_tts")
-                        ):
+                        # trigger spoken replies — unless the operator opted in via
+                        # the VOX_SPEAK_TEXT_REPLIES toggle, which attaches a clip
+                        # to text replies on every user-facing interface.
+                        elif (
+                            is_user_facing
+                            and (
+                                (tts_allowed and _is_voice_input) or _speak_text_replies
+                            )
+                        ) or (context and context.get("request_tts")):
                             # With the new strategy we honor explicit TTS requests even when
                             # they come from non-WebUI interfaces (voice note, etc.).
                             if (
@@ -2375,7 +2523,48 @@ async def handle_incoming_message(
                                     else:
                                         filtered.append(act)
                                 actions = filtered
-                        result = await run_actions(actions, ctx, bot, message)
+                        # Agentic Runtime 2.0: optional deterministic router.
+                        # When AGENTIC_ROUTING_ENABLED is False (default) this is
+                        # a no-op and the Fast Lane runs exactly as before.
+                        if config_registry.get_var(
+                            "AGENTIC_ROUTING_ENABLED", False, value_type=bool
+                        ):
+                            from core.agent_router import (
+                                classify as _agent_classify,
+                                route as _agent_route,
+                            )
+
+                            action_list = actions if isinstance(actions, list) else []
+                            lane = _agent_classify(action_list, context=ctx)
+                            if lane == "agent":
+                                log_info(
+                                    "[message_chain] 🤖 Agent Lane engaged for this turn"
+                                )
+                                result = await _agent_route(
+                                    action_list,
+                                    context=ctx,
+                                    bot=bot,
+                                    message=message,
+                                )
+                                # The agent lane returns its own result shape;
+                                # normalize to what the loop expects downstream.
+                                if not isinstance(result, dict):
+                                    result = {"processed": [], "failed_actions": []}
+                                result.setdefault("processed", [])
+                                result.setdefault("failed_actions", [])
+                                result.setdefault("errors", [])
+                                result.setdefault("action_outputs", [])
+                                actions_executed_during_loop = True
+                                # Skip the rest of the Fast-Lane correction logic.
+                                delivered_to_llm = False
+                                fixable_failures: list = []
+                                unfixable_failures: list = []
+                            else:
+                                result = await run_actions(
+                                    action_list, ctx, bot, message
+                                )
+                        else:
+                            result = await run_actions(actions, ctx, bot, message)
                         processed = result.get("processed", [])
                         failed = result.get("failed_actions", [])
                         errors = result.get("errors", [])

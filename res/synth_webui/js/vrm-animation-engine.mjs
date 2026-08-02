@@ -41,6 +41,17 @@ let idleAction = null;
 let idleClip = null;
 const IDLE_FALLBACK_STATE = 'idle';
 
+// Persistent low-weight base idle. Bones that are NOT keyed by the current
+// foreground action fall back to the VRM bind pose (arms open = "T-pose") when
+// the mixer has no other weighted action driving them. Keeping an idle action
+// always running at a small weight floor guarantees the whole skeleton is
+// always driven, so no transient T-pose can appear between animations.
+let baseIdleAction = null;
+let baseIdleClip = null;
+const BASE_IDLE_MIN_WEIGHT = 0.15; // weight raised at the start of every transition
+const BASE_IDLE_FLOOR_WEIGHT = 0.12; // weight lowered back to after a crossfade completes
+let baseIdleFloorTimer = null;
+
 // Callbacks for state changes
 let onStateChangeCallback = null;
 let onSectionChangeCallback = null;
@@ -51,6 +62,10 @@ let onSectionChangeCallback = null;
  */
 function initAnimationEngine(mixerInstance) {
     mixer = mixerInstance;
+    // Start the persistent base idle if the idle clip is already cached. If it
+    // is not ready yet, the first transition will lazily start it via
+    // _ensureBaseIdle(), so there is no hard dependency on ordering here.
+    _ensureBaseIdle();
     console.log('[KaradaEngine] Initialized');
 }
 
@@ -186,18 +201,27 @@ function playSection(section) {
     newAction.loop = (section === 'loop') ? THREE.LoopRepeat : THREE.LoopOnce;
     newAction.clampWhenFinished = (section !== 'loop');
 
-    // Fade in new section
-    if (currentAction && currentAction !== newAction) {
-        currentAction.fadeOut(CROSSFADE_DURATION);
-    }
+    // Guarantee the skeleton is fully covered during the transition so no bind
+    // pose (T-pose) shows through, then use a true crossfade so total weight
+    // stays ~1 (independent fadeOut+fadeIn can dip below full coverage).
+    _ensureBaseIdle();
 
     newAction.reset();
-    newAction.fadeIn(CROSSFADE_DURATION);
-    newAction.play();
+    if (currentAction && currentAction !== newAction && currentAction.isRunning()) {
+        newAction.play();
+        currentAction.crossFadeTo(newAction, CROSSFADE_DURATION, false);
+    } else {
+        newAction.fadeIn(CROSSFADE_DURATION);
+        newAction.play();
+    }
 
     currentAction = newAction;
     currentSection = section;
     sectionStartTime = animationClock;
+
+    // Once the new section is fully weighted, relax the base idle back to its
+    // resting floor.
+    _scheduleBaseIdleFloorDrop();
 
     if (onSectionChangeCallback) {
         onSectionChangeCallback(section, animationClock);
@@ -277,10 +301,16 @@ function playAnimation(params) {
         return;
     }
 
-    // Stop current action with fade out
-    if (currentAction) {
-        currentAction.fadeOut(CROSSFADE_DURATION);
-    }
+    // Raise the persistent base idle to its guaranteed floor so the whole
+    // skeleton stays driven throughout this transition — no transient T-pose.
+    _ensureBaseIdle();
+
+    const previousAction = currentAction;
+
+    // A section-less descriptor with `play_once: true` (e.g. touch/Surprised)
+    // must play ONCE and return to idle, never loop. Idle itself is always a
+    // looping state regardless of any descriptor flag.
+    const playOnce = !!(descriptor && descriptor.play_once) && state !== IDLE_FALLBACK_STATE;
 
     // Create new action
     currentClip = clip;
@@ -290,24 +320,41 @@ function playAnimation(params) {
 
     // Start playing appropriate section
     if (descriptor && (descriptor.intro || descriptor.loop || descriptor.outro)) {
-        // Has descriptor structure - start with intro if available, else loop
+        // Has descriptor structure - start with intro if available, else loop.
+        // playSection handles the crossfade from the previous action itself, so
+        // fade the previous action out here to avoid a lingering overlay.
+        if (previousAction && previousAction !== currentAction) {
+            previousAction.fadeOut(CROSSFADE_DURATION);
+        }
         if (descriptor.intro && typeof descriptor.intro === 'object') {
             playSection('intro');
         } else if (descriptor.loop && typeof descriptor.loop === 'object') {
             playSection('loop');
         } else {
             // Just play the full clip
-            currentAction.reset();
-            currentAction.fadeIn(CROSSFADE_DURATION);
-            currentAction.play();
+            _startForegroundAction(currentAction, previousAction);
             currentSection = 'loop';
+            _scheduleBaseIdleFloorDrop();
         }
+    } else if (playOnce) {
+        // One-shot, section-less clip: play a single time then fall back to idle.
+        currentAction.loop = THREE.LoopOnce;
+        currentAction.clampWhenFinished = true;
+        _startForegroundAction(currentAction, previousAction);
+        currentSection = 'loop';
+        _scheduleBaseIdleFloorDrop();
+        _scheduleReturnToIdle(currentAction);
     } else {
         // No descriptor structure - just play the clip
-        currentAction.reset();
-        currentAction.fadeIn(CROSSFADE_DURATION);
-        currentAction.play();
+        _startForegroundAction(currentAction, previousAction);
         currentSection = 'loop';
+        _scheduleBaseIdleFloorDrop();
+        // No structure and not explicitly play-once: a non-idle finite clip must
+        // still return to idle when it ends, otherwise it clamps on its last
+        // frame with nothing to follow. Idle itself loops forever.
+        if (state !== IDLE_FALLBACK_STATE && currentAction.loop === THREE.LoopOnce) {
+            _scheduleReturnToIdle(currentAction);
+        }
     }
 
     // Karada v2: the engine owns the skeletal clip, but facial expressions
@@ -416,12 +463,164 @@ function _forwardDescriptorExpressions(stateName, descriptor, startedAt) {
 }
 
 /**
+ * Resolve the idle animation clip from the shared VRM animation cache so a
+ * one-shot animation can fall back to idle without the server re-sending it.
+ * @returns {THREE.AnimationClip|null}
+ */
+function _resolveIdleClip() {
+    if (idleClip) return idleClip;
+    try {
+        if (typeof window !== 'undefined'
+            && window.VRMAnimations
+            && typeof window.VRMAnimations._getCachedAnimation === 'function') {
+            return window.VRMAnimations._getCachedAnimation(IDLE_FALLBACK_STATE, null) || null;
+        }
+    } catch (e) { /* ignore */ }
+    return null;
+}
+
+/**
+ * Ensure a persistent, low-weight idle action is running so that bones not
+ * keyed by the active foreground action are always driven (never bind-pose).
+ *
+ * IMPORTANT: never use `fadeIn()` here. `fadeIn(t)` resets the action weight to
+ * 0 and ramps it up over `t` seconds; if this is briefly the only driver that
+ * would expose a single-frame bind pose. Set the weight directly with
+ * `setEffectiveWeight` using Math.max so we only ever raise it here.
+ * @param {number} [minWeight] - Minimum weight to guarantee for the base idle.
+ * @returns {boolean} true if a base idle is (now) running.
+ */
+function _ensureBaseIdle(minWeight = BASE_IDLE_MIN_WEIGHT) {
+    if (!mixer) return false;
+
+    // (Re)create the base idle if it does not exist yet or lost its clip.
+    if (!baseIdleAction) {
+        const clip = _resolveIdleClip();
+        if (!clip) return false; // idle clip not cached yet; retry on next transition
+        baseIdleClip = clip;
+        baseIdleAction = mixer.clipAction(clip);
+        baseIdleAction.loop = THREE.LoopRepeat;
+        baseIdleAction.clampWhenFinished = false;
+    }
+
+    try {
+        baseIdleAction.enabled = true;
+        baseIdleAction.setLoop(THREE.LoopRepeat, Infinity);
+        baseIdleAction.clampWhenFinished = false;
+        if (typeof baseIdleAction.setEffectiveWeight === 'function') {
+            const cur = typeof baseIdleAction.getEffectiveWeight === 'function'
+                ? (baseIdleAction.getEffectiveWeight() || 0)
+                : 0;
+            baseIdleAction.setEffectiveWeight(Math.max(cur, minWeight));
+        }
+        baseIdleAction.play();
+    } catch (e) { /* ignore */ }
+    return true;
+}
+
+/**
+ * Lower the base idle back down to its resting floor weight, but only AFTER
+ * the incoming foreground action has finished fading in. Lowering it earlier
+ * would drop total skeleton coverage while the new action is still ramping up,
+ * re-exposing the bind pose. The delay defaults to the crossfade duration plus
+ * a small margin.
+ * @param {number} [targetWeight]
+ * @param {number} [delayMs]
+ */
+function _scheduleBaseIdleFloorDrop(targetWeight = BASE_IDLE_FLOOR_WEIGHT,
+    delayMs = CROSSFADE_DURATION * 1000 + 120) {
+    if (!baseIdleAction) return;
+    if (baseIdleFloorTimer) {
+        clearTimeout(baseIdleFloorTimer);
+        baseIdleFloorTimer = null;
+    }
+    baseIdleFloorTimer = setTimeout(() => {
+        baseIdleFloorTimer = null;
+        try {
+            if (baseIdleAction && typeof baseIdleAction.setEffectiveWeight === 'function') {
+                baseIdleAction.setEffectiveWeight(targetWeight);
+            }
+        } catch (e) { /* ignore */ }
+    }, delayMs);
+}
+
+/**
+ * Start a foreground action, crossfading from the previous one when possible.
+ * Using a true crossfade keeps the combined foreground weight ~1 during the
+ * transition instead of the dip that independent fadeOut+fadeIn can produce.
+ * @param {THREE.AnimationAction} newAction
+ * @param {THREE.AnimationAction|null} prevAction
+ */
+function _startForegroundAction(newAction, prevAction) {
+    if (!newAction) return;
+    newAction.reset();
+    newAction.setEffectiveWeight(1.0);
+    if (prevAction && prevAction !== newAction && prevAction !== baseIdleAction
+        && typeof prevAction.isRunning === 'function' && prevAction.isRunning()) {
+        newAction.play();
+        prevAction.crossFadeTo(newAction, CROSSFADE_DURATION, false);
+    } else {
+        newAction.fadeIn(CROSSFADE_DURATION);
+        newAction.play();
+    }
+}
+
+/**
+ * Register a one-time `finished` handler on the mixer for a play-once action.
+ * When that specific action completes, transition back to idle. A short timer
+ * acts as a safety net in case the `finished` event is missed (e.g. the action
+ * is replaced by a new state before it fires).
+ * @param {THREE.AnimationAction} oneShotAction - The play-once action to watch
+ */
+function _scheduleReturnToIdle(oneShotAction) {
+    if (!mixer || !oneShotAction) return;
+
+    const clip = oneShotAction.getClip();
+    const durationS = clip && Number.isFinite(clip.duration) ? clip.duration : 2.0;
+
+    const onFinished = (event) => {
+        if (event.action !== oneShotAction) return; // not our action
+        mixer.removeEventListener('finished', onFinished);
+        // Only fall back if this one-shot is still the active action; a newer
+        // state may have already replaced it.
+        if (currentAction === oneShotAction) {
+            const clipIdle = _resolveIdleClip();
+            if (clipIdle) {
+                transitionToIdle(clipIdle);
+            }
+        }
+    };
+
+    mixer.addEventListener('finished', onFinished);
+
+    // Safety net: if the event never arrives, force the fallback shortly after
+    // the clip's natural duration (plus the crossfade).
+    setTimeout(() => {
+        mixer.removeEventListener('finished', onFinished);
+        if (currentAction === oneShotAction) {
+            const clipIdle = _resolveIdleClip();
+            if (clipIdle) {
+                transitionToIdle(clipIdle);
+            }
+        }
+    }, (durationS + CROSSFADE_DURATION) * 1000 + 250);
+}
+
+/**
  * Stop current animation (play outro if available, then transition to idle)
  * @param {Function} onComplete - Callback when outro is complete
  */
 function stopAnimation(onComplete) {
-    if (!currentAction || !currentDescriptor || !currentState) {
+    // Always return to idle when stopping so no state ever ends with the
+    // skeleton clamped on a finished clip (or, worse, no active action at all).
+    const goIdle = () => {
+        const clipIdle = _resolveIdleClip();
+        if (clipIdle) transitionToIdle(clipIdle);
         if (onComplete) onComplete();
+    };
+
+    if (!currentAction || !currentDescriptor || !currentState) {
+        goIdle();
         return;
     }
 
@@ -430,6 +629,7 @@ function stopAnimation(onComplete) {
 
     if (hasOutro && currentSection !== 'outro') {
         console.debug('[KaradaEngine] Playing outro before stopping');
+        const stoppingAction = currentAction;
         playSection('outro');
 
         // Schedule transition to idle after outro completes
@@ -437,11 +637,16 @@ function stopAnimation(onComplete) {
         const outroDuration = ((currentDescriptor.outro.end_frame - currentDescriptor.outro.start_frame) / fps);
 
         setTimeout(() => {
-            if (onComplete) onComplete();
+            // Only fall to idle if a newer state hasn't taken over meanwhile.
+            if (currentState === IDLE_FALLBACK_STATE) {
+                if (onComplete) onComplete();
+                return;
+            }
+            goIdle();
         }, outroDuration * 1000 + 100);
     } else {
-        // No outro, just stop
-        if (onComplete) onComplete();
+        // No outro, go straight to idle.
+        goIdle();
     }
 }
 
@@ -454,20 +659,39 @@ function transitionToIdle(idleClipParam) {
 
     console.debug('[KaradaEngine] Transitioning to idle');
 
-    // Fade out current action
-    if (currentAction) {
-        currentAction.fadeOut(CROSSFADE_DURATION);
+    idleClip = idleClipParam;
+
+    // Reuse the persistent base idle as the foreground idle when it already
+    // holds the same clip: promote it to full weight instead of layering a
+    // second idle action on the mixer. This keeps a single idle driver and
+    // avoids the base-idle floor being dropped out from under a foreground idle.
+    _ensureBaseIdle();
+    if (baseIdleAction && baseIdleClip === idleClip) {
+        if (baseIdleFloorTimer) {
+            clearTimeout(baseIdleFloorTimer);
+            baseIdleFloorTimer = null;
+        }
+        if (currentAction && currentAction !== baseIdleAction) {
+            currentAction.fadeOut(CROSSFADE_DURATION);
+        }
+        try {
+            baseIdleAction.enabled = true;
+            baseIdleAction.setEffectiveWeight(1.0);
+            baseIdleAction.play();
+        } catch (e) { /* ignore */ }
+        idleAction = baseIdleAction;
+        currentAction = baseIdleAction;
+    } else {
+        // Different idle clip than the base: crossfade to a dedicated idle
+        // action while the base idle keeps the skeleton covered underneath.
+        const prevAction = currentAction;
+        idleAction = mixer.clipAction(idleClip);
+        idleAction.loop = THREE.LoopRepeat;
+        _startForegroundAction(idleAction, prevAction);
+        currentAction = idleAction;
+        _scheduleBaseIdleFloorDrop();
     }
 
-    // Play idle
-    idleClip = idleClipParam;
-    idleAction = mixer.clipAction(idleClip);
-    idleAction.loop = THREE.LoopRepeat;
-    idleAction.reset();
-    idleAction.fadeIn(CROSSFADE_DURATION);
-    idleAction.play();
-
-    currentAction = idleAction;
     currentState = IDLE_FALLBACK_STATE;
     currentSection = 'loop';
     currentDescriptor = null;

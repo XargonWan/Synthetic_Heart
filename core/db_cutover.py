@@ -64,7 +64,7 @@ _SOUL_TABLE_SPECS: tuple[_SoulTableSpec, ...] = (
             "atomic_facts",
             "emotional_tag",
             "foresight_signals",
-            "timestamp",
+            "event_timestamp",
             "retrieval_count",
             "explicit_importance",
             "consolidated",

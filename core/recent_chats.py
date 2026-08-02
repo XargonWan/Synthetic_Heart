@@ -100,7 +100,13 @@ async def reset_chat(chat_id: Union[int, str], interface_name: str):
 
 
 def set_chat_path(chat_id: Union[int, str], chat_path: str) -> None:
-    chat_path_map[str(chat_id)] = chat_path
+    # No-op when the mapping is already current: this is called for every
+    # message (see chat_context_manager.add_message_to_context), so skipping
+    # unchanged entries avoids rewriting chat_paths.json on each turn.
+    key = str(chat_id)
+    if chat_path_map.get(key) == chat_path:
+        return
+    chat_path_map[key] = chat_path
     _save_chat_paths()
 
 

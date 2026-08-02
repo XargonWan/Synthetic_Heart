@@ -29,13 +29,17 @@ getting started.
    features
    cortex
    interfaces
+   peer_synths
    plugins
+   plugins/generated_index
+   self_growth
    external_endpoints
    auris_vox
    radio_azuracast
    vrm_animations
    animation_system
    webui_controls
+   synth_stage_frontend
    gemini/synth-live-voice-integration
    faq
 
@@ -51,6 +55,8 @@ getting started.
    COMPONENT_DEVELOPMENT_GUIDE
    dev_components
    api_endpoints
+   agent_integration
+   agentic_tools
    component_pattern
    two_phase_init_implementation
    config_management

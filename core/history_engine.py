@@ -140,6 +140,17 @@ register_exposed_var(
     component="history_engine",
 )
 
+register_exposed_var(
+    "LITE_MODE_HISTORY_LIMIT",
+    label="Lite Mode History Limit (items)",
+    default=3,
+    value_type=int,
+    ui_type="number",
+    description="Max number of recent chat history / recap items to inject while Prompt Lite Mode is on. Overrides Context Verbosity while lite mode is active.",
+    scope="core",
+    component="history_engine",
+)
+
 
 def _get_int(key: str, default: int) -> int:
     try:
@@ -198,16 +209,11 @@ def _entry_to_text(entry: HistoryEntry) -> str:
     )
     ts = entry.get("timestamp") or entry.get("date") or ""
 
-    # Diary-like dicts
+    # Diary-like dicts: inject only the interaction summary, never the raw
+    # personal thought.
     if "interaction_summary" in entry or "personal_thought" in entry:
         summary = entry.get("interaction_summary") or ""
-        thought = entry.get("personal_thought") or ""
-        parts = []
-        if summary:
-            parts.append(f"summary: {summary}")
-        if thought:
-            parts.append(f"thought: {thought}")
-        body = " | ".join(parts) or (text or "")
+        body = f"summary: {summary}" if summary else (text or "")
         return f"[diary {_format_ts(ts)}] {body}".strip()
 
     # Reply context annotation (40-char truncation for LLM readability)
@@ -227,6 +233,39 @@ def _entry_to_text(entry: HistoryEntry) -> str:
     return f'[{_format_ts(ts)}] {sender}{reply_suffix}: "{safe_text}"'.strip()
 
 
+def telegram_chat_kind(path: str) -> str | None:
+    """Return ``"group"`` or ``"dm"`` for a telegram_bot interface_path.
+
+    Telegram chat IDs are negative for groups/supergroups and positive for
+    private chats -- a reliable signal that's already on every interface_path,
+    with no need to track chat titles (nothing in the codebase populates
+    those). Returns ``None`` for non-Telegram interfaces or an unparseable
+    chat id, where this convention doesn't apply.
+    """
+    parts = path.split("/")
+    if len(parts) >= 2 and parts[0] == "telegram_bot":
+        try:
+            chat_id = int(parts[1])
+        except ValueError:
+            return None
+        return "group" if chat_id < 0 else "dm"
+    return None
+
+
+def _friendly_interface_label(path: str) -> str:
+    """Best-effort human-readable label for a cross-chat source path.
+
+    Falls back to the raw path when :func:`telegram_chat_kind` can't
+    classify it (non-Telegram interfaces, unparseable chat id).
+    """
+    kind = telegram_chat_kind(path)
+    if kind == "group":
+        return "the group chat"
+    if kind == "dm":
+        return "your DM"
+    return path
+
+
 def _source_label(
     entry: HistoryEntry, current_interface_path: str | None = None
 ) -> str | None:
@@ -240,7 +279,7 @@ def _source_label(
     pretty = entry.get("interface_path_pretty")
     if pretty:
         return str(pretty)
-    return str(entry_path)
+    return _friendly_interface_label(str(entry_path))
 
 
 def _entry_to_text_with_source(
@@ -331,9 +370,13 @@ class HistoryEngine:
         verbosity = max(0, _get_int("CONTEXT_VERBOSITY", 10))
         thoughts_limit = max(0, _get_int("THOUGHTS_LIMIT", 5))
 
-        # In lite mode, aggressively cap limits for small/local models
+        # In lite mode, the dedicated lite-mode limit is authoritative -- it's
+        # the WebUI-exposed dial right next to the Lite Mode toggle, and
+        # min()-ing it against the general CONTEXT_VERBOSITY dial meant raising
+        # it above CONTEXT_VERBOSITY silently had no effect (the two dials
+        # look independent in the UI but weren't).
         if lite_mode:
-            verbosity = min(verbosity, 3)
+            verbosity = max(0, _get_int("LITE_MODE_HISTORY_LIMIT", 3))
             thoughts_limit = min(thoughts_limit, 2)
 
         enable_current = _get_bool("ENABLE_HISTORY_CURRENT_CHAT", True)
@@ -414,6 +457,17 @@ class HistoryEngine:
         thoughts: List[str] = []
 
         seen_history: set[str] = set()
+        # Distinct interface_paths that actually contributed history lines. Used
+        # by the prompt engine to render a compact pretty-name legend so the
+        # model can map each "[from ...]" source back to a routable path.
+        used_interface_paths: set[str] = set()
+
+        def _note_path(entry: Any) -> None:
+            if not isinstance(entry, dict):
+                return
+            p = entry.get("interface_path") or entry.get("source_path")
+            if p:
+                used_interface_paths.add(str(p))
 
         # --- Core contributions ---
         if enable_current and interface_path:
@@ -433,7 +487,7 @@ class HistoryEngine:
                             load_chat_history as cache_load,
                         )
 
-                        cached = await cache_load(interface_path)
+                        cached = await cache_load(interface_path, match_chat_level=True)
                         combined = list(msgs) + list(cached)
                         msgs = combined[-verbosity:]
                     except Exception as e:
@@ -480,6 +534,7 @@ class HistoryEngine:
                     if k in seen_history:
                         continue
                     history_current_chat.append(line)
+                    _note_path(m)
                     seen_history.add(k)
             except Exception as e:
                 log_debug(f"[history_engine] Failed building history_current_chat: {e}")
@@ -654,6 +709,7 @@ class HistoryEngine:
                     else:
                         other_lines.append(line)
 
+                    _note_path(m)
                     seen_history.add(k)
 
                 if verbosity > 0:
@@ -726,6 +782,7 @@ class HistoryEngine:
                     if k in seen_history:
                         continue
                     history_recent.append(line)
+                    _note_path(m)
                     seen_history.add(k)
             except Exception as e:
                 log_debug(f"[history_engine] Failed building history_recent: {e}")
@@ -795,6 +852,7 @@ class HistoryEngine:
                         if c.name == "ai_diary" and not diary_full:
                             continue
                         history_recent.append(line)
+                    _note_path(raw)
                     seen_history.add(k)
 
             elif target == "thoughts":
@@ -869,5 +927,13 @@ class HistoryEngine:
 
         if enable_tags_placeholder and not lite_mode:
             context["tags_placeholder"] = []
+
+        # Distinct interface_paths present in the assembled history (excluding the
+        # current chat, which the model already knows). The prompt engine turns
+        # these into a compact pretty-name legend.
+        if interface_path:
+            used_interface_paths.discard(str(interface_path))
+        if used_interface_paths:
+            context["history_interface_paths"] = sorted(used_interface_paths)
 
         return context

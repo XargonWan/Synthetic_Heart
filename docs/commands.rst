@@ -46,7 +46,19 @@ Administration
 * ``/last_chats`` – List recently active chats.
 * ``/purge_map [days]`` – Remove chat mappings older than ``days`` (default 7).
 * ``/logchat`` – Set the current chat as the log chat.
-* ``/manage_chat_id [reset <id>|reset this]`` – Reset stored mapping for a chat.
+
+Agent (trainer only)
+--------------------
+
+These commands require trainer privileges (the caller's ``interface:id`` must
+be listed in ``TRAINER_IDS``).
+
+* ``/task`` – List the most recent agentic tasks (id, status, engine and
+  goal). Tasks whose status is ``pending`` are marked as resumable.
+* ``/task resume <id>`` – Resume a pending task by its numeric id. The agent
+  turn runs asynchronously in the background and its final reply is delivered
+  to the originating chat when the loop completes.
+
 
 Voice Control (Discord only)
 ----------------------------

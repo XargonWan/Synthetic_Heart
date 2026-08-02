@@ -8,7 +8,7 @@ services:
       - .env
     ports:
       - "${SYNTH_WEBUI_HTTPS_PORT:-8000}:${SYNTH_WEBUI_HTTPS_PORT:-8000}"
-      - "${OLLAMA_PORT:-11435}:11435" # SyntH can be seen as an OpenAPI endpoint itself. This is the original Ollama port+1 to avoid conflicts, but you can change it as needed.
+      - "${OPENAI_API_SERVER_PORT:-11435}:11435" # SyntH can be seen as an OpenAPI endpoint itself. This is the original Ollama port+1 to avoid conflicts, but you can change it as needed.
     volumes:
       - synth_data:/config
       - synth_skins:/app/skins
@@ -33,6 +33,13 @@ services:
       - ROOT_PASSWORD=${ROOT_PASSWORD:-"password"}
       - SYNTH_WEBUI_HTTPS_PORT=${SYNTH_WEBUI_HTTPS_PORT:-8000}
       - SYNTH_WEBUI_HTTP_PORT=${SYNTH_WEBUI_HTTP_PORT:-8080}
+      # Persistent storage under the synth_data volume (/config) so downloaded
+      # models, HuggingFace cache, generated TTS audio and received media survive
+      # container rebuilds/recreates instead of living on the ephemeral layer.
+      - SYNTH_MODELS_DIR=${SYNTH_MODELS_DIR:-/config/models}
+      - HF_HOME=${HF_HOME:-/config/hf-cache}
+      - VOX_OUTPUT_DIR=${VOX_OUTPUT_DIR:-/config/media/tts}
+      - TMPDIR=${TMPDIR:-/config/media/tmp}
     restart: unless-stopped
     stdin_open: true
     tty: true

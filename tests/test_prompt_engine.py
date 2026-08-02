@@ -125,7 +125,7 @@ def test_build_context_summary_adds_memory_honesty_notice_when_memories_present(
     summary = _build_context_summary(
         {
             "memories": [
-                "[SOUL recalled memory | 2026-04-20 | same chat] Scarlet loves jasmine tea."
+                "[SOUL recalled memory | 2026-04-20 | same chat] Alice loves jasmine tea."
             ]
         }
     )
@@ -134,7 +134,7 @@ def test_build_context_summary_adds_memory_honesty_notice_when_memories_present(
     assert "recalled internal records" in summary
     assert "acknowledge uncertainty instead of inventing a recollection" in summary
     assert (
-        "Recalled memory from 2026-04-20 (same chat): Scarlet loves jasmine tea."
+        "Recalled memory from 2026-04-20 (same chat): Alice loves jasmine tea."
         in summary
     )
     assert "SOUL recalled memory" not in summary
@@ -157,13 +157,13 @@ def test_build_context_summary_humanizes_diary_entries() -> None:
 
 def test_build_live_system_instruction_enforces_identity_rules(monkeypatch):
     async def dummy_gather(message, ctx):
-        return {"persona": "You are 2B."}
+        return {"persona": "You are SynthA."}
 
     monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
 
     result = asyncio.run(build_live_system_instruction())
 
-    assert "You are 2B." in result
+    assert "You are SynthA." in result
     assert "Stay fully inside the active persona in first person" in result
     assert "Keep participant pronouns consistent" in result
     assert (
@@ -176,20 +176,20 @@ def test_build_live_prompt_request_returns_live_mode(monkeypatch):
     from core.prompt_request import PromptRequest
 
     async def dummy_gather(message, ctx):
-        return {"persona": "You are 2B."}
+        return {"persona": "You are SynthA."}
 
     monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
 
     req = asyncio.run(build_live_prompt_request())
     assert isinstance(req, PromptRequest)
     assert req.mode == "live"
-    assert "You are 2B." in req.system_instruction
+    assert "You are SynthA." in req.system_instruction
 
 
 def test_build_json_prompt_demotes_persona_preferences_to_context_summary(monkeypatch):
     async def dummy_gather(message, ctx):
         return {
-            "persona": "PERSONA IDENTITY:\nName: 2B\nProfile: You are 2B.",
+            "persona": "PERSONA IDENTITY:\nName: SynthA\nProfile: You are SynthA.",
             "persona_preferences": "Likes: tea\nDislikes: liars",
         }
 
@@ -302,7 +302,7 @@ def test_build_json_prompt_gates_exact_runtime_facts_by_current_turn(monkeypatch
 def test_build_live_prompt_request_keeps_runtime_facts_ambient_by_default(monkeypatch):
     async def dummy_gather(message, ctx):
         return {
-            "persona": "You are 2B.",
+            "persona": "You are SynthA.",
             "date": "2026-04-20",
             "time": "21:27 CEST",
             "time_of_day": "late evening",
@@ -326,7 +326,7 @@ def test_build_live_prompt_request_surfaces_exact_runtime_facts_when_requested(
 ):
     async def dummy_gather(message, ctx):
         return {
-            "persona": "You are 2B.",
+            "persona": "You are SynthA.",
             "date": "2026-04-20",
             "time": "21:27 CEST",
             "location": "Sečovlje,Slovenia",
@@ -348,7 +348,7 @@ def test_build_live_prompt_request_surfaces_exact_runtime_facts_when_requested(
 def test_build_live_prompt_request_keeps_persona_preferences(monkeypatch):
     async def dummy_gather(message, ctx):
         return {
-            "persona": "You are 2B.",
+            "persona": "You are SynthA.",
             "persona_preferences": "Likes: tea\nDislikes: liars",
         }
 
@@ -356,7 +356,7 @@ def test_build_live_prompt_request_keeps_persona_preferences(monkeypatch):
 
     req = asyncio.run(build_live_prompt_request())
 
-    assert "You are 2B." in req.system_instruction
+    assert "You are SynthA." in req.system_instruction
     assert "Background preferences and interests:" in req.system_instruction
     assert "Likes: tea" in req.system_instruction
     assert "Dislikes: liars" in req.system_instruction
@@ -366,7 +366,7 @@ def test_build_live_system_instruction_matches_live_renderer(monkeypatch):
     from core.prompt_renderers import LiveRenderer
 
     async def dummy_gather(message, ctx):
-        return {"persona": "You are 2B."}
+        return {"persona": "You are SynthA."}
 
     monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
 
@@ -567,7 +567,7 @@ def test_prompt_request_mode_is_grillo_for_grillo_beat(monkeypatch):
     assert "DO NOT emit any message_* action" in result.get("instructions", "")
 
 
-def test_prompt_request_attaches_for_grillo_outreach_with_string_message_id(
+def test_prompt_request_attaches_for_grillo_observer_with_string_message_id(
     monkeypatch,
 ):
     async def dummy_gather(message, ctx):
@@ -577,8 +577,8 @@ def test_prompt_request_attaches_for_grillo_outreach_with_string_message_id(
 
     message = SimpleNamespace(
         chat_id="123456",
-        text="[G.R.I.L.L.O. OUTREACH] check in",
-        message_id="grillo_outreach_0",
+        text="[G.R.I.L.L.O. CHAT OBSERVER] check in",
+        message_id="grillo_observer_0",
         from_user=SimpleNamespace(full_name="grillo", username="grillo"),
         date=datetime.now(timezone.utc),
         interface_path="telegram_bot/123456",
@@ -587,14 +587,14 @@ def test_prompt_request_attaches_for_grillo_outreach_with_string_message_id(
     result = asyncio.run(
         build_json_prompt(
             message,
-            {"grillo_beat": True, "beat_type": "outreach"},
+            {"grillo_beat": True, "beat_type": "observer"},
             interface_name="telegram_bot",
         )
     )
 
     assert "__prompt_request" in result
     pr = result["__prompt_request"]
-    assert pr.current_text == "[G.R.I.L.L.O. OUTREACH] check in"
+    assert pr.current_text == "[G.R.I.L.L.O. CHAT OBSERVER] check in"
     assert pr.runtime_ctx.interface_path == "telegram_bot/123456"
     assert pr.runtime_ctx.message_id is None
 
@@ -663,6 +663,86 @@ def test_build_pr_attachments_extracts_pdf_page_images_when_text_missing(monkeyp
     )
 
 
+def _build_acroform_pdf() -> bytes:
+    """Build a minimal one-page PDF with a filled AcroForm text field."""
+    from io import BytesIO
+
+    from pypdf import PdfWriter
+    from pypdf.generic import (
+        ArrayObject,
+        BooleanObject,
+        DictionaryObject,
+        NameObject,
+        NumberObject,
+        TextStringObject,
+    )
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    page = writer.pages[0]
+
+    field = DictionaryObject()
+    field.update(
+        {
+            NameObject("/FT"): NameObject("/Tx"),
+            NameObject("/T"): TextStringObject("CharacterName"),
+            NameObject("/V"): TextStringObject("Rekku the Bard"),
+            NameObject("/Type"): NameObject("/Annot"),
+            NameObject("/Subtype"): NameObject("/Widget"),
+            NameObject("/Rect"): ArrayObject(
+                [NumberObject(0), NumberObject(0), NumberObject(100), NumberObject(20)]
+            ),
+        }
+    )
+    ref = writer._add_object(field)
+    page[NameObject("/Annots")] = ArrayObject([ref])
+
+    acroform = DictionaryObject()
+    acroform.update(
+        {
+            NameObject("/Fields"): ArrayObject([ref]),
+            NameObject("/NeedAppearances"): BooleanObject(True),
+        }
+    )
+    writer._root_object[NameObject("/AcroForm")] = writer._add_object(acroform)
+
+    buffer = BytesIO()
+    writer.write(buffer)
+    return buffer.getvalue()
+
+
+def test_extract_attachment_text_preview_reads_acroform_fields():
+    from core.prompt_engine import _extract_attachment_text_preview
+
+    pdf_bytes = _build_acroform_pdf()
+
+    text, _truncated = _extract_attachment_text_preview(
+        mime_type="application/pdf",
+        filename="sheet.pdf",
+        data=pdf_bytes,
+    )
+
+    assert text is not None
+    assert "=== Form fields ===" in text
+    assert "CharacterName: Rekku the Bard" in text
+
+
+def test_rasterize_pdf_pages_renders_vector_only_pdf():
+    from core.prompt_engine import _rasterize_pdf_pages
+
+    # A blank PDF page has no extractable text and no embedded raster image;
+    # rasterization is the only way to make it visible to a vision model.
+    pdf_bytes = _build_acroform_pdf()
+
+    images, _truncated = _rasterize_pdf_pages(pdf_bytes, "sheet", "sheet.pdf")
+
+    assert len(images) == 1
+    assert images[0]["mime_type"] == "image/png"
+    assert images[0]["filename"] == "sheet_page_1.png"
+    # Rendered PNG payload must be non-empty base64.
+    assert len(images[0]["data"]) > 0
+
+
 # ── _history_to_turns tests ──────────────────────────────────────────────
 
 
@@ -679,31 +759,31 @@ class TestHistoryToTurns:
     def test_self_sender_becomes_assistant(self) -> None:
         """'self' is the canonical sender_name for the AI in history format."""
         lines = ['[13/04/26:0858] self: "Hello from the AI"']
-        turns = self._call(lines, {"2b"})
+        turns = self._call(lines, {"syntha"})
         assert len(turns) == 1
         assert turns[0].role == "assistant"
         assert "Hello from the AI" in turns[0].content
 
     def test_synth_name_becomes_assistant(self) -> None:
-        lines = ['[13/04/26:0900] 2B: "I am 2B"']
-        turns = self._call(lines, {"2b"})
+        lines = ['[13/04/26:0900] SynthA: "I am SynthA"']
+        turns = self._call(lines, {"syntha"})
         assert len(turns) == 1
         assert turns[0].role == "assistant"
 
     def test_user_sender_becomes_user(self) -> None:
-        lines = ['[13/04/26:0924] Scar: "Hey there"']
-        turns = self._call(lines, {"2b"})
+        lines = ['[13/04/26:0924] Alice: "Hey there"']
+        turns = self._call(lines, {"syntha"})
         assert len(turns) == 1
         assert turns[0].role == "user"
         assert "Hey there" in turns[0].content
 
     def test_mixed_conversation_roles(self) -> None:
         lines = [
-            '[13/04/26:0924] Scar: "How are you?"',
+            '[13/04/26:0924] Alice: "How are you?"',
             '[13/04/26:0925] self: "I am great!"',
-            '[13/04/26:0926] Scar: "Good to hear"',
+            '[13/04/26:0926] Alice: "Good to hear"',
         ]
-        turns = self._call(lines, {"2b"})
+        turns = self._call(lines, {"syntha"})
         assert [t.role for t in turns] == ["user", "assistant", "user"]
 
     def test_from_prefix_parsed_correctly(self) -> None:
@@ -721,7 +801,7 @@ class TestHistoryToTurns:
         lines = [
             "not a valid line",
             42,
-            '[13/04/26:0924] Scar: "valid line"',
+            '[13/04/26:0924] Alice: "valid line"',
         ]
         turns = self._call(lines, {"synth"})
         assert len(turns) == 1
@@ -729,7 +809,7 @@ class TestHistoryToTurns:
 
     def test_alias_detected_as_assistant(self) -> None:
         lines = ['[13/04/26:0900] Toobs: "My alias"']
-        turns = self._call(lines, {"2b", "toobs"})
+        turns = self._call(lines, {"syntha", "toobs"})
         assert len(turns) == 1
         assert turns[0].role == "assistant"
 
@@ -737,11 +817,11 @@ class TestHistoryToTurns:
         lines = [
             '[13/04/26:0900] self: "Older outreach"',
             '[13/04/26:0901] self: "Another outreach"',
-            '[13/04/26:0902] Scar: "Replying now"',
+            '[13/04/26:0902] Alice: "Replying now"',
             '[13/04/26:0903] self: "Thanks"',
         ]
 
-        turns = self._call(lines, {"2b"})
+        turns = self._call(lines, {"syntha"})
 
         assert [turn.role for turn in turns] == ["user", "assistant"]
         assert turns[0].content == "Replying now"
@@ -749,14 +829,105 @@ class TestHistoryToTurns:
 
     def test_coalesces_consecutive_same_role_turns(self) -> None:
         lines = [
-            '[13/04/26:0924] Scar: "First part"',
-            '[13/04/26:0925] Scar: "Second part"',
+            '[13/04/26:0924] Alice: "First part"',
+            '[13/04/26:0925] Alice: "Second part"',
             '[13/04/26:0926] self: "First answer"',
             '[13/04/26:0927] self: "Second answer"',
         ]
 
-        turns = self._call(lines, {"2b"})
+        turns = self._call(lines, {"syntha"})
 
         assert [turn.role for turn in turns] == ["user", "assistant"]
         assert turns[0].content == "First part\n\nSecond part"
         assert turns[1].content == "First answer\n\nSecond answer"
+
+    def test_peer_synth_sender_tagged_not_collapsed_into_anonymous_user(
+        self, monkeypatch
+    ) -> None:
+        """A peer SyntH's message must stay attributable, not silently look
+        like it came from the human -- see AGENTS.md 'Telegram bots can't
+        see each other's messages...' entry."""
+        monkeypatch.setattr(
+            "core.peer_policy.get_peer_names", lambda: {8000000001: "SynthB"}
+        )
+        lines = ['[13/04/26:0924] SynthB: "I bounce on my toes, so excited!"']
+
+        turns = self._call(lines, {"syntha"})
+
+        assert len(turns) == 1
+        assert turns[0].role == "user"
+        assert turns[0].content == "[SynthB]: I bounce on my toes, so excited!"
+
+    def test_human_sender_not_tagged_even_with_peer_mode_configured(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            "core.peer_policy.get_peer_names", lambda: {8000000001: "SynthB"}
+        )
+        lines = ['[13/04/26:0924] Alice: "Hey there"']
+
+        turns = self._call(lines, {"syntha"})
+
+        assert len(turns) == 1
+        assert turns[0].role == "user"
+        assert turns[0].content == "Hey there"
+
+    def test_peer_lookup_failure_falls_back_to_plain_user(self, monkeypatch) -> None:
+        def _raise():
+            raise RuntimeError("config unavailable")
+
+        monkeypatch.setattr("core.peer_policy.get_peer_names", _raise)
+        lines = ['[13/04/26:0924] SynthB: "Still works without peer config"']
+
+        turns = self._call(lines, {"syntha"})
+
+        assert len(turns) == 1
+        assert turns[0].role == "user"
+        assert turns[0].content == "Still works without peer config"
+
+    def test_peer_and_human_turns_not_coalesced_together(self, monkeypatch) -> None:
+        """Reproduces the Langfuse trace bug (ff4e648f-fb13-47f9-b7ca-85828d987832,
+        blocks 1 and 3): a human line sandwiched between two peer lines must not
+        get squashed into one "user" blob -- each stays a standalone turn so the
+        peer attribution and the human's real words are never blended."""
+        monkeypatch.setattr("core.peer_policy.get_peer_names", lambda: {99: "SynthA"})
+        lines = [
+            '[02/07/26:2045] SynthA: "peer line one"',
+            '[02/07/26:2046] Alice: "genuine human line"',
+            '[02/07/26:2047] SynthA: "peer line two"',
+        ]
+
+        turns = self._call(lines, {"synth"})
+
+        assert [turn.role for turn in turns] == ["user", "user", "user"]
+        assert turns[0].content == "[SynthA]: peer line one"
+        assert turns[1].content == "genuine human line"
+        assert turns[2].content == "[SynthA]: peer line two"
+
+    def test_consecutive_peer_turns_still_coalesce(self, monkeypatch) -> None:
+        monkeypatch.setattr("core.peer_policy.get_peer_names", lambda: {99: "SynthA"})
+        lines = [
+            '[02/07/26:2045] SynthA: "peer line one"',
+            '[02/07/26:2046] SynthA: "peer line two"',
+        ]
+
+        turns = self._call(lines, {"synth"})
+
+        assert len(turns) == 1
+        assert turns[0].role == "user"
+        assert turns[0].content == "[SynthA]: peer line one\n\n[SynthA]: peer line two"
+
+    def test_consecutive_human_turns_still_coalesce_with_peer_configured(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("core.peer_policy.get_peer_names", lambda: {99: "SynthA"})
+        lines = [
+            '[02/07/26:2045] Alice: "First part"',
+            '[02/07/26:2046] Alice: "Second part"',
+        ]
+
+        turns = self._call(lines, {"synth"})
+
+        assert len(turns) == 1
+        assert turns[0].role == "user"
+        assert turns[0].content == "First part\n\nSecond part"

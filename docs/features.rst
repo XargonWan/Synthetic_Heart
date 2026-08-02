@@ -42,7 +42,7 @@ Multi-Platform Integration
     - **Telegram**: Bot support with media handling
     - **Discord**: Full bot integration with threading
     - **Matrix**: Chat bridge with real-time messaging
-    - **Ollama Compatible**: REST API bridge for external clients
+    - **OpenAI Compatible**: REST API bridge for external clients (also speaks the legacy Ollama protocol)
 
 **Cross-Platform Messaging**
     Send messages across different platforms using unified chat identifiers.
@@ -93,7 +93,6 @@ Plugin Ecosystem
     - ``ai_diary``: Personal memory and interaction tracking
     - ``bio_manager``: Persistent user profile management
     - ``blocklist``: User access control
-    - ``chat_link``: Conversation linking and management
     - ``message_map``: Message threading and tracking
     - ``message_plugin``: Cross-platform message routing
     - ``recent_chats``: Access to conversation history

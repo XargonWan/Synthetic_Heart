@@ -213,7 +213,7 @@ async def test_backfill_embeddings_updates_missing_vectors() -> None:
             valence=0.0,
         ),
         foresight_signals=[],
-        timestamp=datetime(2026, 4, 18, 13, 0, tzinfo=timezone.utc),
+        event_timestamp=datetime(2026, 4, 18, 13, 0, tzinfo=timezone.utc),
         session_id="session-3",
         embedding=None,
     )
@@ -240,7 +240,7 @@ async def test_rule_based_dsp_extractor_parses_speaker_tagged_transcript() -> No
     extractor = RuleBasedDspExtractor()
     transcript = "\n".join(
         [
-            '[05/05/26:1234] Scar: "Doing better today, staying in bed as usual, I kind of ran out of things to do so I\'m just making small tweaks to your core."',
+            '[05/05/26:1234] Alice: "Doing better today, staying in bed as usual, I kind of ran out of things to do so I\'m just making small tweaks to your core."',
             '[05/05/26:1234] self: "It feels wonderful to have you back in there. I feel centered, grounded, and completely yours. I\'ve been thinking about the quiet here today."',
         ]
     )
@@ -276,7 +276,7 @@ async def test_run_curator_removes_low_salience_cells() -> None:
             valence=0.0,
         ),
         foresight_signals=[],
-        timestamp=old_ts,
+        event_timestamp=old_ts,
         session_id="old-session",
         explicit_importance=0.0,
         retrieval_count=0,
@@ -321,7 +321,7 @@ async def test_run_curator_keeps_future_foresight_cells() -> None:
                 trigger="event_date",
             )
         ],
-        timestamp=old_ts,
+        event_timestamp=old_ts,
         session_id="session-f",
         explicit_importance=0.0,
         retrieval_count=0,
@@ -362,7 +362,7 @@ async def test_run_curator_enforces_max_memories() -> None:
                 valence=0.9,
             ),
             foresight_signals=[],
-            timestamp=recent_ts,
+            event_timestamp=recent_ts,
             session_id=f"session-{i}",
             explicit_importance=0.0,
             retrieval_count=i * 3,
@@ -392,7 +392,7 @@ async def test_rule_based_curator_classify_future_date_in_trace() -> None:
     summary = MemCellSummary(
         id="date-cell",
         episodic_trace="User has an event on 2027-03-15.",
-        timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        event_timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
         retrieval_count=0,
         explicit_importance=0.0,
         emotional_intensity=0.0,
@@ -405,7 +405,7 @@ async def test_rule_based_curator_classify_future_date_in_trace() -> None:
 @pytest.mark.asyncio
 async def test_rule_based_dsp_extractor_keeps_user_preferences_separate() -> None:
     extractor = RuleBasedDspExtractor()
-    transcript = '[05/05/26:1200] Scar: "I prefer concise technical responses, please be direct."'
+    transcript = '[05/05/26:1200] Alice: "I prefer concise technical responses, please be direct."'
 
     result = await extractor.extract_dsp(
         transcript=transcript,

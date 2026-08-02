@@ -27,6 +27,7 @@ from typing import Deque, Dict, Optional, List, Any
 from urllib.parse import quote, unquote, urlparse
 
 from fastapi import (
+    Depends,
     FastAPI,
     WebSocket,
     WebSocketDisconnect,
@@ -38,6 +39,7 @@ from fastapi import (
 )
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.websockets import WebSocketState
 
 from core.core_initializer import register_interface
 from core.logging_utils import _LOG_FILE, log_debug, log_error, log_info, log_warning
@@ -100,13 +102,35 @@ mimetypes.add_type("text/javascript", ".mjs")
 mimetypes.add_type("application/json", ".json")
 
 
+def _clean_env(name: str, default: Optional[str] = None) -> Optional[str]:
+    """Read an env var, stripping inline ``# comment`` suffixes and whitespace.
+
+    Some launchers (notably the VS Code/Antigravity Python integration, which
+    injects the workspace ``.env`` with its own parser) leave inline comments
+    inside the value, e.g. ``'8088   # HTTPS port'``. Because the app loads
+    ``.env`` with ``override=False``, such a poisoned value wins over the
+    correctly parsed file — so sanitize here and warn instead of failing
+    silently downstream (see AGENTS.md §12, 2026-07-09).
+    """
+    raw = os.getenv(name, default)
+    if raw is None:
+        return None
+    cleaned = raw.split("#", 1)[0].strip()
+    if cleaned != raw.strip():
+        log_warning(
+            f"{LOG_PREFIX} Env var {name} contained an inline comment; "
+            f"using {cleaned!r} (raw value was {raw!r})"
+        )
+    return cleaned
+
+
 class SynthWebUIInterface:
     """Production-ready web interface served from the Docker container."""
 
     display_name = "Web UI"
 
     def __init__(self, autostart: bool = True) -> None:
-        self.app = FastAPI(title=BRAND_NAME, version="1.0")
+        self.app = FastAPI(title=BRAND_NAME, version="0.0.0-dev")
         self.start_time = datetime.now(tz=timezone.utc)
 
         # Lightweight request logger middleware to capture client static/resource requests
@@ -166,14 +190,15 @@ class SynthWebUIInterface:
         # Runtime/configurable attributes with sensible defaults
         # Autostart can be disabled for tests/dev harnesses.
         self.autostart = bool(autostart)
-        self.host = os.getenv("SYNTH_WEBUI_HOST", "0.0.0.0")
+        self.host = _clean_env("SYNTH_WEBUI_HOST", "0.0.0.0") or "0.0.0.0"
         self.log_level = os.getenv("SYNTH_WEBUI_LOG_LEVEL", "info")
         # TLS / HTTPS configuration
         # By default expose the WebUI over HTTPS unless explicitly disabled.
         # This makes the default developer experience minimal and secure.
-        self.tls_enabled = (
-            os.getenv("SYNTH_WEBUI_TLS", os.getenv("SECURE_CONNECTION", "1")) == "1"
-        )
+        tls_flag = _clean_env("SYNTH_WEBUI_TLS")
+        if tls_flag is None:
+            tls_flag = _clean_env("SECURE_CONNECTION", "1")
+        self.tls_enabled = tls_flag == "1"
         self.tls_certfile = os.getenv("SYNTH_WEBUI_CERTFILE", None)
         self.tls_keyfile = os.getenv("SYNTH_WEBUI_KEYFILE", None)
         # Port configuration
@@ -181,22 +206,32 @@ class SynthWebUIInterface:
         # - SYNTH_WEBUI_HTTPS_PORT: HTTPS/TLS port (only used when TLS is enabled)
         # Backward compatible fallbacks:
         # - SYNTH_WEBUI_PORT / PORT
-        raw_http_port = os.getenv(
-            "SYNTH_WEBUI_HTTP_PORT",
-            os.getenv("SYNTH_WEBUI_PORT", os.getenv("PORT", "8080")),
-        )
+        raw_http_port = _clean_env("SYNTH_WEBUI_HTTP_PORT")
+        if raw_http_port is None:
+            raw_http_port = _clean_env("SYNTH_WEBUI_PORT")
+        if raw_http_port is None:
+            raw_http_port = _clean_env("PORT", "8080")
         try:
-            http_port = int(raw_http_port)
+            http_port = int(raw_http_port or "8080")
         except Exception:
+            log_warning(
+                f"{LOG_PREFIX} Could not parse HTTP port {raw_http_port!r}; "
+                f"falling back to 8080"
+            )
             http_port = 8080
 
         https_port = None
         if self.tls_enabled:
-            raw_https_port = os.getenv("SYNTH_WEBUI_HTTPS_PORT", None)
+            raw_https_port = _clean_env("SYNTH_WEBUI_HTTPS_PORT")
             if raw_https_port:
                 try:
                     https_port = int(raw_https_port)
                 except Exception:
+                    log_warning(
+                        f"{LOG_PREFIX} Could not parse HTTPS port "
+                        f"{raw_https_port!r}; serving HTTPS on the HTTP port "
+                        f"{http_port} instead"
+                    )
                     https_port = http_port
             else:
                 # If no explicit HTTPS port is provided, keep historical behavior
@@ -210,26 +245,6 @@ class SynthWebUIInterface:
         self.http_port = (
             http_port if (self.tls_enabled and http_port != self.port) else None
         )
-        # Selkies desktop ports used for UI hints
-        # Selkies: prefer HTTPS; HTTP port is optional and will only be set
-        # if the environment explicitly defines SELKIES_HTTP_PORT.
-        try:
-            # Default host-exposed Selkies HTTPS port is 3006 (docker-compose mapping).
-            # Respect SELKIES_HTTPS_PORT if explicitly provided in the environment.
-            self.selkies_https_port = int(os.getenv("SELKIES_HTTPS_PORT", "3006"))
-        except Exception:
-            self.selkies_https_port = 3006
-
-        if "SELKIES_HTTP_PORT" in os.environ:
-            try:
-                raw_http_port = os.getenv("SELKIES_HTTP_PORT")
-                self.selkies_http_port = int(raw_http_port) if raw_http_port else None
-            except Exception:
-                self.selkies_http_port = None
-        else:
-            self.selkies_http_port = None
-        # Selkies host (allow overriding via env)
-        self.selkies_host = os.getenv("SELKIES_HOST", "127.0.0.1")
         # Log streaming options
         self.log_source_path = None
         self.log_wait_seconds = 20
@@ -359,6 +374,45 @@ class SynthWebUIInterface:
                 log_file=WEBUI_LOG,
             )
 
+        # When the configured Vox output directory lives *outside* the /static
+        # tree (e.g. a persistent volume like /config/media/tts), serve its
+        # parent under the alternate /media mount so generated TTS audio is
+        # actually reachable by clients. The URL prefix (/media/<leaf>/...) is
+        # produced by core.media_url_utils.derive_audio_url and must match the
+        # directory mounted here.
+        try:
+            from core.media_url_utils import (
+                get_vox_output_dir,
+                vox_output_is_outside_static,
+                MEDIA_MOUNT_PATH,
+            )
+
+            if vox_output_is_outside_static():
+                vox_dir = get_vox_output_dir()
+                media_parent = vox_dir.parent
+                if media_parent.exists():
+                    self.app.mount(
+                        MEDIA_MOUNT_PATH,
+                        StaticFiles(directory=str(media_parent)),
+                        name="media",
+                    )
+                    log_info(
+                        f"{LOG_PREFIX} mounted {MEDIA_MOUNT_PATH} → {media_parent} "
+                        f"for out-of-static Vox output {vox_dir}",
+                        log_file=WEBUI_LOG,
+                    )
+                else:
+                    log_warning(
+                        f"{LOG_PREFIX} Vox media parent dir not found, "
+                        f"skipping {MEDIA_MOUNT_PATH} mount: {media_parent}",
+                        log_file=WEBUI_LOG,
+                    )
+        except Exception as exc:
+            log_warning(
+                f"{LOG_PREFIX} could not set up /media mount for Vox output: {exc}",
+                log_file=WEBUI_LOG,
+            )
+
         # Ensure the root path always returns the rendered HTML directly.
         # In some deployment or hot-reload scenarios a previous handler may
         # end up returning None (serialized as JSON null). Add a lightweight
@@ -475,6 +529,52 @@ class SynthWebUIInterface:
             log_warning(
                 f"{LOG_PREFIX} VRM directory does not exist, /avatars endpoint NOT mounted"
             )
+
+        # Mount the SyntH Stage frontend (frontend/dist) at /stage when built.
+        # The Stage app is an optional standalone Vue client (see frontend/README.md);
+        # the backend runs fine without it, so this mount is best-effort.
+        stage_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+        self._stage_mounted = False
+        if stage_dist.exists():
+            try:
+                self.app.mount(
+                    "/stage",
+                    StaticFiles(directory=str(stage_dist), html=True),
+                    name="synth-stage",
+                )
+                self._stage_mounted = True
+                log_info(f"{LOG_PREFIX} Mounted /stage to {stage_dist}")
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to mount /stage: {exc}")
+        else:
+            log_info(
+                f"{LOG_PREFIX} Stage frontend not built, /stage NOT mounted ({stage_dist})"
+            )
+
+        # Optional CORS for cross-origin Stage clients (e.g. Capacitor apps).
+        # Gated on SYNTH_WEBUI_CORS_ORIGINS (comma-separated origins); default
+        # empty -> middleware not added, existing behaviour unchanged. Same-origin
+        # deployments (/stage) and the Vite dev proxy do not need this.
+        cors_origins = [
+            origin.strip()
+            for origin in os.getenv("SYNTH_WEBUI_CORS_ORIGINS", "").split(",")
+            if origin.strip()
+        ]
+        if cors_origins:
+            try:
+                from starlette.middleware.cors import CORSMiddleware
+
+                self.app.add_middleware(
+                    CORSMiddleware,  # type: ignore[arg-type]
+                    allow_origins=cors_origins,
+                    allow_credentials=True,
+                    allow_methods=["*"],
+                    allow_headers=["*"],
+                )
+                log_info(f"{LOG_PREFIX} CORS enabled for origins: {cors_origins}")
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to add CORS middleware: {exc}")
+
         if self.vrm_dir.exists():
             log_debug(f"{LOG_PREFIX} VRM directory is_dir: {self.vrm_dir.is_dir()}")
             log_debug(
@@ -516,8 +616,11 @@ class SynthWebUIInterface:
             try:
                 from core.karada_api import create_karada_router
 
-                karada_router = create_karada_router(self.animation_handler)
+                karada_router, karada_ws_router = create_karada_router(
+                    self.animation_handler
+                )
                 self.app.include_router(karada_router)
+                self.app.include_router(karada_ws_router)
                 log_info(f"{LOG_PREFIX} Karada API router mounted at /api/karada/")
             except Exception as karada_exc:
                 log_warning(
@@ -619,8 +722,17 @@ class SynthWebUIInterface:
         self.app.post("/api/log-console")(self.log_console_endpoint)
         self.app.websocket("/ws")(self.websocket_endpoint)
         self.app.websocket("/logs")(self.logs_ws_endpoint)
+        # Endpoints the stage/legacy clients hit outside /api/karada/* but that
+        # act on the avatar or feed text into the chain — gated by the same
+        # optional SYNTH_WEBUI_API_TOKEN as /ws and the Karada REST router
+        # (no-op when the token is unset). Per-route Depends is safe here; the
+        # router-level-dependency-on-websocket bug only affects WS routes.
+        from core.karada_api import _require_api_token
+
         # Auris audio endpoints
-        self.app.post("/api/audio/upload")(self.audio_upload_endpoint)
+        self.app.post("/api/audio/upload", dependencies=[Depends(_require_api_token)])(
+            self.audio_upload_endpoint
+        )
         self.app.post("/api/chat/attachments")(self.chat_attachment_upload_endpoint)
         # helper endpoint for Vosk language selection (legacy compat, delegates to MODEL_MANAGER)
         self.app.post("/api/auris/vosk/download")(self.vosk_model_download)
@@ -642,6 +754,9 @@ class SynthWebUIInterface:
         # Vox metadata/sample endpoints
         self.app.get("/api/vox/speakers")(self.vox_speakers)
         self.app.get("/api/vox/sample")(self.vox_sample)
+        self.app.post("/api/vox/voices")(self.vox_add_voice)
+        self.app.delete("/api/vox/voices")(self.vox_remove_voice)
+        self.app.get("/api/languages")(self.languages_list)
         self.app.get("/api/vrm")(self.list_vrm_models)
         self.app.get("/api/vrm/active")(self.get_active_vrm_endpoint)
         self.app.post("/api/vrm")(self.upload_vrm_model)
@@ -653,7 +768,10 @@ class SynthWebUIInterface:
         self.app.get("/api/skins")(self.list_skins)
         # new helper: allow clients to query which skin is active
         self.app.get("/api/skins/current_skin")(self.get_current_skin)
-        self.app.post("/api/skins/{skin_name}/activate")(self.activate_skin)
+        self.app.post(
+            "/api/skins/{skin_name}/activate",
+            dependencies=[Depends(_require_api_token)],
+        )(self.activate_skin)
         self.app.post("/api/skins/uploaded/clear")(self.clear_uploaded_vrm)
         # Skin editor endpoints
         self.app.post("/api/skins")(self.create_skin)
@@ -665,6 +783,8 @@ class SynthWebUIInterface:
         self.app.get("/api/components")(self.components_summary)
         self.app.post("/api/components/reload")(self.reload_component)
         self.app.post("/api/components/dev/toggle")(self.toggle_dev_components)
+        self.app.get("/api/plugins/{name}/icon")(self.plugin_icon)
+        self.app.post("/api/components/toggle")(self.toggle_plugin)
         self.app.post("/api/system/restart")(self.restart_system)
         self.app.get("/api/config")(self.config_summary)
         # File-backed exposed variables: upload/download handlers
@@ -673,7 +793,9 @@ class SynthWebUIInterface:
         # Debug endpoints (only enabled when WEB_DEBUG=1)
         self.app.get("/api/debug/db_pool")(self.db_pool_debug)
         self.app.post("/api/debug/inject_message")(self.debug_inject_message)
+        self.app.post("/api/debug/tts_test")(self.debug_tts_test)
         self.app.get("/api/debug/expressions")(self.debug_expressions)
+        self.app.post("/api/debug/build_prompt")(self.debug_build_prompt)
         self.app.post("/api/config")(self.update_config_entry)
         # Cortex-aware endpoints
         self.app.post("/api/components/cortex")(self.set_cortex_engine)
@@ -681,6 +803,10 @@ class SynthWebUIInterface:
         self.app.post("/api/components/cortex/login")(self.cortex_login)
         # Model selection for cortex engines
         self.app.post("/api/components/cortex/model")(self.set_cortex_model)
+        # Model selection for external Vox / Auris engines (persist the chosen
+        # model into the endpoint's extra_config so the bridge picks it up).
+        self.app.post("/api/components/vox/model")(self.set_vox_model)
+        self.app.post("/api/components/auris/model")(self.set_auris_model)
         # Run component actions on demand (e.g., Run Now button)
         self.app.post("/api/components/run")(self.run_component)
         self.app.get("/api/logchat/info")(self.get_logchat_info)
@@ -701,27 +827,46 @@ class SynthWebUIInterface:
         self.app.post("/api/chat/session_meta")(self.set_session_meta)
         self.app.get("/api/chat/session_meta")(self.get_session_meta)
         # History API endpoints (unified diary, grillo, chat history)
-        self.app.get("/api/history/interactions")(self.history_interactions)
         self.app.get("/api/history/diary")(self.history_diary)
         self.app.get("/api/history/grillo")(self.history_grillo)
+        self.app.get("/api/history/calendar")(self.history_calendar)
+        self.app.post("/api/history/calendar")(self.create_calendar_event)
+        self.app.put("/api/history/calendar/{event_id}")(self.update_calendar_event)
+        self.app.delete("/api/history/calendar/{event_id}")(self.delete_calendar_event)
+        self.app.get("/api/history/calendar/upcoming")(self.history_calendar_upcoming)
+        self.app.get("/calendar.ics")(self.export_calendar_ics)
+        # External calendar subscriptions (CalDAV / ICS)
+        self.app.get("/api/history/calendar/external")(self.list_external_calendars)
+        self.app.post("/api/history/calendar/external")(self.add_external_calendar)
+        self.app.delete("/api/history/calendar/external/{calendar_id}")(
+            self.delete_external_calendar
+        )
+        self.app.get("/api/history/dreams")(self.history_dreams)
+        self.app.get("/api/history/growth")(self.history_growth)
+        self.app.post("/api/growth/current")(self.update_growth_current)
+        self.app.post("/api/growth/revert")(self.revert_growth_state)
+        # Per-item delete for History sub-tabs
+        self.app.delete("/api/history/diary/{entry_id}")(self.delete_diary_day)
+        self.app.delete("/api/history/grillo/{entry_id}")(self.delete_grillo_entry)
+        self.app.delete("/api/history/dreams/{entry_id}")(self.delete_grillo_entry)
+        self.app.delete("/api/history/growth/{entry_id}")(self.delete_growth_state)
+        self.app.get("/api/history/interface-paths")(self.list_known_interface_paths)
         self.app.get("/api/history/chat")(self.history_chat)
         self.app.get("/api/log-failures")(self.list_log_failures)
         self.app.delete("/api/log-failures/{failure_id}")(self.delete_log_failure)
-        self.app.get("/api/selkies")(self.get_selkies_config)
-        self.app.get("/api/selkies/health")(self.get_selkies_health)
 
-        # Agent tasks endpoints (Agent Loop persistence & control)
+        # Agent tasks endpoints (Agentic Runtime persistence)
         self.app.get("/api/agent/tasks")(self.list_agent_tasks)
         self.app.get("/api/agent/tasks/{task_id}")(self.get_agent_task)
-        self.app.post("/api/agent/tasks")(self.create_agent_task)
-        self.app.post("/api/agent/tasks/{task_id}/pause")(self.pause_agent_task)
-        self.app.post("/api/agent/tasks/{task_id}/resume")(self.resume_agent_task)
-        self.app.post("/api/agent/tasks/{task_id}/cancel")(self.cancel_agent_task)
-        # Agent proposal approval endpoint
-        self.app.get("/api/agent/proposals")(self.list_agent_proposals)
-        self.app.post("/api/agent/proposals/{proposal_id}/approve")(
-            self.approve_agent_proposal
+        self.app.post("/api/agent/run")(self.run_agent_turn)
+        self.app.get("/api/agent/tools")(self.list_agent_tools)
+        self.app.delete("/api/agent/tasks/{task_id}")(self.delete_agent_task)
+        self.app.patch("/api/agent/tasks/{task_id}")(self.rename_agent_task)
+        self.app.post("/api/agent/tasks/{task_id}/message")(
+            self.send_agent_task_message
         )
+        self.app.post("/api/agent/tasks/{task_id}/continue")(self.continue_agent_task)
+        self.app.post("/api/agent/tasks/{task_id}/retry")(self.retry_agent_task)
         self.app.get("/api/animations/{skin}/{animation_type}")(
             self.get_animations_for_type
         )
@@ -930,12 +1075,19 @@ class SynthWebUIInterface:
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        "SELECT id, engine, status, created_at, updated_at FROM agent_tasks ORDER BY created_at DESC LIMIT %s",
+                        "SELECT id, engine, status, created_at, updated_at, metadata FROM agent_tasks ORDER BY created_at DESC LIMIT %s",
                         (int(limit),),
                     )
                     rows = await cur.fetchall()
                     tasks = []
                     for r in rows:
+                        name = None
+                        try:
+                            meta = json.loads(r[5]) if r[5] else None
+                            if isinstance(meta, dict):
+                                name = meta.get("name") or None
+                        except Exception:
+                            name = None
                         tasks.append(
                             {
                                 "id": r[0],
@@ -943,6 +1095,7 @@ class SynthWebUIInterface:
                                 "status": r[2],
                                 "created_at": r[3].isoformat() if r[3] else None,
                                 "updated_at": r[4].isoformat() if r[4] else None,
+                                "name": name,
                             }
                         )
                     return JSONResponse({"tasks": tasks})
@@ -990,38 +1143,323 @@ class SynthWebUIInterface:
             log_error(f"{LOG_PREFIX} get_agent_task failed: {error_msg}")
             raise HTTPException(status_code=500, detail=error_msg)
 
-    async def create_agent_task(self, request: Request):
+    async def send_agent_task_message(self, task_id: int, request: Request):
+        """Append a user message to a task's reasoning timeline.
+
+        This records the human intervention as a ``user_message`` entry in
+        ``agent_tasks.iterations_meta`` so it appears inline in the
+        conversational UI. It does NOT relaunch the agent loop — that
+        "continue with new input" behaviour is a separate future feature.
+        """
         try:
             body = await request.json()
-            engine = body.get("engine", "default")
-            input_payload = body.get("input") or body.get("prompt") or {}
-            max_iterations = body.get("max_iterations")
+            text = (body.get("text") or "").strip()
+            if not text:
+                raise HTTPException(status_code=400, detail="text is required")
 
-            # Check agent enabled
+            from core.db import get_conn_ctx
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT iterations_meta FROM agent_tasks WHERE id=%s",
+                        (int(task_id),),
+                    )
+                    row = await cur.fetchone()
+                    if not row:
+                        raise HTTPException(status_code=404, detail="task not found")
+
+                    meta = json.loads(row[0]) if row[0] else []
+                    if not isinstance(meta, list):
+                        meta = []
+
+                    next_iteration = len(meta) + 1
+                    entry = {
+                        "iteration": next_iteration,
+                        "role": "user_message",
+                        "result": text,
+                    }
+                    meta.append(entry)
+
+                    await cur.execute(
+                        "UPDATE agent_tasks SET iterations_meta=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s",
+                        (json.dumps(meta, ensure_ascii=False), int(task_id)),
+                    )
+                    await conn.commit()
+
+            return JSONResponse({"success": True, "entry": entry})
+        except HTTPException:
+            raise
+        except Exception as e:
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} send_agent_task_message failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
+
+    async def list_agent_tools(self):
+        """Return the unified tool catalog (internal actions + MCP tools)."""
+        try:
+            from core.tool_registry import tool_registry
+            from core.core_initializer import core_initializer
+            from core.mcp_bridge.client import mcp_client_bridge
+
+            # Rebuild actions so plugin enable/disable toggles are applied immediately.
+            await core_initializer._build_actions_block()
+
+            available_actions = {}
+            if isinstance(core_initializer.actions_block, dict):
+                available_actions = (
+                    core_initializer.actions_block.get("available_actions", {}) or {}
+                )
+
+            # Refresh internal tools from the latest actions block.
+            tool_registry.load_internal_actions(available_actions)
+            await mcp_client_bridge.connect_all(force=True)
+
+            tools = []
+            for tool in tool_registry.all_tools():
+                parameters = []
+                for p in tool.parameters:
+                    parameters.append(
+                        {
+                            "name": p.name,
+                            "type": p.type,
+                            "description": p.description,
+                            "required": bool(p.required),
+                            "enum": p.enum,
+                        }
+                    )
+                tools.append(
+                    {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "source": tool.source,
+                        "security_level": tool.security_level,
+                        "external_effects": list(tool.external_effects or []),
+                        "server_name": tool.server_name,
+                        "parameters": parameters,
+                    }
+                )
+
+            tools.sort(key=lambda t: t["name"])
+            return JSONResponse({"tools": tools})
+        except Exception as e:
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} list_agent_tools failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
+
+    async def run_agent_turn(self, request: Request):
+        """Run one synchronous Agentic Runtime turn from WebUI."""
+        try:
+            body = await request.json()
+            prompt = str(body.get("prompt") or body.get("goal") or "").strip()
+            planned_actions = body.get("actions")
+            if not prompt and not isinstance(planned_actions, list):
+                raise HTTPException(status_code=400, detail="Missing prompt")
+
+            engine = body.get("engine")
+            max_iterations = body.get("max_iterations")
+            timeout_seconds = body.get("timeout_seconds")
+
+            # Ensure unified registry is fresh and MCP servers are connected.
+            from core.core_initializer import core_initializer
+            from core.tool_registry import tool_registry
+            from core.mcp_bridge.client import mcp_client_bridge
+            from core.agent_core import get_agent_loop_manager
             from core.config_manager import config_registry as cfg
 
             if not bool(cfg.get_var("AGENT_ENABLED", True)):
                 raise HTTPException(status_code=403, detail="Agent disabled")
 
-            from core.agent_core import get_agent_loop_manager
+            # Rebuild actions so plugin enable/disable toggles are applied immediately.
+            await core_initializer._build_actions_block()
+
+            available_actions = {}
+            if isinstance(core_initializer.actions_block, dict):
+                available_actions = (
+                    core_initializer.actions_block.get("available_actions", {}) or {}
+                )
+            tool_registry.load_internal_actions(available_actions)
+            await mcp_client_bridge.connect_all(force=True)
 
             manager = get_agent_loop_manager()
-            task_id = await manager.run_loop(
+            result = await manager.run_agentic_turn(
+                goal=prompt or "Execute planned agent actions",
                 engine=engine,
-                input_payload=input_payload,
-                context={},
+                context={
+                    "goal": prompt,
+                    "interface": "synth_webui",
+                    "interface_name": "synth_webui",
+                    "interface_path": "synth_webui/agent",
+                    "chat_id": "agent",
+                },
                 max_iterations=max_iterations,
+                timeout_seconds=timeout_seconds,
+                original_message={"sender_id": "webui"},
+                preplanned_calls=planned_actions
+                if isinstance(planned_actions, list)
+                else None,
             )
-            if not task_id:
-                raise HTTPException(
-                    status_code=500, detail="Failed to create agent task"
-                )
-            return JSONResponse({"task_id": task_id})
+
+            # Persistence into agent_tasks is centralised in run_agentic_turn
+            # (source-agnostic), which returns the created task id. This avoids
+            # a duplicate WebUI-only row for the same turn.
+            task_id = result.get("task_id")
+
+            return JSONResponse({"result": result, "task_id": task_id})
         except HTTPException:
             raise
         except Exception as e:
             error_msg = str(e)
-            log_error(f"{LOG_PREFIX} create_agent_task failed: {error_msg}")
+            log_error(f"{LOG_PREFIX} run_agent_turn failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
+
+    async def _resume_task(self, task_id: int, allowed_statuses: tuple[str, ...]):
+        """Re-run an agentic task ON THE SAME ``agent_tasks`` row.
+
+        Shared by ``continue_agent_task`` (resumes ``pending`` tasks that
+        exhausted their iteration budget) and ``retry_agent_task`` (relaunches
+        ``failed`` tasks). The prior observation history is rebuilt from the
+        persisted iterations so the model continues with the context it already
+        built, and the row is flipped back to ``running`` so the UI reflects the
+        resume. ``allowed_statuses`` gates which current statuses may be resumed.
+        """
+        from core.db import get_conn_ctx
+        from core.core_initializer import core_initializer
+        from core.tool_registry import tool_registry
+        from core.mcp_bridge.client import mcp_client_bridge
+        from core.agent_core import get_agent_loop_manager
+        from core.config_manager import config_registry as cfg
+
+        if not bool(cfg.get_var("AGENT_ENABLED", True)):
+            raise HTTPException(status_code=403, detail="Agent disabled")
+
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT status, engine, input, iterations_meta, metadata "
+                    "FROM agent_tasks WHERE id=%s",
+                    (int(task_id),),
+                )
+                row = await cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="task not found")
+
+        status, engine, input_raw, iterations_raw, metadata_raw = (
+            row[0],
+            row[1],
+            row[2],
+            row[3],
+            row[4],
+        )
+        if status not in allowed_statuses:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"task status={status} is not resumable "
+                    f"(allowed: {', '.join(allowed_statuses)})"
+                ),
+            )
+
+        input_payload = json.loads(input_raw) if input_raw else {}
+        if not isinstance(input_payload, dict):
+            input_payload = {}
+        goal = str(input_payload.get("goal") or "").strip()
+        if not goal:
+            raise HTTPException(status_code=422, detail="task has no goal to resume")
+
+        metadata = json.loads(metadata_raw) if metadata_raw else {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        interface_path = metadata.get("interface_path") or "synth_webui/agent"
+
+        # Rebuild the observation history from the persisted iterations so
+        # the resumed loop continues with the context it already built.
+        prior_observations: list[dict] = []
+        iterations_meta = json.loads(iterations_raw) if iterations_raw else []
+        if isinstance(iterations_meta, list):
+            for entry in iterations_meta:
+                if not isinstance(entry, dict):
+                    continue
+                prior_observations.append(
+                    {
+                        "iteration": entry.get("iteration"),
+                        "role": entry.get("role") or "observation",
+                        "content": entry.get("result"),
+                    }
+                )
+
+        # Mark the row back to ``running`` so the UI reflects the resume. A
+        # resumed task never stays ``failed``: from here it goes running →
+        # terminal (completed/failed/pending) via ``_persist_agentic_turn``.
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE agent_tasks SET status='running', "
+                    "updated_at=CURRENT_TIMESTAMP WHERE id=%s",
+                    (int(task_id),),
+                )
+                await conn.commit()
+
+        # Refresh the unified tool registry (same as run_agent_turn).
+        await core_initializer._build_actions_block()
+        available_actions = {}
+        if isinstance(core_initializer.actions_block, dict):
+            available_actions = (
+                core_initializer.actions_block.get("available_actions", {}) or {}
+            )
+        tool_registry.load_internal_actions(available_actions)
+        await mcp_client_bridge.connect_all(force=True)
+
+        manager = get_agent_loop_manager()
+        result = await manager.run_agentic_turn(
+            goal=goal,
+            engine=engine if engine and engine != "default" else None,
+            context={
+                "goal": goal,
+                "interface": "synth_webui",
+                "interface_name": "synth_webui",
+                "interface_path": interface_path,
+                "chat_id": "agent",
+                "resumed": True,
+            },
+            original_message={"sender_id": "webui"},
+            task_id=int(task_id),
+            prior_observations=prior_observations,
+        )
+
+        return JSONResponse({"result": result, "task_id": int(task_id)})
+
+    async def continue_agent_task(self, task_id: int):
+        """Resume a paused (``pending``) agentic task for another iteration batch.
+
+        A task is parked as ``pending`` when it exhausts its iteration budget
+        without the model calling ``attempt_completion`` (see
+        ``core.agent_core.AgentLoopManager.run_agentic_turn``). This re-runs the
+        loop ON THE SAME ``agent_tasks`` row with a fresh iteration budget.
+        """
+        try:
+            return await self._resume_task(task_id, allowed_statuses=("pending",))
+        except HTTPException:
+            raise
+        except Exception as e:
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} continue_agent_task failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
+
+    async def retry_agent_task(self, task_id: int):
+        """Relaunch a ``failed`` agentic task on the same ``agent_tasks`` row.
+
+        Rebuilds the prior observation history and re-runs the loop, flipping
+        the row back to ``running`` so the task never stays ``failed`` once the
+        user retries it.
+        """
+        try:
+            return await self._resume_task(task_id, allowed_statuses=("failed",))
+        except HTTPException:
+            raise
+        except Exception as e:
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} retry_agent_task failed: {error_msg}")
             raise HTTPException(status_code=500, detail=error_msg)
 
     async def create_database_backup_endpoint(self):
@@ -1053,130 +1491,73 @@ class SynthWebUIInterface:
             )
             raise HTTPException(status_code=500, detail=error_msg)
 
-    async def pause_agent_task(self, task_id: int):
+    async def delete_agent_task(self, task_id: int):
         try:
-            from core.agent_core import get_agent_loop_manager
-
-            manager = get_agent_loop_manager()
-            manager.pause_task(int(task_id))
-            # Persist status
             from core.db import get_conn_ctx
 
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        "UPDATE agent_tasks SET status=%s WHERE id=%s",
-                        ("paused", int(task_id)),
+                        "DELETE FROM agent_tasks WHERE id=%s",
+                        (int(task_id),),
                     )
                     await conn.commit()
-            return JSONResponse({"status": "paused"})
+            return JSONResponse({"status": "deleted", "task_id": int(task_id)})
         except Exception as e:
             error_msg = str(e)
-            log_error(f"{LOG_PREFIX} pause_agent_task failed: {error_msg}")
+            log_error(f"{LOG_PREFIX} delete_agent_task failed: {error_msg}")
             raise HTTPException(status_code=500, detail=error_msg)
 
-    async def resume_agent_task(self, task_id: int):
-        try:
-            from core.agent_core import get_agent_loop_manager
+    async def rename_agent_task(self, task_id: int, request: Request):
+        """Set (or clear) a human-friendly display name for a task.
 
-            manager = get_agent_loop_manager()
-            manager.resume_task(int(task_id))
-            from core.db import get_conn_ctx
-
-            async with get_conn_ctx() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        "UPDATE agent_tasks SET status=%s WHERE id=%s",
-                        ("running", int(task_id)),
-                    )
-                    await conn.commit()
-            return JSONResponse({"status": "running"})
-        except Exception as e:
-            error_msg = str(e)
-            log_error(f"{LOG_PREFIX} resume_agent_task failed: {error_msg}")
-            raise HTTPException(status_code=500, detail=error_msg)
-
-    async def cancel_agent_task(self, task_id: int):
-        try:
-            from core.agent_core import get_agent_loop_manager
-
-            manager = get_agent_loop_manager()
-            manager.cancel_task(int(task_id))
-            from core.db import get_conn_ctx
-
-            async with get_conn_ctx() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        "UPDATE agent_tasks SET status=%s WHERE id=%s",
-                        ("cancelled", int(task_id)),
-                    )
-                    await conn.commit()
-            return JSONResponse({"status": "cancelled"})
-        except Exception as e:
-            error_msg = str(e)
-            log_error(f"{LOG_PREFIX} cancel_agent_task failed: {error_msg}")
-            raise HTTPException(status_code=500, detail=error_msg)
-
-    async def approve_agent_proposal(self, proposal_id: int, request: Request):
+        The name is stored inside the ``metadata`` JSON blob under the
+        ``name`` key so no schema change is required. Passing an empty or
+        null name clears it.
+        """
         try:
             body = await request.json()
-            trainer = body.get("trainer") or body.get("trainer_id") or None
-            original_message = {"sender_id": trainer} if trainer else None
+            raw_name = body.get("name")
+            name = (raw_name or "").strip() if isinstance(raw_name, str) else ""
 
-            from core.core_initializer import PLUGIN_REGISTRY
+            from core.db import get_conn_ctx
 
-            plugin = PLUGIN_REGISTRY.get("agent")
-            if not plugin:
-                raise HTTPException(status_code=404, detail="Agent plugin not loaded")
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT metadata FROM agent_tasks WHERE id=%s",
+                        (int(task_id),),
+                    )
+                    row = await cur.fetchone()
+                    if not row:
+                        raise HTTPException(status_code=404, detail="task not found")
 
-            res = await plugin.execute_action(
-                {
-                    "type": "approve_action",
-                    "payload": {"proposal_id": int(proposal_id)},
-                },
-                {},
-                None,
-                original_message,
+                    try:
+                        meta = json.loads(row[0]) if row[0] else {}
+                    except Exception:
+                        meta = {}
+                    if not isinstance(meta, dict):
+                        meta = {}
+
+                    if name:
+                        meta["name"] = name
+                    else:
+                        meta.pop("name", None)
+
+                    await cur.execute(
+                        "UPDATE agent_tasks SET metadata=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s",
+                        (json.dumps(meta, ensure_ascii=False), int(task_id)),
+                    )
+                    await conn.commit()
+
+            return JSONResponse(
+                {"status": "renamed", "task_id": int(task_id), "name": name or None}
             )
-            return JSONResponse({"result": res})
         except HTTPException:
             raise
         except Exception as e:
             error_msg = str(e)
-            log_error(f"{LOG_PREFIX} approve_agent_proposal failed: {error_msg}")
-            raise HTTPException(status_code=500, detail=error_msg)
-
-    async def list_agent_proposals(self, limit: int = 50):
-        try:
-            from core.db import get_conn_ctx
-
-            async with get_conn_ctx() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        "SELECT id, command, proposer, status, request_ts FROM agent_activity_log WHERE status=%s ORDER BY request_ts DESC LIMIT %s",
-                        ("proposed", int(limit)),
-                    )
-                    rows = await cur.fetchall()
-                    proposals = []
-                    for r in rows:
-                        proposals.append(
-                            {
-                                "id": r[0],
-                                "command": r[1],
-                                "proposer": r[2],
-                                "status": r[3],
-                                "requested_at": r[4].isoformat() if r[4] else None,
-                            }
-                        )
-                    return JSONResponse({"proposals": proposals})
-        except Exception as e:
-            if self._is_missing_agent_table_error(e):
-                log_warning(
-                    f"{LOG_PREFIX} list_agent_proposals: agent_activity_log table missing, returning empty list"
-                )
-                return JSONResponse({"proposals": []})
-            error_msg = str(e)
-            log_error(f"{LOG_PREFIX} list_agent_proposals failed: {error_msg}")
+            log_error(f"{LOG_PREFIX} rename_agent_task failed: {error_msg}")
             raise HTTPException(status_code=500, detail=error_msg)
 
     async def set_animation_state(self, request: Request):
@@ -1262,6 +1643,64 @@ class SynthWebUIInterface:
             priority=int(priority),
             source=str(source),
         )
+
+        # Record the touch on the Synth avatar as a Karada interaction event.
+        try:
+            from core.karada_touch_events import record_touch_event, EVENT_SYNTH_TOUCH
+
+            # Prefer the precise catalog zone id resolved by the frontend 3D
+            # zoning; fall back to the raw node name / heuristic label.
+            raw_part = (
+                payload.get("precise_id")
+                or payload.get("part")
+                or payload.get("mapped_part")
+            )
+            await record_touch_event(
+                session_id=session_id,
+                interface_path=f"{INTERFACE_NAME}/{session_id}",
+                event_type=EVENT_SYNTH_TOUCH,
+                raw_part=str(raw_part) if raw_part and raw_part != "unknown" else None,
+                username=self._get_session_username(),
+            )
+        except Exception as rec_exc:
+            log_debug(f"{LOG_PREFIX} Failed to record synth_touch event: {rec_exc}")
+
+    def _get_session_username(self) -> str:
+        """Best-effort display name for the interacting WebUI user."""
+        try:
+            from core.config import TRAINER_NAME
+
+            if TRAINER_NAME and TRAINER_NAME != "Trainer":
+                return str(TRAINER_NAME)
+        except Exception:
+            pass
+        return "Trainer"
+
+    async def _handle_interaction_event(
+        self, session_id: str, payload: Dict[str, Any]
+    ) -> None:
+        """Record a non-avatar 3D interaction (environment or window tap)."""
+        try:
+            from core.karada_touch_events import (
+                record_touch_event,
+                EVENT_ENVIRONMENT_TAP,
+                EVENT_WINDOW_TAP,
+            )
+
+            subtype = payload.get("subtype") or payload.get("interaction")
+            if subtype == "window_tap":
+                event_type = EVENT_WINDOW_TAP
+            else:
+                event_type = EVENT_ENVIRONMENT_TAP
+
+            await record_touch_event(
+                session_id=session_id,
+                interface_path=f"{INTERFACE_NAME}/{session_id}",
+                event_type=event_type,
+                username=self._get_session_username(),
+            )
+        except Exception as exc:
+            log_debug(f"{LOG_PREFIX} Failed to record interaction event: {exc}")
 
     # ------------------------------------------------------------------
     # Interface metadata
@@ -1414,6 +1853,11 @@ class SynthWebUIInterface:
                 "%%MULTI_SESSION%%": "true"
                 if self._multi_session_enabled()
                 else "false",
+                # Whether the SyntH Stage frontend (/stage) is mounted. Used by
+                # the settings section to show/hide the "Open SyntH Stage" link.
+                "%%STAGE_AVAILABLE%%": "true"
+                if getattr(self, "_stage_mounted", False)
+                else "false",
             }
 
             # Vox (TTS) flag exposed to the WebUI client is derived from
@@ -1524,64 +1968,6 @@ class SynthWebUIInterface:
             raise HTTPException(
                 status_code=500, detail="Unable to render Synthetic Heart"
             ) from exc
-
-    async def _probe_selkies_protocol(self) -> dict:
-        """Probe local Selkies ports to determine if HTTPS or HTTP is reachable.
-
-        Returns a dict: { 'protocol': 'https'|'http'|'none', 'details': str }
-        This is a best-effort check intended to improve UI hints; it must not
-        block for long (uses short timeouts).
-        """
-        import ssl
-        import socket
-
-        host = getattr(self, "selkies_host", "127.0.0.1") or "127.0.0.1"
-
-        # Build a prioritized list of ports to probe:
-        # 1) configured host-exposed ports (selkies_https_port / selkies_http_port)
-        # 2) container defaults (3001 = HTTPS, 3000 = HTTP) as a last resort
-        candidate_ports = []
-        if getattr(self, "selkies_https_port", None):
-            candidate_ports.append((int(self.selkies_https_port), "https"))
-        if getattr(self, "selkies_http_port", None):
-            candidate_ports.append((int(self.selkies_http_port), "http"))
-
-        # Container defaults (try HTTPS container port first)
-        candidate_ports.extend([(3001, "https"), (3000, "http")])
-
-        https_err = ""
-        http_err = ""
-        for port, proto in candidate_ports:
-            try:
-                if proto == "https":
-                    ctx = ssl.create_default_context()
-                    ctx.check_hostname = False
-                    ctx.verify_mode = ssl.CERT_NONE
-                    with socket.create_connection((host, port), timeout=1) as sock:
-                        with ctx.wrap_socket(sock, server_hostname=host):
-                            return {
-                                "protocol": "https",
-                                "details": f"TLS handshake succeeded on port {port}",
-                                "port": port,
-                            }
-                else:
-                    with socket.create_connection((host, port), timeout=1) as sock:
-                        return {
-                            "protocol": "http",
-                            "details": f"Plain TCP connect succeeded on port {port}",
-                            "port": port,
-                        }
-            except Exception as e:
-                if proto == "https":
-                    https_err = str(e)
-                else:
-                    http_err = str(e)
-
-        return {
-            "protocol": "none",
-            "details": f"https_err={https_err}; http_err={http_err}",
-            "port": None,
-        }
 
     def _get_chat_resizable(self) -> bool:
         """Return whether chat should be resizable (from config/DB)."""
@@ -1981,6 +2367,112 @@ class SynthWebUIInterface:
             resp["warnings"] = errors
         return JSONResponse(resp)
 
+    async def debug_tts_test(self, request: Request) -> JSONResponse:
+        """Synthesise arbitrary text through the active Vox (TTS) engine.
+
+        Used by the Debug window to test the currently selected Vox engine /
+        model: the text is synthesised and the resulting audio is broadcast to
+        the shared avatar (Karada state server) so it can be heard on every
+        connected WebUI client. Gated by ``WEB_DEBUG=1``.
+
+        Supports ``[em_*]`` facial expression tags: they are stripped before
+        synthesis (so they are never spoken) and drive the avatar's facial
+        expression timeline, synchronised to the real audio duration.
+
+        JSON body: ``{"text": "...", "engine": "optional-engine-name"}``.
+        """
+        web_debug = os.getenv("WEB_DEBUG", "0").lower()
+        if web_debug not in ("1", "true", "yes"):
+            raise HTTPException(status_code=403, detail="Debug endpoints disabled")
+
+        try:
+            body: Dict[str, Any] = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+        text: str = (body.get("text") or "").strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="'text' is required")
+
+        engine_name: Optional[str] = body.get("engine") or None
+
+        # Parse [em_*] facial expression tags so the Vox test can drive the
+        # avatar's face in sync with the synthesised audio. vox.speak() strips
+        # the tags before synthesis, so we parse them here purely to schedule
+        # the expression timeline after the audio duration is known.
+        from core.facial_expression_parser import parse_facial_expressions
+
+        clean_text, em_events = parse_facial_expressions(text)
+
+        from core.core_initializer import PLUGIN_REGISTRY
+
+        vox = PLUGIN_REGISTRY.get("vox_plugin")
+        if vox is None:
+            return JSONResponse(
+                {
+                    "error": (
+                        "Vox TTS subsystem is not loaded. Select a Vox engine "
+                        "via ACTIVE_VOX_ENGINE."
+                    )
+                },
+                status_code=503,
+            )
+
+        try:
+            # Generate only — do not dispatch through the normal interface path.
+            result = await vox.speak(
+                text,
+                engine_name=engine_name,
+                allow_fallback=False,
+                generate_only=True,
+            )
+            status = result.get("status") if isinstance(result, dict) else None
+            if status != "success":
+                reason = (
+                    result.get("reason", status) if isinstance(result, dict) else status
+                )
+                return JSONResponse(
+                    {"error": f"TTS generation failed: {reason}"},
+                    status_code=422,
+                )
+
+            audio_path = result.get("audio_path")
+            used_engine = engine_name or getattr(vox, "_active_engine_name", None)
+            audio_duration_s = (
+                result.get("audio_duration_s") if isinstance(result, dict) else None
+            )
+
+            delivered = False
+            if audio_path:
+                delivered = await vox.broadcast_audio_to_webui(
+                    audio_path, text=clean_text, engine_name=engine_name
+                )
+
+            # Drive the facial expression timeline for any [em_*] tags,
+            # synchronised to the real audio duration.
+            if em_events and delivered:
+                try:
+                    interface_path = f"{INTERFACE_NAME}/debug-vox-test"
+                    vox._schedule_expression_timeline(
+                        em_events, clean_text, interface_path, audio_duration_s
+                    )
+                except Exception as exc:
+                    log_debug(
+                        f"{LOG_PREFIX} debug_tts_test expression timeline error: {exc}"
+                    )
+
+            log_info(
+                f"{LOG_PREFIX} 🔊 Debug Vox test: engine={used_engine}, "
+                f"delivered={delivered}, em_tags={len(em_events)}, "
+                f"text={clean_text[:60]!r}"
+            )
+            return JSONResponse(
+                {"status": "ok", "engine": used_engine, "delivered": delivered}
+            )
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} debug_tts_test error: {exc}")
+            return JSONResponse({"error": str(exc)}, status_code=500)
+
     async def debug_expressions(self, request: Request) -> JSONResponse:
         """Return the list of valid facial expressions for the active persona.
 
@@ -1993,17 +2485,33 @@ class SynthWebUIInterface:
 
         from core.persona_manager import get_persona_manager
 
-        persona_json: Optional[Dict[str, Any]] = None
         pm = get_persona_manager()
-        if pm and getattr(pm, "_current_persona", None):
-            try:
-                persona_json = pm._load_persona_json(pm._current_persona.name)
-            except Exception:
-                persona_json = None
 
-        expr_section: Dict[str, Any] = (
-            persona_json.get("facial_expressions", {}) if persona_json else {}
-        )
+        def _load_expressions(skin_name: str) -> Dict[str, Any]:
+            if not pm:
+                return {}
+            try:
+                pj = pm._load_persona_json(skin_name)
+            except Exception:
+                return {}
+            if not pj:
+                return {}
+            return pj.get("facial_expressions", {}) or {}
+
+        # Prefer the active persona's expressions.  Dynamically loaded skins
+        # (e.g. ``temp``) or the ``default`` persona may not declare any, so
+        # fall back to the canonical reference skin ``Rei`` — the same skin the
+        # animation system uses as its resolution fallback (see AGENTS.md §7) —
+        # rather than a partial hardcoded list.
+        active_name: Optional[str] = None
+        if pm and getattr(pm, "_current_persona", None):
+            active_name = getattr(pm._current_persona, "name", None)
+
+        expr_section: Dict[str, Any] = {}
+        if active_name:
+            expr_section = _load_expressions(active_name)
+        if not expr_section:
+            expr_section = _load_expressions("Rei")
         if not expr_section:
             expr_section = {
                 n: {"description": n}
@@ -2026,6 +2534,171 @@ class SynthWebUIInterface:
                     for name, info in expr_section.items()
                 },
                 "canonical_emotions": canonical_emotions,
+            }
+        )
+
+    async def debug_build_prompt(self, request: Request) -> JSONResponse:
+        """Build a REAL prompt from the live system state for a faked incoming message.
+
+        This is a debugging aid: it runs the full ``build_prompt_request``
+        pipeline (persona, history, recon context, action catalog, etc.) against
+        the *actual* running system state, but the resulting prompt is returned
+        as JSON and is NEVER sent to the LLM. It lets you inspect whether the
+        prompt is assembled correctly (e.g. the ``current_chat`` anchor, the
+        ``interface_path`` routing metadata, the unified-history labelling)
+        without spending a single token.
+
+        The incoming message is simulated. By default it mimics an OpenAI-compatible
+        API endpoint delivering the text "This is a test message"; the text and a
+        few other fields can be overridden in the request body:
+
+        - ``text`` (str): the faked message body. Default "This is a test message".
+        - ``interface_name`` (str): which interface delivered it. Default
+          "openai_compat" (the Ollama-compatible API surface).
+        - ``interface_path`` (str): the chat the message "arrived in". Default
+          "openai_compat/test".
+        - ``chat_id`` (str/int): the chat id. Default "test".
+        - ``user_id`` (str/int): the sender id. Default 0.
+        - ``username`` (str): sender display name. Default "DebugUser".
+        - ``usertag`` (str): sender @tag. Default "@debuguser".
+        - ``history_scope`` (str): "local" | "recent" | "unified". Default None
+          (falls back to the global UNIFIED_HISTORY setting).
+        - ``thread_id`` (str): optional thread id.
+
+        Gated by ``WEB_DEBUG=1``.
+        """
+        web_debug = os.getenv("WEB_DEBUG", "0").lower()
+        if web_debug not in ("1", "true", "yes"):
+            raise HTTPException(status_code=403, detail="Debug endpoints disabled")
+
+        try:
+            body: Dict[str, Any] = await request.json()
+        except Exception:
+            body = {}
+
+        if not isinstance(body, dict):
+            body = {}
+
+        text: str = str(body.get("text", "This is a test message"))
+        interface_path: str = str(body.get("interface_path", "openai_compat/test"))
+        # Derive interface_name from interface_path when not given explicitly,
+        # so the simulated message is internally consistent.
+        interface_name: str = str(
+            body.get("interface_name") or interface_path.split("/")[0]
+        )
+        chat_id: Any = body.get("chat_id", "test")
+        user_id: Any = body.get("user_id", 0)
+        username: Optional[str] = body.get("username") or "DebugUser"
+        usertag: Optional[str] = body.get("usertag") or "@debuguser"
+        history_scope: Optional[str] = body.get("history_scope")
+        thread_id: Optional[str] = body.get("thread_id")
+
+        # Build a faked incoming message. build_prompt_request reads fields via
+        # getattr, so a SimpleNamespace is sufficient and avoids constructing a
+        # full interface-specific message object.
+        import datetime as _dt
+        from types import SimpleNamespace
+
+        fake_user = SimpleNamespace(
+            id=user_id,
+            username=username,
+            full_name=username or "DebugUser",
+        )
+        fake_message = SimpleNamespace(
+            id=body.get("message_id", 0),
+            text=text,
+            message_id=body.get("message_id", 0),
+            chat_id=chat_id,
+            interface_path=interface_path,
+            interface_name=interface_name,
+            from_user=fake_user,
+            date=_dt.datetime.now(_dt.timezone.utc),
+            reply_to_message=None,
+            thread_id=thread_id,
+            message_thread_id=thread_id,
+        )
+        # chat attribute is read by some paths (e.g. telegram_chat_kind)
+        fake_message.chat = SimpleNamespace(id=chat_id, type="group")
+
+        try:
+            from core.prompt_engine import build_prompt_request
+
+            prompt = await build_prompt_request(
+                message=fake_message,
+                context_memory={},
+                interface_name=interface_name,
+                history_scope=history_scope,
+            )
+        except Exception as exc:
+            import traceback as _tb
+
+            _stack = _tb.format_exc()
+            log_error(f"{LOG_PREFIX} debug_build_prompt failed: {exc}\n{_stack}")
+            raise HTTPException(
+                status_code=500, detail=f"Failed to build prompt: {exc}"
+            )
+
+        # build_prompt_request returns a dict that embeds non-JSON-serializable
+        # objects (Turn, RuntimeContext, ToolManifest, Attachment) under keys
+        # like "actions"/"__prompt_request". For a debug view we only need the
+        # human-readable, JSON-safe parts: the input payload (with the
+        # current_chat anchor), the context_summary, the system instruction and
+        # the rendered instructions. Anything else is dropped to keep the
+        # response serializable.
+        def _safe(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {k: _safe(v) for k, v in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [_safe(v) for v in value]
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                return value
+            return str(value)
+
+        debug_prompt: Dict[str, Any] = {}
+        if isinstance(prompt, dict):
+            for key in ("input", "context_summary", "instructions", "context"):
+                if key in prompt:
+                    debug_prompt[key] = _safe(prompt[key])
+            # The raw system instruction lives on the attached PromptRequest
+            pr = prompt.get("__prompt_request")
+            if pr is not None and hasattr(pr, "system_instruction"):
+                debug_prompt["system_instruction"] = _safe(pr.system_instruction)
+            # Expose the action catalog names so the caller can verify which
+            # actions were offered for this turn. build_prompt_request keeps the
+            # live catalog on the attached PromptRequest (actions_block), so read
+            # it from there when present; fall back to a top-level "actions" key.
+            action_names: list[str] = []
+            pr = prompt.get("__prompt_request")
+            if pr is not None:
+                try:
+                    from core.core_initializer import core_initializer
+
+                    _ab = getattr(core_initializer, "actions_block", None) or {}
+                    _av = _ab.get("available_actions", {}) or {}
+                    action_names = list(_av.keys())
+                except Exception:
+                    action_names = []
+            if not action_names and isinstance(prompt.get("actions"), dict):
+                action_names = list(
+                    prompt["actions"].get("available_actions", {}).keys()
+                )
+            debug_prompt["available_actions"] = _safe(action_names)
+
+        return JSONResponse(
+            {
+                "success": True,
+                "simulated_message": {
+                    "text": text,
+                    "interface_name": interface_name,
+                    "interface_path": interface_path,
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "username": username,
+                    "usertag": usertag,
+                    "history_scope": history_scope,
+                    "thread_id": thread_id,
+                },
+                "prompt": debug_prompt,
             }
         )
 
@@ -2056,7 +2729,6 @@ class SynthWebUIInterface:
                 "navbar",
                 "agent",
                 "engines",
-                "external_engines",
             }
             if section not in allowed_sections:
                 raise HTTPException(
@@ -2220,6 +2892,16 @@ class SynthWebUIInterface:
     # WebSocket logic
     # ------------------------------------------------------------------
     async def websocket_endpoint(self, websocket: WebSocket):
+        from core.karada_api import _configured_api_token, _token_from_websocket
+
+        expected_token = _configured_api_token()
+        if (
+            expected_token is not None
+            and _token_from_websocket(websocket) != expected_token
+        ):
+            await websocket.close(code=4401, reason="Invalid or missing API token")
+            return
+
         try:
             client_info = getattr(websocket, "client", None)
             log_debug(f"{LOG_PREFIX} Incoming websocket connection from: {client_info}")
@@ -2268,6 +2950,7 @@ class SynthWebUIInterface:
         client_type: str = "unknown"
         client_capabilities: List[str] = ["url_fetch"]
         missing_assets: List[str] = []
+        hello_disconnect = False
 
         try:
             raw_hello = await asyncio.wait_for(websocket.receive_text(), timeout=0.3)
@@ -2298,12 +2981,29 @@ class SynthWebUIInterface:
             log_debug(
                 f"{LOG_PREFIX} No hello from {session_id} within timeout, proceeding"
             )
+        except WebSocketDisconnect:
+            # Client dropped during the handshake (page reload / reconnect
+            # churn). Skip the state push and the receive loop — attempting
+            # either on a closed socket logs a spurious warning ("Failed to
+            # push VRM state ... after 'websocket.close'") followed by an
+            # error ("Cannot call 'receive' once a disconnect message has
+            # been received").
+            hello_disconnect = True
         except Exception as hello_exc:
             log_debug(f"{LOG_PREFIX} Hello handling error (non-fatal): {hello_exc}")
 
+        # The disconnect can also be consumed without raising (e.g. the
+        # ``wait_for`` cancellation races the close frame), so double-check
+        # the socket state rather than trusting the exception alone.
+        if (
+            websocket.client_state is not WebSocketState.CONNECTED
+            or websocket.application_state is not WebSocketState.CONNECTED
+        ):
+            hello_disconnect = True
+
         # Push full VRM state to the newly connected client
         try:
-            if self.animation_handler:
+            if self.animation_handler and not hello_disconnect:
                 full_state = await self.animation_handler.get_full_state()
 
                 # 1) VRM model
@@ -2348,9 +3048,16 @@ class SynthWebUIInterface:
                 f"{LOG_PREFIX} Failed to push VRM state to session {session_id}: {push_exc}"
             )
 
-        log_info(f"{LOG_PREFIX} Client connected: {session_id} (type={client_type})")
+        if not hello_disconnect:
+            log_info(
+                f"{LOG_PREFIX} Client connected: {session_id} (type={client_type})"
+            )
 
         try:
+            if hello_disconnect:
+                # Route through the normal disconnect path so the shared
+                # cleanup in ``finally`` runs exactly once.
+                raise WebSocketDisconnect(code=1000)
             while True:
                 data = await websocket.receive_text()
                 try:
@@ -2368,6 +3075,14 @@ class SynthWebUIInterface:
                     except Exception as touch_exc:
                         log_warning(
                             f"{LOG_PREFIX} Failed to handle touch interaction from {session_id}: {touch_exc}"
+                        )
+                    continue
+                if msg_type == "interaction":
+                    try:
+                        await self._handle_interaction_event(session_id, payload)
+                    except Exception as inter_exc:
+                        log_warning(
+                            f"{LOG_PREFIX} Failed to handle interaction event from {session_id}: {inter_exc}"
                         )
                     continue
 
@@ -2676,10 +3391,24 @@ class SynthWebUIInterface:
         except ValueError:
             raise HTTPException(status_code=404, detail="Engine not found")
         try:
-            speakers = engine.get_speakers()
+            # ``get_speakers`` is a synchronous method that, for external
+            # endpoints, drives an async adapter call. Running it on the event
+            # loop thread would deadlock (the bridge schedules the coroutine on
+            # the running loop and blocks on the result, but the loop thread is
+            # this handler). Run it in a worker thread so the loop stays free.
+            import asyncio
+
+            speakers = await asyncio.to_thread(engine.get_speakers)
         except Exception:
             speakers = []
         return JSONResponse(speakers)
+
+    async def languages_list(self, request: Request):
+        """GET /api/languages — full ISO-639-1 catalogue for the Vox
+        per-language override UI."""
+        from core.languages import SUPPORTED_LANGUAGES
+
+        return JSONResponse({"languages": SUPPORTED_LANGUAGES})
 
     async def vox_sample(self, request: Request):
         """GET /api/vox/sample?engine=<name>&speaker=<code>"""
@@ -2698,10 +3427,124 @@ class SynthWebUIInterface:
         except ValueError:
             raise HTTPException(status_code=404, detail="Engine not found")
         try:
-            data = engine.sample(speaker)
+            # Off-load to a worker thread: for external endpoints ``sample``
+            # synthesises via an async adapter, and running it on the event
+            # loop thread would deadlock (see ``vox_speakers``).
+            import asyncio
+
+            data = await asyncio.to_thread(engine.sample, speaker)
         except NotImplementedError:
             raise HTTPException(status_code=404, detail="No sample available")
         return Response(data, media_type="audio/wav")
+
+    async def vox_add_voice(self, request: Request) -> JSONResponse:
+        """POST /api/vox/voices  — add a voice by URL to an external Vox engine.
+
+        Body JSON: ``{"engine": <name>, "url": <fish share URL or id>}``.
+        Scrapes the voice's metadata (title/language) from the adapter and
+        persists it in the endpoint's ``extra_config["manual_voices"]`` list so
+        it appears in the "Manually added" tier of the voice picker.
+        """
+        from core.config_manager import config_registry
+        from core.external_endpoints.registry import get_external_endpoint_registry
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        engine_name = (body or {}).get("engine") or config_registry.get_value(
+            "ACTIVE_VOX_ENGINE", "kitten", value_type=str
+        )
+        url = str((body or {}).get("url") or "").strip()
+        if not url:
+            raise HTTPException(status_code=400, detail="url is required")
+
+        registry = get_external_endpoint_registry()
+        endpoint = await registry.get_endpoint_by_name(str(engine_name))
+        if endpoint is None:
+            raise HTTPException(status_code=404, detail="Engine not found")
+
+        from core.external_endpoints.crypto import decrypt_api_key
+        from core.external_endpoints.probe import get_adapter_for_endpoint
+
+        api_key = decrypt_api_key(endpoint.api_key_enc or "")
+        adapter = get_adapter_for_endpoint(endpoint, api_key)
+        parse = getattr(type(adapter), "parse_model_id_from_url", None)
+        fetch_detail = getattr(adapter, "fetch_model_detail", None)
+        if parse is None or not callable(fetch_detail):
+            raise HTTPException(
+                status_code=400,
+                detail="This engine does not support adding voices by URL",
+            )
+
+        model_id = parse(url)
+        if not model_id:
+            raise HTTPException(status_code=400, detail="Could not parse a voice id")
+
+        detail = await fetch_detail(model_id)
+        if not detail:
+            # Fall back to a minimal record so the id is still usable even if
+            # metadata scraping failed (e.g. private voice, transient error).
+            detail = {"reference_id": model_id, "title": model_id, "language": None}
+
+        extra = dict(endpoint.extra_config or {})
+        manual = extra.get("manual_voices")
+        if not isinstance(manual, list):
+            manual = []
+        ref_id = str(detail.get("reference_id") or model_id)
+        # De-duplicate on reference_id, refreshing metadata if already present.
+        manual = [
+            v
+            for v in manual
+            if isinstance(v, dict) and str(v.get("reference_id")) != ref_id
+        ]
+        manual.append(
+            {
+                "reference_id": ref_id,
+                "title": detail.get("title") or ref_id,
+                "language": detail.get("language"),
+            }
+        )
+        extra["manual_voices"] = manual
+        await registry.update_endpoint(endpoint.id, extra_config=extra)
+        return JSONResponse({"success": True, "voice": manual[-1]})
+
+    async def vox_remove_voice(self, request: Request) -> JSONResponse:
+        """DELETE /api/vox/voices  — remove a manually-added voice.
+
+        Body JSON: ``{"engine": <name>, "reference_id": <id>}``.
+        """
+        from core.config_manager import config_registry
+        from core.external_endpoints.registry import get_external_endpoint_registry
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        engine_name = (body or {}).get("engine") or config_registry.get_value(
+            "ACTIVE_VOX_ENGINE", "kitten", value_type=str
+        )
+        ref_id = str((body or {}).get("reference_id") or "").strip()
+        if not ref_id:
+            raise HTTPException(status_code=400, detail="reference_id is required")
+
+        registry = get_external_endpoint_registry()
+        endpoint = await registry.get_endpoint_by_name(str(engine_name))
+        if endpoint is None:
+            raise HTTPException(status_code=404, detail="Engine not found")
+
+        extra = dict(endpoint.extra_config or {})
+        manual = extra.get("manual_voices")
+        if not isinstance(manual, list):
+            manual = []
+        new_manual = [
+            v
+            for v in manual
+            if isinstance(v, dict) and str(v.get("reference_id")) != ref_id
+        ]
+        extra["manual_voices"] = new_manual
+        await registry.update_endpoint(endpoint.id, extra_config=extra)
+        return JSONResponse({"success": True, "removed": ref_id})
 
     # ------------------------------------------------------------------
     # Model management endpoints  (SSOT: core.model_manager.MODEL_MANAGER)
@@ -2996,6 +3839,16 @@ class SynthWebUIInterface:
         - ``{"type": "vad",     "signal": "speech_start"|"speech_end"}`` — VAD events.
         - ``{"type": "error",   "detail": "..."}`` — error notification.
         """
+        from core.karada_api import _configured_api_token, _token_from_websocket
+
+        expected_token = _configured_api_token()
+        if (
+            expected_token is not None
+            and _token_from_websocket(websocket) != expected_token
+        ):
+            await websocket.close(code=4401, reason="Invalid or missing API token")
+            return
+
         await websocket.accept()
         session_id = f"ws_{uuid.uuid4().hex}"
         live_engine = None  # only set when using LIVE_REGISTRY
@@ -3654,6 +4507,14 @@ class SynthWebUIInterface:
             )
             return
         for item in history:
+            # Karada 3D-interaction events are recorded into chat history purely
+            # for LLM context; they must never surface as visible chat bubbles.
+            try:
+                _meta = item.get("metadata") if isinstance(item, dict) else None
+                if isinstance(_meta, dict) and _meta.get("karada_touch"):
+                    continue
+            except Exception:
+                pass
             # Normalize history item to expected format: {type:'message', sender:'synth'|'user', text: '...'}
             try:
                 sender = item.get("sender") if isinstance(item, dict) else None
@@ -4216,21 +5077,14 @@ class SynthWebUIInterface:
             log_warning(f"{LOG_PREFIX} send_tts_audio: no websocket for session {sid}")
             return False
 
-        # Derive a client-accessible URL from the filesystem path.
-        # Audio is stored under the /static mount, e.g.
-        #   res/synth_webui/static/audio/tts/vox_123.wav → /static/audio/tts/vox_123.wav
-        try:
-            from pathlib import Path as _Path
+        # Derive a client-accessible URL from the filesystem path. In-image
+        # audio is served under /static; audio living outside the static tree
+        # (e.g. a persistent VOX_OUTPUT_DIR volume like /config/media/tts) is
+        # served under the alternate /media mount. Both cases are handled by the
+        # shared helper so this path and the Karada broadcast agree on the URL.
+        from core.media_url_utils import derive_audio_url
 
-            p = _Path(audio_path)
-            parts_list = list(p.parts)
-            try:
-                idx = parts_list.index("static")
-                url = "/" + "/".join(parts_list[idx:])
-            except ValueError:
-                url = "/static/audio/tts/" + p.name
-        except Exception:
-            url = "/static/audio/tts/" + str(audio_path).rsplit("/", 1)[-1]
+        url = derive_audio_url(audio_path)
 
         # Deliver the caption as a regular chat message so that it is persisted
         # in the DB, appears in the in-memory history (replay on reconnect) and
@@ -4247,41 +5101,13 @@ class SynthWebUIInterface:
                     f"{LOG_PREFIX} send_tts_audio: failed to send caption message for session {sid}: {exc}"
                 )
 
-        payload: Dict[str, Any] = {"type": "tts-play", "url": url}
-        if text is not None:
-            payload["text"] = text
-        if lipsync_data:
-            payload["lipsync"] = lipsync_data
-        if audio_duration_s is not None:
-            payload["audio_duration_s"] = audio_duration_s
-
-        # "Single body" principle: broadcast TTS audio to ALL connected
-        # clients, not just the requesting session.  Every viewer should
-        # hear the same voice coming from the shared avatar.
-        delivered = False
-        for target_sid, target_ws in list(self.connections.items()):
-            try:
-                await target_ws.send_json(payload)
-                delivered = True
-            except Exception as exc:
-                log_warning(
-                    f"{LOG_PREFIX} send_tts_audio failed for session {target_sid}: {exc}"
-                )
-        if delivered:
-            log_info(
-                f"{LOG_PREFIX} TTS audio broadcast to {len(self.connections)} session(s): {url}"
-            )
-
-        # Track current audio in KaradaStateServer for late-joining clients
-        if hasattr(self, "animation_handler") and self.animation_handler:
-            try:
-                self.animation_handler.set_current_audio(
-                    url, audio_duration_s, lipsync_data
-                )
-            except Exception:
-                pass
-
-        return delivered
+        # NOTE: the actual ``tts-play`` broadcast to all clients and the
+        # ``set_current_audio`` bookkeeping for late-joiners are performed by
+        # the Karada state server (the single source of truth for "the avatar
+        # is speaking"), which the Vox plugin drives directly. This method only
+        # persists/renders the WebUI-specific chat caption above so we do NOT
+        # broadcast the audio again here (that would double-play the clip).
+        return True
 
     async def _webui_clear_pending_thinking(self, session_id: str) -> None:
         pending = self._pending_thinking_actions.get(session_id)
@@ -4320,7 +5146,22 @@ class SynthWebUIInterface:
 
         For WebUI this approximates 'LLM started responding', so we switch THINK->WRITE
         as early as possible (before the final message is sent).
+
+        For voice-originated input (Auris STT) there is no textual writing phase —
+        the reply is spoken — so the avatar stays in THINK during generation.
         """
+        # Detect voice-originated input; if so we keep THINK instead of WRITE.
+        _is_voice_input = False
+        try:
+            _ctx = kwargs.get("context")
+            if isinstance(_ctx, dict) and _ctx.get("is_voice_input"):
+                _is_voice_input = True
+            _msg = kwargs.get("message")
+            if not _is_voice_input and getattr(_msg, "is_voice_input", False):
+                _is_voice_input = True
+        except Exception:
+            _is_voice_input = False
+
         # Switch THINK -> WRITE when generation actually starts, but ensure THINK
         # remains visible for a short minimum window to avoid being skipped.
         try:
@@ -4395,13 +5236,16 @@ class SynthWebUIInterface:
                     )
 
             if writing_pushed and self.persona_manager:
+                # Voice input has no textual writing phase — keep the avatar in
+                # THINK during generation (the reply is spoken via Vox).
+                _anim_state = "think" if _is_voice_input else "write"
                 try:
                     await self.persona_manager.set_animation_state(
-                        "write", session_id=session_id
+                        _anim_state, session_id=session_id
                     )
                 except Exception as anim_exc:
                     log_debug(
-                        f"{LOG_PREFIX} Failed to set 'write' animation (generation_start): {anim_exc}"
+                        f"{LOG_PREFIX} Failed to set '{_anim_state}' animation (generation_start): {anim_exc}"
                     )
         except Exception as exc:
             log_debug(f"{LOG_PREFIX} on_generation_start failed: {exc}")
@@ -4928,7 +5772,9 @@ class SynthWebUIInterface:
         component_descriptions = {
             "core": "Core runtime configuration for the Synthetic Heart system.",
             "persona": "Persona identity, triggers, and autonomy preferences.",
+            "agent": "Agentic runtime controls (Fast/Agent routing, iteration and timeout budgets, exposed MCP actions).",
             "recon": "Recon preflight controls (language/tone hints and timeouts).",
+            "web_search": "Web Search tunables (queries, result and page fetching limits, timeouts).",
             "debrief": "Debrief postflight recovery and audit behavior.",
             "grillo": "Grillo scheduling and internal beat behavior.",
             "grillo_chat_observer": "Grillo chat observer scheduling and sampling.",
@@ -4939,7 +5785,7 @@ class SynthWebUIInterface:
             "message_send": "Outbound message delivery tuning.",
             "action_safety": "Action execution safety policy settings.",
             "weather_plugin": "Weather plugin scheduling and delivery settings.",
-            "cortex": "Cortex engine selection for base, trainer, and Grillo scopes.",
+            "cortex": "Cortex engine selection for base, trainer, agent, Grillo and live scopes.",
         }
 
         try:
@@ -4978,6 +5824,16 @@ class SynthWebUIInterface:
             )
             options = exposed_def.options if exposed_def else []
 
+            # A sensitive variable (token / API key / password / secret) must be
+            # masked in the WebUI. The frontend renders a masked input purely
+            # from ``ui_type === 'password'`` and ignores the ``sensitive`` flag,
+            # so promote any sensitive var that still carries the neutral default
+            # "string" type to "password". This covers vars registered only via
+            # ``config_registry.get_var(sensitive=True)`` (e.g. engine API keys)
+            # without touching every individual registration site.
+            if entry.get("sensitive") and ui_type == "string":
+                ui_type = "password"
+
             # If no explicit options from exposed_vars, try deriving from constraints
             if not options and entry.get("constraints"):
                 constraints = entry["constraints"]
@@ -5000,6 +5856,7 @@ class SynthWebUIInterface:
                 "GRILLO_CORTEX",
                 "TRAINER_CORTEX",
                 "LIVE_CORTEX",
+                "AGENT_CORTEX",
             ):
                 ui_type = "select"
                 if entry.get("key") == "LIVE_CORTEX":
@@ -5013,7 +5870,11 @@ class SynthWebUIInterface:
                     combined = sorted(set(live_engines + extra))
                     # always allow explicit disable
                     options = ["Default", "disabled"] + combined
-                elif entry.get("key") in ("GRILLO_CORTEX", "TRAINER_CORTEX"):
+                elif entry.get("key") in (
+                    "GRILLO_CORTEX",
+                    "TRAINER_CORTEX",
+                    "AGENT_CORTEX",
+                ):
                     options = ["Default"] + available_cortex_engines
                 else:
                     options = available_cortex_engines
@@ -5078,38 +5939,6 @@ class SynthWebUIInterface:
                 },
             }
         )
-
-    async def get_selkies_config(self):
-        """Return Selkies configuration for dynamic URL construction."""
-        payload = {"https_port": self.selkies_https_port, "host": self.selkies_host}
-        if getattr(self, "selkies_http_port", None):
-            payload["http_port"] = self.selkies_http_port
-
-        # Best-effort probe to detect which protocol is actually reachable
-        try:
-            probe = await asyncio.get_event_loop().run_in_executor(
-                None, self._probe_selkies_protocol
-            )
-            payload["detected_protocol"] = probe.get("protocol")
-            payload["detected_details"] = probe.get("details")
-            payload["detected_port"] = probe.get("port")
-        except Exception:
-            payload["detected_protocol"] = "unknown"
-            payload["detected_port"] = None
-
-        return JSONResponse(payload)
-
-    async def get_selkies_health(self):
-        """Return a health probe result for Selkies (reachable protocol and details)."""
-        try:
-            probe = await asyncio.get_event_loop().run_in_executor(
-                None, self._probe_selkies_protocol
-            )
-            return JSONResponse(
-                {"ok": probe.get("protocol") in ("https", "http"), **probe}
-            )
-        except Exception as exc:
-            return JSONResponse({"ok": False, "protocol": "none", "details": str(exc)})
 
     async def get_animations_for_type(self, skin: str, animation_type: str):
         """Return list of animation files for a specific skin and animation type.
@@ -5620,6 +6449,7 @@ class SynthWebUIInterface:
                 status=result.status,
                 capabilities=result.capabilities,
                 models=result.models,
+                models_metadata=result.models_metadata,
             )
             return {
                 "status": result.status,
@@ -6252,18 +7082,18 @@ class SynthWebUIInterface:
                         # Note: try to include involved_users if column exists
                         try:
                             query = f"""
-                                (SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
+                                (SELECT id, content, personal_thought, created_at, context_tags, involved_users, 
                                        emotions, interface, chat_id, thread_id, interaction_summary, user_message,
                                        FALSE as archived
                                 FROM ai_diary
                                 WHERE 1=1 {search_condition})
                                 UNION ALL
-                                (SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
+                                (SELECT id, content, personal_thought, created_at, context_tags, involved_users, 
                                        emotions, interface, chat_id, thread_id, interaction_summary, user_message,
                                        TRUE as archived
                                 FROM ai_diary_archive
                                 WHERE 1=1 {search_condition})
-                                ORDER BY timestamp DESC
+                                ORDER BY created_at DESC
                                 LIMIT %s OFFSET %s
                             """
                             await cur.execute(query, search_params + [limit, offset])
@@ -6271,18 +7101,18 @@ class SynthWebUIInterface:
                             # If involved_users column doesn't exist, fallback to query without it
                             if "Unknown column" in str(e):
                                 query = f"""
-                                    (SELECT id, content, personal_thought, timestamp, context_tags, '[]' as involved_users, 
+                                    (SELECT id, content, personal_thought, created_at, context_tags, '[]' as involved_users, 
                                            emotions, interface, chat_id, thread_id, interaction_summary, user_message,
                                            FALSE as archived
                                     FROM ai_diary
                                     WHERE 1=1 {search_condition})
                                     UNION ALL
-                                    (SELECT id, content, personal_thought, timestamp, context_tags, '[]' as involved_users, 
+                                    (SELECT id, content, personal_thought, created_at, context_tags, '[]' as involved_users, 
                                            emotions, interface, chat_id, thread_id, interaction_summary, user_message,
                                            TRUE as archived
                                     FROM ai_diary_archive
                                     WHERE 1=1 {search_condition})
-                                    ORDER BY timestamp DESC
+                                    ORDER BY created_at DESC
                                     LIMIT %s OFFSET %s
                                 """
                                 await cur.execute(
@@ -6293,12 +7123,12 @@ class SynthWebUIInterface:
                     else:
                         try:
                             query = f"""
-                                SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
+                                SELECT id, content, personal_thought, created_at, context_tags, involved_users, 
                                        emotions, interface, chat_id, thread_id, interaction_summary, user_message,
                                        FALSE as archived
                                 FROM ai_diary
                                 WHERE 1=1 {search_condition}
-                                ORDER BY timestamp DESC
+                                ORDER BY created_at DESC
                                 LIMIT %s OFFSET %s
                             """
                             await cur.execute(query, search_params + [limit, offset])
@@ -6306,12 +7136,12 @@ class SynthWebUIInterface:
                             # If involved_users column doesn't exist, fallback
                             if "Unknown column" in str(e):
                                 query = f"""
-                                    SELECT id, content, personal_thought, timestamp, context_tags, '[]' as involved_users, 
+                                    SELECT id, content, personal_thought, created_at, context_tags, '[]' as involved_users, 
                                            emotions, interface, chat_id, thread_id, interaction_summary, user_message,
                                            FALSE as archived
                                     FROM ai_diary
                                     WHERE 1=1 {search_condition}
-                                    ORDER BY timestamp DESC
+                                    ORDER BY created_at DESC
                                     LIMIT %s OFFSET %s
                                 """
                                 await cur.execute(
@@ -6443,156 +7273,6 @@ class SynthWebUIInterface:
             log_error(f"{LOG_PREFIX} Failed to delete archived diary entries: {exc}")
             raise HTTPException(status_code=500, detail=str(exc))
 
-    async def history_interactions(self, request: Request):
-        """Return interaction-log data from ai_diary for the History > Interactions sub-tab.
-
-        Only the metadata fields (interaction_summary, personal_thought, emotions,
-        involved_users) are returned — NOT the diary prose (content), which belongs
-        exclusively to the Diary tab.
-        """
-        params = request.query_params
-
-        def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
-            try:
-                parsed = int(value)
-            except (TypeError, ValueError):
-                return default
-            return max(minimum, min(maximum, parsed))
-
-        page = _bounded_int(params.get("page"), default=1, minimum=1, maximum=1000)
-        per_page = _bounded_int(
-            params.get("per_page"), default=10, minimum=1, maximum=30
-        )  # Ridotto a 10 per pagina, max 30
-        search = params.get("search", "").strip()
-        include_archived = params.get("include_archived", "false").lower() == "true"
-        sort = params.get("sort", "desc")
-
-        try:
-            from core.db import get_conn_ctx
-
-            offset = (page - 1) * per_page
-            order = "DESC" if sort == "desc" else "ASC"
-
-            # Strategy: skip COUNT(*) for better performance, use approximate count
-            entries = []
-            total_count = 0
-
-            async with get_conn_ctx() as conn:
-                async with conn.cursor() as cur:
-                    # Interactions shows only metadata — NOT the diary prose (content).
-                    # Search searches only interaction_summary.
-                    if search:
-                        search_term = f"%{search}%"
-                        where_clause = "WHERE interaction_summary LIKE %s"
-                        search_params = [search_term]
-                    else:
-                        where_clause = ""
-                        search_params = []
-
-                    # Simplified query without archived for speed (most common case)
-                    if not include_archived:
-                        query = f"""
-                            SELECT id, interaction_summary, personal_thought,
-                                   timestamp,
-                                   JSON_EXTRACT(emotions, '$[0].type') AS primary_emotion,
-                                   JSON_LENGTH(involved_users) AS user_count
-                            FROM ai_diary
-                            {where_clause}
-                            ORDER BY timestamp {order}
-                            LIMIT %s OFFSET %s
-                        """
-                        params_list = search_params + [per_page + 1, offset]
-
-                        await cur.execute(query, params_list)
-                        rows = await cur.fetchall()
-
-                        has_more = len(rows) > per_page
-                        if has_more:
-                            rows = rows[:per_page]
-
-                        if page == 1 and not has_more:
-                            total_count = len(rows)
-                        else:
-                            total_count = (
-                                offset + len(rows) + (per_page if has_more else 0)
-                            )
-                    else:
-                        query = f"""
-                            SELECT * FROM (
-                                (SELECT id, interaction_summary, personal_thought,
-                                        timestamp,
-                                        JSON_EXTRACT(emotions, '$[0].type') AS primary_emotion,
-                                        JSON_LENGTH(involved_users) AS user_count,
-                                        0 AS archived
-                                FROM ai_diary
-                                {where_clause}
-                                ORDER BY timestamp {order}
-                                LIMIT {per_page * 2})
-                                UNION ALL
-                                (SELECT id, interaction_summary, personal_thought,
-                                        timestamp,
-                                        JSON_EXTRACT(emotions, '$[0].type'),
-                                        JSON_LENGTH(involved_users),
-                                        1 AS archived
-                                FROM ai_diary_archive
-                                {where_clause}
-                                ORDER BY timestamp {order}
-                                LIMIT {per_page * 2})
-                            ) AS combined
-                            ORDER BY timestamp {order}
-                            LIMIT %s OFFSET %s
-                        """
-                        params_list = (
-                            search_params * 2 + [per_page + 1, offset]
-                            if search_params
-                            else [per_page + 1, offset]
-                        )
-
-                        await cur.execute(query, params_list)
-                        rows = await cur.fetchall()
-
-                        has_more = len(rows) > per_page
-                        if has_more:
-                            rows = rows[:per_page]
-                        total_count = offset + len(rows) + (per_page if has_more else 0)
-
-                    # Build response — row indices: 0=id,1=interaction_summary,2=personal_thought,
-                    # 3=timestamp,4=primary_emotion,5=user_count,[6=archived]
-                    for row in rows:
-                        timestamp_str = self._dt_to_utc_iso(row[3])
-
-                        entries.append(
-                            {
-                                "id": row[0],
-                                "interaction_summary": row[1],
-                                "personal_thought": row[2],
-                                "timestamp": timestamp_str,
-                                "primary_emotion": row[4],
-                                "user_count": row[5] or 0,
-                                "archived": bool(row[6]) if len(row) > 6 else False,
-                            }
-                        )
-
-            # Calculate total_pages from total_count
-            total_pages = (
-                (total_count + per_page - 1) // per_page if total_count > 0 else 1
-            )
-
-            return JSONResponse(
-                {
-                    "success": True,
-                    "entries": entries,
-                    "page": page,
-                    "per_page": per_page,
-                    "total_count": total_count,
-                    "total_pages": total_pages,
-                }
-            )
-
-        except Exception as exc:
-            log_error(f"{LOG_PREFIX} Failed to fetch interactions history: {exc}")
-            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
-
     async def history_diary(self, request: Request):
         """Return one entry per day for the History > Diary sub-tab (daily consolidated view)."""
         params = request.query_params
@@ -6637,7 +7317,7 @@ class SynthWebUIInterface:
 
                     # Count distinct days that match the filter
                     count_query = f"""
-                        SELECT COUNT(DISTINCT DATE(timestamp))
+                        SELECT COUNT(DISTINCT DATE(created_at))
                         FROM ai_diary
                         {where_clause}
                     """
@@ -6654,12 +7334,12 @@ class SynthWebUIInterface:
                             MAX(id)                                                           AS id,
                             GROUP_CONCAT(content ORDER BY id ASC SEPARATOR '\n\n---\n\n')    AS content,
                             MAX(personal_thought)                                             AS personal_thought,
-                            MAX(timestamp)                                                    AS timestamp,
+                            MAX(created_at)                                                    AS timestamp,
                             JSON_EXTRACT(MAX(emotions), '$[0].type')                          AS primary_emotion
                         FROM ai_diary
                         {where_clause}
-                        GROUP BY DATE(timestamp)
-                        ORDER BY MAX(timestamp) {order}
+                        GROUP BY DATE(created_at)
+                        ORDER BY MAX(created_at) {order}
                         LIMIT %s OFFSET %s
                     """
                     await cur.execute(query, search_params + [per_page, offset])
@@ -6694,6 +7374,140 @@ class SynthWebUIInterface:
 
         except Exception as exc:
             log_error(f"{LOG_PREFIX} Failed to fetch daily diary: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def history_growth(self, request: Request):
+        """Return the current self-growth state plus its rolling history.
+
+        Powers the History > Self-Growth sub-tab. The response mirrors the other
+        history endpoints' envelope but the payload is growth-specific.
+        """
+        try:
+            from core.growth_state import get_current_growth, get_growth_history
+
+            current = await get_current_growth()
+            history = await get_growth_history()
+
+            entries = []
+            for row in history:
+                entries.append(
+                    {
+                        "id": row.get("id"),
+                        "content": row.get("content"),
+                        "created_by": row.get("created_by"),
+                        "source": row.get("source"),
+                        "is_current": bool(row.get("is_current")),
+                        # get_growth_history already serializes created_at to an
+                        # ISO string, so pass it through as-is.
+                        "created_at": row.get("created_at"),
+                        # likes/dislikes proposed/applied at this iteration
+                        # (empty for rows created before the columns existed).
+                        "likes": row.get("likes") or [],
+                        "dislikes": row.get("dislikes") or [],
+                    }
+                )
+
+            # Surface the requested (pending) likes/dislikes awaiting trainer
+            # approval, plus the current lists for comparison. When no proposal
+            # is pending, ``pending_proposal`` is None and the UI hides the block.
+            from core.config_manager import config_registry
+
+            def _as_str_list(value: Any) -> list[str]:
+                if isinstance(value, list):
+                    return [str(x) for x in value]
+                return []
+
+            current_likes = _as_str_list(
+                config_registry.get_value("SYNTH_LIKES", []) or []
+            )
+            current_dislikes = _as_str_list(
+                config_registry.get_value("SYNTH_DISLIKES", []) or []
+            )
+
+            pending_proposal = None
+            raw_pending = config_registry.get_value("GROWTH_PENDING_PROPOSAL", "") or ""
+            if str(raw_pending).strip():
+                try:
+                    proposal = json.loads(raw_pending)
+                    if isinstance(proposal, dict):
+                        pending_proposal = {
+                            "self_growth": str(proposal.get("self_growth") or ""),
+                            "likes": _as_str_list(proposal.get("likes")),
+                            "dislikes": _as_str_list(proposal.get("dislikes")),
+                        }
+                except Exception as parse_exc:
+                    log_error(
+                        f"{LOG_PREFIX} Failed to parse pending growth proposal: "
+                        f"{parse_exc}"
+                    )
+
+            return JSONResponse(
+                {
+                    "success": True,
+                    "current": current,
+                    "entries": entries,
+                    "total_count": len(entries),
+                    "current_likes": current_likes,
+                    "current_dislikes": current_dislikes,
+                    "pending_proposal": pending_proposal,
+                }
+            )
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to fetch self-growth history: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def update_growth_current(self, request: Request):
+        """Persist a user-edited self-growth state as the new current entry."""
+        try:
+            from core.config_manager import config_registry
+            from core.growth_state import save_growth_state
+
+            body = await request.json()
+            content = str(body.get("content") or "").strip()
+
+            def _as_str_list(value: Any) -> list[str]:
+                if isinstance(value, list):
+                    return [str(x) for x in value]
+                return []
+
+            # Preserve the currently-applied likes/dislikes on the new history
+            # row so a manual text edit does not lose that context.
+            cur_likes = _as_str_list(config_registry.get_value("SYNTH_LIKES", []) or [])
+            cur_dislikes = _as_str_list(
+                config_registry.get_value("SYNTH_DISLIKES", []) or []
+            )
+
+            new_id = await save_growth_state(
+                content,
+                created_by="user",
+                source="manual",
+                allow_empty=True,
+                likes=cur_likes,
+                dislikes=cur_dislikes,
+            )
+            return JSONResponse({"success": new_id is not None, "id": new_id})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to update self-growth state: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def revert_growth_state(self, request: Request):
+        """Revert the current self-growth state to a previous history entry."""
+        try:
+            from core.growth_state import revert_to_state
+
+            body = await request.json()
+            try:
+                state_id = int(body.get("id"))
+            except (TypeError, ValueError):
+                return JSONResponse(
+                    {"success": False, "error": "valid id is required"},
+                    status_code=400,
+                )
+
+            new_id = await revert_to_state(state_id)
+            return JSONResponse({"success": new_id is not None, "id": new_id})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to revert self-growth state: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
     async def history_grillo(self, request: Request):
@@ -6857,6 +7671,838 @@ class SynthWebUIInterface:
             log_error(f"{LOG_PREFIX} Failed to fetch grillo history: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
+    async def _fetch_calendar_event_rows(self) -> list[dict[str, Any]]:
+        """Fetch all ``scheduled_events`` rows as plain dicts for calendar use."""
+        from core.db import get_conn_ctx
+
+        rows: list[dict[str, Any]] = []
+        columns = [
+            "id",
+            "date",
+            "time",
+            "recurrence_type",
+            "next_run",
+            "description",
+            "created_at",
+            "created_by",
+            "uid",
+            "rrule",
+            "tzid",
+            "source",
+            "delivered",
+        ]
+        col_list = ", ".join(columns)
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"SELECT {col_list} FROM scheduled_events ORDER BY next_run ASC"
+                )
+                fetched = await cur.fetchall()
+                for row in fetched:
+                    rows.append(dict(zip(columns, row)))
+        return rows
+
+    async def history_calendar(self, request: Request):
+        """Return event occurrences within a requested month for the calendar view.
+
+        Expands recurring events (via their RRULE) into per-occurrence entries
+        that fall inside the requested month window. Each entry carries a local
+        ``date`` (YYYY-MM-DD) and ``time`` (HH:MM) so the frontend grid can place
+        it without any further timezone maths.
+        """
+        params = request.query_params
+
+        def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return default
+            return max(minimum, min(maximum, parsed))
+
+        from datetime import datetime as _dt
+
+        now_local = _dt.now()
+        year = _bounded_int(
+            params.get("year"), default=now_local.year, minimum=1970, maximum=3000
+        )
+        month = _bounded_int(
+            params.get("month"), default=now_local.month, minimum=1, maximum=12
+        )
+
+        try:
+            from datetime import timedelta
+            import recurring_ical_events
+
+            from core.calendar_utils import build_calendar
+            from core.time_zone_utils import get_local_timezone
+
+            system_tz = get_local_timezone()
+
+            # Month window in the local timezone (inclusive start, exclusive end).
+            window_start = _dt(year, month, 1, tzinfo=system_tz)
+            if month == 12:
+                window_end = _dt(year + 1, 1, 1, tzinfo=system_tz)
+            else:
+                window_end = _dt(year, month + 1, 1, tzinfo=system_tz)
+
+            from core.calendar_utils import build_event_uid
+
+            rows = await self._fetch_calendar_event_rows()
+            # Map effective UID -> row so we can annotate occurrences with
+            # source/id. build_calendar synthesises ``synth-<id>@host`` when a
+            # row has no stored ``uid``, so the map must key on the same value.
+            row_by_uid: dict[str, dict[str, Any]] = {}
+            for r in rows:
+                uid = r.get("uid")
+                if not uid and r.get("id") is not None:
+                    uid = build_event_uid(r["id"])
+                if uid:
+                    row_by_uid[str(uid)] = r
+
+            calendar = build_calendar(rows, system_tz=system_tz)
+
+            events: list[dict[str, Any]] = []
+            try:
+                occurrences = recurring_ical_events.of(calendar).between(
+                    window_start, window_end - timedelta(seconds=1)
+                )
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} calendar expansion failed: {exc}")
+                occurrences = []
+
+            for occ in occurrences:
+                try:
+                    dtstart = occ.get("dtstart")
+                    if dtstart is None:
+                        continue
+                    start_dt = dtstart.dt
+                    if isinstance(start_dt, datetime):
+                        if start_dt.tzinfo is None:
+                            start_dt = start_dt.replace(tzinfo=system_tz)
+                        local_dt = start_dt.astimezone(system_tz)
+                        date_str = local_dt.strftime("%Y-%m-%d")
+                        time_str = local_dt.strftime("%H:%M")
+                    else:
+                        # All-day (date only)
+                        date_str = start_dt.strftime("%Y-%m-%d")
+                        time_str = ""
+
+                    uid = str(occ.get("uid", "")) if occ.get("uid") else ""
+                    src_row = row_by_uid.get(uid, {})
+                    rrule = src_row.get("rrule") or (occ.get("rrule") is not None)
+                    events.append(
+                        {
+                            "id": src_row.get("id"),
+                            "uid": uid,
+                            "date": date_str,
+                            "time": time_str,
+                            "description": str(occ.get("summary", "")),
+                            "recurring": bool(rrule),
+                            "recurrence_type": src_row.get("recurrence_type") or "none",
+                            "source": src_row.get("source") or "synth",
+                            "delivered": bool(src_row.get("delivered")),
+                        }
+                    )
+                except Exception as exc:
+                    log_debug(f"{LOG_PREFIX} skipping calendar occurrence: {exc}")
+                    continue
+
+            # Merge in occurrences from subscribed external calendars (ICS/CalDAV)
+            # so they show up in the grid alongside internal events. External
+            # occurrences are read-only: they carry an ``external:<id>`` source
+            # and no internal ``id``, so the frontend hides edit/delete controls.
+            try:
+                from core.external_calendars import gather_all_external_occurrences
+
+                external = await gather_all_external_occurrences(
+                    window_start=window_start, window_end=window_end
+                )
+                for occ in external:
+                    try:
+                        start_dt = occ.get("start")
+                        if start_dt is None:
+                            continue
+                        if occ.get("all_day"):
+                            date_str = start_dt.strftime("%Y-%m-%d")
+                            time_str = ""
+                        else:
+                            if start_dt.tzinfo is None:
+                                start_dt = start_dt.replace(tzinfo=system_tz)
+                            local_dt = start_dt.astimezone(system_tz)
+                            date_str = local_dt.strftime("%Y-%m-%d")
+                            time_str = local_dt.strftime("%H:%M")
+                        events.append(
+                            {
+                                "id": None,
+                                "uid": str(occ.get("uid") or ""),
+                                "date": date_str,
+                                "time": time_str,
+                                "description": str(occ.get("summary") or ""),
+                                "recurring": False,
+                                "recurrence_type": "none",
+                                "source": str(occ.get("source") or "external"),
+                                "calendar_name": str(occ.get("calendar_name") or ""),
+                                "delivered": False,
+                            }
+                        )
+                    except Exception as exc:
+                        log_debug(
+                            f"{LOG_PREFIX} skipping external calendar occurrence: {exc}"
+                        )
+                        continue
+            except Exception as exc:
+                log_warning(
+                    f"{LOG_PREFIX} failed to gather external calendar occurrences: {exc}"
+                )
+
+            return JSONResponse({"success": True, "events": events})
+
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to fetch calendar: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def history_calendar_upcoming(self, request: Request):
+        """Return the next few upcoming events over a short look-ahead window.
+
+        Purely informational: it expands recurring events (via RRULE) starting
+        from *now* over the next ``days`` days and returns at most ``limit``
+        occurrences, each with a preformatted ``label`` such as
+        ``Jul 9, 9:00 (JST)`` for direct display.
+        """
+        params = request.query_params
+
+        def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return default
+            return max(minimum, min(maximum, parsed))
+
+        days = _bounded_int(params.get("days"), default=3, minimum=1, maximum=31)
+        limit = _bounded_int(params.get("limit"), default=5, minimum=1, maximum=20)
+
+        try:
+            from datetime import datetime as _dt
+            from datetime import timedelta
+            import recurring_ical_events
+
+            from core.calendar_utils import build_calendar
+            from core.time_zone_utils import get_local_timezone
+
+            system_tz = get_local_timezone()
+            window_start = _dt.now(tz=system_tz)
+            window_end = window_start + timedelta(days=days)
+
+            from core.calendar_utils import build_event_uid
+
+            rows = await self._fetch_calendar_event_rows()
+            row_by_uid: dict[str, dict[str, Any]] = {}
+            for r in rows:
+                uid = r.get("uid")
+                if not uid and r.get("id") is not None:
+                    uid = build_event_uid(r["id"])
+                if uid:
+                    row_by_uid[str(uid)] = r
+
+            calendar = build_calendar(rows, system_tz=system_tz)
+
+            try:
+                occurrences = recurring_ical_events.of(calendar).between(
+                    window_start, window_end
+                )
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} upcoming expansion failed: {exc}")
+                occurrences = []
+
+            collected: list[dict[str, Any]] = []
+            for occ in occurrences:
+                try:
+                    dtstart = occ.get("dtstart")
+                    if dtstart is None:
+                        continue
+                    start_dt = dtstart.dt
+                    if isinstance(start_dt, datetime):
+                        if start_dt.tzinfo is None:
+                            start_dt = start_dt.replace(tzinfo=system_tz)
+                        local_dt = start_dt.astimezone(system_tz)
+                        all_day = False
+                    else:
+                        # All-day (date only) -> anchor at local midnight.
+                        local_dt = _dt(
+                            start_dt.year,
+                            start_dt.month,
+                            start_dt.day,
+                            tzinfo=system_tz,
+                        )
+                        all_day = True
+
+                    if local_dt < window_start:
+                        continue
+
+                    if all_day:
+                        label = f"{local_dt.strftime('%b %-d')} (all day)"
+                    else:
+                        tz_abbr = local_dt.strftime("%Z") or "local"
+                        label = (
+                            f"{local_dt.strftime('%b %-d')}, "
+                            f"{local_dt.hour}:{local_dt.strftime('%M')} ({tz_abbr})"
+                        )
+
+                    uid = str(occ.get("uid", "")) if occ.get("uid") else ""
+                    src_row = row_by_uid.get(uid, {})
+                    collected.append(
+                        {
+                            "sort_key": local_dt.timestamp(),
+                            "label": label,
+                            "description": str(occ.get("summary", "")),
+                            "source": src_row.get("source") or "synth",
+                            "all_day": all_day,
+                        }
+                    )
+                except Exception as exc:
+                    log_debug(f"{LOG_PREFIX} skipping upcoming occurrence: {exc}")
+                    continue
+
+            collected.sort(key=lambda e: e["sort_key"])
+            trimmed = [
+                {k: v for k, v in e.items() if k != "sort_key"}
+                for e in collected[:limit]
+            ]
+            return JSONResponse({"success": True, "events": trimmed, "days": days})
+
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to fetch upcoming events: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def create_calendar_event(self, request: Request):
+        """Create a new internal scheduled event from the WebUI calendar.
+
+        The event is stored exactly like a Synth-created reminder. When it fires
+        it is delivered to the Synth as an internal ``scheduled_reminder`` beat,
+        which then decides whether/how/who to contact.
+        """
+        try:
+            payload = await request.json()
+        except Exception:
+            return JSONResponse(
+                {"success": False, "error": "Invalid JSON body"}, status_code=400
+            )
+
+        if not isinstance(payload, dict):
+            return JSONResponse(
+                {"success": False, "error": "Invalid payload"}, status_code=400
+            )
+
+        date = str(payload.get("date", "")).strip()
+        time_val = str(payload.get("time", "")).strip() or "00:00"
+        recurrence = str(payload.get("recurrence", "none")).strip() or "none"
+        description = str(payload.get("description", "")).strip()
+
+        if not date or not description:
+            return JSONResponse(
+                {"success": False, "error": "date and description are required"},
+                status_code=400,
+            )
+        if recurrence not in ("none", "daily", "weekly", "monthly", "always"):
+            recurrence = "none"
+
+        try:
+            from core.db import insert_scheduled_event
+
+            await insert_scheduled_event(
+                date=date,
+                time=time_val,
+                recurrence_type=recurrence,
+                description=description,
+                created_by="user",
+                source="user",
+            )
+            return JSONResponse({"success": True})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to create calendar event: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def update_calendar_event(self, request: Request):
+        """Update an existing internal scheduled event from the WebUI calendar.
+
+        Only internal events (``source`` not starting with ``external``) can be
+        edited; external calendar occurrences are read-only mirrors.
+        """
+        event_id_raw = request.path_params.get("event_id")
+        try:
+            event_id = int(event_id_raw)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"success": False, "error": "Invalid event id"}, status_code=400
+            )
+
+        try:
+            payload = await request.json()
+        except Exception:
+            return JSONResponse(
+                {"success": False, "error": "Invalid JSON body"}, status_code=400
+            )
+
+        if not isinstance(payload, dict):
+            return JSONResponse(
+                {"success": False, "error": "Invalid payload"}, status_code=400
+            )
+
+        date = str(payload.get("date", "")).strip()
+        time_val = str(payload.get("time", "")).strip() or "00:00"
+        recurrence = str(payload.get("recurrence", "none")).strip() or "none"
+        description = str(payload.get("description", "")).strip()
+
+        if not date or not description:
+            return JSONResponse(
+                {"success": False, "error": "date and description are required"},
+                status_code=400,
+            )
+        if recurrence not in ("none", "daily", "weekly", "monthly", "always"):
+            recurrence = "none"
+
+        # Optional processed/delivered flag from the editor. When the key is
+        # absent, keep the legacy reset-to-not-delivered behaviour (None).
+        delivered_raw = payload.get("delivered", None)
+        delivered: bool | None = None if delivered_raw is None else bool(delivered_raw)
+
+        try:
+            from core.db import get_conn_ctx, update_scheduled_event
+
+            # Guard: refuse to edit external (read-only) occurrences.
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT source FROM scheduled_events WHERE id = %s",
+                        (event_id,),
+                    )
+                    row = await cur.fetchone()
+            if row is None:
+                return JSONResponse(
+                    {"success": False, "error": "Event not found"}, status_code=404
+                )
+            source = str(row[0] or "")
+            if source.startswith("external"):
+                return JSONResponse(
+                    {
+                        "success": False,
+                        "error": "External calendar events are read-only",
+                    },
+                    status_code=403,
+                )
+
+            updated = await update_scheduled_event(
+                event_id=event_id,
+                date=date,
+                time=time_val,
+                recurrence_type=recurrence,
+                description=description,
+                delivered=delivered,
+            )
+            if not updated:
+                return JSONResponse(
+                    {"success": False, "error": "Event not found or unchanged"},
+                    status_code=404,
+                )
+            return JSONResponse({"success": True})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to update calendar event: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def delete_calendar_event(self, request: Request):
+        """Delete a scheduled event by id (WebUI calendar)."""
+        event_id_raw = request.path_params.get("event_id")
+        try:
+            event_id = int(event_id_raw)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"success": False, "error": "Invalid event id"}, status_code=400
+            )
+
+        try:
+            from core.db import get_conn_ctx
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "DELETE FROM scheduled_events WHERE id = %s", (event_id,)
+                    )
+            return JSONResponse({"success": True})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to delete calendar event: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def delete_diary_day(self, request: Request):
+        """Delete every diary row for the day of the given entry id.
+
+        The History > Diary view is aggregated per day (one card = all rows for
+        that date), so deletion targets the whole day rather than a single row.
+        """
+        entry_id_raw = request.path_params.get("entry_id")
+        try:
+            entry_id = int(entry_id_raw)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"success": False, "error": "Invalid entry id"}, status_code=400
+            )
+
+        try:
+            from core.db import get_conn_ctx
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "DELETE FROM ai_diary WHERE DATE(created_at) = "
+                        "(SELECT DATE(created_at) FROM ai_diary WHERE id = %s)",
+                        (entry_id,),
+                    )
+                    deleted = getattr(cur, "rowcount", 0) or 0
+            return JSONResponse({"success": True, "deleted_count": deleted})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to delete diary day: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def delete_grillo_entry(self, request: Request):
+        """Delete a single grillo_activity_log row by id (Grillo & Dreams sub-tabs)."""
+        entry_id_raw = request.path_params.get("entry_id")
+        try:
+            entry_id = int(entry_id_raw)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"success": False, "error": "Invalid entry id"}, status_code=400
+            )
+
+        try:
+            from core.db import get_conn_ctx
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "DELETE FROM grillo_activity_log WHERE id = %s", (entry_id,)
+                    )
+                    deleted = getattr(cur, "rowcount", 0) or 0
+            return JSONResponse({"success": True, "deleted_count": deleted})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to delete grillo entry: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def delete_growth_state(self, request: Request):
+        """Delete a single self-growth history row by id.
+
+        The current state (``is_current``) is protected and cannot be deleted.
+        """
+        entry_id_raw = request.path_params.get("entry_id")
+        try:
+            entry_id = int(entry_id_raw)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"success": False, "error": "Invalid entry id"}, status_code=400
+            )
+
+        try:
+            from core.db import get_conn_ctx
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT is_current FROM growth_states WHERE id = %s",
+                        (entry_id,),
+                    )
+                    row = await cur.fetchone()
+                    if row is None:
+                        return JSONResponse(
+                            {"success": False, "error": "Entry not found"},
+                            status_code=404,
+                        )
+                    if row[0]:
+                        return JSONResponse(
+                            {
+                                "success": False,
+                                "error": "Cannot delete the current self-growth state",
+                            },
+                            status_code=400,
+                        )
+                    await cur.execute(
+                        "DELETE FROM growth_states WHERE id = %s", (entry_id,)
+                    )
+                    deleted = getattr(cur, "rowcount", 0) or 0
+            return JSONResponse({"success": True, "deleted_count": deleted})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to delete self-growth state: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def export_calendar_ics(self, request: Request):
+        """Serve all scheduled events as a single iCalendar (.ics) file.
+
+        This endpoint powers both the "Download .ics" button and the
+        ``webcal://`` subscription (Google Calendar, Apple Calendar, ...).
+        """
+        try:
+            from core.calendar_utils import build_calendar
+            from core.time_zone_utils import get_local_timezone
+
+            system_tz = get_local_timezone()
+            rows = await self._fetch_calendar_event_rows()
+            calendar = build_calendar(rows, system_tz=system_tz)
+            ics_bytes = calendar.to_ical()
+
+            return Response(
+                content=ics_bytes,
+                media_type="text/calendar; charset=utf-8",
+                headers={
+                    "Content-Disposition": 'attachment; filename="synth-calendar.ics"'
+                },
+            )
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to export calendar ICS: {exc}")
+            return Response(
+                content=f"Calendar export failed: {exc}",
+                media_type="text/plain",
+                status_code=500,
+            )
+
+    async def list_external_calendars(self, request: Request):
+        """Return the configured external calendar subscriptions.
+
+        Credentials are never exposed: the encrypted password column is
+        stripped and replaced with a boolean ``has_password`` flag.
+        """
+        try:
+            from core.external_calendars import (
+                ensure_external_calendars_table,
+                list_external_calendars,
+            )
+
+            await ensure_external_calendars_table()
+            rows = await list_external_calendars()
+            safe_rows: list[dict[str, Any]] = []
+            for row in rows:
+                safe: dict[str, Any] = {}
+                for k, v in row.items():
+                    if k == "password_enc":
+                        continue
+                    safe[k] = v.isoformat() if isinstance(v, datetime) else v
+                safe["has_password"] = bool(row.get("password_enc"))
+                safe_rows.append(safe)
+            return JSONResponse({"calendars": safe_rows})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to list external calendars: {exc}")
+            return JSONResponse({"error": str(exc)}, status_code=500)
+
+    async def list_known_interface_paths(self, request: Request) -> JSONResponse:
+        """Return known interface paths with a human-friendly label.
+
+        Used by the calendar event editor to let the user attach a delivery
+        target to a scheduled reminder. Labels come from the stored
+        ``segment_labels`` (multi-level pretty name) of each known path.
+        """
+        try:
+            from core.interface_paths import list_interface_paths
+
+            entries: list[dict[str, str]] = []
+            for item in await list_interface_paths():
+                path = item.get("interface_path")
+                if not path:
+                    continue
+                display = item.get("display") or path
+                label = (
+                    f"{display} ({path})" if display and display != path else str(path)
+                )
+                entries.append({"interface_path": str(path), "label": label})
+
+            entries.sort(key=lambda item: item["label"].lower())
+            return JSONResponse({"success": True, "interface_paths": entries})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to list interface paths: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def add_external_calendar(self, request: Request):
+        """Add a new external calendar subscription (CalDAV or ICS)."""
+        try:
+            from core.external_calendars import (
+                CALENDAR_TYPES,
+                add_external_calendar,
+                ensure_external_calendars_table,
+            )
+
+            body = await request.json()
+            name = (body.get("name") or "").strip()
+            url = (body.get("url") or "").strip()
+            cal_type = (body.get("cal_type") or "ics").strip().lower()
+            username = body.get("username") or None
+            password = body.get("password") or None
+            enabled = bool(body.get("enabled", True))
+
+            if not name or not url:
+                return JSONResponse(
+                    {"error": "name and url are required"}, status_code=400
+                )
+            if cal_type not in CALENDAR_TYPES:
+                return JSONResponse(
+                    {"error": f"cal_type must be one of {sorted(CALENDAR_TYPES)}"},
+                    status_code=400,
+                )
+
+            await ensure_external_calendars_table()
+            new_id = await add_external_calendar(
+                name=name,
+                url=url,
+                cal_type=cal_type,
+                username=username,
+                password=password,
+                enabled=enabled,
+            )
+            if new_id is None:
+                return JSONResponse(
+                    {"error": "Failed to add calendar"}, status_code=500
+                )
+            return JSONResponse({"id": new_id})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to add external calendar: {exc}")
+            return JSONResponse({"error": str(exc)}, status_code=500)
+
+    async def delete_external_calendar(self, request: Request):
+        """Delete an external calendar and its materialised events."""
+        try:
+            from core.external_calendars import (
+                delete_external_calendar,
+                ensure_external_calendars_table,
+            )
+
+            calendar_id = int(request.path_params["calendar_id"])
+            await ensure_external_calendars_table()
+            ok = await delete_external_calendar(calendar_id)
+            if not ok:
+                return JSONResponse({"error": "Calendar not found"}, status_code=404)
+            return JSONResponse({"deleted": calendar_id})
+        except (ValueError, KeyError):
+            return JSONResponse({"error": "Invalid calendar id"}, status_code=400)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to delete external calendar: {exc}")
+            return JSONResponse({"error": str(exc)}, status_code=500)
+
+    @staticmethod
+    def _extract_dream_text(response_text: Any) -> str | None:
+        """Extract the readable dream text from a dream beat's response_text.
+
+        Dream beats store the LLM output as a JSON action envelope in
+        grillo_activity_log.response_text, where the actual dream lives in the
+        create_personal_diary_entry action's payload.content. The linked diary
+        entry (diary_entry_id) is a separate interaction diary, NOT the dream,
+        so we must read the dream text from here.
+        """
+        if not response_text or not isinstance(response_text, str):
+            return None
+        import json as _json
+
+        try:
+            data = _json.loads(response_text)
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        actions = data.get("actions")
+        if not isinstance(actions, list):
+            return None
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            payload = action.get("payload")
+            if isinstance(payload, dict):
+                content = payload.get("content")
+                if isinstance(content, str) and content.strip():
+                    return content.strip()
+        return None
+
+    async def history_dreams(self, request: Request):
+        """Return dream beats for the History > Dreams sub-tab."""
+        params = request.query_params
+
+        def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return default
+            return max(minimum, min(maximum, parsed))
+
+        page = _bounded_int(params.get("page"), default=1, minimum=1, maximum=1000)
+        per_page = _bounded_int(
+            params.get("per_page"), default=15, minimum=1, maximum=50
+        )
+        search = params.get("search", "").strip()
+        sort = params.get("sort", "desc")
+
+        try:
+            from core.db import get_conn_ctx
+
+            offset = (page - 1) * per_page
+            order = "DESC" if sort == "desc" else "ASC"
+
+            where_conditions = ["g.beat_type = %s"]
+            where_params: list[Any] = ["dream"]
+
+            if search:
+                # The dream text lives inside g.response_text (JSON action payload),
+                # not in the linked diary entry, so search there.
+                where_conditions.append("g.response_text LIKE %s")
+                where_params.append(f"%{search}%")
+
+            where_clause = " AND ".join(where_conditions)
+
+            entries = []
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    query = f"""
+                        SELECT g.id,
+                               g.response_text as response_text,
+                               g.diary_entry_id,
+                               g.executed_at,
+                               d.content as diary_content
+                        FROM grillo_activity_log g
+                        LEFT JOIN ai_diary d ON g.diary_entry_id = d.id
+                        WHERE {where_clause}
+                        ORDER BY g.executed_at {order}
+                        LIMIT %s OFFSET %s
+                    """
+
+                    await cur.execute(query, where_params + [per_page + 1, offset])
+                    rows = await cur.fetchall()
+
+                    has_more = len(rows) > per_page
+                    if has_more:
+                        rows = rows[:per_page]
+
+                    for row in rows:
+                        executed_at_str = self._dt_to_utc_iso(row[3])
+                        dream_text = self._extract_dream_text(row[1]) or row[4] or ""
+                        entries.append(
+                            {
+                                "id": row[0],
+                                "content": dream_text,
+                                "diary_entry_id": row[2],
+                                "executed_at": executed_at_str,
+                                "has_diary": row[2] is not None,
+                            }
+                        )
+
+            total_count = offset + len(rows) + (per_page if has_more else 0)
+            total_pages = (total_count + per_page - 1) // per_page
+
+            return JSONResponse(
+                {
+                    "success": True,
+                    "entries": entries,
+                    "page": page,
+                    "per_page": per_page,
+                    "total_count": total_count,
+                    "total_pages": total_pages,
+                }
+            )
+
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to fetch dreams history: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
     async def history_chat(self, request: Request):
         """Return chat history for the History > Chat sub-tab - optimized."""
         params = request.query_params
@@ -6903,10 +8549,10 @@ class SynthWebUIInterface:
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     query = f"""
-                        SELECT interface_path, sender_name, message_text, timestamp, metadata
+                        SELECT interface_path, sender_name, message_text, created_at, metadata
                         FROM chat_history_cache
                         WHERE {where_clause}
-                        ORDER BY timestamp {order}
+                        ORDER BY created_at {order}
                         LIMIT %s OFFSET %s
                     """
 
@@ -6924,7 +8570,7 @@ class SynthWebUIInterface:
                             raw_interface_path = row.get("interface_path")
                             raw_sender_name = row.get("sender_name")
                             raw_message_text = row.get("message_text")
-                            raw_timestamp = row.get("timestamp")
+                            raw_timestamp = row.get("created_at")
                             raw_meta = row.get("metadata")
                         else:
                             raw_interface_path = row[0]
@@ -7484,6 +9130,31 @@ class SynthWebUIInterface:
             raise HTTPException(status_code=400, detail="Missing configuration value")
 
         value = payload.get("value")
+
+        # Cortex scope overrides ship a combined engine/model selection. Accept
+        # either a bare engine string (legacy) or an object {engine, model} and
+        # normalise it to the canonical stored form (bare string when no model,
+        # else compact JSON) via serialize_cortex_scope_value.
+        _CORTEX_SCOPE_KEYS = {
+            "BASE_CORTEX",
+            "GRILLO_CORTEX",
+            "TRAINER_CORTEX",
+            "AGENT_CORTEX",
+            "LIVE_CORTEX",
+        }
+        if key in _CORTEX_SCOPE_KEYS and isinstance(value, dict):
+            try:
+                from core.config import serialize_cortex_scope_value
+
+                _sc_engine = str(value.get("engine") or "").strip()
+                _sc_model = value.get("model")
+                _sc_model = str(_sc_model).strip() if _sc_model else None
+                value = serialize_cortex_scope_value(_sc_engine, _sc_model or None)
+            except Exception as exc:
+                log_warning(
+                    f"{LOG_PREFIX} failed to serialize cortex scope value for {key}: {exc}"
+                )
+
         log_debug(
             f"{LOG_PREFIX} Updating config: key={key}, value_type={type(value)}, value_len={len(str(value)) if value else 0}"
         )
@@ -7510,6 +9181,29 @@ class SynthWebUIInterface:
             raise HTTPException(
                 status_code=500, detail="Failed to update configuration"
             ) from exc
+
+        # Invalidate the in-memory Vox language-override cache so the next TTS
+        # call picks up the new mapping immediately (the cache has a short TTL
+        # anyway, but this makes the change instant).
+        if key == "VOX_LANGUAGE_OVERRIDES":
+            try:
+                from core.config import _invalidate_vox_lang_override_cache
+
+                _invalidate_vox_lang_override_cache()
+            except Exception:
+                pass
+
+        if key in {"AGENT_ENABLED", "AGENT_APPROVAL_MODE", "AGENT_SHELL_WHITELIST"}:
+            try:
+                from core.core_initializer import core_initializer
+
+                # Agent plugin checks is_enabled() while rebuilding this map, so
+                # a config toggle instantly updates the available tool/action set.
+                await core_initializer._build_actions_block()
+            except Exception as exc:
+                log_warning(
+                    f"{LOG_PREFIX} failed to rebuild actions after {key} update: {exc}"
+                )
 
         response_data = {"status": "ok"}
 
@@ -8153,14 +9847,32 @@ class SynthWebUIInterface:
         if component is None:
             return ""
         description = ""
+
+        # A plugin may declare its human-readable description in the
+        # ``get_metadata()`` dict (the documented convention in AGENTS.md §4)
+        # rather than as a bare ``description`` attribute. Honour it first so
+        # metadata-driven plugins (e.g. radio_host) surface their description
+        # instead of falling back to the "Plugin with N actions" placeholder.
         try:
-            candidate = getattr(component, "description", None)
-            if isinstance(candidate, str):
-                description = candidate
-            elif callable(candidate):
-                result = candidate()
-                if isinstance(result, str):
-                    description = result
+            getter = getattr(component, "get_metadata", None)
+            if callable(getter):
+                meta = getter()
+                if isinstance(meta, dict):
+                    meta_desc = meta.get("description")
+                    if isinstance(meta_desc, str) and meta_desc.strip():
+                        description = meta_desc
+        except Exception:  # pragma: no cover - defensive
+            description = ""
+
+        try:
+            if not description:
+                candidate = getattr(component, "description", None)
+                if isinstance(candidate, str):
+                    description = candidate
+                elif callable(candidate):
+                    result = candidate()
+                    if isinstance(result, str):
+                        description = result
         except Exception:  # pragma: no cover - defensive
             description = ""
 
@@ -8220,6 +9932,348 @@ class SynthWebUIInterface:
         elif isinstance(config, (list, tuple, set)):
             entry["required_fields"] = list(config)
         return entry
+
+    @staticmethod
+    def _component_icons_dir() -> "Path":
+        """Directory holding bundled per-component icons (``<name>.<ext>``).
+
+        Used for legacy components that do not own a dedicated folder with an
+        ``icon.<ext>`` — e.g. single-file interfaces (Ollama) that live in the
+        shared ``interface/`` directory. The
+        icons shipped here are original, non-branded glyphs. A third-party
+        brand/trademark logo may only be committed when its owner's licence or
+        press kit permits it; such assets are attributed in
+        ``LICENSE_EXTERNAL.md`` (see AGENTS.md / docs/plugins.rst).
+        """
+        from pathlib import Path
+
+        return (
+            Path(__file__).resolve().parent.parent
+            / "res"
+            / "synth_webui"
+            / "static"
+            / "component_icons"
+        )
+
+    # Supported icon extensions, in priority order, mapped to their MIME type.
+    # The component/plugin manager looks for an ``icon.<ext>`` file sitting next
+    # to the component (usually inside the plugin/interface folder) — the
+    # component itself never declares its icon path.
+    _ICON_EXTENSIONS: "tuple[tuple[str, str], ...]" = (
+        ("png", "image/png"),
+        ("svg", "image/svg+xml"),
+        ("webp", "image/webp"),
+        ("jpg", "image/jpeg"),
+        ("jpeg", "image/jpeg"),
+        ("gif", "image/gif"),
+    )
+
+    @classmethod
+    def _find_icon_in_dir(cls, base: "Path") -> "Optional[tuple[Path, str]]":
+        """Return ``(path, media_type)`` for the first ``icon.<ext>`` in ``base``.
+
+        Searches the directory for an ``icon.*`` file using the supported
+        extensions in :attr:`_ICON_EXTENSIONS` priority order. Every candidate
+        is confined to ``base`` to prevent path traversal. Returns ``None`` when
+        no supported icon exists.
+        """
+        try:
+            resolved_base = base.resolve()
+        except Exception:  # pragma: no cover - defensive
+            return None
+        for ext, media_type in cls._ICON_EXTENSIONS:
+            candidate = (resolved_base / f"icon.{ext}").resolve()
+            if candidate.parent == resolved_base and candidate.is_file():
+                return candidate, media_type
+        return None
+
+    @classmethod
+    def _bundled_component_icon(cls, name: str) -> "Optional[tuple[Path, str]]":
+        """Return ``(path, media_type)`` for a bundled component icon, if any.
+
+        Looks for ``<name>.<ext>`` under :meth:`_component_icons_dir` using the
+        supported extensions in :attr:`_ICON_EXTENSIONS` priority order. The
+        lookup is confined to that directory to prevent path traversal; returns
+        ``None`` when no bundled icon exists for ``name``.
+        """
+        base = cls._component_icons_dir().resolve()
+        for ext, media_type in cls._ICON_EXTENSIONS:
+            candidate = (base / f"{name}.{ext}").resolve()
+            if candidate.parent == base and candidate.is_file():
+                return candidate, media_type
+        return None
+
+    @staticmethod
+    def _reflect_component_dir(name: str, info: Any = None) -> "Optional[Path]":
+        """Resolve a component's on-disk folder by reflecting its instance.
+
+        The component manager owns icon/guide discovery — a plugin or interface
+        never declares where its assets live. The primary source is the tracked
+        ``ComponentInfo.dir_path``, but that field can be missing for sub-folder
+        interfaces whose package shim rebinds ``sys.modules`` (e.g. Matrix and
+        Fluxer), leaving the manager unable to find their ``icon.<ext>``.
+
+        This fallback derives the folder directly from the live registered
+        instance: it looks the component up in the interface and plugin
+        registries and resolves the concrete *class* source file via
+        :func:`inspect.getfile`. The parent of that file is the component's
+        folder — exactly where its ``icon.<ext>`` and ``guide.md`` sit — so
+        discovery works regardless of how the import machinery rebound modules.
+
+        Returns the resolved directory ``Path`` (or ``None`` when it cannot be
+        determined). No filesystem write or traversal outside the class source
+        tree is possible; the caller still confines icon lookups to the folder.
+        """
+        from pathlib import Path
+        import inspect
+
+        # 1. Trust the tracked dir_path when it is populated.
+        dir_path = getattr(info, "dir_path", "") if info else ""
+        if dir_path:
+            return Path(dir_path)
+
+        # 2. Reflect the live registered instance (interface first, then plugin)
+        #    and resolve the concrete class' source file. This is immune to the
+        #    ``sys.modules`` rebinding done by sub-folder package shims.
+        instance = None
+        try:
+            from core.core_initializer import INTERFACE_REGISTRY, PLUGIN_REGISTRY
+
+            instance = INTERFACE_REGISTRY.get(name) or PLUGIN_REGISTRY.get(name)
+            if instance is None:
+                # Tolerate the ``<name>_plugin`` component stem alias.
+                instance = PLUGIN_REGISTRY.get(f"{name}_plugin")
+        except Exception:  # pragma: no cover - defensive
+            instance = None
+
+        if instance is None:
+            return None
+
+        try:
+            source_file = inspect.getfile(type(instance))
+        except Exception:  # pragma: no cover - defensive (builtins, C-exts)
+            return None
+        if not source_file:
+            return None
+        return Path(source_file).parent
+
+    async def plugin_icon(self, name: str) -> FileResponse:
+        """Serve a component's icon.
+
+        The icon is discovered generically — the component manager looks for an
+        ``icon.<ext>`` file (``png``, ``svg``, ``webp``, ``jpg``, ``jpeg``,
+        ``gif``) sitting next to the component, so a plugin/interface never has
+        to declare its own icon path.
+
+        Resolution order:
+
+        1. The component's own on-disk directory (``<dir_path>/icon.<ext>``),
+           resolved from the tracked ``ComponentInfo`` and confined to that
+           directory to prevent path traversal.
+        2. A bundled per-component icon under
+           ``res/synth_webui/static/component_icons/<name>.<ext>`` — for
+           legacy single-file components that share a directory and therefore
+           cannot each own an ``icon.<ext>``.
+
+        Returns 404 when neither exists; the WebUI then falls back to the
+        SyntH logo.
+        """
+
+        # Reject anything that is not a plain short-name to avoid traversal.
+        if not name or "/" in name or "\\" in name or ".." in name:
+            raise HTTPException(status_code=404, detail="Icon not found")
+
+        try:
+            from core.core_initializer import PLUGIN_REGISTRY
+
+            plugin = PLUGIN_REGISTRY.get(name)
+            info = self._resolve_component_info(name, plugin)
+        except Exception:
+            info = None
+
+        # Resolve the component's on-disk folder generically: the tracked
+        # ``dir_path`` when present, otherwise reflected from the live instance
+        # (covers sub-folder interfaces whose package shim hides ``dir_path``).
+        component_dir = self._reflect_component_dir(name, info)
+        if component_dir is not None:
+            found = self._find_icon_in_dir(component_dir)
+            if found is not None:
+                icon_path, media_type = found
+                return FileResponse(str(icon_path), media_type=media_type)
+
+        # Fallback: a bundled per-component icon (legacy single-file components).
+        bundled = self._bundled_component_icon(name)
+        if bundled is not None:
+            bundled_path, bundled_media = bundled
+            return FileResponse(str(bundled_path), media_type=bundled_media)
+
+        raise HTTPException(status_code=404, detail="Icon not found")
+
+    @staticmethod
+    def _led_for_status(status: str) -> str:
+        """Map a component status to a UI LED colour.
+
+        green = loaded + active, red = loaded but broken, grey = disabled.
+        orange (degraded) is reserved for future per-plugin health checks.
+        """
+        mapping = {
+            "success": "green",
+            "failed": "red",
+            "disabled": "grey",
+            "skipped": "grey",
+            "loading": "grey",
+        }
+        return mapping.get(status, "grey")
+
+    @classmethod
+    def _plugin_has_icon(cls, info: Any, name: str = "") -> bool:
+        """Return True when the component has an icon available.
+
+        Checks the component's own ``<dir_path>/icon.<ext>`` first (any
+        supported extension), then falls back to a bundled per-component icon
+        (``component_icons/<name>.<ext>``) when ``name`` is provided — the
+        latter covers legacy single-file components that share a directory.
+        """
+        try:
+            component_dir = cls._reflect_component_dir(name, info)
+            if component_dir is not None and cls._find_icon_in_dir(component_dir):
+                return True
+            if name and cls._bundled_component_icon(name) is not None:
+                return True
+        except Exception:  # pragma: no cover - defensive
+            return False
+        return False
+
+    @staticmethod
+    def _read_plugin_guide(info: Any, name: str = "") -> str:
+        """Return the raw Markdown of a plugin's guide (empty if absent).
+
+        Two layouts are supported: folder-plugins ship ``<dir>/guide.md``,
+        while single-file plugins ship ``plugins/<name>.guide.md`` next to
+        their ``<name>.py`` module (``dir_path`` then points at ``plugins/``).
+
+        The component folder is resolved generically by
+        :meth:`_reflect_component_dir`: the tracked ``dir_path`` when present,
+        otherwise reflected from the live registered instance. This covers
+        sub-folder interfaces whose package shim rebinds ``sys.modules`` and
+        leaves ``dir_path`` empty (e.g. Matrix and Fluxer) — the manager still
+        finds their ``guide.md``.
+        """
+        base = SynthWebUIInterface._reflect_component_dir(name, info)
+        if base is None:
+            return ""
+        try:
+            # Folder-owned guide: <dir>/guide.md
+            folder_guide = base / "guide.md"
+            if folder_guide.is_file():
+                return folder_guide.read_text(encoding="utf-8")
+            # Single-file plugin guide: plugins/<name>.guide.md
+            guide_name = name or (getattr(info, "name", "") if info else "")
+            if guide_name:
+                sibling_guide = base / f"{guide_name}.guide.md"
+                if sibling_guide.is_file():
+                    return sibling_guide.read_text(encoding="utf-8")
+        except Exception:  # pragma: no cover - defensive
+            pass
+        return ""
+
+    @staticmethod
+    def _plugin_run_meta(plugin: Any) -> dict:
+        """Derive the on-demand "Run Now" button metadata for a plugin.
+
+        A plugin opts in by either declaring ``runnable`` (optionally with
+        ``run_label`` / ``run_action`` / ``run_title``) in its
+        ``get_metadata()`` dict, or simply by exposing a ``run_now`` /
+        ``run_once`` / ``execute_now`` coroutine/method. This keeps the WebUI
+        free of any hardcoded, name-keyed special cases.
+        """
+        meta: dict = {}
+        try:
+            if hasattr(plugin, "get_metadata"):
+                raw = plugin.get_metadata() or {}
+                if isinstance(raw, dict):
+                    meta = raw
+        except Exception:  # pragma: no cover - defensive
+            meta = {}
+
+        runnable = bool(meta.get("runnable"))
+        if not runnable:
+            runnable = any(
+                callable(getattr(plugin, m, None))
+                for m in ("run_now", "run_once", "execute_now")
+            )
+        if not runnable:
+            return {}
+
+        out: dict = {"runnable": True}
+        if isinstance(meta.get("run_label"), str) and meta["run_label"].strip():
+            out["run_label"] = meta["run_label"].strip()
+        if isinstance(meta.get("run_action"), str) and meta["run_action"].strip():
+            out["run_action"] = meta["run_action"].strip()
+        if isinstance(meta.get("run_title"), str) and meta["run_title"].strip():
+            out["run_title"] = meta["run_title"].strip()
+        return out
+
+    @staticmethod
+    def _plugin_capability_flags(plugin: Any) -> dict:
+        """Detect whether a plugin participates in the Recon / Debrief pipelines.
+
+        Recon capability mirrors ``core.recon.gather_recon_contributions`` — a
+        plugin is recon-capable if it exposes ``get_recon_contributions`` or the
+        combined trio ``get_recon_key`` / ``get_recon_instruction`` /
+        ``parse_recon_response``. Debrief capability mirrors
+        ``core.debrief.run_debrief`` — a plugin is debrief-capable if it exposes
+        an ``on_debrief`` hook. Both are surfaced so the WebUI can filter plugins
+        by pipeline participation.
+        """
+        has_recon = hasattr(plugin, "get_recon_contributions") or all(
+            hasattr(plugin, attr)
+            for attr in (
+                "get_recon_key",
+                "get_recon_instruction",
+                "parse_recon_response",
+            )
+        )
+        has_debrief = hasattr(plugin, "on_debrief")
+        return {"has_recon": bool(has_recon), "has_debrief": bool(has_debrief)}
+
+    @staticmethod
+    def _resolve_component_info(name: str, plugin: Any = None) -> Any:
+        """Return the ComponentInfo backing a plugin, tolerating name aliases.
+
+        The loader always tracks a plugin's ComponentInfo under its module
+        stem (e.g. ``radio_host_plugin`` for
+        ``plugins/radio_host/radio_host_plugin.py``), which is where the
+        on-disk ``dir_path`` (used for icon/guide lookup) lives. A plugin that
+        registers under a shorter canonical name via
+        ``register_plugin("radio_host", self)`` would otherwise miss its own
+        folder because ``components.get("radio_host")`` is ``None``.
+
+        Resolution order: (1) exact ``name``; (2) any registry alias pointing
+        at the same plugin instance (covers the ``<name>_plugin`` stem); (3)
+        the ``<name>_plugin`` component key as a last resort. The first match
+        that actually carries a ``dir_path`` wins so icon/guide resolve.
+        """
+        from core.core_initializer import core_initializer, PLUGIN_REGISTRY
+
+        candidates: list[str] = [name]
+        if plugin is not None:
+            for alias, reg_plugin in PLUGIN_REGISTRY.items():
+                if reg_plugin is plugin and alias not in candidates:
+                    candidates.append(alias)
+        if f"{name}_plugin" not in candidates:
+            candidates.append(f"{name}_plugin")
+
+        fallback = None
+        for candidate in candidates:
+            info = core_initializer.components.get(candidate)
+            if info is None:
+                continue
+            if fallback is None:
+                fallback = info
+            if getattr(info, "dir_path", ""):
+                return info
+        return fallback
 
     @staticmethod
     def _get_component_meta(name: str) -> dict:
@@ -8498,61 +10552,30 @@ class SynthWebUIInterface:
                     )
 
             meta = self._get_component_meta(name)
+            info = core_initializer.components.get(name)
+            iface_enabled = core_initializer._is_interface_enabled(name)
             interfaces_data.append(
                 {
                     "name": name,
                     "display_name": self._get_display_name(name, interface),
                     "description": description,
                     "actions": actions,
-                    "status": meta["status"],
+                    "status": "disabled" if not iface_enabled else meta["status"],
                     "details": meta["details"],
                     "error": meta["error"],
+                    # Fields required so interfaces render in the plugins
+                    # two-column grid under the "Interfaces" category.
+                    "category": "Interfaces",
+                    "led": "grey"
+                    if not iface_enabled
+                    else self._led_for_status(meta["status"]),
+                    "enabled": iface_enabled,
+                    "disable_allowed": not core_initializer.is_core_interface(name),
+                    "has_icon": self._plugin_has_icon(info, name),
+                    "icon_url": f"/api/plugins/{name}/icon",
+                    "guide": self._read_plugin_guide(info, name),
                 }
             )
-
-        # Add Selkies Web Desktop as a special hardcoded component
-        # Prefer explicit SELKIES_HTTPS_PORT/SELKIES_HTTP_PORT env vars when deciding protocol
-        # If SELKIES_HTTPS_PORT is set, prefer https regardless of SECURE_CONNECTION value.
-        # This avoids accidental inversion when docker/env mappings differ from runtime.
-        if os.getenv("SELKIES_HTTPS_PORT"):
-            selkies_protocol = "https"
-            selkies_port = self.selkies_https_port
-        elif os.getenv("SELKIES_HTTP_PORT"):
-            selkies_protocol = "http"
-            selkies_port = self.selkies_http_port
-        else:
-            selkies_protocol = (
-                "https" if os.getenv("SECURE_CONNECTION", "0") == "1" else "http"
-            )
-            selkies_port = (
-                self.selkies_https_port
-                if selkies_protocol == "https"
-                else self.selkies_http_port
-            )
-
-        # Mark as dynamic - JavaScript will construct the full URL client-side
-        interfaces_data.append(
-            {
-                "name": "selkies_desktop",
-                "display_name": "Selkies Web Desktop",
-                "description": "Web-based VNC desktop environment for visual interaction with the SyntH container. Provides full desktop access with Chrome browser.",
-                "actions": [
-                    {
-                        "name": "login",
-                        "description": "Open Selkies login page in a new tab",
-                        "required_fields": [],
-                        "optional_fields": [],
-                    }
-                ],
-                "status": "success",
-                "details": f"Available at {selkies_protocol}://[host]:{selkies_port}",
-                "error": None,
-                "url": None,  # Will be set client-side
-                "is_external": True,
-                "selkies_protocol": selkies_protocol,
-                "selkies_port": selkies_port,
-            }
-        )
 
         # Deduplicate interfaces by name to avoid duplicates when modules are scanned multiple times
         seen = set()
@@ -8568,7 +10591,71 @@ class SynthWebUIInterface:
         interfaces_data = deduped_interfaces
 
         plugins_data: List[dict] = []
+
+        # Media-engine plugins (Vox/Auris/Iris and the Cortex/Live engines) are
+        # surfaced in the dedicated "Engines" tab — they are engines, not
+        # general-purpose plugins, so they must NOT appear in the Plugins grid.
+        _ENGINE_PLUGIN_NAMES = frozenset(
+            {
+                "vox_plugin",
+                "auris_plugin",
+                "iris_plugin",
+                "cortex_plugin",
+                "live_plugin",
+            }
+        )
+
+        # "One plugin, one entry" — collapse duplicate registrations so each
+        # plugin appears exactly ONCE in the WebUI grid.
+        #
+        # Two independent causes produce duplicates:
+        #   1. A plugin file `X_plugin.py` is tracked by the loader under its
+        #      module stem (`X_plugin`) AND calls `register_plugin("X", self)`
+        #      with a shorter canonical name — the SAME instance ends up in
+        #      PLUGIN_REGISTRY under both keys.
+        #   2. Two module files re-export the same PLUGIN_CLASS (e.g.
+        #      `grillo_impl.py` + `grillo_plugin.py`) — two DISTINCT instances
+        #      of the same class.
+        #
+        # We deduplicate by a canonical identity key derived from the plugin's
+        # fully-qualified CLASS (`module.qualname`). This collapses both cases:
+        # the same instance registered under two names (case 1) and two
+        # distinct instances of the same re-exported class (case 2, grillo).
+        # The preferred display name is the one WITHOUT the `_plugin` suffix
+        # (the explicit canonical name chosen by the plugin author); when
+        # both/neither carry the suffix, the shorter — then lexicographically
+        # first — name wins.
+        def _plugin_identity(plugin_obj: Any) -> str:
+            cls = type(plugin_obj)
+            return f"{cls.__module__}.{cls.__qualname__}"
+
+        def _canonical_score(candidate: str) -> tuple[int, int, str]:
+            # Lower tuple sorts first → preferred name.
+            has_suffix = 1 if candidate.endswith("_plugin") else 0
+            return (has_suffix, len(candidate), candidate)
+
+        canonical_names: Dict[str, str] = {}
+        for reg_name, reg_plugin in PLUGIN_REGISTRY.items():
+            key = _plugin_identity(reg_plugin)
+            current = canonical_names.get(key)
+            if current is None or _canonical_score(reg_name) < _canonical_score(
+                current
+            ):
+                canonical_names[key] = reg_name
+
+        emitted_plugin_identities: set[str] = set()
         for name, plugin in sorted(PLUGIN_REGISTRY.items()):
+            # Media-engine plugins belong to the Engines tab, not the grid.
+            if name in _ENGINE_PLUGIN_NAMES:
+                continue
+            identity = _plugin_identity(plugin)
+            # Skip if another alias of the same plugin was already emitted, or
+            # if this alias is not the canonical (preferred) name.
+            if identity in emitted_plugin_identities:
+                continue
+            if canonical_names.get(identity) != name:
+                continue
+            emitted_plugin_identities.add(identity)
             description = self._extract_description(plugin)
             actions = []
             if hasattr(plugin, "get_supported_actions"):
@@ -8587,6 +10674,10 @@ class SynthWebUIInterface:
                     )
 
             meta = self._get_component_meta(name)
+            info = self._resolve_component_info(name, plugin)
+            category = getattr(info, "category", "") or "Various"
+            run_meta = self._plugin_run_meta(plugin)
+            capability_flags = self._plugin_capability_flags(plugin)
             plugins_data.append(
                 {
                     "name": name,
@@ -8596,8 +10687,81 @@ class SynthWebUIInterface:
                     "status": meta["status"],
                     "details": meta["details"],
                     "error": meta["error"],
+                    "category": category,
+                    "led": self._led_for_status(meta["status"]),
+                    "enabled": True,
+                    "disable_allowed": not core_initializer.is_core_plugin(name),
+                    "has_icon": self._plugin_has_icon(info, name),
+                    "icon_url": f"/api/plugins/{name}/icon",
+                    "guide": self._read_plugin_guide(info, name),
+                    **capability_flags,
+                    **run_meta,
                 }
             )
+
+        # Include disabled ("ghost") plugins so the UI still lists them (grey).
+        for name, info in sorted(core_initializer.components.items()):
+            if getattr(info, "type", "") != "plugin":
+                continue
+            if name in _ENGINE_PLUGIN_NAMES:
+                continue  # engines live in the Engines tab, not the grid
+            if name in PLUGIN_REGISTRY:
+                continue  # already emitted above
+            status_value = getattr(info.status, "value", str(info.status))
+            if status_value not in ("skipped", "failed", "disabled"):
+                continue
+            led = "grey" if status_value in ("skipped", "disabled") else "red"
+            enabled = status_value not in ("skipped", "disabled")
+            plugins_data.append(
+                {
+                    "name": name,
+                    "display_name": name,
+                    "description": "",
+                    "actions": [],
+                    "status": "disabled" if status_value == "skipped" else status_value,
+                    "details": getattr(info, "details", "") or "",
+                    "error": getattr(info, "error", "") or "",
+                    "category": getattr(info, "category", "") or "Various",
+                    "led": led,
+                    "enabled": enabled,
+                    "disable_allowed": not core_initializer.is_core_plugin(name),
+                    "has_icon": self._plugin_has_icon(info, name),
+                    "icon_url": f"/api/plugins/{name}/icon",
+                    "guide": self._read_plugin_guide(info, name),
+                }
+            )
+
+        # Surface Synth-owned MCP servers under the "Agent" category as
+        # read-only banners (they are not togglable from this panel).
+        try:
+            from core.mcp_bridge.config import load_synth_mcp_servers
+
+            for mcp_name, mcp_cfg in sorted(load_synth_mcp_servers().items()):
+                plugins_data.append(
+                    {
+                        "name": f"mcp:{mcp_name}",
+                        "display_name": mcp_name,
+                        "description": getattr(mcp_cfg, "description", "") or "",
+                        "actions": [],
+                        "status": "success" if mcp_cfg.enabled else "disabled",
+                        "details": f"MCP server ({mcp_cfg.transport})",
+                        "error": "",
+                        "category": "Agent",
+                        "led": "green" if mcp_cfg.enabled else "grey",
+                        "enabled": bool(mcp_cfg.enabled),
+                        "disable_allowed": False,
+                        "has_icon": False,
+                        "icon_url": "",
+                        "guide": "",
+                        "is_mcp": True,
+                    }
+                )
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} unable to list Synth MCP servers: {exc}")
+
+        # Interfaces are presented inside the same two-column grid as plugins,
+        # grouped under the "Interfaces" category (no separate card).
+        plugins_data.extend(interfaces_data)
 
         # Deduplicate plugins by name to avoid duplicates in the UI
         seen_p = set()
@@ -8675,6 +10839,7 @@ class SynthWebUIInterface:
                 _caps = _meta.get("capabilities") or {}
                 _v_available_models: list[str] = []
                 _v_default_model: str | None = None
+                _v_models_meta: list[dict] = []
                 _v_instance = VOX_REGISTRY._instances.get(_name)
                 if _v_instance is not None and hasattr(_v_instance, "_endpoint"):
                     _v_ep = _v_instance._endpoint
@@ -8682,6 +10847,7 @@ class SynthWebUIInterface:
                         getattr(_v_ep, "available_models", None) or []
                     )
                     _v_default_model = getattr(_v_ep, "default_model", None)
+                    _v_models_meta = list(getattr(_v_ep, "models_metadata", None) or [])
                 vox_data.append(
                     {
                         "name": _name,
@@ -8695,6 +10861,7 @@ class SynthWebUIInterface:
                         "active": _name == active_vox,
                         "available_models": _v_available_models,
                         "default_model": _v_default_model,
+                        "models_meta": _v_models_meta,
                     }
                 )
         except Exception as exc:
@@ -8755,6 +10922,7 @@ class SynthWebUIInterface:
                 _caps = _meta.get("capabilities") or {}
                 _a_available_models: list[str] = []
                 _a_default_model: str | None = None
+                _a_models_meta: list[dict] = []
                 _a_instance = AURIS_REGISTRY._instances.get(_name)
                 if _a_instance is not None and hasattr(_a_instance, "_endpoint"):
                     _a_ep = _a_instance._endpoint
@@ -8762,6 +10930,7 @@ class SynthWebUIInterface:
                         getattr(_a_ep, "available_models", None) or []
                     )
                     _a_default_model = getattr(_a_ep, "default_model", None)
+                    _a_models_meta = list(getattr(_a_ep, "models_metadata", None) or [])
                 auris_data.append(
                     {
                         "name": _name,
@@ -8775,6 +10944,7 @@ class SynthWebUIInterface:
                         "active": _name == active_auris,
                         "available_models": _a_available_models,
                         "default_model": _a_default_model,
+                        "models_meta": _a_models_meta,
                     }
                 )
         except Exception as exc:
@@ -8887,6 +11057,7 @@ class SynthWebUIInterface:
                 _caps = _meta.get("capabilities") or {}
                 _available_models: list[str] = []
                 _default_model: str | None = None
+                _models_meta: list[dict] = []
                 _instance = IRIS_REGISTRY.get_instance(_name)
                 if _instance is not None and hasattr(_instance, "_endpoint"):
                     _ep = _instance._endpoint
@@ -8894,6 +11065,7 @@ class SynthWebUIInterface:
                         getattr(_ep, "available_models", None) or []
                     )
                     _default_model = getattr(_ep, "default_model", None)
+                    _models_meta = list(getattr(_ep, "models_metadata", None) or [])
                 iris_data.append(
                     {
                         "name": _name,
@@ -8907,6 +11079,7 @@ class SynthWebUIInterface:
                         "active": _name == active_iris,
                         "available_models": _available_models,
                         "default_model": _default_model,
+                        "models_meta": _models_meta,
                     }
                 )
         except Exception as exc:
@@ -8916,10 +11089,16 @@ class SynthWebUIInterface:
         # Single source of truth: derive options from the same data already built above.
         cortex_scopes: list[dict] = []
         try:
-            # Grillo/Trainer: only llm_provider engines — same source as the main
-            # engine selector in the Engines tab (by_cortex is already built above).
+            # Grillo/Trainer/Agent: only registered & enabled llm_provider engines.
+            # Mirror the main engine selector in the Engines tab, which shows only
+            # external-endpoint engines (is_external=True) for the llm_provider kind
+            # — those are the endpoints actually configured and enabled. Static
+            # protocol-template modules (is_external=False) and disabled endpoints
+            # (never registered) are excluded.
             llm_engines_sorted = sorted(
-                e["name"] for e in by_cortex.get("llm_provider", [])
+                e["name"]
+                for e in by_cortex.get("llm_provider", [])
+                if e.get("is_external")
             )
             # Live scope: LIVE_REGISTRY is the authoritative source for streaming
             # engines; fall back to CortexRegistry if the registry is unavailable.
@@ -8935,25 +11114,45 @@ class SynthWebUIInterface:
                     )
                 except Exception:
                     pass
+            # Map engine name -> its selectable models, so the UI can render a
+            # single "engine / model" combo per scope. Derived from the same
+            # cortex_engines list built above (supported_models per engine).
+            engine_models: dict[str, list[str]] = {}
+            for _e in cortex_engines:
+                _ename = _e.get("name")
+                if not _ename:
+                    continue
+                engine_models[_ename] = list(_e.get("supported_models") or [])
+
+            from core.config import parse_cortex_scope_value
+
+            def _build_scope_entry(key: str, label: str, options: list[str]) -> dict:
+                raw = config_registry.get_value(key, "Default")
+                v_engine, v_model = parse_cortex_scope_value(raw)
+                return {
+                    "key": key,
+                    "label": label,
+                    # Kept for retro-compat with any consumer reading `value`.
+                    "value": raw,
+                    "value_engine": v_engine or "Default",
+                    "value_model": v_model or "",
+                    "options": options,
+                    "models": engine_models,
+                }
+
             cortex_scopes = [
-                {
-                    "key": "GRILLO_CORTEX",
-                    "label": "Grillo",
-                    "value": config_registry.get_value("GRILLO_CORTEX", "Default"),
-                    "options": ["Default"] + llm_engines_sorted,
-                },
-                {
-                    "key": "TRAINER_CORTEX",
-                    "label": "Trainer",
-                    "value": config_registry.get_value("TRAINER_CORTEX", "Default"),
-                    "options": ["Default"] + llm_engines_sorted,
-                },
-                {
-                    "key": "LIVE_CORTEX",
-                    "label": "Live",
-                    "value": config_registry.get_value("LIVE_CORTEX", "Default"),
-                    "options": ["Default"] + live_engine_names,
-                },
+                _build_scope_entry(
+                    "GRILLO_CORTEX", "Grillo", ["Default"] + llm_engines_sorted
+                ),
+                _build_scope_entry(
+                    "TRAINER_CORTEX", "Trainer", ["Default"] + llm_engines_sorted
+                ),
+                _build_scope_entry(
+                    "AGENT_CORTEX", "Agent", ["Default"] + llm_engines_sorted
+                ),
+                _build_scope_entry(
+                    "LIVE_CORTEX", "Live", ["Default"] + live_engine_names
+                ),
             ]
         except Exception as exc:
             log_warning(f"{LOG_PREFIX} unable to build cortex scopes: {exc}")
@@ -8977,7 +11176,10 @@ class SynthWebUIInterface:
                 config_registry.get_value("VOX_DEFAULT_MODEL", "") or ""
             ),
             "auris_current_model": (
-                config_registry.get_value("AURIS_DEFAULT_MODEL", "") or ""
+                config_registry.get_value(
+                    "VOSK_MODEL", "", group="plugins", component="auris_plugin"
+                )
+                or ""
             ),
             "live": live_data,
             "interfaces": interfaces_data,
@@ -9123,6 +11325,98 @@ class SynthWebUIInterface:
             {"status": "ok", "engine": engine_name, "model": model_name}
         )
 
+    async def _set_external_media_model(
+        self,
+        request: Request,
+        registry_getter,
+        extra_config_key: str,
+        subsystem: str,
+    ) -> JSONResponse:
+        """Persist a model selection for an external Vox/Auris engine.
+
+        The bridge reads the chosen model from the endpoint's
+        ``extra_config`` (``tts_model`` for Vox, ``stt_model`` for Auris) with
+        a fallback to ``default_model``. We therefore merge the value into the
+        endpoint's ``extra_config`` and let ``update_endpoint`` re-sync the
+        live registry so a running instance picks up the change without a
+        restart.
+        """
+        try:
+            data = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
+        engine_name = str(data.get("engine") or "").strip()
+        model_name = str(data.get("model") or "").strip()
+        if not engine_name or not model_name:
+            raise HTTPException(status_code=400, detail="Missing 'engine' or 'model'")
+
+        try:
+            registry = registry_getter()
+            instance = registry.load_engine(engine_name)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} unable to access {subsystem} registry: {exc}")
+            raise HTTPException(
+                status_code=500, detail=f"Unable to access {subsystem} registry"
+            ) from exc
+
+        endpoint = (
+            getattr(instance, "_endpoint", None) if instance is not None else None
+        )
+        if endpoint is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Engine '{engine_name}' is not an external endpoint engine "
+                    f"and does not support model selection"
+                ),
+            )
+
+        try:
+            from core.external_endpoints.registry import (
+                get_external_endpoint_registry,
+            )
+
+            ep_registry = get_external_endpoint_registry()
+            merged = dict(endpoint.extra_config or {})
+            merged[extra_config_key] = model_name
+            await ep_registry.update_endpoint(endpoint.id, extra_config=merged)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(
+                f"{LOG_PREFIX} failed to set {subsystem} model '{model_name}' "
+                f"on '{engine_name}': {exc}"
+            )
+            raise HTTPException(
+                status_code=500, detail=f"Failed to set model: {exc}"
+            ) from exc
+
+        log_info(
+            f"{LOG_PREFIX} {subsystem} model for '{engine_name}' set to '{model_name}'"
+        )
+        return JSONResponse(
+            {"status": "ok", "engine": engine_name, "model": model_name}
+        )
+
+    async def set_vox_model(self, request: Request) -> JSONResponse:
+        """Set the active TTS model for an external Vox engine."""
+        from core.vox_registry import VOX_REGISTRY
+
+        return await self._set_external_media_model(
+            request, lambda: VOX_REGISTRY, "tts_model", "Vox"
+        )
+
+    async def set_auris_model(self, request: Request) -> JSONResponse:
+        """Set the active STT model for an external Auris engine."""
+        from core.auris_registry import AURIS_REGISTRY
+
+        return await self._set_external_media_model(
+            request, lambda: AURIS_REGISTRY, "stt_model", "Auris"
+        )
+
     async def cortex_login(self, request: Request):
         """Selenium-based login is no longer supported.
 
@@ -9207,6 +11501,85 @@ class SynthWebUIInterface:
         raise HTTPException(
             status_code=400, detail="Component does not support run_action or run_now"
         )
+
+    async def toggle_plugin(self, request: Request):
+        """Enable or disable a plugin at runtime (TRUE unload, no restart)."""
+        try:
+            data = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
+        name = str(data.get("name") or "").strip()
+        enabled = data.get("enabled")
+        if not name:
+            raise HTTPException(status_code=400, detail="Missing 'name'")
+        if not isinstance(enabled, bool):
+            raise HTTPException(
+                status_code=400, detail="Missing or invalid boolean 'enabled'"
+            )
+
+        try:
+            from core.core_initializer import core_initializer, INTERFACE_REGISTRY
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} unable to import core_initializer: {exc}")
+            raise HTTPException(
+                status_code=500, detail="Unable to access core initializer"
+            ) from exc
+
+        # Route interfaces to the interface enable/disable path. An entry is an
+        # interface if it lives in INTERFACE_REGISTRY or is tracked as one.
+        tracked = core_initializer.components.get(name)
+        is_interface = name in INTERFACE_REGISTRY or (
+            tracked is not None and getattr(tracked, "type", "") == "interface"
+        )
+
+        if is_interface:
+            if core_initializer.is_core_interface(name):
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Interface '{name}' is a core interface and cannot be disabled",
+                )
+            try:
+                if enabled:
+                    result = await core_initializer.enable_interface(name)
+                else:
+                    result = await core_initializer.disable_interface(name)
+            except Exception as exc:
+                log_error(f"{LOG_PREFIX} toggle interface failed for {name}: {exc}")
+                raise HTTPException(
+                    status_code=500, detail=f"Toggle failed: {exc}"
+                ) from exc
+
+            if not result.get("ok"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=result.get("error", "toggle_failed"),
+                )
+            return JSONResponse({"status": "ok", **result})
+
+        if core_initializer.is_core_plugin(name):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Plugin '{name}' is a core plugin and cannot be disabled",
+            )
+
+        try:
+            if enabled:
+                result = await core_initializer.enable_plugin(name)
+            else:
+                result = await core_initializer.disable_plugin(name)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} toggle_plugin failed for {name}: {exc}")
+            raise HTTPException(
+                status_code=500, detail=f"Toggle failed: {exc}"
+            ) from exc
+
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=400,
+                detail=result.get("error", "toggle_failed"),
+            )
+        return JSONResponse({"status": "ok", **result})
 
     async def reload_component(self, request: Request):
         """Reload a specific component (interface or plugin)."""
@@ -9478,6 +11851,15 @@ class SynthWebUIInterface:
                 port=self.port,
                 log_level=self.log_level or "info",
                 lifespan="off",
+                # Uvicorn's default (None) waits indefinitely for open
+                # connections to close on SIGINT before server.serve()
+                # returns. The stage keeps long-lived WebSockets open
+                # (karada state broadcast, mic streaming for barge-in) that
+                # don't close promptly, which blocks serve() forever — and
+                # until it returns, uvicorn never hands SIGINT back to
+                # main.py's own shutdown handler, so the whole app hangs.
+                # Bound it so one Ctrl+C is enough.
+                timeout_graceful_shutdown=5,
             )
             if self.tls_enabled and self.tls_certfile and self.tls_keyfile:
                 log_info(
@@ -9812,6 +12194,17 @@ class SynthWebUIInterface:
                         f"{LOG_PREFIX} Exception while getting persona manager: {pm_exc_outer}"
                     )
                     self.persona_manager = None
+
+            # Start the periodic Karada touch-event cleanup task.
+            try:
+                from core.karada_touch_events import start_cleanup_task
+
+                start_cleanup_task()
+                log_debug(f"{LOG_PREFIX} Karada touch-event cleanup task started")
+            except Exception as kte_exc:
+                log_warning(
+                    f"{LOG_PREFIX} Failed to start Karada cleanup task: {kte_exc}"
+                )
 
             if self.autostart:
                 log_info(
@@ -10285,6 +12678,18 @@ class SynthWebUIInterface:
                 f"{LOG_PREFIX} Failed to set active VRM after activating skin {skin_name}: {exc}"
             )
             raise HTTPException(status_code=500, detail="Failed to activate skin")
+
+        # Broadcast the new model so connected clients reload it live. Without
+        # this only clients that poll (legacy webui's refreshModels) notice the
+        # swap; the stage frontend relies entirely on the vrm_model broadcast.
+        try:
+            if self.animation_handler:
+                await self.animation_handler.set_vrm_model(
+                    f"/avatars/{target.name}", target.name
+                )
+                log_debug(f"{LOG_PREFIX} Broadcast vrm_model: {target.name}")
+        except Exception as vrm_exc:
+            log_warning(f"{LOG_PREFIX} Failed to broadcast vrm_model: {vrm_exc}")
 
         # Trigger skin_change animation so the avatar plays a transition animation
         # after the frontend reloads the VRM model.

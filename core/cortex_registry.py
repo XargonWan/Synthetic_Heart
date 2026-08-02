@@ -86,9 +86,7 @@ class CortexRegistry:
         available = [
             n for n, meta in self._engine_meta.items() if meta.get("cortex") == cortex
         ]
-        if "manual" in available:
-            return "manual"
-        elif available:
+        if available:
             return available[0]
         else:
             raise ValueError(f"No engines registered for cortex: {cortex}")

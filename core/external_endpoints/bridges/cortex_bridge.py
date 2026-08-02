@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import copy
 import json
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -145,6 +146,11 @@ class ExternalCortexEngine(AIPluginBase):
         self.notify_fn = notify_fn
         self.display_name = endpoint.display_label or endpoint.name
         self._last_response_metadata: dict[str, Any] = {}
+        # Transient, per-call model override applied by scope-aware call sites
+        # (see ``scope_model_override``). Unlike ``_endpoint.default_model`` this
+        # is NOT persisted and is scoped to a single ``generate_response`` call,
+        # because a bridge is a singleton shared across every cortex scope.
+        self._scope_model_override: str | None = None
 
     # ------------------------------------------------------------------
     # Multimodal format helpers
@@ -703,6 +709,34 @@ class ExternalCortexEngine(AIPluginBase):
             )
             return {}
 
+    @contextlib.contextmanager
+    def scope_model_override(self, model: str | None):
+        """Temporarily override the model used by the next ``generate_response``.
+
+        Scope-aware call sites resolve a per-scope model (via
+        :func:`core.config.get_active_cortex_scope`) and wrap the generation call
+        with this context manager. The override is applied only for that single
+        call and restored afterwards — the shared endpoint ``default_model`` is
+        never mutated, so concurrent calls on other scopes are unaffected.
+
+        A ``None``/empty model, or one not present in the endpoint's
+        ``available_models``, is ignored (falls back to the endpoint default).
+        """
+        model = str(model or "").strip()
+        available = getattr(self._endpoint, "available_models", None) or []
+        if model and available and model not in available:
+            log_debug(
+                f"[cortex_bridge:{self._endpoint.name}] scope model "
+                f"'{model}' not in available_models -- ignoring override"
+            )
+            model = ""
+        previous = self._scope_model_override
+        self._scope_model_override = model or None
+        try:
+            yield
+        finally:
+            self._scope_model_override = previous
+
     async def generate_response(self, messages: list[dict[str, Any]] | Any) -> str:
         """Forward ``messages`` to the external endpoint and return the response text.
 
@@ -719,7 +753,7 @@ class ExternalCortexEngine(AIPluginBase):
             prompt_extra_kwargs = self._tool_api_kwargs(messages)
             msg_list = self._build_messages(messages)
 
-        model = self._endpoint.default_model
+        model = self._scope_model_override or self._endpoint.default_model
         if not model and self._endpoint.available_models:
             model = self._endpoint.available_models[0]
         self._last_response_metadata = {}
