@@ -387,6 +387,17 @@ curl -X POST http://localhost:11435/api/chat \
 
 ## 10. Documentation
 
+### Wiki synchronization
+
+When asked to update the exported repository wiki, follow
+`docs/WIKI_MAINTENANCE.md`.
+
+Treat the requested Git range as the change scope, current source and tests as
+implementation evidence, and `docs/wiki/` as the structural baseline. Do not
+regenerate the export unless explicitly requested. Patch affected pages in both
+wiki trees where applicable, apply the documented metadata rules, validate
+links and references, and report the resulting wiki diff.
+
 Update documentation when a change affects:
 
 - public behavior;
