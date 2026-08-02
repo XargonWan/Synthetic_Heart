@@ -1,0 +1,6 @@
+- Configuration keys are declared by calling `config_registry.get_var(key, default, label=..., description=..., group=..., component=..., value_type=...)` at module top-level, never read directly from env or DB.
+- Each config definition carries rich metadata (`label`, `description`, `group`, `component`, `tags`, `constraints`, `hidden`, `readonly`, `allow_env_override`) so the WebUI can render a unified settings dashboard.
+- Runtime updates go through `config_registry.set_value(key, new_value)` which persists to DB, invokes registered setters/listeners, and optionally triggers component reloads via `needs_component_reload`.
+- Cortex scope values are stored as either a bare engine name string (legacy) or a compact JSON object `{"engine": ..., "model": ...}`, parsed/serialized through `parse_cortex_scope_value` / `serialize_cortex_scope_value` for backward compatibility.
+- Optional third-party imports (aiomysql, dotenv, huggingface_hub) are wrapped in try/except blocks so the module remains importable in minimal environments, with clear error messages raised only at usage time.
+- Model registration follows a plugin-driven pattern: plugins import `MODEL_MANAGER` and call `MODEL_MANAGER.register(ModelSpec(...))` at import time; the manager holds a thread-safe dict keyed by `model_id`.

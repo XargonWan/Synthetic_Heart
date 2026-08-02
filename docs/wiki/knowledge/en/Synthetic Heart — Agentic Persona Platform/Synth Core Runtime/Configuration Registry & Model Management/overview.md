@@ -1,0 +1,1 @@
+Central configuration registry with environment/DB/default precedence and a downloadable model catalog manager that plugins use to register AI models for on-demand installation.

@@ -1,0 +1,1 @@
+Core runtime for SyntH's Rift Vessel embodiment: connector registry, session lifecycle with buffered lived experience, two-speed autonomy (will/action beats and motor tick), end-of-session diary compaction, and structural vessel-turn detection.

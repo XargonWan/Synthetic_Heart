@@ -1,0 +1,5 @@
+- Every broadcast method follows the same shape: a private `_broadcast(payload, label)` helper iterates `self._connections.items()`, calls `ws.send_json(payload)`, and logs failures via `log_warning` with a `[ClassName]` prefix.
+- Public configuration knobs are exposed through `register_exposed_var(...)` calls at module top-level with consistent fields (`label`, `default`, `value_type`, `ui_type`, `description`, `scope="core"`, `component="karada"`).
+- Database access uses lazy imports of `core.db.get_conn_ctx()` inside each async function rather than module-level imports, avoiding circular imports during startup.
+- Async background tasks are tracked via a module-level `set[asyncio.Task]` with `task.add_done_callback(set.discard)` to prevent garbage collection while keeping references weak after completion.
+- Error paths log at `log_debug`/`log_warning` level and never raise from I/O helpers; DB operations wrap commits in try/except blocks that silently swallow failures.

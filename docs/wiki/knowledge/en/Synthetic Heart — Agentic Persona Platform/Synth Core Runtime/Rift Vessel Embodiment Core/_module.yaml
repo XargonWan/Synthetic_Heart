@@ -1,0 +1,12 @@
+schema_version: 1
+module_path: core_runtime/vessel_system
+title: Rift Vessel Embodiment Core
+scope:
+    - core/vessel_beat.py
+    - core/vessel_diary_compactor.py
+    - core/vessel_focus.py
+    - core/vessel_registry.py
+    - core/vessel_session_manager.py
+source_files: []
+depends_on: []
+related_to: []

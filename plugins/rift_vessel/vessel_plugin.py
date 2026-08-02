@@ -737,7 +737,8 @@ class VesselPlugin(AIPluginBase):
             _act_elapsed_ms = (time.monotonic() - _act_started) * 1000.0
             log_info(
                 f"[vessel_plugin] act('{action}') dispatched via '{name}' in "
-                f"{_act_elapsed_ms:.0f} ms"
+                f"{_act_elapsed_ms:.0f} ms (ok={getattr(result, 'ok', None)}, "
+                f"detail={getattr(result, 'detail', None)!r})"
             )
             if not isinstance(result, VesselActionResult):
                 # Be permissive: connectors that return a bool/dict get wrapped.
@@ -1530,19 +1531,18 @@ class VesselPlugin(AIPluginBase):
             connect_schema["description"] = (
                 "Enter (connect to) an external game/virtual world to embody "
                 "your presence there. Choose the world via the 'game' field. "
-                f"Available games: {games}. Optionally override the world "
-                "server address for this connect only via 'host' and 'port' "
-                "(the configured defaults are used otherwise). Once connected, "
+                f"Available games: {games}. Use the configured server address; "
+                "do not invent or override a host or port. Once connected, "
                 "the world's own actions (say/move/look/use/attack/follow/…) "
                 "become available and this action disappears until you "
                 "disconnect."
             )
             connect_schema["required_fields"] = ["game"]
-            optional = list(connect_schema.get("optional_fields") or [])
-            for extra in ("host", "port"):
-                if extra not in optional:
-                    optional.append(extra)
-            connect_schema["optional_fields"] = optional
+            # Host/port overrides remain accepted by the backend for explicit
+            # API/CLI callers, but are deliberately not exposed to the LLM.
+            # Otherwise a provider name or URL in the cortex context can be
+            # hallucinated as a Minecraft endpoint (e.g. rift.venice.ai).
+            connect_schema["optional_fields"] = []
             connect_schema["game_choices"] = enabled
             # The entry point must stay visible on *every* turn (not just
             # Vessel turns) so Synth can decide to enter a world — tag it

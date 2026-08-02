@@ -1,0 +1,49 @@
+schema_version: 1
+module_path: ""
+title: Synthetic Heart — Agentic Persona Platform
+scope:
+    - README.md
+    - main.py
+    - pyproject.toml
+    - Dockerfile
+    - docker-compose.yml
+    - .github/
+    - config/
+    - providers/
+    - scripts/
+    - tools/
+    - automation_tools/
+    - webtop/
+    - skins/
+    - .dockerignore
+    - .eslintignore
+    - .eslintrc.json
+    - .gitattributes
+    - .gitignore
+    - .htmlhintrc
+    - .mcp.json
+    - .python-version
+    - .readthedocs.yml
+    - AGENTS.md
+    - CHANGELOG.md
+    - CLAUDE.md
+    - FIXED_ISSUES.md
+    - GitVersion.yml
+    - LICENSE
+    - LICENSE_ADDENDUM.md
+    - LICENSE_EXTERNAL.md
+    - init-db.sql
+    - kronos-task.md
+    - mypy.ini
+    - package-lock.json
+    - package.json
+    - pytest.ini
+    - run_tests.py
+    - run_tests.sh
+    - start_synth.ps1
+    - synth
+    - synth.sh
+    - uv.lock
+source_files: []
+depends_on: []
+related_to: []

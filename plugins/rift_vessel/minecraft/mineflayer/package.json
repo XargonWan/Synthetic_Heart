@@ -5,10 +5,10 @@
   "description": "SyntH Rift Vessel Minecraft bridge — self-contained Node runtime shipped inside the plugin package.",
   "main": "minecraft_bridge.js",
   "dependencies": {
-    "mineflayer": "^4.20.0",
-    "mineflayer-pathfinder": "^2.4.5",
-    "minecraft-data": "^3.78.0",
+    "minecraft-data": "^3.111.0",
+    "mineflayer": "^4.37.1",
     "mineflayer-auto-eat": "^3.3.6",
-    "mineflayer-collectblock": "^1.4.1"
+    "mineflayer-collectblock": "^1.4.1",
+    "mineflayer-pathfinder": "^2.4.5"
   }
 }

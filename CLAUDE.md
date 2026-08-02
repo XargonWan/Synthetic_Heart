@@ -1,6 +1,6 @@
 # CLAUDE.md — Synthetic Heart (SyntH)
 
-Read and follow the full project reference in `AGENTS.md`. Consult `docs/` as needed for deep-dives on specific subsystems.
+Read and follow the repository operating rules in `AGENTS.md`. For architecture and subsystem discovery, use the wiki export under `docs/wiki/`; use maintained documentation under `docs/` and component guides for authoritative user/developer guidance.
 
 ## Role
 
@@ -17,12 +17,12 @@ You are a Senior Python Architect working on SyntH, a modular AI persona system.
 uv run ruff format .
 uv run ruff check --fix .
 uv run ty check path/to/files_you_edited.py   # scoped — never the whole repo
-uv run pytest tests/test_<area_you_touched>.py   # scoped — NEVER the bare full suite (see AGENTS.md §9)
+uv run pytest tests/test_<area_you_touched>.py   # focused by default; see AGENTS.md §9
 ```
 
 Fix failures before moving on.
 
-**Never run a bare `uv run pytest`:** it takes ~5 minutes, has ~3 known order-dependent failures (`config_registry` pollution, AGENTS.md §12), and `tests/plugins/test_selenium_ttsfree.py` fails at collection because Selenium is not installed in this workspace. Run only the tests covering your change; if a full sweep is explicitly requested, add `--ignore=tests/plugins/test_selenium_ttsfree.py`.
+**Prefer focused tests:** a bare `uv run pytest` takes roughly five minutes and may encounter known order-dependent failures (`config_registry` pollution); `tests/plugins/test_selenium_ttsfree.py` also fails at collection when Selenium is unavailable. Run tests covering the change during development. For broad changes or an explicitly requested full sweep, follow `AGENTS.md` §9 and report unrelated failures; where Selenium is unavailable, add `--ignore=tests/plugins/test_selenium_ttsfree.py`.
 
 ## Git & Commits
 
@@ -36,7 +36,7 @@ Fix failures before moving on.
 - **Type hints required** on all Python functions (params + return).
 - **Cross-platform:** Linux-container-first. Platform-specific code only as a guarded secondary path (`sys.platform`).
 - **Docs:** if your change warrants it, update `docs/` (Sphinx, ReadTheDocs format, English).
-- **Document unknown issues:** If you encounter a bug, recurring error, or non-obvious workaround that isn't already in `AGENTS.md` §12, append an entry before ending your session. Do not fix it unless asked — just document it so future agents don't waste tokens rediscovering it.
+- **Document recurring issues:** If you encounter a genuinely recurring, non-obvious defect or workaround, record it in the repository's established issue/changelog location. Do not turn `AGENTS.md` into an issue log, and do not fix unrelated issues unless asked.
 
 ## Key Paths
 
@@ -138,7 +138,7 @@ one call. Only use `cortex_read` when you need to see the literal prompt text.
 
 ### synth-langfuse — full-verbosity trace payloads
 
-In-repo server (`mcp_servers/synth_langfuse.py`); credentials come from this workspace's `.env`. Use it whenever you need the **actual prompt/response text** of a trace — the third-party `langfuse` server's `get_trace_detail` strips payloads entirely and `get_observations` caps them at 2000 chars, and `cortex_api.log` never contains the system prompt at all (see AGENTS.md §12).
+In-repo server (`mcp_servers/synth_langfuse.py`); credentials come from this workspace's `.env`. Use it whenever you need the **actual prompt/response text** of a trace — the third-party `langfuse` server's `get_trace_detail` strips payloads entirely and `get_observations` caps them at 2000 chars, and `cortex_api.log` never contains the system prompt at all.
 
 | Tool | What it shows |
 |------|--------------|
@@ -163,7 +163,7 @@ Full reference in the GitNexus section below.
 
 Use the `affine` MCP tools to read project plans, roadmap pages, meeting notes, and task status before starting any significant feature work. Write to the board only when explicitly asked.
 
-Credentials are in `~/.config/affine-mcp/config` (per-machine, not in repo). Setup instructions in `AGENTS.md` §8a.
+Credentials are in `~/.config/affine-mcp/config` (per-machine, not in repo). Follow the access and write policy in `AGENTS.md` §12.
 
 ## Debugging SOP
 
@@ -183,10 +183,10 @@ Always follow this order — it prevents reading code you don't need:
 - Don't explore `.venv/` — enormous (torch, torchaudio etc.), never relevant
 - Don't read `logs/*.wav` — binary audio test fixtures
 - Don't grep across `plugins/` (40 files) — use `gitnexus_query` instead
-- Don't read all of `init-db.sql` — grep for the specific `CREATE TABLE <name>`, or see AGENTS.md §13
+- Don't read all of `init-db.sql` — grep for the specific `CREATE TABLE <name>`, or consult `docs/wiki/en/content/Database Design.md`
 - Don't read full active `synth.log` — it rotates constantly, use MCP tools
 - Don't run `uv run ty check .` on the whole repo — scope to edited files only
-- Don't run the full pytest suite — ~5 min, known unrelated failures; scope to the tests for what you touched (AGENTS.md §9)
+- Prefer focused pytest runs during development; use the wider relevant suite for broad changes as required by `AGENTS.md` §9
 
 ## Architecture TL;DR
 
@@ -195,9 +195,9 @@ Always follow this order — it prevents reading code you don't need:
 - **Plugins** subclass `PluginBase` or `AIPluginBase`. Removing one never breaks the system.
 - **Interfaces** (Telegram, Discord, Matrix) forward I/O into the chain. Never bypass it.
 - **Animations** use logical state names (`think`, `write`, `idle`), never raw file paths.
-- **Karada state server is the single source of truth** for all avatar state (animation, face, expressions, audio/speaking). Clients (WebUI, future Android/XR) are passive receivers. To make the avatar speak, call `await get_karada_state_server().broadcast_audio(...)` — plugins must NEVER iterate client connections. See AGENTS.md §7.
+- **Karada state server is the single source of truth** for all avatar state (animation, face, expressions, audio/speaking). Clients (WebUI, future Android/XR) are passive receivers. To make the avatar speak, call `await get_karada_state_server().broadcast_audio(...)` — plugins must NEVER iterate client connections. See `AGENTS.md` §4.
 
-See `AGENTS.md` for the full architecture reference, animation system details, plugin contracts, and container/infra notes.
+See `AGENTS.md` for durable architecture constraints and component contracts. Use `docs/wiki/en/content/` for architecture orientation, `docs/wiki/knowledge/en/` for generated subsystem detail, and source/tests as final evidence.
 
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence

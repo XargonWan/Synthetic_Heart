@@ -1,0 +1,1 @@
+Environment variables drive both subsystems: `SYNTH_MODELS_DIR` sets the model cache root (default `~/.cache/synth/models`); `.env` at `/app/.env` is loaded via `load_dotenv(dotenv_path="/app/.env", override=False)` at module import. Model downloads require `huggingface_hub` installed (`uv add huggingface_hub` is logged on missing import).

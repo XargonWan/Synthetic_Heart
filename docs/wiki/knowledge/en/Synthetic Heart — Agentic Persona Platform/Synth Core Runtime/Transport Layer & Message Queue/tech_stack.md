@@ -1,0 +1,1 @@
+Python asyncio `PriorityQueue` for the message bus, `json.JSONDecoder.raw_decode` plus the third-party `json_repair` library for LLM output recovery, and direct `python-telegram-bot` style `bot.send_*` calls for outbound media.

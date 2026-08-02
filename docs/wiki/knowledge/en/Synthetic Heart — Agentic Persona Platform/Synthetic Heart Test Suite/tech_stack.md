@@ -1,0 +1,1 @@
+pytest with Python 3.8+, uv for dependency management, Playwright for e2e specs, and unittest for legacy smoke tests; optional mocks for telegram, dotenv, and aiomysql injected through `sys.modules` stubs.

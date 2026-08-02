@@ -2288,16 +2288,33 @@ async def run_corrector_middleware(
                     f"[corrector_middleware] Added full action schema for {attempted_action_info['action_type']}"
                 )
 
-            # Add required format examples — use concrete interface name when known
+            # Add required format examples — use concrete interface name when known.
+            # Vessel is an internal world channel, not a conventional
+            # ``message_<interface>`` interface.  The old generic example
+            # therefore produced ``message_vessel``, which is not registered;
+            # a correction response was silently dropped even after the game
+            # actions themselves had succeeded.
             iface_label = originating_interface or "<interface>"
+            correction_action_type = f"message_{iface_label}"
+            correction_payload_fields: dict[str, Any] = {
+                "text": "Your message content here (optional - only if you want to reply to user)",
+                "interface_path": f"{iface_label}/{chat_id or '<chat_id>'}/{payload_thread_id if payload_thread_id is not None else ''}",
+            }
+            if iface_label == "vessel":
+                world = ""
+                chat_parts = str(chat_id or "").split("/")
+                if len(chat_parts) >= 2 and chat_parts[0] == "vessel":
+                    world = chat_parts[1].strip()
+                if world:
+                    correction_action_type = f"vessel_{world}_say"
+                    correction_payload_fields = {
+                        "text": "Your message content here (optional - only if you want to reply to the player)",
+                    }
             correction_payload["system_message"]["required_format"] = {
                 "actions": [
                     {
-                        "type": f"message_{iface_label}",
-                        "payload": {
-                            "text": "Your message content here (optional - only if you want to reply to user)",
-                            "interface_path": f"{iface_label}/{chat_id or '<chat_id>'}/{payload_thread_id if payload_thread_id is not None else ''}",
-                        },
+                        "type": correction_action_type,
+                        "payload": correction_payload_fields,
                     }
                 ]
             }

@@ -1,0 +1,6 @@
+- All database operations go through `core.db.get_conn_ctx()` async context manager and wrap queries in try/except blocks that log via `log_debug`/`log_warning`/`log_error` rather than raising.
+- Module-level configuration variables are declared by calling `register_exposed_var` from `core.variables_engine` with explicit `scope`, `component`, `label`, `default`, `value_type`, and optional `ui_type`/`advanced` fields.
+- Heavy or cross-cutting dependencies are imported lazily inside functions (e.g. `from core.chat_history_cache import ...`) to break circular imports between core modules.
+- Vessel perception detection uses structural metadata flags (`metadata.vessel_perception`, `metadata.vessel_event_type.endswith('_beat')`) rather than keyword matching on message text, following the project rule of multi-language safety.
+- Message objects are normalized to a common dict shape with keys `text`, `sender_name`, `sender_id`, `timestamp`, `interface_path`, and optional `metadata`, regardless of whether they originate from in-memory deques or DB rows.
+- Deduplication of history entries is performed by computing a SHA-256 hash of whitespace-normalized lowercased text and skipping duplicates within a single prompt build.

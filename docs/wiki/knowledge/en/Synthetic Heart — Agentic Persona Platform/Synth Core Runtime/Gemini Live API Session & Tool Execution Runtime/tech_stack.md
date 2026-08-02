@@ -1,0 +1,1 @@
+Python asyncio with the `google-genai` SDK (v1alpha) for Gemini Live WebSocket streaming; PCM audio at 16kHz mono input / 24kHz output; uses `TimestampedRotatingFileHandler` for log rotation; integrates with the existing `core.config_manager` for feature flags (affective dialog, proactive audio, thinking level, voice name).

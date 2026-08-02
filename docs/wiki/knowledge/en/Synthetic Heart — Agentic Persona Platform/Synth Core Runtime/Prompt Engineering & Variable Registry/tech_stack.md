@@ -1,0 +1,1 @@
+Python dataclasses for the `PromptRequest` schema; `pypdf` for PDF text/form extraction; regex-based parsing for turn history and memory formatting; `config_registry` for variable persistence and UI wiring; no external LLM SDKs are imported directly — renderers produce plain dicts/lists consumed by higher-level engine code.

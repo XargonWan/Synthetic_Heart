@@ -1,0 +1,1 @@
+Importing `core.llm_registry` intentionally raises `RuntimeError` to block legacy usage; callers must switch to `core.cortex_registry`. Auto-registration is triggered via `auto_register_all_components()` which scans existing plugins/interfaces at startup.

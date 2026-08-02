@@ -323,18 +323,18 @@ The repo ships with a full AI agent setup out of the box. If you use Claude Code
 **One-time setup after cloning:**
 ```bash
 uv sync                   # installs all deps including the MCP server
-npx gitnexus analyze      # builds the code intelligence index (~1-2 min)
+GITNEXUS_HOME=.gitnexus-home npx gitnexus analyze --skip-agents-md
 ```
 
 **What you get automatically:**
 
 - **`synth-logs` MCP server** (`mcp_servers/synth_logs.py`) — gives AI agents structured access to all log files across rotations. Instead of reading raw log files, agents can call `get_recent_errors()`, `search_logs()`, and `tail_log()` directly. Logs rotate fast in DEBUG mode (2000 lines), so this saves a lot of manual hunting.
 
-- **GitNexus code intelligence** — pre-configured in `.mcp.json` and `.vscode/mcp.json`. Gives agents a queryable map of the codebase: callers, callees, execution flows, and safe rename/refactor operations. Run `npx gitnexus analyze` to build or refresh the index after large changes.
+- **GitNexus code intelligence** — pre-configured in `.mcp.json` and `.vscode/mcp.json`. Gives agents a queryable map of the codebase: callers, callees, execution flows, and safe rename/refactor operations. Use the workspace-local analysis command above to build or refresh the index after large changes. PowerShell users should first run `$env:GITNEXUS_HOME = ".gitnexus-home"`, then `npx gitnexus analyze --skip-agents-md`.
 
-Both servers are pre-configured for **Claude Code** (`.mcp.json`) and **VS Code Copilot** (`.vscode/mcp.json`). No manual setup beyond the two commands above.
+Both servers are pre-configured for **Claude Code** (`.mcp.json`) and **VS Code Copilot** (`.vscode/mcp.json`). No additional service configuration is required after dependency sync and index creation.
 
-**`AGENTS.md`** is the canonical reference for any AI agent working on this codebase — architecture overview, plugin contracts, DB schema, config keys, known issues, and debugging SOP. Read it before starting a non-trivial task.
+**`AGENTS.md`** contains the repository-wide operating rules and durable architecture constraints for coding agents. The exported knowledge base under **`docs/wiki/`** provides architecture and subsystem discovery; maintained documentation under **`docs/`**, component guides, source code, and tests establish current behavior. Read `AGENTS.md` before starting a non-trivial task, then load only the documentation relevant to that work.
 
 ---
 

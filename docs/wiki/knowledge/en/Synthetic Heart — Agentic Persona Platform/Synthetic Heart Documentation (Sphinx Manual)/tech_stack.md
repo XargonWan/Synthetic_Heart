@@ -1,0 +1,1 @@
+Sphinx >=7.0 with sphinx-rtd-theme >=2.0, myst-parser >=2.0, and standard extensions (autodoc, napoleon, viewcode, graphviz).

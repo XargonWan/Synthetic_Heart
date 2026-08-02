@@ -1,0 +1,38 @@
+{
+  "$schema": "https://app.kilo.ai/config.json",
+  "mcp": {
+    "gitnexus": {
+      "type": "local",
+      "command": ["npx", "gitnexus", "mcp"],
+      "environment": {
+        "GITNEXUS_HOME": ".gitnexus-home"
+      },
+      "enabled": true
+    },
+    "synth-logs": {
+      "type": "local",
+      "command": ["uv", "run", "python", "mcp_servers/synth_logs.py"],
+      "enabled": true
+    },
+    "synth-db": {
+      "type": "local",
+      "command": ["uv", "run", "python", "mcp_servers/synth_db.py"],
+      "enabled": true
+    },
+    "synth-cortex": {
+      "type": "local",
+      "command": ["uv", "run", "python", "mcp_servers/synth_cortex.py"],
+      "enabled": true
+    },
+    "synth-langfuse": {
+      "type": "local",
+      "command": ["uv", "run", "python", "mcp_servers/synth_langfuse.py"],
+      "enabled": true
+    },
+    "affine": {
+      "type": "local",
+      "command": ["affine-mcp"],
+      "enabled": true
+    }
+  }
+}

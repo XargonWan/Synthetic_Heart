@@ -25,7 +25,10 @@ source_suffix = {
 }
 
 templates_path = ["_templates"]
-exclude_patterns = []
+# Qoder's repository wiki is committed under ``docs/wiki`` for agent
+# navigation, but it is a separate generated export rather than Sphinx source.
+# Its exporter-specific links and Mermaid fences are not valid manual inputs.
+exclude_patterns = ["wiki/**"]
 
 html_theme = "sphinx_rtd_theme"
 html_static_path = ["_static"]

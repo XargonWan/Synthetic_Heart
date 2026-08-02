@@ -1,0 +1,1 @@
+Async MySQL via `aiomysql` with `get_conn_ctx()` from `core.db`; JSON-persisted `experience_buffer` column in `vessel_sessions`; chunked LLM summarisation through a pluggable Cortex engine resolved via `core.cortex_registry` scoped to `"vessel"`; configurable chunk sizing via `VESSEL_DIARY_CHUNK_ITEMS` / `VESSEL_DIARY_CHUNK_CHARS`.

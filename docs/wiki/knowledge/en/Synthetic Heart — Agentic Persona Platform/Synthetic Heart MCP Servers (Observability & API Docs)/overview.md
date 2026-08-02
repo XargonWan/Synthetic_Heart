@@ -1,0 +1,1 @@
+Collection of Model Context Protocol servers that expose Synthetic Heart's logs, databases, Langfuse traces, LLM failure log, and xAI/Grok API documentation to AI agents via stdio.
