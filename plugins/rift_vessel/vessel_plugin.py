@@ -319,6 +319,94 @@ config_registry.get_value(
     advanced=True,
 )
 config_registry.get_value(
+    "VESSEL_GOAL_DEBRIEF_ENABLED",
+    True,
+    value_type=bool,
+    label="Autonomous Goal Debrief",
+    description=(
+        "When enabled, a slow postflight check supervises Synth's single active "
+        "goal: it deterministically marks a goal complete when it is already "
+        "satisfied by what Synth holds or sees (closing the gap where Synth "
+        "progresses physically but never declares a goal done), and — when a "
+        "goal sits unchanged for too many checks — nudges the next will beat to "
+        "reconsider it. Structural only (never reads goal text as intent); "
+        "never runs a cognition turn or writes a diary. Only used when "
+        "Autonomous In-World Play is enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_GOAL_DEBRIEF_USE_HISTORY",
+    True,
+    value_type=bool,
+    label="Autonomous Goal Debrief — History Check",
+    description=(
+        "When enabled, and the fast inventory/world-state check did not already "
+        "satisfy the goal, the debrief also consults the session's own in-world "
+        "activity history and auto-completes the goal when a successful action "
+        "actually taken this session structurally matches the goal's concrete "
+        "target (e.g. placing/mining a block, killing a mob, crafting an item). "
+        "This closes the gap where a goal is fulfilled by an action that leaves "
+        "no lasting inventory trace. Purely structural (id-based matching on the "
+        "logged targets), never a text parse. Only used when Autonomous In-World "
+        "Play and the Autonomous Goal Debrief are both enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_GOAL_DEBRIEF_INTERVAL_SEC",
+    30,
+    value_type=int,
+    label="Autonomous Goal Debrief Interval (s)",
+    description=(
+        "Seconds between goal-debrief checks (clamped to 5–3600). Each check "
+        "compares the active goal against the live world/inventory to auto-"
+        "complete it, and advances the stall counter. Only used when Autonomous "
+        "In-World Play and the Autonomous Goal Debrief are both enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_GOAL_DEBRIEF_STALL_TICKS",
+    4,
+    value_type=int,
+    label="Autonomous Goal Debrief Stall Ticks",
+    description=(
+        "How many consecutive debrief checks a goal may stay unchanged "
+        "(same id, step and update time) before the debrief arms a stall cue "
+        "on the next will beat, prompting Synth to reconsider or change "
+        "approach (clamped to 2–100). Only used when Autonomous In-World Play "
+        "and the Autonomous Goal Debrief are both enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_CRAFT_CUE_TURNS",
+    15,
+    value_type=int,
+    label="Craft Shortfall Cue Turns",
+    description=(
+        "When a craft fails because Synth lacks the materials, the will/action "
+        "beats show a 'you wished to build X, you need have/need <material>' "
+        "hint so Synth gathers the missing intermediate item (e.g. planks) "
+        "before retrying. This sets how many turns that hint stays shown before "
+        "it self-clears (clamped to 1–200). The hint also clears early once the "
+        "missing material is obtained. Only used when Autonomous In-World Play "
+        "is enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
     "VESSEL_MOTOR_ENABLED",
     True,
     value_type=bool,

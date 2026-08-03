@@ -173,6 +173,17 @@ class VesselInterface:
         # sustained damage stream (e.g. lava) does not enqueue an appraisal on
         # every tick. Monotonic clock; structural, never keyword logic.
         self._last_appraisal_at: float = 0.0
+        # Goal debrief bookkeeping. A slow postflight supervisor that watches
+        # the single active vessel goal (see core.vessel_goal_debrief and
+        # AGENTS.md §5c): it (B) auto-closes a goal the world reports already
+        # satisfied by the live state, and (A) surfaces a structural stall cue
+        # for the next will beat when a goal sits unchanged for several ticks.
+        # ``_last_goal_debrief_at`` paces the check; ``_goal_debrief_stall``
+        # holds the caller-owned {"sig", "count"} progress fingerprint; the flag
+        # arms the stall cue read by the will beat. All structural, no keywords.
+        self._last_goal_debrief_at: float = 0.0
+        self._goal_debrief_stall: dict[str, Any] = {"sig": None, "count": 0}
+        self._goal_debrief_cue_armed: bool = False
         # Disconnect-grace bookkeeping: environment -> monotonic timestamp when
         # its connector was first observed no longer ``is_connected`` while a
         # session was still active. Once the grace window elapses the session is
@@ -1192,6 +1203,11 @@ class VesselInterface:
                 # Concrete-doing cognition: map the free-text goal onto a real
                 # verb (gather/craft/place) — what actually accomplishes work.
                 await self._maybe_run_action_beat()
+                # Goal supervision (slow postflight): deterministically close a
+                # goal already satisfied by the live world/inventory, and arm a
+                # will-beat cue when a goal has sat unchanged too long. Closes
+                # the gap where Synth progresses physically but never completes.
+                await self._maybe_run_goal_debrief()
                 await self._maybe_run_motor_tick()
             except asyncio.CancelledError:
                 raise
@@ -1393,6 +1409,21 @@ class VesselInterface:
         if interface_path is None:
             return
 
+        # If the goal debrief armed a stall cue, surface it on this turn's world
+        # state so ``build_will_prompt`` can nudge Synth to reconsider a goal
+        # that has sat unchanged (e.g. one already completable with what it
+        # holds). Consumed once — disarm after arming the flag on ``extra``.
+        if self._goal_debrief_cue_armed:
+            try:
+                from core.vessel_goal_debrief import STALL_FLAG_KEY
+
+                extra = getattr(world_state, "extra", None)
+                if isinstance(extra, dict):
+                    extra[STALL_FLAG_KEY] = True
+            except Exception:  # pragma: no cover - defensive
+                pass
+            self._goal_debrief_cue_armed = False
+
         prompt = vessel_beat.build_will_prompt(world_state, world)
         self._last_will_beat_at = now
         log_debug(
@@ -1486,6 +1517,140 @@ class VesselInterface:
             environment=world,
             event_type="action_beat",
         )
+
+    async def _maybe_run_goal_debrief(self) -> None:
+        """Supervise the single active vessel goal (slow postflight check).
+
+        A world-agnostic debrief (see ``core.vessel_goal_debrief`` and AGENTS.md
+        §5c) that closes the gap where Synth *progresses physically but never
+        completes a goal*. It runs on its own slow cadence and does two things,
+        both purely **structural** (never keyword/text intent detection):
+
+        * **(B) Auto-completion.** Ask the connector whether the active goal is
+          already satisfied by the live world/inventory
+          (``evaluate_goal_completion``). If so, close it via the world's
+          ``complete_active_goal`` hook — the deterministic outcome check the
+          cognitive beats were failing to make.
+        * **(A) Stall feedback.** Fingerprint the goal (id + step + updated_at);
+          when it sits unchanged for ``VESSEL_GOAL_DEBRIEF_STALL_TICKS`` checks,
+          arm a stall cue so the next will beat nudges Synth to reconsider the
+          goal (is it already done? change approach?).
+
+        Fully guarded so a failure never breaks the scheduler. Gated on
+        ``VESSEL_GOAL_DEBRIEF_ENABLED`` + a session active + the configured
+        interval elapsed. Fast Lane only — it never enqueues a cognition turn or
+        writes a diary; the auto-close is a direct goal-store write.
+        """
+        try:
+            from core import vessel_goal_debrief as vgd
+        except Exception:
+            return
+
+        def _cfg(key: str, default: Any) -> Any:
+            return config_registry.get_value(
+                key, default, group="vessel", component="vessel"
+            )
+
+        if not vgd.is_debrief_enabled(_cfg):
+            return
+
+        manager = get_vessel_session_manager()
+        if not manager.has_active_session():
+            return
+
+        now = asyncio.get_event_loop().time()
+        interval = vgd.resolve_debrief_interval(_cfg)
+        if now - self._last_goal_debrief_at < interval:
+            return
+        self._last_goal_debrief_at = now
+
+        world, world_state = await self._read_active_world_state()
+        if world is None or world_state is None:
+            return
+
+        connector = self._connected_connector(world)
+        if connector is None:
+            return
+
+        try:
+            goal = await connector.get_active_goal()
+        except Exception:
+            return
+        if not goal:
+            # No active goal to supervise — reset stall bookkeeping so a fresh
+            # goal starts its stall count clean.
+            self._goal_debrief_stall = {"sig": None, "count": 0}
+            return
+
+        # (B) Deterministic completion check against the live world/inventory.
+        try:
+            verdict = await connector.evaluate_goal_completion(goal, world_state)
+        except Exception:
+            verdict = {"satisfied": False}
+        if isinstance(verdict, dict) and verdict.get("satisfied"):
+            reason = str(verdict.get("reason") or "auto_completed")
+            try:
+                result = await connector.complete_active_goal(reason)
+            except Exception as exc:  # pragma: no cover - defensive
+                log_debug(f"[vessel_interface] goal debrief close failed: {exc}")
+                result = None
+            log_debug(
+                f"[vessel_interface] Goal debrief auto-completed goal for "
+                f"'{world}' (reason={reason}, item={verdict.get('item')}, "
+                f"result={result})"
+            )
+            # Goal closed — reset stall bookkeeping and disarm any stale cue.
+            self._goal_debrief_stall = {"sig": None, "count": 0}
+            self._goal_debrief_cue_armed = False
+            return
+
+        # (B2) History-based completion check. Many goals leave no inventory
+        # trace (placing a block, killing a mob, saying something), so the
+        # inventory verdict above never marks them done. Ask the world whether
+        # a *successful action actually taken this session* structurally
+        # matches the goal's concrete target (by canonical game id, never by
+        # parsing free text). Gated on VESSEL_GOAL_DEBRIEF_USE_HISTORY.
+        if vgd.is_debrief_history_enabled(_cfg) and hasattr(
+            connector, "evaluate_goal_completion_from_history"
+        ):
+            session_id, _path = self._resolve_session_for_environment(world)
+            if session_id:
+                try:
+                    hist = await connector.evaluate_goal_completion_from_history(
+                        goal, session_id, world_state
+                    )
+                except Exception:
+                    hist = {"satisfied": False}
+                if isinstance(hist, dict) and hist.get("satisfied"):
+                    reason = str(hist.get("reason") or "action_in_history")
+                    try:
+                        result = await connector.complete_active_goal(reason)
+                    except Exception as exc:  # pragma: no cover - defensive
+                        log_debug(
+                            f"[vessel_interface] goal debrief (history) close "
+                            f"failed: {exc}"
+                        )
+                        result = None
+                    log_debug(
+                        f"[vessel_interface] Goal debrief auto-completed goal "
+                        f"for '{world}' via history (reason={reason}, "
+                        f"event_type={hist.get('event_type')}, "
+                        f"item={hist.get('item')}, result={result})"
+                    )
+                    self._goal_debrief_stall = {"sig": None, "count": 0}
+                    self._goal_debrief_cue_armed = False
+                    return
+
+        # (A) Stall detection: fingerprint the goal and count unchanged checks.
+        stall_ticks = vgd.resolve_stall_ticks(_cfg)
+        stalled = vgd.update_stall_state(self._goal_debrief_stall, goal, stall_ticks)
+        if stalled:
+            self._goal_debrief_cue_armed = True
+            log_debug(
+                f"[vessel_interface] Goal debrief detected stall for '{world}' "
+                f"(sig={self._goal_debrief_stall.get('sig')}, "
+                f"count={self._goal_debrief_stall.get('count')}) — arming will cue"
+            )
 
     async def _maybe_run_damage_appraisal(self) -> None:
         """Enqueue a **post-damage appraisal** cognition turn when Synth is hurt.
@@ -2462,6 +2627,25 @@ class VesselInterface:
         except Exception as exc:
             log_debug(f"[vessel_interface] active world lookup failed: {exc}")
         return None, None
+
+    def _connected_connector(self, world: str) -> Any | None:
+        """Return the live, connected connector for ``world`` (or ``None``).
+
+        Resolves the built connector instance the same way
+        :meth:`_read_active_world_state` does. Fully guarded.
+        """
+        try:
+            from core.vessel_registry import VESSEL_REGISTRY
+
+            instances = getattr(VESSEL_REGISTRY, "_instances", {}) or {}
+            connector = instances.get(world)
+            if connector is not None and getattr(connector, "is_connected", False):
+                return connector
+        except Exception as exc:
+            log_debug(
+                f"[vessel_interface] connector lookup failed for '{world}': {exc}"
+            )
+        return None
 
     def _decision_interface_path(self, world: str) -> str | None:
         """Return the ``vessel/…`` path to attribute the beat to.

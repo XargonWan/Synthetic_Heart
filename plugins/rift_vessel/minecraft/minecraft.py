@@ -3253,6 +3253,283 @@ class MinecraftConnector(VesselConnectorBase):
         tz = int(pz + (dz / norm) * flee_dist)
         return await self.act("goto", {"x": tx, "y": int(py), "z": tz})
 
+    async def evaluate_goal_completion(
+        self, goal: Dict[str, Any] | None, world_state: WorldState | None
+    ) -> Dict[str, Any]:
+        """Judge whether ``goal`` is already satisfied by the live inventory.
+
+        World-owned half of the core goal debrief (see
+        ``core.vessel_goal_debrief`` and AGENTS.md §5c). A goal is considered
+        structurally satisfied when its free text names a concrete **target** or
+        **product** item and that exact game id is already present in the live
+        inventory in quantity >= 1:
+
+          * **Gather goals** (a natural block/entity target, e.g. *"gather oak
+            logs"*): the derived ``target_name`` — from the goal's explicit
+            field or :func:`target_names.derive_target` — sits in the inventory.
+          * **Craft/build goals** (a produced item, e.g. *"craft a crafting
+            table"*): any product id named in the goal text
+            (:func:`target_names.derive_products`) sits in the inventory.
+
+        This is the exact Minecraft-name exception the rest of this adapter
+        already relies on: matching against canonical game item ids is
+        structural, not natural-language intent detection. It never decides what
+        to do — only whether the goal's concrete outcome already exists. Fully
+        fail-safe: any error / no recognizable item → ``{"satisfied": False}``.
+        """
+        try:
+            if not isinstance(goal, dict) or world_state is None:
+                return {"satisfied": False}
+            extra = getattr(world_state, "extra", None) or {}
+            inv = extra.get("inventory_counts")
+            if not isinstance(inv, dict) or not inv:
+                return {"satisfied": False}
+
+            description = " ".join(
+                str(goal.get(field) or "") for field in ("description", "note")
+            ).strip()
+
+            # 1) Crafted/produced outcome already in inventory (craft/build goal).
+            for product in mc_target_names.derive_products(description):
+                try:
+                    if int(inv.get(product, 0)) >= 1:
+                        return {
+                            "satisfied": True,
+                            "reason": "product_in_inventory",
+                            "item": product,
+                        }
+                except (TypeError, ValueError):
+                    continue
+
+            # 2) Gather target already in inventory (explicit field, else derived).
+            target_name = goal.get("target_name")
+            if not target_name:
+                derived = mc_target_names.derive_target(description)
+                if derived:
+                    target_name = derived.get("target_name")
+            if isinstance(target_name, str) and target_name:
+                try:
+                    if int(inv.get(target_name, 0)) >= 1:
+                        return {
+                            "satisfied": True,
+                            "reason": "target_in_inventory",
+                            "item": target_name,
+                        }
+                except (TypeError, ValueError):
+                    pass
+
+            return {"satisfied": False}
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[minecraft] evaluate_goal_completion failed: {exc}")
+            return {"satisfied": False}
+
+    # Structural map: a goal target_kind → the successful action event_types
+    # that count as "the goal was reached by an action actually taken", plus the
+    # metadata payload keys that carry the acted-upon game id for that verb.
+    # These come straight from ``get_world_actions`` payload schemas (mine→target,
+    # collect_block→name, place/craft/smelt→item, attack/shoot→target). All are
+    # canonical Minecraft ids — the same explicitly-authorized id exception the
+    # rest of this adapter uses; never natural-language intent.
+    _HISTORY_BLOCK_EVENTS: tuple[str, ...] = (
+        "action_mine",
+        "action_collect_block",
+        "action_place",
+    )
+    _HISTORY_ENTITY_EVENTS: tuple[str, ...] = (
+        "action_attack",
+        "action_shoot",
+    )
+    _HISTORY_CRAFT_EVENTS: tuple[str, ...] = (
+        "action_craft",
+        "action_smelt",
+    )
+    _HISTORY_TARGET_KEYS: tuple[str, ...] = ("target", "name", "item")
+
+    async def evaluate_goal_completion_from_history(
+        self,
+        goal: Dict[str, Any] | None,
+        session_id: str | None,
+        world_state: WorldState | None = None,
+    ) -> Dict[str, Any]:
+        """Judge whether ``goal`` was reached by an action actually taken.
+
+        Complements :meth:`evaluate_goal_completion` (which reads only the live
+        inventory + world state). Many goals leave **no inventory trace** — you
+        place a block, kill a mob, or say something — so an inventory scan never
+        marks them done. This half inspects the session's ``vessel_activity_log``
+        (the structured audit of every outbound action) and confirms completion
+        when a **successful action row** exists whose logged metadata target id
+        matches the goal's concrete structural target:
+
+          * **block** target (mine/gather/place goals) → a logged
+            ``mine``/``collect_block``/``place`` on that exact block id;
+          * **entity** target (kill goals) → a logged ``attack``/``shoot`` on
+            that exact entity id;
+          * **crafted product** (from :func:`target_names.derive_products`) → a
+            logged ``craft``/``smelt`` of that exact item id.
+
+        Matching is purely structural, by canonical Minecraft id (the same
+        authorized id exception this adapter already uses) — it never parses the
+        goal's or the log's free text for intent. Fully fail-safe: any error /
+        no session / no recognizable target → ``{"satisfied": False}``.
+        """
+        try:
+            if not isinstance(goal, dict) or not session_id:
+                return {"satisfied": False}
+
+            description = " ".join(
+                str(goal.get(field) or "") for field in ("description", "note")
+            ).strip()
+
+            # Resolve the goal's concrete structural target(s): the explicit
+            # field first, else the id derived from the free text.
+            target_kind = goal.get("target_kind")
+            target_name = goal.get("target_name")
+            if not target_name:
+                derived = mc_target_names.derive_target(description)
+                if derived:
+                    target_kind = derived.get("target_kind")
+                    target_name = derived.get("target_name")
+
+            products = set(mc_target_names.derive_products(description))
+            wanted_block = (
+                target_name
+                if isinstance(target_name, str)
+                and target_name
+                and target_kind == "block"
+                else None
+            )
+            wanted_entity = (
+                target_name
+                if isinstance(target_name, str)
+                and target_name
+                and target_kind == "entity"
+                else None
+            )
+            if not (wanted_block or wanted_entity or products):
+                return {"satisfied": False}
+
+            from core.vessel_diary_compactor import load_activity_rows
+
+            rows = await load_activity_rows(session_id)
+            for row in rows:
+                event_type = row.get("event_type") or ""
+                meta = row.get("metadata") or {}
+                ids = {
+                    str(meta.get(key)).strip()
+                    for key in self._HISTORY_TARGET_KEYS
+                    if isinstance(meta.get(key), (str, int))
+                    and str(meta.get(key)).strip()
+                }
+                if not ids:
+                    continue
+                if (
+                    wanted_block
+                    and event_type in self._HISTORY_BLOCK_EVENTS
+                    and wanted_block in ids
+                ):
+                    return {
+                        "satisfied": True,
+                        "reason": "action_in_history",
+                        "event_type": event_type,
+                        "item": wanted_block,
+                    }
+                if (
+                    wanted_entity
+                    and event_type in self._HISTORY_ENTITY_EVENTS
+                    and wanted_entity in ids
+                ):
+                    return {
+                        "satisfied": True,
+                        "reason": "action_in_history",
+                        "event_type": event_type,
+                        "item": wanted_entity,
+                    }
+                if (
+                    products
+                    and event_type in self._HISTORY_CRAFT_EVENTS
+                    and (products & ids)
+                ):
+                    return {
+                        "satisfied": True,
+                        "reason": "action_in_history",
+                        "event_type": event_type,
+                        "item": sorted(products & ids)[0],
+                    }
+            return {"satisfied": False}
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(
+                f"[minecraft] evaluate_goal_completion_from_history failed: {exc}"
+            )
+            return {"satisfied": False}
+
+    async def get_active_goal(self) -> Dict[str, Any] | None:
+        """Return the active Minecraft goal from the scoped goal store."""
+        try:
+            return await mc_goals.get_active_goal()
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[minecraft] get_active_goal failed: {exc}")
+            return None
+
+    async def complete_active_goal(
+        self, reason: str = "auto_completed"
+    ) -> Dict[str, Any]:
+        """Mark the active Minecraft goal ``done`` via the scoped goal store."""
+        try:
+            note = f"[debrief] {reason}"
+            return await mc_goals.update_active_goal(
+                status=mc_goals.STATUS_DONE, note=note
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[minecraft] complete_active_goal failed: {exc}")
+            return {"status": "error", "message": str(exc)}
+
+    async def get_bases(self) -> list[Dict[str, Any]]:
+        """Return the bases (homes) Synth registered in this world.
+
+        Concretises the core :meth:`VesselConnectorBase.get_bases` hook by
+        delegating to the scoped Minecraft base store. Fail-safe: any error
+        degrades to an empty list.
+        """
+        try:
+            return await mc_bases.list_bases()
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[minecraft] get_bases failed: {exc}")
+            return []
+
+    async def get_active_quest(self) -> Dict[str, Any] | None:
+        """Return the active Ender Dragon questline milestone (reference only).
+
+        Concretises the core :meth:`VesselConnectorBase.get_active_quest` hook by
+        delegating to the scoped Minecraft questline store. The quest is a
+        *direction* Synth may bind its freely-authored goal to, never a script
+        (AGENTS.md §5c). Fail-safe: any error (or a disabled questline) degrades
+        to ``None``.
+        """
+        if not self._quests_enabled:
+            return None
+        try:
+            return await quests.get_active_quest()
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[minecraft] get_active_quest failed: {exc}")
+            return None
+
+    async def on_entity_killed(self, mob_kind: str) -> None:
+        """Advance the active quest's kill objective for a slain mob.
+
+        Concretises the core :meth:`VesselConnectorBase.on_entity_killed` hook.
+        Called when the bridge reports the bot killed an entity; forwards the
+        mob game id to the questline store's structural kill counter (e.g. the
+        Ender Dragon milestone). Fail-safe: any error is swallowed.
+        """
+        if not self._quests_enabled or not mob_kind:
+            return None
+        try:
+            await quests.record_kill(str(mob_kind))
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[minecraft] on_entity_killed failed: {exc}")
+        return None
+
     async def motor_step(self, goal: Dict[str, Any] | None) -> Dict[str, Any]:
         """Fast reflexive step toward the active goal — **no LLM, no cognition**.
 

@@ -408,6 +408,153 @@ class VesselConnectorBase(ABC):
         """
         return {"acted": False, "reason": "no_motorics"}
 
+    async def evaluate_goal_completion(
+        self, goal: Dict[str, Any] | None, world_state: "WorldState | None"
+    ) -> Dict[str, Any]:
+        """Judge whether ``goal`` is already **satisfied** by the world state.
+
+        This is the world-owned *judgement* half of the goal debrief (see
+        ``core.vessel_goal_debrief`` and AGENTS.md §5c). The core debrief calls
+        this on a slow timer with the active goal and the current
+        :class:`WorldState`; if the connector reports the goal already fulfilled
+        (e.g. the item Synth set out to craft is now sitting in the inventory),
+        the core closes the goal deterministically so it does not linger
+        ``active`` forever. Deciding *what counts as satisfied* — matching the
+        goal's structural ``target_name`` / description-derived items against the
+        live inventory or a scan — is a per-world detail and lives in the
+        adapter, which is why the matching is allowed to use that world's own
+        item/block ids (the no-keyword rule is about natural-language intent
+        detection, not structural game ids).
+
+        The reflex/debrief must never read the goal's free text for *intent*;
+        matching against concrete world item ids is structural and permitted.
+
+        Args:
+            goal: The active goal dict, or ``None``.
+            world_state: The current world state, or ``None``.
+
+        Returns:
+            A dict with at least ``{"satisfied": bool}``; may add a short
+            structural ``reason``. Optional override; defaults to
+            ``{"satisfied": False}`` so a world without a completion check never
+            auto-closes a goal (and never breaks the debrief).
+        """
+        return {"satisfied": False}
+
+    async def evaluate_goal_completion_from_history(
+        self,
+        goal: Dict[str, Any] | None,
+        session_id: str | None,
+        world_state: "WorldState | None" = None,
+    ) -> Dict[str, Any]:
+        """Judge whether ``goal`` was **achieved by actions taken this session**.
+
+        Second, history-based half of the goal debrief (see
+        ``core.vessel_goal_debrief`` and AGENTS.md §5c). The fast
+        :meth:`evaluate_goal_completion` only sees the *present* world/inventory,
+        so it can never confirm an objective whose outcome leaves no lasting
+        inventory trace — placing blocks, killing a mob, saying something,
+        travelling somewhere. This hook instead inspects the session's own
+        audit trail (``vessel_activity_log``) for a **structurally matching
+        successful action** toward the goal's concrete target and, if found,
+        reports the goal satisfied.
+
+        The matching is strictly structural — canonical game item/block ids and
+        logged ``event_type`` / ``metadata`` fields — never a natural-language
+        parse of the goal text or the log summary (the exact same game-id
+        exception :meth:`evaluate_goal_completion` relies on).
+
+        Args:
+            goal: The active goal dict, or ``None``.
+            session_id: The active vessel session id whose activity log to read,
+                or ``None``.
+            world_state: The current world state, or ``None`` (optional context).
+
+        Returns:
+            A dict with at least ``{"satisfied": bool}``; may add a short
+            structural ``reason``. Optional override; defaults to
+            ``{"satisfied": False}`` so a world without a history check never
+            auto-closes a goal (and never breaks the debrief). Must be
+            fully fail-safe.
+        """
+        return {"satisfied": False}
+
+    async def get_active_goal(self) -> Dict[str, Any] | None:
+        """Return the world's currently-active goal, or ``None``.
+
+        Read-only accessor the core goal debrief uses to fetch the goal to
+        supervise without knowing the world's goal-scope details. Optional
+        override; defaults to ``None`` (a world with no goal store never runs
+        the debrief). Fully fail-safe.
+        """
+        return None
+
+    async def complete_active_goal(
+        self, reason: str = "auto_completed"
+    ) -> Dict[str, Any]:
+        """Mark the world's active goal as done. Returns a small status dict.
+
+        The core goal debrief calls this (never the goal store directly) so the
+        world owns how a goal is scoped/closed. Optional override; defaults to a
+        no-op ``{"status": "noop"}``. Fully fail-safe.
+        """
+        return {"status": "noop"}
+
+    async def get_bases(self) -> List[Dict[str, Any]]:
+        """Return the bases (homes) Synth registered in this world.
+
+        A **base** is a place Synth chose to build, store resources, shelter,
+        sleep, or set its respawn — common to most game worlds, so the *store*
+        lives in the Rift Vessel core (:mod:`plugins.rift_vessel.vessel_bases`)
+        while a world resolves it through this hook with its own scope tuple
+        pinned. Read-only; used by the will/action/reflection prompts (so Synth
+        remembers its home) and by the night-retreat survival reflex (so it can
+        head home instead of walling itself in wherever it stands).
+
+        Each base is a dict as returned by
+        :func:`plugins.rift_vessel.vessel_bases.list_bases`
+        (``{id, name, kind, anchor, box, note, ...}``); ``anchor`` is a
+        structural ``{x, y, z}`` point. Optional override; defaults to ``[]``
+        (a world with no base store simply has no home). Fully fail-safe:
+        implementations must never raise (return ``[]`` on any error).
+        """
+        return []
+
+    async def get_active_quest(self) -> Dict[str, Any] | None:
+        """Return the world's currently-active quest (milestone), or ``None``.
+
+        A **quest** is a longer-arc, ordered milestone Synth is working toward
+        (e.g. one step of a Minecraft questline toward the Ender Dragon).
+        Having a sense of *direction* is common to most game worlds, so the
+        quest *store + mechanism* live in the Rift Vessel core
+        (:mod:`plugins.rift_vessel.vessel_quests`) while a world resolves the
+        active quest through this hook with its own scope tuple pinned and its
+        own questline content registered.
+
+        The returned dict is a quest as produced by
+        :func:`plugins.rift_vessel.vessel_quests.get_active_quest`
+        (``{quest_id, title, description, objectives, progress, ...}``). It is
+        surfaced to cognition **only as reference** (the will/action/reflection
+        prompts) — Synth still authors its own goal freely and may bind it to
+        the quest or not (the spontaneity rule). Optional override; defaults to
+        ``None`` (a world with no questline simply has no quest). Fully
+        fail-safe: implementations must never raise (return ``None`` on error).
+        """
+        return None
+
+    async def on_entity_killed(self, mob_kind: str) -> None:
+        """Notify the connector that Synth defeated an entity of ``mob_kind``.
+
+        The interface calls this when the world bridge reports a kill
+        attributed to Synth's body (a structural mob id, never free text). A
+        world with a questline uses it to advance any ``kill`` objective of the
+        active quest via
+        :func:`plugins.rift_vessel.vessel_quests.record_kill`. Optional
+        override; defaults to a no-op (a world with no kill-tracked quest simply
+        ignores it). Fully fail-safe: implementations must never raise.
+        """
+        return None
+
     @property
     def is_connected(self) -> bool:
         """Whether the connector currently holds a live world connection."""
