@@ -224,3 +224,190 @@ def test_base_progression_stage_default_is_none() -> None:
             return VesselActionResult(ok=True)
 
     assert _Bare().get_progression_stage() is None
+
+
+# ======================================================================
+# Core quest store (plugins/rift_vessel/vessel_quests.py)
+# ----------------------------------------------------------------------
+# The core store is Rift Vessel scope: a scope-aware ordered milestone
+# tracker + per-mob kill counter, surfaced as a reference direction (never a
+# script). These cover the PURE, DB-free helpers and the objective judge.
+# ======================================================================
+
+from plugins.rift_vessel.vessel_quests import (  # noqa: E402
+    OBJ_HAS_BASE,
+    OBJ_HAS_BED,
+    OBJ_HAVE_ITEM,
+    OBJ_KILL,
+    OBJ_REACH_DIMENSION,
+    STATUS_LOCKED,
+)
+from plugins.rift_vessel.vessel_quests import SCOPE_NONE as _Q_SCOPE_NONE  # noqa: E402
+from plugins.rift_vessel.vessel_quests import _clip as _q_clip  # noqa: E402
+from plugins.rift_vessel.vessel_quests import (  # noqa: E402
+    _coerce_int as _q_coerce_int,
+)
+from plugins.rift_vessel.vessel_quests import (  # noqa: E402
+    _coerce_objective as _q_coerce_objective,
+)
+from plugins.rift_vessel.vessel_quests import (  # noqa: E402
+    _coerce_objectives as _q_coerce_objectives,
+)
+from plugins.rift_vessel.vessel_quests import (  # noqa: E402
+    _coerce_scope as _q_coerce_scope,
+)
+from plugins.rift_vessel.vessel_quests import (  # noqa: E402
+    _row_to_quest as _q_row_to_quest,
+)
+from plugins.rift_vessel.vessel_quests import (  # noqa: E402
+    evaluate_quest_objectives,
+)
+
+
+def test_store_clip_trims_and_caps() -> None:
+    assert _q_clip("  hi  ", 10) == "hi"
+    assert _q_clip(None, 10) == ""
+    assert _q_clip("x" * 50, 8) == "x" * 8
+
+
+def test_store_coerce_scope_lowercases_and_defaults() -> None:
+    assert _q_coerce_scope("Minecraft") == "minecraft"
+    assert _q_coerce_scope("  ") == _Q_SCOPE_NONE
+    assert _q_coerce_scope(None) == _Q_SCOPE_NONE
+    assert len(_q_coerce_scope("a" * 200)) == 64
+
+
+def test_store_coerce_int_fail_safe() -> None:
+    assert _q_coerce_int("3") == 3
+    assert _q_coerce_int(None, default=1) == 1
+    assert _q_coerce_int("nope", default=5) == 5
+    assert _q_coerce_int(-4, default=1) == 1
+
+
+def test_store_coerce_objective_normalises_valid_kinds() -> None:
+    assert _q_coerce_objective(
+        {"kind": "have_item", "target": "Iron_Pickaxe", "count": 1}
+    ) == {"kind": "have_item", "target": "iron_pickaxe", "count": 1}
+    assert _q_coerce_objective({"kind": "has_base"}) == {
+        "kind": "has_base",
+        "target": None,
+        "count": 1,
+    }
+
+
+def test_store_coerce_objective_rejects_unknown_kind() -> None:
+    assert _q_coerce_objective({"kind": "eat_cookie"}) is None
+    assert _q_coerce_objective("nope") is None
+    assert _q_coerce_objective({}) is None
+
+
+def test_store_coerce_objectives_caps_and_filters() -> None:
+    raw = [{"kind": "kill", "target": "zombie"}, "bad", {"kind": "unknown"}]
+    assert _q_coerce_objectives(raw) == [
+        {"kind": "kill", "target": "zombie", "count": 1}
+    ]
+    assert _q_coerce_objectives("nope") == []
+    many = [{"kind": "kill", "target": f"m{i}"} for i in range(50)]
+    assert len(_q_coerce_objectives(many)) == 16
+
+
+def test_store_row_to_quest_tuple_row() -> None:
+    row = (
+        7,
+        "vessel",
+        "minecraft",
+        "none",
+        "first_base",
+        "Establish your first base",
+        "desc",
+        0,
+        STATUS_LOCKED,
+        '[{"kind": "has_base"}]',
+        "{}",
+    )
+    q = _q_row_to_quest(row)
+    assert q is not None
+    assert q["quest_id"] == "first_base"
+    assert q["objectives"] == [{"kind": "has_base", "target": None, "count": 1}]
+    assert q["progress"] == {}
+
+
+def test_store_row_to_quest_none_row() -> None:
+    assert _q_row_to_quest(None) is None
+
+
+def test_evaluate_empty_objectives_is_complete() -> None:
+    assert evaluate_quest_objectives({"objectives": []})["complete"] is True
+    assert evaluate_quest_objectives(None)["complete"] is False
+
+
+def test_evaluate_have_item() -> None:
+    quest = {
+        "objectives": [{"kind": OBJ_HAVE_ITEM, "target": "iron_pickaxe", "count": 1}]
+    }
+    assert evaluate_quest_objectives(quest, {"iron_pickaxe": 1})["complete"] is True
+    result = evaluate_quest_objectives(quest, {"iron_pickaxe": 0})
+    assert result["complete"] is False
+    assert result["pending"]
+
+
+def test_evaluate_have_item_count_threshold() -> None:
+    quest = {"objectives": [{"kind": OBJ_HAVE_ITEM, "target": "blaze_rod", "count": 6}]}
+    assert evaluate_quest_objectives(quest, {"blaze_rod": 5})["complete"] is False
+    assert evaluate_quest_objectives(quest, {"blaze_rod": 6})["complete"] is True
+
+
+def test_evaluate_reach_dimension() -> None:
+    quest = {"objectives": [{"kind": OBJ_REACH_DIMENSION, "target": "the_end"}]}
+    assert evaluate_quest_objectives(quest, {}, dimension="the_end")["complete"] is True
+    assert (
+        evaluate_quest_objectives(quest, {}, dimension="overworld")["complete"] is False
+    )
+
+
+def test_evaluate_has_base_and_has_bed() -> None:
+    base_q = {"objectives": [{"kind": OBJ_HAS_BASE}]}
+    assert evaluate_quest_objectives(base_q, {}, has_base=True)["complete"] is True
+    assert evaluate_quest_objectives(base_q, {}, has_base=False)["complete"] is False
+
+    bed_q = {"objectives": [{"kind": OBJ_HAS_BED}]}
+    assert evaluate_quest_objectives(bed_q, {}, has_bed=True)["complete"] is True
+    assert evaluate_quest_objectives(bed_q, {"bed": 1})["complete"] is True
+    assert evaluate_quest_objectives(bed_q, {})["complete"] is False
+
+
+def test_evaluate_kill_by_target() -> None:
+    quest = {
+        "objectives": [{"kind": OBJ_KILL, "target": "ender_dragon", "count": 1}],
+        "progress": {"kills": {"ender_dragon": 1}},
+    }
+    assert evaluate_quest_objectives(quest, {})["complete"] is True
+    quest["progress"] = {"kills": {"zombie": 3}}
+    assert evaluate_quest_objectives(quest, {})["complete"] is False
+
+
+def test_evaluate_kill_any_hostile_sums() -> None:
+    quest = {
+        "objectives": [{"kind": OBJ_KILL, "count": 3}],
+        "progress": {"kills": {"zombie": 2, "skeleton": 1}},
+    }
+    assert evaluate_quest_objectives(quest, {})["complete"] is True
+    quest["progress"] = {"kills": {"zombie": 1}}
+    assert evaluate_quest_objectives(quest, {})["complete"] is False
+
+
+def test_evaluate_multiple_objectives_all_required() -> None:
+    quest = {
+        "objectives": [
+            {"kind": OBJ_HAS_BASE},
+            {"kind": OBJ_HAVE_ITEM, "target": "iron_pickaxe", "count": 1},
+        ]
+    }
+    result = evaluate_quest_objectives(quest, {"iron_pickaxe": 1}, has_base=False)
+    assert result["complete"] is False
+    assert len(result["satisfied"]) == 1
+    assert len(result["pending"]) == 1
+    assert (
+        evaluate_quest_objectives(quest, {"iron_pickaxe": 1}, has_base=True)["complete"]
+        is True
+    )

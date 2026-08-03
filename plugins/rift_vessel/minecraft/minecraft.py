@@ -1120,7 +1120,21 @@ class MinecraftConnector(VesselConnectorBase):
             await asyncio.sleep(_POLL_INTERVAL_SEC)
 
     async def _dispatch_event(self, raw: Dict[str, Any]) -> None:
-        if not self._on_event or not isinstance(raw, dict):
+        if not isinstance(raw, dict):
+            return
+        # A `kill` event advances the questline's kill objectives (e.g. the
+        # Ender Dragon). Structural: the mob game id comes straight from the
+        # bridge, never a keyword scan. Fail-safe — a quest-store error must
+        # never stop the perception from reaching the chain.
+        if str(raw.get("event_type")) == "kill":
+            data = raw.get("data") or {}
+            mob = data.get("mob") if isinstance(data, dict) else None
+            if isinstance(mob, str) and mob:
+                try:
+                    await self.on_entity_killed(mob)
+                except Exception as exc:  # pragma: no cover - defensive
+                    log_debug(f"{LOG_PREFIX} kill objective advance failed: {exc}")
+        if not self._on_event:
             return
         try:
             event = PerceptionEvent(

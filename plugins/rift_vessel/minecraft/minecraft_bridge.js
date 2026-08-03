@@ -382,6 +382,39 @@ const DAMAGE_ATTRIBUTION_WINDOW_MS = 2500;
 let lastDeath = null;
 let deathCount = 0;
 
+// Tracks entities the bot recently attacked so a subsequent `entityGone`
+// (the entity was removed — i.e. it died) can be attributed as a *kill* by the
+// bot. Keyed by entity id → { name, at }. This is how the questline's kill
+// objective (e.g. the Ender Dragon) is advanced: the connector consumes the
+// resulting `kill` event and forwards the mob game id to the core quest store.
+// Structural only — the `name` is the entity's game id (mob type), never a
+// keyword scan of human language. Entries expire after KILL_ATTRIBUTION_WINDOW_MS
+// so an entity that merely wandered out of loaded range long after a hit is not
+// miscounted as a kill.
+/** @type {Map<number, { name: string, at: number }>} */
+const recentlyAttacked = new Map();
+const KILL_ATTRIBUTION_WINDOW_MS = 8000;
+
+// Normalise an entity's structural game id (mob type/name) for the kill event.
+// Prefers minecraft-data's canonical name; falls back to the display name.
+// Never a keyword scan — this is the game's own entity id.
+function entityKindId(entity) {
+  if (!entity) return '';
+  const raw = entity.name || (entity.displayName ? String(entity.displayName) : '');
+  return String(raw || '').toLowerCase();
+}
+
+// Record that the bot just attacked `entity`, so its later removal counts as a
+// kill. Prunes expired entries to keep the map small.
+function noteAttacked(entity) {
+  if (!entity || typeof entity.id !== 'number') return;
+  const now = Date.now();
+  recentlyAttacked.set(entity.id, { name: entityKindId(entity), at: now });
+  for (const [id, rec] of recentlyAttacked) {
+    if (now - rec.at > KILL_ATTRIBUTION_WINDOW_MS) recentlyAttacked.delete(id);
+  }
+}
+
 // Classify an entity as an attacker source without keyword matching: a mob is
 // hostile game logic, a real player is a person. Falls back to a neutral
 // "entity" when the structural type is unknown.
@@ -1652,6 +1685,29 @@ function wireBotEvents(b) {
     });
   });
 
+  // A recently-attacked entity that is now removed from the world counts as a
+  // kill by the bot. This drives the questline's kill objectives (e.g. the
+  // Ender Dragon milestone): the connector consumes this `kill` event and
+  // forwards `mob` (the entity's game id) to the core quest store. Structural
+  // only — `mob` is the entity type id, never a keyword scan. Entities that
+  // simply wandered out of range are excluded by the attribution window.
+  b.on('entityGone', (entity) => {
+    if (!entity || typeof entity.id !== 'number') return;
+    const rec = recentlyAttacked.get(entity.id);
+    if (!rec) return;
+    recentlyAttacked.delete(entity.id);
+    if (Date.now() - rec.at > KILL_ATTRIBUTION_WINDOW_MS) return;
+    const mob = rec.name || entityKindId(entity);
+    if (!mob) return;
+    pushEvent({
+      environment: ENVIRONMENT,
+      event_type: 'kill',
+      summary: `Defeated ${mob}`,
+      actor: b.username,
+      data: { mob },
+    });
+  });
+
   b.on('kicked', (reason) => {
     connected = false;
     // Some servers KICK the first handshake before the bot ever spawns and
@@ -2105,6 +2161,7 @@ async function runAction(action, payload) {
           const d = bot.entity.position.distanceTo(entity.position);
           if (d > MELEE_REACH) break;
           bot.attack(entity);
+          noteAttacked(entity);
           swings += 1;
           await sleep(250);
         }
@@ -2185,6 +2242,7 @@ async function runAction(action, payload) {
           /* ignore */
         }
         bot.deactivateItem();
+        noteAttacked(entity);
         return {
           ok: true,
           detail: `shot at ${name}`,

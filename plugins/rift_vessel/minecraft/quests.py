@@ -462,3 +462,222 @@ def progression_query_tokens(stage: dict[str, Any] | None) -> list[str]:
     if not isinstance(query, list):
         return []
     return [str(tok).lower() for tok in query if tok]
+
+
+# ---------------------------------------------------------------------------
+# Ender Dragon questline (Minecraft CONTENT) + core-store shim.
+# ---------------------------------------------------------------------------
+# The ordered milestones that give Synth a *direction* toward the natural
+# end-game. This is the same progression as the tech-tree above, expressed as
+# concrete, structural quest objectives the core store
+# (``plugins/rift_vessel/vessel_quests.py``) can evaluate: item ids (have_item),
+# a dimension id (reach_dimension), the base/bed flags (has_base/has_bed) and a
+# per-mob kill counter (kill). Every ``target`` is a plain Minecraft id — the
+# only place keyword/id matching is permitted (AGENTS.md §5c, adapter-only).
+#
+# This is CONTENT, not a script: the questline is surfaced to cognition purely
+# as reference (see ``core/vessel_beat.py::_fmt_quest``). Synth still authors its
+# own goal freely and may or may not bind it to the active quest. The store
+# advances a quest only when the world *structurally* satisfies its objectives
+# (inventory / dimension / kill counter), never because a step was "executed".
+
+QUESTLINE: list[dict[str, Any]] = [
+    {
+        "quest_id": "first_base",
+        "title": "Establish your first base",
+        "description": (
+            "Claim a place of your own — somewhere to shelter, store what you "
+            "gather, and come back to. A home to build up over time."
+        ),
+        "objectives": [{"kind": "has_base"}],
+    },
+    {
+        "quest_id": "make_a_bed",
+        "title": "Craft a bed and set your respawn",
+        "description": (
+            "A bed lets you sleep through the night and, once slept in, becomes "
+            "the point you return to if you ever die. Anchor yourself to the world."
+        ),
+        "objectives": [{"kind": "has_bed"}],
+    },
+    {
+        "quest_id": "wooden_tools",
+        "title": "Craft your first wooden tools",
+        "description": (
+            "Gather wood and craft a wooden pickaxe so you can start mining stone."
+        ),
+        "objectives": [{"kind": "have_item", "target": "wooden_pickaxe", "count": 1}],
+    },
+    {
+        "quest_id": "stone_tools",
+        "title": "Upgrade to stone tools",
+        "description": (
+            "Mine cobblestone and craft a stone pickaxe — durable enough to mine "
+            "iron ore."
+        ),
+        "objectives": [{"kind": "have_item", "target": "stone_pickaxe", "count": 1}],
+    },
+    {
+        "quest_id": "get_iron",
+        "title": "Mine and smelt iron",
+        "description": (
+            "Find iron ore, smelt it into ingots, and craft an iron pickaxe so "
+            "you can mine diamonds."
+        ),
+        "objectives": [{"kind": "have_item", "target": "iron_pickaxe", "count": 1}],
+    },
+    {
+        "quest_id": "get_diamond",
+        "title": "Find diamonds",
+        "description": (
+            "Dig deep for diamonds — the key to the strongest gear and a diamond "
+            "pickaxe for mining obsidian."
+        ),
+        "objectives": [{"kind": "have_item", "target": "diamond_pickaxe", "count": 1}],
+    },
+    {
+        "quest_id": "enter_nether",
+        "title": "Open a portal and enter the Nether",
+        "description": (
+            "Build an obsidian frame, light it, and step through into the Nether "
+            "— where blaze rods and the path to the End await."
+        ),
+        "objectives": [{"kind": "reach_dimension", "target": "the_nether"}],
+    },
+    {
+        "quest_id": "blaze_rods",
+        "title": "Gather blaze rods",
+        "description": (
+            "Find a nether fortress and collect blaze rods — you need their "
+            "powder to craft eyes of ender."
+        ),
+        "objectives": [{"kind": "have_item", "target": "blaze_rod", "count": 6}],
+    },
+    {
+        "quest_id": "eyes_of_ender",
+        "title": "Craft eyes of ender",
+        "description": (
+            "Combine blaze powder with ender pearls to make eyes of ender — they "
+            "locate the stronghold and activate the End portal."
+        ),
+        "objectives": [{"kind": "have_item", "target": "ender_eye", "count": 12}],
+    },
+    {
+        "quest_id": "reach_the_end",
+        "title": "Find the stronghold and enter the End",
+        "description": (
+            "Follow the eyes of ender to the stronghold, fill the End portal, "
+            "and step into the End dimension."
+        ),
+        "objectives": [{"kind": "reach_dimension", "target": "the_end"}],
+    },
+    {
+        "quest_id": "slay_ender_dragon",
+        "title": "Defeat the Ender Dragon",
+        "description": (
+            "Destroy the end crystals, then bring down the Ender Dragon — the "
+            "natural climax of the journey."
+        ),
+        "objectives": [{"kind": "kill", "target": "ender_dragon", "count": 1}],
+    },
+]
+
+
+# Scope tuple every Minecraft quest is keyed by (mirrors the goals/bases shims).
+_QUEST_SCOPE = "vessel"
+_QUEST_GAME = "minecraft"
+
+try:  # pragma: no cover - import guarded for fail-safe degradation
+    from plugins.rift_vessel.vessel_quests import (
+        complete_quest as _q_complete_quest,
+    )
+    from plugins.rift_vessel.vessel_quests import (
+        get_active_quest as _q_get_active_quest,
+    )
+    from plugins.rift_vessel.vessel_quests import (
+        init_quest_table as _q_init_quest_table,
+    )
+    from plugins.rift_vessel.vessel_quests import (
+        list_quests as _q_list_quests,
+    )
+    from plugins.rift_vessel.vessel_quests import (
+        record_kill as _q_record_kill,
+    )
+    from plugins.rift_vessel.vessel_quests import (
+        register_quests as _q_register_quests,
+    )
+
+    _QUESTS_AVAILABLE = True
+except Exception as _exc:  # pragma: no cover - degrade gracefully
+    from core.logging_utils import log_debug as _log_debug
+
+    _log_debug(f"[minecraft_quests] core quest store unavailable: {_exc}")
+    _QUESTS_AVAILABLE = False
+
+
+async def register_questline() -> dict[str, Any]:
+    """Register the Ender Dragon questline in the core store (idempotent).
+
+    Called by the connector at connect. Upserts every :data:`QUESTLINE` entry
+    under the Minecraft scope tuple, preserving any existing per-quest status
+    and progress, and promotes the first quest to active if none is. Fully
+    fail-safe — degrades to a no-op when the core store is unavailable.
+    """
+    if not _QUESTS_AVAILABLE:
+        return {"status": "unavailable"}
+    try:
+        await _q_init_quest_table()
+        # Derive each milestone's order from its position in QUESTLINE so the
+        # store advances them in the authored sequence (the dicts omit an
+        # explicit order_index on purpose — list order IS the questline order).
+        ordered = [
+            {**quest, "order_index": index} for index, quest in enumerate(QUESTLINE)
+        ]
+        return await _q_register_quests(ordered, scope=_QUEST_SCOPE, game=_QUEST_GAME)
+    except Exception as exc:  # pragma: no cover - defensive
+        from core.logging_utils import log_debug
+
+        log_debug(f"[minecraft_quests] register_questline skipped: {exc}")
+        return {"status": "error"}
+
+
+async def get_active_quest() -> dict[str, Any] | None:
+    """Return the active Minecraft quest for the questline scope, or None."""
+    if not _QUESTS_AVAILABLE:
+        return None
+    try:
+        return await _q_get_active_quest(scope=_QUEST_SCOPE, game=_QUEST_GAME)
+    except Exception:  # pragma: no cover - defensive
+        return None
+
+
+async def list_quests(limit: int = 100) -> list[dict[str, Any]]:
+    """Return the full Minecraft questline ordered by milestone."""
+    if not _QUESTS_AVAILABLE:
+        return []
+    try:
+        return await _q_list_quests(scope=_QUEST_SCOPE, game=_QUEST_GAME, limit=limit)
+    except Exception:  # pragma: no cover - defensive
+        return []
+
+
+async def complete_quest(quest_id: str) -> dict[str, Any]:
+    """Mark a Minecraft quest done and promote the next milestone."""
+    if not _QUESTS_AVAILABLE:
+        return {"status": "unavailable"}
+    try:
+        return await _q_complete_quest(quest_id, scope=_QUEST_SCOPE, game=_QUEST_GAME)
+    except Exception:  # pragma: no cover - defensive
+        return {"status": "error"}
+
+
+async def record_kill(mob_kind: str, amount: int = 1) -> dict[str, Any]:
+    """Advance the active quest's kill objective for ``mob_kind`` (fail-safe)."""
+    if not _QUESTS_AVAILABLE:
+        return {"status": "unavailable"}
+    try:
+        return await _q_record_kill(
+            mob_kind, scope=_QUEST_SCOPE, game=_QUEST_GAME, amount=amount
+        )
+    except Exception:  # pragma: no cover - defensive
+        return {"status": "error"}

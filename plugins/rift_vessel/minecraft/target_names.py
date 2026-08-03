@@ -216,3 +216,98 @@ def derive_target(description: Optional[str]) -> Optional[Dict[str, str]]:
     if kind is None:
         return None
     return {"target_kind": kind, "target_name": game_id}
+
+
+# --- Crafted/produced item ids for goal-completion detection. -----------------
+# These are the *outcomes* a "make/craft/build X" goal produces — deliberately
+# the crafted blocks/tools EXCLUDED from ``derive_target`` above (they are never
+# natural mine objectives, only craft results). Used ONLY by the goal debrief's
+# deterministic auto-completion (option B): when a goal's free text names one of
+# these AND that id is present in the live inventory in quantity >= 1, the goal
+# is structurally satisfied. Matching is on the canonical game id (or a tiny set
+# of aliases), never natural-language intent — the same explicitly-authorized
+# Minecraft-name exception that governs the rest of this module.
+_PRODUCT_IDS: Tuple[str, ...] = (
+    # crafting/utility blocks
+    "crafting_table",
+    "furnace",
+    "blast_furnace",
+    "smoker",
+    "chest",
+    "barrel",
+    "torch",
+    "ladder",
+    "bed",
+    "boat",
+    # planks (a common intermediate product)
+    "oak_planks",
+    "spruce_planks",
+    "birch_planks",
+    "jungle_planks",
+    "acacia_planks",
+    "dark_oak_planks",
+    "mangrove_planks",
+    "cherry_planks",
+    "stick",
+    # tools / weapons — wood
+    "wooden_pickaxe",
+    "wooden_axe",
+    "wooden_shovel",
+    "wooden_sword",
+    "wooden_hoe",
+    # tools / weapons — stone
+    "stone_pickaxe",
+    "stone_axe",
+    "stone_shovel",
+    "stone_sword",
+    "stone_hoe",
+    # tools / weapons — iron
+    "iron_pickaxe",
+    "iron_axe",
+    "iron_shovel",
+    "iron_sword",
+    "iron_hoe",
+    # tools / weapons — diamond
+    "diamond_pickaxe",
+    "diamond_axe",
+    "diamond_shovel",
+    "diamond_sword",
+    "diamond_hoe",
+    # armor (representative)
+    "iron_helmet",
+    "iron_chestplate",
+    "iron_leggings",
+    "iron_boots",
+    "shield",
+    "bucket",
+)
+
+_PRODUCT_SET = frozenset(_PRODUCT_IDS)
+_ORDERED_PRODUCT_IDS: List[str] = sorted(
+    _PRODUCT_IDS, key=lambda game_id: len(game_id), reverse=True
+)
+
+
+def derive_products(description: Optional[str]) -> List[str]:
+    """Return the crafted/produced item ids a goal's free text names.
+
+    Structural scan for any of :data:`_PRODUCT_IDS` appearing as a whole
+    word/phrase in the goal text (canonical id or its spaced form). Returns the
+    distinct ids in the order matched, or an empty list. Fully fail-safe. Used
+    only by the goal debrief's deterministic auto-completion (option B) — never
+    for deciding *what to do*, only whether a "make X" goal's outcome already
+    exists in the inventory.
+    """
+    if not isinstance(description, str) or not description.strip():
+        return []
+    text_lower = description.lower()
+    found: List[str] = []
+    for game_id in _ORDERED_PRODUCT_IDS:
+        spaced = game_id.replace("_", " ")
+        for needle in (game_id, spaced):
+            pattern = r"(?<![a-z0-9_])" + re.escape(needle) + r"(?![a-z0-9_])"
+            if re.search(pattern, text_lower):
+                if game_id not in found:
+                    found.append(game_id)
+                break
+    return found
