@@ -165,6 +165,12 @@ class VesselInterface:
         self._reflecting: bool = False
         self._reflecting_until: float = 0.0
         self._last_reflection_at: float = 0.0
+        # Dedicated goal-beat bookkeeping. The goal beat is a single-purpose
+        # volition turn (only ``set_goal``/``update_goal`` allowed) fired while
+        # Synth has no active goal; ``_last_goal_beat_at`` throttles how often it
+        # may fire (anti-thrash). Monotonic clock; structural, never keyword
+        # logic. See core.vessel_beat.build_goal_prompt and AGENTS.md §5c.
+        self._last_goal_beat_at: float = 0.0
         # Post-damage appraisal bookkeeping. When Synth takes damage the
         # connector surfaces a positive ``extra["damage_taken"]`` delta for that
         # one tick. The scheduler then fires a single elevated (PRIORITY_URGENT)
@@ -1029,6 +1035,7 @@ class VesselInterface:
         environment: str,
         event_type: str,
         actor: str | None = None,
+        allowed_actions: set[str] | None = None,
     ) -> None:
         """Wrap a perception as a normal message and enqueue it (Fast Lane).
 
@@ -1060,7 +1067,13 @@ class VesselInterface:
             # the queue's ``vessel_reflection`` band, jump ahead of ordinary
             # in-world player chat while yielding to any real emergency. Purely
             # structural (event kind), never keyword text.
-            is_reflection = event_type == "reflection"
+            #
+            # A **goal** turn is the dedicated single-purpose goal-setting beat:
+            # it shares the reflection band (standalone, prunes older autonomous
+            # beats, ranks at PRIORITY_REFLECTION) but its action allowlist is
+            # hard-restricted to set_goal/update_goal via ``allowed_actions``
+            # below. Structural (event kind), never keyword text.
+            is_reflection = event_type in ("reflection", "goal")
             # A damage-appraisal turn is the deliberate "I was just hurt — what
             # do I do?" cognition turn fired right after Synth took damage. It
             # must run standalone (never coalesced) and, via the queue's
@@ -1112,11 +1125,23 @@ class VesselInterface:
                 entities=None,
                 reply_to_message=None,
             )
+            # A per-turn action restriction: when ``allowed_actions`` is given
+            # (the dedicated goal beat), pass it as ``context_memory`` so the
+            # prompt engine trims this turn's action catalog to exactly those
+            # actions (it reads ``context_memory["allowed_action_types"]`` with
+            # precedence over the vessel whitelist). This is the same mechanism
+            # Grillo uses for its restricted beats. When ``None`` we pass no
+            # context_memory, so the normal global context + vessel whitelist
+            # apply. Structural, keyword-free.
+            context_memory: dict[str, Any] | None = None
+            if allowed_actions:
+                context_memory = {"allowed_action_types": sorted(allowed_actions)}
             await message_queue.enqueue(
                 self,
                 wrapped,
                 interface_id=INTERFACE_NAME,
                 skip_mention_check=True,
+                context_memory=context_memory,
             )
         except Exception as exc:
             log_error(f"[vessel_interface] Failed to enqueue perception: {exc}")
@@ -1191,6 +1216,10 @@ class VesselInterface:
                 # earlier beat that reads the world state would clear it.
                 await self._maybe_run_damage_appraisal()
                 await self._maybe_run_reflection()
+                # Dedicated goal beat: when Synth has no goal at all, fire a
+                # turn that can ONLY set/update the goal (restricted allowlist),
+                # so a weak model cannot fall back to a passive verb and drift.
+                await self._maybe_run_goal_beat()
                 # Volition (may set a fresh goal), then motorics acts on it.
                 await self._maybe_run_will_beat()
                 # If volition left the goal without a reachable target/destination,
@@ -1336,6 +1365,107 @@ class VesselInterface:
             summary=prompt,
             environment=world,
             event_type="reflection",
+        )
+
+    async def _maybe_run_goal_beat(self) -> None:
+        """Author a goal with a turn that can ONLY set/update the goal.
+
+        A dedicated, single-purpose volition turn (AGENTS.md §5c). It fires only
+        while Synth has **no active goal at all**, and is the imperative
+        "commit an objective now" case. Unlike the general reflection pause —
+        which keeps the full vessel action catalog and, on a weak tool-calling
+        model, tends to fall back to a passive verb (observe/status/wait) — this
+        beat's action allowlist is hard-restricted to just
+        ``vessel_<world>_set_goal`` (and ``vessel_<world>_update_goal``), enforced
+        per-turn via ``context_memory["allowed_action_types"]`` in the prompt
+        engine (which takes precedence over the vessel whitelist). A turn that
+        can *only* set/update the goal cannot drift into a passive fallback, so
+        a goal is structurally guaranteed to be authored.
+
+        It runs as a normal Fast-Lane persona cognition turn (the persona/profile
+        is injected by the ordinary system-prompt machinery), shares the
+        reflection priority band and enqueue behaviour (standalone, prunes older
+        autonomous beats), but is throttled independently.
+
+        Fully guarded. Gated: (1) ``VESSEL_AUTONOMY_ENABLED`` on; (2) a session
+        active; (3) ``VESSEL_GOAL_BEAT_ENABLED`` on; (4) not currently in a
+        reflection pause; (5) there is genuinely no active goal (structural,
+        never keyword text); (6) no player active within the will-quiet window;
+        (7) the anti-thrash floor ``VESSEL_GOAL_BEAT_INTERVAL_SEC`` has elapsed.
+        """
+        try:
+            from core import vessel_beat
+        except Exception:
+            return
+
+        def _cfg(key: str, default: Any) -> Any:
+            return config_registry.get_value(
+                key, default, group="vessel", component="vessel"
+            )
+
+        if not vessel_beat.is_autonomy_enabled(_cfg):
+            return
+        if not vessel_beat.is_goal_beat_enabled(_cfg):
+            return
+
+        manager = get_vessel_session_manager()
+        if not manager.has_active_session():
+            return
+
+        now = asyncio.get_event_loop().time()
+
+        # Yield to an in-flight reflection pause: it is already dedicating an
+        # elevated turn to the goal, so a competing goal beat would only muddy
+        # it. The fast motor tick is not gated (the body keeps moving).
+        if self._reflecting and now < self._reflecting_until:
+            return
+
+        # Anti-thrash: never fire two goal beats back-to-back.
+        interval = vessel_beat.resolve_goal_beat_interval(_cfg)
+        if now - self._last_goal_beat_at < interval:
+            return
+
+        # A player addressing Synth in-world is answered reactively first; do
+        # not pre-empt them with a private goal turn. Structural (actor-based),
+        # never keyword matching; ``0`` disables the deferral.
+        quiet_sec = vessel_beat.resolve_will_quiet_sec(_cfg)
+        if quiet_sec > 0 and now - self._last_player_activity_at < quiet_sec:
+            return
+
+        world, world_state = await self._read_active_world_state()
+        if world is None or world_state is None:
+            return
+
+        # Structural trigger: only when there is genuinely no active goal —
+        # the case where committing one is imperative. Never inspects the goal's
+        # free-text description (no keyword logic).
+        goal = self._goal_from_world_state(world_state)
+        if goal is not None:
+            return
+
+        interface_path = self._decision_interface_path(world)
+        if interface_path is None:
+            return
+
+        prompt = vessel_beat.build_goal_prompt(world_state, world)
+        self._last_goal_beat_at = now
+        # Restrict this turn's action catalog to exactly the goal verbs, so the
+        # turn cannot fall back to a passive verb. World-agnostic (namespace from
+        # the world arg), structural, never keyword text.
+        allowed_actions = {
+            f"vessel_{world}_set_goal",
+            f"vessel_{world}_update_goal",
+        }
+        log_debug(
+            f"[vessel_interface] Goal beat for '{world}' "
+            f"(allowed={sorted(allowed_actions)})"
+        )
+        await self._enqueue_perception(
+            interface_path=interface_path,
+            summary=prompt,
+            environment=world,
+            event_type="goal",
+            allowed_actions=allowed_actions,
         )
 
     async def _maybe_run_will_beat(self) -> None:

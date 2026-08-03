@@ -488,6 +488,39 @@ config_registry.get_value(
     advanced=True,
 )
 config_registry.get_value(
+    "VESSEL_GOAL_BEAT_ENABLED",
+    True,
+    value_type=bool,
+    label="Autonomous Goal Beat (set-goal only)",
+    description=(
+        "When enabled, a dedicated single-purpose cognition turn fires whenever "
+        "Synth has no active goal at all. Unlike the general reflection pause, "
+        "this turn's action list is hard-restricted to just set/update the "
+        "goal — so a weaker model cannot fall back to a passive verb and drift, "
+        "and a goal is always authored. It runs as a normal persona turn, ranks "
+        "ahead of ordinary in-world chat, and never stops the body from moving. "
+        "Only used when Autonomous In-World Play is enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_GOAL_BEAT_INTERVAL_SEC",
+    45,
+    value_type=int,
+    label="Autonomous Goal Beat Interval (s)",
+    description=(
+        "Minimum seconds between two goal beats (clamped to 10–3600). Paces how "
+        "often the dedicated set-goal turn may fire while Synth is goal-less. "
+        "Only used when Autonomous In-World Play and the Autonomous Goal Beat "
+        "are both enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
     "VESSEL_DRONE_PLAN_INTERVAL_SEC",
     120,
     value_type=int,

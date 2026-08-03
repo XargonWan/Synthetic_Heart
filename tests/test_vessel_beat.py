@@ -17,17 +17,22 @@ from __future__ import annotations
 from typing import Any
 
 from core.vessel_beat import (
+    _fmt_bases,
+    _fmt_quest,
     build_action_prompt,
     build_damage_appraisal_prompt,
     build_decision_prompt,
+    build_goal_prompt,
     build_reflection_prompt,
     build_will_prompt,
     is_action_beat_enabled,
     is_autonomy_enabled,
+    is_goal_beat_enabled,
     is_motor_enabled,
     is_reflection_enabled,
     resolve_action_interval,
     resolve_beat_interval,
+    resolve_goal_beat_interval,
     resolve_motor_interval,
     resolve_reflection_duration,
     resolve_reflection_min_interval,
@@ -174,6 +179,107 @@ def test_prompt_truncates_long_lists() -> None:
     assert "…" in prompt
     assert "item0" in prompt
     assert "item19" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# _fmt_bases — structural rendering of Synth's registered homes
+# ---------------------------------------------------------------------------
+
+
+def test_fmt_bases_empty_returns_no_lines() -> None:
+    assert _fmt_bases(None) == []
+    assert _fmt_bases([]) == []
+    assert _fmt_bases("not-a-list") == []
+
+
+def test_fmt_bases_renders_name_kind_and_coords() -> None:
+    bases = [
+        {
+            "name": "Lakeside home",
+            "kind": "home",
+            "anchor": {"x": 12.7, "y": 65.0, "z": -4.2},
+        },
+        {
+            "name": "mine outpost",
+            "kind": "outpost",
+            "anchor": {"x": 100.0, "y": 12.0, "z": 8.0},
+        },
+    ]
+    lines = _fmt_bases(bases)
+    text = "\n".join(lines)
+    # Header framing (home context) is present.
+    assert "Your bases" in text
+    # Coordinates are truncated to ints; a "home" kind is not labelled, a
+    # non-home kind is shown in parentheses.
+    assert "- Lakeside home at x=12, y=65, z=-4" in text
+    assert "- mine outpost (outpost) at x=100, y=12, z=8" in text
+
+
+def test_fmt_bases_handles_missing_and_partial_anchor() -> None:
+    bases = [
+        {"name": "floating claim"},  # no anchor at all
+        {"name": "flat spot", "anchor": {"x": 5.0, "z": 9.0}},  # no y
+    ]
+    lines = _fmt_bases(bases)
+    text = "\n".join(lines)
+    assert "- floating claim" in text  # rendered with no coords, no crash
+    assert "- flat spot at x=5, z=9" in text  # y omitted when not numeric
+    assert "y=" not in "\n".join(li for li in lines if "flat spot" in li)
+
+
+def test_fmt_bases_defaults_blank_name_to_base() -> None:
+    lines = _fmt_bases([{"name": "   ", "anchor": {"x": 1.0, "y": 2.0, "z": 3.0}}])
+    assert any(li.startswith("- base") for li in lines)
+
+
+# ---------------------------------------------------------------------------
+# _fmt_quest — structural rendering of the active directed quest
+# ---------------------------------------------------------------------------
+
+
+def test_fmt_quest_empty_returns_no_lines() -> None:
+    assert _fmt_quest(None) == []
+    assert _fmt_quest("not-a-dict") == []
+    # A quest with no title renders nothing (an empty block destabilises the LLM).
+    assert _fmt_quest({"title": "   "}) == []
+
+
+def test_fmt_quest_renders_title_description_and_framing() -> None:
+    lines = _fmt_quest({"title": "Establish your first base", "description": "home"})
+    blob = "\n".join(lines)
+    assert "Establish your first base" in blob
+    assert "direction, not a script" in blob
+    assert "home" in blob
+
+
+def test_fmt_quest_renders_pending_objectives_structurally() -> None:
+    quest = {
+        "title": "Slay the Ender Dragon",
+        "objectives": [
+            {"kind": "have_item", "target": "ender_eye", "count": 12},
+            {"kind": "reach_dimension", "target": "the_end"},
+            {"kind": "has_base"},
+            {"kind": "has_bed"},
+            {"kind": "kill", "target": "ender_dragon", "count": 1},
+        ],
+        "progress": {"kills": {"ender_dragon": 0}},
+    }
+    lines = _fmt_quest(quest)
+    blob = "\n".join(lines)
+    assert "have 12x ender_eye" in blob
+    assert "reach the the_end" in blob
+    assert "have a base (home)" in blob
+    assert "have a bed to sleep / set respawn" in blob
+    assert "defeat 1x ender_dragon (0/1)" in blob
+
+
+def test_fmt_quest_kill_progress_reflects_counter() -> None:
+    quest = {
+        "title": "Clear the mobs",
+        "objectives": [{"kind": "kill", "target": "zombie", "count": 5}],
+        "progress": {"kills": {"zombie": 3}},
+    }
+    assert any("defeat 5x zombie (3/5)" in li for li in _fmt_quest(quest))
 
 
 # ---------------------------------------------------------------------------
@@ -528,6 +634,59 @@ def test_knowledge_block_absent_when_no_knowledge() -> None:
 
 
 # ---------------------------------------------------------------------------
+# craft-material shortfall cue
+# ---------------------------------------------------------------------------
+
+
+def _state_with_craft_deficit() -> dict[str, Any]:
+    state = _rich_world_state()
+    state["extra"]["craft_deficit"] = {
+        "wanted": "crafting_table",
+        "missing": [{"item": "oak_planks", "have": 1, "need": 4}],
+    }
+    return state
+
+
+def test_build_will_prompt_renders_craft_deficit() -> None:
+    prompt = build_will_prompt(_state_with_craft_deficit(), "minecraft")
+    assert "wished to build 'crafting_table'" in prompt
+    # The actual recipe ingredient + have/need counts are surfaced verbatim.
+    assert "1/4 oak_planks" in prompt
+
+
+def test_build_action_prompt_renders_craft_deficit() -> None:
+    prompt = build_action_prompt(_state_with_craft_deficit(), "minecraft")
+    assert "wished to build 'crafting_table'" in prompt
+    assert "1/4 oak_planks" in prompt
+
+
+def test_craft_deficit_multiple_ingredients() -> None:
+    state = _rich_world_state()
+    state["extra"]["craft_deficit"] = {
+        "wanted": "furnace",
+        "missing": [
+            {"item": "cobblestone", "have": 3, "need": 8},
+            {"item": "stick", "have": 0, "need": 2},
+        ],
+    }
+    prompt = build_will_prompt(state, "minecraft")
+    assert "3/8 cobblestone" in prompt
+    assert "0/2 stick" in prompt
+
+
+def test_craft_deficit_absent_or_malformed() -> None:
+    # No cue → nothing rendered.
+    assert "wished to build" not in build_will_prompt(_rich_world_state(), "minecraft")
+    # Malformed shapes are skipped without raising.
+    bad = _rich_world_state()
+    bad["extra"]["craft_deficit"] = {"wanted": "", "missing": []}
+    assert "wished to build" not in build_will_prompt(bad, "minecraft")
+    bad2 = _rich_world_state()
+    bad2["extra"]["craft_deficit"] = {"wanted": "chest", "missing": "nope"}
+    assert "wished to build" not in build_will_prompt(bad2, "minecraft")
+
+
+# ---------------------------------------------------------------------------
 # build_damage_appraisal_prompt — post-damage cognitive appraisal
 # ---------------------------------------------------------------------------
 
@@ -638,8 +797,10 @@ def test_build_reflection_prompt_pushes_set_goal_when_no_goal() -> None:
     state = _rich_world_state()
     state["extra"]["current_goal"] = None
     prompt = build_reflection_prompt(state, "minecraft")
+    # Neutral, non-restricted framing: the no-goal branch still points at
+    # set_goal but keeps the general reflection tone (no forced banner).
     assert "vessel_minecraft_set_goal" in prompt
-    assert "NO goal" in prompt
+    assert "no active goal" in prompt.lower()
 
 
 def test_build_reflection_prompt_pushes_update_goal_when_goal_exists() -> None:
@@ -695,3 +856,71 @@ def test_resolve_reflection_min_interval_failsafe_on_error() -> None:
         raise RuntimeError("boom")
 
     assert resolve_reflection_min_interval(_boom, default=60) == 60.0
+
+
+# ---------------------------------------------------------------------------
+# build_goal_prompt — dedicated single-purpose goal beat
+# ---------------------------------------------------------------------------
+
+
+def test_build_goal_prompt_frames_goal_only_turn() -> None:
+    prompt = build_goal_prompt(_rich_world_state(), "minecraft")
+    # In-game framing, names the world, and forbids speaking (private turn).
+    assert "IN GAME" in prompt
+    assert "minecraft" in prompt
+    assert "Do NOT" in prompt or "private" in prompt.lower()
+
+
+def test_build_goal_prompt_references_set_goal_when_no_goal() -> None:
+    state = _rich_world_state()
+    state["extra"]["current_goal"] = None
+    prompt = build_goal_prompt(state, "minecraft")
+    assert "vessel_minecraft_set_goal" in prompt
+
+
+def test_build_goal_prompt_references_update_goal_when_goal_exists() -> None:
+    prompt = build_goal_prompt(_rich_world_state(), "minecraft")
+    assert "vessel_minecraft_update_goal" in prompt
+
+
+def test_build_goal_prompt_is_world_agnostic() -> None:
+    # Verb namespace derives from the world arg — never hardcoded to minecraft.
+    state = _rich_world_state()
+    state["extra"]["current_goal"] = None
+    prompt = build_goal_prompt(state, "skyrim")
+    assert "vessel_skyrim_set_goal" in prompt
+    assert "vessel_minecraft_set_goal" not in prompt
+
+
+def test_build_goal_prompt_handles_empty_world_state() -> None:
+    # Fully guarded: an empty state still yields a usable prompt.
+    prompt = build_goal_prompt({}, "minecraft")
+    assert "vessel_minecraft_set_goal" in prompt
+
+
+def test_is_goal_beat_enabled_defaults_true_and_reads_flag() -> None:
+    assert is_goal_beat_enabled(lambda k, d: d) is True
+    assert is_goal_beat_enabled(lambda k, d: False) is False
+    assert is_goal_beat_enabled(lambda k, d: True) is True
+
+
+def test_is_goal_beat_enabled_failsafe_on_error() -> None:
+    def _boom(key: str, default: Any) -> Any:
+        raise RuntimeError("boom")
+
+    assert is_goal_beat_enabled(_boom) is True
+
+
+def test_resolve_goal_beat_interval_default_and_clamp() -> None:
+    assert resolve_goal_beat_interval(lambda k, d: d, default=45) == 45
+    # Clamped to [10, 3600].
+    assert resolve_goal_beat_interval(lambda k, d: 0) == 10
+    assert resolve_goal_beat_interval(lambda k, d: 99999) == 3600
+    assert resolve_goal_beat_interval(lambda k, d: 120) == 120
+
+
+def test_resolve_goal_beat_interval_failsafe_on_error() -> None:
+    def _boom(key: str, default: Any) -> Any:
+        raise RuntimeError("boom")
+
+    assert resolve_goal_beat_interval(_boom, default=45) == 45
