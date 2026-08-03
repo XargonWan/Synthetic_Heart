@@ -747,6 +747,87 @@ function inventoryDelta(before, after) {
   return gained;
 }
 
+// Structural "what is missing to craft this?" report. When a craft has no
+// makeable recipe (not enough materials), we still want to tell the caller
+// which ingredients — and how many — are short, so the will/action beat can
+// inject a "you need 1/4 oak_planks" cue. Purely structural: it reads the
+// recipe's ingredient deltas (canonical Minecraft item ids) from
+// minecraft-data and diffs them against the live inventory totals — never any
+// human text. Returns { wanted, missing: [{ item, have, need }] } or null when
+// no recipe shape is known at all. `recipesAll` returns recipe *shapes*
+// regardless of held materials (unlike `recipesFor`, which filters to makeable
+// ones), so it works precisely in the failure case.
+// Structural test: can this missing ingredient itself be crafted RIGHT NOW from
+// the materials currently held? (e.g. `acacia_planks` from held `acacia_log`.)
+// Uses `recipesFor`, which — unlike `recipesAll` — filters to recipes makeable
+// with the present inventory. Purely structural (canonical item ids, no text).
+// A cue for an ingredient Synth can already produce is actionable; one for an
+// ingredient she has no path to is not — so this drives the tie-break below.
+function ingredientObtainableNow(itemName, mcData, craftingTable) {
+  try {
+    if (!itemName || !bot || typeof bot.recipesFor !== 'function') return false;
+    const def = mcData.itemsByName && mcData.itemsByName[itemName];
+    if (!def) return false;
+    const makeable = bot.recipesFor(def.id, null, 1, craftingTable || null) || [];
+    return makeable.length > 0;
+  } catch (e) {
+    return false;
+  }
+}
+
+function craftMissingIngredients(itemDef, mcData, craftingTable) {
+  try {
+    if (!itemDef || !bot || typeof bot.recipesAll !== 'function') return null;
+    const shapes = bot.recipesAll(itemDef.id, null, craftingTable || null) || [];
+    if (!shapes.length) return null;
+    const totals = inventoryTotals();
+    // Score each recipe's shortfall on two levels: (1) fewest distinct missing
+    // ingredients (closest to craftable), then (2) prefer the recipe whose
+    // missing ingredients are ALL obtainable right now from held materials —
+    // so the cue names a material Synth can actually make/gather next
+    // (e.g. acacia_planks from her 25 acacia_log) instead of an unreachable
+    // variant (oak_planks she has no oak for). Purely structural.
+    let best = null;
+    let bestObtainable = false;
+    for (const recipe of shapes) {
+      const needed = {};
+      // A recipe's `delta` lists every id it consumes with a negative count.
+      const delta = Array.isArray(recipe.delta) ? recipe.delta : [];
+      for (const d of delta) {
+        if (!d || d.count == null || d.count >= 0) continue; // outputs are +
+        const name = mcData.items && mcData.items[d.id] ? mcData.items[d.id].name : null;
+        if (!name) continue;
+        needed[name] = (needed[name] || 0) + Math.abs(d.count);
+      }
+      const missing = [];
+      for (const name of Object.keys(needed)) {
+        const have = totals[name] || 0;
+        const need = needed[name];
+        if (have < need) missing.push({ item: name, have, need });
+      }
+      // Every shortfall obtainable now => the cue is fully actionable.
+      const obtainable =
+        missing.length > 0 &&
+        missing.every((m) => ingredientObtainableNow(m.item, mcData, craftingTable));
+      // Level 1: fewer distinct shortfalls wins. Level 2 (tie): an actionable
+      // shortfall beats a non-actionable one of the same size.
+      const better =
+        best == null ||
+        missing.length < best.length ||
+        (missing.length === best.length && obtainable && !bestObtainable);
+      if (better) {
+        best = missing;
+        bestObtainable = obtainable;
+      }
+      if (best.length === 0) break;
+    }
+    if (best == null) return null;
+    return { wanted: itemDef.name, missing: best };
+  } catch (e) {
+    return null;
+  }
+}
+
 // Small awaitable delay used to let physics/pickup settle after a raw dig so
 // the inventory delta reflects the collected drop.
 function sleep(ms) {
@@ -3478,10 +3559,13 @@ async function runAction(action, payload) {
           const needsTable = craftingTable
             ? ''
             : ' (a crafting table may be required and none is reachable)';
+          // Structural shortfall report so the caller can surface a
+          // "you need N/M <material>" cue for a few turns.
+          const shortfall = craftMissingIngredients(itemDef, mcData, craftingTable);
           return {
             ok: false,
             detail: `no craftable recipe for '${itemName}' with current materials${needsTable}`,
-            data: {},
+            data: shortfall || { wanted: itemName, missing: [] },
           };
         }
         await bot.craft(recipes[0], count, craftingTable || null);

@@ -236,6 +236,153 @@ def _fmt_knowledge(knowledge: Any) -> list[str]:
     return lines
 
 
+def _fmt_craft_deficit(craft_deficit: Any) -> list[str]:
+    """Render the craft-material shortfall cue as prompt lines.
+
+    ``craft_deficit`` is the opaque dict the connector placed in
+    ``extra["craft_deficit"]`` — ``{"wanted": <item>, "missing": [{"item",
+    "have", "need"}, ...]}`` — meaning Synth tried to craft ``wanted`` but was
+    short on the listed ingredients. Returns an empty list when there is nothing
+    to show, so the caller can skip the block. Purely structural rendering of
+    ids + counts; it never inspects anything for keywords.
+    """
+    if not isinstance(craft_deficit, dict):
+        return []
+    wanted = str(craft_deficit.get("wanted") or "").strip()
+    missing = craft_deficit.get("missing")
+    if not wanted or not isinstance(missing, list) or not missing:
+        return []
+    parts: list[str] = []
+    for entry in missing:
+        if not isinstance(entry, dict):
+            continue
+        item = str(entry.get("item") or "").strip()
+        if not item:
+            continue
+        try:
+            have = int(entry.get("have") or 0)
+            need = int(entry.get("need") or 0)
+        except (TypeError, ValueError):
+            continue
+        if need <= 0:
+            continue
+        parts.append(f"{have}/{need} {item}")
+    if not parts:
+        return []
+    return [
+        "",
+        f"You wished to build '{wanted}', but you do not have the materials "
+        f"yet — you have {', '.join(parts)} (have/need). Gather the missing "
+        "material first (harvest or craft the intermediate item you are short "
+        "on), then try building again.",
+    ]
+
+
+def _fmt_bases(bases: Any) -> list[str]:
+    """Render Synth's registered bases (homes) as prompt lines.
+
+    ``bases`` is the opaque list the connector placed in ``extra["bases"]`` —
+    each entry a dict as returned by
+    :func:`plugins.rift_vessel.vessel_bases.list_bases`
+    (``{name, kind, anchor{x,y,z}, note, ...}``). Returns an empty list when
+    there is nothing to show, so the caller can skip the block entirely. Purely
+    structural rendering of names + coordinates; it never inspects any text for
+    keywords.
+    """
+    if not isinstance(bases, list) or not bases:
+        return []
+    lines: list[str] = [
+        "",
+        "Your bases (places you built/claimed as home — you can return here to "
+        "store things, shelter, sleep or respawn):",
+    ]
+    for entry in bases[:_MAX_LIST_ITEMS]:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip() or "base"
+        kind = str(entry.get("kind") or "").strip()
+        anchor = entry.get("anchor")
+        coord_txt = ""
+        if isinstance(anchor, dict):
+            ax = anchor.get("x")
+            ay = anchor.get("y")
+            az = anchor.get("z")
+            if isinstance(ax, (int, float)) and isinstance(az, (int, float)):
+                ay_txt = f", y={int(ay)}" if isinstance(ay, (int, float)) else ""
+                coord_txt = f" at x={int(ax)}{ay_txt}, z={int(az)}"
+        kind_txt = f" ({kind})" if kind and kind != "home" else ""
+        lines.append(f"- {name}{kind_txt}{coord_txt}")
+    if len(lines) <= 2:
+        return []
+    return lines
+
+
+def _fmt_quest(quest: Any) -> list[str]:
+    """Render the active quest (directed milestone) as prompt lines.
+
+    ``quest`` is the opaque dict the connector placed in ``extra["quest"]`` — a
+    single active quest as returned by
+    :func:`plugins.rift_vessel.vessel_quests.get_active_quest`
+    (``{quest_id, title, description, objectives, progress, ...}``). Returns an
+    empty list when there is nothing to show, so the caller can skip the block
+    entirely (an empty string block destabilises the LLM). Purely structural
+    rendering of the title + its still-pending objectives; it never inspects any
+    text for keywords, and it frames the quest as *reference* — a milestone to
+    aim for, not a script — so Synth binds its own freely-authored goal to it
+    only if it wants to.
+    """
+    if not isinstance(quest, dict):
+        return []
+    title = str(quest.get("title") or "").strip()
+    if not title:
+        return []
+    lines: list[str] = [
+        "",
+        "Your current quest (a milestone you are working toward — treat it as a "
+        "direction, not a script; you may bind the goal you author to it):",
+        f"- {title}",
+    ]
+    description = str(quest.get("description") or "").strip()
+    if description:
+        lines.append(f"  {description}")
+    # Surface still-pending objectives structurally (item/dimension/mob ids and
+    # counts) so Synth knows what remains for this milestone.
+    objectives = quest.get("objectives")
+    if isinstance(objectives, list) and objectives:
+        progress = quest.get("progress") or {}
+        kills = progress.get("kills") if isinstance(progress, dict) else {}
+        if not isinstance(kills, dict):
+            kills = {}
+        obj_lines: list[str] = []
+        for obj in objectives[:_MAX_LIST_ITEMS]:
+            if not isinstance(obj, dict):
+                continue
+            kind = str(obj.get("kind") or "").strip()
+            target = obj.get("target")
+            try:
+                count = int(obj.get("count") or 1)
+            except (TypeError, ValueError):
+                count = 1
+            if kind == "have_item" and target:
+                obj_lines.append(f"  - have {count}x {target}")
+            elif kind == "reach_dimension" and target:
+                obj_lines.append(f"  - reach the {target}")
+            elif kind == "has_base":
+                obj_lines.append("  - have a base (home)")
+            elif kind == "has_bed":
+                obj_lines.append("  - have a bed to sleep / set respawn")
+            elif kind == "kill":
+                done = 0
+                if target and isinstance(kills.get(str(target).lower()), int):
+                    done = int(kills.get(str(target).lower()) or 0)
+                what = target or "any hostile"
+                obj_lines.append(f"  - defeat {count}x {what} ({done}/{count})")
+        if obj_lines:
+            lines.append("  objectives:")
+            lines.extend(obj_lines)
+    return lines
+
+
 def world_state_to_dict(world_state: Any) -> dict[str, Any]:
     """Normalize a ``WorldState`` (dataclass or dict) to a plain dict.
 
@@ -764,6 +911,19 @@ def build_action_prompt(world_state: Any, world: str) -> str:
     # rendering here is keyword-free. Helps pick the correct verb (e.g. that
     # iron ore needs a stone pickaxe first).
     lines.extend(_fmt_knowledge(extra.get("knowledge")))
+
+    # Craft-material shortfall cue (see build_will_prompt). Surface it here too
+    # so the action beat gathers the missing intermediate instead of retrying
+    # the impossible craft. Structural (item ids + counts), keyword-free.
+    lines.extend(_fmt_craft_deficit(extra.get("craft_deficit")))
+
+    # Registered bases (homes), keyword-free — so a concrete step can head home
+    # to build/store instead of leaving resources scattered.
+    lines.extend(_fmt_bases(extra.get("bases")))
+
+    # The active quest (directed milestone), reference only — so the concrete
+    # step advances the current milestone when it fits.
+    lines.extend(_fmt_quest(extra.get("quest")))
 
     # Surface the exact reachable ids so the chosen 'name'/'target' is verbatim.
     if block_names:

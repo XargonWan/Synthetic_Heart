@@ -446,6 +446,18 @@ class MinecraftConnector(VesselConnectorBase):
         # detection can tell she has crossed into the Nether/End without a fresh
         # snapshot. Plain game id, never chat text. Empty until first snapshot.
         self._last_dimension: str = ""
+        # Craft-material shortfall cue. When a ``craft`` fails for missing
+        # ingredients, the bridge returns the exact shortfall (which item was
+        # wanted and how many of each material are short); we latch it here with
+        # a turn budget so the will/action beats can render a
+        # "you wished to build X, you need have/need <material>" hint for a few
+        # turns, then it self-clears. Structural (Minecraft item ids + counts),
+        # never chat text. ``None`` when there is no pending shortfall.
+        self._craft_deficit: Dict[str, Any] | None = None
+        # How many turns (world-state builds) a fresh craft shortfall cue stays
+        # rendered before it self-clears. Resolved from VESSEL_CRAFT_CUE_TURNS
+        # on connect; falls back to the class default.
+        self._craft_cue_turns: int = self._CRAFT_CUE_TURNS
 
     # Self-preservation thresholds (defaults; overridable per-connect via the
     # ``VESSEL_SP_*`` config keys resolved in ``connect``). All structural:
@@ -1188,14 +1200,102 @@ class MinecraftConnector(VesselConnectorBase):
             return await self._act_lookup_knowledge(payload or {})
         if action in self._GOAL_VERBS:
             return await self._act_goal(action, payload or {})
+        if action == "build_base":
+            return await self._act_build_base(payload or {})
+        if action in self._BASE_VERBS:
+            return await self._act_base(action, payload or {})
         if action == "say":
             return await self._act_say(payload or {})
         res = await self._post("/cmd", {"action": action, "payload": payload or {}})
+        if action == "craft":
+            self._update_craft_deficit(bool(res.get("ok")), res.get("data") or {})
         return VesselActionResult(
             ok=bool(res.get("ok")),
             detail=res.get("detail"),
             data=res.get("data") or {},
         )
+
+    def _update_craft_deficit(self, ok: bool, data: Dict[str, Any]) -> None:
+        """Latch or clear the craft-material shortfall cue after a craft attempt.
+
+        On a **successful** craft we clear any pending shortfall (Synth got what
+        it wanted). On a **failed** craft the bridge returns the exact shortfall
+        — ``{"wanted": <item id>, "missing": [{"item", "have", "need"}, ...]}`` —
+        which we latch here with a fresh turn budget so the will/action beats can
+        render a "you wished to build X, you need have/need <material>" hint for
+        a few turns. Purely structural (Minecraft item ids + counts), never chat
+        text; fully fail-safe.
+        """
+        if ok:
+            self._craft_deficit = None
+            return
+        try:
+            wanted = str(data.get("wanted") or "").strip()
+            raw_missing = data.get("missing")
+            if not wanted or not isinstance(raw_missing, list) or not raw_missing:
+                return
+            missing: list[dict[str, Any]] = []
+            for entry in raw_missing:
+                if not isinstance(entry, dict):
+                    continue
+                item = str(entry.get("item") or "").strip()
+                if not item:
+                    continue
+                try:
+                    have = int(entry.get("have") or 0)
+                    need = int(entry.get("need") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if need <= 0:
+                    continue
+                missing.append({"item": item, "have": have, "need": need})
+            if not missing:
+                return
+            self._craft_deficit = {
+                "wanted": wanted,
+                "missing": missing,
+                "turns_left": int(self._craft_cue_turns),
+            }
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} craft deficit latch failed: {exc}")
+
+    def _consume_craft_deficit(
+        self, inventory_counts: Dict[str, int]
+    ) -> Dict[str, Any] | None:
+        """Return the active craft-shortfall cue for this turn, or ``None``.
+
+        Called once per ``get_world_state`` (one perception/beat turn). Refreshes
+        each missing ingredient's ``have`` from the live inventory, drops any
+        ingredient now fully satisfied, decrements the turn budget, and clears
+        the whole cue when the budget runs out or every ingredient is satisfied.
+        Structural only (item ids + counts). Returns a snapshot dict suitable for
+        ``WorldState.extra["craft_deficit"]`` or ``None`` when nothing to show.
+        """
+        deficit = self._craft_deficit
+        if not deficit:
+            return None
+        try:
+            refreshed: list[dict[str, Any]] = []
+            for entry in deficit.get("missing", []):
+                item = str(entry.get("item") or "")
+                need = int(entry.get("need") or 0)
+                have = int(inventory_counts.get(item, 0)) if inventory_counts else 0
+                if need > 0 and have < need:
+                    refreshed.append({"item": item, "have": have, "need": need})
+            turns_left = int(deficit.get("turns_left") or 0) - 1
+            if not refreshed or turns_left <= 0:
+                self._craft_deficit = None
+                if not refreshed:
+                    return None
+                # Last render before it self-clears.
+                return {"wanted": deficit.get("wanted"), "missing": refreshed}
+            deficit["missing"] = refreshed
+            deficit["turns_left"] = turns_left
+            return {"wanted": deficit.get("wanted"), "missing": refreshed}
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} craft deficit consume failed: {exc}")
+            self._craft_deficit = None
+            return None
 
     @staticmethod
     def _split_chat_text(text: str, limit: int) -> list[str]:
@@ -1673,10 +1773,15 @@ class MinecraftConnector(VesselConnectorBase):
         # Cache live telemetry for ``get_progression_context`` (starter-goal
         # KB seeding). Structural ids only, never chat text.
         self._last_inventory_counts = inventory_counts
+        # Advance the craft-material shortfall cue by one turn (refresh have,
+        # decrement budget, self-clear when done). Structural, fail-safe.
+        craft_deficit = self._consume_craft_deficit(inventory_counts)
         self._last_blocks = blocks
         self._last_dimension = str(data.get("dimension") or "")
         affordances = self._build_affordances(entities, blocks)
         current_goal, recent_goals = await self._resolve_goals()
+        bases = await self._resolve_bases()
+        quest = await self._resolve_quest(inventory_counts, bases)
         knowledge = await self._resolve_knowledge(
             current_goal, affordances, inventory_counts, blocks
         )
@@ -1830,6 +1935,29 @@ class MinecraftConnector(VesselConnectorBase):
                 # rules. Empty when the knowledge base is disabled or nothing
                 # matches. Keyed on structural ids, keyword-free.
                 "knowledge": knowledge,
+                # Craft-material shortfall cue: the item Synth last tried to
+                # craft but lacked materials for, with each missing ingredient's
+                # live have/need counts. Rendered by the will/action beats as a
+                # "you wished to build X, you need have/need <material>" hint for
+                # a few turns, then self-clears. Structural (Minecraft item ids +
+                # counts), never chat text. None when there is no pending
+                # shortfall.
+                "craft_deficit": craft_deficit,
+                # Registered bases (homes) Synth built/claimed in this world.
+                # Surfaced into the will/action/reflection beats so Synth
+                # remembers it has a home to build up, store in, or return to at
+                # night, and read by the night-retreat reflex. Structural
+                # (name/kind + {x,y,z} anchor), never chat text. Empty when no
+                # base has been set. See bases.py / vessel_bases.py.
+                "bases": bases,
+                # The active quest (directed milestone toward the Ender Dragon).
+                # Surfaced into the will/action/reflection beats as *reference*
+                # only — a direction to bind the freely-authored goal to, never
+                # a script (spontaneity rule). The store advances a quest only
+                # when the world structurally satisfies its objectives. None
+                # when quests are disabled or the questline is complete. See
+                # quests.py / vessel_quests.py and AGENTS.md §5c.
+                "quest": quest,
             },
         )
 
