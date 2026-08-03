@@ -346,6 +346,13 @@ Key                             Purpose
 ``VESSEL_SP_APPRAISAL_ENABLED``  Enable the post-damage appraisal will beat — a ``PRIORITY_URGENT`` Fast-Lane LLM turn on taking damage (``True`` default)
 ``VESSEL_SP_ENGAGE_RATIO``      Minimum ``own_power / mob_power`` at/above which an **armed** Synth engages instead of fleeing (1.0, clamp 0.2–5.0)
 ``VESSEL_SP_WEAK_MOB_POWER``    Power floor below which a **disarmed** Synth still punches out a mob bare-handed instead of fleeing (6.0)
+``VESSEL_SP_NIGHT_SHELTER``     Enable the priority-6 night-shelter reflex — fully enclose (roofed bed → seal → dig-in) at night with hostiles near (``True`` default)
+``VESSEL_SP_SHELTER_DIST``      Distance (blocks) within which a hostile mob at night triggers the shelter reflex (16.0 — wider than ``VESSEL_SP_HOSTILE_DIST`` so the body walls in before a mob closes)
+``VESSEL_MORNING_EXIT_ENABLED``  Enable the priority-7 morning surface-exit reflex — if buried with no reachable base, dig a jumpable ``climb_staircase`` back to daylight at day with no open sky (``True`` default)
+``VESSEL_GOAL_DEBRIEF_ENABLED``  Enable the goal debrief — a slow structural postflight check that auto-completes a satisfied goal and arms a stall cue (``True`` default)
+``VESSEL_GOAL_DEBRIEF_USE_HISTORY``  Also confirm goal completion from the session's ``vessel_activity_log`` (place/mine/kill/craft) when it leaves no lasting inventory trace — structural id match, fail-safe (``True`` default)
+``VESSEL_GOAL_DEBRIEF_INTERVAL_SEC``  Seconds between goal-debrief checks (30, clamped 5–3600)
+``VESSEL_GOAL_DEBRIEF_STALL_TICKS``  Consecutive unchanged debrief checks before arming a will-beat stall cue (4, clamped 2–100)
 ``MINECRAFT_BRIDGE_RUN_AT_START``  Optional boot pre-warm (False). The bridge starts **on demand** by default, only when Synth enters the world.
 ``MINECRAFT_BRIDGE_HOST``       Bridge bind host (``127.0.0.1``)
 ``MINECRAFT_BRIDGE_PORT``       Bridge HTTP port (``8137``)
@@ -716,6 +723,34 @@ Agent Lane/Drones, no mid-session diary). Unit-tested in
 ``tests/test_vessel_beat.py`` (prompt) and ``tests/test_vessel_survival.py``
 (combat reflex).
 
+**Night shelter (priority 6).** Below drowning/burning/combat: when it is
+**not day** (``is_day`` False — structural time telemetry) AND aggressive mobs
+are within ``VESSEL_SP_SHELTER_DIST`` (default 16.0, deliberately wider than the
+melee ``VESSEL_SP_HOSTILE_DIST`` = 8 so the body walls in *before* a mob closes),
+``_survival_threat`` returns ``{"threat":"night_shelter","verb":"shelter"}``. A
+torch is **not** enough — Synth must fully enclose: the bridge ``shelter`` verb
+tries, in order, a nearby **roofed bed** (``bot.sleep`` → ``method:"bed"``), then
+**sealing** the ~10 open cells around the body (``method:"seal"``), then a 1×2
+**dig-in** niche as a last resort (``method:"dig_in"``). Gated by
+``VESSEL_SP_NIGHT_SHELTER`` (default True).
+
+**Morning surface-exit (priority 7, lowest).** If Synth dug in / walled itself
+in overnight and has **no real base**, at dawn it must climb back to daylight
+instead of staying buried. When it is **day** (``is_day`` True) AND there is **no
+open sky above** (the bridge's ``hasOpenSkyAbove(maxUp)`` → ``sky_access`` False),
+and only when a ``_surfaced_last_day`` day-latch has not already fired,
+``_survival_threat`` returns ``{"threat":"morning_exit","verb":"climb_staircase"}``.
+The bridge ``climb_staircase`` verb digs a **jumpable ascending staircase** — one
+block forward + one block up per step, placing the tread — via direct dig/place
+(no pathfinder), stopping early once ``skyClear()`` reports open sky. The async
+``_run_survival_guard`` gates the actual climb on ``_has_reachable_base(state)``:
+if a registered base is within ``_base_retreat_radius`` it just sets the day-latch
+and skips (a real base already has an exit); otherwise it dispatches
+``climb_staircase``. The day-latch prevents refiring the same day and re-arms at
+night. Structural only (numeric time + sky-access bool, never text), Fast Lane,
+no diary. Gated by ``VESSEL_MORNING_EXIT_ENABLED`` (default True). Unit-tested in
+``tests/test_vessel_survival.py``.
+
 **GOTCHA — oxygen is the 0..20 bubble scale.** At runtime mineflayer
 ``bot.oxygenLevel`` reports the vanilla 0..20 air-bubble scale (20 = full lungs,
 0 = out of air), **not** air ticks — a healthy submerged bot reads ~20, so
@@ -774,6 +809,54 @@ connector still exposes the bridge-backed verbs ``goto``, ``scan``, ``mine``,
 in the ``goals`` table so a goal survives across beats within a session.
 *"Do I go looking for diamonds or build a chest first?"* is Synth's decision,
 driven by its personality and wants — not a hardcoded script.
+
+**Goal debrief — a structural postflight check.** Synth often progresses
+*physically* (places a block, kills a mob, crafts a tool) yet never declares the
+goal ``done`` — so a slow, structural supervisor (``core/vessel_goal_debrief.py``
++ the wiring in ``interface/vessel_interface.py``) runs every
+``VESSEL_GOAL_DEBRIEF_INTERVAL_SEC`` while a session is active, gated by
+``VESSEL_GOAL_DEBRIEF_ENABLED`` (default True). It supervises the single active
+goal in two ways, **never** reading the goal text as intent:
+
+#. **Deterministic completion.** It first asks the connector's world-owned
+   ``evaluate_goal_completion`` / ``complete_active_goal`` hooks whether the live
+   world/inventory already satisfies the goal (e.g. the target item is now held).
+#. **History-based completion** (gated by ``VESSEL_GOAL_DEBRIEF_USE_HISTORY``,
+   default True). When the fast check did **not** satisfy the goal, it additionally
+   consults the session's own ``vessel_activity_log`` via the connector's
+   ``evaluate_goal_completion_from_history`` hook (Minecraft implemented) and
+   auto-completes the goal when a **successful action actually taken this session**
+   structurally matches the goal's concrete target — place/mine/collect a block,
+   attack/shoot a mob, craft/smelt an item. This closes the gap where a goal is
+   fulfilled by an action that leaves **no lasting inventory trace**. Matching is
+   purely id-based on the logged target ids (``_HISTORY_TARGET_KEYS``), never a
+   text parse, and fully fail-safe (a loader error → unsatisfied).
+
+If neither path completes the goal, the debrief tracks *staleness*: after
+``VESSEL_GOAL_DEBRIEF_STALL_TICKS`` consecutive unchanged checks (same goal id +
+``current_step`` + ``updated_at``) it arms a will-beat stall cue prompting Synth
+to reconsider or change approach. The debrief is structural only, Fast Lane only
+(no cognition turn, no diary). The completion hook is a world-agnostic core
+contract (``VesselConnectorBase.evaluate_goal_completion_from_history``, default
+unsatisfied); the event-class → target-kind mapping and Minecraft ids live in the
+adapter. Unit-tested in ``tests/test_vessel_goal_debrief.py``.
+
+**Prefab closed-house build (``build_base``).** The Minecraft ``build_base`` verb
+builds a small, fully-enclosed hollow-cube shelter (walls + roof + floor + one
+door gap + interior torch + crafting table, optional bed) from a deterministic,
+inventory-aware layout — a *model/reference*, not a scripted quest (the
+spontaneity rule holds). The layout recipe is
+``plugins/rift_vessel/minecraft/base_spec.py::derive_base_layout(origin,
+inventory_counts)`` (pure, bounded, structural id-only, fail-open): it emits the
+shell **bottom-up — floor → walls → roof** so every cell has a solid neighbour
+already placed to click against (the roof, placed last, anchors onto the finished
+wall tops — the fix for the earlier "house was not closed" bug). The bridge
+``build_base`` case then runs the shell placement plus a bounded **seal pass**
+(max 3 idempotent re-attempt rounds over the cells that first failed with
+``no-solid-face``, no-progress early-bail) so edge/corner/roof cells that were
+floating in air on the first pass get closed once the rest of the shell exists. A
+material shortfall surfaces structurally as ``ok=False`` + ``missing`` rather than
+dispatching an unbuildable plan. Unit-tested in ``tests/test_base_spec.py``.
 
 **Game knowledge base — reference facts, never a script.** A Synth that does not
 know a world's *rules* plays badly — e.g. it tries to mine iron ore bare-handed
