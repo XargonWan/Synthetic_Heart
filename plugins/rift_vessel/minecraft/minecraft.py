@@ -310,6 +310,18 @@ class MinecraftConnector(VesselConnectorBase):
         # own displacement covers every one of them uniformly.
         self._last_body_position: Dict[str, float] | None = None
         self._stuck_position_ticks = 0
+        # Staticity ward state (see ``_STATIC_WARD_RADIUS`` / ``_staticity_ward``
+        # and AGENTS.md §5c). ``_static_anchor`` is the reference point the body
+        # is "parked" around; ``_static_ward_ticks`` counts how many consecutive
+        # motor ticks it has lingered within ``_static_ward_radius`` of it. When
+        # the body strays outside that radius the anchor moves and the counter
+        # resets, so the ward only fires on *genuine* stasis, not on normal
+        # travel. Runtime-configurable via the ``VESSEL_STATICITY_*`` keys.
+        self._static_anchor: Dict[str, float] | None = None
+        self._static_ward_ticks = 0
+        self._static_ward_enabled: bool = True
+        self._static_ward_radius: float = float(self._STATIC_WARD_RADIUS)
+        self._static_ward_limit: int = int(self._STATIC_WARD_TICKS)
         # Structural 3-state feedback for the *last named target* the motor
         # tried to reach (``goal_target``: a block/entity id cognition chose
         # from the live scan). A named target can fail two very different ways
@@ -2248,6 +2260,22 @@ class MinecraftConnector(VesselConnectorBase):
     _STUCK_MOVE_EPS = 0.75
     _STUCK_POSITION_TICKS = 4
 
+    # Staticity ward thresholds (see ``_static_anchor`` / ``_staticity_ward``).
+    # Where ``_STUCK_POSITION_TICKS`` measures *tick-to-tick* motion and only
+    # runs while a goal is actively driving the body, the staticity ward is a
+    # broader, always-on guard: it fires when the body *lingers in the same
+    # small area* for too long **regardless of goal or what it is doing** — the
+    # "Synth stays parked in one spot forever" case the tick-to-tick watchdog
+    # misses (no goal at all, or endlessly ``mine``/``use``ing an in-reach block
+    # without displacing). ``_STATIC_WARD_RADIUS`` is the radius (blocks,
+    # horizontal) that still counts as "the same place": while the body stays
+    # within this radius of a moving anchor it accrues idle ticks; leaving it
+    # resets the anchor. After ``_STATIC_WARD_TICKS`` consecutive idle ticks the
+    # ward forces a fresh long directional march to break the parking. Purely
+    # positional/numeric — no timers, no keywords.
+    _STATIC_WARD_RADIUS = 2.0
+    _STATIC_WARD_TICKS = 8
+
     # Turn applied to the exploration heading each time a stale destination is
     # reprojected, so successive self-directed reprojections fan out across the
     # world instead of retracing the same straight line. ~2.4 rad ≈ 137° (a
@@ -2268,6 +2296,50 @@ class MinecraftConnector(VesselConnectorBase):
             MinecraftConnector._EXPLORE_LEG_MAX_FACTOR,
         )
         return MinecraftConnector._MIN_TRAVEL_DISTANCE * factor
+
+    def _update_staticity_ward(self, position: Any) -> bool:
+        """Track lingering-in-place and report when the ward should fire.
+
+        Purely positional/numeric guard (no timers, no keywords). Maintains a
+        moving anchor: while the body stays within ``_static_ward_radius`` of the
+        anchor it accrues idle ticks; straying outside resets the anchor and the
+        counter. Returns ``True`` exactly once when the idle count reaches
+        ``_static_ward_limit`` — the signal that the body has been parked in the
+        same small area too long and must relocate. On that fire the counter and
+        anchor are reset so the ward re-arms cleanly for the next stasis.
+
+        Fail-safe: a missing/malformed position resets tracking and never fires.
+        """
+        if not self._static_ward_enabled:
+            return False
+        cur = position if isinstance(position, dict) else None
+        if cur is None:
+            self._static_anchor = None
+            self._static_ward_ticks = 0
+            return False
+        try:
+            here = {"x": float(cur["x"]), "z": float(cur["z"])}
+        except (KeyError, TypeError, ValueError):
+            self._static_anchor = None
+            self._static_ward_ticks = 0
+            return False
+        if self._static_anchor is None:
+            self._static_anchor = here
+            self._static_ward_ticks = 0
+            return False
+        moved = self._horizontal_distance(here, self._static_anchor)
+        if moved is None or moved > self._static_ward_radius:
+            # The body left the parked area — re-anchor and start fresh.
+            self._static_anchor = here
+            self._static_ward_ticks = 0
+            return False
+        self._static_ward_ticks += 1
+        if self._static_ward_ticks >= self._static_ward_limit:
+            # Parked too long: fire once, re-anchor here and re-arm.
+            self._static_ward_ticks = 0
+            self._static_anchor = here
+            return True
+        return False
 
     @staticmethod
     def _reproject_forward(
@@ -2557,6 +2629,31 @@ class MinecraftConnector(VesselConnectorBase):
             self._sp_shelter_dist = _flt(
                 "VESSEL_SP_SHELTER_DIST", float(self._SHELTER_HOSTILE_DIST)
             )
+            # Morning bunker-exit: carve a staircase back to the surface when day
+            # returns and the body is still buried underground with no base.
+            self._sp_morning_exit = _boolv("VESSEL_MORNING_EXIT_ENABLED", True)
+            # Base concept + night-retreat radius. When enabled, the night
+            # shelter reflex first tries to head back to the nearest registered
+            # base within this radius (reusing ``goto``) instead of walling the
+            # body in on the spot.
+            self._base_enabled = _boolv("VESSEL_BASE_ENABLED", True)
+            self._base_retreat_radius = _flt(
+                "VESSEL_BASE_RETREAT_RADIUS", float(self._BASE_RETREAT_RADIUS)
+            )
+            # Ender Dragon questline enablement (directed reference milestones).
+            self._quests_enabled = _boolv("VESSEL_QUESTS_ENABLED", True)
+            # Craft-material shortfall cue budget (turns). Clamp to the sane
+            # "a few turns" band so a stray value can neither disable it (0) nor
+            # pin the cue forever.
+            craft_turns = _intv("VESSEL_CRAFT_CUE_TURNS", int(self._CRAFT_CUE_TURNS))
+            self._craft_cue_turns = min(max(craft_turns, 1), 200)
+            # Staticity ward: always-on guard that relocates the body when it
+            # lingers in the same small area too long, regardless of goal.
+            self._static_ward_enabled = _boolv("VESSEL_STATICITY_WARD_ENABLED", True)
+            radius = _flt("VESSEL_STATICITY_RADIUS", float(self._STATIC_WARD_RADIUS))
+            self._static_ward_radius = min(max(radius, 0.5), 32.0)
+            limit = _intv("VESSEL_STATICITY_TICKS", int(self._STATIC_WARD_TICKS))
+            self._static_ward_limit = min(max(limit, 2), 1000)
         except Exception as exc:  # pragma: no cover - defensive
             log_debug(f"{LOG_PREFIX} self-preservation config load failed: {exc}")
 
@@ -2984,6 +3081,43 @@ class MinecraftConnector(VesselConnectorBase):
                 # Day returned — arm the shelter reflex for the next night.
                 self._sheltered_last_day = True
 
+        # 7. Morning bunker exit — lowest priority, only when nothing else is
+        #    pressing (no fight/flee/shelter above triggered).
+        #
+        # If Synth spent the night in a dug bunker (no base), when DAY returns
+        # and the body is still buried under a ceiling (no open sky) it should
+        # carve a walkable ascending staircase back to the surface — a jump-up
+        # stair (one block up, one block forward) rather than a pit it cannot
+        # climb out of. Structural: numeric ``is_day`` + the bridge
+        # ``sky_access`` flag only, never keyword logic. The "no base reachable"
+        # gate and the actual staircase action live in the async
+        # ``_run_survival_guard`` (base lookup is async); here we only surface
+        # the candidate plan and manage the per-day latch so it fires once.
+        if self._sp_morning_exit:
+            extra_now = state.extra or {}
+            is_day = extra_now.get("is_day")
+            sky = extra_now.get("sky_access")
+            if is_day is True:
+                if sky is True:
+                    # Out in the open — arm the reflex and clear the latch so a
+                    # fresh burial next night/morning re-triggers it.
+                    self._surfaced_last_day = True
+                elif sky is False and self._surfaced_last_day is not False:
+                    # Buried under a ceiling in daylight: candidate for exit.
+                    self._surfaced_last_day = False
+                    return {
+                        "threat": "morning_exit",
+                        "verb": "climb_staircase",
+                        "payload": {},
+                        "reason": {
+                            "is_day": True,
+                            "sky_access": False,
+                        },
+                    }
+            elif is_day is False:
+                # Night — re-arm so the next morning fires the exit if buried.
+                self._surfaced_last_day = True
+
         # Safe — clear any lingering fight state.
         if self._fight_target is not None:
             self._fight_target = None
@@ -3071,7 +3205,28 @@ class MinecraftConnector(VesselConnectorBase):
                 # A shot is also a defend tick for escalation purposes.
                 self._fight_fail_count += 1
             elif verb == "shelter":
-                result = await self.act("shelter", payload)
+                # Base-retreat first: if Synth has a home nearby, head BACK to
+                # it (reusing ``goto``) instead of burying the body wherever it
+                # is standing. Sheltering-in-place stays only as the last resort
+                # when no base is reachable. Structural: numeric distance vs the
+                # retreat radius, never keyword logic. Fully fail-safe — any
+                # error falls through to the in-place shelter.
+                retreat = await self._retreat_to_base(state)
+                if retreat is not None:
+                    result = retreat
+                    threat = "night_retreat"
+                else:
+                    result = await self.act("shelter", payload)
+            elif verb == "climb_staircase":
+                # Morning bunker exit. Only carve a staircase when Synth has NO
+                # reachable base — a registered base means it has a home to
+                # path back to, not a bunker to dig out of. Structural async
+                # base lookup; fail-safe. If a base IS reachable we let the
+                # will/motor beats handle returning home instead.
+                if await self._has_reachable_base(state):
+                    self._surfaced_last_day = True  # not a bunker; disarm
+                    return None
+                result = await self.act("climb_staircase", payload)
             else:  # pragma: no cover - defensive
                 return None
         except Exception as exc:  # pragma: no cover - defensive
@@ -3088,6 +3243,10 @@ class MinecraftConnector(VesselConnectorBase):
         # while the previous attempt is still resolving.
         elif verb == "shelter":
             self._survival_cooldown_ticks = 2
+        # Carving a staircase up takes several seconds; hold a few ticks so the
+        # reflex does not re-issue while the previous climb is still resolving.
+        elif verb == "climb_staircase":
+            self._survival_cooldown_ticks = 3
         acted = _result_acted(result)
         log_info(
             f"{LOG_PREFIX} survival reflex: {threat} -> {verb} "
@@ -3595,6 +3754,34 @@ class MinecraftConnector(VesselConnectorBase):
             survival = await self._run_survival_guard(state)
             if survival is not None:
                 return survival
+
+            # Staticity ward — runs BEFORE the ``no goal`` early-return and every
+            # other movement branch, so it covers the cases the tick-to-tick
+            # ``_stuck_position_ticks`` watchdog cannot: the body parked in one
+            # spot with *no goal at all*, or endlessly ``mine``/``use``ing an
+            # in-reach block without displacing. When the body has lingered in
+            # the same small area for too many ticks, break the parking by
+            # rotating the exploration heading and marching to a fresh, distant
+            # waypoint — the body ends up *somewhere else*, exactly the ward the
+            # user asked for. Purely positional (no goal text, no keywords).
+            if self._update_staticity_ward(state.position):
+                self._explore_heading += self._EXPLORE_TURN_RAD
+                forward = self._reproject_forward(state.position, self._explore_heading)
+                if forward is not None:
+                    await self.act("goto", {"x": forward["x"], "z": forward["z"]})
+                    log_info(
+                        f"{LOG_PREFIX} staticity ward: parked too long -> "
+                        f"relocating to ({forward['x']:.0f}, {forward['z']:.0f})"
+                    )
+                    return {
+                        "acted": True,
+                        "action": "goto",
+                        "destination": forward,
+                        "reason": "staticity_ward",
+                    }
+                # No usable position to reproject from — last-resort roam.
+                await self.act("wander", {})
+                return {"acted": True, "action": "wander", "reason": "staticity_ward"}
 
             if not goal:
                 return {"acted": False, "reason": "no_goal"}
@@ -4244,6 +4431,26 @@ class MinecraftConnector(VesselConnectorBase):
                 ),
                 "required_fields": [],
                 "optional_fields": ["height", "target_y", "item"],
+                "security_level": "low",
+            },
+            "climb_staircase": {
+                "description": (
+                    "Carve a walkable staircase UP to the surface out of a "
+                    "bunker or tunnel. Instead of pillaring straight up (a pole "
+                    "you can only fall off), you build a diagonal ramp: each "
+                    "step goes one block up and one block forward, placing a "
+                    "solid tread under your next foothold and clearing the "
+                    "space above it, so the same corridor becomes a stair you "
+                    "can walk and jump up on foot — one block up, one block "
+                    "forward. Use this when you dug yourself underground with no "
+                    "staircase and need to get back to open sky. You must be "
+                    "carrying blocks to place the treads; give 'height' for how "
+                    "many steps up, or 'target_y' to stop at a specific height. "
+                    "Pass 'item' to use a particular block, or 'yaw' to force a "
+                    "direction."
+                ),
+                "required_fields": [],
+                "optional_fields": ["height", "target_y", "item", "yaw"],
                 "security_level": "low",
             },
             "scan": {

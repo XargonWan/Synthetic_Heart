@@ -1251,3 +1251,115 @@ def test_extract_goal_description_empty_and_missing() -> None:
     # Non-string values are ignored (must be a non-empty string).
     assert MinecraftConnector._extract_goal_description({"goal": 123}) == ""
     assert MinecraftConnector._extract_goal_description({"description": None}) == ""
+
+
+# ----------------------------------------------------------------------
+# Staticity ward — always-on relocate-when-parked guard (pure logic)
+# ----------------------------------------------------------------------
+
+
+def test_staticity_ward_first_sample_sets_anchor() -> None:
+    # The very first position seen becomes the anchor; the ward never fires on
+    # its first observation (nothing to compare against yet).
+    conn = _FakeConnector()
+    assert conn._update_staticity_ward({"x": 0.0, "z": 0.0}) is False
+    assert conn._static_anchor == {"x": 0.0, "z": 0.0}
+    assert conn._static_ward_ticks == 0
+
+
+def test_staticity_ward_fires_after_limit_ticks() -> None:
+    # Staying within the radius accrues idle ticks; the ward fires exactly once
+    # the counter reaches the limit, then re-arms (counter reset, anchor kept).
+    conn = _FakeConnector()
+    conn._static_ward_limit = 4
+    conn._static_ward_radius = 2.0
+    pos = {"x": 5.0, "z": 5.0}
+    # Tick 1 seeds the anchor (no fire). Ticks 2-4 accrue; the 5th call is the
+    # 4th idle tick → fires.
+    assert conn._update_staticity_ward(pos) is False  # anchor set
+    assert conn._update_staticity_ward(pos) is False  # 1
+    assert conn._update_staticity_ward(pos) is False  # 2
+    assert conn._update_staticity_ward(pos) is False  # 3
+    assert conn._update_staticity_ward(pos) is True  # 4 -> fire
+    # Re-armed cleanly.
+    assert conn._static_ward_ticks == 0
+    assert conn._static_anchor == pos
+
+
+def test_staticity_ward_resets_when_body_moves_out_of_radius() -> None:
+    # Leaving the radius re-anchors and resets the counter, so genuine travel
+    # never trips the ward.
+    conn = _FakeConnector()
+    conn._static_ward_limit = 4
+    conn._static_ward_radius = 2.0
+    conn._update_staticity_ward({"x": 0.0, "z": 0.0})  # anchor
+    conn._update_staticity_ward({"x": 0.5, "z": 0.5})  # still inside -> 1 tick
+    assert conn._static_ward_ticks == 1
+    # A big step outside the radius re-anchors and zeroes the counter.
+    assert conn._update_staticity_ward({"x": 50.0, "z": 50.0}) is False
+    assert conn._static_ward_ticks == 0
+    assert conn._static_anchor == {"x": 50.0, "z": 50.0}
+
+
+def test_staticity_ward_disabled_never_fires() -> None:
+    conn = _FakeConnector()
+    conn._static_ward_enabled = False
+    conn._static_ward_limit = 2
+    pos = {"x": 0.0, "z": 0.0}
+    for _ in range(20):
+        assert conn._update_staticity_ward(pos) is False
+
+
+def test_staticity_ward_fail_safe_on_bad_position() -> None:
+    # A missing/malformed position resets tracking and never fires.
+    conn = _FakeConnector()
+    conn._update_staticity_ward({"x": 0.0, "z": 0.0})  # anchor
+    assert conn._update_staticity_ward(None) is False
+    assert conn._static_anchor is None
+    assert conn._update_staticity_ward({"x": "nope", "z": 0.0}) is False
+    assert conn._static_anchor is None
+
+
+@pytest.mark.asyncio
+async def test_motor_step_staticity_ward_relocates_parked_body() -> None:
+    # End-to-end: a body pinned at the same spot (the fake connector reports a
+    # static position every tick) is relocated by the ward once it has been
+    # parked for _static_ward_limit ticks — even though it HAS an active goal
+    # and there is a benign in-reach affordance it keeps poking. The ward runs
+    # before every other branch and forces a fresh directional goto.
+    conn = _FakeConnector(
+        affordances=[
+            {"kind": "entity", "target": "chest", "verb": "use", "distance": 1.0}
+        ]
+    )
+    conn._static_ward_limit = 3
+    conn._static_ward_radius = 2.0
+
+    results: list[dict[str, Any]] = []
+    for _ in range(6):
+        results.append(await conn.motor_step(_ACTIVE_GOAL))
+
+    # The ward fires at least once and relocates the body with a fresh goto.
+    fired = [r for r in results if r.get("reason") == "staticity_ward"]
+    assert fired, "staticity ward never fired over 6 parked ticks"
+    for r in fired:
+        assert r["action"] == "goto"
+        assert r["acted"] is True
+        assert set(r["destination"]) == {"x", "z"}
+
+
+@pytest.mark.asyncio
+async def test_motor_step_staticity_ward_fires_without_goal() -> None:
+    # The ward covers the case the tick-to-tick watchdog cannot: a parked body
+    # with NO goal at all. After enough idle ticks it relocates rather than
+    # sitting inert forever.
+    conn = _FakeConnector(affordances=[])
+    conn._static_ward_limit = 3
+    conn._static_ward_radius = 2.0
+
+    results: list[dict[str, Any]] = []
+    for _ in range(6):
+        results.append(await conn.motor_step(None))
+
+    # At least one tick fired the ward (relocated) instead of returning no_goal.
+    assert any(r.get("reason") == "staticity_ward" for r in results)

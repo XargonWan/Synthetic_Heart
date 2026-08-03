@@ -1127,6 +1127,29 @@ function blockNameAt(dx, dy, dz) {
   }
 }
 
+// Whether there is OPEN SKY directly above the bot's head — i.e. the column of
+// blocks from just above the head up to `maxUp` is all air/passable. This is
+// the structural "am I underground / buried?" signal: false means the body is
+// under a solid ceiling (a dug bunker, a cave, a tunnel). It scans canonical
+// block ids only (air / non-solid), never human text. Guarded — returns null
+// when there is no bot. `maxUp` caps the scan so it is cheap.
+function hasOpenSkyAbove(maxUp) {
+  if (!bot || !bot.entity || typeof bot.blockAt !== 'function') return null;
+  const cap = typeof maxUp === 'number' && maxUp > 0 ? Math.floor(maxUp) : 24;
+  try {
+    for (let dy = 2; dy <= cap; dy += 1) {
+      const name = blockNameAt(0, dy, 0);
+      if (name == null) continue;
+      if (name === 'air' || name === 'cave_air' || name === 'void_air') continue;
+      // First solid/non-air block found overhead → there is a ceiling.
+      return false;
+    }
+    return true;
+  } catch (e) {
+    return null;
+  }
+}
+
 // Build the full world snapshot shared by 'status' and 'scan'. Every field is
 // guarded so a partial read still returns a useful object.
 function worldSnapshot(opts) {
@@ -1171,6 +1194,10 @@ function worldSnapshot(opts) {
     // standing in lava/fire or having its head underwater (drowning).
     block_feet: blockNameAt(0, 0, 0),
     block_head: blockNameAt(0, 1, 0),
+    // Whether open sky is directly above the head (true) or a ceiling covers
+    // the body (false) — the structural "am I underground / buried in a
+    // bunker?" signal the morning-exit reflex uses to dig a way back up.
+    sky_access: hasOpenSkyAbove(24),
     // --- Combat telemetry (structural, all guarded) ------------------------
     // Whether the bot is carrying a usable ranged weapon (bow/crossbow) AND
     // has projectile ammunition. The reflex uses this to decide whether it can
@@ -3245,6 +3272,168 @@ async function runAction(action, payload) {
           ? `climbed ~${risen} blocks and reached open sky`
           : `climbed ~${risen} blocks (still enclosed)`,
         data: { risen, reached_sky: reachedSky, used },
+      };
+    }
+    case 'climb_staircase': {
+      // Carve a walkable ASCENDING staircase back to the surface — the mirror
+      // of 'dig_staircase'. Instead of pillaring straight up (which leaves a
+      // pole you can only fall off), we build a diagonal ramp: for each step we
+      // move one block forward and one block UP, placing a solid tread under
+      // the next foothold and clearing the two head cells above it, so the same
+      // corridor is a stair you can walk/jump up (one block up, one block
+      // forward). This is exactly "un blocco sì un blocco no da saltarci
+      // sopra". Bounded steps + per-step guards mean it can never loop forever.
+      // All placement/dig is direct on cells computed from the bot's own
+      // position — NO pathfind/collectblock, so no buried-block OOM risk.
+      if (!bot || !bot.entity || !bot.entity.position) {
+        return { ok: false, detail: 'climb_staircase unavailable (no bot position)', data: {} };
+      }
+      const Vec3 = bot.entity.position.constructor;
+      // How many ascending steps to carve. Bounded.
+      const steps = Math.min(Math.max(parseInt(payload.height || '12', 10) || 12, 1), 64);
+      const targetY =
+        payload.target_y !== undefined && payload.target_y !== null && payload.target_y !== ''
+          ? parseInt(payload.target_y, 10)
+          : null;
+      // Heading snapped to a cardinal axis, same convention as dig_staircase.
+      let yaw =
+        payload.yaw !== undefined && payload.yaw !== null && payload.yaw !== ''
+          ? parseFloat(payload.yaw)
+          : bot.entity.yaw;
+      if (!Number.isFinite(yaw)) yaw = bot.entity.yaw || 0;
+      const fx = -Math.sin(yaw);
+      const fz = -Math.cos(yaw);
+      const stepX = Math.abs(fx) >= Math.abs(fz) ? (fx >= 0 ? 1 : -1) : 0;
+      const stepZ = stepX === 0 ? (fz >= 0 ? 1 : -1) : 0;
+      // Scaffolding blocks: preferred item first, else any solid held item.
+      const preferred = payload.item ? [String(payload.item).trim().toLowerCase()] : [];
+      const held = botInventory();
+      const scaffoldNames = [
+        ...preferred,
+        ...held.map((it) => it.name.toLowerCase()),
+      ].filter((v, i, a) => v && a.indexOf(v) === i);
+      // Open sky above the head → already out.
+      const skyClear = () => {
+        const feet = bot.entity.position.floored();
+        for (let dy = 2; dy <= 4; dy++) {
+          const blk = bot.blockAt(feet.offset(0, dy, 0));
+          if (blk && blk.name !== 'air') return false;
+        }
+        return true;
+      };
+      const before = inventoryTotals();
+      const startPos = bot.entity.position.clone();
+      let carved = 0;
+      try {
+        for (let i = 0; i < steps; i++) {
+          if (targetY !== null && bot.entity.position.y >= targetY) break;
+          if (targetY === null && skyClear() && i > 0) break;
+          const feet = bot.entity.position.floored();
+          // Next tread: one forward + one up (where the feet will land) plus
+          // the two head cells above it for 2-tall clearance.
+          const treadFeet = feet.offset(stepX, 1, stepZ);
+          const treadHead = treadFeet.offset(0, 1, 0);
+          // Clear the head cells so the body can rise into them.
+          for (const cell of [treadHead, treadFeet]) {
+            const blk = bot.blockAt(cell);
+            if (!blk || blk.name === 'air') continue;
+            if (typeof bot.canDigBlock === 'function' && !bot.canDigBlock(blk)) continue;
+            try {
+              if (bot.tool && typeof bot.tool.equipForBlock === 'function') {
+                try {
+                  await bot.tool.equipForBlock(blk, {});
+                } catch (_e) {
+                  /* best-effort */
+                }
+              }
+              await bot.dig(blk);
+            } catch (_digErr) {
+              /* skip; next step recomputes from live pos */
+            }
+          }
+          // Place a solid tread to stand on: the block occupying the tread's
+          // foot cell (one forward + one up). We jump and drop a block into the
+          // cell under the next foothold. Reference face: the block below the
+          // tread foot (i.e. the current forward wall / current tread).
+          let placed = false;
+          try {
+            const refPos = treadFeet.offset(0, -1, 0);
+            const refBlock = bot.blockAt(refPos);
+            const centre = new Vec3(treadFeet.x + 0.5, treadFeet.y, treadFeet.z + 0.5);
+            await bot.lookAt(centre, true);
+            bot.setControlState('jump', true);
+            await sleep(220);
+            if (scaffoldNames.length && refBlock && refBlock.name !== 'air') {
+              for (const name of scaffoldNames) {
+                const stack = bot.inventory
+                  .items()
+                  .find((it) => it.name.toLowerCase() === name);
+                if (!stack) continue;
+                try {
+                  await bot.equip(stack, 'hand');
+                  await bot.placeBlock(refBlock, new Vec3(0, 1, 0));
+                  placed = true;
+                  break;
+                } catch (_placeErr) {
+                  /* next candidate */
+                }
+              }
+            }
+            // Nudge forward onto the (new) tread while at the top of the jump.
+            bot.setControlState('forward', true);
+            await sleep(300);
+            bot.setControlState('forward', false);
+            bot.setControlState('jump', false);
+            await sleep(150);
+          } catch (_moveErr) {
+            bot.setControlState('forward', false);
+            bot.setControlState('jump', false);
+          }
+          // If we could neither place a tread nor rise (a natural block already
+          // formed the step is fine), keep going only while Y is increasing;
+          // otherwise stop to avoid spinning.
+          const rose = bot.entity.position.y > feet.y + 0.4;
+          if (!placed && !rose) {
+            // No progress this step — try one more, then bail if still stuck.
+            if (carved === 0 && i > 2) break;
+          }
+          carved++;
+        }
+      } catch (err) {
+        bot.setControlState('forward', false);
+        bot.setControlState('jump', false);
+        return {
+          ok: false,
+          detail: String(err && err.message ? err.message : err),
+          data: { carved },
+        };
+      }
+      bot.setControlState('forward', false);
+      bot.setControlState('jump', false);
+      const used = inventoryDelta(inventoryTotals(), before);
+      const endPos = bot.entity.position;
+      const climbed = Math.max(0, Math.round(endPos.y - startPos.y));
+      const reachedSky = skyClear();
+      pushEvent({
+        environment: ENVIRONMENT,
+        event_type: 'build',
+        summary: `Carved a ${carved}-step staircase up (climbed ~${climbed} blocks)`,
+        actor: bot.username,
+        data: {
+          steps: carved,
+          climbed,
+          reached_sky: reachedSky,
+          used,
+          start: roundVec(startPos),
+          end: roundVec(endPos),
+        },
+      });
+      return {
+        ok: true,
+        detail: reachedSky
+          ? `carved a ${carved}-step staircase up and reached open sky`
+          : `carved a ${carved}-step staircase up (climbed ~${climbed} blocks, still enclosed)`,
+        data: { steps: carved, climbed, reached_sky: reachedSky, used },
       };
     }
     case 'craft': {

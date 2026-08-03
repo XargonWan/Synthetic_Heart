@@ -810,6 +810,74 @@ config_registry.get_value(
     component="vessel_plugin",
     advanced=True,
 )
+config_registry.get_value(
+    "VESSEL_MORNING_EXIT_ENABLED",
+    True,
+    value_type=bool,
+    label="Self-Preservation: Morning Bunker Exit",
+    description=(
+        "When enabled, if Synth spent the night dug into a bunker with no "
+        "reachable base, the next morning it carves a walkable jump-up "
+        "staircase (one block up + one block forward per step) back to the "
+        "open sky instead of staying buried. Purely structural — it fires only "
+        "in daylight when the sky above is blocked and no registered base is "
+        "within retreat range; a reachable base means Synth has a home to walk "
+        "to, not a bunker to dig out of. Runs on the fast reflex layer (no LLM, "
+        "no diary)."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_STATICITY_WARD_ENABLED",
+    True,
+    value_type=bool,
+    label="Staticity Ward",
+    description=(
+        "When enabled, if Synth lingers in the same small area for too long — "
+        "regardless of whether it has a goal, and even while endlessly poking "
+        "an in-reach block — the body breaks the parking by marching off to a "
+        "fresh, distant spot. This is a broader guard than the tick-to-tick "
+        "stuck-body watchdog: it catches genuine stasis (no goal at all, or "
+        "standing still) that the other watchdog misses. Purely positional (no "
+        "goal text, no keywords), on the fast reflex layer (no LLM, no diary)."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_STATICITY_TICKS",
+    8,
+    value_type=int,
+    label="Staticity Ward: Idle Ticks",
+    description=(
+        "How many consecutive motor ticks the body may stay within the "
+        "staticity radius before the ward relocates it. With the default motor "
+        "interval (~3 s per tick) 8 ticks is roughly 24 s of standing in place. "
+        "Lower to relocate sooner, raise to tolerate longer pauses. Clamped "
+        "2–1000."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_STATICITY_RADIUS",
+    2.0,
+    value_type=float,
+    label="Staticity Ward: Radius (blocks)",
+    description=(
+        "Horizontal radius (blocks) that still counts as 'the same place'. "
+        "While the body stays within this radius of its anchor it accrues idle "
+        "ticks; stepping outside re-anchors and resets the counter, so the ward "
+        "never fires during normal travel. Clamped 0.5–32.0."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
 
 
 class VesselPlugin(AIPluginBase):

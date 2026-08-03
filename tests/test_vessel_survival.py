@@ -751,3 +751,221 @@ def test_generic_hostile_falls_through_to_power_ratio() -> None:
     )
     assert plan is not None
     assert plan["threat"] == "defend"
+
+
+# ----------------------------------------------------------------------
+# Night-retreat to a registered base (burial fix) — _retreat_to_base /
+# _position_from_state
+# ----------------------------------------------------------------------
+
+
+def test_position_from_state_reads_structural_position() -> None:
+    state = _state()
+    pos = MinecraftConnector._position_from_state(state)
+    assert pos == {"x": 0.0, "y": 64.0, "z": 0.0}
+
+
+def test_position_from_state_falls_back_to_extra() -> None:
+    state = WorldState(
+        environment="minecraft",
+        health=20.0,
+        position=None,
+        possible_actions=[],
+        flags={},
+        extra={"position": {"x": 5, "y": 60, "z": -8}},
+    )
+    pos = MinecraftConnector._position_from_state(state)
+    assert pos == {"x": 5.0, "y": 60.0, "z": -8.0}
+
+
+def test_position_from_state_none_when_absent() -> None:
+    state = WorldState(
+        environment="minecraft",
+        health=20.0,
+        position=None,
+        possible_actions=[],
+        flags={},
+        extra={},
+    )
+    assert MinecraftConnector._position_from_state(state) is None
+
+
+async def test_retreat_to_base_walks_to_nearby_base(monkeypatch: Any) -> None:
+    conn = _make_conn()
+    conn._base_enabled = True
+    conn._base_retreat_radius = 64.0
+
+    from plugins.rift_vessel.minecraft import minecraft as mc_mod
+
+    async def _fake_nearest(pos: Any) -> dict[str, Any]:
+        return {
+            "name": "home",
+            "anchor": {"x": 10.0, "y": 63.0, "z": 4.0},
+            "distance": 20.0,
+        }
+
+    monkeypatch.setattr(mc_mod.mc_bases, "get_nearest_base", _fake_nearest)
+
+    calls: list[tuple[str, Any]] = []
+
+    async def _fake_act(action: str, payload: Any) -> dict[str, Any]:
+        calls.append((action, payload))
+        return {"ok": True}
+
+    monkeypatch.setattr(conn, "act", _fake_act)
+
+    result = await conn._retreat_to_base(_state())
+    assert result is not None
+    assert result["reason"] == "night_retreat"
+    # Reuses ``goto`` (no new verb) toward the base anchor.
+    assert calls and calls[0][0] == "goto"
+    assert calls[0][1]["x"] == 10.0 and calls[0][1]["z"] == 4.0
+    assert calls[0][1]["y"] == 63
+
+
+async def test_retreat_to_base_none_when_base_too_far(monkeypatch: Any) -> None:
+    conn = _make_conn()
+    conn._base_enabled = True
+    conn._base_retreat_radius = 64.0
+
+    from plugins.rift_vessel.minecraft import minecraft as mc_mod
+
+    async def _fake_nearest(pos: Any) -> dict[str, Any]:
+        return {
+            "name": "home",
+            "anchor": {"x": 999.0, "y": 63.0, "z": 999.0},
+            "distance": 500.0,  # beyond retreat radius
+        }
+
+    monkeypatch.setattr(mc_mod.mc_bases, "get_nearest_base", _fake_nearest)
+    # A base too far => None => caller falls back to in-place shelter.
+    assert await conn._retreat_to_base(_state()) is None
+
+
+async def test_retreat_to_base_none_when_disabled(monkeypatch: Any) -> None:
+    conn = _make_conn()
+    conn._base_enabled = False
+    # Disabled via config => never retreats, regardless of a nearby base.
+    assert await conn._retreat_to_base(_state()) is None
+
+
+async def test_retreat_to_base_none_when_no_base(monkeypatch: Any) -> None:
+    conn = _make_conn()
+    conn._base_enabled = True
+    conn._base_retreat_radius = 64.0
+
+    from plugins.rift_vessel.minecraft import minecraft as mc_mod
+
+    async def _fake_nearest(pos: Any) -> None:
+        return None
+
+    monkeypatch.setattr(mc_mod.mc_bases, "get_nearest_base", _fake_nearest)
+    assert await conn._retreat_to_base(_state()) is None
+
+
+# ----------------------------------------------------------------------
+# Morning bunker exit (climb_staircase reflex) — branch #7 of
+# _survival_threat + the _run_survival_guard base gate.
+# ----------------------------------------------------------------------
+
+
+def test_morning_exit_fires_when_buried_in_daylight() -> None:
+    conn = _make_conn()
+    # Day + no open sky above (buried under a ceiling) => carve a staircase up.
+    plan = conn._survival_threat(_state(is_day=True, sky_access=False))
+    assert plan is not None
+    assert plan["threat"] == "morning_exit"
+    assert plan["verb"] == "climb_staircase"
+    # Latched for the day so it does not re-issue every tick.
+    assert conn._surfaced_last_day is False
+
+
+def test_morning_exit_no_fire_when_sky_is_open() -> None:
+    conn = _make_conn()
+    # Day + open sky => already out; no threat, latch armed for next burial.
+    assert conn._survival_threat(_state(is_day=True, sky_access=True)) is None
+    assert conn._surfaced_last_day is True
+
+
+def test_morning_exit_no_fire_at_night() -> None:
+    conn = _make_conn()
+    # Night, even buried => the morning exit does not fire (only in daylight).
+    assert conn._survival_threat(_state(is_day=False, sky_access=False)) is None
+    # Re-armed so the next morning fires if still buried.
+    assert conn._surfaced_last_day is True
+
+
+def test_morning_exit_latch_prevents_refire_same_day() -> None:
+    conn = _make_conn()
+    first = conn._survival_threat(_state(is_day=True, sky_access=False))
+    assert first is not None and first["threat"] == "morning_exit"
+    # Same day, still buried, latch already tripped => no second plan.
+    second = conn._survival_threat(_state(is_day=True, sky_access=False))
+    assert second is None
+
+
+def test_morning_exit_disabled_never_fires() -> None:
+    conn = _make_conn()
+    conn._sp_morning_exit = False
+    assert conn._survival_threat(_state(is_day=True, sky_access=False)) is None
+
+
+def test_morning_exit_absent_signal_no_fire() -> None:
+    conn = _make_conn()
+    # No is_day / sky_access telemetry (older bridge) => cannot decide => safe.
+    assert conn._survival_threat(_state()) is None
+
+
+async def test_run_guard_climb_skipped_when_base_reachable(monkeypatch: Any) -> None:
+    """A reachable base means it is a home, not a bunker → do not dig out."""
+    conn = _make_conn()
+    conn._base_enabled = True
+    conn._base_retreat_radius = 64.0
+
+    from plugins.rift_vessel.minecraft import minecraft as mc_mod
+
+    async def _fake_nearest(pos: Any) -> dict[str, Any]:
+        return {"name": "home", "anchor": {"x": 0, "y": 63, "z": 0}, "distance": 10.0}
+
+    monkeypatch.setattr(mc_mod.mc_bases, "get_nearest_base", _fake_nearest)
+
+    acted: list[str] = []
+
+    async def _fake_act(action: str, payload: Any) -> dict[str, Any]:
+        acted.append(action)
+        return {"ok": True}
+
+    monkeypatch.setattr(conn, "act", _fake_act)
+
+    result = await conn._run_survival_guard(_state(is_day=True, sky_access=False))
+    # Base is reachable => no climb, latch disarmed, guard returns None.
+    assert result is None
+    assert "climb_staircase" not in acted
+    assert conn._surfaced_last_day is True
+
+
+async def test_run_guard_climb_fires_when_no_base(monkeypatch: Any) -> None:
+    """No reachable base => genuine bunker => carve the staircase up."""
+    conn = _make_conn()
+    conn._base_enabled = True
+    conn._base_retreat_radius = 64.0
+
+    from plugins.rift_vessel.minecraft import minecraft as mc_mod
+
+    async def _fake_nearest(pos: Any) -> None:
+        return None
+
+    monkeypatch.setattr(mc_mod.mc_bases, "get_nearest_base", _fake_nearest)
+
+    acted: list[str] = []
+
+    async def _fake_act(action: str, payload: Any) -> dict[str, Any]:
+        acted.append(action)
+        return {"ok": True, "data": {"reached_sky": True}}
+
+    monkeypatch.setattr(conn, "act", _fake_act)
+
+    result = await conn._run_survival_guard(_state(is_day=True, sky_access=False))
+    assert result is not None
+    assert result["reason"] == "survival:morning_exit"
+    assert "climb_staircase" in acted
