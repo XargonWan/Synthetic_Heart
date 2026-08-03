@@ -552,6 +552,55 @@ async def load_activity_lines(session_id: str) -> list[str]:
     return lines
 
 
+async def load_activity_rows(session_id: str) -> list[dict[str, Any]]:
+    """Load a session's ``vessel_activity_log`` rows as structured dicts.
+
+    Unlike :func:`load_activity_lines` (which renders each row into a factual
+    *text* line for the LLM recap), this returns the raw structural fields —
+    ``event_type`` and the JSON-deserialised ``metadata`` — so a caller can
+    match logged actions against a goal's structural target **by id**, never by
+    parsing the human-readable summary. Chronological order. Fully fail-safe —
+    any DB error yields an empty list.
+    """
+    if not session_id:
+        return []
+    import json as _json
+
+    columns = ["event_type", "summary", "metadata", "created_at"]
+    try:
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT event_type, summary, metadata, created_at "
+                    "FROM vessel_activity_log WHERE session_id = %s "
+                    "ORDER BY created_at ASC, id ASC",
+                    (session_id,),
+                )
+                rows = await cur.fetchall()
+    except Exception as exc:
+        log_error(
+            f"[vessel_recap] failed to read vessel_activity_log rows for "
+            f"{session_id}: {exc}"
+        )
+        return []
+    out: list[dict[str, Any]] = []
+    for raw in rows or []:
+        row = raw if isinstance(raw, dict) else dict(zip(columns, raw))
+        meta = row.get("metadata")
+        if isinstance(meta, str):
+            try:
+                meta = _json.loads(meta)
+            except (TypeError, ValueError):
+                meta = None
+        out.append(
+            {
+                "event_type": str(row.get("event_type") or "").strip(),
+                "metadata": meta if isinstance(meta, dict) else {},
+            }
+        )
+    return out
+
+
 def _build_recap_chunk_prompt(
     environment: str,
     lines: list[str],
