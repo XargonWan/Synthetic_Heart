@@ -187,6 +187,38 @@ config_registry.get_value(
     advanced=True,
 )
 config_registry.get_value(
+    "VESSEL_BASE_ENABLED",
+    True,
+    value_type=bool,
+    label="Bases / Home",
+    description=(
+        "When enabled, Synth can claim places in a world as its bases (homes) — "
+        "where it builds, stores things, shelters and sleeps — and remember "
+        "them across a session. The night-shelter survival reflex uses this: "
+        "instead of walling the body in wherever it happens to be standing "
+        "(which was burying Synth underground far from home), it first heads "
+        "back to the nearest base within the retreat radius, reusing the "
+        "ordinary movement. Disable to fall back to sheltering in place."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+)
+config_registry.get_value(
+    "VESSEL_BASE_RETREAT_RADIUS",
+    64,
+    value_type=int,
+    label="Base Retreat Radius (blocks)",
+    description=(
+        "How far (blocks) a registered base may be for the night-shelter reflex "
+        "to head back to it instead of sheltering in place. Wide enough that "
+        "coming home is worthwhile, bounded so the body does not sprint across "
+        "the map into fresh danger. Only used when Bases / Home is enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
     "VESSEL_AUTONOMY_ENABLED",
     False,
     value_type=bool,

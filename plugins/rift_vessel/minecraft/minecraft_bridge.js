@@ -3366,6 +3366,240 @@ async function runAction(action, payload) {
         return { ok: false, detail: String(err && err.message ? err.message : err), data: {} };
       }
     }
+    case 'build_base': {
+      // Build a small, mob-safe first shelter from an explicit block layout the
+      // Minecraft adapter derived (see base_spec.derive_base_layout): a walled,
+      // roofed, floored box with one door, an interior torch, and a crafting
+      // table. Every placement is an absolute-coordinate cell; we walk within
+      // reach of each cell (bounded GoalNear) and place the named block against
+      // a solid neighbour face — the same reference-face logic as 'place', but
+      // targeting a specific world cell rather than the nearest air face. Fully
+      // bounded (a finite block list) and fail-safe: any single failure is
+      // recorded in `missing` and the build continues; nothing crashes the
+      // bridge. Materials are canonical block ids (structural, never chat text).
+      if (!bot || !bot.entity || !bot.entity.position) {
+        return { ok: false, detail: 'build_base unavailable (no bot position)', data: {} };
+      }
+      const Vec3 = bot.entity.position.constructor;
+      const blocks = Array.isArray(payload.blocks) ? payload.blocks : [];
+      // Fixtures placed after the shell so they land against finished walls/floor.
+      const fixtures = [];
+      for (const key of ['crafting_table', 'torch', 'door', 'bed']) {
+        if (payload[key] && typeof payload[key] === 'object') {
+          fixtures.push(payload[key]);
+        }
+      }
+      if (!blocks.length && !fixtures.length) {
+        return { ok: false, detail: 'build_base needs a non-empty layout', data: {} };
+      }
+      // Six unit face directions to look for a solid reference neighbour.
+      const faceDirs = [
+        new Vec3(0, -1, 0),
+        new Vec3(0, 1, 0),
+        new Vec3(1, 0, 0),
+        new Vec3(-1, 0, 0),
+        new Vec3(0, 0, 1),
+        new Vec3(0, 0, -1),
+      ];
+      // Blocks a placement may overwrite (they count as "empty"): air plus the
+      // common replaceable vegetation/fluids. Everything else is treated as a
+      // real block we must not grief. Structural name checks only.
+      const isReplaceable = (blk) => {
+        if (!blk) return true;
+        const n = blk.name;
+        if (!n || n === 'air' || n === 'cave_air' || n === 'void_air') return true;
+        return (
+          n === 'water' ||
+          n === 'lava' ||
+          n === 'snow' ||
+          n === 'grass' ||
+          n === 'short_grass' ||
+          n === 'tall_grass' ||
+          n === 'fern' ||
+          n === 'large_fern' ||
+          n === 'seagrass' ||
+          n === 'dead_bush' ||
+          n === 'vine' ||
+          n.endsWith('_sapling') ||
+          n.endsWith('flower') ||
+          n === 'dandelion' ||
+          n === 'poppy'
+        );
+      };
+      // A face is usable to place against only when it is a genuine solid block
+      // (not air/replaceable) — otherwise mineflayer has nothing to click on.
+      const isSolidFace = (blk) => !!blk && !isReplaceable(blk);
+      const placeErrors = [];
+      // Place a single named block at an absolute cell. Returns 'ok' on success
+      // or a short reason string on failure. Structural: equips by exact id,
+      // places against a solid neighbour face, walks within reach first if the
+      // cell is far. Never throws.
+      const placeAt = async (cx, cy, cz, itemName) => {
+        try {
+          const name = String(itemName || '').trim().toLowerCase();
+          if (!name) return 'no-item';
+          const cell = new Vec3(cx, cy, cz);
+          const existing = bot.blockAt(cell);
+          if (existing && existing.name === name) {
+            return 'ok'; // already the wanted block — idempotent
+          }
+          if (existing && !isReplaceable(existing)) {
+            return `occupied:${existing.name}`; // real block; skip (no grief)
+          }
+          // Walk within reach of the cell if the pathfinder is available and we
+          // are too far to place (mineflayer reach is ~4-5 blocks).
+          const reach = bot.entity.position.distanceTo(cell);
+          if (reach > 4 && pathfinder && bot.pathfinder) {
+            try {
+              await navigateToGoal(
+                new pathfinder.goals.GoalNear(cx, cy, cz, 2),
+                8000
+              );
+            } catch (_navErr) {
+              // Non-fatal: still attempt the placement from wherever we are.
+            }
+          }
+          // Equip the block by exact id.
+          const stack = bot.inventory
+            .items()
+            .find((it) => it.name && it.name.toLowerCase() === name);
+          if (!stack) return 'no-material';
+          try {
+            await bot.equip(stack, 'hand');
+          } catch (eqErr) {
+            return `equip-failed:${eqErr && eqErr.message ? eqErr.message : eqErr}`;
+          }
+          // Find a solid neighbour face to place against.
+          let refBlock = null;
+          let faceVec = null;
+          for (const dir of faceDirs) {
+            const refPos = cell.plus(dir);
+            const rb = bot.blockAt(refPos);
+            if (isSolidFace(rb)) {
+              refBlock = rb;
+              // Face vector points from the reference block back to the cell.
+              faceVec = new Vec3(-dir.x, -dir.y, -dir.z);
+              break;
+            }
+          }
+          if (!refBlock || !faceVec) return 'no-solid-face';
+          const lookAt = refBlock.position
+            .offset(0.5, 0.5, 0.5)
+            .offset(faceVec.x * 0.5, faceVec.y * 0.5, faceVec.z * 0.5);
+          try {
+            await bot.lookAt(lookAt, true);
+          } catch (_lookErr) {
+            // Non-fatal.
+          }
+          try {
+            await bot.placeBlock(refBlock, faceVec);
+            return 'ok';
+          } catch (placeErr) {
+            // mineflayer throws when the blockUpdate confirmation event does not
+            // fire within its timeout, which happens under server lag even when
+            // the block was actually placed. Give the server a moment, then
+            // re-read the cell to confirm before declaring failure.
+            const msg = placeErr && placeErr.message ? placeErr.message : `${placeErr}`;
+            for (let attempt = 0; attempt < 3; attempt++) {
+              const after = bot.blockAt(cell);
+              if (after && after.name === itemName) return 'ok';
+              await new Promise((r) => setTimeout(r, 400));
+            }
+            return `place-error:${msg}`;
+          }
+        } catch (err) {
+          return `place-error:${err && err.message ? err.message : err}`;
+        }
+      };
+
+      const before = inventoryTotals();
+      let placed = 0;
+      let missing = [];
+      // 1) Shell first (floor, walls, roof) so fixtures have solid backing.
+      for (const b of blocks) {
+        if (!b || typeof b !== 'object') continue;
+        const r = await placeAt(Number(b.x), Number(b.y), Number(b.z), b.item);
+        if (r === 'ok') placed++;
+        else {
+          missing.push({ x: b.x, y: b.y, z: b.z, item: b.item });
+          if (placeErrors.length < 12) placeErrors.push(r);
+        }
+      }
+      // 1b) Seal pass — re-attempt the shell cells that failed the first time.
+      // The commonest first-pass failure is `no-solid-face`: an edge/corner cell
+      // whose neighbours were all still air when we reached it. Once the rest of
+      // the shell exists those cells finally have a solid face to click, so a
+      // bounded re-sweep closes the holes that used to leave the "house not
+      // closed". Purely structural (retries the exact same cells), idempotent
+      // (placeAt skips a cell already the wanted block), and bounded (a fixed
+      // few passes over a shrinking remainder). This is the TASK 3 closure fix.
+      const _MAX_SEAL_PASSES = 3;
+      for (let pass = 0; pass < _MAX_SEAL_PASSES && missing.length; pass++) {
+        const stillMissing = [];
+        let sealedThisPass = 0;
+        for (const b of missing) {
+          const r = await placeAt(Number(b.x), Number(b.y), Number(b.z), b.item);
+          if (r === 'ok') {
+            placed++;
+            sealedThisPass++;
+          } else {
+            stillMissing.push(b);
+          }
+        }
+        missing = stillMissing;
+        // No progress this pass → further identical retries are futile (a real
+        // obstructing block or an exhausted material), so stop early.
+        if (sealedThisPass === 0) break;
+      }
+      // 2) Fixtures (crafting table, torch, door, bed) against the finished box.
+      const fixtureResults = {};
+      for (const key of ['crafting_table', 'torch', 'door', 'bed']) {
+        const f = payload[key];
+        if (!f || typeof f !== 'object') continue;
+        const r = await placeAt(Number(f.x), Number(f.y), Number(f.z), f.item);
+        fixtureResults[key] = r === 'ok';
+        if (r === 'ok') placed++;
+        else {
+          missing.push({ x: f.x, y: f.y, z: f.z, item: f.item });
+          if (placeErrors.length < 12) placeErrors.push(`${key}:${r}`);
+        }
+      }
+      const used = inventoryDelta(inventoryTotals(), before);
+      const anchor =
+        payload.anchor && typeof payload.anchor === 'object'
+          ? {
+              x: Number(payload.anchor.x),
+              y: Number(payload.anchor.y),
+              z: Number(payload.anchor.z),
+            }
+          : roundVec(bot.entity.position);
+      const total = blocks.length + fixtures.length;
+      const ok = placed > 0 && missing.length < total;
+      pushEvent({
+        environment: ENVIRONMENT,
+        event_type: 'build',
+        summary: ok
+          ? `Built a base shelter (${placed}/${total} blocks placed)`
+          : `Tried to build a base but placed only ${placed}/${total} blocks`,
+        actor: bot.username,
+        data: { placed, total, anchor },
+      });
+      return {
+        ok,
+        detail: ok
+          ? `built base shelter (${placed}/${total} blocks)`
+          : `incomplete base build (${placed}/${total} blocks)`,
+        data: {
+          placed,
+          total,
+          missing,
+          used,
+          anchor,
+          fixtures: fixtureResults,
+          errors: placeErrors,
+        },
+      };
+    }
     default:
       return { ok: false, detail: `unknown action: ${action}`, data: {} };
   }

@@ -41,6 +41,8 @@ from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.plugin_base import PluginBase
 from core.vessel_registry import register_vessel_connector
 from plugins.rift_vessel.knowledge_client import WikiSource
+from plugins.rift_vessel.minecraft import base_spec
+from plugins.rift_vessel.minecraft import bases as mc_bases
 from plugins.rift_vessel.minecraft import goals as mc_goals
 from plugins.rift_vessel.minecraft import quests
 from plugins.rift_vessel.minecraft import target_names as mc_target_names
@@ -393,9 +395,30 @@ class MinecraftConnector(VesselConnectorBase):
         # night-time hostile presence justifies sheltering.
         self._sp_night_shelter = True
         self._sp_shelter_dist: float = float(self._SHELTER_HOSTILE_DIST)
+        # Base-retreat: at night with hostiles around, if a registered base is
+        # within this many blocks the reflex heads BACK to it (reusing ``goto``)
+        # instead of walling the body in wherever it happens to be standing —
+        # which was burying Synth underground far from home (the "seppellita
+        # sotto terra" bug). Sheltering-in-place stays only as the last resort
+        # when no base is reachable. Loaded from VESSEL_BASE_RETREAT_RADIUS.
+        self._base_enabled: bool = True
+        self._base_retreat_radius: float = float(self._BASE_RETREAT_RADIUS)
+        # Ender Dragon questline (directed reference milestones). When enabled,
+        # the connector registers the questline at connect, surfaces the active
+        # quest into the beats via extra["quest"], and structurally advances it
+        # as the world satisfies each objective. Loaded from VESSEL_QUESTS_ENABLED.
+        self._quests_enabled: bool = True
         # Anti-flap latch: once a shelter attempt succeeds this session-night we
         # do not keep re-issuing it every tick. Reset when day returns.
         self._sheltered_last_day: bool | None = None
+        # Morning bunker-exit: if Synth sheltered underground overnight (dug a
+        # bunker with no base), when DAY returns and the body is still buried
+        # under a ceiling (no open sky) with no reachable base, carve a walkable
+        # ascending staircase back to the surface. Loaded from
+        # VESSEL_MORNING_EXIT_ENABLED. Latched per day so it fires once, not
+        # every tick, until the body has surfaced (regains sky access).
+        self._sp_morning_exit: bool = True
+        self._surfaced_last_day: bool | None = None
         # Last observed health reading, used to detect "took damage this tick"
         # (health dropped vs the previous motor tick). Structural numeric delta,
         # never keyword logic. None until the first reading.
@@ -479,10 +502,21 @@ class MinecraftConnector(VesselConnectorBase):
     # walling itself in BEFORE the mob closes to melee, rather than only reacting
     # once it is already being hit. From VESSEL_SP_NIGHT_SHELTER radius default.
     _SHELTER_HOSTILE_DIST = 16.0
+    # How far (blocks) a registered base may be for the night-retreat reflex to
+    # head back to it (reusing ``goto``) instead of sheltering in place. Wide
+    # enough to make coming home worthwhile, bounded so the body does not sprint
+    # across the map into fresh danger. From VESSEL_BASE_RETREAT_RADIUS.
+    _BASE_RETREAT_RADIUS = 64.0
     # How close (blocks) the keep-distance tactic tries to keep a special mob
     # (creeper/enderman) — reuse the flee vector but only when the mob is inside
     # this radius, so the body backs off without a full sprint away.
     _KEEP_DISTANCE = 6.0
+    # Default number of turns (world-state builds) a craft-material shortfall
+    # cue stays rendered in the will/action prompt before it self-clears. From
+    # VESSEL_CRAFT_CUE_TURNS. Kept in the "a few turns" band the request asked
+    # for (10-20), so the hint nudges Synth to gather the missing intermediate
+    # material without lingering forever once it has moved on.
+    _CRAFT_CUE_TURNS = 15
     # Max characters per in-world chat line. Minecraft vanilla chat rejects or
     # truncates anything past ~256 characters, so a long ``say`` is split on
     # word boundaries into multiple ≤256-char lines rather than hard-cut
@@ -745,6 +779,13 @@ class MinecraftConnector(VesselConnectorBase):
         except Exception as exc:
             log_debug(f"{LOG_PREFIX} goal world scope not set: {exc}")
 
+        # Scope bases by the same concrete server so a returning Synth recalls
+        # the homes it built there. Structural identity, fail-safe.
+        try:
+            mc_bases.set_active_world(self.get_world_identity())
+        except Exception as exc:
+            log_debug(f"{LOG_PREFIX} base world scope not set: {exc}")
+
         # Resolve the self-preservation thresholds for this session (fail-safe;
         # falls back to the class defaults on any read error).
         self._load_self_preservation_config()
@@ -755,6 +796,22 @@ class MinecraftConnector(VesselConnectorBase):
             await mc_goals.init_goal_table()
         except Exception as exc:
             log_debug(f"{LOG_PREFIX} goal table init skipped: {exc}")
+
+        # Ensure the base (home) table exists (idempotent, fail-safe).
+        try:
+            await mc_bases.init_base_table()
+        except Exception as exc:
+            log_debug(f"{LOG_PREFIX} base table init skipped: {exc}")
+
+        # Register the Ender Dragon questline (idempotent; preserves existing
+        # per-quest status/progress and promotes the first milestone to active
+        # if none is). Reference-only direction, never a script. Fail-safe.
+        if self._quests_enabled:
+            try:
+                res = await quests.register_questline()
+                log_info(f"{LOG_PREFIX} questline registered: {res}")
+            except Exception as exc:
+                log_debug(f"{LOG_PREFIX} questline register skipped: {exc}")
 
         # Apply the configured skin once the bot is in-world. Best-effort: a
         # failure here (e.g. no server skin plugin) must never break the session.
@@ -948,6 +1005,10 @@ class MinecraftConnector(VesselConnectorBase):
             mc_goals.set_active_world(None)
         except Exception:
             pass
+        try:
+            mc_bases.set_active_world(None)
+        except Exception:
+            pass
         log_info(f"{LOG_PREFIX} disconnected")
 
     async def _close_session(self) -> None:
@@ -1088,6 +1149,7 @@ class MinecraftConnector(VesselConnectorBase):
     # ``minecraft_goals`` table, not the Node bridge). Everything else is a
     # bridge command forwarded verbatim to ``POST /cmd``.
     _GOAL_VERBS = frozenset({"set_goal", "goals", "update_goal"})
+    _BASE_VERBS = frozenset({"set_base", "list_bases"})
 
     async def act(
         self,
@@ -1353,6 +1415,197 @@ class MinecraftConnector(VesselConnectorBase):
             log_warning(f"{LOG_PREFIX} goal verb '{action}' failed: {exc}")
             return VesselActionResult(ok=False, detail=str(exc))
 
+    @staticmethod
+    def _extract_anchor(payload: Dict[str, Any]) -> Dict[str, float] | None:
+        """Build a ``{x, y, z}`` base anchor from flat numeric payload fields.
+
+        Reads ``x`` / ``y`` / ``z`` (all three required). Purely numeric — never
+        inspects free text. Returns ``None`` when a usable triple is absent, so
+        the caller can fall back to the body's live position.
+        """
+        try:
+            x = payload.get("x")
+            y = payload.get("y")
+            z = payload.get("z")
+            if x is None or y is None or z is None:
+                return None
+            return {"x": float(x), "y": float(y), "z": float(z)}
+        except (TypeError, ValueError):
+            return None
+
+    async def _live_position(self) -> Dict[str, float] | None:
+        """Read the body's current ``{x, y, z}`` position from the bridge.
+
+        Fail-safe: any error (no connection, unreadable snapshot) returns None.
+        """
+        try:
+            res = await self._post("/cmd", {"action": "status", "payload": {}})
+            if not res.get("ok"):
+                return None
+            pos = (res.get("data") or {}).get("position")
+            if not isinstance(pos, dict):
+                return None
+            x = pos.get("x")
+            y = pos.get("y")
+            z = pos.get("z")
+            if x is None or y is None or z is None:
+                return None
+            return {"x": float(x), "y": float(y), "z": float(z)}
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} could not read live position: {exc}")
+            return None
+
+    async def _act_base(
+        self,
+        action: str,
+        payload: Dict[str, Any],
+    ) -> VesselActionResult:
+        """Handle the native base (home) verbs (``set_base`` / ``list_bases``).
+
+        A base is a place Synth chose to build up, store resources in, shelter
+        or sleep at — Synth names and places it freely (there is no catalogue).
+        ``list_bases`` reports the bases Synth registered in this world;
+        ``set_base`` claims/updates a base at an explicit ``{x, y, z}`` anchor
+        (or, when omitted, the body's current position). Both are fail-safe — a
+        DB hiccup degrades to an ``ok=False`` result and never raises into the
+        message chain.
+        """
+        try:
+            if action == "list_bases":
+                bases = await mc_bases.list_bases()
+                return VesselActionResult(
+                    ok=True,
+                    detail=f"{len(bases)} base(s)",
+                    data={"bases": bases},
+                )
+            # set_base — claim/update a home. The name is free text Synth chose;
+            # the anchor is numeric coordinates (explicit fields, else the live
+            # body position). Structural, keyword-free.
+            name = payload.get("name")
+            if not isinstance(name, str) or not name.strip():
+                return VesselActionResult(ok=False, detail="set_base requires a name")
+            anchor = self._extract_anchor(payload)
+            if anchor is None:
+                anchor = await self._live_position()
+            kind = payload.get("kind") if isinstance(payload.get("kind"), str) else None
+            note = payload.get("note") if isinstance(payload.get("note"), str) else None
+            result = await mc_bases.set_base(
+                name.strip(),
+                anchor=anchor,
+                kind=kind,
+                note=note,
+                session_id=self._session_id,
+            )
+            ok = result.get("status") == "ok"
+            return VesselActionResult(
+                ok=ok,
+                detail=result.get("message") or "base registered",
+                data=result,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log_warning(f"{LOG_PREFIX} base verb '{action}' failed: {exc}")
+            return VesselActionResult(ok=False, detail=str(exc))
+
+    async def _act_build_base(self, payload: Dict[str, Any]) -> VesselActionResult:
+        """Build a first shelter, then register the result as a base (home).
+
+        This is the Fase-2 counterpart to ``set_base`` (which only *claims* a
+        spot): it derives a bounded shelter layout from the body's live
+        inventory (:mod:`base_spec`), forwards the block list to the Node bridge
+        ``build_base`` verb (which physically places every block), and — on a
+        successful (even partial) build — registers the shelter's interior
+        anchor and bounding box in the core base store so night-retreat and
+        ``list_bases`` can find it.
+
+        The build origin is an explicit ``{x, y, z}`` payload triple when given,
+        otherwise the body's live position. Materials come from the inventory
+        and layout is pure grid math — no free text is ever inspected (only
+        canonical Minecraft block ids, which the scope rules permit as
+        structural). Fully fail-safe: a missing position, an empty inventory, or
+        a bridge hiccup degrades to an ``ok=False`` result and never raises into
+        the message chain.
+        """
+        try:
+            name = payload.get("name")
+            if not isinstance(name, str) or not name.strip():
+                return VesselActionResult(ok=False, detail="build_base requires a name")
+            # Build origin: explicit coords, else the live body position.
+            origin_pos = self._extract_anchor(payload)
+            if origin_pos is None:
+                origin_pos = await self._live_position()
+            if origin_pos is None:
+                return VesselActionResult(
+                    ok=False, detail="build_base could not read a build position"
+                )
+            # Live inventory so the layout uses materials actually carried.
+            res_status = await self._post("/cmd", {"action": "status", "payload": {}})
+            inventory = (res_status.get("data") or {}).get("inventory") or []
+            inventory_counts = self._inventory_counts(inventory)
+
+            layout = base_spec.derive_base_layout(origin_pos, inventory_counts)
+            if not layout.get("ok"):
+                missing = layout.get("missing") or []
+                return VesselActionResult(
+                    ok=False,
+                    detail=(
+                        "cannot build a base yet — missing materials: "
+                        + ", ".join(str(m) for m in missing)
+                    ),
+                    data={"missing": missing},
+                )
+
+            # Forward the physical build to the bridge.
+            bridge_payload: Dict[str, Any] = {
+                "blocks": layout.get("blocks") or [],
+                "anchor": layout.get("anchor"),
+            }
+            for key in ("door", "torch", "crafting_table", "bed"):
+                if layout.get(key):
+                    bridge_payload[key] = layout[key]
+            res = await self._post(
+                "/cmd", {"action": "build_base", "payload": bridge_payload}
+            )
+            built = bool(res.get("ok"))
+            data = res.get("data") or {}
+
+            # Register the base on a successful (even partial) build so the body
+            # can retreat/sleep here. The interior-centre anchor and the outer
+            # bounding box come from the deterministic layout.
+            registered: Dict[str, Any] | None = None
+            if built:
+                anchor = layout.get("anchor")
+                box = layout.get("box")
+                kind = (
+                    payload.get("kind")
+                    if isinstance(payload.get("kind"), str)
+                    else "home"
+                )
+                note = (
+                    payload.get("note")
+                    if isinstance(payload.get("note"), str)
+                    else None
+                )
+                registered = await mc_bases.set_base(
+                    name.strip(),
+                    anchor=anchor,
+                    box=box,
+                    kind=kind,
+                    note=note,
+                    session_id=self._session_id,
+                )
+
+            detail = res.get("detail") or (
+                "base built" if built else "base build failed"
+            )
+            return VesselActionResult(
+                ok=built,
+                detail=detail,
+                data={"build": data, "base": registered},
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log_warning(f"{LOG_PREFIX} build_base failed: {exc}")
+            return VesselActionResult(ok=False, detail=str(exc))
+
     async def _resolve_travel_destination(
         self,
         payload: Dict[str, Any],
@@ -1455,6 +1708,9 @@ class MinecraftConnector(VesselConnectorBase):
                 "set_goal",
                 "goals",
                 "update_goal",
+                # Base (home) verbs (see get_world_actions).
+                "set_base",
+                "list_bases",
             ],
             flags={
                 "connected": bool(data.get("connected")),
@@ -1735,6 +1991,70 @@ class MinecraftConnector(VesselConnectorBase):
         except Exception as exc:  # pragma: no cover - defensive
             log_debug(f"{LOG_PREFIX} goal resolution failed: {exc}")
             return None, []
+
+    async def _resolve_bases(self) -> list[Dict[str, Any]]:
+        """Recall the bases (homes) Synth registered in this world.
+
+        Fail-safe: any error (e.g. DB unavailable or the base store missing)
+        degrades to "no base" rather than breaking the world snapshot.
+        """
+        try:
+            return await mc_bases.list_bases()
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} base resolution failed: {exc}")
+            return []
+
+    async def _resolve_quest(
+        self,
+        inventory_counts: dict[str, int],
+        bases: list[Dict[str, Any]],
+    ) -> Dict[str, Any] | None:
+        """Return the active questline milestone (reference only), auto-advancing.
+
+        Reads the current active quest from the core store and, if the world now
+        **structurally** satisfies its objectives (inventory counts, current
+        dimension, base/bed flags, kill counters), marks it done and promotes
+        the next milestone — then returns the (possibly newly-promoted) active
+        quest for the beats to render as reference. Never inspects chat/goal
+        text; advancement is purely structural. Fully fail-safe: any error (or a
+        disabled questline) degrades to "no quest".
+        """
+        if not self._quests_enabled:
+            return None
+        try:
+            from plugins.rift_vessel.vessel_quests import evaluate_quest_objectives
+
+            active = await quests.get_active_quest()
+            if not isinstance(active, dict) or not active:
+                return active if isinstance(active, dict) else None
+            has_base = bool(bases)
+            # A slept-in bed sets respawn; we treat carrying/placing a bed as
+            # satisfying "have a bed" (structural: bed id in inventory). The
+            # core evaluator also checks counts["bed"], but any *_bed id counts.
+            has_bed = any(
+                name.endswith("_bed") or name == "bed"
+                for name in inventory_counts
+                if isinstance(name, str)
+            )
+            result = evaluate_quest_objectives(
+                active,
+                inventory_counts,
+                self._last_dimension,
+                has_base=has_base,
+                has_bed=has_bed,
+            )
+            if isinstance(result, dict) and result.get("complete"):
+                qid = active.get("quest_id")
+                if isinstance(qid, str) and qid:
+                    log_info(
+                        f"{LOG_PREFIX} questline milestone complete: {qid} -> advancing"
+                    )
+                    await quests.complete_quest(qid)
+                    return await quests.get_active_quest()
+            return active
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} quest resolution failed: {exc}")
+            return None
 
     @staticmethod
     def _inventory_counts(inventory: list[dict[str, Any]]) -> dict[str, int]:
@@ -2761,6 +3081,106 @@ class MinecraftConnector(VesselConnectorBase):
         )
         return {"acted": acted, "reason": f"survival:{threat}"}
 
+    async def _retreat_to_base(self, state: "WorldState") -> dict[str, Any] | None:
+        """Head back to the nearest registered base at night, if one is close.
+
+        The fix for Synth being buried underground far from home: instead of
+        walling the body in wherever it is standing, the night-shelter reflex
+        first checks whether a base is within ``_base_retreat_radius`` and, if
+        so, walks the body toward that base's anchor (reusing ``goto`` — no new
+        verb). Returns a ``motor_step``-style result dict when it retreated, or
+        ``None`` to let the caller fall back to the in-place shelter (no base,
+        base too far, or any error). Purely structural (numeric distance), never
+        keyword logic; fully fail-safe.
+        """
+        if not self._base_enabled:
+            return None
+        try:
+            pos = self._position_from_state(state)
+            if pos is None:
+                pos = await self._live_position()
+            if pos is None:
+                return None
+            base = await mc_bases.get_nearest_base(pos)
+            if not isinstance(base, dict):
+                return None
+            anchor = base.get("anchor")
+            distance = base.get("distance")
+            if not isinstance(anchor, dict):
+                return None
+            if not isinstance(distance, (int, float)) or (
+                float(distance) > self._base_retreat_radius
+            ):
+                return None
+            ax = anchor.get("x")
+            ay = anchor.get("y")
+            az = anchor.get("z")
+            if ax is None or az is None:
+                return None
+            goto_payload: Dict[str, Any] = {"x": float(ax), "z": float(az)}
+            if ay is not None:
+                goto_payload["y"] = int(float(ay))
+            await self.act("goto", goto_payload)
+            log_info(
+                f"{LOG_PREFIX} night retreat -> base "
+                f"'{base.get('name')}' at {goto_payload} (dist={distance})"
+            )
+            return {"acted": True, "action": "goto", "reason": "night_retreat"}
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} base retreat failed: {exc}")
+            return None
+
+    async def _has_reachable_base(self, state: "WorldState") -> bool:
+        """Whether a registered base is within ``_base_retreat_radius``.
+
+        Used by the morning bunker-exit reflex to decide it is a genuine
+        bunker (dig out) vs a body that simply has a home to path back to. A
+        base registered but far away does NOT count as reachable, so a body
+        buried on the far side of the world still digs out. Purely structural
+        (numeric distance vs the retreat radius); fully fail-safe → ``False``
+        (i.e. "no home nearby, treat as a bunker") on any error.
+        """
+        if not self._base_enabled:
+            return False
+        try:
+            pos = self._position_from_state(state)
+            if pos is None:
+                pos = await self._live_position()
+            if pos is None:
+                return False
+            base = await mc_bases.get_nearest_base(pos)
+            if not isinstance(base, dict):
+                return False
+            distance = base.get("distance")
+            return isinstance(distance, (int, float)) and (
+                float(distance) <= self._base_retreat_radius
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} reachable-base check failed: {exc}")
+            return False
+
+    @staticmethod
+    def _position_from_state(state: "WorldState") -> Dict[str, float] | None:
+        """Extract the body's ``{x, y, z}`` from a WorldState, or None.
+
+        Reads the structural ``position`` field; fully fail-safe.
+        """
+        try:
+            pos = getattr(state, "position", None)
+            if not isinstance(pos, dict):
+                extra = state.extra or {}
+                pos = extra.get("position")
+            if not isinstance(pos, dict):
+                return None
+            x = pos.get("x")
+            y = pos.get("y")
+            z = pos.get("z")
+            if x is None or y is None or z is None:
+                return None
+            return {"x": float(x), "y": float(y), "z": float(z)}
+        except (TypeError, ValueError):
+            return None
+
     async def _act_goto_surface(self, state: "WorldState") -> Any:
         """Swim straight up to escape drowning (mineflayer ``jump`` in water).
 
@@ -3657,6 +4077,54 @@ class MinecraftConnector(VesselConnectorBase):
                 ),
                 "required_fields": ["query"],
                 "optional_fields": ["limit"],
+                "security_level": "low",
+            },
+            "set_base": {
+                "description": (
+                    "Claim a place in this world as one of your bases — a home "
+                    "you build up, store things at, shelter or sleep in, and "
+                    "return to. Give it a 'name' in your own words (there is no "
+                    "list to pick from — call it whatever it means to you). By "
+                    "default the base is claimed right where your body is "
+                    "standing; give explicit 'x'/'y'/'z' coordinates only if you "
+                    "mean somewhere else you can see. You can keep several bases: "
+                    "claiming a new name adds one, reusing a name updates it. Add "
+                    "an optional 'kind' (for example 'home', 'mine', 'farm') and "
+                    "a short 'note'. Having a base matters for survival: when "
+                    "night falls and danger is near, your body heads back to the "
+                    "nearest base instead of walling itself in wherever it "
+                    "happens to be."
+                ),
+                "required_fields": ["name"],
+                "optional_fields": ["x", "y", "z", "kind", "note"],
+                "security_level": "low",
+            },
+            "list_bases": {
+                "description": (
+                    "Recall the bases (homes) you have claimed in this world — "
+                    "their names, kinds and coordinates — so you can decide "
+                    "whether to head back to one, build it up, or claim a new "
+                    "place. Takes no fields."
+                ),
+                "required_fields": [],
+                "optional_fields": [],
+                "security_level": "low",
+            },
+            "build_base": {
+                "description": (
+                    "Actually build a first shelter with your own hands: a small "
+                    "walled, roofed room with a door, a torch inside so nothing "
+                    "spawns in the dark, and a crafting table — and, if you carry "
+                    "a bed, a bed to sleep and set your respawn. Your body places "
+                    "the blocks from your inventory around where you stand (give "
+                    "explicit 'x'/'y'/'z' only if you want to build somewhere "
+                    "else you can see). Give it a 'name' so it is remembered as a "
+                    "base you can return to. If you are missing blocks the build "
+                    "will be partial and tell you what you still need — gather "
+                    "stone/wood, a door, a torch and a crafting table first."
+                ),
+                "required_fields": ["name"],
+                "optional_fields": ["x", "y", "z", "kind", "note"],
                 "security_level": "low",
             },
         }
