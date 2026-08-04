@@ -178,6 +178,21 @@ def minify_actions_block(
         "use_animation",
     )
 
+    # Vessel turns can expose a structurally whitelisted set of world verbs.
+    # Their human-oriented briefs are intentionally verbose, and sending all
+    # of them unchanged can consume the downstream character budget before the
+    # will/reflection body survives. Keep the action names and a useful compact
+    # prefix/suffix while preserving the normal (non-lite) prompt unchanged.
+    _LITE_VESSEL_BRIEF_LIMIT = 420
+
+    def _compact_lite_brief(action_name: str, brief: object) -> str:
+        value = str(brief or "")
+        if not action_name.startswith("vessel_") or len(value) <= _LITE_VESSEL_BRIEF_LIMIT:
+            return value
+        head = 300
+        tail = _LITE_VESSEL_BRIEF_LIMIT - head - len(" … ")
+        return f"{value[:head].rstrip()} … {value[-tail:].lstrip()}"
+
     minified = {}
     for action_name, action_def in available_actions.items():
         # In lite mode, skip non-essential actions. Vessel embodiment actions
@@ -200,7 +215,9 @@ def minify_actions_block(
 
         if lite:
             # Lite: brief-only, no schema
-            minified[action_name] = {"brief": normalized.get("brief", "")}
+            minified[action_name] = {
+                "brief": _compact_lite_brief(action_name, normalized.get("brief", ""))
+            }
         else:
             # Standard: schema + brief
             minified[action_name] = extract_for_llm_prompt(action_name, normalized)
@@ -365,6 +382,76 @@ def _resolve_turn_scopes(
         # Never hide anything on error: widen to every known scope.
         return {"core", "vessel", "recon", "wiki", "interface"}
     return scopes
+
+
+def _derive_vessel_whitelist_action_types(
+    available_actions: dict[str, Any],
+) -> set[str] | None:
+    """Compute the whitelisted action set for a Rift Vessel embodiment turn.
+
+    The allowlist is the union of the hardcoded, non-editable vessel/game verb
+    patterns (``vessel_*`` plus the connected world's ``*_<world>_*``) and the
+    user-editable core-extra patterns held in ``VESSEL_ACTION_WHITELIST``.
+    Matching is structural (:func:`fnmatch.fnmatchcase` on the action name),
+    never keyword/regex intent detection.
+
+    The whitelist implementation lives inside the Rift Vessel plugin
+    (``plugins.rift_vessel.vessel_whitelist``); it is imported lazily and
+    guarded so the core degrades gracefully. Returns ``None`` when the plugin is
+    absent/disabled or on any error, letting the caller fall back to the
+    scope-based derive. System-only and non-user-facing actions are always
+    dropped regardless of the patterns.
+    """
+    try:
+        from plugins.rift_vessel.vessel_whitelist import (
+            hardcoded_vessel_patterns,
+            matches_whitelist,
+            parse_patterns,
+        )
+    except Exception:
+        return None
+
+    # Resolve the connected world token via the Vessel plugin (fail-safe).
+    world = "vessel"
+    try:
+        from core.core_initializer import PLUGIN_REGISTRY
+
+        vessel_plugin = PLUGIN_REGISTRY.get("vessel_plugin")
+        if vessel_plugin is not None:
+            resolved = vessel_plugin._action_world()
+            if resolved:
+                world = str(resolved)
+    except Exception:
+        pass
+
+    try:
+        from core.config_manager import config_registry as _cfg
+
+        raw_whitelist = _cfg.get_value(
+            "VESSEL_ACTION_WHITELIST",
+            "",
+            value_type=str,
+            component="vessel_plugin",
+            group="plugins",
+            advanced=True,
+        )
+    except Exception:
+        raw_whitelist = ""
+
+    patterns = hardcoded_vessel_patterns(world) + parse_patterns(raw_whitelist)
+    if not patterns:
+        return None
+
+    allowed: set[str] = set()
+    for action_name, action_def in available_actions.items():
+        if action_name in _SYSTEM_ONLY_ACTION_NAMES:
+            continue
+        if _is_non_user_facing_action(action_def):
+            continue
+        if matches_whitelist(action_name, patterns):
+            allowed.add(action_name)
+
+    return allowed or None
 
 
 def _derive_default_prompt_action_types(
@@ -1489,23 +1576,40 @@ async def build_prompt_request(
     is_grillo_internal = _is_grillo_beat and not is_outbound_beat(_beat_type)
 
     # A Rift Vessel embodiment turn is an in-world conversation, not a research
-    # task. Running recon (memory + web-search contributions + "do a web search"
-    # style instructions) on such a turn makes the weaker embodiment model
-    # verbalise the recon plan as its in-world reply — e.g. a player's "rekku,
-    # vieni qua" got answered with "Jay, I'm diving into the web searches for
-    # you..." instead of Synth actually replying to the player and moving toward
+    # task. Running the FULL recon (memory + web-search contributions + "do a
+    # web search" style instructions) on such a turn makes the weaker embodiment
+    # model verbalise the recon plan as its in-world reply — e.g. a player's
+    # "rekku, vieni qua" got answered with "Jay, I'm diving into the web
+    # searches for you..." instead of Synth actually replying and moving toward
     # them. AGENTS.md §5c: while embodied SyntH is NOT omniscient — it does not
-    # pull global memory/web context mid-session; catch-up happens in quiet
-    # moments and at end-of-session. So skip the recon LLM call here, exactly as
-    # for Grillo internal beats. Structural detection (routing metadata only,
-    # never message text) via core.vessel_focus.is_vessel_turn.
-    _is_vessel_recon_skip = False
+    # pull global web context mid-session. But recon is the Fast-Lane PREFLIGHT
+    # stage, and (like the main action catalog) it is governed by a whitelist:
+    # instead of skipping recon wholesale, we run it in-world with only the
+    # vessel-safe recon keys (language/tone hints, memory search, vessel_*) via
+    # VESSEL_RECON_WHITELIST — the noisy research plugins are filtered out before
+    # the combined recon LLM call. Structural detection (routing metadata only,
+    # never message text) via core.vessel_focus.is_vessel_turn; structural
+    # recon-key matching (fnmatch) via the Rift Vessel whitelist helper.
+    _is_vessel_turn = False
     try:
         from core.vessel_focus import is_vessel_turn
 
-        _is_vessel_recon_skip = is_vessel_turn(message, context_memory, interface_path)
+        _is_vessel_turn = is_vessel_turn(message, context_memory, interface_path)
     except Exception:  # pragma: no cover - defensive
-        _is_vessel_recon_skip = False
+        _is_vessel_turn = False
+
+    _vessel_recon_patterns: list[str] | None = None
+    if _is_vessel_turn:
+        try:
+            from plugins.rift_vessel.vessel_whitelist import (
+                vessel_recon_whitelist_patterns,
+            )
+
+            _vessel_recon_patterns = vessel_recon_whitelist_patterns()
+        except Exception:  # pragma: no cover - defensive (plugin absent/disabled)
+            # Rift Vessel plugin unavailable: no whitelist to apply. Fall back to
+            # the non-vessel path (full recon) rather than silently skipping.
+            _vessel_recon_patterns = None
 
     try:
         from core.recon import (
@@ -1519,19 +1623,19 @@ async def build_prompt_request(
             # skip the LLM recon call to avoid wasting API tokens.
             log_debug("[json_prompt] Skipping recon LLM call for Grillo internal beat")
             recon_contributions = []
-        elif _is_vessel_recon_skip:
-            # In-world embodiment turn: no recon (see the block comment above).
-            log_debug(
-                "[json_prompt] Skipping recon LLM call for Vessel embodiment turn"
-            )
-            recon_contributions = []
         else:
+            if _vessel_recon_patterns:
+                log_debug(
+                    "[json_prompt] Vessel embodiment turn: running recon with "
+                    f"whitelist patterns={_vessel_recon_patterns}"
+                )
             recon_contributions = await gather_recon_contributions(
                 message=message,
                 context_memory=context_memory,
                 text=text,
                 tags=expanded_tags,
                 keywords=None,
+                recon_whitelist_patterns=_vessel_recon_patterns,
             )
 
         for c in recon_contributions:
@@ -2049,6 +2153,37 @@ async def build_prompt_request(
 
         full_actions = core_initializer.actions_block.get("available_actions", {})
 
+        # Vessel action exposure is connection-driven.  The cached actions block
+        # is refreshed after connect/disconnect, but that refresh is scheduled
+        # asynchronously from the action handler.  A player can send a message
+        # before the refresh task runs, leaving this prompt with the disconnected
+        # catalog (``vessel_connect`` only) even though the connector is live.
+        # Merge the live VesselPlugin declaration on every Vessel prompt so the
+        # current world verbs are available immediately.  This is deliberately
+        # fail-safe and plugin-local: removing Rift Vessel leaves the normal
+        # cached action path unchanged.
+        if is_vessel_prompt:
+            try:
+                from core.core_initializer import PLUGIN_REGISTRY
+
+                vessel_plugin = PLUGIN_REGISTRY.get("vessel_plugin")
+                get_supported_actions = getattr(
+                    vessel_plugin, "get_supported_actions", None
+                )
+                if callable(get_supported_actions):
+                    live_vessel_actions = get_supported_actions()
+                    if isinstance(live_vessel_actions, dict):
+                        full_actions = dict(full_actions)
+                        full_actions.update(live_vessel_actions)
+                        log_debug(
+                            "[json_prompt] Merged live Vessel actions into prompt "
+                            f"catalog ({len(live_vessel_actions)} actions)"
+                        )
+            except Exception as exc:  # pragma: no cover - defensive
+                log_debug(
+                    f"[json_prompt] Live Vessel action merge skipped: {exc}"
+                )
+
         # When audio attachments are present as multimodal content, remove
         # stt_transcribe from the available actions so the LLM processes the
         # audio directly instead of requesting a redundant transcription step.
@@ -2086,6 +2221,25 @@ async def build_prompt_request(
                     "[json_prompt] Removed diary/memory-write actions during "
                     f"Vessel turn (§5c single end-of-session diary): "
                     f"{sorted(removed_vessel_actions)}"
+                )
+
+        if allowed_action_types_for_prompt is None and is_vessel_prompt:
+            # Vessel whitelist: on an embodiment turn keep the in-world catalog
+            # lean so the folded action block does not push the system prompt
+            # past the downstream char-budget clamp (which would erase the
+            # will/reflection prompt in the user body). The allowlist is the
+            # union of the hardcoded vessel/game verb patterns and the
+            # user-editable core-extra patterns, matched structurally (fnmatch on
+            # the action NAME — never keyword/regex intent detection). The
+            # whitelist logic lives in the Rift Vessel plugin, so it degrades to
+            # the scope-based derive below when the plugin is absent/disabled.
+            vessel_allow = _derive_vessel_whitelist_action_types(full_actions)
+            if vessel_allow is not None and len(vessel_allow) < len(full_actions):
+                allowed_action_types_for_prompt = vessel_allow
+                log_debug(
+                    "[json_prompt] Applied Vessel action whitelist: "
+                    f"{len(vessel_allow)}/{len(full_actions)} actions kept "
+                    f"({sorted(vessel_allow)})"
                 )
 
         if allowed_action_types_for_prompt is None:

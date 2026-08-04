@@ -1788,6 +1788,86 @@ class AgentLoopManager:
             cortex_scope=cortex_scope,
         )
 
+    async def run_agent_drone(
+        self,
+        *,
+        goal: str,
+        engine: str | None = None,
+        context: Dict[str, Any] | None = None,
+        parent_task_id: int | None = None,
+        max_iterations: int | None = None,
+        timeout_seconds: float | None = None,
+        original_message: Any = None,
+        allowed_tools: set[str] | None = None,
+        cortex_scope: str = "agent",
+    ) -> Dict[str, Any]:
+        """Run a task-scoped sub-agent with the full **Agent** budget.
+
+        An *agent Drone* is the same single-level, task-scoped delegation as an
+        ordinary :meth:`run_drone` (it cannot spawn further Drones, and it honours
+        the ``allowed_tools`` allow-list), but it is deliberately given the
+        Agent's iteration/time budget (``AGENT_MAX_ITERATIONS`` /
+        ``AGENT_TURN_TIMEOUT_SEC``) instead of the tight Drone budget
+        (``DRONE_MAX_ITERATIONS`` / ``DRONE_TURN_TIMEOUT_SEC``). This lets it
+        genuinely *reason*: ask itself questions, consult the knowledge base over
+        several iterations and refine before committing — work that a 3-iteration
+        Drone cannot complete. It is meant for open-ended reasoning sub-tasks
+        such as breaking a self-authored goal into an ordered plan.
+
+        The larger budget is the ONLY difference from :meth:`run_drone`; every
+        safety property (single-level delegation, tool allow-list, cortex scope,
+        no vessel ``interface_path`` so it is never attributed to an embodiment
+        turn) is identical.
+
+        Args:
+            goal: The focused reasoning objective for the agent Drone.
+            engine: Optional cortex engine name. When ``None`` the Drone inherits
+                the ``cortex_scope`` engine (same resolution as the parent Agent).
+            cortex_scope: Cortex scope used to resolve the engine/model when
+                ``engine`` is ``None`` (default ``"agent"``). Out-of-band vessel
+                agent Drones (the goal expander/planner) pass ``"vessel"``.
+            context: Optional context dict; a ``drone`` marker is injected.
+            parent_task_id: DB id of the Agent task that spawned this Drone.
+            max_iterations: Hard cap (defaults to ``AGENT_MAX_ITERATIONS``).
+            timeout_seconds: Wall-clock budget (defaults to ``AGENT_TURN_TIMEOUT_SEC``).
+            original_message: Optional originating message (for audit/safety).
+            allowed_tools: Optional allow-list of tool names this Drone may use.
+
+        Returns:
+            The standard :meth:`run_agentic_turn` result dict.
+        """
+        if max_iterations is None:
+            max_iterations = int(config_registry.get_var("AGENT_MAX_ITERATIONS", 30))
+        if timeout_seconds is None:
+            timeout_seconds = float(
+                config_registry.get_var("AGENT_TURN_TIMEOUT_SEC", 120)
+            )
+
+        drone_context: Dict[str, Any] = dict(context or {})
+        drone_meta: Dict[str, Any] = {
+            "is_drone": True,
+            "is_agent_drone": True,
+            "parent_task_id": parent_task_id,
+        }
+        if allowed_tools:
+            drone_meta["allowed_tools"] = sorted(str(t) for t in allowed_tools)
+        drone_context["drone"] = drone_meta
+
+        log_info(
+            f"[agent_core] Spawning agent Drone (parent_task_id={parent_task_id}, "
+            f"max_iterations={max_iterations}, timeout={timeout_seconds}s)"
+        )
+
+        return await self.run_agentic_turn(
+            goal=goal,
+            engine=engine,
+            context=drone_context,
+            max_iterations=max_iterations,
+            timeout_seconds=timeout_seconds,
+            original_message=original_message,
+            cortex_scope=cortex_scope,
+        )
+
     async def _call_engine_direct(
         self,
         prompt: Dict[str, Any],

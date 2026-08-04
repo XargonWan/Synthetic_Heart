@@ -41,8 +41,16 @@ from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.plugin_base import PluginBase
 from core.vessel_registry import register_vessel_connector
 from plugins.rift_vessel.knowledge_client import WikiSource
+from plugins.rift_vessel.minecraft import base_spec
+from plugins.rift_vessel.minecraft import bases as mc_bases
 from plugins.rift_vessel.minecraft import goals as mc_goals
+from plugins.rift_vessel.minecraft import quests
+from plugins.rift_vessel.minecraft import target_names as mc_target_names
 from plugins.rift_vessel.minecraft import wiki_client
+from plugins.rift_vessel.vessel_combat_strategy import (
+    apply_combat_strategy,
+    register_combat_strategy,
+)
 from plugins.rift_vessel.vessel_base import (
     PerceptionCallback,
     PerceptionEvent,
@@ -95,6 +103,16 @@ _MAX_POLL_FAILURES = 5
 # the bridge's own auto-reconnect settles any shorter blip long before it trips.
 # Structural boolean check, no keyword logic.
 _MAX_HEALTH_FALSE_STREAK = 60
+# A Mineflayer reconnect briefly reports ``not connected`` while the bridge
+# process is still alive and negotiating the server connection.  Keep a chat
+# reply alive across that short transition instead of dropping it immediately.
+_SAY_RETRY_ATTEMPTS = 8
+_SAY_RETRY_DELAY_SEC = 0.5
+# Minecraft servers and proxy/chat plugins can drop back-to-back client chat
+# packets even when the HTTP command itself succeeds.  Serialize embodied
+# speech and leave a small inter-packet gap so an action batch cannot race the
+# server's chat handling.
+_SAY_GAP_SEC = 0.15
 
 # Loopback host names that mean "this same machine". When Synth runs inside a
 # container these do NOT point at the Docker host (where a "Open to LAN" world
@@ -201,8 +219,18 @@ class MinecraftConnector(VesselConnectorBase):
         self._on_event: PerceptionCallback | None = None
         self._session: aiohttp.ClientSession | None = None
         self._poll_task: asyncio.Task[None] | None = None
+        # Startup reattach and an explicit vessel_connect can arrive together.
+        # Serialize the bridge handshake so two callers cannot replace each
+        # other's HTTP session or issue competing /connect requests.
+        self._connect_lock = asyncio.Lock()
+        self._say_lock = asyncio.Lock()
         self._connected = False
         self._base_url = ""
+        # Per-connect settings (host/port/version overrides) captured so the
+        # world identity can be resolved consistently for this connect — set at
+        # the top of :meth:`connect` and also seeded by the plugin *before*
+        # ``begin_session`` so the interface path carries the right world token.
+        self._connect_settings: Dict[str, Any] = {}
         # Optional session id for tagging goal rows (best-effort tracability).
         self._session_id: str | None = None
         # Human-readable reason for the last failed connect (bridge health
@@ -234,6 +262,22 @@ class MinecraftConnector(VesselConnectorBase):
         # remember the last one and skip it so the body moves on. Purely
         # structural (kind + exact id) — never keyword matching.
         self._last_reflex_interaction: str | None = None
+        # Progress watchdog for a *named* block/entity target the body keeps
+        # ``arriving`` at but can never interact with. The named-target branch
+        # of ``motor_step`` re-issues ``goto {target: <id>}`` every tick; the
+        # bridge reports ``arrived`` each time (the body is standing at/near the
+        # thing) yet the target never surfaces as a benign affordance in reach
+        # (e.g. the will beat named an id that isn't actually a harvestable
+        # block here, or the pathfinder stops one tile short), so the reflex
+        # never falls through to ``mine`` and loops ``goto`` forever on a target
+        # it has already reached — the "arrived but no progress" freeze. We
+        # count consecutive same-target arrivals and, past ``_STALE_ARRIVAL_TICKS``,
+        # give up on that exact target for now: fall through to the directional
+        # march (explore new ground) and surface ``arrived_idle`` so the slow
+        # will beat can re-plan a reachable objective. Purely structural
+        # (kind + exact id) — never keyword matching.
+        self._named_target_arrival_key: str | None = None
+        self._named_target_arrival_ticks = 0
         # ``_goal_key`` of a numeric destination we have already **reached**.
         # A goal's numeric destination is chosen *once* by the slow will beat
         # and stays static until the next beat (which, on the slow Selenium
@@ -281,6 +325,18 @@ class MinecraftConnector(VesselConnectorBase):
         # own displacement covers every one of them uniformly.
         self._last_body_position: Dict[str, float] | None = None
         self._stuck_position_ticks = 0
+        # Staticity ward state (see ``_STATIC_WARD_RADIUS`` / ``_staticity_ward``
+        # and AGENTS.md §5c). ``_static_anchor`` is the reference point the body
+        # is "parked" around; ``_static_ward_ticks`` counts how many consecutive
+        # motor ticks it has lingered within ``_static_ward_radius`` of it. When
+        # the body strays outside that radius the anchor moves and the counter
+        # resets, so the ward only fires on *genuine* stasis, not on normal
+        # travel. Runtime-configurable via the ``VESSEL_STATICITY_*`` keys.
+        self._static_anchor: Dict[str, float] | None = None
+        self._static_ward_ticks = 0
+        self._static_ward_enabled: bool = True
+        self._static_ward_radius: float = float(self._STATIC_WARD_RADIUS)
+        self._static_ward_limit: int = int(self._STATIC_WARD_TICKS)
         # Structural 3-state feedback for the *last named target* the motor
         # tried to reach (``goal_target``: a block/entity id cognition chose
         # from the live scan). A named target can fail two very different ways
@@ -351,10 +407,72 @@ class MinecraftConnector(VesselConnectorBase):
         # Whether a post-damage social/combat appraisal will beat may be raised
         # when the body takes a hit this tick. From VESSEL_SP_APPRAISAL_ENABLED.
         self._sp_appraisal_enabled = True
+        # Power-ratio fight/flee threshold and weak-mob floor (structural
+        # numeric only). When armed, the reflex engages a mob whose combat power
+        # it matches (own_power / mob_power >= _sp_engage_ratio); when disarmed
+        # it flees unless the mob is weaker than _sp_weak_mob_power. Loaded from
+        # VESSEL_SP_ENGAGE_RATIO / VESSEL_SP_WEAK_MOB_POWER.
+        self._sp_engage_ratio: float = float(self._ENGAGE_RATIO)
+        self._sp_weak_mob_power: float = float(self._WEAK_MOB_POWER)
+        # Whether the body proactively seeks/builds a shelter at night when
+        # hostiles are around. A torch is NOT enough (mobs still path to an
+        # exposed body); the reflex builds/digs an enclosed refuge or sleeps in
+        # a roofed bed. Loaded from VESSEL_SP_NIGHT_SHELTER. When on, the reflex
+        # also uses _sp_shelter_dist as the (wider) radius within which a
+        # night-time hostile presence justifies sheltering.
+        self._sp_night_shelter = True
+        self._sp_shelter_dist: float = float(self._SHELTER_HOSTILE_DIST)
+        # Base-retreat: at night with hostiles around, if a registered base is
+        # within this many blocks the reflex heads BACK to it (reusing ``goto``)
+        # instead of walling the body in wherever it happens to be standing —
+        # which was burying Synth underground far from home (the "seppellita
+        # sotto terra" bug). Sheltering-in-place stays only as the last resort
+        # when no base is reachable. Loaded from VESSEL_BASE_RETREAT_RADIUS.
+        self._base_enabled: bool = True
+        self._base_retreat_radius: float = float(self._BASE_RETREAT_RADIUS)
+        # Ender Dragon questline (directed reference milestones). When enabled,
+        # the connector registers the questline at connect, surfaces the active
+        # quest into the beats via extra["quest"], and structurally advances it
+        # as the world satisfies each objective. Loaded from VESSEL_QUESTS_ENABLED.
+        self._quests_enabled: bool = True
+        # Anti-flap latch: once a shelter attempt succeeds this session-night we
+        # do not keep re-issuing it every tick. Reset when day returns.
+        self._sheltered_last_day: bool | None = None
+        # Morning bunker-exit: if Synth sheltered underground overnight (dug a
+        # bunker with no base), when DAY returns and the body is still buried
+        # under a ceiling (no open sky) with no reachable base, carve a walkable
+        # ascending staircase back to the surface. Loaded from
+        # VESSEL_MORNING_EXIT_ENABLED. Latched per day so it fires once, not
+        # every tick, until the body has surfaced (regains sky access).
+        self._sp_morning_exit: bool = True
+        self._surfaced_last_day: bool | None = None
         # Last observed health reading, used to detect "took damage this tick"
         # (health dropped vs the previous motor tick). Structural numeric delta,
         # never keyword logic. None until the first reading.
         self._last_health: float | None = None
+        # Last observed inventory item→count map and surrounding block list,
+        # cached from ``get_world_state`` so ``get_progression_context`` can
+        # seed a starter-goal KB query from live telemetry only (item/block
+        # ids), never chat text. Empty until the first snapshot.
+        self._last_inventory_counts: dict[str, int] = {}
+        self._last_blocks: list[dict[str, Any]] = []
+        # Last observed dimension id (e.g. ``overworld`` / ``the_nether`` /
+        # ``the_end``), cached from ``get_world_state`` so the progression-stage
+        # detection can tell she has crossed into the Nether/End without a fresh
+        # snapshot. Plain game id, never chat text. Empty until first snapshot.
+        self._last_dimension: str = ""
+        # Craft-material shortfall cue. When a ``craft`` fails for missing
+        # ingredients, the bridge returns the exact shortfall (which item was
+        # wanted and how many of each material are short); we latch it here with
+        # a turn budget so the will/action beats can render a
+        # "you wished to build X, you need have/need <material>" hint for a few
+        # turns, then it self-clears. Structural (Minecraft item ids + counts),
+        # never chat text. ``None`` when there is no pending shortfall.
+        self._craft_deficit: Dict[str, Any] | None = None
+        # How many turns (world-state builds) a fresh craft shortfall cue stays
+        # rendered before it self-clears. Resolved from VESSEL_CRAFT_CUE_TURNS
+        # on connect; falls back to the class default.
+        self._craft_cue_turns: int = self._CRAFT_CUE_TURNS
 
     # Self-preservation thresholds (defaults; overridable per-connect via the
     # ``VESSEL_SP_*`` config keys resolved in ``connect``). All structural:
@@ -397,6 +515,47 @@ class MinecraftConnector(VesselConnectorBase):
     # closing to melee, when a bow/crossbow with ammo is carried. Below this it
     # is faster/safer to close and swing.
     _RANGED_MIN_DIST = 5.0
+    # Structural offensive value credited to a usable ranged weapon (bow/
+    # crossbow with ammo) in the own-power estimate. Vanilla bow damage is ~6-9
+    # per charged hit; this numeric floor lets an archer clear the power gate
+    # and reach the shoot branch instead of always fleeing. Never a keyword.
+    _RANGED_OFFENSE = 6.0
+    # Power-ratio combat threshold (own combat power / mob combat power). At or
+    # above this the reflex judges the fight winnable and engages; below it the
+    # body flees a mob it is outmatched by. ~1.0 = "fight when at least as
+    # strong as the mob". Structural numeric ratio, never keyword logic. From
+    # VESSEL_SP_ENGAGE_RATIO.
+    _ENGAGE_RATIO = 1.0
+    # Combat-power floor below which a mob is considered "weak" (trivial) — a
+    # disarmed body will still turn and fight a weak mob rather than flee it.
+    # Compared against the mob's structural power (see _mob_power). From
+    # VESSEL_SP_WEAK_MOB_POWER.
+    _WEAK_MOB_POWER = 6.0
+    # Moderate default combat power assumed for a mob whose registry stats are
+    # unavailable (older bridge / null max_health & attack_damage). Cautious but
+    # not paralysing: it lets an armed, healthy body engage an unknown mob while
+    # a disarmed body still treats it as non-trivial (above _WEAK_MOB_POWER).
+    _DEFAULT_MOB_POWER = 12.0
+    # How close (blocks) a hostile must be at NIGHT for the proactive shelter
+    # reflex to trigger. Wider than _HOSTILE_NEAR_DIST so the body starts
+    # walling itself in BEFORE the mob closes to melee, rather than only reacting
+    # once it is already being hit. From VESSEL_SP_NIGHT_SHELTER radius default.
+    _SHELTER_HOSTILE_DIST = 16.0
+    # How far (blocks) a registered base may be for the night-retreat reflex to
+    # head back to it (reusing ``goto``) instead of sheltering in place. Wide
+    # enough to make coming home worthwhile, bounded so the body does not sprint
+    # across the map into fresh danger. From VESSEL_BASE_RETREAT_RADIUS.
+    _BASE_RETREAT_RADIUS = 64.0
+    # How close (blocks) the keep-distance tactic tries to keep a special mob
+    # (creeper/enderman) — reuse the flee vector but only when the mob is inside
+    # this radius, so the body backs off without a full sprint away.
+    _KEEP_DISTANCE = 6.0
+    # Default number of turns (world-state builds) a craft-material shortfall
+    # cue stays rendered in the will/action prompt before it self-clears. From
+    # VESSEL_CRAFT_CUE_TURNS. Kept in the "a few turns" band the request asked
+    # for (10-20), so the hint nudges Synth to gather the missing intermediate
+    # material without lingering forever once it has moved on.
+    _CRAFT_CUE_TURNS = 15
     # Max characters per in-world chat line. Minecraft vanilla chat rejects or
     # truncates anything past ~256 characters, so a long ``say`` is split on
     # word boundaries into multiple ≤256-char lines rather than hard-cut
@@ -545,7 +704,19 @@ class MinecraftConnector(VesselConnectorBase):
         settings: Dict[str, Any],
         on_event: PerceptionCallback,
     ) -> bool:
+        """Serialize connect/reattach attempts for the singleton bridge."""
+        async with self._connect_lock:
+            if self._connected:
+                return True
+            return await self._connect_impl(settings, on_event)
+
+    async def _connect_impl(
+        self,
+        settings: Dict[str, Any],
+        on_event: PerceptionCallback,
+    ) -> bool:
         self._on_event = on_event
+        self._connect_settings = dict(settings or {})
         self._base_url = self._resolve_base_url(settings or {})
         timeout = aiohttp.ClientTimeout(total=_HTTP_TIMEOUT_SEC)
         self._session = aiohttp.ClientSession(timeout=timeout)
@@ -649,6 +820,22 @@ class MinecraftConnector(VesselConnectorBase):
         self._poll_task = asyncio.create_task(self._poll_loop())
         log_info(f"{LOG_PREFIX} connected via {self._base_url}")
 
+        # Scope goals by the concrete server we just entered so that logging
+        # back into the same world resumes exactly where Synth left off, while
+        # a different server keeps its own independent progression. Structural
+        # identity (host:port slug), fail-safe — degrades to the shared scope.
+        try:
+            mc_goals.set_active_world(self.get_world_identity())
+        except Exception as exc:
+            log_debug(f"{LOG_PREFIX} goal world scope not set: {exc}")
+
+        # Scope bases by the same concrete server so a returning Synth recalls
+        # the homes it built there. Structural identity, fail-safe.
+        try:
+            mc_bases.set_active_world(self.get_world_identity())
+        except Exception as exc:
+            log_debug(f"{LOG_PREFIX} base world scope not set: {exc}")
+
         # Resolve the self-preservation thresholds for this session (fail-safe;
         # falls back to the class defaults on any read error).
         self._load_self_preservation_config()
@@ -659,6 +846,22 @@ class MinecraftConnector(VesselConnectorBase):
             await mc_goals.init_goal_table()
         except Exception as exc:
             log_debug(f"{LOG_PREFIX} goal table init skipped: {exc}")
+
+        # Ensure the base (home) table exists (idempotent, fail-safe).
+        try:
+            await mc_bases.init_base_table()
+        except Exception as exc:
+            log_debug(f"{LOG_PREFIX} base table init skipped: {exc}")
+
+        # Register the Ender Dragon questline (idempotent; preserves existing
+        # per-quest status/progress and promotes the first milestone to active
+        # if none is). Reference-only direction, never a script. Fail-safe.
+        if self._quests_enabled:
+            try:
+                res = await quests.register_questline()
+                log_info(f"{LOG_PREFIX} questline registered: {res}")
+            except Exception as exc:
+                log_debug(f"{LOG_PREFIX} questline register skipped: {exc}")
 
         # Apply the configured skin once the bot is in-world. Best-effort: a
         # failure here (e.g. no server skin plugin) must never break the session.
@@ -845,6 +1048,17 @@ class MinecraftConnector(VesselConnectorBase):
         except Exception:
             pass
         await self._close_session()
+        # Reset the goal scope to the shared "none" world so a later
+        # scope-agnostic call (e.g. before the next connect) doesn't leak the
+        # previous server's identity. Fail-safe.
+        try:
+            mc_goals.set_active_world(None)
+        except Exception:
+            pass
+        try:
+            mc_bases.set_active_world(None)
+        except Exception:
+            pass
         log_info(f"{LOG_PREFIX} disconnected")
 
     async def _close_session(self) -> None:
@@ -956,7 +1170,21 @@ class MinecraftConnector(VesselConnectorBase):
             await asyncio.sleep(_POLL_INTERVAL_SEC)
 
     async def _dispatch_event(self, raw: Dict[str, Any]) -> None:
-        if not self._on_event or not isinstance(raw, dict):
+        if not isinstance(raw, dict):
+            return
+        # A `kill` event advances the questline's kill objectives (e.g. the
+        # Ender Dragon). Structural: the mob game id comes straight from the
+        # bridge, never a keyword scan. Fail-safe — a quest-store error must
+        # never stop the perception from reaching the chain.
+        if str(raw.get("event_type")) == "kill":
+            data = raw.get("data") or {}
+            mob = data.get("mob") if isinstance(data, dict) else None
+            if isinstance(mob, str) and mob:
+                try:
+                    await self.on_entity_killed(mob)
+                except Exception as exc:  # pragma: no cover - defensive
+                    log_debug(f"{LOG_PREFIX} kill objective advance failed: {exc}")
+        if not self._on_event:
             return
         try:
             event = PerceptionEvent(
@@ -985,6 +1213,7 @@ class MinecraftConnector(VesselConnectorBase):
     # ``minecraft_goals`` table, not the Node bridge). Everything else is a
     # bridge command forwarded verbatim to ``POST /cmd``.
     _GOAL_VERBS = frozenset({"set_goal", "goals", "update_goal"})
+    _BASE_VERBS = frozenset({"set_base", "list_bases"})
 
     async def act(
         self,
@@ -997,14 +1226,102 @@ class MinecraftConnector(VesselConnectorBase):
             return await self._act_lookup_knowledge(payload or {})
         if action in self._GOAL_VERBS:
             return await self._act_goal(action, payload or {})
+        if action == "build_base":
+            return await self._act_build_base(payload or {})
+        if action in self._BASE_VERBS:
+            return await self._act_base(action, payload or {})
         if action == "say":
             return await self._act_say(payload or {})
         res = await self._post("/cmd", {"action": action, "payload": payload or {}})
+        if action == "craft":
+            self._update_craft_deficit(bool(res.get("ok")), res.get("data") or {})
         return VesselActionResult(
             ok=bool(res.get("ok")),
             detail=res.get("detail"),
             data=res.get("data") or {},
         )
+
+    def _update_craft_deficit(self, ok: bool, data: Dict[str, Any]) -> None:
+        """Latch or clear the craft-material shortfall cue after a craft attempt.
+
+        On a **successful** craft we clear any pending shortfall (Synth got what
+        it wanted). On a **failed** craft the bridge returns the exact shortfall
+        — ``{"wanted": <item id>, "missing": [{"item", "have", "need"}, ...]}`` —
+        which we latch here with a fresh turn budget so the will/action beats can
+        render a "you wished to build X, you need have/need <material>" hint for
+        a few turns. Purely structural (Minecraft item ids + counts), never chat
+        text; fully fail-safe.
+        """
+        if ok:
+            self._craft_deficit = None
+            return
+        try:
+            wanted = str(data.get("wanted") or "").strip()
+            raw_missing = data.get("missing")
+            if not wanted or not isinstance(raw_missing, list) or not raw_missing:
+                return
+            missing: list[dict[str, Any]] = []
+            for entry in raw_missing:
+                if not isinstance(entry, dict):
+                    continue
+                item = str(entry.get("item") or "").strip()
+                if not item:
+                    continue
+                try:
+                    have = int(entry.get("have") or 0)
+                    need = int(entry.get("need") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if need <= 0:
+                    continue
+                missing.append({"item": item, "have": have, "need": need})
+            if not missing:
+                return
+            self._craft_deficit = {
+                "wanted": wanted,
+                "missing": missing,
+                "turns_left": int(self._craft_cue_turns),
+            }
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} craft deficit latch failed: {exc}")
+
+    def _consume_craft_deficit(
+        self, inventory_counts: Dict[str, int]
+    ) -> Dict[str, Any] | None:
+        """Return the active craft-shortfall cue for this turn, or ``None``.
+
+        Called once per ``get_world_state`` (one perception/beat turn). Refreshes
+        each missing ingredient's ``have`` from the live inventory, drops any
+        ingredient now fully satisfied, decrements the turn budget, and clears
+        the whole cue when the budget runs out or every ingredient is satisfied.
+        Structural only (item ids + counts). Returns a snapshot dict suitable for
+        ``WorldState.extra["craft_deficit"]`` or ``None`` when nothing to show.
+        """
+        deficit = self._craft_deficit
+        if not deficit:
+            return None
+        try:
+            refreshed: list[dict[str, Any]] = []
+            for entry in deficit.get("missing", []):
+                item = str(entry.get("item") or "")
+                need = int(entry.get("need") or 0)
+                have = int(inventory_counts.get(item, 0)) if inventory_counts else 0
+                if need > 0 and have < need:
+                    refreshed.append({"item": item, "have": have, "need": need})
+            turns_left = int(deficit.get("turns_left") or 0) - 1
+            if not refreshed or turns_left <= 0:
+                self._craft_deficit = None
+                if not refreshed:
+                    return None
+                # Last render before it self-clears.
+                return {"wanted": deficit.get("wanted"), "missing": refreshed}
+            deficit["missing"] = refreshed
+            deficit["turns_left"] = turns_left
+            return {"wanted": deficit.get("wanted"), "missing": refreshed}
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} craft deficit consume failed: {exc}")
+            self._craft_deficit = None
+            return None
 
     @staticmethod
     def _split_chat_text(text: str, limit: int) -> list[str]:
@@ -1044,6 +1361,12 @@ class MinecraftConnector(VesselConnectorBase):
         return chunks
 
     async def _act_say(self, payload: Dict[str, Any]) -> VesselActionResult:
+        async with self._say_lock:
+            result = await self._act_say_unlocked(payload)
+            await asyncio.sleep(_SAY_GAP_SEC)
+            return result
+
+    async def _act_say_unlocked(self, payload: Dict[str, Any]) -> VesselActionResult:
         """Send in-world chat, splitting long text into clean ≤256-char lines.
 
         A chat char limit is a world-specific concern (Minecraft's vanilla cap is
@@ -1061,7 +1384,20 @@ class MinecraftConnector(VesselConnectorBase):
         for chunk in chunks:
             line_payload = dict(payload)
             line_payload["text"] = chunk
-            res = await self._post("/cmd", {"action": "say", "payload": line_payload})
+            res: Dict[str, Any] = {}
+            for attempt in range(_SAY_RETRY_ATTEMPTS + 1):
+                res = await self._post(
+                    "/cmd", {"action": "say", "payload": line_payload}
+                )
+                if res.get("ok"):
+                    break
+                detail = str(res.get("detail") or "")
+                if (
+                    "not connected to a world" not in detail.lower()
+                    or attempt >= _SAY_RETRY_ATTEMPTS
+                ):
+                    break
+                await asyncio.sleep(_SAY_RETRY_DELAY_SEC)
             last = res
             if res.get("ok"):
                 sent.append(chunk)
@@ -1102,6 +1438,71 @@ class MinecraftConnector(VesselConnectorBase):
         except (TypeError, ValueError):
             return None
 
+    # Canonical payload key for a free-text goal, plus the alias keys a weaker
+    # LLM tends to emit instead ("goal", "goal_text", "text", "objective",
+    # "description_text"). These are *action payload field names* (structural
+    # JSON keys of the action schema), NOT natural-language content keywords, so
+    # accepting them keeps the multi-language / keyword-free rule intact while
+    # stopping a mis-keyed set_goal from silently persisting nothing (the model
+    # sometimes puts the description under "goal"/"goal_text" — see the empty
+    # goals-table bug). Order is the resolution priority; the canonical key wins.
+    _GOAL_DESCRIPTION_KEYS = (
+        "description",
+        "goal",
+        "goal_text",
+        "objective",
+        "description_text",
+        "text",
+    )
+
+    @classmethod
+    def _extract_goal_description(cls, payload: Dict[str, Any]) -> str:
+        """Return the free-text goal from the canonical key or a known alias.
+
+        Reads ``description`` first, then falls back to the structural alias
+        payload keys a weaker model emits (``goal``, ``goal_text``, …). Purely
+        key-based — never inspects the *value* for keywords — so it is safe in a
+        multi-language deployment. Returns the first non-empty stripped string.
+        """
+        for key in cls._GOAL_DESCRIPTION_KEYS:
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    @classmethod
+    def _resolve_goal_target(
+        cls, payload: Dict[str, Any], description: str
+    ) -> tuple[str | None, str | None]:
+        """Resolve ``(target_kind, target_name)`` for a set/update_goal payload.
+
+        Cognition's explicit ``target_kind`` / ``target_name`` always win. When
+        the (weaker vessel-scope) model omits them, fall back to deriving them
+        from the free-text goal ``description`` by matching **Minecraft item /
+        block / mob names** — the single, user-authorized exception to the
+        keyword-free rule (see :mod:`plugins.rift_vessel.minecraft.target_names`).
+        Without a target the motor reflex only wanders, so this is what makes
+        autonomous play actually progress toward the authored goal.
+        """
+        kind = payload.get("target_kind")
+        name = payload.get("target_name")
+        if (
+            isinstance(kind, str)
+            and kind.strip()
+            and isinstance(name, str)
+            and name.strip()
+        ):
+            return kind.strip(), name.strip()
+        derived = mc_target_names.derive_target(description)
+        if derived is not None:
+            log_info(
+                f"{LOG_PREFIX} derived goal target "
+                f"{derived['target_kind']}={derived['target_name']} "
+                f"from free-text goal"
+            )
+            return derived["target_kind"], derived["target_name"]
+        return kind, name
+
     async def _act_goal(
         self,
         action: str,
@@ -1129,6 +1530,10 @@ class MinecraftConnector(VesselConnectorBase):
                     },
                 )
             if action == "update_goal":
+                upd_desc = self._extract_goal_description(payload) or (
+                    payload.get("note") if isinstance(payload.get("note"), str) else ""
+                )
+                upd_kind, upd_name = self._resolve_goal_target(payload, upd_desc or "")
                 result = await mc_goals.update_active_goal(
                     note=payload.get("note"),
                     status=payload.get("status"),
@@ -1136,8 +1541,8 @@ class MinecraftConnector(VesselConnectorBase):
                     steps=payload.get("steps"),
                     current_step=payload.get("current_step"),
                     advance=bool(payload.get("advance")),
-                    target_kind=payload.get("target_kind"),
-                    target_name=payload.get("target_name"),
+                    target_kind=upd_kind,
+                    target_name=upd_name,
                 )
                 ok = result.get("status") == "ok"
                 return VesselActionResult(
@@ -1145,8 +1550,12 @@ class MinecraftConnector(VesselConnectorBase):
                     detail=result.get("message") or "goal updated",
                     data=result,
                 )
-            # set_goal — free-text objective authored by Synth.
-            description = str(payload.get("description") or "").strip()
+            # set_goal — free-text objective authored by Synth. Accept the
+            # canonical `description` key OR the structural alias keys a weaker
+            # model emits (goal/goal_text/objective/…) so a mis-keyed payload
+            # still persists a goal instead of silently no-op'ing (empty
+            # goals-table bug: the model put the text under "goal"/"goal_text").
+            description = self._extract_goal_description(payload)
             if not description:
                 return VesselActionResult(
                     ok=False, detail="set_goal requires a free-text description"
@@ -1158,13 +1567,14 @@ class MinecraftConnector(VesselConnectorBase):
             # Letting the will beat pass `steps` here would pre-fill a vague
             # plan and gate the expander out (_goal_needs_expansion -> False),
             # so the goal would never be expanded. Structural, keyword-free.
+            set_kind, set_name = self._resolve_goal_target(payload, description)
             result = await mc_goals.set_goal(
                 description,
                 self._session_id,
                 note=payload.get("note"),
                 destination=await self._resolve_travel_destination(payload),
-                target_kind=payload.get("target_kind"),
-                target_name=payload.get("target_name"),
+                target_kind=set_kind,
+                target_name=set_name,
             )
             ok = result.get("status") == "ok"
             return VesselActionResult(
@@ -1174,6 +1584,197 @@ class MinecraftConnector(VesselConnectorBase):
             )
         except Exception as exc:  # pragma: no cover - defensive
             log_warning(f"{LOG_PREFIX} goal verb '{action}' failed: {exc}")
+            return VesselActionResult(ok=False, detail=str(exc))
+
+    @staticmethod
+    def _extract_anchor(payload: Dict[str, Any]) -> Dict[str, float] | None:
+        """Build a ``{x, y, z}`` base anchor from flat numeric payload fields.
+
+        Reads ``x`` / ``y`` / ``z`` (all three required). Purely numeric — never
+        inspects free text. Returns ``None`` when a usable triple is absent, so
+        the caller can fall back to the body's live position.
+        """
+        try:
+            x = payload.get("x")
+            y = payload.get("y")
+            z = payload.get("z")
+            if x is None or y is None or z is None:
+                return None
+            return {"x": float(x), "y": float(y), "z": float(z)}
+        except (TypeError, ValueError):
+            return None
+
+    async def _live_position(self) -> Dict[str, float] | None:
+        """Read the body's current ``{x, y, z}`` position from the bridge.
+
+        Fail-safe: any error (no connection, unreadable snapshot) returns None.
+        """
+        try:
+            res = await self._post("/cmd", {"action": "status", "payload": {}})
+            if not res.get("ok"):
+                return None
+            pos = (res.get("data") or {}).get("position")
+            if not isinstance(pos, dict):
+                return None
+            x = pos.get("x")
+            y = pos.get("y")
+            z = pos.get("z")
+            if x is None or y is None or z is None:
+                return None
+            return {"x": float(x), "y": float(y), "z": float(z)}
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} could not read live position: {exc}")
+            return None
+
+    async def _act_base(
+        self,
+        action: str,
+        payload: Dict[str, Any],
+    ) -> VesselActionResult:
+        """Handle the native base (home) verbs (``set_base`` / ``list_bases``).
+
+        A base is a place Synth chose to build up, store resources in, shelter
+        or sleep at — Synth names and places it freely (there is no catalogue).
+        ``list_bases`` reports the bases Synth registered in this world;
+        ``set_base`` claims/updates a base at an explicit ``{x, y, z}`` anchor
+        (or, when omitted, the body's current position). Both are fail-safe — a
+        DB hiccup degrades to an ``ok=False`` result and never raises into the
+        message chain.
+        """
+        try:
+            if action == "list_bases":
+                bases = await mc_bases.list_bases()
+                return VesselActionResult(
+                    ok=True,
+                    detail=f"{len(bases)} base(s)",
+                    data={"bases": bases},
+                )
+            # set_base — claim/update a home. The name is free text Synth chose;
+            # the anchor is numeric coordinates (explicit fields, else the live
+            # body position). Structural, keyword-free.
+            name = payload.get("name")
+            if not isinstance(name, str) or not name.strip():
+                return VesselActionResult(ok=False, detail="set_base requires a name")
+            anchor = self._extract_anchor(payload)
+            if anchor is None:
+                anchor = await self._live_position()
+            kind = payload.get("kind") if isinstance(payload.get("kind"), str) else None
+            note = payload.get("note") if isinstance(payload.get("note"), str) else None
+            result = await mc_bases.set_base(
+                name.strip(),
+                anchor=anchor,
+                kind=kind,
+                note=note,
+                session_id=self._session_id,
+            )
+            ok = result.get("status") == "ok"
+            return VesselActionResult(
+                ok=ok,
+                detail=result.get("message") or "base registered",
+                data=result,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log_warning(f"{LOG_PREFIX} base verb '{action}' failed: {exc}")
+            return VesselActionResult(ok=False, detail=str(exc))
+
+    async def _act_build_base(self, payload: Dict[str, Any]) -> VesselActionResult:
+        """Build a first shelter, then register the result as a base (home).
+
+        This is the Fase-2 counterpart to ``set_base`` (which only *claims* a
+        spot): it derives a bounded shelter layout from the body's live
+        inventory (:mod:`base_spec`), forwards the block list to the Node bridge
+        ``build_base`` verb (which physically places every block), and — on a
+        successful (even partial) build — registers the shelter's interior
+        anchor and bounding box in the core base store so night-retreat and
+        ``list_bases`` can find it.
+
+        The build origin is an explicit ``{x, y, z}`` payload triple when given,
+        otherwise the body's live position. Materials come from the inventory
+        and layout is pure grid math — no free text is ever inspected (only
+        canonical Minecraft block ids, which the scope rules permit as
+        structural). Fully fail-safe: a missing position, an empty inventory, or
+        a bridge hiccup degrades to an ``ok=False`` result and never raises into
+        the message chain.
+        """
+        try:
+            name = payload.get("name")
+            if not isinstance(name, str) or not name.strip():
+                return VesselActionResult(ok=False, detail="build_base requires a name")
+            # Build origin: explicit coords, else the live body position.
+            origin_pos = self._extract_anchor(payload)
+            if origin_pos is None:
+                origin_pos = await self._live_position()
+            if origin_pos is None:
+                return VesselActionResult(
+                    ok=False, detail="build_base could not read a build position"
+                )
+            # Live inventory so the layout uses materials actually carried.
+            res_status = await self._post("/cmd", {"action": "status", "payload": {}})
+            inventory = (res_status.get("data") or {}).get("inventory") or []
+            inventory_counts = self._inventory_counts(inventory)
+
+            layout = base_spec.derive_base_layout(origin_pos, inventory_counts)
+            if not layout.get("ok"):
+                missing = layout.get("missing") or []
+                return VesselActionResult(
+                    ok=False,
+                    detail=(
+                        "cannot build a base yet — missing materials: "
+                        + ", ".join(str(m) for m in missing)
+                    ),
+                    data={"missing": missing},
+                )
+
+            # Forward the physical build to the bridge.
+            bridge_payload: Dict[str, Any] = {
+                "blocks": layout.get("blocks") or [],
+                "anchor": layout.get("anchor"),
+            }
+            for key in ("door", "torch", "crafting_table", "bed"):
+                if layout.get(key):
+                    bridge_payload[key] = layout[key]
+            res = await self._post(
+                "/cmd", {"action": "build_base", "payload": bridge_payload}
+            )
+            built = bool(res.get("ok"))
+            data = res.get("data") or {}
+
+            # Register the base on a successful (even partial) build so the body
+            # can retreat/sleep here. The interior-centre anchor and the outer
+            # bounding box come from the deterministic layout.
+            registered: Dict[str, Any] | None = None
+            if built:
+                anchor = layout.get("anchor")
+                box = layout.get("box")
+                kind = (
+                    payload.get("kind")
+                    if isinstance(payload.get("kind"), str)
+                    else "home"
+                )
+                note = (
+                    payload.get("note")
+                    if isinstance(payload.get("note"), str)
+                    else None
+                )
+                registered = await mc_bases.set_base(
+                    name.strip(),
+                    anchor=anchor,
+                    box=box,
+                    kind=kind,
+                    note=note,
+                    session_id=self._session_id,
+                )
+
+            detail = res.get("detail") or (
+                "base built" if built else "base build failed"
+            )
+            return VesselActionResult(
+                ok=built,
+                detail=detail,
+                data={"build": data, "base": registered},
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log_warning(f"{LOG_PREFIX} build_base failed: {exc}")
             return VesselActionResult(ok=False, detail=str(exc))
 
     async def _resolve_travel_destination(
@@ -1214,9 +1815,34 @@ class MinecraftConnector(VesselConnectorBase):
         blocks = data.get("blocks") or []
         inventory = data.get("inventory") or []
         inventory_counts = self._inventory_counts(inventory)
+        # Cache live telemetry for ``get_progression_context`` (starter-goal
+        # KB seeding). Structural ids only, never chat text.
+        self._last_inventory_counts = inventory_counts
+        # Advance the craft-material shortfall cue by one turn (refresh have,
+        # decrement budget, self-clear when done). Structural, fail-safe.
+        craft_deficit = self._consume_craft_deficit(inventory_counts)
+        self._last_blocks = blocks
+        self._last_dimension = str(data.get("dimension") or "")
         affordances = self._build_affordances(entities, blocks)
         current_goal, recent_goals = await self._resolve_goals()
-        knowledge = await self._resolve_knowledge(current_goal, affordances)
+        bases = await self._resolve_bases()
+        quest = await self._resolve_quest(inventory_counts, bases)
+        knowledge = await self._resolve_knowledge(
+            current_goal, affordances, inventory_counts, blocks
+        )
+        # Prepend the current progression-stage reference facts (virtual quest
+        # tech-tree) to the knowledge block so the will/action beats render
+        # "where you are / a typical next milestone / the far horizon" through
+        # the same "reference, not a script" framing as the KB. Structural /
+        # numeric only (id-count + dimension), fully fail-safe (never breaks the
+        # snapshot). See quests.py and AGENTS.md §5c (spontaneity rule).
+        try:
+            stage = quests.detect_stage(inventory_counts, self._last_dimension)
+            stage_facts = quests.stage_reference_facts(stage)
+            if stage_facts:
+                knowledge = stage_facts + list(knowledge or [])
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} progression stage facts failed: {exc}")
         # Structural "took damage this tick" delta: health dropped versus the
         # previous snapshot. Numeric-only, never keyword logic. The magnitude
         # feeds the post-damage appraisal will beat (see vessel_interface).
@@ -1258,6 +1884,9 @@ class MinecraftConnector(VesselConnectorBase):
                 "set_goal",
                 "goals",
                 "update_goal",
+                # Base (home) verbs (see get_world_actions).
+                "set_base",
+                "list_bases",
             ],
             flags={
                 "connected": bool(data.get("connected")),
@@ -1294,6 +1923,12 @@ class MinecraftConnector(VesselConnectorBase):
                 "oxygen": data.get("oxygen"),
                 "is_in_water": data.get("is_in_water"),
                 "is_alive": data.get("is_alive"),
+                # The most recent death: {x, y, z, count, at} or None before the
+                # first death. Lets the will beat steer Synth away from the spot
+                # it keeps dying at and reconsider its approach instead of
+                # resuming the same fatal goal. Structural (coordinates + a
+                # count), never text. Null on an older bridge.
+                "last_death": data.get("last_death"),
                 "block_feet": data.get("block_feet"),
                 "block_head": data.get("block_head"),
                 # Combat readiness telemetry (structural, from the bridge
@@ -1304,6 +1939,11 @@ class MinecraftConnector(VesselConnectorBase):
                 "has_ranged_weapon": data.get("has_ranged_weapon"),
                 "ranged_ammo": data.get("ranged_ammo"),
                 "best_melee_damage": data.get("best_melee_damage"),
+                # Total equipped armor defense points (helmet+chest+legs+boots),
+                # summed by the bridge from minecraft-data. Feeds the survivor
+                # term of the power-aware fight/flee decision. Null/0 bare or on
+                # an older bridge. Numeric-only, structural.
+                "armor_points": data.get("armor_points"),
                 # Structural "took damage this tick" magnitude (health drop vs
                 # the previous snapshot), or None if unchanged/unknown. Drives
                 # the post-damage appraisal will beat. Numeric-only.
@@ -1340,6 +1980,29 @@ class MinecraftConnector(VesselConnectorBase):
                 # rules. Empty when the knowledge base is disabled or nothing
                 # matches. Keyed on structural ids, keyword-free.
                 "knowledge": knowledge,
+                # Craft-material shortfall cue: the item Synth last tried to
+                # craft but lacked materials for, with each missing ingredient's
+                # live have/need counts. Rendered by the will/action beats as a
+                # "you wished to build X, you need have/need <material>" hint for
+                # a few turns, then self-clears. Structural (Minecraft item ids +
+                # counts), never chat text. None when there is no pending
+                # shortfall.
+                "craft_deficit": craft_deficit,
+                # Registered bases (homes) Synth built/claimed in this world.
+                # Surfaced into the will/action/reflection beats so Synth
+                # remembers it has a home to build up, store in, or return to at
+                # night, and read by the night-retreat reflex. Structural
+                # (name/kind + {x,y,z} anchor), never chat text. Empty when no
+                # base has been set. See bases.py / vessel_bases.py.
+                "bases": bases,
+                # The active quest (directed milestone toward the Ender Dragon).
+                # Surfaced into the will/action/reflection beats as *reference*
+                # only — a direction to bind the freely-authored goal to, never
+                # a script (spontaneity rule). The store advances a quest only
+                # when the world structurally satisfies its objectives. None
+                # when quests are disabled or the questline is complete. See
+                # quests.py / vessel_quests.py and AGENTS.md §5c.
+                "quest": quest,
             },
         )
 
@@ -1347,6 +2010,8 @@ class MinecraftConnector(VesselConnectorBase):
         self,
         current_goal: Dict[str, Any] | None,
         affordances: list[dict[str, Any]],
+        inventory_counts: dict[str, int] | None = None,
+        blocks: list[dict[str, Any]] | None = None,
     ) -> list[Dict[str, Any]]:
         """Pick knowledge-base facts relevant to the goal and surroundings.
 
@@ -1354,6 +2019,16 @@ class MinecraftConnector(VesselConnectorBase):
         block/entity ids Synth is standing among (from the affordance contract)
         — and looks them up in the connector's knowledge base. Never inspects
         free-text goal descriptions for keywords, so it stays language-agnostic.
+
+        Starter-goal seeding: when there is **no active goal** and nothing
+        interactable nearby produced query tokens, the query falls back to the
+        ids Synth actually **holds** (inventory) and the ids of **blocks around
+        her** — purely structural facts about her real situation, never a
+        scripted progression catalogue. This lets the will beat author a
+        *progression-appropriate* first goal from what she has and sees, rather
+        than blind (AGENTS.md §5c, the spontaneity rule: the facts are
+        reference only; Synth still chooses the goal).
+
         Gated by ``VESSEL_KNOWLEDGE_ENABLED`` and capped by
         ``VESSEL_KNOWLEDGE_MAX_SNIPPETS``. Fail-safe: any error degrades to no
         knowledge rather than breaking the world snapshot.
@@ -1393,6 +2068,34 @@ class MinecraftConnector(VesselConnectorBase):
                 target = aff.get("target")
                 if target:
                     tokens.append(str(target).lower())
+
+            # Starter-goal seeding. With no goal target and no interactable
+            # nearby, seed the query from Synth's ACTUAL situation — the item
+            # ids she holds and the block ids around her — so a first login
+            # still surfaces progression-relevant facts (what she has / sees),
+            # letting the will beat author an informed first goal. Purely
+            # structural (bridge ids), never a scripted objective list.
+            has_goal = isinstance(current_goal, dict) and bool(
+                str(current_goal.get("description") or "").strip()
+            )
+            if not tokens and not has_goal:
+                # First, steer the seed toward the NEXT progression milestone
+                # (virtual-quest tech-tree): from the detected stage's next-step
+                # query ids (e.g. she has logs → seed crafting_table /
+                # wooden_pickaxe / cobblestone). Structural / numeric only
+                # (id-count + dimension), so the starter goal points at the
+                # next tier instead of random nearby junk — while staying
+                # reference-only (spontaneity rule: Synth still chooses).
+                try:
+                    stage = quests.detect_stage(inventory_counts, self._last_dimension)
+                    tokens.extend(quests.progression_query_tokens(stage))
+                except Exception:  # pragma: no cover - defensive
+                    pass
+                # Then add her ACTUAL situation (held item ids + surrounding
+                # block ids) so the seed is also grounded in what she has/sees.
+                progression = self._progression_query_tokens(inventory_counts, blocks)
+                tokens.extend(progression)
+
             if not tokens:
                 return []
             query = " ".join(dict.fromkeys(tokens))  # de-dup, preserve order
@@ -1402,6 +2105,75 @@ class MinecraftConnector(VesselConnectorBase):
         except Exception as exc:  # pragma: no cover - defensive
             log_debug(f"{LOG_PREFIX} knowledge resolution failed: {exc}")
             return []
+
+    @staticmethod
+    def _progression_query_tokens(
+        inventory_counts: dict[str, int] | None,
+        blocks: list[dict[str, Any]] | None,
+    ) -> list[str]:
+        """Structural KB-query tokens describing Synth's real situation.
+
+        Used for starter-goal seeding when she has no goal yet: the ids she
+        actually **holds** plus the ids of **blocks around her**. This is a
+        plain read of live bridge ids — never a hardcoded progression stage or
+        objective list (spontaneity rule). Fail-safe: any error → ``[]``.
+        """
+        tokens: list[str] = []
+        try:
+            if isinstance(inventory_counts, dict):
+                # Order by quantity so the most-held items lead the query;
+                # numeric only, no id inspection/keyword logic.
+                for item_id, _count in sorted(
+                    inventory_counts.items(),
+                    key=lambda kv: kv[1],
+                    reverse=True,
+                ):
+                    if item_id:
+                        tokens.append(str(item_id).lower())
+            for blk in blocks or []:
+                if not isinstance(blk, dict):
+                    continue
+                name = blk.get("name")
+                if name:
+                    tokens.append(str(name).lower())
+        except Exception:  # pragma: no cover - defensive
+            return []
+        # De-dup, preserve order, and keep the seed small.
+        return list(dict.fromkeys(tokens))[:6]
+
+    def get_progression_context(self) -> list[str] | None:
+        """Structural progression-context tokens for the starter-goal hook.
+
+        Delegates to :meth:`_progression_query_tokens` over the connector's
+        last-known inventory/blocks so a world-agnostic caller (the core will
+        beat / starter-goal path) can seed a knowledge lookup without knowing
+        Minecraft specifics. Fail-safe: returns ``None`` when nothing is known.
+        """
+        try:
+            counts = self._last_inventory_counts
+            blocks = self._last_blocks
+            tokens = self._progression_query_tokens(counts, blocks)
+            return tokens or None
+        except Exception:  # pragma: no cover - defensive
+            return None
+
+    def get_progression_stage(self) -> Dict[str, Any] | None:
+        """Current virtual-quest stage + typical next milestone (reference).
+
+        Minecraft-specific **content** side of the core
+        :meth:`VesselConnectorBase.get_progression_stage` mechanism. Delegates
+        to the adapter's structural tech-tree (:func:`quests.detect_stage`) over
+        the connector's last-known inventory counts and dimension id — plain
+        game ids only, never chat text (AGENTS.md §5c). The result is surfaced
+        purely as reference context; Synth still authors its own goal freely.
+        Fail-safe: any error → ``None``.
+        """
+        try:
+            return quests.detect_stage(
+                self._last_inventory_counts, self._last_dimension
+            )
+        except Exception:  # pragma: no cover - defensive
+            return None
 
     async def _resolve_goals(
         self,
@@ -1418,6 +2190,70 @@ class MinecraftConnector(VesselConnectorBase):
         except Exception as exc:  # pragma: no cover - defensive
             log_debug(f"{LOG_PREFIX} goal resolution failed: {exc}")
             return None, []
+
+    async def _resolve_bases(self) -> list[Dict[str, Any]]:
+        """Recall the bases (homes) Synth registered in this world.
+
+        Fail-safe: any error (e.g. DB unavailable or the base store missing)
+        degrades to "no base" rather than breaking the world snapshot.
+        """
+        try:
+            return await mc_bases.list_bases()
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} base resolution failed: {exc}")
+            return []
+
+    async def _resolve_quest(
+        self,
+        inventory_counts: dict[str, int],
+        bases: list[Dict[str, Any]],
+    ) -> Dict[str, Any] | None:
+        """Return the active questline milestone (reference only), auto-advancing.
+
+        Reads the current active quest from the core store and, if the world now
+        **structurally** satisfies its objectives (inventory counts, current
+        dimension, base/bed flags, kill counters), marks it done and promotes
+        the next milestone — then returns the (possibly newly-promoted) active
+        quest for the beats to render as reference. Never inspects chat/goal
+        text; advancement is purely structural. Fully fail-safe: any error (or a
+        disabled questline) degrades to "no quest".
+        """
+        if not self._quests_enabled:
+            return None
+        try:
+            from plugins.rift_vessel.vessel_quests import evaluate_quest_objectives
+
+            active = await quests.get_active_quest()
+            if not isinstance(active, dict) or not active:
+                return active if isinstance(active, dict) else None
+            has_base = bool(bases)
+            # A slept-in bed sets respawn; we treat carrying/placing a bed as
+            # satisfying "have a bed" (structural: bed id in inventory). The
+            # core evaluator also checks counts["bed"], but any *_bed id counts.
+            has_bed = any(
+                name.endswith("_bed") or name == "bed"
+                for name in inventory_counts
+                if isinstance(name, str)
+            )
+            result = evaluate_quest_objectives(
+                active,
+                inventory_counts,
+                self._last_dimension,
+                has_base=has_base,
+                has_bed=has_bed,
+            )
+            if isinstance(result, dict) and result.get("complete"):
+                qid = active.get("quest_id")
+                if isinstance(qid, str) and qid:
+                    log_info(
+                        f"{LOG_PREFIX} questline milestone complete: {qid} -> advancing"
+                    )
+                    await quests.complete_quest(qid)
+                    return await quests.get_active_quest()
+            return active
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} quest resolution failed: {exc}")
+            return None
 
     @staticmethod
     def _inventory_counts(inventory: list[dict[str, Any]]) -> dict[str, int]:
@@ -1597,6 +2433,22 @@ class MinecraftConnector(VesselConnectorBase):
     _STUCK_MOVE_EPS = 0.75
     _STUCK_POSITION_TICKS = 4
 
+    # Staticity ward thresholds (see ``_static_anchor`` / ``_staticity_ward``).
+    # Where ``_STUCK_POSITION_TICKS`` measures *tick-to-tick* motion and only
+    # runs while a goal is actively driving the body, the staticity ward is a
+    # broader, always-on guard: it fires when the body *lingers in the same
+    # small area* for too long **regardless of goal or what it is doing** — the
+    # "Synth stays parked in one spot forever" case the tick-to-tick watchdog
+    # misses (no goal at all, or endlessly ``mine``/``use``ing an in-reach block
+    # without displacing). ``_STATIC_WARD_RADIUS`` is the radius (blocks,
+    # horizontal) that still counts as "the same place": while the body stays
+    # within this radius of a moving anchor it accrues idle ticks; leaving it
+    # resets the anchor. After ``_STATIC_WARD_TICKS`` consecutive idle ticks the
+    # ward forces a fresh long directional march to break the parking. Purely
+    # positional/numeric — no timers, no keywords.
+    _STATIC_WARD_RADIUS = 2.0
+    _STATIC_WARD_TICKS = 8
+
     # Turn applied to the exploration heading each time a stale destination is
     # reprojected, so successive self-directed reprojections fan out across the
     # world instead of retracing the same straight line. ~2.4 rad ≈ 137° (a
@@ -1617,6 +2469,50 @@ class MinecraftConnector(VesselConnectorBase):
             MinecraftConnector._EXPLORE_LEG_MAX_FACTOR,
         )
         return MinecraftConnector._MIN_TRAVEL_DISTANCE * factor
+
+    def _update_staticity_ward(self, position: Any) -> bool:
+        """Track lingering-in-place and report when the ward should fire.
+
+        Purely positional/numeric guard (no timers, no keywords). Maintains a
+        moving anchor: while the body stays within ``_static_ward_radius`` of the
+        anchor it accrues idle ticks; straying outside resets the anchor and the
+        counter. Returns ``True`` exactly once when the idle count reaches
+        ``_static_ward_limit`` — the signal that the body has been parked in the
+        same small area too long and must relocate. On that fire the counter and
+        anchor are reset so the ward re-arms cleanly for the next stasis.
+
+        Fail-safe: a missing/malformed position resets tracking and never fires.
+        """
+        if not self._static_ward_enabled:
+            return False
+        cur = position if isinstance(position, dict) else None
+        if cur is None:
+            self._static_anchor = None
+            self._static_ward_ticks = 0
+            return False
+        try:
+            here = {"x": float(cur["x"]), "z": float(cur["z"])}
+        except (KeyError, TypeError, ValueError):
+            self._static_anchor = None
+            self._static_ward_ticks = 0
+            return False
+        if self._static_anchor is None:
+            self._static_anchor = here
+            self._static_ward_ticks = 0
+            return False
+        moved = self._horizontal_distance(here, self._static_anchor)
+        if moved is None or moved > self._static_ward_radius:
+            # The body left the parked area — re-anchor and start fresh.
+            self._static_anchor = here
+            self._static_ward_ticks = 0
+            return False
+        self._static_ward_ticks += 1
+        if self._static_ward_ticks >= self._static_ward_limit:
+            # Parked too long: fire once, re-anchor here and re-arm.
+            self._static_ward_ticks = 0
+            self._static_anchor = here
+            return True
+        return False
 
     @staticmethod
     def _reproject_forward(
@@ -1895,6 +2791,42 @@ class MinecraftConnector(VesselConnectorBase):
                 "VESSEL_SP_RANGED_MIN_DIST", float(self._RANGED_MIN_DIST)
             )
             self._sp_appraisal_enabled = _boolv("VESSEL_SP_APPRAISAL_ENABLED", True)
+            # Power-ratio fight/flee threshold and weak-mob floor.
+            ratio = _flt("VESSEL_SP_ENGAGE_RATIO", float(self._ENGAGE_RATIO))
+            self._sp_engage_ratio = min(max(ratio, 0.2), 5.0)
+            self._sp_weak_mob_power = _flt(
+                "VESSEL_SP_WEAK_MOB_POWER", float(self._WEAK_MOB_POWER)
+            )
+            # Proactive night shelter: enable flag + (wider) trigger radius.
+            self._sp_night_shelter = _boolv("VESSEL_SP_NIGHT_SHELTER", True)
+            self._sp_shelter_dist = _flt(
+                "VESSEL_SP_SHELTER_DIST", float(self._SHELTER_HOSTILE_DIST)
+            )
+            # Morning bunker-exit: carve a staircase back to the surface when day
+            # returns and the body is still buried underground with no base.
+            self._sp_morning_exit = _boolv("VESSEL_MORNING_EXIT_ENABLED", True)
+            # Base concept + night-retreat radius. When enabled, the night
+            # shelter reflex first tries to head back to the nearest registered
+            # base within this radius (reusing ``goto``) instead of walling the
+            # body in on the spot.
+            self._base_enabled = _boolv("VESSEL_BASE_ENABLED", True)
+            self._base_retreat_radius = _flt(
+                "VESSEL_BASE_RETREAT_RADIUS", float(self._BASE_RETREAT_RADIUS)
+            )
+            # Ender Dragon questline enablement (directed reference milestones).
+            self._quests_enabled = _boolv("VESSEL_QUESTS_ENABLED", True)
+            # Craft-material shortfall cue budget (turns). Clamp to the sane
+            # "a few turns" band so a stray value can neither disable it (0) nor
+            # pin the cue forever.
+            craft_turns = _intv("VESSEL_CRAFT_CUE_TURNS", int(self._CRAFT_CUE_TURNS))
+            self._craft_cue_turns = min(max(craft_turns, 1), 200)
+            # Staticity ward: always-on guard that relocates the body when it
+            # lingers in the same small area too long, regardless of goal.
+            self._static_ward_enabled = _boolv("VESSEL_STATICITY_WARD_ENABLED", True)
+            radius = _flt("VESSEL_STATICITY_RADIUS", float(self._STATIC_WARD_RADIUS))
+            self._static_ward_radius = min(max(radius, 0.5), 32.0)
+            limit = _intv("VESSEL_STATICITY_TICKS", int(self._STATIC_WARD_TICKS))
+            self._static_ward_limit = min(max(limit, 2), 1000)
         except Exception as exc:  # pragma: no cover - defensive
             log_debug(f"{LOG_PREFIX} self-preservation config load failed: {exc}")
 
@@ -1969,6 +2901,107 @@ class MinecraftConnector(VesselConnectorBase):
             out.append(ent)
         out.sort(key=lambda e: float(e.get("distance") or 1e9))
         return out
+
+    # ------------------------------------------------------------------
+    # Power model (structural, pure — no LLM, no keyword logic)
+    # ------------------------------------------------------------------
+
+    def _own_power(self, extra: dict[str, Any]) -> float:
+        """Structural estimate of the body's current combat power.
+
+        Combines the best melee weapon's attack damage (or a small bare-hand
+        base), the equipped armor defense points, and the current health — all
+        numeric telemetry from the bridge. Never reads item/mob names as
+        keywords. Higher = more able to win a fight.
+        """
+        try:
+            melee = extra.get("best_melee_damage")
+            weapon = float(melee) if isinstance(melee, (int, float)) else 0.0
+        except (TypeError, ValueError):
+            weapon = 0.0
+        # A usable ranged weapon (bow/crossbow with ammo) is itself an offensive
+        # capability: a body that can shoot from afar is NOT helpless just
+        # because it carries no melee weapon. Give it a structural offensive
+        # term so an archer clears the power gate and reaches the ranged
+        # (``shoot``) branch instead of always fleeing. Vanilla bow damage is
+        # ~6-9 per charged hit; ``_RANGED_OFFENSE`` is a numeric floor, never a
+        # name keyword. Both flags come from the bridge.
+        try:
+            ranged_ok = bool(extra.get("has_ranged_weapon"))
+        except (TypeError, ValueError):
+            ranged_ok = False
+        ranged = self._RANGED_OFFENSE if ranged_ok else 0.0
+        # Bare-handed vanilla base attack is ~1 heart/hit; give it a small floor
+        # so a weaponless body still has a non-zero offensive term. Take the
+        # strongest available offensive option (melee vs ranged).
+        offense = max(weapon, ranged, 1.0)
+        try:
+            armor_raw = extra.get("armor_points")
+            armor = float(armor_raw) if isinstance(armor_raw, (int, float)) else 0.0
+        except (TypeError, ValueError):
+            armor = 0.0
+        try:
+            hp_raw = extra.get("health")
+            health = float(hp_raw) if isinstance(hp_raw, (int, float)) else 20.0
+        except (TypeError, ValueError):
+            health = 20.0
+        # Survivability scales the offense: full armor + full health roughly
+        # doubles effective power, an unarmored dying body roughly halves it.
+        survivability = 1.0 + (armor / 20.0) + (health / 40.0)
+        return offense * survivability
+
+    def _mob_power(self, entity: dict[str, Any]) -> float:
+        """Structural estimate of a mob's combat power.
+
+        Combines the mob's registry max health and attack damage (from the
+        bridge). When both are unavailable (older bridge / missing registry
+        value) it returns a cautious MODERATE default so an unknown mob is
+        neither trivially engaged nor treated as unbeatable. Numeric only.
+        """
+        max_health: float | None = None
+        attack: float | None = None
+        try:
+            mh = entity.get("max_health")
+            if isinstance(mh, (int, float)):
+                max_health = float(mh)
+        except (TypeError, ValueError):
+            max_health = None
+        try:
+            ad = entity.get("attack_damage")
+            if isinstance(ad, (int, float)):
+                attack = float(ad)
+        except (TypeError, ValueError):
+            attack = None
+        if max_health is None and attack is None:
+            return float(self._DEFAULT_MOB_POWER)
+        # A missing single term falls back to a neutral component so the mob is
+        # still ranked, just less precisely.
+        hp_term = max_health if max_health is not None else 20.0
+        atk_term = attack if attack is not None else 3.0
+        # Health is the dominant survivability term; attack scales the threat.
+        return hp_term * (1.0 + atk_term / 8.0)
+
+    def _is_disarmed(self, extra: dict[str, Any]) -> bool:
+        """True when the body carries no melee weapon and no usable ranged one.
+
+        Structural: reads the bridge's numeric ``best_melee_damage`` (0 when
+        bare) and ``has_ranged_weapon`` flag. Never a name keyword.
+        """
+        try:
+            melee = extra.get("best_melee_damage")
+            has_melee = isinstance(melee, (int, float)) and float(melee) > 0
+        except (TypeError, ValueError):
+            has_melee = False
+        has_ranged = bool(extra.get("has_ranged_weapon"))
+        return not has_melee and not has_ranged
+
+    def _is_weak_mob(self, entity: dict[str, Any]) -> bool:
+        """True when a mob's structural power is below the weak-mob floor.
+
+        Lets a disarmed body still turn and fight a trivial creature instead of
+        fleeing everything. Numeric only.
+        """
+        return self._mob_power(entity) < self._sp_weak_mob_power
 
     def _survival_threat(self, state: "WorldState") -> dict[str, Any] | None:
         """Assess the highest-priority survival threat from the world state.
@@ -2068,11 +3101,38 @@ class MinecraftConnector(VesselConnectorBase):
             if self._fight_target != target_id:
                 self._fight_target = target_id
                 self._fight_fail_count = 0
+
+            # --- Per-mob strategy override (§17) -----------------------------
+            # Before the generic power-ratio decision, give a special creature
+            # (creeper/enderman/…) the chance to impose its own tactic via the
+            # world-agnostic core registry. Keyed on the canonical entity id —
+            # never a keyword. Returns a full plan dict, or None to fall through
+            # to the generic reflex below. Fully fail-safe.
+            override = apply_combat_strategy(ENVIRONMENT, target, extra)
+            if override is not None:
+                return override
+
+            # --- Power-aware fight/flee decision -----------------------------
+            # A disarmed body (no melee weapon, no usable ranged) should not
+            # trade blows with a real mob — it flees, UNLESS the mob is weak
+            # enough to punch out. An armed body compares its own combat power
+            # (weapon + armor + health) against the mob's (health + attack) and
+            # engages only when the ratio says the fight is winnable. All
+            # structural numeric telemetry, never keywords.
+            own_power = self._own_power(extra)
+            mob_power = self._mob_power(target)
+            ratio = own_power / mob_power if mob_power > 0 else 999.0
+            disarmed = self._is_disarmed(extra)
+            weak_mob = self._is_weak_mob(target)
+            if disarmed:
+                power_ok = weak_mob
+            else:
+                power_ok = ratio >= self._sp_engage_ratio
             # Escalation to flight is driven PRIMARILY by low health (the body
             # is actually losing), with the fail counter only a secondary
             # safeguard against swinging forever at an unreachable mob.
             escalated = self._fight_fail_count >= self._sp_fight_max_fails
-            if self._sp_fight_back and not low_health and not escalated:
+            if self._sp_fight_back and power_ok and not low_health and not escalated:
                 # Ranged vs melee: prefer a bow/crossbow shot when we carry one
                 # with ammo AND the target is far enough to warrant it (closing
                 # to melee would take damage on the way). Structural: uses the
@@ -2096,6 +3156,9 @@ class MinecraftConnector(VesselConnectorBase):
                             "ammo": extra.get("ranged_ammo"),
                             "targets": len(targets),
                             "fails": self._fight_fail_count,
+                            "own_power": round(own_power, 2),
+                            "mob_power": round(mob_power, 2),
+                            "ratio": round(ratio, 2),
                         },
                     }
                 # Melee engage: close the gap and swing. The bridge ``attack``
@@ -2126,9 +3189,13 @@ class MinecraftConnector(VesselConnectorBase):
                         "best_melee_damage": extra.get("best_melee_damage"),
                         "targets": len(targets),
                         "fails": self._fight_fail_count,
+                        "own_power": round(own_power, 2),
+                        "mob_power": round(mob_power, 2),
+                        "ratio": round(ratio, 2),
                     },
                 }
-            # Escalate to flight.
+            # Escalate to flight — outmatched, disarmed vs a non-weak mob, low
+            # health, fight-back disabled, or the fail cap tripped.
             return {
                 "threat": "flee",
                 "verb": "flee",
@@ -2140,8 +3207,89 @@ class MinecraftConnector(VesselConnectorBase):
                     "fight_back": self._sp_fight_back,
                     "escalated": escalated,
                     "targets": len(targets),
+                    "own_power": round(own_power, 2),
+                    "mob_power": round(mob_power, 2),
+                    "ratio": round(ratio, 2),
+                    "disarmed": disarmed,
+                    "weak_mob": weak_mob,
+                    "power_ok": power_ok,
                 },
             }
+
+        # 6. Night shelter — proactive, lower priority than an active fight.
+        #
+        # No hostile is close enough to fight/flee (handled above), but it is
+        # NIGHT and hostiles are within the wider shelter radius: wall the body
+        # in / sleep in a roofed bed BEFORE a mob closes to melee. A torch is
+        # deliberately NOT used — an exposed body is still reachable; the point
+        # is an actual enclosed refuge. Structural: numeric is_day flag + mob
+        # distance only, never keyword logic. Latched per night so it does not
+        # re-issue every tick once enclosed.
+        if self._sp_night_shelter:
+            extra_now = state.extra or {}
+            is_day = extra_now.get("is_day")
+            if is_day is False:
+                # Reset the per-night latch would happen in daytime (see the
+                # daytime branch below). Only shelter once per night unless the
+                # body left cover.
+                if self._sheltered_last_day is not False:
+                    near = self._aggressive_targets(state, self._sp_shelter_dist)
+                    # Also shelter if ANY hostile mob is within the wider radius,
+                    # not only ones actively targeting us (a wandering zombie at
+                    # night is a reason to enclose). _aggressive_targets already
+                    # covers hostile-flagged + targeting mobs.
+                    if near:
+                        self._sheltered_last_day = False
+                        return {
+                            "threat": "night_shelter",
+                            "verb": "shelter",
+                            "payload": {},
+                            "reason": {
+                                "is_day": False,
+                                "hostiles_near": len(near),
+                                "shelter_dist": self._sp_shelter_dist,
+                            },
+                        }
+            elif is_day is True:
+                # Day returned — arm the shelter reflex for the next night.
+                self._sheltered_last_day = True
+
+        # 7. Morning bunker exit — lowest priority, only when nothing else is
+        #    pressing (no fight/flee/shelter above triggered).
+        #
+        # If Synth spent the night in a dug bunker (no base), when DAY returns
+        # and the body is still buried under a ceiling (no open sky) it should
+        # carve a walkable ascending staircase back to the surface — a jump-up
+        # stair (one block up, one block forward) rather than a pit it cannot
+        # climb out of. Structural: numeric ``is_day`` + the bridge
+        # ``sky_access`` flag only, never keyword logic. The "no base reachable"
+        # gate and the actual staircase action live in the async
+        # ``_run_survival_guard`` (base lookup is async); here we only surface
+        # the candidate plan and manage the per-day latch so it fires once.
+        if self._sp_morning_exit:
+            extra_now = state.extra or {}
+            is_day = extra_now.get("is_day")
+            sky = extra_now.get("sky_access")
+            if is_day is True:
+                if sky is True:
+                    # Out in the open — arm the reflex and clear the latch so a
+                    # fresh burial next night/morning re-triggers it.
+                    self._surfaced_last_day = True
+                elif sky is False and self._surfaced_last_day is not False:
+                    # Buried under a ceiling in daylight: candidate for exit.
+                    self._surfaced_last_day = False
+                    return {
+                        "threat": "morning_exit",
+                        "verb": "climb_staircase",
+                        "payload": {},
+                        "reason": {
+                            "is_day": True,
+                            "sky_access": False,
+                        },
+                    }
+            elif is_day is False:
+                # Night — re-arm so the next morning fires the exit if buried.
+                self._surfaced_last_day = True
 
         # Safe — clear any lingering fight state.
         if self._fight_target is not None:
@@ -2198,6 +3346,29 @@ class MinecraftConnector(VesselConnectorBase):
                     result = await self._act_goto_surface(state)
                 else:
                     result = await self._act_flee(state)
+            elif verb == "keep_distance":
+                # Special-mob tactic (creeper/enderman): back off only when the
+                # mob is inside the keep-distance radius, otherwise hold — no
+                # full sprint. Reuses the flee vector at a shorter range. When
+                # the mob is already far enough, do nothing and let the will
+                # beat decide. Structural (distance only).
+                entity = payload.get("entity") if isinstance(payload, dict) else None
+                near = False
+                if isinstance(entity, dict):
+                    try:
+                        ed = entity.get("distance")
+                        near = (
+                            isinstance(ed, (int, float))
+                            and float(ed) <= self._KEEP_DISTANCE
+                        )
+                    except (TypeError, ValueError):
+                        near = False
+                if near:
+                    result = await self._act_flee(
+                        state, distance=self._FLEE_DISTANCE / 2
+                    )
+                else:
+                    result = {"acted": False, "reason": "keep_distance_hold"}
             elif verb == "attack":
                 result = await self.act("attack", payload)
                 # Count this defend tick; escalate on repeated engagement.
@@ -2206,6 +3377,29 @@ class MinecraftConnector(VesselConnectorBase):
                 result = await self.act("shoot", payload)
                 # A shot is also a defend tick for escalation purposes.
                 self._fight_fail_count += 1
+            elif verb == "shelter":
+                # Base-retreat first: if Synth has a home nearby, head BACK to
+                # it (reusing ``goto``) instead of burying the body wherever it
+                # is standing. Sheltering-in-place stays only as the last resort
+                # when no base is reachable. Structural: numeric distance vs the
+                # retreat radius, never keyword logic. Fully fail-safe — any
+                # error falls through to the in-place shelter.
+                retreat = await self._retreat_to_base(state)
+                if retreat is not None:
+                    result = retreat
+                    threat = "night_retreat"
+                else:
+                    result = await self.act("shelter", payload)
+            elif verb == "climb_staircase":
+                # Morning bunker exit. Only carve a staircase when Synth has NO
+                # reachable base — a registered base means it has a home to
+                # path back to, not a bunker to dig out of. Structural async
+                # base lookup; fail-safe. If a base IS reachable we let the
+                # will/motor beats handle returning home instead.
+                if await self._has_reachable_base(state):
+                    self._surfaced_last_day = True  # not a bunker; disarm
+                    return None
+                result = await self.act("climb_staircase", payload)
             else:  # pragma: no cover - defensive
                 return None
         except Exception as exc:  # pragma: no cover - defensive
@@ -2217,12 +3411,121 @@ class MinecraftConnector(VesselConnectorBase):
         # Respawn / surface take a moment; give the world a tick to update.
         if verb in ("respawn", "goto_surface"):
             self._survival_cooldown_ticks = 1
+        # Sheltering (navigate to bed / place walls / dig in) takes several
+        # seconds; hold the reflex a couple of ticks so it does not re-issue
+        # while the previous attempt is still resolving.
+        elif verb == "shelter":
+            self._survival_cooldown_ticks = 2
+        # Carving a staircase up takes several seconds; hold a few ticks so the
+        # reflex does not re-issue while the previous climb is still resolving.
+        elif verb == "climb_staircase":
+            self._survival_cooldown_ticks = 3
         acted = _result_acted(result)
         log_info(
             f"{LOG_PREFIX} survival reflex: {threat} -> {verb} "
             f"(reason={plan.get('reason')})"
         )
         return {"acted": acted, "reason": f"survival:{threat}"}
+
+    async def _retreat_to_base(self, state: "WorldState") -> dict[str, Any] | None:
+        """Head back to the nearest registered base at night, if one is close.
+
+        The fix for Synth being buried underground far from home: instead of
+        walling the body in wherever it is standing, the night-shelter reflex
+        first checks whether a base is within ``_base_retreat_radius`` and, if
+        so, walks the body toward that base's anchor (reusing ``goto`` — no new
+        verb). Returns a ``motor_step``-style result dict when it retreated, or
+        ``None`` to let the caller fall back to the in-place shelter (no base,
+        base too far, or any error). Purely structural (numeric distance), never
+        keyword logic; fully fail-safe.
+        """
+        if not self._base_enabled:
+            return None
+        try:
+            pos = self._position_from_state(state)
+            if pos is None:
+                pos = await self._live_position()
+            if pos is None:
+                return None
+            base = await mc_bases.get_nearest_base(pos)
+            if not isinstance(base, dict):
+                return None
+            anchor = base.get("anchor")
+            distance = base.get("distance")
+            if not isinstance(anchor, dict):
+                return None
+            if not isinstance(distance, (int, float)) or (
+                float(distance) > self._base_retreat_radius
+            ):
+                return None
+            ax = anchor.get("x")
+            ay = anchor.get("y")
+            az = anchor.get("z")
+            if ax is None or az is None:
+                return None
+            goto_payload: Dict[str, Any] = {"x": float(ax), "z": float(az)}
+            if ay is not None:
+                goto_payload["y"] = int(float(ay))
+            await self.act("goto", goto_payload)
+            log_info(
+                f"{LOG_PREFIX} night retreat -> base "
+                f"'{base.get('name')}' at {goto_payload} (dist={distance})"
+            )
+            return {"acted": True, "action": "goto", "reason": "night_retreat"}
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} base retreat failed: {exc}")
+            return None
+
+    async def _has_reachable_base(self, state: "WorldState") -> bool:
+        """Whether a registered base is within ``_base_retreat_radius``.
+
+        Used by the morning bunker-exit reflex to decide it is a genuine
+        bunker (dig out) vs a body that simply has a home to path back to. A
+        base registered but far away does NOT count as reachable, so a body
+        buried on the far side of the world still digs out. Purely structural
+        (numeric distance vs the retreat radius); fully fail-safe → ``False``
+        (i.e. "no home nearby, treat as a bunker") on any error.
+        """
+        if not self._base_enabled:
+            return False
+        try:
+            pos = self._position_from_state(state)
+            if pos is None:
+                pos = await self._live_position()
+            if pos is None:
+                return False
+            base = await mc_bases.get_nearest_base(pos)
+            if not isinstance(base, dict):
+                return False
+            distance = base.get("distance")
+            return isinstance(distance, (int, float)) and (
+                float(distance) <= self._base_retreat_radius
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} reachable-base check failed: {exc}")
+            return False
+
+    @staticmethod
+    def _position_from_state(state: "WorldState") -> Dict[str, float] | None:
+        """Extract the body's ``{x, y, z}`` from a WorldState, or None.
+
+        Reads the structural ``position`` field; fully fail-safe.
+        """
+        try:
+            pos = getattr(state, "position", None)
+            if not isinstance(pos, dict):
+                extra = state.extra or {}
+                pos = extra.get("position")
+            if not isinstance(pos, dict):
+                return None
+            x = pos.get("x")
+            y = pos.get("y")
+            z = pos.get("z")
+            if x is None or y is None or z is None:
+                return None
+            return {"x": float(x), "y": float(y), "z": float(z)}
+        except (TypeError, ValueError):
+            return None
 
     async def _act_goto_surface(self, state: "WorldState") -> Any:
         """Swim straight up to escape drowning (mineflayer ``jump`` in water).
@@ -2237,13 +3540,18 @@ class MinecraftConnector(VesselConnectorBase):
         """
         return await self.act("surface", {})
 
-    async def _act_flee(self, state: "WorldState") -> Any:
+    async def _act_flee(
+        self, state: "WorldState", distance: float | None = None
+    ) -> Any:
         """Run away from the nearest threat (mindcraft moveAway style).
 
-        Picks a destination ``_FLEE_DISTANCE`` blocks in the direction opposite
-        the nearest hostile (or, when fleeing fire, simply forward) and gotos
-        it. Purely numeric vector math — no keyword logic. Fail-safe.
+        Picks a destination ``distance`` blocks (default ``_FLEE_DISTANCE``) in
+        the direction opposite the nearest hostile (or, when fleeing fire,
+        simply forward) and gotos it. A shorter ``distance`` is used by the
+        keep-distance special-mob tactic. Purely numeric vector math — no
+        keyword logic. Fail-safe.
         """
+        flee_dist = self._FLEE_DISTANCE if distance is None else float(distance)
         try:
             pos = state.position if isinstance(state.position, dict) else None
             if pos is None:
@@ -2273,9 +3581,286 @@ class MinecraftConnector(VesselConnectorBase):
             dx = float(math.cos(self._explore_heading))
             dz = float(math.sin(self._explore_heading))
             norm = 1.0
-        tx = int(px + (dx / norm) * self._FLEE_DISTANCE)
-        tz = int(pz + (dz / norm) * self._FLEE_DISTANCE)
+        tx = int(px + (dx / norm) * flee_dist)
+        tz = int(pz + (dz / norm) * flee_dist)
         return await self.act("goto", {"x": tx, "y": int(py), "z": tz})
+
+    async def evaluate_goal_completion(
+        self, goal: Dict[str, Any] | None, world_state: WorldState | None
+    ) -> Dict[str, Any]:
+        """Judge whether ``goal`` is already satisfied by the live inventory.
+
+        World-owned half of the core goal debrief (see
+        ``core.vessel_goal_debrief`` and AGENTS.md §5c). A goal is considered
+        structurally satisfied when its free text names a concrete **target** or
+        **product** item and that exact game id is already present in the live
+        inventory in quantity >= 1:
+
+          * **Gather goals** (a natural block/entity target, e.g. *"gather oak
+            logs"*): the derived ``target_name`` — from the goal's explicit
+            field or :func:`target_names.derive_target` — sits in the inventory.
+          * **Craft/build goals** (a produced item, e.g. *"craft a crafting
+            table"*): any product id named in the goal text
+            (:func:`target_names.derive_products`) sits in the inventory.
+
+        This is the exact Minecraft-name exception the rest of this adapter
+        already relies on: matching against canonical game item ids is
+        structural, not natural-language intent detection. It never decides what
+        to do — only whether the goal's concrete outcome already exists. Fully
+        fail-safe: any error / no recognizable item → ``{"satisfied": False}``.
+        """
+        try:
+            if not isinstance(goal, dict) or world_state is None:
+                return {"satisfied": False}
+            extra = getattr(world_state, "extra", None) or {}
+            inv = extra.get("inventory_counts")
+            if not isinstance(inv, dict) or not inv:
+                return {"satisfied": False}
+
+            description = " ".join(
+                str(goal.get(field) or "") for field in ("description", "note")
+            ).strip()
+
+            # 1) Crafted/produced outcome already in inventory (craft/build goal).
+            for product in mc_target_names.derive_products(description):
+                try:
+                    if int(inv.get(product, 0)) >= 1:
+                        return {
+                            "satisfied": True,
+                            "reason": "product_in_inventory",
+                            "item": product,
+                        }
+                except (TypeError, ValueError):
+                    continue
+
+            # 2) Gather target already in inventory (explicit field, else derived).
+            target_name = goal.get("target_name")
+            if not target_name:
+                derived = mc_target_names.derive_target(description)
+                if derived:
+                    target_name = derived.get("target_name")
+            if isinstance(target_name, str) and target_name:
+                try:
+                    if int(inv.get(target_name, 0)) >= 1:
+                        return {
+                            "satisfied": True,
+                            "reason": "target_in_inventory",
+                            "item": target_name,
+                        }
+                except (TypeError, ValueError):
+                    pass
+
+            return {"satisfied": False}
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[minecraft] evaluate_goal_completion failed: {exc}")
+            return {"satisfied": False}
+
+    # Structural map: a goal target_kind → the successful action event_types
+    # that count as "the goal was reached by an action actually taken", plus the
+    # metadata payload keys that carry the acted-upon game id for that verb.
+    # These come straight from ``get_world_actions`` payload schemas (mine→target,
+    # collect_block→name, place/craft/smelt→item, attack/shoot→target). All are
+    # canonical Minecraft ids — the same explicitly-authorized id exception the
+    # rest of this adapter uses; never natural-language intent.
+    _HISTORY_BLOCK_EVENTS: tuple[str, ...] = (
+        "action_mine",
+        "action_collect_block",
+        "action_place",
+    )
+    _HISTORY_ENTITY_EVENTS: tuple[str, ...] = (
+        "action_attack",
+        "action_shoot",
+    )
+    _HISTORY_CRAFT_EVENTS: tuple[str, ...] = (
+        "action_craft",
+        "action_smelt",
+    )
+    _HISTORY_TARGET_KEYS: tuple[str, ...] = ("target", "name", "item")
+
+    async def evaluate_goal_completion_from_history(
+        self,
+        goal: Dict[str, Any] | None,
+        session_id: str | None,
+        world_state: WorldState | None = None,
+    ) -> Dict[str, Any]:
+        """Judge whether ``goal`` was reached by an action actually taken.
+
+        Complements :meth:`evaluate_goal_completion` (which reads only the live
+        inventory + world state). Many goals leave **no inventory trace** — you
+        place a block, kill a mob, or say something — so an inventory scan never
+        marks them done. This half inspects the session's ``vessel_activity_log``
+        (the structured audit of every outbound action) and confirms completion
+        when a **successful action row** exists whose logged metadata target id
+        matches the goal's concrete structural target:
+
+          * **block** target (mine/gather/place goals) → a logged
+            ``mine``/``collect_block``/``place`` on that exact block id;
+          * **entity** target (kill goals) → a logged ``attack``/``shoot`` on
+            that exact entity id;
+          * **crafted product** (from :func:`target_names.derive_products`) → a
+            logged ``craft``/``smelt`` of that exact item id.
+
+        Matching is purely structural, by canonical Minecraft id (the same
+        authorized id exception this adapter already uses) — it never parses the
+        goal's or the log's free text for intent. Fully fail-safe: any error /
+        no session / no recognizable target → ``{"satisfied": False}``.
+        """
+        try:
+            if not isinstance(goal, dict) or not session_id:
+                return {"satisfied": False}
+
+            description = " ".join(
+                str(goal.get(field) or "") for field in ("description", "note")
+            ).strip()
+
+            # Resolve the goal's concrete structural target(s): the explicit
+            # field first, else the id derived from the free text.
+            target_kind = goal.get("target_kind")
+            target_name = goal.get("target_name")
+            if not target_name:
+                derived = mc_target_names.derive_target(description)
+                if derived:
+                    target_kind = derived.get("target_kind")
+                    target_name = derived.get("target_name")
+
+            products = set(mc_target_names.derive_products(description))
+            wanted_block = (
+                target_name
+                if isinstance(target_name, str)
+                and target_name
+                and target_kind == "block"
+                else None
+            )
+            wanted_entity = (
+                target_name
+                if isinstance(target_name, str)
+                and target_name
+                and target_kind == "entity"
+                else None
+            )
+            if not (wanted_block or wanted_entity or products):
+                return {"satisfied": False}
+
+            from core.vessel_diary_compactor import load_activity_rows
+
+            rows = await load_activity_rows(session_id)
+            for row in rows:
+                event_type = row.get("event_type") or ""
+                meta = row.get("metadata") or {}
+                ids = {
+                    str(meta.get(key)).strip()
+                    for key in self._HISTORY_TARGET_KEYS
+                    if isinstance(meta.get(key), (str, int))
+                    and str(meta.get(key)).strip()
+                }
+                if not ids:
+                    continue
+                if (
+                    wanted_block
+                    and event_type in self._HISTORY_BLOCK_EVENTS
+                    and wanted_block in ids
+                ):
+                    return {
+                        "satisfied": True,
+                        "reason": "action_in_history",
+                        "event_type": event_type,
+                        "item": wanted_block,
+                    }
+                if (
+                    wanted_entity
+                    and event_type in self._HISTORY_ENTITY_EVENTS
+                    and wanted_entity in ids
+                ):
+                    return {
+                        "satisfied": True,
+                        "reason": "action_in_history",
+                        "event_type": event_type,
+                        "item": wanted_entity,
+                    }
+                if (
+                    products
+                    and event_type in self._HISTORY_CRAFT_EVENTS
+                    and (products & ids)
+                ):
+                    return {
+                        "satisfied": True,
+                        "reason": "action_in_history",
+                        "event_type": event_type,
+                        "item": sorted(products & ids)[0],
+                    }
+            return {"satisfied": False}
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(
+                f"[minecraft] evaluate_goal_completion_from_history failed: {exc}"
+            )
+            return {"satisfied": False}
+
+    async def get_active_goal(self) -> Dict[str, Any] | None:
+        """Return the active Minecraft goal from the scoped goal store."""
+        try:
+            return await mc_goals.get_active_goal()
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[minecraft] get_active_goal failed: {exc}")
+            return None
+
+    async def complete_active_goal(
+        self, reason: str = "auto_completed"
+    ) -> Dict[str, Any]:
+        """Mark the active Minecraft goal ``done`` via the scoped goal store."""
+        try:
+            note = f"[debrief] {reason}"
+            return await mc_goals.update_active_goal(
+                status=mc_goals.STATUS_DONE, note=note
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[minecraft] complete_active_goal failed: {exc}")
+            return {"status": "error", "message": str(exc)}
+
+    async def get_bases(self) -> list[Dict[str, Any]]:
+        """Return the bases (homes) Synth registered in this world.
+
+        Concretises the core :meth:`VesselConnectorBase.get_bases` hook by
+        delegating to the scoped Minecraft base store. Fail-safe: any error
+        degrades to an empty list.
+        """
+        try:
+            return await mc_bases.list_bases()
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[minecraft] get_bases failed: {exc}")
+            return []
+
+    async def get_active_quest(self) -> Dict[str, Any] | None:
+        """Return the active Ender Dragon questline milestone (reference only).
+
+        Concretises the core :meth:`VesselConnectorBase.get_active_quest` hook by
+        delegating to the scoped Minecraft questline store. The quest is a
+        *direction* Synth may bind its freely-authored goal to, never a script
+        (AGENTS.md §5c). Fail-safe: any error (or a disabled questline) degrades
+        to ``None``.
+        """
+        if not self._quests_enabled:
+            return None
+        try:
+            return await quests.get_active_quest()
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[minecraft] get_active_quest failed: {exc}")
+            return None
+
+    async def on_entity_killed(self, mob_kind: str) -> None:
+        """Advance the active quest's kill objective for a slain mob.
+
+        Concretises the core :meth:`VesselConnectorBase.on_entity_killed` hook.
+        Called when the bridge reports the bot killed an entity; forwards the
+        mob game id to the questline store's structural kill counter (e.g. the
+        Ender Dragon milestone). Fail-safe: any error is swallowed.
+        """
+        if not self._quests_enabled or not mob_kind:
+            return None
+        try:
+            await quests.record_kill(str(mob_kind))
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[minecraft] on_entity_killed failed: {exc}")
+        return None
 
     async def motor_step(self, goal: Dict[str, Any] | None) -> Dict[str, Any]:
         """Fast reflexive step toward the active goal — **no LLM, no cognition**.
@@ -2342,6 +3927,34 @@ class MinecraftConnector(VesselConnectorBase):
             survival = await self._run_survival_guard(state)
             if survival is not None:
                 return survival
+
+            # Staticity ward — runs BEFORE the ``no goal`` early-return and every
+            # other movement branch, so it covers the cases the tick-to-tick
+            # ``_stuck_position_ticks`` watchdog cannot: the body parked in one
+            # spot with *no goal at all*, or endlessly ``mine``/``use``ing an
+            # in-reach block without displacing. When the body has lingered in
+            # the same small area for too many ticks, break the parking by
+            # rotating the exploration heading and marching to a fresh, distant
+            # waypoint — the body ends up *somewhere else*, exactly the ward the
+            # user asked for. Purely positional (no goal text, no keywords).
+            if self._update_staticity_ward(state.position):
+                self._explore_heading += self._EXPLORE_TURN_RAD
+                forward = self._reproject_forward(state.position, self._explore_heading)
+                if forward is not None:
+                    await self.act("goto", {"x": forward["x"], "z": forward["z"]})
+                    log_info(
+                        f"{LOG_PREFIX} staticity ward: parked too long -> "
+                        f"relocating to ({forward['x']:.0f}, {forward['z']:.0f})"
+                    )
+                    return {
+                        "acted": True,
+                        "action": "goto",
+                        "destination": forward,
+                        "reason": "staticity_ward",
+                    }
+                # No usable position to reproject from — last-resort roam.
+                await self.act("wander", {})
+                return {"acted": True, "action": "wander", "reason": "staticity_ward"}
 
             if not goal:
                 return {"acted": False, "reason": "no_goal"}
@@ -2516,10 +4129,31 @@ class MinecraftConnector(VesselConnectorBase):
                     # tick moves on instead of repeating the same interaction.
                     self._last_reflex_interaction = f"{target.get('kind')}:{name}"
                     if target.get("kind") == "block":
-                        await self.act("mine", {"target": name})
-                        return {"acted": True, "action": "mine", "target": name}
-                    await self.act("use", {"target": name})
-                    return {"acted": True, "action": "use", "target": name}
+                        # Reflex mining is only ever justified for a block
+                        # cognition *deliberately* named as the goal target: the
+                        # will / action beat decides *what* to mine, the motor
+                        # only executes it. An incidental block that merely
+                        # happens to be the nearest benign affordance (the dirt /
+                        # grass / stone under the body's feet) must NOT be dug —
+                        # that is the reported "digs a block beneath itself for
+                        # no apparent reason" behaviour, pure world vandalism.
+                        # So gate the incidental ``mine`` on the block matching
+                        # the goal's already-validated ``target_name`` by exact
+                        # id (structural, never keyword/free-text). When it does
+                        # not match we fall through to the travel / march
+                        # branches and keep moving instead of scarring the world.
+                        if (
+                            goal_target is not None
+                            and goal_target.get("kind") == "block"
+                            and goal_target.get("name") == name
+                        ):
+                            await self.act("mine", {"target": name})
+                            return {"acted": True, "action": "mine", "target": name}
+                        # Not the goal target — do not mine incidental terrain.
+                        # Fall through past this affordance to travel / march.
+                    else:
+                        await self.act("use", {"target": name})
+                        return {"acted": True, "action": "use", "target": name}
 
                 # Out of reach. Only chase this affordance if we have *no
                 # chosen destination at all*; otherwise heading toward random
@@ -2531,9 +4165,26 @@ class MinecraftConnector(VesselConnectorBase):
                 # arrival/anti-stall block below and would freeze on the spot.
                 # So gate on ``dest is None`` (no destination) rather than
                 # ``not travel_pending`` (which is also true once arrived).
+                #
+                # And chase it only when it is the block cognition *deliberately*
+                # named as the goal target (exact id): walking toward an
+                # incidental terrain block the will beat never asked for is the
+                # same aimless wandering as digging it — the body should instead
+                # fall through to the directional march and genuinely explore.
+                # Entities stay chase-able (a mob/villager out of reach is
+                # inherently salient); only a non-goal *block* is skipped.
+                # Structural (kind + exact id), never keyword/free-text.
                 if name and dest is None:
-                    await self.act("goto", {"target": name})
-                    return {"acted": True, "action": "goto", "target": name}
+                    is_goal_block = (
+                        goal_target is not None
+                        and goal_target.get("kind") == "block"
+                        and goal_target.get("name") == name
+                    )
+                    if target is not None and (
+                        target.get("kind") != "block" or is_goal_block
+                    ):
+                        await self.act("goto", {"target": name})
+                        return {"acted": True, "action": "goto", "target": name}
 
             # Honour a self-chosen travel destination so movement stays attuned
             # to the goal even when incidental affordances litter the path.
@@ -2638,6 +4289,10 @@ class MinecraftConnector(VesselConnectorBase):
                     if reachable is not None:
                         name = goal_target["name"]
                         self._last_reflex_interaction = f"block:{name}"
+                        # Interacting resets the arrival-stall watchdog: we are
+                        # making progress on this target, not looping on it.
+                        self._named_target_arrival_key = None
+                        self._named_target_arrival_ticks = 0
                         await self.act("mine", {"target": name})
                         return {
                             "acted": True,
@@ -2651,6 +4306,80 @@ class MinecraftConnector(VesselConnectorBase):
                 # target can't be reached. Keyword-free — see
                 # ``_record_target_outcome``.
                 self._record_target_outcome(state, goal_target, result)
+                target_key = f"{goal_target['kind']}:{goal_target['name']}"
+                # Arrived at the named block but the affordance-based ``mine``
+                # branch above never fired (the block's scan distance did not
+                # fall inside ``_MOTOR_REACH`` even though the bridge pathfinder
+                # stopped within its own ``range`` of it — the two reach numbers
+                # disagree, which is exactly what left the body looping ``goto``
+                # on a block it was already standing next to). When we *arrive*
+                # at a block target, try mining it directly: the bridge's own
+                # ``mine`` re-resolves the nearest matching block and reports the
+                # inventory delta, so this is the authoritative "can I actually
+                # interact?" test. A successful mine advances the gather goal;
+                # a miss ("no matching block") means the target is genuinely not
+                # here and the watchdog below releases it. Block-only — entities
+                # are never mined. Structural (kind + exact id + ``arrived``).
+                if (
+                    goal_target["kind"] == "block"
+                    and self._last_target_result == "arrived"
+                ):
+                    mine_result = await self.act(
+                        "mine", {"target": goal_target["name"]}
+                    )
+                    if getattr(mine_result, "ok", False):
+                        name = goal_target["name"]
+                        self._last_reflex_interaction = f"block:{name}"
+                        self._named_target_arrival_key = None
+                        self._named_target_arrival_ticks = 0
+                        return {
+                            "acted": True,
+                            "action": "mine",
+                            "target": name,
+                            "target_kind": "block",
+                            "target_result": "arrived",
+                        }
+                # Arrival-stall watchdog: if we keep *arriving* at the same named
+                # target without ever managing to interact with it (the block/
+                # entity never surfaces as a benign affordance in reach), stop
+                # re-issuing ``goto`` at it forever. Count consecutive same-target
+                # arrivals and, past the threshold, give up on this exact target
+                # for now — fall through to the directional march so the body
+                # explores new ground while the slow will beat re-plans. Purely
+                # structural (kind + exact id + ``arrived`` outcome) — no keywords.
+                if self._last_target_result == "arrived":
+                    if target_key != self._named_target_arrival_key:
+                        self._named_target_arrival_key = target_key
+                        self._named_target_arrival_ticks = 1
+                    else:
+                        self._named_target_arrival_ticks += 1
+                    if self._named_target_arrival_ticks >= self._STALE_ARRIVAL_TICKS:
+                        # Reached but never interactable — release this target
+                        # and let cognition re-aim.
+                        self._named_target_arrival_key = None
+                        self._named_target_arrival_ticks = 0
+                        forward = self._reproject_forward(
+                            state.position, self._explore_heading
+                        )
+                        self._explore_heading += self._EXPLORE_TURN_RAD
+                        if forward is not None:
+                            await self.act(
+                                "goto", {"x": forward["x"], "z": forward["z"]}
+                            )
+                            return {
+                                "acted": True,
+                                "action": "goto",
+                                "target": goal_target["name"],
+                                "target_kind": goal_target["kind"],
+                                "target_result": "arrived_idle",
+                                "destination": forward,
+                                "reason": "target_arrived_idle_reproject",
+                            }
+                else:
+                    # A non-``arrived`` outcome (still travelling / unreachable /
+                    # not_found) means we are not stuck on arrival — reset.
+                    self._named_target_arrival_key = None
+                    self._named_target_arrival_ticks = 0
                 return {
                     "acted": True,
                     "action": "goto",
@@ -2877,6 +4606,26 @@ class MinecraftConnector(VesselConnectorBase):
                 "optional_fields": ["height", "target_y", "item"],
                 "security_level": "low",
             },
+            "climb_staircase": {
+                "description": (
+                    "Carve a walkable staircase UP to the surface out of a "
+                    "bunker or tunnel. Instead of pillaring straight up (a pole "
+                    "you can only fall off), you build a diagonal ramp: each "
+                    "step goes one block up and one block forward, placing a "
+                    "solid tread under your next foothold and clearing the "
+                    "space above it, so the same corridor becomes a stair you "
+                    "can walk and jump up on foot — one block up, one block "
+                    "forward. Use this when you dug yourself underground with no "
+                    "staircase and need to get back to open sky. You must be "
+                    "carrying blocks to place the treads; give 'height' for how "
+                    "many steps up, or 'target_y' to stop at a specific height. "
+                    "Pass 'item' to use a particular block, or 'yaw' to force a "
+                    "direction."
+                ),
+                "required_fields": [],
+                "optional_fields": ["height", "target_y", "item", "yaw"],
+                "security_level": "low",
+            },
             "scan": {
                 "description": (
                     "Take a wider, tunable survey of your surroundings than a "
@@ -2999,6 +4748,54 @@ class MinecraftConnector(VesselConnectorBase):
                 ),
                 "required_fields": ["query"],
                 "optional_fields": ["limit"],
+                "security_level": "low",
+            },
+            "set_base": {
+                "description": (
+                    "Claim a place in this world as one of your bases — a home "
+                    "you build up, store things at, shelter or sleep in, and "
+                    "return to. Give it a 'name' in your own words (there is no "
+                    "list to pick from — call it whatever it means to you). By "
+                    "default the base is claimed right where your body is "
+                    "standing; give explicit 'x'/'y'/'z' coordinates only if you "
+                    "mean somewhere else you can see. You can keep several bases: "
+                    "claiming a new name adds one, reusing a name updates it. Add "
+                    "an optional 'kind' (for example 'home', 'mine', 'farm') and "
+                    "a short 'note'. Having a base matters for survival: when "
+                    "night falls and danger is near, your body heads back to the "
+                    "nearest base instead of walling itself in wherever it "
+                    "happens to be."
+                ),
+                "required_fields": ["name"],
+                "optional_fields": ["x", "y", "z", "kind", "note"],
+                "security_level": "low",
+            },
+            "list_bases": {
+                "description": (
+                    "Recall the bases (homes) you have claimed in this world — "
+                    "their names, kinds and coordinates — so you can decide "
+                    "whether to head back to one, build it up, or claim a new "
+                    "place. Takes no fields."
+                ),
+                "required_fields": [],
+                "optional_fields": [],
+                "security_level": "low",
+            },
+            "build_base": {
+                "description": (
+                    "Actually build a first shelter with your own hands: a small "
+                    "walled, roofed room with a door, a torch inside so nothing "
+                    "spawns in the dark, and a crafting table — and, if you carry "
+                    "a bed, a bed to sleep and set your respawn. Your body places "
+                    "the blocks from your inventory around where you stand (give "
+                    "explicit 'x'/'y'/'z' only if you want to build somewhere "
+                    "else you can see). Give it a 'name' so it is remembered as a "
+                    "base you can return to. If you are missing blocks the build "
+                    "will be partial and tell you what you still need — gather "
+                    "stone/wood, a door, a torch and a crafting table first."
+                ),
+                "required_fields": ["name"],
+                "optional_fields": ["x", "y", "z", "kind", "note"],
                 "security_level": "low",
             },
         }
@@ -3152,6 +4949,123 @@ class MinecraftConnector(VesselConnectorBase):
             return name or None
         except Exception:  # pragma: no cover - defensive
             return None
+
+    def get_world_identity(self) -> str | None:
+        """Return a stable structural token identifying *which* Minecraft
+        server Synth is embodied in, for the ``<world>`` path level and the
+        goal-store ``world`` scope.
+
+        Derived from the resolved server ``host:port`` (per-connect override,
+        else the configured ``MINECRAFT_SERVER_HOST``/``MINECRAFT_SERVER_PORT``)
+        so a login always resumes progression on the same concrete server.
+        Purely structural — the raw address, never a keyword-derived label.
+
+        The Docker loopback remap (``127.0.0.1`` -> ``host.docker.internal``)
+        is intentionally *not* applied here: both point at the same logical
+        server, so the identity must stay identical whether SyntH runs in a
+        container or on the host. The interface slugifies the returned token
+        into a path-safe form. Fully fail-safe — returns ``None`` on any error
+        so the caller falls back to the legacy shared scope.
+        """
+        try:
+            settings = self._connect_settings or {}
+            host = settings.get("host") or config_registry.get_value(
+                "MINECRAFT_SERVER_HOST",
+                "127.0.0.1",
+                group="plugins",
+                component="minecraft_vessel",
+            )
+            host_str = str(host or "127.0.0.1").strip()
+            # Canonicalise loopback so container/host deployments agree on the
+            # same world token (structural normalisation, not keyword logic).
+            if host_str.lower() in _LOOPBACK_HOSTS or host_str == _HOST_GATEWAY_NAME:
+                host_str = "localhost"
+            port = settings.get("port") or config_registry.get_value(
+                "MINECRAFT_SERVER_PORT",
+                44383,
+                group="plugins",
+                component="minecraft_vessel",
+            )
+            try:
+                port_int = int(port)
+            except (TypeError, ValueError):
+                port_int = 44383
+            return f"{host_str}:{port_int}"
+        except Exception:  # pragma: no cover - defensive
+            return None
+
+
+# ----------------------------------------------------------------------
+# Per-mob combat strategy overrides (Minecraft content for the generic
+# core mechanism in ``vessel_combat_strategy``). Keyed on the bridge's
+# canonical structural entity id (game enum, e.g. ``"creeper"``) — never a
+# display name / keyword. Each returns the reflex plan shape
+# ``{"threat", "verb", "payload", "reason"}`` or ``None`` to fall through to
+# the generic power-ratio decision. Pure/structural, Fast-Lane only.
+# ----------------------------------------------------------------------
+
+
+def _mc_target_distance(entity: Dict[str, Any]) -> float:
+    """Structural distance to a target entity (large when unknown)."""
+    try:
+        dist = entity.get("distance")
+        return float(dist) if isinstance(dist, (int, float)) else 999.0
+    except (TypeError, ValueError):
+        return 999.0
+
+
+def _mc_strategy_creeper(
+    entity: Dict[str, Any], extra: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Creeper: never chase — it explodes on contact.
+
+    A creeper's raw health/attack under-rates it badly (its real threat is a
+    contact explosion), so the generic power-ratio would happily close and get
+    the body blown up. Instead: keep distance when it is near, otherwise leave
+    it to the slow will beat. Purely structural (distance only).
+    """
+    dist = _mc_target_distance(entity)
+    name = str(entity.get("name") or "creeper")
+    return {
+        "threat": "special_mob",
+        "verb": "keep_distance",
+        "payload": {"entity": entity},
+        "reason": {
+            "mob": name,
+            "distance": dist,
+            "strategy": "creeper_no_chase",
+        },
+    }
+
+
+def _mc_strategy_enderman(
+    entity: Dict[str, Any], extra: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Enderman: disengage / keep distance rather than trade blows.
+
+    An enderman teleports and hits very hard once provoked; a cornered fight is
+    rarely winnable for a lightly-equipped body. Conservative structural
+    tactic: back off and keep distance. (Gaze/eye-contact telemetry is not yet
+    exposed by the bridge, so we do not attempt the "don't look at it" nuance —
+    a structural disengage is the safe default.)
+    """
+    dist = _mc_target_distance(entity)
+    name = str(entity.get("name") or "enderman")
+    return {
+        "threat": "special_mob",
+        "verb": "keep_distance",
+        "payload": {"entity": entity},
+        "reason": {
+            "mob": name,
+            "distance": dist,
+            "strategy": "enderman_disengage",
+        },
+    }
+
+
+# Register the Minecraft-specific strategies against the generic core registry.
+register_combat_strategy("minecraft", "creeper", _mc_strategy_creeper)
+register_combat_strategy("minecraft", "enderman", _mc_strategy_enderman)
 
 
 # Module-level connector class + self-registration (registry contract).
@@ -3458,6 +5372,9 @@ class MinecraftVesselPlugin(PluginBase):
             "category": "Vessels",
             "icon": "icon.svg",
             "guide": "guide.md",
+            # Advisory dependency: the Minecraft world attaches to the Rift
+            # Vessel core plugin, which in turn depends on the Goals plugin.
+            "depends_on": ["vessel_plugin"],
         }
 
     def get_supported_action_types(self) -> list[str]:

@@ -101,6 +101,18 @@ class TestPromptGeneration(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("terminal_bash", minified)
         self.assertNotIn("spawn_drone", minified)
 
+    def test_lite_vessel_briefs_are_bounded(self):
+        """Verbose world briefs must not crowd out the vessel reply body."""
+        from core.prompt_engine import minify_actions_block
+
+        minified = minify_actions_block(
+            {"vessel_minecraft_say": {"brief": "x" * 2000}}, lite=True
+        )
+
+        self.assertLessEqual(
+            len(minified["vessel_minecraft_say"]["brief"]), 420
+        )
+
     @patch("core.core_initializer.core_initializer.actions_block")
     def test_actions_block_population(self, mock_actions_block):
         """Test that the actions block is properly populated."""

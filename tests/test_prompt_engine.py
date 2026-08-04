@@ -569,6 +569,60 @@ def test_build_json_prompt_suppresses_diary_actions_on_vessel_turn(monkeypatch):
         core_initializer.actions_block = original_actions_block
 
 
+def test_vessel_prompt_merges_live_connection_actions(monkeypatch):
+    """A prompt built before the async action-cache refresh must still expose
+    the currently connected world's actions."""
+
+    async def dummy_gather(message, ctx):
+        return {}
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+
+    from core.core_initializer import core_initializer
+
+    original_actions_block = core_initializer.actions_block
+    core_initializer.actions_block = {
+        "available_actions": {
+            "vessel_connect": {
+                "schema": {"type": "object", "properties": {}, "required": []},
+                "brief": "Connect to a world.",
+            }
+        }
+    }
+
+    class LiveVessel:
+        def get_supported_actions(self):
+            return {
+                "vessel_minecraft_say": {
+                    "schema": {"type": "object", "properties": {}, "required": []},
+                    "brief": "Speak in Minecraft.",
+                }
+            }
+
+        def _action_world(self):
+            return "minecraft"
+
+    monkeypatch.setattr(
+        "core.core_initializer.PLUGIN_REGISTRY", {"vessel_plugin": LiveVessel()}
+    )
+
+    try:
+        message = SimpleNamespace(
+            chat_id="minecraft",
+            text="hello",
+            message_id=1,
+            from_user=SimpleNamespace(full_name="player", username="player"),
+            date=datetime.now(timezone.utc),
+            interface_path="vessel/minecraft",
+        )
+
+        result = asyncio.run(build_json_prompt(message, {}, interface_name="vessel"))
+
+        assert "vessel_minecraft_say" in result["actions"]
+    finally:
+        core_initializer.actions_block = original_actions_block
+
+
 def test_prompt_request_attached_to_result(monkeypatch):
     """build_json_prompt must attach a PromptRequest under '__prompt_request'."""
     from core.prompt_request import PromptRequest

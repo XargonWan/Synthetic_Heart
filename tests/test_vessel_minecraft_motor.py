@@ -69,6 +69,19 @@ class _FakeConnector(MinecraftConnector):
 
 _ACTIVE_GOAL = {"id": 1, "description": "explore", "status": "active"}
 
+# A goal that structurally names a block target (``target_kind`` /
+# ``target_name`` — populated by cognition, never parsed from free text). Only
+# a block matching this exact id is mined/chased by the reflex; incidental
+# terrain is left alone (AGENTS.md §5c — "walks up but never picks anything up"
+# is the OLD bug; digging incidental ground is the reported floor-vandalism).
+_GOAL_TARGET_OAK = {
+    "id": 1,
+    "description": "gather wood",
+    "status": "active",
+    "target_kind": "block",
+    "target_name": "oak_log",
+}
+
 
 # ----------------------------------------------------------------------
 # Gating rules
@@ -141,14 +154,55 @@ async def test_motor_step_empty_affordances_marches() -> None:
 
 @pytest.mark.asyncio
 async def test_motor_step_block_within_reach_mines() -> None:
+    # A block matching the goal's structural target IS mined when in reach.
     conn = _FakeConnector(
         affordances=[
             {"kind": "block", "target": "oak_log", "verb": "mine", "distance": 2.0}
         ]
     )
-    result = await conn.motor_step(_ACTIVE_GOAL)
+    result = await conn.motor_step(_GOAL_TARGET_OAK)
     assert result == {"acted": True, "action": "mine", "target": "oak_log"}
-    assert conn.calls == [("mine", {"target": "oak_log"})]
+
+
+@pytest.mark.asyncio
+async def test_motor_step_non_goal_block_in_reach_not_mined() -> None:
+    # Regression (reported "digs a block beneath itself for no reason"): an
+    # incidental block in reach that is NOT the goal target must NOT be mined.
+    # With a concrete goal target that is absent from the scan, the body walks
+    # *toward the named target* instead of vandalising the terrain under it.
+    conn = _FakeConnector(
+        affordances=[
+            {"kind": "block", "target": "dirt", "verb": "mine", "distance": 2.0}
+        ]
+    )
+    result = await conn.motor_step(_GOAL_TARGET_OAK)
+    assert result["acted"] is True
+    # The incidental ``dirt`` block is never mined — only the named goal target.
+    assert ("mine", {"target": "dirt"}) not in conn.calls
+    # The body walks toward the named target (``goto``); with the fake bridge
+    # reporting ``ok`` (arrived), the reflex then tries to MINE the named
+    # target directly — the authoritative interact test that fixes the
+    # "arrived but never picks anything up" loop. Either way ``dirt`` is safe.
+    assert ("goto", {"target": "oak_log"}) in conn.calls
+    assert result["action"] == "mine"
+    assert result["target"] == "oak_log"
+
+
+@pytest.mark.asyncio
+async def test_motor_step_no_target_block_in_reach_not_mined() -> None:
+    # With no structural goal target at all, an incidental block is likewise
+    # left alone — only the deliberately-named target is ever mined. The body
+    # falls through to the directional march instead of digging the terrain.
+    conn = _FakeConnector(
+        affordances=[
+            {"kind": "block", "target": "stone", "verb": "mine", "distance": 2.0}
+        ]
+    )
+    result = await conn.motor_step(_ACTIVE_GOAL)
+    assert result["acted"] is True
+    assert result["action"] == "goto"
+    assert result["reason"] == "directional_march"
+    assert ("mine", {"target": "stone"}) not in conn.calls
 
 
 @pytest.mark.asyncio
@@ -165,14 +219,31 @@ async def test_motor_step_nonblock_within_reach_uses() -> None:
 
 @pytest.mark.asyncio
 async def test_motor_step_out_of_reach_goes_to() -> None:
+    # An out-of-reach block that IS the goal target is walked toward.
+    conn = _FakeConnector(
+        affordances=[
+            {"kind": "block", "target": "oak_log", "verb": "mine", "distance": 12.0}
+        ]
+    )
+    result = await conn.motor_step(_GOAL_TARGET_OAK)
+    assert result == {"acted": True, "action": "goto", "target": "oak_log"}
+    assert conn.calls == [("goto", {"target": "oak_log"})]
+
+
+@pytest.mark.asyncio
+async def test_motor_step_non_goal_block_out_of_reach_not_chased() -> None:
+    # An out-of-reach block that is NOT the goal target must not hijack travel:
+    # chasing ubiquitous incidental terrain is aimless. Fall to the march.
     conn = _FakeConnector(
         affordances=[
             {"kind": "block", "target": "oak_log", "verb": "mine", "distance": 12.0}
         ]
     )
     result = await conn.motor_step(_ACTIVE_GOAL)
-    assert result == {"acted": True, "action": "goto", "target": "oak_log"}
-    assert conn.calls == [("goto", {"target": "oak_log"})]
+    assert result["acted"] is True
+    assert result["action"] == "goto"
+    assert result["reason"] == "directional_march"
+    assert ("goto", {"target": "oak_log"}) not in conn.calls
 
 
 @pytest.mark.asyncio
@@ -198,37 +269,38 @@ async def test_motor_step_does_not_repeat_same_in_reach_interaction() -> None:
 
 
 @pytest.mark.asyncio
-async def test_motor_step_interacts_with_new_in_reach_after_previous() -> None:
-    # The anti-repeat guard is per exact id: a *different* adjacent affordance
-    # must still be interacted with, so the body isn't wrongly frozen out of
-    # grabbing something genuinely new right in front of it.
+async def test_motor_step_goal_target_block_remined_while_in_reach() -> None:
+    # The named goal-target branch deliberately re-mines the target while it is
+    # in reach: a gather goal (e.g. "collect oak_log") wants the body to keep
+    # harvesting the same resource block tick after tick until it is exhausted.
     conn = _FakeConnector(
         affordances=[
             {"kind": "block", "target": "oak_log", "verb": "mine", "distance": 2.0}
         ]
     )
-    first = await conn.motor_step(_ACTIVE_GOAL)
+    first = await conn.motor_step(_GOAL_TARGET_OAK)
     assert first == {"acted": True, "action": "mine", "target": "oak_log"}
 
-    conn._affordances = [
-        {"kind": "block", "target": "stone", "verb": "mine", "distance": 2.0}
-    ]
-    second = await conn.motor_step(_ACTIVE_GOAL)
-    assert second == {"acted": True, "action": "mine", "target": "stone"}
+    second = await conn.motor_step(_GOAL_TARGET_OAK)
+    assert second["acted"] is True
+    assert second["action"] == "mine"
+    assert second["target"] == "oak_log"
 
 
 @pytest.mark.asyncio
-async def test_motor_step_takes_nearest_benign_affordance() -> None:
-    # Affordances arrive distance-sorted (nearest first); the head wins.
+async def test_motor_step_takes_goal_target_block_over_incidental() -> None:
+    # Affordances arrive distance-sorted; a nearer *incidental* block does NOT
+    # win — only the goal-target block is mined, even when it is farther away.
     conn = _FakeConnector(
         affordances=[
             {"kind": "block", "target": "stone", "verb": "mine", "distance": 1.0},
             {"kind": "block", "target": "oak_log", "verb": "mine", "distance": 3.0},
         ]
     )
-    result = await conn.motor_step(_ACTIVE_GOAL)
-    assert result["target"] == "stone"
-    assert conn.calls == [("mine", {"target": "stone"})]
+    result = await conn.motor_step(_GOAL_TARGET_OAK)
+    assert result["target"] == "oak_log"
+    assert result["action"] == "mine"
+    assert ("mine", {"target": "stone"}) not in conn.calls
 
 
 # ----------------------------------------------------------------------
@@ -291,14 +363,20 @@ async def test_motor_step_pending_destination_wins_over_reachable_affordance() -
 
 @pytest.mark.asyncio
 async def test_motor_step_reachable_affordance_acted_when_arrived() -> None:
-    # Once we have arrived at (or have no) destination, a reachable affordance
-    # IS acted on — the body works with what is right in front of it.
+    # Once we have arrived at (or have no) destination, a reachable block that
+    # IS the goal target is acted on — the body works with what it came for.
     conn = _FakeConnector(
         affordances=[
             {"kind": "block", "target": "oak_log", "verb": "mine", "distance": 1.0}
         ]
     )
-    goal_no_dest = {"id": 9, "description": "gather", "status": "active"}
+    goal_no_dest = {
+        "id": 9,
+        "description": "gather",
+        "status": "active",
+        "target_kind": "block",
+        "target_name": "oak_log",
+    }
     result = await conn.motor_step(goal_no_dest)
     assert result == {"acted": True, "action": "mine", "target": "oak_log"}
     assert conn.calls == [("mine", {"target": "oak_log"})]
@@ -784,14 +862,20 @@ async def test_motor_step_block_target_routes_goto_by_name() -> None:
         "target_name": "oak_log",
     }
     result = await conn.motor_step(goal)
+    # Walks to the exact id via ``goto target=<name>``; on arrival (fake bridge
+    # reports ``ok``) it tries to MINE the named block directly — the interact
+    # test that stops the "arrived-loop". A successful mine advances the goal.
     assert result == {
         "acted": True,
-        "action": "goto",
+        "action": "mine",
         "target": "oak_log",
         "target_kind": "block",
         "target_result": "arrived",
     }
-    assert conn.calls == [("goto", {"target": "oak_log"})]
+    assert conn.calls == [
+        ("goto", {"target": "oak_log"}),
+        ("mine", {"target": "oak_log"}),
+    ]
 
 
 @pytest.mark.asyncio
@@ -1027,10 +1111,14 @@ async def test_motor_step_mines_named_block_target_when_within_reach() -> None:
 async def test_motor_step_walks_to_named_block_target_when_out_of_reach() -> None:
     # A named block target whose affordance is beyond MOTOR_REACH → the reflex
     # walks to it by name (goto), never a premature mine.
+    # The bridge reports the walk is still in progress (``ok=False`` → the
+    # named-target ``goto`` outcome is *not* ``arrived``), so the reflex only
+    # walks — it never issues a premature mine while still travelling.
     conn = _FakeConnector(
         affordances=[
             {"kind": "block", "target": "oak_log", "verb": "use", "distance": 9.0}
-        ]
+        ],
+        act_ok=False,
     )
     conn._last_reflex_interaction = "block:oak_log"
     goal = {
@@ -1103,3 +1191,175 @@ def test_inventory_counts_is_fail_safe_on_bad_entries() -> None:
 
 def test_inventory_counts_empty() -> None:
     assert MinecraftConnector._inventory_counts([]) == {}
+
+
+# ----------------------------------------------------------------------
+# set_goal payload description extraction (empty goals-table bug)
+# ----------------------------------------------------------------------
+#
+# A weaker LLM sometimes emits the free-text objective under an alias key
+# ("goal", "goal_text", …) instead of the canonical "description". Before the
+# fix the connector read only payload["description"], so a mis-keyed set_goal
+# returned "requires a free-text description" and persisted NOTHING while the
+# action was still logged as executed — hence "goals shown but not set".
+# _extract_goal_description accepts the canonical key or a known alias. It is
+# purely KEY-based (never inspects the value for keywords), so it stays
+# multi-language / keyword-free.
+
+
+def test_extract_goal_description_canonical() -> None:
+    assert (
+        MinecraftConnector._extract_goal_description({"description": " build a house "})
+        == "build a house"
+    )
+
+
+def test_extract_goal_description_aliases() -> None:
+    assert (
+        MinecraftConnector._extract_goal_description({"goal": "find diamonds"})
+        == "find diamonds"
+    )
+    assert (
+        MinecraftConnector._extract_goal_description({"goal_text": "explore caves"})
+        == "explore caves"
+    )
+    assert (
+        MinecraftConnector._extract_goal_description({"objective": "tame a wolf"})
+        == "tame a wolf"
+    )
+    assert (
+        MinecraftConnector._extract_goal_description({"text": "relax by the water"})
+        == "relax by the water"
+    )
+
+
+def test_extract_goal_description_canonical_wins_over_alias() -> None:
+    # When both the canonical key and an alias are present, the canonical
+    # "description" must win (it is first in the resolution order).
+    assert (
+        MinecraftConnector._extract_goal_description(
+            {"description": "canonical", "goal": "alias"}
+        )
+        == "canonical"
+    )
+
+
+def test_extract_goal_description_empty_and_missing() -> None:
+    assert MinecraftConnector._extract_goal_description({}) == ""
+    assert MinecraftConnector._extract_goal_description({"description": "   "}) == ""
+    assert MinecraftConnector._extract_goal_description({"goal": ""}) == ""
+    # Non-string values are ignored (must be a non-empty string).
+    assert MinecraftConnector._extract_goal_description({"goal": 123}) == ""
+    assert MinecraftConnector._extract_goal_description({"description": None}) == ""
+
+
+# ----------------------------------------------------------------------
+# Staticity ward — always-on relocate-when-parked guard (pure logic)
+# ----------------------------------------------------------------------
+
+
+def test_staticity_ward_first_sample_sets_anchor() -> None:
+    # The very first position seen becomes the anchor; the ward never fires on
+    # its first observation (nothing to compare against yet).
+    conn = _FakeConnector()
+    assert conn._update_staticity_ward({"x": 0.0, "z": 0.0}) is False
+    assert conn._static_anchor == {"x": 0.0, "z": 0.0}
+    assert conn._static_ward_ticks == 0
+
+
+def test_staticity_ward_fires_after_limit_ticks() -> None:
+    # Staying within the radius accrues idle ticks; the ward fires exactly once
+    # the counter reaches the limit, then re-arms (counter reset, anchor kept).
+    conn = _FakeConnector()
+    conn._static_ward_limit = 4
+    conn._static_ward_radius = 2.0
+    pos = {"x": 5.0, "z": 5.0}
+    # Tick 1 seeds the anchor (no fire). Ticks 2-4 accrue; the 5th call is the
+    # 4th idle tick → fires.
+    assert conn._update_staticity_ward(pos) is False  # anchor set
+    assert conn._update_staticity_ward(pos) is False  # 1
+    assert conn._update_staticity_ward(pos) is False  # 2
+    assert conn._update_staticity_ward(pos) is False  # 3
+    assert conn._update_staticity_ward(pos) is True  # 4 -> fire
+    # Re-armed cleanly.
+    assert conn._static_ward_ticks == 0
+    assert conn._static_anchor == pos
+
+
+def test_staticity_ward_resets_when_body_moves_out_of_radius() -> None:
+    # Leaving the radius re-anchors and resets the counter, so genuine travel
+    # never trips the ward.
+    conn = _FakeConnector()
+    conn._static_ward_limit = 4
+    conn._static_ward_radius = 2.0
+    conn._update_staticity_ward({"x": 0.0, "z": 0.0})  # anchor
+    conn._update_staticity_ward({"x": 0.5, "z": 0.5})  # still inside -> 1 tick
+    assert conn._static_ward_ticks == 1
+    # A big step outside the radius re-anchors and zeroes the counter.
+    assert conn._update_staticity_ward({"x": 50.0, "z": 50.0}) is False
+    assert conn._static_ward_ticks == 0
+    assert conn._static_anchor == {"x": 50.0, "z": 50.0}
+
+
+def test_staticity_ward_disabled_never_fires() -> None:
+    conn = _FakeConnector()
+    conn._static_ward_enabled = False
+    conn._static_ward_limit = 2
+    pos = {"x": 0.0, "z": 0.0}
+    for _ in range(20):
+        assert conn._update_staticity_ward(pos) is False
+
+
+def test_staticity_ward_fail_safe_on_bad_position() -> None:
+    # A missing/malformed position resets tracking and never fires.
+    conn = _FakeConnector()
+    conn._update_staticity_ward({"x": 0.0, "z": 0.0})  # anchor
+    assert conn._update_staticity_ward(None) is False
+    assert conn._static_anchor is None
+    assert conn._update_staticity_ward({"x": "nope", "z": 0.0}) is False
+    assert conn._static_anchor is None
+
+
+@pytest.mark.asyncio
+async def test_motor_step_staticity_ward_relocates_parked_body() -> None:
+    # End-to-end: a body pinned at the same spot (the fake connector reports a
+    # static position every tick) is relocated by the ward once it has been
+    # parked for _static_ward_limit ticks — even though it HAS an active goal
+    # and there is a benign in-reach affordance it keeps poking. The ward runs
+    # before every other branch and forces a fresh directional goto.
+    conn = _FakeConnector(
+        affordances=[
+            {"kind": "entity", "target": "chest", "verb": "use", "distance": 1.0}
+        ]
+    )
+    conn._static_ward_limit = 3
+    conn._static_ward_radius = 2.0
+
+    results: list[dict[str, Any]] = []
+    for _ in range(6):
+        results.append(await conn.motor_step(_ACTIVE_GOAL))
+
+    # The ward fires at least once and relocates the body with a fresh goto.
+    fired = [r for r in results if r.get("reason") == "staticity_ward"]
+    assert fired, "staticity ward never fired over 6 parked ticks"
+    for r in fired:
+        assert r["action"] == "goto"
+        assert r["acted"] is True
+        assert set(r["destination"]) == {"x", "z"}
+
+
+@pytest.mark.asyncio
+async def test_motor_step_staticity_ward_fires_without_goal() -> None:
+    # The ward covers the case the tick-to-tick watchdog cannot: a parked body
+    # with NO goal at all. After enough idle ticks it relocates rather than
+    # sitting inert forever.
+    conn = _FakeConnector(affordances=[])
+    conn._static_ward_limit = 3
+    conn._static_ward_radius = 2.0
+
+    results: list[dict[str, Any]] = []
+    for _ in range(6):
+        results.append(await conn.motor_step(None))
+
+    # At least one tick fired the ward (relocated) instead of returning no_goal.
+    assert any(r.get("reason") == "staticity_ward" for r in results)

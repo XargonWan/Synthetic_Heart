@@ -504,10 +504,19 @@ async def gather_recon_contributions(
     tags: List[str] | None = None,
     keywords: List[str] | None = None,
     max_results: int | None = None,
+    recon_whitelist_patterns: List[str] | None = None,
 ) -> List[Dict[str, Any]]:
     """Call plugin hooks `get_recon_contributions` and merge results.
 
     Returns list of normalized contribution dicts.
+
+    ``recon_whitelist_patterns`` is the preflight counterpart of the vessel
+    action whitelist: when non-empty (an in-world embodiment turn), a recon
+    plugin is only kept if its ``get_recon_key()`` matches one of the fnmatch
+    patterns. This is structural name matching, never keyword/regex intent
+    detection. Fail-safe: a plugin missing a usable key, or whose key raises,
+    is excluded on a whitelisted turn; ``None``/empty patterns disable the
+    filter entirely (the normal, non-vessel behaviour).
     """
     enabled = bool(config_registry.get_var("ENABLE_RECON", True))
     # start-of-flow logging
@@ -544,6 +553,20 @@ async def gather_recon_contributions(
         log_warning(f"[recon] Failed to access PLUGIN_REGISTRY: {e}")
         plugins = []
 
+    # Preflight whitelist (vessel embodiment turn): resolve the matcher once.
+    _use_recon_whitelist = bool(recon_whitelist_patterns)
+    _matches_recon_whitelist = None
+    if _use_recon_whitelist:
+        try:
+            from plugins.rift_vessel.vessel_whitelist import matches_whitelist
+
+            _matches_recon_whitelist = matches_whitelist
+        except Exception:
+            # Rift Vessel plugin unavailable: cannot apply the whitelist. Fall
+            # back to the normal (unfiltered) path rather than dropping every
+            # plugin, matching the caller's "plugin absent -> full recon" intent.
+            _use_recon_whitelist = False
+
     eligible = []
     for p in plugins:
         has_combined = all(
@@ -557,6 +580,24 @@ async def gather_recon_contributions(
         if (has_combined or hasattr(p, "get_recon_contributions")) and _plugin_enabled(
             p, "RECON"
         ):
+            # In-world embodiment turn: keep only recon plugins whose recon key
+            # matches the vessel whitelist. Structural fnmatch on the key name
+            # (never message text). Fail-safe: no usable key -> excluded.
+            if _use_recon_whitelist and _matches_recon_whitelist is not None:
+                recon_key = ""
+                try:
+                    if hasattr(p, "get_recon_key"):
+                        recon_key = str(p.get_recon_key() or "").strip()
+                except Exception:
+                    recon_key = ""
+                if not recon_key or not _matches_recon_whitelist(
+                    recon_key, list(recon_whitelist_patterns or [])
+                ):
+                    log_debug(
+                        f"[recon] Plugin {p.__class__.__name__} recon_key="
+                        f"{recon_key!r} not in vessel recon whitelist; skipping"
+                    )
+                    continue
             # Optional per-turn eligibility hook. A recon plugin may declare
             # ``is_recon_eligible(message, context_memory) -> bool`` to opt out
             # of a given turn *before* its key is baked into the combined recon

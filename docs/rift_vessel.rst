@@ -296,11 +296,23 @@ the reserved word ``timestamp``.
 * ``vessel_activity_log`` — ``id``, ``session_id``, ``interface_path``,
   ``environment``, ``event_type``, ``summary``, ``metadata`` (JSON),
   ``created_at``.
-* ``minecraft_goals`` — ``id``, ``session_id``, ``description`` (free text Synth
-  authored itself), ``note`` (Synth's own progress reflection), ``status``
-  (``active``/``done``/``abandoned``), ``created_at``, ``updated_at``.
-  Minecraft-specific (goal store, **no** predefined catalogue); created in
-  ``plugins/rift_vessel/minecraft/goals.py`` and seeded in ``init-db.sql``.
+* ``goals`` — ``id``, ``session_id``, ``scope``, ``game``, ``world``,
+  ``description`` (free text Synth authored itself), ``note`` (Synth's own
+  progress reflection), ``destination``, ``steps`` (JSON), ``current_step``,
+  ``target_kind``, ``target_name``, ``status`` (``active``/``done``/
+  ``abandoned``), ``created_at``, ``updated_at``. Owned by the **generic Goals
+  plugin** (``plugins/goals/goals.py``) — a standalone, *scope-aware* goal store
+  that any game, planner, or the Synth itself (personal life goals) can use, not
+  just Minecraft. The three-part **scope tuple** (``scope`` / ``game`` /
+  ``world``) isolates goal sets: Minecraft goals are pinned to
+  ``scope="vessel"`` / ``game="minecraft"`` / ``world="none"``; a personal goal
+  uses ``scope="none"``. Goals are still **free text, no predefined catalogue**.
+  The legacy ``minecraft_goals`` table is renamed to ``goals`` (and the scope
+  columns backfilled) by a startup migration
+  (``core/migrations.py::_migrate_goals_table``); seeded in ``init-db.sql``.
+  The Minecraft connector reaches the store through a thin compatibility shim
+  (``plugins/rift_vessel/minecraft/goals.py``) that forwards every call with the
+  Minecraft scope tuple pinned.
 
 Configuration keys
 -------------------
@@ -332,6 +344,15 @@ Key                             Purpose
 ``VESSEL_SP_USE_RANGED``        Use a carried bow/crossbow (with ammo) against a distant aggressor via ``shoot`` (``True`` default)
 ``VESSEL_SP_RANGED_MIN_DIST``   Target distance (blocks) at/above which the reflex prefers ranged over melee (5.0)
 ``VESSEL_SP_APPRAISAL_ENABLED``  Enable the post-damage appraisal will beat — a ``PRIORITY_URGENT`` Fast-Lane LLM turn on taking damage (``True`` default)
+``VESSEL_SP_ENGAGE_RATIO``      Minimum ``own_power / mob_power`` at/above which an **armed** Synth engages instead of fleeing (1.0, clamp 0.2–5.0)
+``VESSEL_SP_WEAK_MOB_POWER``    Power floor below which a **disarmed** Synth still punches out a mob bare-handed instead of fleeing (6.0)
+``VESSEL_SP_NIGHT_SHELTER``     Enable the priority-6 night-shelter reflex — fully enclose (roofed bed → seal → dig-in) at night with hostiles near (``True`` default)
+``VESSEL_SP_SHELTER_DIST``      Distance (blocks) within which a hostile mob at night triggers the shelter reflex (16.0 — wider than ``VESSEL_SP_HOSTILE_DIST`` so the body walls in before a mob closes)
+``VESSEL_MORNING_EXIT_ENABLED``  Enable the priority-7 morning surface-exit reflex — if buried with no reachable base, dig a jumpable ``climb_staircase`` back to daylight at day with no open sky (``True`` default)
+``VESSEL_GOAL_DEBRIEF_ENABLED``  Enable the goal debrief — a slow structural postflight check that auto-completes a satisfied goal and arms a stall cue (``True`` default)
+``VESSEL_GOAL_DEBRIEF_USE_HISTORY``  Also confirm goal completion from the session's ``vessel_activity_log`` (place/mine/kill/craft) when it leaves no lasting inventory trace — structural id match, fail-safe (``True`` default)
+``VESSEL_GOAL_DEBRIEF_INTERVAL_SEC``  Seconds between goal-debrief checks (30, clamped 5–3600)
+``VESSEL_GOAL_DEBRIEF_STALL_TICKS``  Consecutive unchanged debrief checks before arming a will-beat stall cue (4, clamped 2–100)
 ``MINECRAFT_BRIDGE_RUN_AT_START``  Optional boot pre-warm (False). The bridge starts **on demand** by default, only when Synth enters the world.
 ``MINECRAFT_BRIDGE_HOST``       Bridge bind host (``127.0.0.1``)
 ``MINECRAFT_BRIDGE_PORT``       Bridge HTTP port (``8137``)
@@ -631,6 +652,49 @@ Below the health floor, or once the fail cap is hit, the reflex escalates to
 ``has_ranged_weapon`` / ``ranged_ammo`` / ``best_melee_damage`` and tags each
 nearby entity with ``is_targeting_me``.
 
+**Power-aware fight-vs-flee (Minecraft adapter scope).** The decision to engage
+a mob is not a flat "always defend while healthy" — it is a **structural power
+comparison** so a disarmed Synth flees a mob it cannot win, while an
+armed/armored one engages. Two numeric helpers on the connector (keyword-free,
+telemetry-only) drive it:
+
+* ``_own_power(extra)`` = ``offense * survivability``, where ``offense`` =
+  ``best_melee_damage`` (bare-hand floor ``1.0`` when carrying no weapon) and
+  ``survivability`` = ``1.0 + armor_points/20 + health/40``. ``armor_points``
+  comes from the bridge's ``armorPoints()`` (summed ``_ARMOR_DEFENSE`` per
+  equipped piece) and is forwarded into ``WorldState.extra``.
+* ``_mob_power(entity)`` = ``max_health * (1 + attack_damage/8)``, using the
+  per-entity ``max_health`` / ``attack_damage`` the bridge attaches via
+  ``mobCombatStats()`` (falling back to ``_DEFAULT_MOB_POWER`` = 12.0 when a
+  mob's stats are unknown).
+
+The gate computes ``ratio = own_power / mob_power``. If the body is **disarmed**
+(``_is_disarmed`` — no melee weapon *and* no ranged weapon) it only engages a
+**weak** mob (``_mob_power < VESSEL_SP_WEAK_MOB_POWER``, default 6.0); otherwise
+``power_ok = ratio >= VESSEL_SP_ENGAGE_RATIO`` (default 1.0). ``power_ok`` (plus
+``fight_back``, ``health > low_health`` and the fail-cap) decides defend/shoot vs
+flee, and every combat reason dict carries ``own_power`` / ``mob_power`` /
+``ratio`` for debugging.
+
+**Per-mob strategy override (Rift Vessel core mechanism + Minecraft content).**
+Before the power gate runs, ``_survival_threat`` calls
+``apply_combat_strategy(ENVIRONMENT, target, extra)``; a non-``None`` result
+short-circuits the reflex with a mob-specific tactic. The **mechanism** is the
+world-agnostic core module ``plugins/rift_vessel/vessel_combat_strategy.py`` — it
+mirrors ``core/vessel_registry.py``: a ``CombatStrategyRegistry`` keyed
+``{world: {entity_id: strategy}}``, a module-level singleton
+``combat_strategy_registry``, and the wrappers ``register_combat_strategy`` /
+``resolve_combat_strategy`` / ``apply_combat_strategy`` (fail-safe, resolves by
+the entity's structural ``name`` id, never display text). The **content** lives
+in the Minecraft adapter: ``_mc_strategy_creeper`` and ``_mc_strategy_enderman``
+both return a ``keep_distance`` plan (a creeper must never be chased into its
+explosion; an enderman is disengaged rather than meleed), registered at import
+via ``register_combat_strategy("minecraft", "creeper"/"enderman", …)``. A generic
+mob has no registered strategy → ``apply_combat_strategy`` returns ``None`` → the
+power gate decides. Adding a special mob for any world is a one-liner
+registration; removing the mechanism leaves the power gate intact. Unit-tested in
+``tests/test_vessel_survival.py``.
+
 **Damage-appraisal will beat (LLM, elevated priority).** The reflex above is the
 *fast* motor response; on top of it a high-priority appraisal beat lets Synth
 *think about* the hit in character. The trigger is **taking damage this tick**:
@@ -659,6 +723,34 @@ Agent Lane/Drones, no mid-session diary). Unit-tested in
 ``tests/test_vessel_beat.py`` (prompt) and ``tests/test_vessel_survival.py``
 (combat reflex).
 
+**Night shelter (priority 6).** Below drowning/burning/combat: when it is
+**not day** (``is_day`` False — structural time telemetry) AND aggressive mobs
+are within ``VESSEL_SP_SHELTER_DIST`` (default 16.0, deliberately wider than the
+melee ``VESSEL_SP_HOSTILE_DIST`` = 8 so the body walls in *before* a mob closes),
+``_survival_threat`` returns ``{"threat":"night_shelter","verb":"shelter"}``. A
+torch is **not** enough — Synth must fully enclose: the bridge ``shelter`` verb
+tries, in order, a nearby **roofed bed** (``bot.sleep`` → ``method:"bed"``), then
+**sealing** the ~10 open cells around the body (``method:"seal"``), then a 1×2
+**dig-in** niche as a last resort (``method:"dig_in"``). Gated by
+``VESSEL_SP_NIGHT_SHELTER`` (default True).
+
+**Morning surface-exit (priority 7, lowest).** If Synth dug in / walled itself
+in overnight and has **no real base**, at dawn it must climb back to daylight
+instead of staying buried. When it is **day** (``is_day`` True) AND there is **no
+open sky above** (the bridge's ``hasOpenSkyAbove(maxUp)`` → ``sky_access`` False),
+and only when a ``_surfaced_last_day`` day-latch has not already fired,
+``_survival_threat`` returns ``{"threat":"morning_exit","verb":"climb_staircase"}``.
+The bridge ``climb_staircase`` verb digs a **jumpable ascending staircase** — one
+block forward + one block up per step, placing the tread — via direct dig/place
+(no pathfinder), stopping early once ``skyClear()`` reports open sky. The async
+``_run_survival_guard`` gates the actual climb on ``_has_reachable_base(state)``:
+if a registered base is within ``_base_retreat_radius`` it just sets the day-latch
+and skips (a real base already has an exit); otherwise it dispatches
+``climb_staircase``. The day-latch prevents refiring the same day and re-arms at
+night. Structural only (numeric time + sky-access bool, never text), Fast Lane,
+no diary. Gated by ``VESSEL_MORNING_EXIT_ENABLED`` (default True). Unit-tested in
+``tests/test_vessel_survival.py``.
+
 **GOTCHA — oxygen is the 0..20 bubble scale.** At runtime mineflayer
 ``bot.oxygenLevel`` reports the vanilla 0..20 air-bubble scale (20 = full lungs,
 0 = out of air), **not** air ticks — a healthy submerged bot reads ~20, so
@@ -685,22 +777,86 @@ world-agnostic.
 call: there is **no** predefined quest list, no goal templates, no
 inventory-count progression. If goals were a fixed menu, every Synth would play
 Minecraft identically, like a scripted bot — which is exactly what SyntH is not.
-Instead ``plugins/rift_vessel/minecraft/goals.py`` is a thin **goal store**: it
-only *persists* and *recalls* the free-text goals Synth writes for itself. During
-a will beat Synth reads its situation (``observe`` / inventory / world state)
-and authors a goal in its own words via ``vessel_minecraft_set_goal`` (required
-``description``, optional ``note``) — e.g. *"build a cozy shelter before it gets
-dark"* or *"go spelunking and see what I find"*. ``vessel_minecraft_goals``
-returns its ``current_goal`` plus ``recent_goals``; ``vessel_minecraft_update_goal``
-lets Synth record its own progress ``note`` or mark the goal ``done`` /
-``abandoned``. Setting a new goal automatically abandons the previous active one.
-Progress is judged by Synth itself from what it perceives — never by an item
-counter. The connector still exposes the bridge-backed verbs ``goto``, ``scan``,
-``mine``, ``place``, ``inventory``, ``wander`` through ``get_world_actions()`` and
-enriches ``WorldState.extra`` with ``current_goal`` / ``recent_goals``. Goals are
-persisted in the ``minecraft_goals`` table so a goal survives across beats within
-a session. *"Do I go looking for diamonds or build a chest first?"* is Synth's
-decision, driven by its personality and wants — not a hardcoded script.
+Instead goals live in the **generic Goals plugin** (``plugins/goals/goals.py``),
+a standalone *scope-aware* store that only *persists* and *recalls* the free-text
+goals Synth writes for itself. It is deliberately **not** Minecraft-specific: the
+same store backs any game world, a general planner, or the Synth pursuing a
+personal life goal — every goal set is isolated by a three-part **scope tuple**
+(``scope`` / ``game`` / ``world``). Minecraft goals are pinned to
+``scope="vessel"`` / ``game="minecraft"`` / ``world="none"``; a personal goal uses
+``scope="none"``. The Minecraft connector reaches the store through a thin
+compatibility shim (``plugins/rift_vessel/minecraft/goals.py``) that forwards
+every call with the Minecraft scope tuple pinned, so the historical
+``mc_goals.<fn>(...)`` call surface is unchanged.
+
+During a will beat Synth reads its situation (``observe`` / inventory / world
+state) and authors a goal in its own words via ``vessel_minecraft_set_goal``
+(required ``description``, optional ``note``) — e.g. *"build a cozy shelter
+before it gets dark"* or *"go spelunking and see what I find"*.
+``vessel_minecraft_goals`` returns its ``current_goal`` plus ``recent_goals``;
+``vessel_minecraft_update_goal`` lets Synth record its own progress ``note``, mark
+the goal ``done`` / ``abandoned``, or advance its step plan. **A stepped goal
+auto-completes** when its ``current_step`` advances past the last step (this was
+the fix for goals never being marked ``done`` once all their steps were finished);
+a stepless goal is only completed explicitly. Setting a new goal automatically
+abandons the previous active one *in the same scope*. Progress is otherwise judged
+by Synth itself from what it perceives — never by an item counter. For non-vessel
+use the plugin additionally exposes the generic actions ``goal_set`` /
+``goal_update`` / ``goal_list`` (security ``low``, no ``external_effects``). The
+connector still exposes the bridge-backed verbs ``goto``, ``scan``, ``mine``,
+``place``, ``inventory``, ``wander`` through ``get_world_actions()`` and enriches
+``WorldState.extra`` with ``current_goal`` / ``recent_goals``. Goals are persisted
+in the ``goals`` table so a goal survives across beats within a session.
+*"Do I go looking for diamonds or build a chest first?"* is Synth's decision,
+driven by its personality and wants — not a hardcoded script.
+
+**Goal debrief — a structural postflight check.** Synth often progresses
+*physically* (places a block, kills a mob, crafts a tool) yet never declares the
+goal ``done`` — so a slow, structural supervisor (``core/vessel_goal_debrief.py``
++ the wiring in ``interface/vessel_interface.py``) runs every
+``VESSEL_GOAL_DEBRIEF_INTERVAL_SEC`` while a session is active, gated by
+``VESSEL_GOAL_DEBRIEF_ENABLED`` (default True). It supervises the single active
+goal in two ways, **never** reading the goal text as intent:
+
+#. **Deterministic completion.** It first asks the connector's world-owned
+   ``evaluate_goal_completion`` / ``complete_active_goal`` hooks whether the live
+   world/inventory already satisfies the goal (e.g. the target item is now held).
+#. **History-based completion** (gated by ``VESSEL_GOAL_DEBRIEF_USE_HISTORY``,
+   default True). When the fast check did **not** satisfy the goal, it additionally
+   consults the session's own ``vessel_activity_log`` via the connector's
+   ``evaluate_goal_completion_from_history`` hook (Minecraft implemented) and
+   auto-completes the goal when a **successful action actually taken this session**
+   structurally matches the goal's concrete target — place/mine/collect a block,
+   attack/shoot a mob, craft/smelt an item. This closes the gap where a goal is
+   fulfilled by an action that leaves **no lasting inventory trace**. Matching is
+   purely id-based on the logged target ids (``_HISTORY_TARGET_KEYS``), never a
+   text parse, and fully fail-safe (a loader error → unsatisfied).
+
+If neither path completes the goal, the debrief tracks *staleness*: after
+``VESSEL_GOAL_DEBRIEF_STALL_TICKS`` consecutive unchanged checks (same goal id +
+``current_step`` + ``updated_at``) it arms a will-beat stall cue prompting Synth
+to reconsider or change approach. The debrief is structural only, Fast Lane only
+(no cognition turn, no diary). The completion hook is a world-agnostic core
+contract (``VesselConnectorBase.evaluate_goal_completion_from_history``, default
+unsatisfied); the event-class → target-kind mapping and Minecraft ids live in the
+adapter. Unit-tested in ``tests/test_vessel_goal_debrief.py``.
+
+**Prefab closed-house build (``build_base``).** The Minecraft ``build_base`` verb
+builds a small, fully-enclosed hollow-cube shelter (walls + roof + floor + one
+door gap + interior torch + crafting table, optional bed) from a deterministic,
+inventory-aware layout — a *model/reference*, not a scripted quest (the
+spontaneity rule holds). The layout recipe is
+``plugins/rift_vessel/minecraft/base_spec.py::derive_base_layout(origin,
+inventory_counts)`` (pure, bounded, structural id-only, fail-open): it emits the
+shell **bottom-up — floor → walls → roof** so every cell has a solid neighbour
+already placed to click against (the roof, placed last, anchors onto the finished
+wall tops — the fix for the earlier "house was not closed" bug). The bridge
+``build_base`` case then runs the shell placement plus a bounded **seal pass**
+(max 3 idempotent re-attempt rounds over the cells that first failed with
+``no-solid-face``, no-progress early-bail) so edge/corner/roof cells that were
+floating in air on the first pass get closed once the rest of the shell exists. A
+material shortfall surfaces structurally as ``ok=False`` + ``missing`` rather than
+dispatching an unbuildable plan. Unit-tested in ``tests/test_base_spec.py``.
 
 **Game knowledge base — reference facts, never a script.** A Synth that does not
 know a world's *rules* plays badly — e.g. it tries to mine iron ore bare-handed

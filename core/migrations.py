@@ -401,12 +401,107 @@ async def _dedup_diary_segments() -> None:
                 )
 
 
+async def _migrate_goals_table() -> None:
+    """Rename the legacy ``minecraft_goals`` table to the generic ``goals`` table.
+
+    The goal store was extracted from the Minecraft adapter into a standalone,
+    scope-aware ``goals`` plugin. This migration renames the legacy table (when
+    it exists and ``goals`` does not yet exist) so the existing Minecraft goals
+    survive the extraction, then backfills the new scope columns for those rows
+    to ``scope='vessel'`` / ``game='minecraft'`` / ``world='none'``.
+
+    The scope columns themselves are added idempotently by the plugin's
+    ``init_goal_table`` (``ADD COLUMN IF NOT EXISTS``); this migration only
+    handles the *rename* and the one-time *backfill* of the migrated rows.
+
+    Idempotent (a no-op once ``goals`` exists / rows are backfilled) and
+    backend-aware.
+    """
+    from core.db import _get_db_type, get_conn_ctx
+
+    db_type = _get_db_type()
+    async with get_conn_ctx() as conn:
+        async with conn.cursor() as cur:
+            has_legacy = await _table_exists(cur, "minecraft_goals", db_type)
+            has_goals = await _table_exists(cur, "goals", db_type)
+
+            # Rename only when the legacy table exists and the new one does not.
+            if has_legacy and not has_goals:
+                try:
+                    if db_type == "postgres":
+                        await cur.execute(
+                            'ALTER TABLE "minecraft_goals" RENAME TO "goals"'
+                        )
+                    else:
+                        await cur.execute(
+                            "ALTER TABLE `minecraft_goals` RENAME TO `goals`"
+                        )
+                    log_info("[migrations] Renamed `minecraft_goals` -> `goals`")
+                    has_goals = True
+                except Exception as exc:
+                    log_error(
+                        f"[migrations] Failed to rename `minecraft_goals`: {exc}",
+                        exc,
+                    )
+                    return
+
+            if not has_goals:
+                # Fresh install with no legacy table — nothing to migrate.
+                return
+
+            # Ensure the scope columns exist so the backfill can run in a single
+            # boot even if this migration executes before the plugin's own
+            # ``init_goal_table``. ADD COLUMN IF NOT EXISTS is idempotent on both
+            # backends in the versions we target.
+            for col_ddl in (
+                "scope VARCHAR(64) DEFAULT 'none'",
+                "game VARCHAR(64) DEFAULT 'none'",
+                "world VARCHAR(64) DEFAULT 'none'",
+            ):
+                try:
+                    await cur.execute(
+                        f"ALTER TABLE goals ADD COLUMN IF NOT EXISTS {col_ddl}"
+                    )
+                except Exception as col_exc:  # pragma: no cover - defensive
+                    log_warning(
+                        f"[migrations] goals column add skipped ({col_ddl}): {col_exc}"
+                    )
+
+            # Backfill scope columns for rows that migrated from the Minecraft
+            # adapter. Only touches rows still on the default scope tuple.
+            if not await _column_exists(cur, "goals", "scope", db_type):
+                return
+            try:
+                await cur.execute(
+                    "UPDATE goals SET scope = %s, game = %s, world = %s "
+                    "WHERE scope = %s AND game = %s AND world = %s",
+                    (
+                        "vessel",
+                        "minecraft",
+                        "none",
+                        "none",
+                        "none",
+                        "none",
+                    ),
+                )
+            except Exception as exc:
+                # Scope columns may not carry the expected defaults on every
+                # backend — non-fatal, the plugin still functions.
+                log_warning(f"[migrations] goals scope backfill skipped: {exc}")
+
+            try:
+                await conn.commit()
+            except Exception:
+                pass
+
+
 # Registry of startup migrations, applied in order. Each entry is
 # (name, coroutine-callable). Add new one-shot migrations here.
 _STARTUP_MIGRATIONS: list[tuple[str, Any]] = [
     ("drop_legacy_recent_chats", _drop_legacy_recent_chats),
     ("rename_timestamp_columns", _rename_timestamp_columns),
     ("dedup_diary_segments", _dedup_diary_segments),
+    ("migrate_goals_table", _migrate_goals_table),
 ]
 
 

@@ -811,20 +811,26 @@ class VoxPlugin(AIPluginBase):
 
     @staticmethod
     def get_supported_actions() -> dict:
-        return {
-            "tts_speak": {
-                "description": (
-                    "Reply with a spoken voice message. Use this whenever the user asks "
-                    "you to answer with voice/audio, or whenever you decide a spoken reply "
-                    "fits better than plain text. The text you provide is turned into "
-                    "audio and delivered as a single voice message (with the text as "
-                    "caption). Works on any turn, including when the incoming message was "
-                    "typed text."
-                ),
-                "required_fields": ["text"],
-                "optional_fields": ["emo"],
-            }
-        }
+        # TODO(vessel-whitelist): the `tts_speak` action is temporarily removed
+        # from the exposed action catalog to keep the global action list lean
+        # (it was one of the ~60 actions folding into every system prompt). The
+        # handler/prompt-instructions below stay dormant so the action can be
+        # re-enabled by restoring this dict. See AGENTS.md §5c.
+        return {}
+        # return {
+        #     "tts_speak": {
+        #         "description": (
+        #             "Reply with a spoken voice message. Use this whenever the user asks "
+        #             "you to answer with voice/audio, or whenever you decide a spoken reply "
+        #             "fits better than plain text. The text you provide is turned into "
+        #             "audio and delivered as a single voice message (with the text as "
+        #             "caption). Works on any turn, including when the incoming message was "
+        #             "typed text."
+        #         ),
+        #         "required_fields": ["text"],
+        #         "optional_fields": ["emo"],
+        #     }
+        # }
 
     def is_enabled(self) -> bool:
         self.refresh_config()

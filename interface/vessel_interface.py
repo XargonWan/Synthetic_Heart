@@ -47,7 +47,44 @@ INTERFACE_NAME = "vessel"
 _DEDUP_WINDOW_SEC = 30.0
 _RATE_LIMIT_SEC = 2.0
 
+# Max length of a slugified world-identity token in the interface path.
+_MAX_WORLD_TOKEN_CHARS = 48
+
 vessel_interface: "VesselInterface | None" = None
+
+
+def _slugify_world_token(value: Any) -> str | None:
+    """Slugify a connector-supplied world/server identity into a path-safe token.
+
+    The token becomes the ``<world>`` level of ``vessel/<game>/<world>`` and the
+    ``world`` scope of the goal store, so it must never contain the path
+    separator ``/`` or whitespace. Purely structural: it lowercases, replaces
+    every run of non-alphanumeric characters with a single ``_``, trims and
+    length-caps. Returns ``None`` for an empty/``None``/whitespace token so the
+    caller falls back to the legacy single-scope path (no ``<world>`` level).
+    Never inspects semantics — only sanitises structure. Fully fail-safe.
+    """
+    try:
+        raw = str(value or "").strip().lower()
+        if not raw:
+            return None
+        out: list[str] = []
+        prev_us = False
+        for ch in raw:
+            if ch.isalnum():
+                out.append(ch)
+                prev_us = False
+            elif not prev_us:
+                out.append("_")
+                prev_us = True
+        token = "".join(out).strip("_")
+        if not token:
+            return None
+        if len(token) > _MAX_WORLD_TOKEN_CHARS:
+            token = token[:_MAX_WORLD_TOKEN_CHARS].strip("_")
+        return token or None
+    except Exception:  # pragma: no cover - defensive
+        return None
 
 
 class VesselInterface:
@@ -128,6 +165,12 @@ class VesselInterface:
         self._reflecting: bool = False
         self._reflecting_until: float = 0.0
         self._last_reflection_at: float = 0.0
+        # Dedicated goal-beat bookkeeping. The goal beat is a single-purpose
+        # volition turn (only ``set_goal``/``update_goal`` allowed) fired while
+        # Synth has no active goal; ``_last_goal_beat_at`` throttles how often it
+        # may fire (anti-thrash). Monotonic clock; structural, never keyword
+        # logic. See core.vessel_beat.build_goal_prompt and AGENTS.md §5c.
+        self._last_goal_beat_at: float = 0.0
         # Post-damage appraisal bookkeeping. When Synth takes damage the
         # connector surfaces a positive ``extra["damage_taken"]`` delta for that
         # one tick. The scheduler then fires a single elevated (PRIORITY_URGENT)
@@ -136,6 +179,17 @@ class VesselInterface:
         # sustained damage stream (e.g. lava) does not enqueue an appraisal on
         # every tick. Monotonic clock; structural, never keyword logic.
         self._last_appraisal_at: float = 0.0
+        # Goal debrief bookkeeping. A slow postflight supervisor that watches
+        # the single active vessel goal (see core.vessel_goal_debrief and
+        # AGENTS.md §5c): it (B) auto-closes a goal the world reports already
+        # satisfied by the live state, and (A) surfaces a structural stall cue
+        # for the next will beat when a goal sits unchanged for several ticks.
+        # ``_last_goal_debrief_at`` paces the check; ``_goal_debrief_stall``
+        # holds the caller-owned {"sig", "count"} progress fingerprint; the flag
+        # arms the stall cue read by the will beat. All structural, no keywords.
+        self._last_goal_debrief_at: float = 0.0
+        self._goal_debrief_stall: dict[str, Any] = {"sig": None, "count": 0}
+        self._goal_debrief_cue_armed: bool = False
         # Disconnect-grace bookkeeping: environment -> monotonic timestamp when
         # its connector was first observed no longer ``is_connected`` while a
         # session was still active. Once the grace window elapses the session is
@@ -166,6 +220,12 @@ class VesselInterface:
         # expanded exactly once. One expansion task per world at a time.
         self._goal_expand_tasks: dict[str, asyncio.Task[Any]] = {}
         self._expanded_goal_ids: dict[str, int] = {}
+        # Monotonic timestamp of the last goal-expansion *attempt* per world.
+        # When a Drone fails to commit a steps plan we clear the de-dup marker
+        # so a later tick can retry — but without a cooldown that retry would
+        # fire on the *very next* tick, spinning a fresh Drone every second and
+        # burning cognition. This gates the retry to VESSEL_GOAL_EXPAND_RETRY_SEC.
+        self._last_goal_expand_at: dict[str, float] = {}
         log_debug("[vessel_interface] Instance initialized")
 
     # ------------------------------------------------------------------
@@ -537,9 +597,18 @@ class VesselInterface:
     # Session lifecycle (called by connectors on connect/disconnect)
     # ------------------------------------------------------------------
 
-    async def begin_session(self, environment: str, server: str | None = None) -> str:
-        """Open an embodiment session for ``environment`` and return its id."""
-        interface_path = build_interface_path(INTERFACE_NAME, environment, server)
+    async def begin_session(self, environment: str, world: str | None = None) -> str:
+        """Open an embodiment session for ``environment`` and return its id.
+
+        ``world`` is the connector-supplied per-world/server identity (see
+        :meth:`VesselConnectorBase.get_world_identity`). When present it becomes
+        the ``<world>`` level of the canonical interface path
+        ``vessel/<game>/<world>`` so progression (goals) is scoped per concrete
+        server; when ``None`` the legacy single-scope path ``vessel/<game>`` is
+        used. The token is slugified defensively so it is always path-safe.
+        """
+        world_token = _slugify_world_token(world)
+        interface_path = build_interface_path(INTERFACE_NAME, environment, world_token)
         manager = get_vessel_session_manager()
         session_id = await manager.start_session(environment, interface_path)
         self._sessions[session_id] = interface_path
@@ -568,6 +637,30 @@ class VesselInterface:
             summary=f"Left {environment} ({reason})",
         )
         self._sessions.pop(session_id, None)
+
+    def _tracked_path_for_environment(self, environment: str) -> str | None:
+        """Return the interface path of a tracked session for ``environment``.
+
+        Lets a perception that knows only the game (e.g. the en-route sighting
+        collector) reuse the exact ``vessel/<game>/<world>`` scope the session
+        was opened with, instead of forking a bare ``vessel/<game>`` scope.
+        Structural prefix match on the tracked paths; returns the most-specific
+        (deepest) match, or ``None`` when nothing is tracked. Fully guarded.
+        """
+        try:
+            prefix = f"{INTERFACE_NAME}/{environment}"
+            candidates = [
+                path
+                for path in self._sessions.values()
+                if path == prefix or path.startswith(f"{prefix}/")
+            ]
+            if not candidates:
+                return None
+            # Prefer the deepest path so a per-world session wins over a bare
+            # game scope when both happen to be tracked.
+            return max(candidates, key=lambda p: p.count("/"))
+        except Exception:  # pragma: no cover - defensive
+            return None
 
     async def end_sessions_for_environment(
         self, environment: str, reason: str = "logout"
@@ -669,7 +762,7 @@ class VesselInterface:
         environment: str,
         event_type: str,
         summary: str,
-        server: str | None = None,
+        world: str | None = None,
         entity: str | None = None,
         session_id: str | None = None,
         data: dict[str, Any] | None = None,
@@ -692,7 +785,22 @@ class VesselInterface:
         lost: it is carried on the enqueued message's ``from_user`` for
         attribution and mention detection.
         """
-        interface_path = build_interface_path(INTERFACE_NAME, environment, server)
+        # Prefer the path the open session was created with (so a perception
+        # lands on the exact same ``vessel/<game>/<world>`` scope the will beat
+        # and goals use); fall back to building one from the world token.
+        world_token = _slugify_world_token(world)
+        tracked_path = self._sessions.get(session_id) if session_id else None
+        # When the caller gave neither a session id nor an explicit world token
+        # (e.g. the en-route sighting collector, which only knows the game),
+        # reuse any tracked session already open for this ``environment`` so the
+        # perception lands on the exact same ``vessel/<game>/<world>`` scope the
+        # session was opened with — instead of forking a bare ``vessel/<game>``
+        # scope and a second session. Structural prefix match, no keyword logic.
+        if tracked_path is None and world_token is None:
+            tracked_path = self._tracked_path_for_environment(environment)
+        interface_path = tracked_path or build_interface_path(
+            INTERFACE_NAME, environment, world_token
+        )
         manager = get_vessel_session_manager()
 
         # Resolve/auto-open a session so experience is always buffered.
@@ -750,6 +858,7 @@ class VesselInterface:
         # attribute it to the acting player (falling back to the world itself).
         try:
             from core.chat_context_manager import add_message_to_context
+            from plugins.rift_vessel.vessel_base import is_ephemeral_event
 
             speaker = entity or f"{environment} world"
             speaker_id = entity or environment
@@ -765,12 +874,22 @@ class VesselInterface:
                 if is_player_chat
                 else {"vessel_perception": True, "vessel_event_type": event_type}
             )
+            # Separate *pure-log telemetry* (sightings/gather/proximity/spawn/
+            # movement/status) from durable *game-experience* (player chat,
+            # damage, death, self-monologue, ...). Ephemeral telemetry provides
+            # live ambient grounding via the in-memory perception ring but must
+            # NOT persist to ``chat_history_cache`` — otherwise the durable
+            # vessel history fills with log noise and is re-loaded every
+            # restart. A player chat carries an actor and is always durable.
+            # Structural (normalized event kind), never keyword matching.
+            is_pure_log = is_ephemeral_event(event_type) and not is_player_chat
             await add_message_to_context(
                 interface_path=interface_path,
                 message_text=summary,
                 sender_name=speaker,
                 sender_id=speaker_id,
                 metadata=perception_meta,
+                persist_to_db=not is_pure_log,
             )
         except Exception as exc:
             log_error(f"[vessel_interface] Failed to persist perception to chat: {exc}")
@@ -916,6 +1035,7 @@ class VesselInterface:
         environment: str,
         event_type: str,
         actor: str | None = None,
+        allowed_actions: set[str] | None = None,
     ) -> None:
         """Wrap a perception as a normal message and enqueue it (Fast Lane).
 
@@ -947,7 +1067,13 @@ class VesselInterface:
             # the queue's ``vessel_reflection`` band, jump ahead of ordinary
             # in-world player chat while yielding to any real emergency. Purely
             # structural (event kind), never keyword text.
-            is_reflection = event_type == "reflection"
+            #
+            # A **goal** turn is the dedicated single-purpose goal-setting beat:
+            # it shares the reflection band (standalone, prunes older autonomous
+            # beats, ranks at PRIORITY_REFLECTION) but its action allowlist is
+            # hard-restricted to set_goal/update_goal via ``allowed_actions``
+            # below. Structural (event kind), never keyword text.
+            is_reflection = event_type in ("reflection", "goal")
             # A damage-appraisal turn is the deliberate "I was just hurt — what
             # do I do?" cognition turn fired right after Synth took damage. It
             # must run standalone (never coalesced) and, via the queue's
@@ -999,11 +1125,23 @@ class VesselInterface:
                 entities=None,
                 reply_to_message=None,
             )
+            # A per-turn action restriction: when ``allowed_actions`` is given
+            # (the dedicated goal beat), pass it as ``context_memory`` so the
+            # prompt engine trims this turn's action catalog to exactly those
+            # actions (it reads ``context_memory["allowed_action_types"]`` with
+            # precedence over the vessel whitelist). This is the same mechanism
+            # Grillo uses for its restricted beats. When ``None`` we pass no
+            # context_memory, so the normal global context + vessel whitelist
+            # apply. Structural, keyword-free.
+            context_memory: dict[str, Any] | None = None
+            if allowed_actions:
+                context_memory = {"allowed_action_types": sorted(allowed_actions)}
             await message_queue.enqueue(
                 self,
                 wrapped,
                 interface_id=INTERFACE_NAME,
                 skip_mention_check=True,
+                context_memory=context_memory,
             )
         except Exception as exc:
             log_error(f"[vessel_interface] Failed to enqueue perception: {exc}")
@@ -1078,6 +1216,10 @@ class VesselInterface:
                 # earlier beat that reads the world state would clear it.
                 await self._maybe_run_damage_appraisal()
                 await self._maybe_run_reflection()
+                # Dedicated goal beat: when Synth has no goal at all, fire a
+                # turn that can ONLY set/update the goal (restricted allowlist),
+                # so a weak model cannot fall back to a passive verb and drift.
+                await self._maybe_run_goal_beat()
                 # Volition (may set a fresh goal), then motorics acts on it.
                 await self._maybe_run_will_beat()
                 # If volition left the goal without a reachable target/destination,
@@ -1090,6 +1232,11 @@ class VesselInterface:
                 # Concrete-doing cognition: map the free-text goal onto a real
                 # verb (gather/craft/place) — what actually accomplishes work.
                 await self._maybe_run_action_beat()
+                # Goal supervision (slow postflight): deterministically close a
+                # goal already satisfied by the live world/inventory, and arm a
+                # will-beat cue when a goal has sat unchanged too long. Closes
+                # the gap where Synth progresses physically but never completes.
+                await self._maybe_run_goal_debrief()
                 await self._maybe_run_motor_tick()
             except asyncio.CancelledError:
                 raise
@@ -1220,6 +1367,107 @@ class VesselInterface:
             event_type="reflection",
         )
 
+    async def _maybe_run_goal_beat(self) -> None:
+        """Author a goal with a turn that can ONLY set/update the goal.
+
+        A dedicated, single-purpose volition turn (AGENTS.md §5c). It fires only
+        while Synth has **no active goal at all**, and is the imperative
+        "commit an objective now" case. Unlike the general reflection pause —
+        which keeps the full vessel action catalog and, on a weak tool-calling
+        model, tends to fall back to a passive verb (observe/status/wait) — this
+        beat's action allowlist is hard-restricted to just
+        ``vessel_<world>_set_goal`` (and ``vessel_<world>_update_goal``), enforced
+        per-turn via ``context_memory["allowed_action_types"]`` in the prompt
+        engine (which takes precedence over the vessel whitelist). A turn that
+        can *only* set/update the goal cannot drift into a passive fallback, so
+        a goal is structurally guaranteed to be authored.
+
+        It runs as a normal Fast-Lane persona cognition turn (the persona/profile
+        is injected by the ordinary system-prompt machinery), shares the
+        reflection priority band and enqueue behaviour (standalone, prunes older
+        autonomous beats), but is throttled independently.
+
+        Fully guarded. Gated: (1) ``VESSEL_AUTONOMY_ENABLED`` on; (2) a session
+        active; (3) ``VESSEL_GOAL_BEAT_ENABLED`` on; (4) not currently in a
+        reflection pause; (5) there is genuinely no active goal (structural,
+        never keyword text); (6) no player active within the will-quiet window;
+        (7) the anti-thrash floor ``VESSEL_GOAL_BEAT_INTERVAL_SEC`` has elapsed.
+        """
+        try:
+            from core import vessel_beat
+        except Exception:
+            return
+
+        def _cfg(key: str, default: Any) -> Any:
+            return config_registry.get_value(
+                key, default, group="vessel", component="vessel"
+            )
+
+        if not vessel_beat.is_autonomy_enabled(_cfg):
+            return
+        if not vessel_beat.is_goal_beat_enabled(_cfg):
+            return
+
+        manager = get_vessel_session_manager()
+        if not manager.has_active_session():
+            return
+
+        now = asyncio.get_event_loop().time()
+
+        # Yield to an in-flight reflection pause: it is already dedicating an
+        # elevated turn to the goal, so a competing goal beat would only muddy
+        # it. The fast motor tick is not gated (the body keeps moving).
+        if self._reflecting and now < self._reflecting_until:
+            return
+
+        # Anti-thrash: never fire two goal beats back-to-back.
+        interval = vessel_beat.resolve_goal_beat_interval(_cfg)
+        if now - self._last_goal_beat_at < interval:
+            return
+
+        # A player addressing Synth in-world is answered reactively first; do
+        # not pre-empt them with a private goal turn. Structural (actor-based),
+        # never keyword matching; ``0`` disables the deferral.
+        quiet_sec = vessel_beat.resolve_will_quiet_sec(_cfg)
+        if quiet_sec > 0 and now - self._last_player_activity_at < quiet_sec:
+            return
+
+        world, world_state = await self._read_active_world_state()
+        if world is None or world_state is None:
+            return
+
+        # Structural trigger: only when there is genuinely no active goal —
+        # the case where committing one is imperative. Never inspects the goal's
+        # free-text description (no keyword logic).
+        goal = self._goal_from_world_state(world_state)
+        if goal is not None:
+            return
+
+        interface_path = self._decision_interface_path(world)
+        if interface_path is None:
+            return
+
+        prompt = vessel_beat.build_goal_prompt(world_state, world)
+        self._last_goal_beat_at = now
+        # Restrict this turn's action catalog to exactly the goal verbs, so the
+        # turn cannot fall back to a passive verb. World-agnostic (namespace from
+        # the world arg), structural, never keyword text.
+        allowed_actions = {
+            f"vessel_{world}_set_goal",
+            f"vessel_{world}_update_goal",
+        }
+        log_debug(
+            f"[vessel_interface] Goal beat for '{world}' "
+            f"(allowed={sorted(allowed_actions)})"
+        )
+        await self._enqueue_perception(
+            interface_path=interface_path,
+            summary=prompt,
+            environment=world,
+            event_type="goal",
+            allowed_actions=allowed_actions,
+        )
+
     async def _maybe_run_will_beat(self) -> None:
         """Enqueue a **volition** cognition turn when it is due (slow layer).
 
@@ -1290,6 +1538,21 @@ class VesselInterface:
         interface_path = self._decision_interface_path(world)
         if interface_path is None:
             return
+
+        # If the goal debrief armed a stall cue, surface it on this turn's world
+        # state so ``build_will_prompt`` can nudge Synth to reconsider a goal
+        # that has sat unchanged (e.g. one already completable with what it
+        # holds). Consumed once — disarm after arming the flag on ``extra``.
+        if self._goal_debrief_cue_armed:
+            try:
+                from core.vessel_goal_debrief import STALL_FLAG_KEY
+
+                extra = getattr(world_state, "extra", None)
+                if isinstance(extra, dict):
+                    extra[STALL_FLAG_KEY] = True
+            except Exception:  # pragma: no cover - defensive
+                pass
+            self._goal_debrief_cue_armed = False
 
         prompt = vessel_beat.build_will_prompt(world_state, world)
         self._last_will_beat_at = now
@@ -1384,6 +1647,140 @@ class VesselInterface:
             environment=world,
             event_type="action_beat",
         )
+
+    async def _maybe_run_goal_debrief(self) -> None:
+        """Supervise the single active vessel goal (slow postflight check).
+
+        A world-agnostic debrief (see ``core.vessel_goal_debrief`` and AGENTS.md
+        §5c) that closes the gap where Synth *progresses physically but never
+        completes a goal*. It runs on its own slow cadence and does two things,
+        both purely **structural** (never keyword/text intent detection):
+
+        * **(B) Auto-completion.** Ask the connector whether the active goal is
+          already satisfied by the live world/inventory
+          (``evaluate_goal_completion``). If so, close it via the world's
+          ``complete_active_goal`` hook — the deterministic outcome check the
+          cognitive beats were failing to make.
+        * **(A) Stall feedback.** Fingerprint the goal (id + step + updated_at);
+          when it sits unchanged for ``VESSEL_GOAL_DEBRIEF_STALL_TICKS`` checks,
+          arm a stall cue so the next will beat nudges Synth to reconsider the
+          goal (is it already done? change approach?).
+
+        Fully guarded so a failure never breaks the scheduler. Gated on
+        ``VESSEL_GOAL_DEBRIEF_ENABLED`` + a session active + the configured
+        interval elapsed. Fast Lane only — it never enqueues a cognition turn or
+        writes a diary; the auto-close is a direct goal-store write.
+        """
+        try:
+            from core import vessel_goal_debrief as vgd
+        except Exception:
+            return
+
+        def _cfg(key: str, default: Any) -> Any:
+            return config_registry.get_value(
+                key, default, group="vessel", component="vessel"
+            )
+
+        if not vgd.is_debrief_enabled(_cfg):
+            return
+
+        manager = get_vessel_session_manager()
+        if not manager.has_active_session():
+            return
+
+        now = asyncio.get_event_loop().time()
+        interval = vgd.resolve_debrief_interval(_cfg)
+        if now - self._last_goal_debrief_at < interval:
+            return
+        self._last_goal_debrief_at = now
+
+        world, world_state = await self._read_active_world_state()
+        if world is None or world_state is None:
+            return
+
+        connector = self._connected_connector(world)
+        if connector is None:
+            return
+
+        try:
+            goal = await connector.get_active_goal()
+        except Exception:
+            return
+        if not goal:
+            # No active goal to supervise — reset stall bookkeeping so a fresh
+            # goal starts its stall count clean.
+            self._goal_debrief_stall = {"sig": None, "count": 0}
+            return
+
+        # (B) Deterministic completion check against the live world/inventory.
+        try:
+            verdict = await connector.evaluate_goal_completion(goal, world_state)
+        except Exception:
+            verdict = {"satisfied": False}
+        if isinstance(verdict, dict) and verdict.get("satisfied"):
+            reason = str(verdict.get("reason") or "auto_completed")
+            try:
+                result = await connector.complete_active_goal(reason)
+            except Exception as exc:  # pragma: no cover - defensive
+                log_debug(f"[vessel_interface] goal debrief close failed: {exc}")
+                result = None
+            log_debug(
+                f"[vessel_interface] Goal debrief auto-completed goal for "
+                f"'{world}' (reason={reason}, item={verdict.get('item')}, "
+                f"result={result})"
+            )
+            # Goal closed — reset stall bookkeeping and disarm any stale cue.
+            self._goal_debrief_stall = {"sig": None, "count": 0}
+            self._goal_debrief_cue_armed = False
+            return
+
+        # (B2) History-based completion check. Many goals leave no inventory
+        # trace (placing a block, killing a mob, saying something), so the
+        # inventory verdict above never marks them done. Ask the world whether
+        # a *successful action actually taken this session* structurally
+        # matches the goal's concrete target (by canonical game id, never by
+        # parsing free text). Gated on VESSEL_GOAL_DEBRIEF_USE_HISTORY.
+        if vgd.is_debrief_history_enabled(_cfg) and hasattr(
+            connector, "evaluate_goal_completion_from_history"
+        ):
+            session_id, _path = self._resolve_session_for_environment(world)
+            if session_id:
+                try:
+                    hist = await connector.evaluate_goal_completion_from_history(
+                        goal, session_id, world_state
+                    )
+                except Exception:
+                    hist = {"satisfied": False}
+                if isinstance(hist, dict) and hist.get("satisfied"):
+                    reason = str(hist.get("reason") or "action_in_history")
+                    try:
+                        result = await connector.complete_active_goal(reason)
+                    except Exception as exc:  # pragma: no cover - defensive
+                        log_debug(
+                            f"[vessel_interface] goal debrief (history) close "
+                            f"failed: {exc}"
+                        )
+                        result = None
+                    log_debug(
+                        f"[vessel_interface] Goal debrief auto-completed goal "
+                        f"for '{world}' via history (reason={reason}, "
+                        f"event_type={hist.get('event_type')}, "
+                        f"item={hist.get('item')}, result={result})"
+                    )
+                    self._goal_debrief_stall = {"sig": None, "count": 0}
+                    self._goal_debrief_cue_armed = False
+                    return
+
+        # (A) Stall detection: fingerprint the goal and count unchanged checks.
+        stall_ticks = vgd.resolve_stall_ticks(_cfg)
+        stalled = vgd.update_stall_state(self._goal_debrief_stall, goal, stall_ticks)
+        if stalled:
+            self._goal_debrief_cue_armed = True
+            log_debug(
+                f"[vessel_interface] Goal debrief detected stall for '{world}' "
+                f"(sig={self._goal_debrief_stall.get('sig')}, "
+                f"count={self._goal_debrief_stall.get('count')}) — arming will cue"
+            )
 
     async def _maybe_run_damage_appraisal(self) -> None:
         """Enqueue a **post-damage appraisal** cognition turn when Synth is hurt.
@@ -1596,6 +1993,23 @@ class VesselInterface:
             value = 120.0
         return max(30.0, min(3600.0, value))
 
+    @staticmethod
+    def _resolve_goal_expand_retry(cfg: Any) -> float:
+        """Per-world cooldown before a *failed* goal expansion is retried.
+
+        Reads ``VESSEL_GOAL_EXPAND_RETRY_SEC`` (default 300 s, clamped
+        ``[30, 3600]``) so a Drone that exhausts its iteration budget without
+        committing a steps plan is retried after this interval rather than on
+        the very next scheduler tick. Fully guarded — any failure falls back to
+        the default.
+        """
+        try:
+            raw = cfg("VESSEL_GOAL_EXPAND_RETRY_SEC", 300)
+            value = float(raw)
+        except Exception:
+            value = 300.0
+        return max(30.0, min(3600.0, value))
+
     async def _run_drone_planner(self, world: str, goal: dict[str, Any]) -> None:
         """Body of the out-of-band drone planner (runs in its own task).
 
@@ -1767,6 +2181,17 @@ class VesselInterface:
         if self._expanded_goal_ids.get(world) == goal_id_int:
             return  # already expanded this exact goal
 
+        # Retry cooldown: after a failed expansion the de-dup marker is cleared
+        # so a later tick can retry — but only after VESSEL_GOAL_EXPAND_RETRY_SEC
+        # has elapsed, so a persistently-failing expansion does not respawn a
+        # Drone on every scheduler tick (a tight loop that burns cognition).
+        retry_sec = self._resolve_goal_expand_retry(_cfg)
+        now = asyncio.get_event_loop().time()
+        last_attempt = self._last_goal_expand_at.get(world, 0.0)
+        if last_attempt > 0.0 and now - last_attempt < retry_sec:
+            return  # still within the retry cooldown for this world
+
+        self._last_goal_expand_at[world] = now
         self._expanded_goal_ids[world] = goal_id_int
         task = asyncio.create_task(self._run_goal_expander(world, goal))
         self._goal_expand_tasks[world] = task
@@ -1776,14 +2201,41 @@ class VesselInterface:
         )
 
     async def _run_goal_expander(self, world: str, goal: dict[str, Any]) -> None:
-        """Body of the out-of-band goal-expansion drone (runs in its own task).
+        """Body of the out-of-band goal-expansion sub-agent (runs in its own task).
 
-        Builds a free-text objective asking a Drone to consult the world's
-        knowledge base (via ``vessel_<world>_lookup_knowledge``) and break the
-        goal into an ordered list of concrete sub-steps, committed through
-        ``vessel_<world>_update_goal`` (``steps=[...]``). The Drone context
-        carries **no** vessel ``interface_path`` so its agentic task is never
-        attributed to the embodiment turn (Fast-Lane invariant, AGENTS.md §5c).
+        Breaking a self-authored goal into an ordered plan is genuine reasoning
+        work, so this uses an **agent Drone** (``run_agent_drone``): a
+        task-scoped sub-agent that runs the bounded agentic loop with the full
+        **Agent** budget (``AGENT_MAX_ITERATIONS`` / ``AGENT_TURN_TIMEOUT_SEC``)
+        rather than the tight Drone budget — giving the model room to ask itself
+        questions, consult the world's knowledge base and iterate before
+        committing. It keeps every Drone safety property (single-level
+        delegation, tool allow-list, no nested spawning).
+
+        It asks the sub-agent to expand the goal into a **detailed, ordered
+        bullet list** of concrete sub-steps — taking nothing for granted, so
+        every tool, material, place or precondition the goal needs becomes its
+        own explicit sub-step placed before the step that uses it — and to
+        **commit early**: the turn's single deliverable is the committed plan,
+        so the sub-agent is told to build a solid ordered plan from what it
+        already knows and commit it through ``vessel_<world>_update_goal``
+        (``steps=[...]``) FIRST, then end the turn with ``attempt_completion``.
+        ``vessel_<world>_lookup_knowledge`` is allowed only for a genuine gap
+        (at most once or twice) — the previous open-ended "research in detail"
+        framing made the slow vessel cortex loop on lookups until the wall-clock
+        budget expired **without ever committing** ``update_goal``, leaving the
+        goal stepless. The plan is **grounded in Synth's real situation**:
+        the current inventory and position are read from the live ``WorldState``
+        and passed to the sub-agent so it plans from what Synth actually has and
+        where it is (the first step must be doable with the current inventory),
+        instead of an abstract textbook chain that assumes endgame materials. The
+        sub-agent context carries **no** vessel ``interface_path`` so its agentic
+        task is never attributed to the embodiment turn (Fast-Lane invariant,
+        AGENTS.md §5c).
+
+        There is **no** description-copy fallback: if the sub-agent does not
+        commit a real multi-step plan the goal is left stepless and a later tick
+        retries — a genuine ordered plan is the only accepted outcome.
 
         On success it re-notifies Synth: resetting ``_last_will_beat_at`` to 0
         forces the next scheduler tick to run a fresh will beat, so volition
@@ -1793,6 +2245,7 @@ class VesselInterface:
         committed = False
         try:
             from core.agent_core import get_agent_loop_manager
+            from core import vessel_beat
 
             description = ""
             if isinstance(goal, dict):
@@ -1800,34 +2253,102 @@ class VesselInterface:
                 if isinstance(raw, str):
                     description = raw.strip()
 
+            # Ground the plan in Synth's ACTUAL situation: read the live world
+            # state and surface the real inventory + position to the Drone. A
+            # plan made in the abstract ("how to craft a Conduit in general")
+            # ignores that Synth only holds a few pieces of wood and is on a
+            # coast — producing impossible, out-of-order steps. Reusing the same
+            # structural formatters as the will beat keeps it keyword-free.
+            inventory_txt = "unknown"
+            position_txt = "unknown"
+            try:
+                _, live_state = await self._read_active_world_state()
+                extra = getattr(live_state, "extra", None)
+                if isinstance(extra, dict):
+                    inventory_txt = vessel_beat._fmt_items(extra.get("inventory") or [])
+                    position_txt = vessel_beat._fmt_position(extra.get("position"))
+            except Exception:
+                pass
+
             drone_goal = (
                 f"You are embodied in the '{world}' world and have just set "
                 f'yourself this goal: "{description}". This is your own '
                 "personal goal — you chose it for yourself out of your own "
-                "will, nobody asked you to do it. Break it down into a "
-                "concrete, ordered plan of sub-steps a player would actually "
-                "follow. First consult the game's rules and knowledge base by "
-                f"calling vessel_{world}_lookup_knowledge with short queries "
-                "about what this goal needs (e.g. required tools, materials, "
-                "where things are found, prerequisite crafting). Use what you "
-                "learn — for example, that a resource must be mined with a "
-                "specific tool you must craft first — to order the steps "
-                "correctly (gather the prerequisite before the thing that "
-                "needs it). Then commit the plan by calling "
-                f"vessel_{world}_update_goal with 'steps' set to your ordered "
-                "list of short sub-step strings (each one a single concrete "
-                "action). Keep it to a handful of steps, grounded in the "
-                "knowledge you looked up — do NOT invent facts. Commit once, "
-                "then stop."
+                "will, nobody asked you to do it.\n\n"
+                "Your ACTUAL situation right now:\n"
+                f"- Inventory: {inventory_txt}\n"
+                f"- Position: {position_txt}\n\n"
+                "YOUR JOB: turn this goal into a detailed, ordered plan — a "
+                "bullet list of concrete sub-steps a player would actually "
+                "follow — and COMMIT that plan. Take nothing for granted: "
+                "everything the goal needs (each tool, material, place or "
+                "precondition) becomes its own explicit sub-step, placed "
+                "BEFORE the step that uses it.\n\n"
+                "This turn has exactly ONE deliverable: a committed plan. You "
+                "have only two useful tools and you MUST use them in this "
+                "order:\n"
+                f"  A) vessel_{world}_update_goal — call it ONCE with 'steps' "
+                "set to your ordered list of short sub-step strings (each a "
+                "single concrete action). This is the whole point of the turn.\n"
+                f"  B) attempt_completion — call it IMMEDIATELY after "
+                "update_goal succeeds, with a one-line summary. This is the "
+                "ONLY way to end the turn.\n\n"
+                "COMMIT EARLY, then stop. Do NOT keep researching forever. Your "
+                "FIRST action should be to commit a solid ordered plan with "
+                f"vessel_{world}_update_goal built from what you already know, "
+                "and then attempt_completion. A committed, imperfect plan is "
+                "infinitely better than no plan.\n\n"
+                f"You MAY call vessel_{world}_lookup_knowledge AT MOST once or "
+                "twice, and ONLY if you are genuinely unsure what a specific "
+                "prerequisite needs (e.g. what tool mines a block, what a "
+                "recipe requires). Look up the specific thing by its in-game "
+                "id, take the answer, and move straight to committing the "
+                "plan. Never loop on lookups — if you have already looked "
+                "something up, do NOT look it up again; commit the plan "
+                "instead.\n\n"
+                "PLAN QUALITY (apply from what you know; a lookup is only for a "
+                "genuine gap):\n"
+                "- Whenever the goal needs an object, a tool, a material, a "
+                "PLACE or any precondition you do not already have or have not "
+                "met, make OBTAINING or REACHING it its own earlier sub-step. "
+                "A precondition can be a thing (craft a pickaxe, gather wood) "
+                "or a condition (reach the beach, level the ground).\n"
+                "- Order the steps so each is reachable from the one before "
+                "it (gather the prerequisite before the thing that needs it). "
+                "The FIRST step must be doable immediately with the inventory "
+                "you hold right now, from where you are.\n"
+                "- Break big steps into small ones. 'Get glass for windows' is "
+                "not one step — it is: gather sand, build a furnace, get fuel, "
+                "smelt the sand, craft the glass. Prefer many small concrete "
+                "actions over a few vague ones.\n"
+                "- If the goal is far beyond your current means, write the "
+                "realistic steps that genuinely progress toward it from here "
+                "and stop where your means run out — do not fabricate a chain "
+                "of impossible endgame steps.\n\n"
+                f"Remember: update_goal (with a steps list) FIRST, then "
+                "attempt_completion. Do not end the turn any other way, and do "
+                "not end it without having committed the steps."
             )
 
             manager = get_agent_loop_manager()
-            # Restrict this out-of-band expander Drone to knowledge lookup +
-            # goal commit only. It must NEVER speak in-world: leaving an
-            # in-world ``vessel_<world>_say`` in its tool set let a broken/
-            # hallucinating cortex emit stray chatter (the "Mirtillo" bug).
-            # Structural allow-list — no keyword logic.
-            result = await manager.run_drone(
+            # Restrict this out-of-band expander to knowledge lookup + goal
+            # commit only. It must NEVER speak in-world: leaving an in-world
+            # ``vessel_<world>_say`` in its tool set let a broken/hallucinating
+            # cortex emit stray chatter (the "Mirtillo" bug). Structural
+            # allow-list — no keyword logic.
+            #
+            # Use an *agent* Drone (``run_agent_drone``), not the tight
+            # ``run_drone``: breaking a self-authored goal into an ordered plan
+            # is genuine reasoning work — the sub-agent must be able to ask
+            # itself questions, consult the knowledge base over several
+            # iterations and refine before committing. The 3-iteration Drone
+            # budget was too small for that (it timed out before ever emitting a
+            # parseable ``update_goal``). The agent Drone runs the same bounded
+            # loop with the full Agent budget (AGENT_MAX_ITERATIONS /
+            # AGENT_TURN_TIMEOUT_SEC) while keeping every Drone safety property
+            # (single-level delegation, the tool allow-list, no vessel
+            # interface_path so it is never attributed to the embodiment turn).
+            result = await manager.run_agent_drone(
                 goal=drone_goal,
                 allowed_tools={
                     f"vessel_{world}_lookup_knowledge",
@@ -1836,9 +2357,9 @@ class VesselInterface:
                 # Run the expander on the vessel cortex (VESSEL_CORTEX), not the
                 # generic agent cortex. AGENT_CORTEX often falls back to the
                 # browser-driven Base Cortex, which cannot complete this
-                # multi-step tool-calling turn within the Drone budget and times
-                # out at iteration 1 — so steps were never written. The vessel
-                # cortex is the same proper API engine that authors the goals.
+                # multi-step tool-calling turn — so steps were never written. The
+                # vessel cortex is the same proper API engine that authors the
+                # goals.
                 cortex_scope="vessel",
             )
             if isinstance(result, dict):
@@ -1861,16 +2382,41 @@ class VesselInterface:
             existing = self._goal_expand_tasks.get(world)
             if existing is not None and existing.done():
                 self._goal_expand_tasks.pop(world, None)
-            # Re-notify Synth via will: force the next tick to run a fresh will
-            # beat so volition re-enters with the now-detailed (steps-filled)
-            # goal. Only when the plan was actually committed, so a failed
-            # expansion does not spuriously reset the will-beat cadence.
             if committed:
+                # Re-notify Synth via will: force the next tick to run a fresh
+                # will beat so volition re-enters with the now-detailed
+                # (steps-filled) goal.
                 self._last_will_beat_at = 0.0
+                # A *successful* expansion resets the retry cooldown for this
+                # world so a subsequent *different* goal can be expanded on the
+                # next tick without waiting out the failure cooldown. The de-dup
+                # marker still prevents re-expanding this same goal.
+                self._last_goal_expand_at.pop(world, None)
                 log_debug(
                     f"[vessel_interface] Goal expanded for '{world}' — "
                     "re-notifying Synth via will beat."
                 )
+            else:
+                # The expansion did NOT commit a steps plan (e.g. the agent Drone
+                # hit its iteration budget with stop_reason=paused_max_iterations,
+                # or errored). Clear the de-dup marker for this world so a future
+                # tick can retry, instead of permanently marking the goal as
+                # "already expanded" and leaving it stepless forever.
+                goal_id = goal.get("id") if isinstance(goal, dict) else None
+                try:
+                    goal_id_int = int(goal_id) if goal_id is not None else None
+                except (TypeError, ValueError):
+                    goal_id_int = None
+                if (
+                    goal_id_int is not None
+                    and self._expanded_goal_ids.get(world) == goal_id_int
+                ):
+                    self._expanded_goal_ids.pop(world, None)
+                    log_debug(
+                        f"[vessel_interface] Goal expansion for '{world}' did "
+                        f"not commit steps (goal id={goal_id_int}); cleared "
+                        "de-dup marker so a later tick can retry."
+                    )
 
     async def _maybe_run_motor_tick(self) -> None:
         """Step the body toward the active goal when due (fast layer, no LLM).
@@ -1927,6 +2473,8 @@ class VesselInterface:
         if isinstance(result, dict) and result.get("acted"):
             log_debug(
                 f"[vessel_interface] motor tick: {result.get('action')} "
+                f"target={result.get('target')} target_kind={result.get('target_kind')} "
+                f"target_result={result.get('target_result')} "
                 f"reason={result.get('reason')} remaining={result.get('remaining')} "
                 f"dest={result.get('destination')} (interval={interval}s)"
             )
@@ -2209,6 +2757,25 @@ class VesselInterface:
         except Exception as exc:
             log_debug(f"[vessel_interface] active world lookup failed: {exc}")
         return None, None
+
+    def _connected_connector(self, world: str) -> Any | None:
+        """Return the live, connected connector for ``world`` (or ``None``).
+
+        Resolves the built connector instance the same way
+        :meth:`_read_active_world_state` does. Fully guarded.
+        """
+        try:
+            from core.vessel_registry import VESSEL_REGISTRY
+
+            instances = getattr(VESSEL_REGISTRY, "_instances", {}) or {}
+            connector = instances.get(world)
+            if connector is not None and getattr(connector, "is_connected", False):
+                return connector
+        except Exception as exc:
+            log_debug(
+                f"[vessel_interface] connector lookup failed for '{world}': {exc}"
+            )
+        return None
 
     def _decision_interface_path(self, world: str) -> str | None:
         """Return the ``vessel/…`` path to attribute the beat to.

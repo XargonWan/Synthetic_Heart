@@ -42,6 +42,12 @@ from core.core_initializer import register_plugin
 from core.logging_utils import log_error, log_info, log_warning
 from core.vessel_registry import VESSEL_REGISTRY
 from plugins.rift_vessel.vessel_base import VesselActionResult, WorldState
+from plugins.rift_vessel.vessel_whitelist import (
+    DEFAULT_RECON_WHITELIST as _DEFAULT_RECON_WHITELIST,
+)
+from plugins.rift_vessel.vessel_whitelist import (
+    DEFAULT_WHITELIST as _DEFAULT_ACTION_WHITELIST,
+)
 
 # ---------------------------------------------------------------------------
 # Config variables (hidden from Settings — the Vessel is configured via the
@@ -72,6 +78,45 @@ config_registry.get_value(
     description=(
         "Inactivity window before a Vessel session is closed and its buffered "
         "experience is compacted (in chunks) into the dedicated vessel_diary."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_ACTION_WHITELIST",
+    _DEFAULT_ACTION_WHITELIST,
+    value_type=str,
+    label="Vessel Action Whitelist (extra core actions)",
+    description=(
+        "Comma/newline-separated fnmatch wildcard patterns of the CORE-EXTRA "
+        "actions visible to SyntH while embodied in a world (e.g. 'message_*, "
+        "event, spawn_drone'). The Vessel's own verbs (vessel_*) and the "
+        "connected world's verbs (e.g. *_minecraft_*) are ALWAYS included and "
+        "cannot be edited here. Keeping the in-world action catalog lean stops "
+        "the system prompt from overrunning the downstream char budget, which "
+        "would otherwise erase the will/reflection prompt and make SyntH author "
+        "trivial goals. Leave empty to fall back to the scope-based default."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_RECON_WHITELIST",
+    _DEFAULT_RECON_WHITELIST,
+    value_type=str,
+    label="Vessel Recon Whitelist (preflight recon keys)",
+    description=(
+        "Comma/newline-separated fnmatch wildcard patterns of the recon KEYS "
+        "allowed to run during an in-world embodiment turn (the preflight "
+        "counterpart of the action whitelist). Only recon plugins whose "
+        "get_recon_key() matches participate in the combined recon LLM call; "
+        "the noisy research-oriented ones (web search, agent-intent, video, "
+        "channel resolver) are excluded so the weaker embodiment model does not "
+        "verbalise a 'do a web search' plan instead of acting in-world. The "
+        "default keeps language/tone hints, memory search, and any vessel_* "
+        "recon key. Leave empty to fall back to the built-in default."
     ),
     group="plugins",
     component="vessel_plugin",
@@ -136,6 +181,38 @@ config_registry.get_value(
         "longer) inactivity cooldown: this unblocks the message flow quickly "
         "when the client simply disconnects, so autonomous beats stop "
         "accumulating. Clamped to 5–3600."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_BASE_ENABLED",
+    True,
+    value_type=bool,
+    label="Bases / Home",
+    description=(
+        "When enabled, Synth can claim places in a world as its bases (homes) — "
+        "where it builds, stores things, shelters and sleeps — and remember "
+        "them across a session. The night-shelter survival reflex uses this: "
+        "instead of walling the body in wherever it happens to be standing "
+        "(which was burying Synth underground far from home), it first heads "
+        "back to the nearest base within the retreat radius, reusing the "
+        "ordinary movement. Disable to fall back to sheltering in place."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+)
+config_registry.get_value(
+    "VESSEL_BASE_RETREAT_RADIUS",
+    64,
+    value_type=int,
+    label="Base Retreat Radius (blocks)",
+    description=(
+        "How far (blocks) a registered base may be for the night-shelter reflex "
+        "to head back to it instead of sheltering in place. Wide enough that "
+        "coming home is worthwhile, bounded so the body does not sprint across "
+        "the map into fresh danger. Only used when Bases / Home is enabled."
     ),
     group="plugins",
     component="vessel_plugin",
@@ -242,6 +319,94 @@ config_registry.get_value(
     advanced=True,
 )
 config_registry.get_value(
+    "VESSEL_GOAL_DEBRIEF_ENABLED",
+    True,
+    value_type=bool,
+    label="Autonomous Goal Debrief",
+    description=(
+        "When enabled, a slow postflight check supervises Synth's single active "
+        "goal: it deterministically marks a goal complete when it is already "
+        "satisfied by what Synth holds or sees (closing the gap where Synth "
+        "progresses physically but never declares a goal done), and — when a "
+        "goal sits unchanged for too many checks — nudges the next will beat to "
+        "reconsider it. Structural only (never reads goal text as intent); "
+        "never runs a cognition turn or writes a diary. Only used when "
+        "Autonomous In-World Play is enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_GOAL_DEBRIEF_USE_HISTORY",
+    True,
+    value_type=bool,
+    label="Autonomous Goal Debrief — History Check",
+    description=(
+        "When enabled, and the fast inventory/world-state check did not already "
+        "satisfy the goal, the debrief also consults the session's own in-world "
+        "activity history and auto-completes the goal when a successful action "
+        "actually taken this session structurally matches the goal's concrete "
+        "target (e.g. placing/mining a block, killing a mob, crafting an item). "
+        "This closes the gap where a goal is fulfilled by an action that leaves "
+        "no lasting inventory trace. Purely structural (id-based matching on the "
+        "logged targets), never a text parse. Only used when Autonomous In-World "
+        "Play and the Autonomous Goal Debrief are both enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_GOAL_DEBRIEF_INTERVAL_SEC",
+    30,
+    value_type=int,
+    label="Autonomous Goal Debrief Interval (s)",
+    description=(
+        "Seconds between goal-debrief checks (clamped to 5–3600). Each check "
+        "compares the active goal against the live world/inventory to auto-"
+        "complete it, and advances the stall counter. Only used when Autonomous "
+        "In-World Play and the Autonomous Goal Debrief are both enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_GOAL_DEBRIEF_STALL_TICKS",
+    4,
+    value_type=int,
+    label="Autonomous Goal Debrief Stall Ticks",
+    description=(
+        "How many consecutive debrief checks a goal may stay unchanged "
+        "(same id, step and update time) before the debrief arms a stall cue "
+        "on the next will beat, prompting Synth to reconsider or change "
+        "approach (clamped to 2–100). Only used when Autonomous In-World Play "
+        "and the Autonomous Goal Debrief are both enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_CRAFT_CUE_TURNS",
+    15,
+    value_type=int,
+    label="Craft Shortfall Cue Turns",
+    description=(
+        "When a craft fails because Synth lacks the materials, the will/action "
+        "beats show a 'you wished to build X, you need have/need <material>' "
+        "hint so Synth gathers the missing intermediate item (e.g. planks) "
+        "before retrying. This sets how many turns that hint stays shown before "
+        "it self-clears (clamped to 1–200). The hint also clears early once the "
+        "missing material is obtained. Only used when Autonomous In-World Play "
+        "is enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
     "VESSEL_MOTOR_ENABLED",
     True,
     value_type=bool,
@@ -317,6 +482,39 @@ config_registry.get_value(
         "firing a reflection turn on every tick and starving everything else. "
         "Only used when Autonomous In-World Play and Autonomous Reflection "
         "Pause are enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_GOAL_BEAT_ENABLED",
+    True,
+    value_type=bool,
+    label="Autonomous Goal Beat (set-goal only)",
+    description=(
+        "When enabled, a dedicated single-purpose cognition turn fires whenever "
+        "Synth has no active goal at all. Unlike the general reflection pause, "
+        "this turn's action list is hard-restricted to just set/update the "
+        "goal — so a weaker model cannot fall back to a passive verb and drift, "
+        "and a goal is always authored. It runs as a normal persona turn, ranks "
+        "ahead of ordinary in-world chat, and never stops the body from moving. "
+        "Only used when Autonomous In-World Play is enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_GOAL_BEAT_INTERVAL_SEC",
+    45,
+    value_type=int,
+    label="Autonomous Goal Beat Interval (s)",
+    description=(
+        "Minimum seconds between two goal beats (clamped to 10–3600). Paces how "
+        "often the dedicated set-goal turn may fire while Synth is goal-less. "
+        "Only used when Autonomous In-World Play and the Autonomous Goal Beat "
+        "are both enabled."
     ),
     group="plugins",
     component="vessel_plugin",
@@ -451,6 +649,24 @@ config_registry.get_value(
         "is written back onto the goal and re-sent to Synth via a will beat so "
         "it can act on it. Never runs inside an embodiment turn (Fast Lane "
         "only). Only used when Autonomous In-World Play is enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_GOAL_EXPAND_RETRY_SEC",
+    300,
+    value_type=int,
+    label="Goal Plan Expansion: Retry Cooldown (s)",
+    description=(
+        "Per-world cooldown before a *failed* goal-expansion Drone is retried "
+        "(clamped to 30–3600). When a Drone exhausts its iteration budget "
+        "without committing a steps plan, the goal is retried after this "
+        "interval instead of on the very next scheduler tick — preventing a "
+        "tight respawn loop that would spin a fresh Drone every tick and burn "
+        "cognition. A *successful* expansion resets the cooldown immediately. "
+        "Only used when Goal Plan Expansion (Drone) is enabled."
     ),
     group="plugins",
     component="vessel_plugin",
@@ -596,6 +812,105 @@ config_registry.get_value(
     component="vessel_plugin",
     advanced=True,
 )
+config_registry.get_value(
+    "VESSEL_SP_ENGAGE_RATIO",
+    1.0,
+    value_type=float,
+    label="Self-Preservation: Engage Power Ratio",
+    description=(
+        "Fight/flee threshold on the ratio of Synth's own combat power (weapon "
+        "+ armor + health) to the mob's power (health + attack). At or above "
+        "this ratio an armed Synth engages; below it, it flees. 1.0 means "
+        "engage when at least evenly matched. Lower is braver (engage tougher "
+        "mobs); higher is more cautious. Clamped 0.2–5.0."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_SP_WEAK_MOB_POWER",
+    6.0,
+    value_type=float,
+    label="Self-Preservation: Weak-Mob Power Floor",
+    description=(
+        "A mob whose structural power is below this floor is considered trivial: "
+        "even a disarmed Synth turns and fights it barehanded instead of fleeing "
+        "everything. Raise to make Synth punch out tougher mobs while unarmed; "
+        "lower to make it flee more readily when disarmed."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_MORNING_EXIT_ENABLED",
+    True,
+    value_type=bool,
+    label="Self-Preservation: Morning Bunker Exit",
+    description=(
+        "When enabled, if Synth spent the night dug into a bunker with no "
+        "reachable base, the next morning it carves a walkable jump-up "
+        "staircase (one block up + one block forward per step) back to the "
+        "open sky instead of staying buried. Purely structural — it fires only "
+        "in daylight when the sky above is blocked and no registered base is "
+        "within retreat range; a reachable base means Synth has a home to walk "
+        "to, not a bunker to dig out of. Runs on the fast reflex layer (no LLM, "
+        "no diary)."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_STATICITY_WARD_ENABLED",
+    True,
+    value_type=bool,
+    label="Staticity Ward",
+    description=(
+        "When enabled, if Synth lingers in the same small area for too long — "
+        "regardless of whether it has a goal, and even while endlessly poking "
+        "an in-reach block — the body breaks the parking by marching off to a "
+        "fresh, distant spot. This is a broader guard than the tick-to-tick "
+        "stuck-body watchdog: it catches genuine stasis (no goal at all, or "
+        "standing still) that the other watchdog misses. Purely positional (no "
+        "goal text, no keywords), on the fast reflex layer (no LLM, no diary)."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_STATICITY_TICKS",
+    8,
+    value_type=int,
+    label="Staticity Ward: Idle Ticks",
+    description=(
+        "How many consecutive motor ticks the body may stay within the "
+        "staticity radius before the ward relocates it. With the default motor "
+        "interval (~3 s per tick) 8 ticks is roughly 24 s of standing in place. "
+        "Lower to relocate sooner, raise to tolerate longer pauses. Clamped "
+        "2–1000."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_STATICITY_RADIUS",
+    2.0,
+    value_type=float,
+    label="Staticity Ward: Radius (blocks)",
+    description=(
+        "Horizontal radius (blocks) that still counts as 'the same place'. "
+        "While the body stays within this radius of its anchor it accrues idle "
+        "ticks; stepping outside re-anchors and resets the counter, so the ward "
+        "never fires during normal travel. Clamped 0.5–32.0."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
 
 
 class VesselPlugin(AIPluginBase):
@@ -622,6 +937,10 @@ class VesselPlugin(AIPluginBase):
             "category": "Vessels",
             "icon": "icon.svg",
             "guide": "guide.md",
+            # Advisory dependency: the generic Goals plugin persists the
+            # self-authored in-world goals the Vessel autonomy loop reads/writes.
+            # Resolved lazily at runtime; absence degrades gracefully.
+            "depends_on": ["goals"],
         }
 
     # ------------------------------------------------------------------
@@ -1058,6 +1377,28 @@ class VesselPlugin(AIPluginBase):
             log_error(f"[vessel_plugin] Cannot load connector '{name}': {exc}")
             return VesselActionResult(ok=False, detail=f"connector_load_failed: {exc}")
 
+        # Seed the connector with this connect's resolved settings *before*
+        # opening the session so its world identity (see get_world_identity)
+        # already reflects any per-connect host/port override — the identity
+        # becomes the <world> path level and goal-store scope.
+        try:
+            setattr(connector, "_connect_settings", dict(settings))
+        except Exception:  # pragma: no cover - defensive
+            pass
+        # Resolve the per-world identity token (stable per concrete server) so
+        # progression (goals) is scoped per world. Guarded: a connector without
+        # the optional hook falls back to the legacy shared scope (None).
+        world_id: str | None = None
+        try:
+            getter = getattr(connector, "get_world_identity", None)
+            if callable(getter):
+                world_id = getter()
+        except Exception as exc:  # pragma: no cover - defensive
+            log_warning(
+                f"[vessel_plugin] get_world_identity failed for '{name}': {exc}"
+            )
+            world_id = None
+
         if getattr(connector, "is_connected", False):
             log_info(f"[vessel_plugin] connect_world: '{name}' already connected")
             # Ensure gameplay verbs are exposed even if the block was cached
@@ -1078,7 +1419,7 @@ class VesselPlugin(AIPluginBase):
                 and not iface.has_local_session(name)
             ):
                 try:
-                    reopened_id = await iface.begin_session(name)
+                    reopened_id = await iface.begin_session(name, world=world_id)
                     log_info(
                         f"[vessel_plugin] connect_world: reopened session for "
                         f"already-connected '{name}' (session={reopened_id})"
@@ -1105,6 +1446,7 @@ class VesselPlugin(AIPluginBase):
                     environment=getattr(event, "environment", name),
                     event_type=getattr(event, "event_type", "event"),
                     summary=getattr(event, "summary", ""),
+                    world=world_id,
                     entity=getattr(event, "actor", None),
                     session_id=session_id,
                     data=getattr(event, "data", None),
@@ -1116,7 +1458,7 @@ class VesselPlugin(AIPluginBase):
         # first event the connector emits during connect().
         if iface is not None and hasattr(iface, "begin_session"):
             try:
-                session_id = await iface.begin_session(name)
+                session_id = await iface.begin_session(name, world=world_id)
             except Exception as exc:
                 log_warning(f"[vessel_plugin] begin_session failed: {exc}")
                 session_id = None

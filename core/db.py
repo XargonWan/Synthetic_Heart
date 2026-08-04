@@ -1594,8 +1594,7 @@ _VESSEL_PG_INDEX_DDL: tuple[str, ...] = (
     " ON vessel_diary (created_at)",
     "CREATE INDEX IF NOT EXISTS idx_vessel_diary_environment"
     " ON vessel_diary (environment)",
-    "CREATE INDEX IF NOT EXISTS idx_vessel_diary_session"
-    " ON vessel_diary (session_id)",
+    "CREATE INDEX IF NOT EXISTS idx_vessel_diary_session ON vessel_diary (session_id)",
 )
 
 

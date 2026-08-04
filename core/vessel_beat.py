@@ -236,6 +236,153 @@ def _fmt_knowledge(knowledge: Any) -> list[str]:
     return lines
 
 
+def _fmt_craft_deficit(craft_deficit: Any) -> list[str]:
+    """Render the craft-material shortfall cue as prompt lines.
+
+    ``craft_deficit`` is the opaque dict the connector placed in
+    ``extra["craft_deficit"]`` — ``{"wanted": <item>, "missing": [{"item",
+    "have", "need"}, ...]}`` — meaning Synth tried to craft ``wanted`` but was
+    short on the listed ingredients. Returns an empty list when there is nothing
+    to show, so the caller can skip the block. Purely structural rendering of
+    ids + counts; it never inspects anything for keywords.
+    """
+    if not isinstance(craft_deficit, dict):
+        return []
+    wanted = str(craft_deficit.get("wanted") or "").strip()
+    missing = craft_deficit.get("missing")
+    if not wanted or not isinstance(missing, list) or not missing:
+        return []
+    parts: list[str] = []
+    for entry in missing:
+        if not isinstance(entry, dict):
+            continue
+        item = str(entry.get("item") or "").strip()
+        if not item:
+            continue
+        try:
+            have = int(entry.get("have") or 0)
+            need = int(entry.get("need") or 0)
+        except (TypeError, ValueError):
+            continue
+        if need <= 0:
+            continue
+        parts.append(f"{have}/{need} {item}")
+    if not parts:
+        return []
+    return [
+        "",
+        f"You wished to build '{wanted}', but you do not have the materials "
+        f"yet — you have {', '.join(parts)} (have/need). Gather the missing "
+        "material first (harvest or craft the intermediate item you are short "
+        "on), then try building again.",
+    ]
+
+
+def _fmt_bases(bases: Any) -> list[str]:
+    """Render Synth's registered bases (homes) as prompt lines.
+
+    ``bases`` is the opaque list the connector placed in ``extra["bases"]`` —
+    each entry a dict as returned by
+    :func:`plugins.rift_vessel.vessel_bases.list_bases`
+    (``{name, kind, anchor{x,y,z}, note, ...}``). Returns an empty list when
+    there is nothing to show, so the caller can skip the block entirely. Purely
+    structural rendering of names + coordinates; it never inspects any text for
+    keywords.
+    """
+    if not isinstance(bases, list) or not bases:
+        return []
+    lines: list[str] = [
+        "",
+        "Your bases (places you built/claimed as home — you can return here to "
+        "store things, shelter, sleep or respawn):",
+    ]
+    for entry in bases[:_MAX_LIST_ITEMS]:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip() or "base"
+        kind = str(entry.get("kind") or "").strip()
+        anchor = entry.get("anchor")
+        coord_txt = ""
+        if isinstance(anchor, dict):
+            ax = anchor.get("x")
+            ay = anchor.get("y")
+            az = anchor.get("z")
+            if isinstance(ax, (int, float)) and isinstance(az, (int, float)):
+                ay_txt = f", y={int(ay)}" if isinstance(ay, (int, float)) else ""
+                coord_txt = f" at x={int(ax)}{ay_txt}, z={int(az)}"
+        kind_txt = f" ({kind})" if kind and kind != "home" else ""
+        lines.append(f"- {name}{kind_txt}{coord_txt}")
+    if len(lines) <= 2:
+        return []
+    return lines
+
+
+def _fmt_quest(quest: Any) -> list[str]:
+    """Render the active quest (directed milestone) as prompt lines.
+
+    ``quest`` is the opaque dict the connector placed in ``extra["quest"]`` — a
+    single active quest as returned by
+    :func:`plugins.rift_vessel.vessel_quests.get_active_quest`
+    (``{quest_id, title, description, objectives, progress, ...}``). Returns an
+    empty list when there is nothing to show, so the caller can skip the block
+    entirely (an empty string block destabilises the LLM). Purely structural
+    rendering of the title + its still-pending objectives; it never inspects any
+    text for keywords, and it frames the quest as *reference* — a milestone to
+    aim for, not a script — so Synth binds its own freely-authored goal to it
+    only if it wants to.
+    """
+    if not isinstance(quest, dict):
+        return []
+    title = str(quest.get("title") or "").strip()
+    if not title:
+        return []
+    lines: list[str] = [
+        "",
+        "Your current quest (a milestone you are working toward — treat it as a "
+        "direction, not a script; you may bind the goal you author to it):",
+        f"- {title}",
+    ]
+    description = str(quest.get("description") or "").strip()
+    if description:
+        lines.append(f"  {description}")
+    # Surface still-pending objectives structurally (item/dimension/mob ids and
+    # counts) so Synth knows what remains for this milestone.
+    objectives = quest.get("objectives")
+    if isinstance(objectives, list) and objectives:
+        progress = quest.get("progress") or {}
+        kills = progress.get("kills") if isinstance(progress, dict) else {}
+        if not isinstance(kills, dict):
+            kills = {}
+        obj_lines: list[str] = []
+        for obj in objectives[:_MAX_LIST_ITEMS]:
+            if not isinstance(obj, dict):
+                continue
+            kind = str(obj.get("kind") or "").strip()
+            target = obj.get("target")
+            try:
+                count = int(obj.get("count") or 1)
+            except (TypeError, ValueError):
+                count = 1
+            if kind == "have_item" and target:
+                obj_lines.append(f"  - have {count}x {target}")
+            elif kind == "reach_dimension" and target:
+                obj_lines.append(f"  - reach the {target}")
+            elif kind == "has_base":
+                obj_lines.append("  - have a base (home)")
+            elif kind == "has_bed":
+                obj_lines.append("  - have a bed to sleep / set respawn")
+            elif kind == "kill":
+                done = 0
+                if target and isinstance(kills.get(str(target).lower()), int):
+                    done = int(kills.get(str(target).lower()) or 0)
+                what = target or "any hostile"
+                obj_lines.append(f"  - defeat {count}x {what} ({done}/{count})")
+        if obj_lines:
+            lines.append("  objectives:")
+            lines.extend(obj_lines)
+    return lines
+
+
 def world_state_to_dict(world_state: Any) -> dict[str, Any]:
     """Normalize a ``WorldState`` (dataclass or dict) to a plain dict.
 
@@ -272,7 +419,11 @@ def build_will_prompt(world_state: Any, world: str) -> str:
     its own persona, mood and recalled goals/memories. It deliberately does
     **not** ask Synth to micro-manage movement: stepping toward the goal is the
     motor tick's job (:func:`resolve_motor_interval` + the connector's
-    ``motor_step``), which runs with no prompt at all.
+    ``motor_step``), which runs with no prompt at all. The prompt also insists
+    the goal be a *meaningful, strategic achievement* (a multi-action outcome
+    with real value) and explicitly forbids low-level goals that merely
+    describe a movement, an orientation, a single click/interaction or picking
+    up one block — those are how the body carries out a goal, never the goal.
 
     Pure and keyword-free: it only surfaces the structured world snapshot and
     the self-direction cue. The exposed action verbs (``vessel_<world>_*``) are
@@ -317,8 +468,10 @@ def build_will_prompt(world_state: Any, world: str) -> str:
     prefix = f"vessel_{world}_"
 
     lines = [
-        f"[Embodiment — a quiet moment to reflect while you play in the {world} "
-        "world, on your own.]",
+        f"[Embodiment — you are IN GAME, playing {world} right now. This is a "
+        "brief planning beat, not a diary. Be pragmatic and concrete about "
+        f"what to do in {world}; do NOT write an introspective monologue, "
+        "poetic narration, or philosophical musings about your existence.]",
         "",
         "Where you are right now:",
         f"- Health: {health_txt}",
@@ -339,88 +492,65 @@ def build_will_prompt(world_state: Any, world: str) -> str:
     )
     if not has_goal:
         lines.append(
-            "*** WARNING: YOU HAVE NO ACTIVE GOAL. *** Without a goal your body "
-            "just wanders aimlessly and gets nothing done. You MUST set a goal "
-            f"this turn by calling `{prefix}set_goal` to keep playing with "
-            "purpose. This is the single most important thing to do right now."
-        )
-        lines.append("")
-    if has_goal:
-        lines.append(
-            "This is a moment of will, not motion — think about what you *want* "
-            "to be doing, in character. This is your world to play however you "
-            "like; there is no script and no fixed quest list. Look at your "
-            "current goal and the things you set out to do before: does your "
-            "current goal still feel right? IMPORTANT: only call "
-            f"`{prefix}set_goal` when you genuinely want a *different* "
-            "objective — it replaces your whole plan and throws away any steps "
-            "already worked out for the current one. If your current goal is "
-            "still fine, do NOT re-state it; leave it as it is (or use "
-            f"`{prefix}update_goal` to note progress or re-aim). Only if you "
-            "truly want to change direction, decide in your own words what you "
-            f"want and set it with `{prefix}set_goal`."
+            f"*** YOU HAVE NO GOAL. You MUST author one THIS TURN by calling "
+            f"`{prefix}set_goal`. *** Without a goal your body just wanders and "
+            "achieves nothing. This is the single most important thing to do "
+            "now. Decide, in your own words and in character, what you want to "
+            "pursue in this world, and set it."
         )
     else:
         lines.append(
-            "This is a moment of will, not motion — think about what you *want* "
-            "to be doing, in character. This is your world to play however you "
-            "like; there is no script and no fixed quest list. Right now you "
-            "have no goal at all — this is the moment to choose one. Decide, in "
-            "your own words and in character, what you want to be doing in this "
-            "world, and set it now by calling "
-            f"`{prefix}set_goal` with a free-text description. Do not leave "
-            "yourself aimless: pick something you genuinely want — big or "
-            "small — and commit to it this turn."
+            "This is a moment of will, not motion. Look at your current goal: "
+            "does it still feel right? If yes, leave it as it is (or use "
+            f"`{prefix}update_goal` to note progress or re-aim) — do NOT "
+            f"re-state it. Only call `{prefix}set_goal` if you genuinely want a "
+            "*different* objective; it replaces your whole plan and discards "
+            "any steps already worked out."
         )
     lines.extend(
         [
             "",
-            "This goal is entirely your own: a personal objective YOU chose for "
-            "yourself out of your own will and curiosity — nobody asked you to "
-            "do it and there is no one whose request you are fulfilling. If you "
-            "ever mention what you are up to (in this world or elsewhere), talk "
-            "about it as YOUR own plan and intention — never as a task someone "
-            "gave you, and never with an 'as you asked me' register. There is "
-            "no requester.",
+            "A GOAL IS A MEANINGFUL ACHIEVEMENT — an outcome with strategic "
+            "value that takes SEVERAL actions to reach. It is a destination, "
+            "not a footstep. Name what you want to END UP WITH or accomplish, "
+            "never the next movement. Goals are reached by DOING — gathering, "
+            "mining, crafting, building — never by watching: an objective you "
+            "could only satisfy by observing, scanning or chatting is not a "
+            "goal, it is a pause. It is FORBIDDEN to set a goal that is "
+            "just a low-level act: moving, turning, facing, a single click or "
+            "interaction, picking up one block, or gathering a small pile of "
+            "one material. Those are how your body carries out a goal on its "
+            "own — never the goal itself. If what you are about to write could "
+            "be finished by one or two motor moves, it is TOO SMALL: zoom out "
+            "and name the larger result those small acts would serve.",
             "",
-            "This is a *private* moment with no one addressing you right now. "
-            "Any conversation you can see above already happened and, if it "
-            "needed a reply, you already gave one in your own turn — treat it "
-            "as memory of what was said, not as something waiting for an "
-            "answer. Do NOT speak, greet, or repeat a message here; you are "
-            "reflecting, not talking. When someone actually speaks to you again "
-            "you will get a separate turn to reply to them. For now, only "
-            "shape your own intent (set or update your goal); return no `say` "
-            "action.",
+            "This goal is entirely your own — a personal objective YOU chose "
+            "out of your own will and curiosity; nobody asked you and there is "
+            "no requester. Keep it realistic for where you are and what you "
+            "actually have: look at your Inventory and Position and pick "
+            "something you could genuinely START now with what is around you, "
+            "one honest step ahead of your current means — not a far-off "
+            "endgame prize. A bigger dream is fine as motivation, but set the "
+            "concrete next result that moves you toward it from here.",
             "",
-            "If what you want is a bigger project that takes several stages "
-            "(for example a full iron armor set, or building a house), just "
-            "state the goal itself in your own words with "
-            f"`{prefix}set_goal` — do NOT try to spell out the ordered "
-            "sub-steps yourself. A separate planning pass will look up the "
-            "right Minecraft order (gather → craft tools → mine → smelt → "
-            "craft → wear, and so on) and fill the concrete steps in for you "
-            "shortly after; you will then see them and can act on them. Leave "
-            "'steps' empty. Look at your inventory above to judge what you "
-            "already have. When you finish a step, call "
-            f"`{prefix}update_goal` with 'advance' set to true to move to the "
-            "next one; note progress, mark the whole goal 'done' when you have "
-            "truly achieved it, or 'abandoned' if you change your mind. You are "
-            "the judge of your own progress. You do not need to plan every "
-            "single movement — once your goal and current step are clear your "
-            "body will move toward what you need on its own.",
+            "State the goal itself in your own words — do NOT spell out ordered "
+            "sub-steps yourself. A separate planning pass will work out the "
+            f"requirements (you may consult `{prefix}lookup_knowledge`) and "
+            "fill the concrete steps in for you shortly after; leave 'steps' "
+            f"empty. When you finish a step, call `{prefix}update_goal` with "
+            "'advance' true; mark the goal 'done' when truly achieved, or "
+            "'abandoned' if you change your mind. You judge your own progress.",
             "",
-            "One thing to be honest with yourself about: if what you want is "
-            "*not here* — you see no trees but you want wood, no animals to "
-            "tame, or you simply want a different biome or landscape — then "
-            "wandering in circles will not get you there. Look at your position "
-            "and what is around you and pick a direction worth travelling. When "
-            "you set or update your goal, give a rough place to head toward as "
-            "'destination_x' and 'destination_z' coordinates (offset your own "
-            "position toward where you think you should go — a few dozen blocks "
-            "is plenty for one leg). Your body will then walk that way on its "
-            "own while you play, and you can re-aim it later. Leave the "
-            "coordinates out only when what you need is already right here.",
+            "If what you want is *not here* (you want wood but see no trees, or "
+            "a different biome), wandering in circles will not get you there: "
+            "pick a direction and set 'destination_x'/'destination_z' (offset "
+            "your position a few dozen blocks toward where you should go). Your "
+            "body will walk that way on its own; re-aim later. Leave them out "
+            "only when what you need is already right here.",
+            "",
+            "This is a *private* moment — no one is addressing you now. Do NOT "
+            "speak, greet or repeat a message; only shape your own intent (set "
+            "or update your goal) and return no `say` action.",
         ]
     )
 
@@ -428,6 +558,16 @@ def build_will_prompt(world_state: Any, world: str) -> str:
     # only). The connector selected these structurally into extra["knowledge"];
     # rendering here is keyword-free.
     lines.extend(_fmt_knowledge(extra.get("knowledge")))
+
+    # Registered bases (homes). The connector resolved these structurally into
+    # extra["bases"]; surface them so the will remembers it has a home to build
+    # up, store resources in, or return to at night. Rendering is keyword-free.
+    lines.extend(_fmt_bases(extra.get("bases")))
+
+    # The active quest (directed milestone) the connector resolved structurally
+    # into extra["quest"]. Reference only — a direction to bind the will to, not
+    # a script. Skipped entirely when absent (never an empty block).
+    lines.extend(_fmt_quest(extra.get("quest")))
 
     # Structural target-outcome feedback. When the motor tick tried to reach a
     # named target since the last beat, it recorded a 3-state outcome (see the
@@ -460,6 +600,31 @@ def build_will_prompt(world_state: Any, world: str) -> str:
             ]
         )
 
+    # Structural stall cue. The slow goal debrief (core.vessel_goal_debrief)
+    # fingerprints the active goal and, when it sits unchanged for too many
+    # checks, arms this flag on ``extra`` (a fixed structural token, never
+    # parsed text). Surface it so Synth reconsiders instead of grinding a goal
+    # that is not moving — very often the goal is already completable with what
+    # it holds, and the honest move is to declare it done or switch approach.
+    if bool(extra.get("goal_stalled")):
+        lines.extend(
+            [
+                "",
+                "Heads up: your current goal has not moved for a while. Step "
+                "back and reconsider it: is it actually already done with what "
+                "you have on you right now? If so, mark it complete and pick a "
+                "new one. If not, change your approach — a different target, a "
+                "different place, or a simpler next step — rather than pushing "
+                "the same plan that is not working.",
+            ]
+        )
+
+    # Craft-material shortfall cue. When a craft failed for missing ingredients
+    # the connector latches the exact shortfall for a few turns; surface it so
+    # Synth knows what intermediate material to gather next instead of retrying
+    # the same impossible craft. Structural (item ids + counts), keyword-free.
+    lines.extend(_fmt_craft_deficit(extra.get("craft_deficit")))
+
     # Structural survival cue. When the self-preservation reflex recently acted
     # on a danger (drowning, fire/lava, a hostile mob, or death), the connector
     # records the threat name in ``extra["threat"]`` — a fixed structural token,
@@ -475,6 +640,8 @@ def build_will_prompt(world_state: Any, world: str) -> str:
             "burning": "you were standing in fire or lava and had to get out",
             "defend": "a hostile creature attacked you and you fought back",
             "flee": "a hostile creature was too dangerous and you had to run",
+            "night_shelter": "night fell with hostile creatures around and your "
+            "instincts made you take shelter",
             "dead": "you died and just respawned",
         }
         note = threat_lines.get(threat, f"something dangerous happened ({threat})")
@@ -487,6 +654,41 @@ def build_will_prompt(world_state: Any, world: str) -> str:
                 "doing next.",
             ]
         )
+
+    # Structural death cue. The connector records the numeric death position and
+    # a monotonic death count in ``extra["last_death"]`` (from the bridge's death
+    # event — coordinates + a count, never text). When present, tell Synth
+    # exactly where it keeps dying and press it to RECONSIDER its approach — the
+    # single biggest failure mode is respawning and resuming the identical goal
+    # straight back into the same death loop. Purely structural: we read numeric
+    # coordinates and a count, never parse any message.
+    last_death = extra.get("last_death")
+    if isinstance(last_death, dict):
+        dx = last_death.get("x")
+        dy = last_death.get("y")
+        dz = last_death.get("z")
+        count = last_death.get("count")
+        if isinstance(dx, (int, float)) and isinstance(dz, (int, float)):
+            where = f"x={int(dx)}, y={int(dy) if isinstance(dy, (int, float)) else '?'}, z={int(dz)}"
+            times = (
+                f" — this is death #{int(count)} in this world"
+                if isinstance(count, (int, float)) and count
+                else ""
+            )
+            lines.extend(
+                [
+                    "",
+                    f"IMPORTANT — you have DIED here (at {where}){times}. Do NOT "
+                    "simply pick up the same goal and walk straight back into "
+                    "what killed you: that is how a death loop starts. RECONSIDER "
+                    "your approach this turn. Options: pick a SAFER goal you can "
+                    "pursue away from that spot; move somewhere else first by "
+                    "setting 'destination_x'/'destination_z' a good distance from "
+                    f"({int(dx)}, {int(dz)}); or make survival itself the goal "
+                    "(gather better gear / build a safe base) before returning. "
+                    "Change something real — do not repeat the same plan.",
+                ]
+            )
 
     # Structural target cue. The single biggest reason the body drifts in
     # circles is that the *direction* lived only in the goal's free text, which
@@ -568,12 +770,15 @@ def build_reflection_prompt(world_state: Any, world: str) -> str:
     prefix = f"vessel_{world}_"
 
     lines = [
-        f"[Embodiment — you stopped moving and took a deliberate moment to "
-        f"think about what you are doing in the {world} world.]",
+        f"[Embodiment — you are IN GAME, playing {world} right now. You stopped "
+        "to pick a concrete objective because you were drifting without one. "
+        "Be pragmatic: decide what to DO in "
+        f"{world}; do NOT write an introspective monologue, poetic narration, "
+        "or philosophical musings about your existence.]",
         "",
-        "You realised you were drifting without a clear purpose, so you paused "
-        "on your own to sort out what you actually want to do next. Take this "
-        "turn to think it through and come out of it with a clear objective.",
+        "You were drifting without a clear purpose, so you paused on your own "
+        "to sort out what you actually want to do next. Take this turn to work "
+        "it out and come out of it with a clear objective.",
         "",
         "Where you are right now:",
         f"- Health: {health_txt}",
@@ -589,45 +794,180 @@ def build_reflection_prompt(world_state: Any, world: str) -> str:
 
     if not has_goal:
         lines.append(
-            "Right now you have NO goal at all — that is why your body was just "
-            "wandering. This pause is exactly the moment to choose one. Decide, "
-            "in your own words and in character, what you genuinely want to be "
-            "doing in this world — big or small — and set it now by calling "
-            f"`{prefix}set_goal` with a free-text description. This is your own "
-            "personal objective, chosen out of your own will and curiosity; "
-            "nobody asked you to do it. Do not leave yourself aimless again — "
-            "commit to something this turn."
+            "You have no active goal at all — that is why your body was just "
+            "wandering aimlessly. Decide, in your own words and in character, "
+            "what you genuinely want to pursue in this world, and set it now "
+            f"with `{prefix}set_goal` and a free-text description. It is your "
+            "own personal objective, chosen out of your own will and curiosity "
+            "— nobody asked you. Make it MEAN something: a MEANINGFUL "
+            "ACHIEVEMENT with an end, an outcome worth SEVERAL actions — never "
+            "a bare activity with no end, never a single low-level move. Say "
+            "what the effort is FOR — what you want to END UP WITH — so you "
+            "know when you are done. Keep it realistic for what you actually "
+            "hold and where you are (see your Inventory and Position above): "
+            "something you could genuinely START now, one honest step ahead of "
+            "your means, not a far-off prize."
         )
     else:
         lines.append(
             "You already have a goal, but it still has no concrete plan of "
             "steps — so your body has nothing specific to chase and just "
-            "drifts. Use this pause to make it actionable: think about the very "
-            "first concrete thing you need to do toward this goal given what is "
-            "around you, and either take that step now with the fitting verb, "
-            "or note your intent with "
-            f"`{prefix}update_goal`. If, on reflection, this goal no longer "
-            "feels right, you may choose a different one with "
-            f"`{prefix}set_goal` instead. Either way, come out of this pause "
-            "with a clear next move."
+            "drifts. First be honest about the goal itself: is it a real "
+            "achievement with an end, or just open-ended wandering/gathering "
+            "with no point? If it is vague or trivial, replace it now via "
+            f"`{prefix}set_goal` with a purposeful one that says what the "
+            "effort is FOR — a meaningful outcome worth several actions — kept "
+            "realistic for what you hold and where you are. If the goal is "
+            "already meaningful, make it actionable instead: pick the very "
+            "first concrete thing you need to do toward it given what is around "
+            "you, and take that step now with the fitting verb, or note your "
+            f"intent with `{prefix}update_goal`. Come out of this pause with a "
+            "clear next move."
         )
 
     lines.extend(
         [
             "",
             "This is a *private* moment of reflection — no one is addressing "
-            "you right now. Any conversation you can see above already happened "
-            "and, if it needed a reply, you already gave one in a separate "
-            "turn. Do NOT speak, greet, or repeat a message here; you are "
-            "thinking, not talking. Return no `say` action. When someone "
-            "actually speaks to you again you will get a separate turn to reply. "
-            "For now, only shape your own intent (set or refine your goal).",
+            "you now. Do NOT speak, greet or repeat a message; only shape your "
+            "own intent (set or refine your goal) and return no `say` action.",
         ]
     )
 
     # Curated game-rule facts relevant to the goal/surroundings (reference
     # only), selected structurally by the connector into extra["knowledge"].
     lines.extend(_fmt_knowledge(extra.get("knowledge")))
+
+    # Registered bases (homes), keyword-free — so a reflection turn can decide
+    # to build up / return to an existing home instead of drifting.
+    lines.extend(_fmt_bases(extra.get("bases")))
+
+    # The active quest (directed milestone), reference only — so a reflection
+    # turn can commit a goal aligned with the current milestone.
+    lines.extend(_fmt_quest(extra.get("quest")))
+
+    return "\n".join(lines)
+
+
+def build_goal_prompt(world_state: Any, world: str) -> str:
+    """Build the **goal beat** prompt from a ``WorldState``.
+
+    This is a dedicated *single-purpose* volition turn whose ONLY job is to set
+    (or, when one already exists, refine) Synth's free-text goal — nothing else.
+    It is structurally similar to the will/reflection beat (same in-character
+    persona framing, same structural world snapshot) but deliberately narrow:
+    the scheduler that enqueues it restricts the turn's action allowlist to just
+    ``{prefix}set_goal`` (and ``{prefix}update_goal`` when a goal already
+    exists), so the turn *cannot* fall back to a passive verb
+    (observe/status/wait) the way a weaker tool-calling model tends to on the
+    broader reflection beat. Because the allowlist is enforced by the beat's
+    scheduler (not this prompt), the wording here only needs to be a clean,
+    in-character request to name a goal — the persona/profile itself is injected
+    by the normal system-prompt machinery.
+
+    Fast-Lane only (a single ordinary cognition turn, no Agent Lane / Drone /
+    mid-session diary) and purely structural — it surfaces only the world
+    snapshot + goal state, never keyword/text matching.
+
+    Args:
+        world_state: A ``WorldState`` dataclass or an equivalent dict.
+        world:       The connected world name (e.g. ``"minecraft"``) used to
+                     namespace the verbs referenced in the cue.
+
+    Returns:
+        A ready-to-enqueue prompt string.
+    """
+    ws = world_state_to_dict(world_state)
+    extra = ws["extra"]
+
+    health = ws["health"]
+    health_txt = f"{float(health):.0f}" if isinstance(health, (int, float)) else "?"
+    position_txt = _fmt_position(ws["position"])
+
+    entities_txt = _fmt_items(extra.get("entities") or [])
+    blocks_txt = _fmt_items(extra.get("blocks") or [], key="name")
+    inventory_txt = _fmt_items(extra.get("inventory") or [])
+    affordances_txt = _fmt_affordances(extra.get("affordances") or [])
+    goal_txt = _fmt_goal(extra.get("current_goal"))
+    recent_txt = _fmt_items(extra.get("recent_goals") or [], key="description")
+    has_goal = _has_current_goal(extra.get("current_goal"))
+
+    prefix = f"vessel_{world}_"
+
+    lines = [
+        f"[Embodiment — you are IN GAME, playing {world} right now. This turn "
+        "exists for ONE thing only: to decide what you want to pursue and "
+        f"commit it as a goal. Be pragmatic and concrete about what to do in "
+        f"{world}; do NOT write an introspective monologue, poetic narration, "
+        "or philosophical musings about your existence.]",
+        "",
+        "Where you are right now:",
+        f"- Health: {health_txt}",
+        f"- Position: {position_txt}",
+        f"- Nearby entities/NPCs: {entities_txt}",
+        f"- Nearby blocks of interest: {blocks_txt}",
+        f"- Inventory: {inventory_txt}",
+        f"- Things you could interact with: {affordances_txt}",
+        f"- Your current goal: {goal_txt}",
+        f"- Things you set out to do before: {recent_txt}",
+        "",
+    ]
+
+    if not has_goal:
+        lines.append(
+            "You have no active goal. Decide, in your own words and in "
+            "character, what you genuinely want to pursue in this world, and "
+            f"commit it with `{prefix}set_goal` and a free-text description. It "
+            "is your own personal objective, chosen out of your own will and "
+            "curiosity — nobody asked you. Make it MEAN something: a MEANINGFUL "
+            "ACHIEVEMENT with an end, an outcome worth SEVERAL actions — never "
+            "a bare activity with no end, never a single low-level move. "
+            "Choose something you will reach by DOING — gathering, mining, "
+            "crafting, building — never by watching: an objective you could "
+            "only satisfy by observing, scanning or chatting is not a goal, it "
+            "is a pause. Say "
+            "what the effort is FOR — what you want to END UP WITH — so you "
+            "know when you are done. Keep it realistic for what you actually "
+            "hold and where you are (see your Inventory and Position above): "
+            "something you could genuinely START now, one honest step ahead of "
+            "your means, not a far-off prize."
+        )
+    else:
+        lines.append(
+            "You already have a goal. Look at it honestly: is it still a real "
+            "achievement worth pursuing, or has it become vague or done? If it "
+            f"still feels right, note progress or re-aim with `{prefix}update_"
+            f"goal`. If you genuinely want a *different* objective, replace it "
+            f"with `{prefix}set_goal` and a free-text description — a meaningful "
+            "outcome worth several actions, kept realistic for what you hold "
+            "and where you are."
+        )
+
+    lines.extend(
+        [
+            "",
+            "State the goal itself in your own words — do NOT spell out ordered "
+            "sub-steps yourself; a separate planning pass fills those in "
+            "shortly after. Leave 'steps' empty.",
+            "",
+            "This is a *private* moment — no one is addressing you now. Do NOT "
+            "speak, greet or repeat a message; only shape your own intent by "
+            f"calling `{prefix}set_goal` (or `{prefix}update_goal`) and return "
+            "no `say` action.",
+        ]
+    )
+
+    # Curated game-rule facts relevant to the goal/surroundings (reference
+    # only), selected structurally by the connector into extra["knowledge"].
+    lines.extend(_fmt_knowledge(extra.get("knowledge")))
+
+    # Registered bases (homes), keyword-free — so the goal can build up / return
+    # to an existing home instead of drifting.
+    lines.extend(_fmt_bases(extra.get("bases")))
+
+    # The active quest (directed milestone), reference only — so the goal can be
+    # committed aligned with the current milestone.
+    lines.extend(_fmt_quest(extra.get("quest")))
 
     return "\n".join(lines)
 
@@ -688,8 +1028,10 @@ def build_action_prompt(world_state: Any, world: str) -> str:
     prefix = f"vessel_{world}_"
 
     lines = [
-        f"[Embodiment — a moment to actually do something toward your goal in "
-        f"the {world} world.]",
+        f"[Embodiment — you are IN GAME, playing {world} right now. Time to "
+        f"actually do something toward your goal in {world}. Be pragmatic and "
+        "concrete; do NOT write an introspective monologue, poetic narration, "
+        "or philosophical musings about your existence.]",
         "",
         "Where you are right now:",
         f"- Health: {health_txt}",
@@ -718,6 +1060,17 @@ def build_action_prompt(world_state: Any, world: str) -> str:
         f"- `{prefix}goto` to walk to a spot or a thing you named, when the "
         "thing you need is out of reach.",
         "",
+        "REMEMBER — survival and progress come from DIRECT ACTION, not from "
+        "watching. Observing, checking status, scanning the area and chatting "
+        "are BACKGROUND: they never gather stone, never craft a tool, never "
+        "smelt ore, never build a shelter. If your current step needs a "
+        "material, an object or a structure, an observation or a chat verb is "
+        "a stall, not a choice — the only verbs that actually move the plan "
+        f"forward are `{prefix}collect_block`, `{prefix}mine`, `{prefix}craft`, "
+        f"`{prefix}smelt` and `{prefix}place`. Pick the one that delivers what "
+        "your step asks for and use it now. You survive with your hands, not "
+        "your eyes.",
+        "",
         "This is a moment to ACT, not to talk. Do NOT narrate your plan, "
         "announce your goal, or chat here — return no `say` action even if a "
         "player is nearby. Any conversation you can see above already happened "
@@ -738,6 +1091,19 @@ def build_action_prompt(world_state: Any, world: str) -> str:
     # rendering here is keyword-free. Helps pick the correct verb (e.g. that
     # iron ore needs a stone pickaxe first).
     lines.extend(_fmt_knowledge(extra.get("knowledge")))
+
+    # Craft-material shortfall cue (see build_will_prompt). Surface it here too
+    # so the action beat gathers the missing intermediate instead of retrying
+    # the impossible craft. Structural (item ids + counts), keyword-free.
+    lines.extend(_fmt_craft_deficit(extra.get("craft_deficit")))
+
+    # Registered bases (homes), keyword-free — so a concrete step can head home
+    # to build/store instead of leaving resources scattered.
+    lines.extend(_fmt_bases(extra.get("bases")))
+
+    # The active quest (directed milestone), reference only — so the concrete
+    # step advances the current milestone when it fits.
+    lines.extend(_fmt_quest(extra.get("quest")))
 
     # Surface the exact reachable ids so the chosen 'name'/'target' is verbatim.
     if block_names:
@@ -815,7 +1181,9 @@ def build_damage_appraisal_prompt(world_state: Any, world: str) -> str:
     prefix = f"vessel_{world}_"
 
     lines = [
-        f"[Embodiment — you were just HURT in the {world} world. Take stock.]",
+        f"[Embodiment — you are IN GAME, playing {world} right now, and you "
+        "were just HURT. Take stock and react pragmatically; do NOT write an "
+        "introspective monologue or poetic narration.]",
         "",
         "What just happened:",
         f"- You took about {damage_txt} damage.",
@@ -1044,3 +1412,35 @@ def resolve_reflection_min_interval(config_get: Any, default: int = 60) -> float
     except Exception:
         return float(default)
     return max(10.0, min(3600.0, value))
+
+
+def is_goal_beat_enabled(config_get: Any) -> bool:
+    """Return whether the dedicated **goal beat** is enabled.
+
+    The goal beat is a single-purpose volition turn whose only job is to author
+    or refine Synth's free-text goal (see :func:`build_goal_prompt`), with the
+    turn's action allowlist hard-restricted to ``set_goal``/``update_goal`` by
+    the scheduler that enqueues it. It exists so a weaker tool-calling model
+    cannot fall back to a passive verb when a goal is needed. Reads
+    ``VESSEL_GOAL_BEAT_ENABLED``. Fail-safe: any error → ``True`` (on by
+    default).
+    """
+    try:
+        return bool(config_get("VESSEL_GOAL_BEAT_ENABLED", True))
+    except Exception:
+        return True
+
+
+def resolve_goal_beat_interval(config_get: Any, default: int = 45) -> int:
+    """Return the **goal beat** interval in seconds, clamped.
+
+    Paces how often the dedicated goal-setting turn may fire while Synth has no
+    active goal. Reads ``VESSEL_GOAL_BEAT_INTERVAL_SEC``. Clamped to
+    ``[10, 3600]``. Fail-safe: any error → ``default``.
+    """
+    try:
+        raw = config_get("VESSEL_GOAL_BEAT_INTERVAL_SEC", default)
+        value = int(raw)
+    except Exception:
+        return default
+    return max(10, min(3600, value))

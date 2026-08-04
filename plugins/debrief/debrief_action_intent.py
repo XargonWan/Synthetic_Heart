@@ -275,6 +275,51 @@ class DebriefActionIntentPlugin:
             return True
 
     @staticmethod
+    def _vessel_preferred_action_types(
+        available_actions: Dict[str, Dict],
+    ) -> List[str]:
+        """Rank the whitelisted vessel catalog for debrief recovery.
+
+        Surfaces the movement / goal / speech / follow verbs that map onto the
+        common in-world commitments, purely by STRUCTURAL fnmatch on the action
+        *name* (never message text, never a hardcoded verb list). The patterns
+        target the namespaced vessel verbs (``vessel_<world>_<verb>``) as well as
+        the bare core verbs, so they stay world-agnostic. Falls back to the full
+        allowed set when nothing matches, so no action is ever excluded.
+        """
+        names = [k for k in (available_actions or {}) if isinstance(k, str)]
+        if not names:
+            return []
+        # Ordered so the most recovery-relevant families come first. Kept as
+        # structural glob patterns on the verb suffix — no keyword/intent logic.
+        preferred_patterns = [
+            "*disconnect",
+            "*set_goal",
+            "*update_goal",
+            "*goto*",
+            "*move*",
+            "*follow*",
+            "*unfollow*",
+            "*look*",
+            "*say*",
+        ]
+        try:
+            from fnmatch import fnmatchcase
+
+            preferred: List[str] = []
+            for pat in preferred_patterns:
+                for name in names:
+                    if name in preferred:
+                        continue
+                    if fnmatchcase(name, pat):
+                        preferred.append(name)
+        except Exception:
+            preferred = []
+        if preferred:
+            return preferred
+        return names
+
+    @staticmethod
     def _normalize_assistant_response(text: str) -> str:
         if not isinstance(text, str) or not text.strip():
             return ""
@@ -340,11 +385,46 @@ class DebriefActionIntentPlugin:
             log_warning(f"[debrief_action_intent] Failed to load actions metadata: {e}")
             available_actions = {}
 
+        # Structural vessel detection (routing metadata only, never text) —
+        # computed up front so the session-aware widening below can reuse it.
+        _is_vessel_debrief = False
+        try:
+            from core.vessel_focus import is_vessel_turn
+
+            _is_vessel_debrief = is_vessel_turn(original_message, context)
+        except Exception:
+            _is_vessel_debrief = False
+
+        # Structural check: is Synth currently embodied (a Vessel session is
+        # really connected)? Used to widen the debrief catalog on chat-originated
+        # turns so a promised-but-unexecuted logout can be recovered.
+        _vessel_session_active = False
+        if not _is_vessel_debrief:
+            try:
+                from core.vessel_session_manager import vessel_session_manager
+
+                _vessel_session_active = vessel_session_manager.has_active_session()
+            except Exception:
+                _vessel_session_active = False
+
+        # Keep the full pre-scope-gate catalog: on a non-vessel turn the vessel
+        # verbs are filtered out below, but a promised logout is still recoverable
+        # when a session is active.
+        full_available_actions = dict(available_actions)
+
         allowed_action_types = context.get("allowed_action_types")
         if isinstance(allowed_action_types, list) and allowed_action_types:
             available_actions = {
                 k: v for k, v in available_actions.items() if k in allowed_action_types
             }
+
+        # Chat-originated debrief while embodied: re-add the disconnect verb so
+        # the LLM can turn a promised logout ("stacco tutto", "logging off") into
+        # the actual action.
+        if _vessel_session_active and "vessel_disconnect" not in available_actions:
+            disconnect_def = full_available_actions.get("vessel_disconnect")
+            if isinstance(disconnect_def, dict):
+                available_actions["vessel_disconnect"] = disconnect_def
 
         if not self._allow_message_actions():
             available_actions = {
@@ -397,55 +477,163 @@ class DebriefActionIntentPlugin:
         except Exception:
             pass
 
-        system_prompt = (
-            f"You are the Debrief Action-Intent analyzer. Your job is to identify\n"
-            f"actions {synth_name} PROMISED or IMPLIED in its response but did NOT\n"
-            f"actually execute as formal actions.\n\n"
-            f"CRITICAL RULES:\n"
-            f"1. ALWAYS propose at least one recovery action when {synth_name} said\n"
-            f"   things like 'ok, i will do it', 'ok, i'll check', 'I will reply',\n"
-            f"   'I will send', 'i will do it tomorrow', or any other commitment.\n"
-            f"2. Convert conversational promises into concrete executable actions\n"
-            f"   using ONLY the available action schemas below.\n"
-            f"3. If {synth_name} promised to send a message, you MUST propose a\n"
-            f"   message_* action with the appropriate interface_path and text.\n"
-            f"4. If {synth_name} promised to schedule/remind something but did NOT\n"
-            f"   create a schedule_message or event action, you MUST propose it.\n"
-            f"   This is the most common failure mode: {synth_name} says 'ok, i will do it',\n"
-            f"   'ok, i'll check', 'I will reply', 'I will send', 'i will do it tomorrow'\n"
-            f"   but forgets to actually schedule it.\n"
-            f"5. Do NOT return an empty list unless {synth_name} explicitly refused\n"
-            f"   or said it cannot do something.\n"
-            f"6. Do NOT repeat actions already in processed_action_types or failed_action_types.\n"
-            f"7. Output ONLY valid JSON with the exact schema below.\n\n"
-            "EXAMPLES:\n"
-            'User: "Remind me tomorrow"\n'
-            f'{synth_name}: "Ok, I will write it tomorrow."\n'
-            '→ [{"type": "schedule_message", "payload": {"text": "...", "send_in": "1 day"}}]\n\n'
-            'User: "Check and let me know"\n'
-            f'{synth_name}: "Ok, I will check and let you know."\n'
-            '→ [{"type": "message_telegram_bot", "payload": {"text": "...", "interface_path": "..."}}]\n\n'
-            'User: "I need a reminder for the meeting"\n'
-            f'{synth_name}: "Perfect, I have set the reminder for the meeting."\n'
-            '→ [{"type": "schedule_message", "payload": {"text": "Meeting reminder", "send_in": "..."}}]\n\n'
-            "Schema:\n"
-            '{"actions":[{"type":str,"payload":object,"reason":str,"confidence":"low|medium|high"}]}'
-        )
+        # --- Rift Vessel embodiment turn ------------------------------------
+        # Postflight (debrief) is the Fast-Lane stage that recovers promised-but-
+        # unexecuted actions. On an in-world turn the usual message/schedule
+        # framing is wrong: the promises SyntH makes are embodiment verbs — "sto
+        # arrivando" (goto/move), "cambio obiettivo" (set_goal/update_goal),
+        # "guardo" (look), "ti seguo" (follow), "stacco tutto" (disconnect) — and
+        # the recovery catalog is the whitelisted vessel action set already
+        # placed on context by the prompt engine. We detected the turn
+        # structurally above (routing metadata only, never message text) and,
+        # when detected, swap in a vessel-verb system prompt, inject the active
+        # goal, and derive the preferred action types from the allowed catalog
+        # (no hardcoded verb list — keyword-free). Everything is lazily imported
+        # and guarded so removing the Vessel plugin can't break the ordinary
+        # debrief path.
+        _active_goal_block: Dict[str, Any] | None = None
+        if _is_vessel_debrief:
+            try:
+                from plugins.rift_vessel.minecraft.goals import get_active_goal
 
-        user_prompt = json.dumps(
-            {
-                "now": now_iso,
-                "user_message": user_message.strip(),
-                "assistant_response": llm_response.strip(),
-                "processed_action_types": sorted([t for t in processed_types if t]),
-                "failed_action_types": sorted([t for t in failed_types if t]),
-                "available_actions": minified_actions,
-                "proactive_enabled": proactive_enabled,
-                "preferred_action_types": ["schedule_message", "event"],
-                "max_actions": max_actions,
-            },
-            ensure_ascii=False,
-        )
+                goal = await get_active_goal()
+                if isinstance(goal, dict) and goal:
+                    steps = goal.get("steps")
+                    steps_total = len(steps) if isinstance(steps, list) else 0
+                    current_step = goal.get("current_step")
+                    current_step_text = None
+                    if (
+                        isinstance(steps, list)
+                        and isinstance(current_step, int)
+                        and 0 <= current_step < len(steps)
+                    ):
+                        current_step_text = steps[current_step]
+                    _active_goal_block = {
+                        "description": goal.get("description"),
+                        "note": goal.get("note"),
+                        "current_step": current_step,
+                        "current_step_text": current_step_text,
+                        "steps_total": steps_total,
+                        "target_kind": goal.get("target_kind"),
+                        "target_name": goal.get("target_name"),
+                        "status": goal.get("status"),
+                    }
+            except Exception:
+                _active_goal_block = None
+
+        if _is_vessel_debrief:
+            system_prompt = (
+                f"You are the Debrief Action-Intent analyzer for an EMBODIED turn:\n"
+                f"{synth_name} is inhabiting a game/virtual world through a Vessel.\n"
+                f"Your job is to identify in-world actions {synth_name} PROMISED or\n"
+                f"IMPLIED in its reply but did NOT actually execute as formal actions.\n\n"
+                f"CRITICAL RULES:\n"
+                f"1. ALWAYS propose at least one recovery action when {synth_name}\n"
+                f"   committed to doing something in the world — e.g. it said it would\n"
+                f"   come/approach a player, go somewhere, look at something, follow or\n"
+                f"   stop following, speak, or change/pursue its goal — but emitted no\n"
+                f"   matching action.\n"
+                f"2. Convert those in-world commitments into concrete executable\n"
+                f"   actions using ONLY the available action schemas below (they are\n"
+                f"   the whitelisted vessel/world verbs for this turn).\n"
+                f"3. If {synth_name} agreed to change or adopt a goal but did NOT emit\n"
+                f"   a set-goal / update-goal action, you MUST propose it, grounded in\n"
+                f"   the active_goal context provided.\n"
+                f"4. If {synth_name} said it would move toward or come to someone/some\n"
+                f"   place but emitted no movement action, you MUST propose the\n"
+                f"   appropriate move/goto/follow action from the catalog.\n"
+                f"5. If {synth_name} said it would leave/disconnect/log off the world\n"
+                f"   (e.g. said goodbye, announced it is logging off / 'stacco tutto')\n"
+                f"   but emitted no disconnect action, you MUST propose the vessel\n"
+                f"   disconnect action.\n"
+                f"6. Do NOT return an empty list unless {synth_name} explicitly refused\n"
+                f"   or said it cannot do something.\n"
+                f"7. Do NOT repeat actions already in processed_action_types or\n"
+                f"   failed_action_types.\n"
+                f"8. Use ONLY action types present in available_actions. Do NOT invent\n"
+                f"   verbs. Output ONLY valid JSON with the exact schema below.\n\n"
+                "Schema:\n"
+                '{"actions":[{"type":str,"payload":object,"reason":str,"confidence":"low|medium|high"}]}'
+            )
+        else:
+            # When Synth is currently embodied (a Vessel session is active) a
+            # chat-originated debrief may need to recover a promised logout, so
+            # surface that rule conditionally — structural session state, never
+            # message text.
+            _session_rule = ""
+            if _vessel_session_active:
+                _session_rule = (
+                    f"\nNOTE: {synth_name} is currently embodied in a game world\n"
+                    f"(a Vessel session is active). If it said it would leave/log off/\n"
+                    f"disconnect the world (e.g. said goodbye) but emitted no\n"
+                    f"vessel_disconnect action, you MUST propose it.\n"
+                )
+            system_prompt = (
+                f"You are the Debrief Action-Intent analyzer. Your job is to identify\n"
+                f"actions {synth_name} PROMISED or IMPLIED in its response but did NOT\n"
+                f"actually execute as formal actions.\n\n"
+                f"CRITICAL RULES:\n"
+                f"1. ALWAYS propose at least one recovery action when {synth_name} said\n"
+                f"   things like 'ok, i will do it', 'ok, i'll check', 'I will reply',\n"
+                f"   'I will send', 'i will do it tomorrow', or any other commitment.\n"
+                f"2. Convert conversational promises into concrete executable actions\n"
+                f"   using ONLY the available action schemas below.\n"
+                f"3. If {synth_name} promised to send a message, you MUST propose a\n"
+                f"   message_* action with the appropriate interface_path and text.\n"
+                f"4. If {synth_name} promised to schedule/remind something but did NOT\n"
+                f"   create a schedule_message or event action, you MUST propose it.\n"
+                f"   This is the most common failure mode: {synth_name} says 'ok, i will do it',\n"
+                f"   'ok, i'll check', 'I will reply', 'I will send', 'i will do it tomorrow'\n"
+                f"   but forgets to actually schedule it.\n"
+                f"{_session_rule}"
+                f"5. Do NOT return an empty list unless {synth_name} explicitly refused\n"
+                f"   or said it cannot do something.\n"
+                f"6. Do NOT repeat actions already in processed_action_types or failed_action_types.\n"
+                f"7. Output ONLY valid JSON with the exact schema below.\n\n"
+                "EXAMPLES:\n"
+                'User: "Remind me tomorrow"\n'
+                f'{synth_name}: "Ok, I will write it tomorrow."\n'
+                '→ [{"type": "schedule_message", "payload": {"text": "...", "send_in": "1 day"}}]\n\n'
+                'User: "Check and let me know"\n'
+                f'{synth_name}: "Ok, I will check and let you know."\n'
+                '→ [{"type": "message_telegram_bot", "payload": {"text": "...", "interface_path": "..."}}]\n\n'
+                'User: "I need a reminder for the meeting"\n'
+                f'{synth_name}: "Perfect, I have set the reminder for the meeting."\n'
+                '→ [{"type": "schedule_message", "payload": {"text": "Meeting reminder", "send_in": "..."}}]\n\n'
+                "Schema:\n"
+                '{"actions":[{"type":str,"payload":object,"reason":str,"confidence":"low|medium|high"}]}'
+            )
+
+        if _is_vessel_debrief:
+            # Prefer whatever the whitelisted vessel catalog offers, ranked by
+            # the recovery scenarios above — but derived STRUCTURALLY from the
+            # allowed catalog (no hardcoded verb list). Movement/goal/speech-like
+            # verbs are surfaced by matching the whitelisted action names against
+            # fnmatch patterns (never the message text), falling back to the full
+            # allowed set so nothing is ever excluded.
+            preferred_action_types = self._vessel_preferred_action_types(
+                minified_actions
+            )
+        else:
+            preferred_action_types = ["schedule_message", "event"]
+            if _vessel_session_active:
+                preferred_action_types = ["vessel_disconnect", *preferred_action_types]
+
+        user_payload: Dict[str, Any] = {
+            "now": now_iso,
+            "user_message": user_message.strip(),
+            "assistant_response": llm_response.strip(),
+            "processed_action_types": sorted([t for t in processed_types if t]),
+            "failed_action_types": sorted([t for t in failed_types if t]),
+            "available_actions": minified_actions,
+            "proactive_enabled": proactive_enabled,
+            "preferred_action_types": preferred_action_types,
+            "max_actions": max_actions,
+        }
+        if _active_goal_block is not None:
+            user_payload["active_goal"] = _active_goal_block
+
+        user_prompt = json.dumps(user_payload, ensure_ascii=False)
 
         engine = None
         try:

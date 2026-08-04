@@ -184,6 +184,7 @@ async def add_message_to_context(
     message_id: Optional[int] = None,
     timestamp: Optional[str] = None,
     metadata: dict[str, Any] | None = None,
+    persist_to_db: bool = True,
     **extra_fields,
 ) -> None:
     """Add a message to chat context with automatic persistence.
@@ -201,6 +202,12 @@ async def add_message_to_context(
         message_id: Optional message ID from interface
         timestamp: Optional ISO format timestamp
         metadata: Optional dict of extra metadata (e.g. reply context).
+        persist_to_db: When ``False``, the message is kept only in the
+            appropriate in-memory buffer (conversational deque or the vessel
+            perception ring) and is NOT written to ``chat_history_cache``. Used
+            for pure-log vessel telemetry (sightings/gather/proximity/...) that
+            provides live ambient grounding but must not bloat the durable
+            history. Defaults to ``True`` (normal persistence).
         **extra_fields: Additional fields to store in context
     """
     interface_path = _resolve_context_path(interface_path)
@@ -221,7 +228,9 @@ async def add_message_to_context(
     # ring buffer so a burst of world perceptions (e.g. repeated environmental
     # damage) can never evict a player's chat from the bounded conversational
     # deque. Structural (a persisted metadata flag), never keyword matching.
-    # Both stores are still persisted to the DB cache below.
+    # Durable perceptions (damage/death/self-monologue) are also persisted to
+    # the DB cache below; pure-log telemetry passes ``persist_to_db=False`` and
+    # lives ONLY in this ring for live ambient grounding.
     is_vessel_perception = bool(
         isinstance(metadata, dict) and metadata.get("vessel_perception")
     )
@@ -250,20 +259,24 @@ async def add_message_to_context(
     except Exception as e:
         log_debug(f"[context_manager] Failed to update chat activity: {e}")
 
-    # Persist to database (non-blocking, don't let DB failures affect message processing)
-    try:
-        from core.chat_history_cache import save_chat_message
+    # Persist to database (non-blocking, don't let DB failures affect message processing).
+    # Pure-log vessel telemetry opts out of durable persistence: it lives only
+    # in the in-memory perception ring for live ambient grounding and must not
+    # bloat ``chat_history_cache`` (nor be re-loaded at restart).
+    if persist_to_db:
+        try:
+            from core.chat_history_cache import save_chat_message
 
-        await save_chat_message(
-            interface_path=interface_path,
-            message_text=message_text,
-            sender_name=sender_name,
-            sender_id=sender_id,
-            timestamp=timestamp,
-            metadata=metadata,
-        )
-    except Exception as e:
-        log_warning(f"[context_manager] Failed to persist message to cache: {e}")
+            await save_chat_message(
+                interface_path=interface_path,
+                message_text=message_text,
+                sender_name=sender_name,
+                sender_id=sender_id,
+                timestamp=timestamp,
+                metadata=metadata,
+            )
+        except Exception as e:
+            log_warning(f"[context_manager] Failed to persist message to cache: {e}")
 
 
 async def update_message_in_context(

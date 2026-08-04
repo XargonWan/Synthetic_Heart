@@ -1,6 +1,6 @@
 services:
   synth:
-    # image: xargonwan/synthetic_heart:${IMAGE_VERSION:-latest-develop}
+    #image: xargonwan/synthetic_heart:${IMAGE_VERSION:-latest-develop}
     build:  . # If you want to build from source, uncomment this and comment out the image line
     container_name: synth
     hostname: synthetic-heart

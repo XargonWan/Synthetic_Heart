@@ -244,3 +244,61 @@ async def test_run_debrief_preserves_context_for_auto_recovery(
     assert captured["context"]["interface_path"] == "telegram/101"
     assert captured["context"]["original_user_message"] == "Ricordamelo domani"
     assert captured["original_message"] is original_message
+
+
+class TestVesselPreferredActionTypes:
+    """Pure tests for the structural vessel debrief ranking helper.
+
+    The helper ranks a whitelisted vessel catalog by matching the action *name*
+    (never message text) against structural fnmatch patterns, falling back to
+    the full allowed set so nothing is ever excluded. Keyword-free.
+    """
+
+    def test_surfaces_movement_goal_speech_verbs(self) -> None:
+        catalog = {
+            "vessel_minecraft_say": {},
+            "vessel_minecraft_goto": {},
+            "vessel_minecraft_set_goal": {},
+            "vessel_minecraft_update_goal": {},
+            "vessel_minecraft_follow": {},
+            "vessel_minecraft_look": {},
+            "vessel_minecraft_observe": {},
+            "message_telegram_bot": {},
+        }
+        preferred = DebriefActionIntentPlugin._vessel_preferred_action_types(catalog)
+        # Every recovery-relevant verb must be present…
+        for name in (
+            "vessel_minecraft_set_goal",
+            "vessel_minecraft_update_goal",
+            "vessel_minecraft_goto",
+            "vessel_minecraft_follow",
+            "vessel_minecraft_look",
+            "vessel_minecraft_say",
+        ):
+            assert name in preferred
+        # …and goal verbs must rank ahead of movement/speech.
+        assert preferred.index("vessel_minecraft_set_goal") < preferred.index(
+            "vessel_minecraft_goto"
+        )
+        # Non-recovery verbs are not injected as preferred.
+        assert "vessel_minecraft_observe" not in preferred
+        assert "message_telegram_bot" not in preferred
+
+    def test_falls_back_to_full_set_when_no_match(self) -> None:
+        catalog = {
+            "vessel_minecraft_observe": {},
+            "vessel_minecraft_attack": {},
+        }
+        preferred = DebriefActionIntentPlugin._vessel_preferred_action_types(catalog)
+        assert set(preferred) == set(catalog.keys())
+
+    def test_empty_catalog_returns_empty(self) -> None:
+        assert DebriefActionIntentPlugin._vessel_preferred_action_types({}) == []
+
+    def test_no_duplicates(self) -> None:
+        catalog = {
+            "vessel_minecraft_goto": {},
+            "vessel_minecraft_say": {},
+        }
+        preferred = DebriefActionIntentPlugin._vessel_preferred_action_types(catalog)
+        assert len(preferred) == len(set(preferred))

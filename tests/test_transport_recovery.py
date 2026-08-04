@@ -196,3 +196,55 @@ def test_attempted_action_description_for_unknown_action():
     # Should not contain an explicit enumeration of action types
     assert "Supported action types" not in desc
     assert "Available actions" in desc or "plugins" in desc
+
+
+def test_parser_recovers_tool_call_dialect_object_params():
+    # Weak model dialect: {"tool":"NAME","params":{...}} instead of the SyntH
+    # {"actions":[{"type","payload"}]} schema.
+    raw = (
+        '{"tool":"vessel_minecraft_lookup_knowledge",'
+        '"params":{"query":"iron pickaxe","limit":"5"}}'
+    )
+    obj = extract_json_from_text(raw)
+    assert obj is not None and isinstance(obj, dict)
+    actions = obj.get("actions", [])
+    assert len(actions) == 1
+    assert actions[0]["type"] == "vessel_minecraft_lookup_knowledge"
+    assert actions[0]["payload"]["query"] == "iron pickaxe"
+    assert actions[0]["payload"]["limit"] == "5"
+
+
+def test_parser_recovers_tool_call_dialect_pseudo_list_params():
+    # The illegal pseudo-list params form: a JSON array holding key:value pairs.
+    # json.loads and json_repair both reject it; structural recovery must fix it.
+    raw = (
+        '{"tool":"vessel_minecraft_update_goal",'
+        '"params":["steps":"a","current_step":"1"]}'
+    )
+    obj = extract_json_from_text(raw)
+    assert obj is not None and isinstance(obj, dict)
+    actions = obj.get("actions", [])
+    assert len(actions) == 1
+    assert actions[0]["type"] == "vessel_minecraft_update_goal"
+    assert actions[0]["payload"]["steps"] == "a"
+    assert actions[0]["payload"]["current_step"] == "1"
+
+
+def test_parser_recovers_tool_call_markup_dialect():
+    # The [tool:NAME] {...} pseudo-markup form.
+    raw = '[tool:vessel_minecraft_lookup_knowledge] {"params": ["query":"stone"]}'
+    obj = extract_json_from_text(raw)
+    assert obj is not None and isinstance(obj, dict)
+    actions = obj.get("actions", [])
+    assert len(actions) >= 1
+    assert actions[0]["type"] == "vessel_minecraft_lookup_knowledge"
+    assert actions[0]["payload"].get("query") == "stone"
+
+
+def test_parser_prefers_native_schema_over_dialect_recovery():
+    # A valid SyntH schema must NOT be overridden by the dialect recovery.
+    raw = '{"actions":[{"type":"message_telegram_bot","payload":{"text":"hi"}}]}'
+    obj = extract_json_from_text(raw)
+    assert obj is not None and isinstance(obj, dict)
+    assert obj["actions"][0]["type"] == "message_telegram_bot"
+    assert obj["actions"][0]["payload"]["text"] == "hi"
