@@ -222,6 +222,14 @@ npx gitnexus analyze --skip-agents-md
 
 Use the repository’s configured MCP servers only after their dependencies and credentials are available.
 
+### Developer MCP usage
+
+- Prefer a configured developer MCP server when its tools directly match the task; use targeted MCP results to reduce broad file, log, database, or codebase inspection.
+- At the start of relevant work, verify that the required MCP server and tool are available in the current agent session. Configuration on disk alone does not prove that the session loaded them.
+- If a required or explicitly requested MCP server or tool is unavailable, notify the user promptly, name what is missing, and state the affected workflow. Do not silently substitute a slower or less precise path.
+- After notifying the user, use a safe local fallback when one exists and the request does not require that specific MCP server. If no suitable fallback exists, stop and request direction.
+- Do not call MCP tools merely because they are available; select them when they are relevant and likely to return narrower, more useful context than general-purpose inspection.
+
 Never use `pip install` or create an ad-hoc virtual environment. Dependency changes go through `uv` so the lockfile remains authoritative.
 
 ### Before editing
