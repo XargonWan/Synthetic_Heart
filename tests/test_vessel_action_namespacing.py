@@ -299,6 +299,7 @@ class _FakeInterface:
         action: str,
         summary: str,
         metadata: dict[str, Any] | None = None,
+        result: dict[str, Any] | None = None,
     ) -> None:
         self.logged.append(
             {
@@ -306,6 +307,7 @@ class _FakeInterface:
                 "action": action,
                 "summary": summary,
                 "metadata": metadata,
+                "result": result,
             }
         )
 
@@ -328,11 +330,18 @@ async def test_successful_action_is_logged_to_activity(
     # The summary is built structurally from the action + payload fields.
     assert "say" in entry["summary"]
     assert "Ciao mondo" in entry["summary"]
-    assert entry["metadata"] == {"text": "Ciao mondo"}
+    assert entry["metadata"]["text"] == "Ciao mondo"
+    assert entry["metadata"]["_provenance"] == "action_request_result"
+    assert entry["metadata"]["_result"] == {
+        "ok": True,
+        "detail": "did say",
+        "data": {},
+    }
+    assert entry["result"] == entry["metadata"]["_result"]
 
 
 @pytest.mark.asyncio
-async def test_failed_action_is_not_logged(
+async def test_failed_action_is_logged_with_failed_result(
     connected_plugin: VesselPlugin,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -348,7 +357,12 @@ async def test_failed_action_is_not_logged(
     )
     result = await connected_plugin.act("move", {"x": 1})
     assert result.ok is False
-    assert iface.logged == []
+    assert len(iface.logged) == 1
+    assert iface.logged[0]["metadata"]["_result"] == {
+        "ok": False,
+        "detail": "boom",
+        "data": {},
+    }
 
 
 def test_describe_outbound_action_is_structural() -> None:

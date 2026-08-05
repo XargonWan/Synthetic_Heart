@@ -73,6 +73,50 @@ def test_stringify_metadata_failsafe() -> None:
     assert vdc._stringify_metadata("  raw text  ") == "raw text"
 
 
+def test_recap_filter_excludes_conversation_and_action_requests() -> None:
+    assert not vdc._is_recap_fact_row(
+        {"event_type": "chat", "metadata": {"_provenance": "player_communication"}}
+    )
+    assert not vdc._is_recap_fact_row(
+        {"event_type": "action_mine", "metadata": {"_result": {"ok": True}}}
+    )
+    assert vdc._is_recap_fact_row(
+        {"event_type": "gather", "metadata": {"collected": 1}}
+    )
+    assert vdc._is_recap_fact_row(
+        {"event_type": "custom_world_fact", "metadata": {"_recap_eligible": True}}
+    )
+
+
+def test_verified_facts_aggregate_structured_outcomes_exactly() -> None:
+    facts = vdc._build_verified_facts(
+        [
+            {
+                "event_type": "gather",
+                "metadata": {
+                    "gained": {"spruce_log": 5, "stick": 1},
+                    "collected": 6,
+                },
+            },
+            {
+                "event_type": "gather",
+                "metadata": {
+                    "gained": {"spruce_log": 8, "spruce_sapling": 1},
+                    "collected": 9,
+                },
+            },
+            {"event_type": "gather", "metadata": {"gained": {}, "collected": 0}},
+        ]
+    )
+    assert facts["event_counts"] == {"gather": 3}
+    assert facts["gained"] == {
+        "spruce_log": 13,
+        "stick": 1,
+        "spruce_sapling": 1,
+    }
+    assert facts["gather_events_without_drop"] == 1
+
+
 def test_activity_row_to_line_third_person_format() -> None:
     line = vdc._activity_row_to_line(
         {
@@ -98,10 +142,10 @@ def test_recap_fallback_is_deterministic_join() -> None:
 
 @pytest.mark.asyncio
 async def test_compact_activity_recap_empty_returns_none(monkeypatch: Any) -> None:
-    async def _no_lines(_sid: str) -> list[str]:
-        return []
+    async def _no_lines(_sid: str) -> tuple[list[str], dict[str, Any]]:
+        return [], {}
 
-    monkeypatch.setattr(vdc, "load_activity_lines", _no_lines)
+    monkeypatch.setattr(vdc, "load_recap_activity", _no_lines)
     result = await vdc.compact_activity_recap(
         session_id="s", environment="mc", interface_path=None, reason="session_ended"
     )
@@ -112,12 +156,13 @@ async def test_compact_activity_recap_empty_returns_none(monkeypatch: Any) -> No
 async def test_compact_activity_recap_stores_activity_recap_reason(
     monkeypatch: Any,
 ) -> None:
-    async def _lines(_sid: str) -> list[str]:
-        return [f"[mine] block {i}" for i in range(3)]
+    async def _lines(_sid: str) -> tuple[list[str], dict[str, Any]]:
+        return [f"[mine] block {i}" for i in range(3)], {"event_counts": {"mine": 3}}
 
-    monkeypatch.setattr(vdc, "load_activity_lines", _lines)
-    monkeypatch.setattr(vdc, "_resolve_chunk_config", lambda: (40, 6000))
-    _patch_engine(monkeypatch, _FakeEngine())
+    monkeypatch.setattr(vdc, "load_recap_activity", _lines)
+    monkeypatch.setattr(vdc, "_resolve_chunk_config", lambda: (2, 6000))
+    engine = _FakeEngine()
+    _patch_engine(monkeypatch, engine)
 
     saved: dict[str, Any] = {}
 
@@ -135,14 +180,20 @@ async def test_compact_activity_recap_stores_activity_recap_reason(
     assert saved["reason"] == vdc.ACTIVITY_RECAP_REASON
     assert saved["session_id"] == "s"
     assert saved["moments_count"] == 3
+    fold_payload = next(
+        call["input"]["payload"]
+        for call in engine.calls
+        if call["input"]["type"] == "vessel_recap_fold"
+    )
+    assert fold_payload["verified_facts"] == {"event_counts": {"mine": 3}}
 
 
 @pytest.mark.asyncio
 async def test_compact_activity_recap_llm_failure_falls_back(monkeypatch: Any) -> None:
-    async def _lines(_sid: str) -> list[str]:
-        return ["[mine] a", "[goto] b"]
+    async def _lines(_sid: str) -> tuple[list[str], dict[str, Any]]:
+        return ["[mine] a", "[goto] b"], {}
 
-    monkeypatch.setattr(vdc, "load_activity_lines", _lines)
+    monkeypatch.setattr(vdc, "load_recap_activity", _lines)
     monkeypatch.setattr(vdc, "_resolve_chunk_config", lambda: (40, 6000))
     _patch_engine(monkeypatch, _BrokenEngine())
 

@@ -8,7 +8,7 @@ stored in the dedicated ``vessel_diary`` table.
 Two compaction modes live in this module:
 
 * :func:`compact_activity_recap` — the **operational recap** (the current
-  end-of-session product). It reads the session's rows from
+  end-of-session product). It filters the session's mixed audit rows from
   ``vessel_activity_log`` and produces a factual, third-person recap of *what
   happened* — coordinates, quantities, world state, actions taken and their
   outcomes — with **no** first-person voice, personality or emotion. This is the
@@ -37,6 +37,7 @@ constraint) and runs off the hot path.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from core.db import get_conn_ctx
@@ -47,6 +48,7 @@ __all__ = [
     "compact_session",
     "compact_activity_recap",
     "load_activity_lines",
+    "load_recap_activity",
     "save_vessel_diary",
 ]
 
@@ -54,6 +56,35 @@ __all__ = [
 # ``vessel_diary`` by :func:`compact_activity_recap`, so the factual recap can be
 # distinguished from any other diary entry sharing the table.
 ACTIVITY_RECAP_REASON = "activity_recap"
+
+# Only these event types describe facts observed in the world or the Vessel
+# session lifecycle.  ``vessel_activity_log`` is also a UI audit trail and
+# therefore contains player chat, Synth's own speech, and outbound action
+# requests.  Those records are useful for history/debugging but are not proof
+# that a world-side outcome occurred and must not enter the factual recap.
+#
+# Keep this structural: event types are connector/schema values, never natural
+# language intent matches.  World-specific connectors may add factual event
+# types by marking their activity metadata with ``_recap_eligible = True``.
+_RECAP_FACT_EVENT_TYPES = frozenset(
+    {
+        "session_start",
+        "session_end",
+        "spawn",
+        "proximity",
+        "damage",
+        "death",
+        "kill",
+        "gather",
+        "build",
+        "craft",
+        "smelt",
+        "equip",
+        "disconnect",
+        "navigation",
+        "arrival",
+    }
+)
 
 # Per-item truncation so one runaway summary cannot dominate a chunk. Mirrors
 # the grillo compactor's 1200-char clamp.
@@ -440,9 +471,10 @@ async def save_vessel_diary(
 # ---------------------------------------------------------------------------
 # Operational recap (factual, third-person) — the end-of-session product.
 #
-# Distinct scope from the autobiographical diary above: this reads the audit
-# rows in ``vessel_activity_log`` and produces a *factual* recap of what the
-# session actually did (coordinates, quantities, world state, action outcomes),
+# Distinct scope from the autobiographical diary above: this reads only
+# recap-eligible world rows from the mixed ``vessel_activity_log`` audit table
+# and produces a *factual* recap of what the session actually did (coordinates,
+# quantities, world state, action outcomes),
 # with no first-person voice or personality. It is the mode the Rift Vessel
 # Compactor plugin enqueues when a session reaches the ENDED state.
 # ---------------------------------------------------------------------------
@@ -478,6 +510,12 @@ def _stringify_metadata(metadata: Any) -> str:
             key_s = str(key).strip()
             if not key_s:
                 continue
+            # Reserved provenance/control fields are for filtering and audit
+            # inspection, not prose.  Exposing the nested action result in the
+            # LLM input would reintroduce the same mixed-source problem this
+            # boundary is intended to prevent.
+            if key_s.startswith("_"):
+                continue
             if isinstance(value, (dict, list)):
                 try:
                     import json as _json
@@ -493,6 +531,118 @@ def _stringify_metadata(metadata: Any) -> str:
             parts.append(f"{key_s}={value_s}")
         return " ".join(parts)
     return str(metadata).strip()
+
+
+def _decode_metadata(metadata: Any) -> dict[str, Any]:
+    """Return metadata as a dict, treating malformed values as empty."""
+    if isinstance(metadata, dict):
+        return metadata
+    if isinstance(metadata, (bytes, bytearray)):
+        try:
+            metadata = metadata.decode("utf-8", errors="replace")
+        except Exception:
+            return {}
+    if isinstance(metadata, str):
+        try:
+            import json as _json
+
+            decoded = _json.loads(metadata)
+        except Exception:
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
+    return {}
+
+
+def _numeric(value: Any) -> float | int | None:
+    """Return a finite number, preserving integer values where possible."""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return int(number) if number.is_integer() else number
+
+
+def _build_verified_facts(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build deterministic aggregates from recap-eligible world rows.
+
+    These values are deliberately computed before the LLM sees the data.  The
+    model can phrase them, but it cannot silently change the arithmetic (for
+    example, turning thirteen collected items into eleven).
+    """
+    event_counts: dict[str, int] = {}
+    gained: dict[str, float | int] = {}
+    gather_without_drop = 0
+    latest_position: dict[str, Any] | None = None
+
+    for row in rows:
+        if not _is_recap_fact_row(row):
+            continue
+        event_type = str(row.get("event_type") or "").strip()
+        if not event_type:
+            continue
+        event_counts[event_type] = event_counts.get(event_type, 0) + 1
+        metadata = _decode_metadata(row.get("metadata"))
+
+        if event_type == "gather":
+            collected = _numeric(metadata.get("collected"))
+            if collected == 0:
+                gather_without_drop += 1
+            raw_gained = metadata.get("gained")
+            if isinstance(raw_gained, dict):
+                for item, amount in raw_gained.items():
+                    number = _numeric(amount)
+                    if number is None:
+                        continue
+                    item_name = str(item).strip()
+                    if not item_name:
+                        continue
+                    gained[item_name] = gained.get(item_name, 0) + number
+
+        position = metadata.get("position")
+        if isinstance(position, dict):
+            coordinates = {
+                axis: _numeric(position.get(axis))
+                for axis in ("x", "y", "z")
+                if _numeric(position.get(axis)) is not None
+            }
+            if coordinates:
+                latest_position = coordinates
+        elif all(axis in metadata for axis in ("x", "y", "z")):
+            coordinates = {
+                axis: _numeric(metadata.get(axis))
+                for axis in ("x", "y", "z")
+                if _numeric(metadata.get(axis)) is not None
+            }
+            if coordinates:
+                latest_position = coordinates
+
+    facts: dict[str, Any] = {
+        "event_counts": event_counts,
+        "gained": gained,
+        "gather_events_without_drop": gather_without_drop,
+    }
+    if latest_position is not None:
+        facts["latest_position"] = latest_position
+    return facts
+
+
+def _is_recap_fact_row(row: dict[str, Any]) -> bool:
+    """Return whether one activity row is safe for a factual recap.
+
+    The default allowlist handles the built-in Vessel/Minecraft event schema.
+    A future connector can opt an event in structurally with the reserved
+    ``_recap_eligible`` metadata flag.  Chat and ``action_*`` rows remain
+    excluded unless explicitly opted in with that flag; an action request is
+    not an outcome merely because its dispatch returned successfully.
+    """
+    event_type = str(row.get("event_type") or "").strip()
+    if event_type in _RECAP_FACT_EVENT_TYPES:
+        return True
+    return _decode_metadata(row.get("metadata")).get("_recap_eligible") is True
 
 
 def _activity_row_to_line(row: dict[str, Any]) -> str:
@@ -513,16 +663,19 @@ def _activity_row_to_line(row: dict[str, Any]) -> str:
     return line
 
 
-async def load_activity_lines(session_id: str) -> list[str]:
-    """Load a session's ``vessel_activity_log`` rows as factual text lines.
+async def load_recap_activity(
+    session_id: str,
+) -> tuple[list[str], dict[str, Any]]:
+    """Load a session's recap-eligible activity rows and verified aggregates.
 
     Returns the rows for ``session_id`` in chronological order, each rendered by
     :func:`_activity_row_to_line`. Empty (no summary and no metadata) lines are
     skipped. Fully fail-safe — any DB error yields an empty list.
     """
     if not session_id:
-        return []
+        return [], {}
     lines: list[str] = []
+    fact_rows: list[dict[str, Any]] = []
     # Column order is fixed by the SELECT below; do NOT rely on ``cur.description``
     # — the PostgresCompatCursor wrapper does not expose it.
     columns = ["event_type", "summary", "metadata", "created_at"]
@@ -540,15 +693,24 @@ async def load_activity_lines(session_id: str) -> list[str]:
         log_error(
             f"[vessel_recap] failed to read vessel_activity_log for {session_id}: {exc}"
         )
-        return []
+        return [], {}
     for raw in rows or []:
         if isinstance(raw, dict):
             row = raw
         else:
             row = dict(zip(columns, raw))
+        if not _is_recap_fact_row(row):
+            continue
+        fact_rows.append(row)
         line = _activity_row_to_line(row)
         if line:
             lines.append(line)
+    return lines, _build_verified_facts(fact_rows)
+
+
+async def load_activity_lines(session_id: str) -> list[str]:
+    """Compatibility wrapper returning only recap text lines."""
+    lines, _facts = await load_recap_activity(session_id)
     return lines
 
 
@@ -621,7 +783,9 @@ def _build_recap_chunk_prompt(
         "were taken and their outcomes, plus concrete state — positions, "
         "quantities, resources, health, notable entities. Report facts only. Do "
         "NOT use first person, do NOT add personality, emotion, or narrative. Do "
-        "NOT invent anything not present in the log. Keep it terse.\n"
+        "NOT treat chat, speech, or an action request as proof of a world outcome. "
+        "Do NOT invent anything not present in the verified world-event log. Keep "
+        "it terse.\n"
         'Return ONLY a JSON object: {"partial": "<factual recap>"}.'
     )
     return {
@@ -638,6 +802,7 @@ def _build_recap_fold_prompt(
     environment: str,
     partials: list[str],
     reason: str,
+    verified_facts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the prompt to fold factual partials into one operational recap."""
     instructions = (
@@ -647,13 +812,19 @@ def _build_recap_fold_prompt(
         "operational recap of the whole session — actions taken and outcomes, "
         "final state, resources gained/lost, and any unresolved goal. Report "
         "facts only. Do NOT use first person, personality, emotion, or "
-        "narrative. Do NOT invent anything beyond the fragments.\n"
+        "narrative. The verified_facts object is authoritative for counts, "
+        "quantities, and final position; do not recalculate or contradict it. "
+        "Do NOT invent anything beyond the fragments and verified_facts.\n"
         'Return ONLY a JSON object: {"entry": "<factual operational recap>"}.'
     )
     return {
         "input": {
             "type": "vessel_recap_fold",
-            "payload": {"environment": environment, "fragments": partials},
+            "payload": {
+                "environment": environment,
+                "fragments": partials,
+                "verified_facts": verified_facts or {},
+            },
         },
         "context": {},
         "instructions": instructions,
@@ -667,6 +838,7 @@ async def _fold_recap_partials(
     reason: str,
     chunk_chars: int,
     depth: int = 0,
+    verified_facts: dict[str, Any] | None = None,
 ) -> str:
     """Fold factual partials into one recap, recursing if still oversized."""
     if not partials:
@@ -682,14 +854,22 @@ async def _fold_recap_partials(
             if len(group) == 1:
                 reduced.append(group[0])
                 continue
-            prompt = _build_recap_fold_prompt(environment, group, reason)
+            prompt = _build_recap_fold_prompt(
+                environment, group, reason, verified_facts
+            )
             folded = await _generate_json(engine, prompt, "entry")
             reduced.append(folded if folded else "\n".join(group))
         return await _fold_recap_partials(
-            engine, environment, reduced, reason, chunk_chars, depth + 1
+            engine,
+            environment,
+            reduced,
+            reason,
+            chunk_chars,
+            depth + 1,
+            verified_facts,
         )
 
-    prompt = _build_recap_fold_prompt(environment, partials, reason)
+    prompt = _build_recap_fold_prompt(environment, partials, reason, verified_facts)
     folded = await _generate_json(engine, prompt, "entry")
     return folded if folded else "\n\n".join(partials)
 
@@ -715,7 +895,7 @@ async def compact_activity_recap(
     ``None`` if there was nothing to recap. Never raises — on any LLM failure it
     falls back to a deterministic plain-text join.
     """
-    lines = await load_activity_lines(session_id)
+    lines, verified_facts = await load_recap_activity(session_id)
     if not lines:
         log_debug(f"[vessel_recap] no activity to recap for session {session_id}")
         return None
@@ -737,7 +917,12 @@ async def compact_activity_recap(
             partial = await _generate_json(engine, prompt, "partial")
             partials.append(partial if partial else "\n".join(chunk))
         summary = await _fold_recap_partials(
-            engine, environment, partials, reason, chunk_chars
+            engine,
+            environment,
+            partials,
+            reason,
+            chunk_chars,
+            verified_facts=verified_facts,
         )
         if not summary:
             summary = _recap_fallback(environment, lines, reason)

@@ -1041,7 +1041,11 @@ class VesselPlugin(AIPluginBase):
             connector = VESSEL_REGISTRY.load_connector(name)
         except ValueError as exc:
             log_error(f"[vessel_plugin] Cannot load connector '{name}': {exc}")
-            return VesselActionResult(ok=False, detail=f"connector_load_failed: {exc}")
+            result = VesselActionResult(
+                ok=False, detail=f"connector_load_failed: {exc}"
+            )
+            await self._log_outbound_action(name, action, payload, result)
+            return result
 
         # Measure the in-world action round-trip. The Rift Vessel is primarily
         # used in games, where responsiveness matters: this INFO metric lets us
@@ -1071,8 +1075,11 @@ class VesselPlugin(AIPluginBase):
                     )
                 else:
                     result = VesselActionResult(ok=True)
+            # Record both successful and failed dispatches. A failed action is
+            # still an operational fact, while the connector result distinguishes
+            # a request from what the world actually accepted.
+            await self._log_outbound_action(name, action, payload, result)
             if result.ok:
-                await self._log_outbound_action(name, action, payload)
                 await self._persist_self_speech(
                     name,
                     action,
@@ -1082,7 +1089,9 @@ class VesselPlugin(AIPluginBase):
             return result
         except Exception as exc:
             log_error(f"[vessel_plugin] act('{action}') error ({name}): {exc}")
-            return VesselActionResult(ok=False, detail=f"act_error: {exc}")
+            result = VesselActionResult(ok=False, detail=f"act_error: {exc}")
+            await self._log_outbound_action(name, action, payload, result)
+            return result
 
     @staticmethod
     def _is_repeat_of_last_self_say(environment: str, payload: dict[str, Any]) -> bool:
@@ -1202,8 +1211,9 @@ class VesselPlugin(AIPluginBase):
         environment: str,
         action: str,
         payload: dict[str, Any],
+        result: VesselActionResult,
     ) -> None:
-        """Log a successful outbound in-world action to the Activities tab.
+        """Log an outbound in-world action and its result to Activities.
 
         Makes Synth's own in-world responses (``say``/``move``/``look``/...)
         visible in the WebUI Vessel Activities tab alongside the incoming
@@ -1216,12 +1226,35 @@ class VesselPlugin(AIPluginBase):
             return
         try:
             summary = self._describe_outbound_action(action, payload)
-            await iface.log_outbound_action(
-                environment=environment,
-                action=action,
-                summary=summary,
-                metadata={k: v for k, v in payload.items() if v is not None},
-            )
+            result_data = {
+                "ok": bool(result.ok),
+                "detail": result.detail,
+                "data": result.data or {},
+            }
+            metadata = {
+                **{k: v for k, v in payload.items() if v is not None},
+                "_provenance": "action_request_result",
+                "_result": result_data,
+            }
+            try:
+                await iface.log_outbound_action(
+                    environment=environment,
+                    action=action,
+                    summary=summary,
+                    metadata=metadata,
+                    result=result_data,
+                )
+            except TypeError as exc:
+                # Preserve duck-typed compatibility with older/custom Vessel
+                # interfaces that still expose the pre-result logger signature.
+                if "result" not in str(exc):
+                    raise
+                await iface.log_outbound_action(
+                    environment=environment,
+                    action=action,
+                    summary=summary,
+                    metadata=metadata,
+                )
         except Exception as exc:  # pragma: no cover - defensive
             log_warning(f"[vessel_plugin] outbound activity log failed: {exc}")
 

@@ -828,6 +828,14 @@ class VesselInterface:
             self._sessions.setdefault(session_id, interface_path)
 
         # Always record experience + activity (audit is not gated by salience).
+        # Keep provenance in the audit metadata without mutating the connector's
+        # structured payload: chat is a real world event, but it is
+        # communication rather than evidence that an in-world action occurred.
+        activity_metadata = dict(data or {})
+        activity_metadata.setdefault(
+            "_provenance",
+            "player_communication" if event_type == "chat" else "world_event",
+        )
         await manager.record_experience(
             session_id=session_id,
             event_type=event_type,
@@ -840,7 +848,7 @@ class VesselInterface:
             environment=environment,
             event_type=event_type,
             summary=summary,
-            metadata=data,
+            metadata=activity_metadata,
         )
 
         if not self._is_salient(event_type, summary):
@@ -3235,25 +3243,33 @@ class VesselInterface:
         action: str,
         summary: str,
         metadata: dict[str, Any] | None = None,
+        result: dict[str, Any] | None = None,
     ) -> None:
-        """Record one outbound in-world action Synth performed.
+        """Record one outbound in-world action and its connector result.
 
         This is the Vessel counterpart of :meth:`on_world_event` for *outgoing*
         actions (``say``/``move``/``look``/...): it buffers the action as lived
         experience and writes an ``action`` row to ``vessel_activity_log`` so
         Synth's own in-world responses appear in the WebUI Activities tab
-        alongside the incoming perceptions. Fully guarded — never raises.
+        alongside the incoming perceptions. The reserved ``_result`` field
+        preserves the connector's structured outcome for debugging and future
+        verified-event consumers; action rows are still excluded from factual
+        diary recaps by default. Fully guarded — never raises.
         """
         session_id, interface_path = self._resolve_session_for_environment(environment)
         manager = get_vessel_session_manager()
         event_type = f"action_{action}"
         if session_id is not None:
             try:
+                experience_data = dict(metadata or {})
+                experience_data["_provenance"] = "action_request_result"
+                if result is not None:
+                    experience_data["_result"] = result
                 await manager.record_experience(
                     session_id=session_id,
                     event_type=event_type,
                     summary=summary,
-                    data=metadata,
+                    data=experience_data,
                 )
             except Exception as exc:  # pragma: no cover - defensive
                 log_debug(
@@ -3265,7 +3281,11 @@ class VesselInterface:
             environment=environment,
             event_type=event_type,
             summary=summary,
-            metadata=metadata,
+            metadata={
+                **(metadata or {}),
+                "_provenance": "action_request_result",
+                **({"_result": result} if result is not None else {}),
+            },
         )
 
     # ------------------------------------------------------------------

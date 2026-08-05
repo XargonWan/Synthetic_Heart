@@ -1345,8 +1345,8 @@ function resolveTargetEntity(target) {
 
 // Resolve the nearest block matching a canonical 'target' name (the block name
 // reported by nearbyBlocks/scan). Returns the block object or null. Purely
-// structural: the caller supplies a game id; the only family fallback is the
-// canonical Minecraft *_log id family when that exact variant is absent.
+// structural: the caller supplies a game id and only that exact block id is
+// accepted.
 function resolveTargetBlock(target, maxDistance) {
   if (!bot || typeof bot.findBlocks !== 'function') return null;
   const wanted = target != null ? String(target).trim().toLowerCase() : '';
@@ -1391,29 +1391,13 @@ function resolveTargetBlock(target, maxDistance) {
       if (exact && exact.name === wanted) return exact;
     }
 
-    // If the exact id exists in minecraft-data but is not present in this
-    // grove, retain a useful structural fallback for wood variants: an action
-    // aimed at `oak_log` or the explicit `*_log` pattern can mine the live
-    // `dark_oak_log`/`spruce_log`/etc. that the observation exposed. This is
-    // deliberately limited to canonical block ids ending in `_log`; it is not
-    // natural-language intent matching and never broadens other targets.
-    if (wanted.endsWith('_log') && blockDefMaps.length) {
-      const familyIds = blockDefMaps.flatMap((blockDefs) =>
-        Object.entries(blockDefs)
-          .filter(
-            ([name, def]) =>
-              name.endsWith('_log') && def && typeof def.id === 'number',
-          )
-          .map(([, def]) => def.id),
-      );
-      if (familyIds.length) {
-        blocks = bot.findBlocks({ matching: familyIds, maxDistance: dist, count: 1 });
-        if (blocks && blocks.length) {
-          const familyBlock = bot.blockAt(blocks[0]);
-          if (familyBlock && familyBlock.name.endsWith('_log')) return familyBlock;
-        }
-      }
-    }
+    // Do not broaden an explicit block id to a different variant.  The old
+    // family fallback turned `mine(target=dark_oak_log)` into a spruce-log
+    // harvest whenever dark oak was absent from the search radius.  That made
+    // a successful command look like the world had returned the wrong
+    // resource.  Callers can inspect the scan/affordance data and choose a
+    // different canonical block id explicitly; a missing exact target is a
+    // clean failure.
   } catch (e) {
     /* fall through */
   }

@@ -19,13 +19,17 @@ produced in the background. No in-world turn, no Agent Lane, no Drone.
 
 ## What it produces
 
-* **Source:** the session's rows in `vessel_activity_log` (event type, summary,
-  metadata such as positions, quantities and action outcomes).
+* **Source:** only recap-eligible world-event rows in the session's mixed
+  `vessel_activity_log` audit table. Player chat, Synth speech, and outbound
+  action requests remain available to the Activities UI but are not treated as
+  proof that an action happened. Structured connector outcomes (such as
+  `gained`, `collected`, and positions) are aggregated deterministically before
+  the model writes prose.
 * **Output:** a factual, third-person recap (no first-person / personality),
   chunked and folded so a long session never overruns a single LLM call, saved
   to `vessel_diary` with `reason = "activity_recap"`.
 * **Fail-safe:** any LLM error degrades to a deterministic plain-text join; an
-  empty activity log produces no entry.
+  empty eligible event log produces no entry.
 
 It **never** writes to the shared `ai_diary` — that would pollute every
 non-vessel prompt.

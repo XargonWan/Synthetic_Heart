@@ -272,12 +272,16 @@ only its runnable *shape*. It owns end-of-session compaction:
   payload it compacts the most recently ended session; ``{"session_id": "..."}``
   targets a specific one.
 * **Recap builder.** The worker calls
-  :func:`core.vessel_diary_compactor.compact_activity_recap`, which reads the
-  session's ``vessel_activity_log`` rows, summarises them in chunks into a
+  :func:`core.vessel_diary_compactor.compact_activity_recap`, which filters the
+  mixed ``vessel_activity_log`` audit rows to verified world events before
+  summarising them in chunks into a
   **factual, third-person operational recap** (no persona/first person), folds
   the partials (recursing when oversized) on the vessel-scope Cortex, and stores
-  one row in ``vessel_diary`` with ``reason = "activity_recap"``. Fully
-  fail-safe (LLM error → deterministic plain-text join; empty log → no entry;
+  one row in ``vessel_diary`` with ``reason = "activity_recap"``. Player chat,
+  Synth speech, and outbound action requests are excluded as evidence;
+  connector quantities and outcomes are aggregated deterministically and passed
+  as an authoritative fact ledger to the final fold. Fully
+  fail-safe (LLM error → deterministic plain-text join; empty eligible log → no entry;
   never raises).
 * **Config:** ``VESSEL_COMPACTOR_ENABLED`` (component ``vessel_compactor``,
   default ``True``). Disabling it makes ``end_session`` fall back to the legacy
