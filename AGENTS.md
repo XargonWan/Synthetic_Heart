@@ -607,14 +607,6 @@ When `eyes_closed > 0.5`, blink and saccade loops are automatically suspended un
 
 ```bash
 uv sync
-GITNEXUS_HOME=.gitnexus-home npx gitnexus analyze --skip-agents-md
-```
-
-PowerShell equivalent:
-
-```powershell
-$env:GITNEXUS_HOME = ".gitnexus-home"
-npx gitnexus analyze --skip-agents-md
 ```
 
 Use the repository’s configured MCP servers only after their dependencies and credentials are available.
@@ -642,7 +634,7 @@ a misleading "pytest is not available" result.
 1. Read the relevant wiki/docs and nearby tests.
 2. Inspect repository status and existing uncommitted work.
 3. Trace the current execution path.
-4. Use GitNexus upstream impact analysis for symbols you plan to modify materially.
+4. Use TencentDB `code_impact` for symbols you plan to modify materially when the MCP tool and code graph are available.
 5. Identify the smallest safe change and its validation plan.
 
 Do not overwrite unrelated work or “clean up” files outside the task.
@@ -681,7 +673,7 @@ This rule does not prohibit deeper investigation; it prevents looping on the sam
 - Do not stage or commit unless the user explicitly asks.
 - Never discard, reset, rewrite, or amend the user’s work without explicit authorization.
 - Before a requested commit, inspect the diff and run the required validation.
-- Use GitNexus change detection after non-trivial code changes and before committing.
+- Recheck affected callers and dependency paths with TencentDB code-graph tools after non-trivial code changes and before committing.
 
 ---
 
@@ -711,41 +703,36 @@ Record genuinely recurring, non-obvious defects in the repository’s establishe
 
 ---
 
-## 8. GitNexus Rules
+## 8. TencentDB Knowledge MCP Rules
 
-Use GitNexus as code-intelligence support, not as a substitute for reading code.
+Use the `tencentdb-knowledge` developer MCP server as code-intelligence and repository-wiki support, not as a substitute for reading current source code and tests.
+
+The launcher is `scripts/tencentdb_knowledge_mcp.py`. It starts or reuses the local Knowledge Service and exposes query-only MCP tools. It must remain separate from Synth runtime MCP configuration under `config/synth_mcp.json`.
+
+The default repository identifiers are supplied by the launcher through `TDAI_CODE_GRAPH_ID` and `TDAI_WIKI_ID`. Use the configured values when invoking tools; do not invent IDs.
 
 ### Required before changing a symbol
 
-Run upstream impact analysis for each materially modified function, class, or method.
+Run `code_impact` for each materially modified function, class, or method when the server and indexed graph are available.
 
 - Review direct callers and affected execution flows.
 - Warn the user before proceeding when the result is HIGH or CRITICAL risk.
 - Update all direct dependents required by the change.
+- Use `code_callers`, `code_callees`, and `code_node` to resolve ambiguous or incomplete impact results.
 
 ### Required for refactors
 
-- Query context before extracting or moving code.
-- Use GitNexus rename tooling for symbol renames; do not rely on global text replacement.
-- Run change detection after the refactor.
+- Use `code_search` or `code_explore` to locate the relevant symbols and files before extracting or moving code.
+- Inspect callers and callees before renaming a symbol; do not rely on global text replacement.
+- Re-run `code_impact` after the refactor and confirm the affected dependency paths match the intended scope.
 
 ### Required after non-trivial code changes
 
-Run change detection and confirm the affected symbols and flows match the intended scope. Repeat it before a requested commit if the working tree changed after the previous run.
+Re-query impact for materially changed symbols and confirm the returned callers and dependency paths match the intended scope. Repeat the check before a requested commit if the working tree changed afterward.
 
-If the index is stale:
+Use `code_status` to verify graph availability before trusting graph results. If the graph is unavailable, stale, or the MCP server/tool is missing, notify the user as required by the Developer MCP usage policy and fall back to direct source search and tests when safe.
 
-```bash
-GITNEXUS_HOME=.gitnexus-home npx gitnexus analyze --skip-agents-md
-```
-
-Preserve embeddings when the existing index uses them:
-
-```bash
-GITNEXUS_HOME=.gitnexus-home npx gitnexus analyze --skip-agents-md --embeddings
-```
-
-On PowerShell, set `$env:GITNEXUS_HOME = ".gitnexus-home"` first. Consult `.gitnexus/meta.json` before choosing whether to preserve embeddings. Keep the registry workspace-local and retain `--skip-agents-md` so analysis does not rewrite this file.
+Use `wiki_search` and `wiki_read` for focused repository documentation lookup. Treat indexed wiki content as navigation context rather than proof when it disagrees with current implementation or tests.
 
 ---
 
@@ -919,7 +906,7 @@ Before finishing a code task, verify:
 - [ ] Focused tests cover the change.
 - [ ] Formatting, linting, and scoped type checks pass.
 - [ ] Wider tests or smoke checks were run where appropriate.
-- [ ] For non-trivial code changes, GitNexus change detection matches the intended scope.
+- [ ] For non-trivial code changes, TencentDB impact queries (or a disclosed direct-source fallback) match the intended scope.
 - [ ] Documentation was updated or explicitly identified as unchanged.
 - [ ] No staging, commit, push, reset, or destructive action occurred without authorization.
 | Key | Purpose |

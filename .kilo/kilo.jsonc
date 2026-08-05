@@ -1,12 +1,9 @@
 {
   "$schema": "https://app.kilo.ai/config.json",
   "mcp": {
-    "gitnexus": {
+    "tencentdb-knowledge": {
       "type": "local",
-      "command": ["npx", "gitnexus", "mcp"],
-      "environment": {
-        "GITNEXUS_HOME": ".gitnexus-home"
-      },
+      "command": ["uv", "run", "python", "scripts/tencentdb_knowledge_mcp.py"],
       "enabled": true
     },
     "synth-logs": {
