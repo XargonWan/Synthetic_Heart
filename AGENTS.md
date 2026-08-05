@@ -629,6 +629,14 @@ Use the repository’s configured MCP servers only after their dependencies and 
 
 Never use `pip install` or create an ad-hoc virtual environment. Dependency changes go through `uv` so the lockfile remains authoritative.
 
+### Test environment
+
+Run Python tests through the repository-managed environment. Prefer `uv run pytest`;
+when invoking the interpreter directly, use `.venv/Scripts/python.exe` on Windows or
+`.venv/bin/python` on Linux/macOS. Do not use bare `python -m pytest` or `pytest`,
+because the system Python may not have the test dependencies installed and can produce
+a misleading "pytest is not available" result.
+
 ### Before editing
 
 1. Read the relevant wiki/docs and nearby tests.
