@@ -501,6 +501,86 @@ def test_build_json_prompt_derives_default_interface_action_scope(monkeypatch):
         core_initializer.actions_block = original_actions_block
 
 
+def test_build_json_prompt_outbound_grillo_exposes_offered_target_interfaces(
+    monkeypatch,
+):
+    async def dummy_gather(message, ctx):
+        return {}
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+
+    from core.core_initializer import core_initializer
+
+    monkeypatch.setattr(
+        "core.core_initializer.INTERFACE_REGISTRY",
+        {
+            "grillo": object(),
+            "telegram_bot": object(),
+            "discord_bot": object(),
+            "webui": object(),
+        },
+        raising=False,
+    )
+
+    original_actions_block = core_initializer.actions_block
+    core_initializer.actions_block = {
+        "available_actions": {
+            "create_personal_diary_entry": {
+                "schema": {"type": "object", "properties": {}, "required": []},
+                "brief": "Create diary entry.",
+                "source": "ai_diary",
+            },
+            "message_telegram_bot": {
+                "schema": {"type": "object", "properties": {}, "required": []},
+                "brief": "Send Telegram message.",
+                "source": "message_plugin, telegram_bot",
+            },
+            "message_discord_bot": {
+                "schema": {"type": "object", "properties": {}, "required": []},
+                "brief": "Send Discord message.",
+                "source": "message_plugin, discord_bot",
+            },
+            "message_webui": {
+                "schema": {"type": "object", "properties": {}, "required": []},
+                "brief": "Send WebUI message.",
+                "source": "message_plugin, webui",
+            },
+        }
+    }
+
+    try:
+        message = SimpleNamespace(
+            chat_id=-1,
+            text="observer beat",
+            message_id=1,
+            from_user=SimpleNamespace(full_name="grillo", username="grillo"),
+            date=datetime.now(timezone.utc),
+            interface_path="grillo/-1",
+        )
+        context_memory = {
+            "grillo_beat": True,
+            "beat_type": "observer",
+            "grillo_snippets": [
+                "(chat:telegram_bot/-100 | sender:alice | timestamp) hello",
+            ],
+            "grillo_targets": [
+                {"interface_path": "discord_bot/42"},
+            ],
+        }
+
+        result = asyncio.run(
+            build_json_prompt(message, context_memory, interface_name="grillo")
+        )
+
+        assert sorted(result["actions"].keys()) == [
+            "create_personal_diary_entry",
+            "message_discord_bot",
+            "message_telegram_bot",
+        ]
+    finally:
+        core_initializer.actions_block = original_actions_block
+
+
 def test_build_json_prompt_suppresses_diary_actions_on_vessel_turn(monkeypatch):
     """AGENTS.md §5c: a Vessel embodiment turn must not expose diary/memory-write
     actions in the prompt (the single 'lived experience' entry is written only at

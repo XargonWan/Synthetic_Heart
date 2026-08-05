@@ -364,6 +364,55 @@ def _action_scopes_by_name(action_name: str, action_def: Any) -> set[str]:
     return set(_DEFAULT_ACTION_SCOPES)
 
 
+def _derive_outbound_beat_target_interfaces(
+    context_memory: Any | None,
+    beat_type: object,
+) -> set[str]:
+    """Return interface prefixes structurally offered by an outbound beat.
+
+    Grillo observer beats run under the synthetic ``grillo`` interface, but
+    their snippets and eligible-target list can point at real interfaces such
+    as ``telegram_bot`` or ``discord_bot``.  The prompt must expose message
+    actions for those offered interfaces so the model can use the target paths
+    it was given.  This deliberately reads only routing metadata; it never
+    infers an interface from message text.
+    """
+    if not isinstance(context_memory, dict):
+        return set()
+    if not context_memory.get("grillo_beat") or not is_outbound_beat(beat_type):
+        return set()
+
+    paths: set[str] = set()
+
+    snippets = context_memory.get("grillo_snippets")
+    if isinstance(snippets, (list, tuple)):
+        for snippet in snippets:
+            if not isinstance(snippet, str):
+                continue
+            marker = "chat:"
+            start = snippet.find(marker)
+            if start == -1:
+                continue
+            start += len(marker)
+            end = start
+            while end < len(snippet) and snippet[end] not in (" ", "|", ")"):
+                end += 1
+            path = snippet[start:end].strip()
+            if path:
+                paths.add(path)
+
+    targets = context_memory.get("grillo_targets")
+    if isinstance(targets, (list, tuple)):
+        for target in targets:
+            if not isinstance(target, dict):
+                continue
+            path = target.get("interface_path")
+            if isinstance(path, str) and path.strip():
+                paths.add(path.strip())
+
+    return {path.split("/", 1)[0].strip() for path in paths if path.strip()}
+
+
 def _resolve_turn_scopes(
     message: Any | None,
     context_memory: Any | None,
@@ -472,6 +521,7 @@ def _derive_default_prompt_action_types(
     available_actions: dict[str, Any],
     interface_name: str | None,
     turn_scopes: set[str] | None = None,
+    outbound_target_interfaces: set[str] | None = None,
 ) -> set[str]:
     try:
         from core.core_initializer import INTERFACE_REGISTRY
@@ -488,9 +538,12 @@ def _derive_default_prompt_action_types(
         if _is_non_user_facing_action(action_def):
             continue
 
-        if current_interface:
+        if current_interface or outbound_target_interfaces:
             action_interfaces = _action_source_tokens(action_def) & interface_names
-            if action_interfaces and current_interface not in action_interfaces:
+            accepted_interfaces = set(outbound_target_interfaces or ())
+            if current_interface:
+                accepted_interfaces.add(current_interface)
+            if action_interfaces and not action_interfaces & accepted_interfaces:
                 continue
 
         # Per-turn scope gate: drop actions whose declared scope is not visible
@@ -1588,6 +1641,9 @@ async def build_prompt_request(
         or ""
     )
     is_grillo_internal = _is_grillo_beat and not is_outbound_beat(_beat_type)
+    outbound_target_interfaces = _derive_outbound_beat_target_interfaces(
+        context_memory, _beat_type
+    )
 
     # A Rift Vessel embodiment turn is an in-world conversation, not a research
     # task. Running the FULL recon (memory + web-search contributions + "do a
@@ -2296,13 +2352,15 @@ async def build_prompt_request(
                 full_actions,
                 interface_name,
                 turn_scopes=turn_scopes,
+                outbound_target_interfaces=outbound_target_interfaces,
             )
             if derived_action_types and len(derived_action_types) < len(full_actions):
                 allowed_action_types_for_prompt = derived_action_types
                 log_debug(
                     "[json_prompt] Derived default prompt action scope: "
                     f"{len(derived_action_types)}/{len(full_actions)} actions kept "
-                    f"for interface={interface_name} scopes={sorted(turn_scopes)}"
+                    f"for interface={interface_name} scopes={sorted(turn_scopes)} "
+                    f"outbound_targets={sorted(outbound_target_interfaces)}"
                 )
 
         if allowed_action_types_for_prompt is not None:
