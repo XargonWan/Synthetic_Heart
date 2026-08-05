@@ -187,7 +187,10 @@ def minify_actions_block(
 
     def _compact_lite_brief(action_name: str, brief: object) -> str:
         value = str(brief or "")
-        if not action_name.startswith("vessel_") or len(value) <= _LITE_VESSEL_BRIEF_LIMIT:
+        if (
+            not action_name.startswith("vessel_")
+            or len(value) <= _LITE_VESSEL_BRIEF_LIMIT
+        ):
             return value
         head = 300
         tail = _LITE_VESSEL_BRIEF_LIMIT - head - len(" … ")
@@ -219,9 +222,7 @@ def minify_actions_block(
             # expensive in the model-facing catalog and validation still uses
             # the registered full definition after the model responds.
             lite_action = {
-                "brief": _compact_lite_brief(
-                    action_name, normalized.get("brief", "")
-                )
+                "brief": _compact_lite_brief(action_name, normalized.get("brief", ""))
             }
             schema = normalized.get("schema")
             if isinstance(schema, dict):
@@ -686,11 +687,49 @@ _EXPLICIT_RUNTIME_FACT_REQUEST_RE = re.compile(
 
 def _turn_requests_explicit_runtime_facts(text: str | None) -> bool:
     """Return True when the current turn needs exact time/date/location facts."""
-
     candidate = str(text or "").strip()
     if not candidate:
         return False
     return bool(_EXPLICIT_RUNTIME_FACT_REQUEST_RE.search(candidate))
+
+
+_SOUL_TURN_DELTA_MIN = 0.05
+
+
+def _build_soul_turn_delta_prefix(context_section: dict[str, Any]) -> str:
+    """Build the per-turn SOUL mood-delta prefix for the current user turn.
+
+    Reads ``soul_turn_emotion_delta`` (a JSON string shaped ``{"e": {...}}``)
+    and returns a compact ``{"e": {...}}`` line prefixed with a newline, or an
+    empty string when the SOUL emotional state is not substantive (all |values|
+    below ``_SOUL_TURN_DELTA_MIN``). Gating on magnitude keeps a quiet session
+    from emitting a competing per-turn emotion signal on ordinary turns.
+    """
+    raw = context_section.get("soul_turn_emotion_delta")
+    if not raw:
+        return ""
+    try:
+        if isinstance(raw, str):
+            import json as _json
+
+            parsed = _json.loads(raw)
+        elif isinstance(raw, dict):
+            parsed = raw
+        else:
+            return ""
+    except Exception:
+        return ""
+
+    state = parsed.get("e") if isinstance(parsed, dict) else None
+    if not isinstance(state, dict) or not state:
+        return ""
+
+    if not any(abs(float(value)) >= _SOUL_TURN_DELTA_MIN for value in state.values()):
+        return ""
+
+    import json as _json
+
+    return _json.dumps(parsed, separators=(",", ":")) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -831,6 +870,20 @@ def _build_context_summary(
             if len(snippet) > 300:
                 snippet = snippet[:300] + "\u2026"
             parts.append(f"- {snippet}")
+
+    # SOUL session state (foresight + emotion snapshot). Emitted only when there
+    # is genuinely active foresight content (the plugin renders a non-empty list),
+    # so the normal no-foresight path contributes ~0 tokens. The foresight list is
+    # used as the sole gate: ``soul_session_state`` already bundles foresight and
+    # the emotion snapshot, so we render that single block and never double-render
+    # ``soul_active_foresight`` separately (dedupe).
+    if not is_grillo_internal:
+        _soul_foresight = context_section.get("soul_active_foresight")
+        _soul_session = context_section.get("soul_session_state")
+        _has_foresight = isinstance(_soul_foresight, list) and bool(_soul_foresight)
+        if _has_foresight and _soul_session:
+            parts.append("[Session state]")
+            parts.append(str(_soul_session))
 
     participants: Any = context_section.get("participants")
     # Grillo internal beats skip participant bios entirely
@@ -1490,6 +1543,16 @@ def _assemble_prompt_request(  # noqa: PLR0913
     # ── Attachments ─────────────────────────────────────────────────────────
     pr_attachments = _build_pr_attachments(image_data, attachments)
 
+    # Per-turn SOUL mood delta. Prepended to the current user turn, gated so it
+    # only fires when the SOUL emotional state is actually substantive (any
+    # |value| >= SOUL_TURN_DELTA_MIN). A fresh/quiet session sits at 0, so
+    # ordinary turns carry no delta and never compete with the legacy emotion
+    # signal in the runtime prefix.
+    try:
+        _soul_delta = _build_soul_turn_delta_prefix(context_section)
+    except Exception:
+        _soul_delta = ""
+
     # ── Determine mode ───────────────────────────────────────────────────────
     mode: str = "grillo" if is_grillo_internal else "chat"
 
@@ -1498,7 +1561,7 @@ def _assemble_prompt_request(  # noqa: PLR0913
         tool_declarations=tool_declarations,
         context_summary=context_summary,
         conversation_history=conversation_history,
-        current_text=text,
+        current_text=(_soul_delta + text) if _soul_delta else text,
         runtime_ctx=runtime_ctx,
         attachments=pr_attachments,
         reply_to=reply_to_dict,
@@ -2280,9 +2343,7 @@ async def build_prompt_request(
                             f"catalog ({len(live_vessel_actions)} actions)"
                         )
             except Exception as exc:  # pragma: no cover - defensive
-                log_debug(
-                    f"[json_prompt] Live Vessel action merge skipped: {exc}"
-                )
+                log_debug(f"[json_prompt] Live Vessel action merge skipped: {exc}")
 
         # When audio attachments are present as multimodal content, remove
         # stt_transcribe from the available actions so the LLM processes the
