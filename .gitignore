@@ -73,6 +73,7 @@ _[Bb]uild
 docs/plugins/generated/
 .gitnexus
 .gitnexus-home
+.tools/
 opencode.json
 .claude
 .clinerules

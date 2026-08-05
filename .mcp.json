@@ -19,17 +19,15 @@
       "type": "sse",
       "url": "https://docs.x.ai/api/mcp"
     },
-    "gitnexus": {
+    "tencentdb-knowledge": {
       "type": "stdio",
-      "command": "npx",
+      "command": "uv",
       "args": [
-        "gitnexus",
-        "mcp"
+        "run",
+        "python",
+        "scripts/tencentdb_knowledge_mcp.py"
       ],
-      "cwd": "D:\\dev\\D16\\synthetic_heart",
-      "env": {
-        "GITNEXUS_HOME": ".gitnexus-home"
-      }
+      "cwd": "D:\\dev\\D16\\synthetic_heart"
     },
     "synth-logs": {
       "type": "stdio",
