@@ -138,6 +138,7 @@ EPHEMERAL_EVENT_TYPES: frozenset[str] = frozenset(
         "spawn",  # a mob spawned nearby — ambient presence
         "movement",  # the body moved — pure motor telemetry
         "status",  # periodic self-status snapshot — pure telemetry
+        "observation_followup",  # internal observe → concrete-action cognition
     }
 )
 

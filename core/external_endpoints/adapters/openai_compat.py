@@ -211,7 +211,11 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         # don't bleed into message content where they corrupt action parsing.
         # Defaulting to False here matches the behaviour of the vision path and of
         # Gemini/OpenRouter which never expose thinking in the response content.
+        # Thinking is opt-in for direct adapter callers as well. The bridge
+        # supplies the endpoint's explicit value when configured.
         extra_body: dict[str, Any] = kwargs.pop("extra_body", {}) or {}
+        if "enable_thinking" not in kwargs:
+            kwargs["enable_thinking"] = False
         if "enable_thinking" in kwargs:
             extra_body["enable_thinking"] = kwargs.pop("enable_thinking")
 

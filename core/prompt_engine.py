@@ -214,10 +214,24 @@ def minify_actions_block(
         normalized = normalize_action_schema(action_name, action_def)
 
         if lite:
-            # Lite: brief-only, no schema
-            minified[action_name] = {
-                "brief": _compact_lite_brief(action_name, normalized.get("brief", ""))
+            # Lite: keep the compact brief plus the field names needed to build
+            # a valid payload.  The full schema is intentionally omitted: it is
+            # expensive in the model-facing catalog and validation still uses
+            # the registered full definition after the model responds.
+            lite_action = {
+                "brief": _compact_lite_brief(
+                    action_name, normalized.get("brief", "")
+                )
             }
+            schema = normalized.get("schema")
+            if isinstance(schema, dict):
+                properties = schema.get("properties") or {}
+                if isinstance(properties, dict) and properties:
+                    lite_action["payload_keys"] = list(properties.keys())
+                required = schema.get("required") or []
+                if isinstance(required, list) and required:
+                    lite_action["required_payload_keys"] = list(required)
+            minified[action_name] = lite_action
         else:
             # Standard: schema + brief
             minified[action_name] = extract_for_llm_prompt(action_name, normalized)
@@ -1914,6 +1928,19 @@ async def build_prompt_request(
     if effective_history_scope:
         input_payload.setdefault("history_scope", effective_history_scope)
 
+    # Reactive Vessel turns carry a bounded structural snapshot from the live
+    # connector. Keep it in the input payload (rather than stuffing it into
+    # chat history or the action catalog) so exact block/entity ids and their
+    # affordances are available for the current decision without polluting the
+    # persistent conversation.
+    _vessel_world_state = (
+        context_memory.get("vessel_world_state")
+        if isinstance(context_memory, dict)
+        else None
+    )
+    if isinstance(_vessel_world_state, dict):
+        input_payload["vessel_world_state"] = _vessel_world_state
+
     if local_time_fields:
         input_payload.update(local_time_fields)
     # debug: log full prompt payload for reconstruction
@@ -2078,6 +2105,23 @@ async def build_prompt_request(
             json_instructions = " ".join(recon_prefixes) + " " + json_instructions
     except Exception as e:
         log_warning(f"[json_prompt] Failed to add recon instructions: {e}")
+
+    if isinstance(_vessel_world_state, dict):
+        vessel_state_guidance = (
+            "LIVE VESSEL STATE is attached at input.payload.vessel_world_state. "
+            "Use its exact ids and affordances for the current world action. "
+            "When a concrete world action is possible, emit that action now "
+            "instead of treating observation as completion."
+        )
+        if isinstance(context_memory, dict) and context_memory.get(
+            "vessel_observation_followup"
+        ):
+            vessel_state_guidance += (
+                " This is an observation follow-up: choose one concrete world "
+                "action from the available actions now; do not emit another "
+                "observe, status, scan, inventory, planning, or speech action."
+            )
+        json_instructions = f"{vessel_state_guidance} {json_instructions}"
 
     # Grillo internal beats are non-user-facing. Without an explicit guardrail,
     # some models invent unsupported message actions (e.g. message_grillo),

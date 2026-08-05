@@ -66,6 +66,9 @@ _DEFAULT_DOWNSTREAM_CHAR_BUDGET = 24000
 # vedono tutte le actions (incluso tts_speak).
 # Per riattivare i tool nativi quando arriverà la parte agentica: riportare
 # questo flag a False. La logica originale del ramo tools resta intatta sotto.
+# Native tools remain off by default for compatibility with endpoints/models
+# that do not support function calling. Individual endpoints may opt in with
+# ``extra_config.enable_tools: true``.
 _NATIVE_TOOLS_ENABLED = False
 
 
@@ -395,8 +398,10 @@ class ExternalCortexEngine(AIPluginBase):
         """
         extra = self._endpoint.extra_config or {}
         kwargs: dict[str, Any] = {}
-        if extra.get("disable_thinking"):
-            kwargs["enable_thinking"] = False
+        if self._endpoint.protocol is EndpointProtocol.OPENAI:
+            # Thinking is opt-in. The legacy disable_thinking key remains
+            # readable in old configs, but the default is now explicit false.
+            kwargs["enable_thinking"] = extra.get("enable_thinking") is True
 
         # Cap completion length. An explicit value always wins; otherwise apply a
         # safe default ONLY for local-model endpoints (disable_tools /
@@ -447,6 +452,13 @@ class ExternalCortexEngine(AIPluginBase):
         """
         extra = self._endpoint.extra_config or {}
         return bool(extra.get("disable_tools") or extra.get("force_action_grammar"))
+
+    def _native_tools_enabled(self) -> bool:
+        """Return whether this endpoint opts into native tool declarations."""
+        if self._disable_tools():
+            return False
+        extra = self._endpoint.extra_config or {}
+        return bool(_NATIVE_TOOLS_ENABLED or extra.get("enable_tools") is True)
 
     def _build_action_grammar(self, prompt_request: Any) -> str | None:
         """Build a GBNF grammar for the action JSON, or ``None``.
@@ -558,7 +570,28 @@ class ExternalCortexEngine(AIPluginBase):
             if not scoped:
                 return
 
-            is_lite: bool = bool(config_registry.get_value("PROMPT_LITE_MODE", False))
+            # ``build_prompt_request`` forces every Vessel turn into lite mode
+            # because the embodiment catalog is unusually large.  That state
+            # is per-turn, while PROMPT_LITE_MODE is a global setting; relying
+            # on the latter here silently re-expanded Vessel actions after the
+            # prompt engine had already compacted them.  Detect the Vessel
+            # route structurally from the typed request so the bridge uses the
+            # same compact representation for both paths.
+            runtime_ctx = getattr(prompt_request, "runtime_ctx", None)
+            runtime_interface = str(
+                getattr(runtime_ctx, "interface_path", "") or ""
+            ).strip()
+            runtime_name = str(
+                getattr(runtime_ctx, "interface_name", "") or ""
+            ).strip()
+            is_vessel_turn = (
+                runtime_interface == "vessel"
+                or runtime_interface.startswith("vessel/")
+                or runtime_name == "vessel"
+            )
+            is_lite: bool = is_vessel_turn or bool(
+                config_registry.get_value("PROMPT_LITE_MODE", False)
+            )
             catalog = minify_actions_block(scoped, lite=is_lite)
             # Render as a flat, unambiguous list — NOT a nested JSON dict. The
             # nested ``{name: {brief, schema}}`` shape made small models emit
@@ -573,13 +606,16 @@ class ExternalCortexEngine(AIPluginBase):
                 props = (
                     list((schema.get("properties") or {}).keys())
                     if isinstance(schema, dict)
-                    else []
+                    else list(spec.get("payload_keys") or [])
                 )
+                required = list(spec.get("required_payload_keys") or [])
                 line = f"- {name}"
                 if brief:
                     line += f": {brief}"
                 if props:
                     line += f" (payload keys: {', '.join(str(p) for p in props)})"
+                if required:
+                    line += f" (required: {', '.join(str(p) for p in required)})"
                 lines.append(line)
 
             block = (
@@ -699,7 +735,7 @@ class ExternalCortexEngine(AIPluginBase):
             # action catalog into the system prompt, and leave
             # supports_tool_calling False so the renderer expects a
             # JSON-in-content reply rather than tool_calls.
-            if not _NATIVE_TOOLS_ENABLED or self._disable_tools():
+            if not self._native_tools_enabled():
                 prompt_request.supports_tool_calling = False
                 self._inject_actions_into_prompt(prompt_request)
                 grammar = self._build_action_grammar(prompt_request)
@@ -943,12 +979,12 @@ class ExternalCortexEngine(AIPluginBase):
         are serialised into role-separated JSON, so the real payload can be much
         larger than the reduced context (dominated, for vessel turns, by the
         injected ``vessel_minecraft_*`` catalog). This clamp operates on the
-        fully assembled messages and trims only the ``user`` body — never the
-        ``system`` message (instructions + action catalog the model must see) and
-        never image parts — so the payload stays under the endpoint's chunking
-        threshold. This is what actually prevents the ``selenium-llm-engine``
-        chunking + "reply only OK" contamination / empty-actions garbling on
-        heavy (vessel) turns.
+        fully assembled messages and trims older non-system content first. The
+        latest user turn is protected so the current command cannot disappear;
+        system instructions and image parts are also preserved. If the system
+        message alone exceeds the budget, the method logs the overflow and
+        sends the preserved current turn rather than silently replacing it with
+        an empty message.
         """
         budget = self._downstream_char_budget()
         if budget <= 0 or not isinstance(messages, list) or not messages:
@@ -959,26 +995,40 @@ class ExternalCortexEngine(AIPluginBase):
             return messages
 
         overflow = total - budget
-        system_len = sum(
-            self._message_content_len(m.get("content"))
-            for m in messages
-            if m.get("role") == "system"
+        # The final user message is the current turn for the typed OpenAI
+        # renderers. Keep it intact and trim preceding history/result messages
+        # first. If there is no user message, protect the last non-system
+        # message as the safest equivalent fallback.
+        protected_index: int | None = None
+        for index in range(len(messages) - 1, -1, -1):
+            if messages[index].get("role") == "user":
+                protected_index = index
+                break
+        if protected_index is None:
+            for index in range(len(messages) - 1, -1, -1):
+                if messages[index].get("role") != "system":
+                    protected_index = index
+                    break
+
+        trimmable = sum(
+            self._message_content_len(message.get("content"))
+            for index, message in enumerate(messages)
+            if message.get("role") != "system" and index != protected_index
         )
-        trimmable = total - system_len
         if trimmable <= 0:
             log_warning(
                 f"[cortex_bridge:{self._endpoint.name}] downstream payload "
-                f"{total} chars exceeds budget {budget} but only the system "
-                f"message is present — cannot trim without dropping the action "
-                f"catalog; sending as-is."
+                f"{total} chars exceeds budget {budget}; preserving the latest "
+                f"user turn because trimming it would erase the current request. "
+                f"Sending as-is."
             )
             return messages
 
         remaining_to_remove = overflow
-        for msg in messages:
+        for index, msg in enumerate(messages):
             if remaining_to_remove <= 0:
                 break
-            if msg.get("role") == "system":
+            if msg.get("role") == "system" or index == protected_index:
                 continue
             content = msg.get("content")
             content_len = self._message_content_len(content)
@@ -988,12 +1038,20 @@ class ExternalCortexEngine(AIPluginBase):
             msg["content"] = self._truncate_message_content(content, take)
             remaining_to_remove -= take
 
-        log_warning(
-            f"[cortex_bridge:{self._endpoint.name}] downstream payload {total} "
-            f"chars exceeded budget {budget}; trimmed ~{overflow} chars from the "
-            f"user body (system/action catalog preserved) to avoid endpoint "
-            f"prompt chunking."
-        )
+        if remaining_to_remove > 0:
+            log_warning(
+                f"[cortex_bridge:{self._endpoint.name}] downstream payload {total} "
+                f"chars exceeded budget {budget}; trimmed "
+                f"~{overflow - remaining_to_remove} chars from older context but "
+                f"kept the latest user turn intact. Remaining overflow: "
+                f"{remaining_to_remove} chars."
+            )
+        else:
+            log_warning(
+                f"[cortex_bridge:{self._endpoint.name}] downstream payload {total} "
+                f"chars exceeded budget {budget}; trimmed ~{overflow} chars from "
+                f"older context while preserving the latest user turn."
+            )
         return messages
 
     def _build_messages(self, prompt: Any) -> list[dict[str, Any]]:

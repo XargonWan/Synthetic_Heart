@@ -1129,6 +1129,80 @@ def _openai_endpoint(extra_config: dict) -> "ExternalEndpoint":
 
 
 @pytest.mark.asyncio
+async def test_vessel_prompt_uses_turn_lite_catalog_and_preserves_current_user():
+    """Vessel lite mode must survive bridge catalog injection."""
+    from core.core_initializer import core_initializer
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from core.prompt_request import PromptRequest, RuntimeContext
+
+    original_actions = core_initializer.actions_block
+    core_initializer.actions_block = {
+        "available_actions": {
+            "vessel_minecraft_mine": {
+                "description": "Break " + ("a nearby block " * 120),
+                "required_fields": ["target"],
+                "optional_fields": ["search_radius", "timeout_ms"],
+            }
+        }
+    }
+    captured: dict[str, Any] = {}
+
+    class FakeAdapter:
+        async def chat_completion(self, messages, model=None, **kwargs):
+            captured["messages"] = messages
+            return SimpleNamespace(content='{"actions": []}', model=model)
+
+    try:
+        prompt = PromptRequest(
+            system_instruction="Use valid JSON.",
+            current_text="Go hit a tree and get some wood.",
+            tool_declarations=[SimpleNamespace(name="vessel_minecraft_mine")],
+            runtime_ctx=RuntimeContext(
+                interface_name="vessel",
+                interface_path="vessel/minecraft",
+            ),
+        )
+        engine = ExternalCortexEngine(
+            _openai_endpoint({"downstream_char_budget": 1200}),
+            FakeAdapter(),
+        )
+
+        await engine.handle_incoming_message(None, None, prompt)
+
+        system = captured["messages"][0]["content"]
+        current = captured["messages"][-1]["content"]
+        assert current.endswith("Go hit a tree and get some wood.")
+        assert len(system) < 1000
+        assert "vessel_minecraft_mine" in system
+        assert "payload keys: target, search_radius, timeout_ms" in system
+        assert "required: target" in system
+    finally:
+        core_initializer.actions_block = original_actions
+
+
+def test_downstream_clamp_preserves_latest_user_turn():
+    """Older context may be trimmed, but the current request must survive."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+
+    engine = ExternalCortexEngine(
+        _openai_endpoint({"downstream_char_budget": 120}),
+        cast(Any, object()),
+    )
+    messages = [
+        {"role": "system", "content": "instructions"},
+        {"role": "user", "content": "old history " * 40},
+        {"role": "assistant", "content": "old result " * 40},
+        {"role": "user", "content": "Go hit a tree and get some wood."},
+    ]
+    old_history_length = len(messages[1]["content"])
+
+    clamped = engine._clamp_messages_to_char_budget(messages)
+
+    assert clamped[-1]["content"] == "Go hit a tree and get some wood."
+    assert len(clamped[1]["content"]) < old_history_length
+
+
+@pytest.mark.asyncio
 async def test_force_json_object_sets_response_format():
     """force_json_object in extra_config asks the server for valid-JSON output."""
     from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
@@ -1281,6 +1355,30 @@ def test_max_tokens_default_only_for_local_flagged_endpoints():
         _openai_endpoint({"max_tokens": 1234}), cast(Any, SimpleNamespace())
     )
     assert explicit._extra_api_kwargs()["max_tokens"] == 1234
+
+
+def test_thinking_is_opt_in_and_native_tools_are_per_endpoint():
+    """Thinking and native tools stay off unless an endpoint opts in."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+
+    plain = ExternalCortexEngine(
+        _openai_endpoint({}), cast(Any, SimpleNamespace())
+    )
+    assert plain._extra_api_kwargs()["enable_thinking"] is False
+    assert plain._native_tools_enabled() is False
+
+    enabled = ExternalCortexEngine(
+        _openai_endpoint({"enable_thinking": True, "enable_tools": True}),
+        cast(Any, SimpleNamespace()),
+    )
+    assert enabled._extra_api_kwargs()["enable_thinking"] is True
+    assert enabled._native_tools_enabled() is True
+
+    legacy_override = ExternalCortexEngine(
+        _openai_endpoint({"enable_tools": True, "disable_tools": True}),
+        cast(Any, SimpleNamespace()),
+    )
+    assert legacy_override._native_tools_enabled() is False
 
 
 @pytest.mark.asyncio

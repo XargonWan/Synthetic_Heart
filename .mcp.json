@@ -26,6 +26,7 @@
         "gitnexus",
         "mcp"
       ],
+      "cwd": "D:\\dev\\D16\\synthetic_heart",
       "env": {
         "GITNEXUS_HOME": ".gitnexus-home"
       }
@@ -33,6 +34,7 @@
     "synth-logs": {
       "type": "stdio",
       "command": "uv",
+      "cwd": "D:\\dev\\D16\\synthetic_heart",
       "args": [
         "run",
         "python",
@@ -42,6 +44,7 @@
     "synth-db": {
       "type": "stdio",
       "command": "uv",
+      "cwd": "D:\\dev\\D16\\synthetic_heart",
       "args": [
         "run",
         "python",
@@ -51,6 +54,7 @@
     "synth-llm-failures": {
       "type": "stdio",
       "command": "uv",
+      "cwd": "D:\\dev\\D16\\synthetic_heart",
       "args": [
         "run",
         "python",
@@ -60,6 +64,7 @@
     "synth-cortex": {
       "type": "stdio",
       "command": "uv",
+      "cwd": "D:\\dev\\D16\\synthetic_heart",
       "args": [
         "run",
         "python",
@@ -69,6 +74,7 @@
     "synth-langfuse": {
       "type": "stdio",
       "command": "uv",
+      "cwd": "D:\\dev\\D16\\synthetic_heart",
       "args": [
         "run",
         "python",

@@ -39,7 +39,7 @@ from typing import Any
 from core.ai_plugin_base import AIPluginBase
 from core.config_manager import config_registry
 from core.core_initializer import register_plugin
-from core.logging_utils import log_error, log_info, log_warning
+from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.vessel_registry import VESSEL_REGISTRY
 from plugins.rift_vessel.vessel_base import VesselActionResult, WorldState
 from plugins.rift_vessel.vessel_whitelist import (
@@ -2070,7 +2070,31 @@ class VesselPlugin(AIPluginBase):
                 },
             }
         if verb == "observe":
-            return await self._observe_surroundings()
+            result = await self._observe_surroundings()
+            # ``observe`` is a read action. On a reactive player turn its
+            # result must get one concrete-action decision, otherwise the
+            # model sees no tool result and the turn ends after looking around.
+            # Keep this as a normal Vessel-interface enqueue: no Agent Lane,
+            # Drone, or parallel message chain is created.
+            if is_reactive_player_chat and isinstance(result, dict):
+                try:
+                    iface = self._get_vessel_interface()
+                    enqueue_followup = getattr(
+                        iface, "enqueue_observation_followup", None
+                    )
+                    interface_path = (context or {}).get("interface_path")
+                    environment = self._connected_world()
+                    if callable(enqueue_followup) and environment and interface_path:
+                        await enqueue_followup(
+                            environment=environment,
+                            interface_path=str(interface_path),
+                            observation=result,
+                        )
+                except Exception as exc:  # pragma: no cover - fail-safe
+                    log_debug(
+                        f"[vessel_plugin] observe follow-up enqueue skipped: {exc}"
+                    )
+            return result
         if verb is not None:
             # World-specific verb declared by the connected connector's
             # get_world_actions() — dispatch it straight to the connector.

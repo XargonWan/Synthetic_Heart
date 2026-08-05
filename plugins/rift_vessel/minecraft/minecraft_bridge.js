@@ -1343,12 +1343,12 @@ function resolveTargetEntity(target) {
   return nearest;
 }
 
-// Resolve the nearest block matching a free-form 'target' name (e.g. the block
-// name reported by nearbyBlocks/scan). Returns the block object or null. Purely
-// structural: the caller supplies the exact block name to look for; the bridge
-// never interprets what a name means.
+// Resolve the nearest block matching a canonical 'target' name (the block name
+// reported by nearbyBlocks/scan). Returns the block object or null. Purely
+// structural: the caller supplies a game id; the only family fallback is the
+// canonical Minecraft *_log id family when that exact variant is absent.
 function resolveTargetBlock(target, maxDistance) {
-  if (!bot || typeof bot.findBlock !== 'function') return null;
+  if (!bot || typeof bot.findBlocks !== 'function') return null;
   const wanted = target != null ? String(target).trim().toLowerCase() : '';
   if (!wanted) return null;
   // CRITICAL (OOM fix): resolve the block NAME to numeric block-state IDs and
@@ -1363,23 +1363,56 @@ function resolveTargetBlock(target, maxDistance) {
   try {
     let matchIds = null;
     const version = bot.version;
-    const mcData = minecraftData && version ? minecraftData(version) : null;
-    if (mcData && mcData.blocksByName) {
-      const def = mcData.blocksByName[wanted];
+    let mcData = null;
+    try {
+      mcData = minecraftData && version ? minecraftData(version) : null;
+    } catch (e) {
+      // The connected protocol can be newer than the bundled data package.
+      // Mineflayer still exposes its live registry, so use that below.
+      mcData = null;
+    }
+    const registry = bot.registry || null;
+    const blockDefMaps = [
+      mcData && mcData.blocksByName,
+      registry && registry.blocksByName,
+    ].filter(Boolean);
+    for (const blockDefs of blockDefMaps) {
+      const def = blockDefs[wanted];
       if (def && typeof def.id === 'number') {
         matchIds = [def.id];
+        break;
       }
     }
-    // Without a numeric id we cannot safely scan (a name callback is the OOM
-    // trap). Bail cleanly instead of risking the heap burst.
-    if (!matchIds) return null;
-    const blocks = bot.findBlocks({
-      matching: matchIds,
-      maxDistance: dist,
-      count: 1,
-    });
+    let blocks = matchIds
+      ? bot.findBlocks({ matching: matchIds, maxDistance: dist, count: 1 })
+      : [];
     if (blocks && blocks.length) {
-      return bot.blockAt(blocks[0]);
+      const exact = bot.blockAt(blocks[0]);
+      if (exact && exact.name === wanted) return exact;
+    }
+
+    // If the exact id exists in minecraft-data but is not present in this
+    // grove, retain a useful structural fallback for wood variants: an action
+    // aimed at `oak_log` or the explicit `*_log` pattern can mine the live
+    // `dark_oak_log`/`spruce_log`/etc. that the observation exposed. This is
+    // deliberately limited to canonical block ids ending in `_log`; it is not
+    // natural-language intent matching and never broadens other targets.
+    if (wanted.endsWith('_log') && blockDefMaps.length) {
+      const familyIds = blockDefMaps.flatMap((blockDefs) =>
+        Object.entries(blockDefs)
+          .filter(
+            ([name, def]) =>
+              name.endsWith('_log') && def && typeof def.id === 'number',
+          )
+          .map(([, def]) => def.id),
+      );
+      if (familyIds.length) {
+        blocks = bot.findBlocks({ matching: familyIds, maxDistance: dist, count: 1 });
+        if (blocks && blocks.length) {
+          const familyBlock = bot.blockAt(blocks[0]);
+          if (familyBlock && familyBlock.name.endsWith('_log')) return familyBlock;
+        }
+      }
     }
   } catch (e) {
     /* fall through */
@@ -2136,10 +2169,48 @@ function disconnectBot() {
 
 // --- Normalized action -> Mineflayer command -------------------------------
 
+// GoalFollow is persistent in mineflayer: a later read-only action does not
+// replace it, and a direct dig can otherwise happen while the pathfinder keeps
+// steering the body back toward the followed entity. Any new physical task
+// therefore interrupts follow before it starts. The set is action-shaped, not
+// text-shaped, so this remains world/runtime structural.
+const FOLLOW_INTERRUPTING_ACTIONS = new Set([
+  'move',
+  'use',
+  'attack',
+  'shoot',
+  'respawn',
+  'surface',
+  'goto',
+  'mine',
+  'collect_block',
+  'place',
+  'wander',
+  'shelter',
+  'dig_staircase',
+  'return_surface',
+  'climb_staircase',
+  'craft',
+  'smelt',
+  'equip',
+  'build_base',
+]);
+
 async function runAction(action, payload) {
   payload = payload || {};
   if (!bot || !connected) {
     return { ok: false, detail: 'not connected to a world', data: {} };
+  }
+  if (
+    FOLLOW_INTERRUPTING_ACTIONS.has(action) &&
+    bot.pathfinder &&
+    typeof bot.pathfinder.setGoal === 'function'
+  ) {
+    try {
+      bot.pathfinder.setGoal(null);
+    } catch (e) {
+      /* The action still gets its own guarded execution below. */
+    }
   }
   switch (action) {
     case 'say': {

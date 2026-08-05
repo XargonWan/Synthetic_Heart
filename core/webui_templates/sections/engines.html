@@ -66,7 +66,7 @@
                 <!-- Per-endpoint extra config — shown only for external endpoints -->
                 <div id="cortex-engine-config-wrap" style="display:none; margin-top:14px; max-width:680px;">
                     <label style="display:block; margin-bottom:4px; font-weight:600;">Engine Configuration <span style="color:var(--muted); font-weight:400; font-size:0.85rem;">(JSON — applies to this endpoint)</span></label>
-                    <textarea id="cortex-engine-config" rows="5" spellcheck="false" placeholder='{"disable_thinking": true, "force_json_object": true}'
+                    <textarea id="cortex-engine-config" rows="5" spellcheck="false" placeholder='{"enable_thinking": true, "enable_tools": true, "max_tokens": 4096}'
                         style="width:100%; padding:9px 12px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:8px; font-family:monospace; font-size:0.85rem; resize:vertical;"></textarea>
                     <div style="margin-top:5px; font-size:0.8rem; color:var(--muted);">
                         Cortex keys: <code>timeout</code> (request seconds), <code>max_tokens</code> (caps reply length),

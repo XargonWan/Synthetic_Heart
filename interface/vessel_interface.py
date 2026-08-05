@@ -50,6 +50,25 @@ _RATE_LIMIT_SEC = 2.0
 # Max length of a slugified world-identity token in the interface path.
 _MAX_WORLD_TOKEN_CHARS = 48
 
+# Reactive turns only need enough live state to translate a visible affordance
+# into a concrete world action. Keep this bounded: the full status payload is
+# useful to the autonomy beats, but would make a chat turn noisy and expensive.
+_REACTIVE_WORLD_LIST_LIMIT = 24
+_REACTIVE_INVENTORY_LIMIT = 48
+_REACTIVE_FOLLOWUP_EXCLUDED_VERBS = frozenset(
+    {
+        "say",
+        "observe",
+        "status",
+        "scan",
+        "inventory",
+        "goals",
+        "set_goal",
+        "update_goal",
+        "lookup_knowledge",
+    }
+)
+
 vessel_interface: "VesselInterface | None" = None
 
 
@@ -1036,6 +1055,8 @@ class VesselInterface:
         event_type: str,
         actor: str | None = None,
         allowed_actions: set[str] | None = None,
+        world_state_context: dict[str, Any] | None = None,
+        observation_followup: bool = False,
     ) -> None:
         """Wrap a perception as a normal message and enqueue it (Fast Lane).
 
@@ -1052,6 +1073,21 @@ class VesselInterface:
         re-attributed.
         """
         try:
+            # A direct player chat gets a bounded live snapshot in prompt
+            # metadata. This is deliberately fetched only for human-facing
+            # turns; autonomous beats already read the full WorldState.
+            if event_type == "chat" and actor and world_state_context is None:
+                try:
+                    _, live_state = await self._read_active_world_state()
+                    if live_state is not None:
+                        world_state_context = self._compact_reactive_world_state(
+                            live_state
+                        )
+                except Exception as exc:  # pragma: no cover - best effort
+                    log_debug(
+                        f"[vessel_interface] reactive world snapshot skipped: {exc}"
+                    )
+
             from core import message_queue
 
             # A salient in-world player chat carrying an actor is a human
@@ -1081,7 +1117,12 @@ class VesselInterface:
             # and in-world chat (PRIORITY_URGENT). Structural (event kind), never
             # keyword text.
             is_appraisal = event_type == "damage_appraisal"
-            no_compact = is_player_chat or is_reflection or is_appraisal
+            no_compact = (
+                is_player_chat
+                or is_reflection
+                or is_appraisal
+                or observation_followup
+            )
 
             wrapped = SimpleNamespace(
                 message_id=None,
@@ -1134,8 +1175,14 @@ class VesselInterface:
             # context_memory, so the normal global context + vessel whitelist
             # apply. Structural, keyword-free.
             context_memory: dict[str, Any] | None = None
+            if allowed_actions or world_state_context or observation_followup:
+                context_memory = {}
             if allowed_actions:
-                context_memory = {"allowed_action_types": sorted(allowed_actions)}
+                context_memory["allowed_action_types"] = sorted(allowed_actions)
+            if world_state_context:
+                context_memory["vessel_world_state"] = world_state_context
+            if observation_followup:
+                context_memory["vessel_observation_followup"] = True
             await message_queue.enqueue(
                 self,
                 wrapped,
@@ -1145,6 +1192,184 @@ class VesselInterface:
             )
         except Exception as exc:
             log_error(f"[vessel_interface] Failed to enqueue perception: {exc}")
+
+    @staticmethod
+    def _compact_reactive_world_state(world_state: Any) -> dict[str, Any]:
+        """Return a small, exact-id snapshot suitable for a reactive prompt.
+
+        The autonomy beats can consume the connector's richer ``WorldState``.
+        Player chat needs only bounded structural facts: position, inventory
+        counts, nearby entities/blocks, and their affordances. The connector
+        owns the meaning of those ids; this layer only relays named fields and
+        never interprets natural-language intent.
+        """
+
+        if isinstance(world_state, dict):
+            source = world_state
+            extra = (
+                source.get("extra")
+                if isinstance(source.get("extra"), dict)
+                else source
+            )
+        else:
+            source = {
+                "environment": getattr(world_state, "environment", None),
+                "health": getattr(world_state, "health", None),
+                "position": getattr(world_state, "position", None),
+                "possible_actions": getattr(world_state, "possible_actions", None),
+                "flags": getattr(world_state, "flags", None),
+                "extra": getattr(world_state, "extra", None),
+            }
+            extra = source["extra"] if isinstance(source["extra"], dict) else {}
+
+        def compact_position(value: Any) -> Any:
+            if not isinstance(value, dict):
+                return value
+            return {
+                key: value[key]
+                for key in ("x", "y", "z")
+                if key in value and isinstance(value[key], (int, float))
+            }
+
+        def compact_records(
+            value: Any, fields: tuple[str, ...]
+        ) -> list[dict[str, Any]]:
+            if not isinstance(value, list):
+                return []
+            result: list[dict[str, Any]] = []
+            for item in value[:_REACTIVE_WORLD_LIST_LIMIT]:
+                if not isinstance(item, dict):
+                    continue
+                record: dict[str, Any] = {}
+                for field in fields:
+                    if field not in item or item[field] in (None, "", [], {}):
+                        continue
+                    record[field] = (
+                        compact_position(item[field])
+                        if field == "position"
+                        else item[field]
+                    )
+                if record:
+                    result.append(record)
+            return result
+
+        raw_counts = extra.get("inventory_counts")
+        inventory_counts: dict[str, Any] = {}
+        if isinstance(raw_counts, dict):
+            for name, count in list(raw_counts.items())[:_REACTIVE_INVENTORY_LIMIT]:
+                if isinstance(name, str) and isinstance(count, (int, float)):
+                    inventory_counts[name] = count
+
+        flags = source.get("flags")
+        if not isinstance(flags, dict):
+            flags = {}
+        return {
+            "environment": source.get("environment"),
+            "health": source.get("health"),
+            "position": compact_position(source.get("position")),
+            "flags": {
+                key: flags[key]
+                for key in ("connected", "is_day")
+                if key in flags
+            },
+            "possible_actions": [
+                str(action)
+                for action in (source.get("possible_actions") or [])[
+                    :_REACTIVE_WORLD_LIST_LIMIT
+                ]
+                if action
+            ],
+            "inventory_counts": inventory_counts,
+            "entities": compact_records(
+                extra.get("entities"),
+                ("name", "username", "type", "kind", "distance", "position"),
+            ),
+            "blocks": compact_records(
+                extra.get("blocks"), ("name", "distance", "position")
+            ),
+            "affordances": compact_records(
+                extra.get("affordances"),
+                ("kind", "target", "verb", "distance", "position"),
+            ),
+        }
+
+    @classmethod
+    def _reactive_followup_actions(
+        cls, environment: str | None, world_state: dict[str, Any] | None
+    ) -> set[str]:
+        """Build the structural action allowlist for an observe follow-up."""
+
+        if not environment or not isinstance(world_state, dict):
+            return set()
+        verbs = world_state.get("possible_actions") or []
+        return {
+            f"vessel_{environment}_{verb}"
+            for verb in verbs
+            if isinstance(verb, str)
+            and verb
+            and verb not in _REACTIVE_FOLLOWUP_EXCLUDED_VERBS
+        }
+
+    async def enqueue_observation_followup(
+        self,
+        environment: str,
+        interface_path: str,
+        observation: dict[str, Any],
+    ) -> None:
+        """Run one concrete-action cognition turn after reactive ``observe``.
+
+        ``observe`` is a read action whose result is otherwise invisible to the
+        model that emitted it. This follow-up keeps the result on the normal
+        message chain, restricts the next prompt to world actions, and leaves
+        speech out because the original reactive turn already replied.
+        """
+
+        data = observation.get("data") if isinstance(observation, dict) else None
+        if not isinstance(data, dict):
+            return
+        world_state = self._compact_reactive_world_state(data)
+        allowed_actions = self._reactive_followup_actions(environment, world_state)
+        if not allowed_actions:
+            return
+        block_ids = [
+            str(block.get("name"))
+            for block in (world_state.get("blocks") or [])
+            if isinstance(block, dict) and block.get("name")
+        ]
+        has_log_family = any(block_id.endswith("_log") for block_id in block_ids)
+        exact_target_hint = (
+            " Nearby block ids that can be targeted directly: "
+            + ", ".join(block_ids)
+            + ". Use one of these exact ids for a block action; do not replace "
+            "a live variant with a different block id."
+            + (
+                " If any log variant is acceptable, target the explicit structural "
+                "pattern *_log."
+                if has_log_family
+                else ""
+            )
+            if block_ids
+            else " If you act on a block, use its exact live block id from the observation."
+        )
+        log_info(
+            "[vessel_interface] queueing reactive observation follow-up "
+            f"for {environment} ({len(allowed_actions)} world actions)"
+        )
+        summary = (
+            "A live observation just returned exact nearby world ids and "
+            "affordances. Choose one concrete world action now; do not only "
+            "observe again."
+            + exact_target_hint
+        )
+        await self._enqueue_perception(
+            interface_path=interface_path,
+            summary=summary,
+            environment=environment,
+            event_type="observation_followup",
+            allowed_actions=allowed_actions,
+            world_state_context=world_state,
+            observation_followup=True,
+        )
 
     # ------------------------------------------------------------------
     # Cooldown scheduler + autonomous decision beat

@@ -162,8 +162,12 @@ keys. Common ones:
 
 - ``timeout`` (number): per-endpoint request timeout in seconds. Overrides the
   global ``LLM_GENERATION_TIMEOUT_SEC`` for this endpoint.
-- ``disable_thinking`` (bool): send ``enable_thinking=False`` (Qwen3 / LM Studio)
-  to stop the model from spending the context window on chain-of-thought.
+- ``enable_thinking`` (bool): opt into thinking/reasoning (default: ``false``).
+  ``disable_thinking`` remains accepted for backwards compatibility, but is no
+  longer needed.
+- ``enable_tools`` (bool): opt this endpoint into native function/tool calling.
+  Native tools remain disabled by default globally; ``disable_tools`` or
+  ``force_action_grammar`` still takes precedence when present.
 - ``disable_tools`` (bool): stop advertising native function/tool-calling to this
   endpoint and use the legacy in-prompt JSON-action protocol instead. The full
   action catalog is folded into the system prompt, so nothing is lost — only the
@@ -217,7 +221,7 @@ decoding to valid JSON:
 
 Example for a local llama.cpp endpoint::
 
-   {"disable_thinking": true, "disable_tools": true, "force_json_object": true}
+   {"enable_thinking": false, "disable_tools": true, "force_json_object": true}
 
 ``disable_tools`` is usually the most impactful setting for small local quants:
 it removes the native-tool confusion (the common cause of replies that contain
@@ -226,7 +230,11 @@ take effect on chat turns. For the hardest guarantee on a llama.cpp backend,
 prefer ``force_action_grammar`` over ``force_json_object`` (which many local
 servers silently ignore)::
 
-   {"disable_thinking": true, "force_action_grammar": true, "max_tokens": 4096}
+   {"enable_thinking": false, "force_action_grammar": true, "max_tokens": 4096}
+
+For a model that supports native function calling, use the opt-in form instead::
+
+   {"enable_thinking": false, "enable_tools": true, "max_tokens": 4096}
 
 These are automatically dropped when native tool-calling is active for the
 request (tool-calling already constrains output and most servers reject the

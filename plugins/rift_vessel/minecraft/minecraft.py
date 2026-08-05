@@ -4474,9 +4474,13 @@ class MinecraftConnector(VesselConnectorBase):
             },
             "mine": {
                 "description": (
-                    "Break and collect a nearby thing by name (target), e.g. a "
-                    "block of wood, stone or ore you spotted around you. You "
-                    "walk to it first if it is out of reach and use the best "
+                    "Break and collect a nearby block by its exact Minecraft id "
+                    "(target) from the latest observation, such as "
+                    "dark_oak_log, stone or iron_ore. Never substitute a generic "
+                    "or different variant when the observation provides the id. "
+                    "When any wood-log variant is acceptable, target the explicit "
+                    "structural pattern *_log. "
+                    "Walk to it first if it is out of reach and use the best "
                     "tool you are carrying. This is how you gather materials."
                 ),
                 "required_fields": ["target"],
@@ -4485,15 +4489,21 @@ class MinecraftConnector(VesselConnectorBase):
             },
             "collect_block": {
                 "description": (
-                    "Gather several of the same thing by name (name), e.g. "
-                    "collect 5 blocks of wood you spotted around you. Give how "
-                    "many you want (count). You walk to each one, break it and "
+                    "Gather several of the same block by its exact Minecraft id "
+                    "(name) from the latest observation, such as dark_oak_log. "
+                    "When any wood-log variant is acceptable, use the explicit "
+                    "structural pattern *_log. "
+                    "Give how many you want (count). You walk to each one, break it and "
                     "pick up the drop, repeating until you have that many or "
                     "there are none left nearby. This is the reliable way to "
                     "stock up on a material for a goal."
                 ),
                 "required_fields": ["name"],
-                "optional_fields": ["count", "search_radius", "timeout_ms"],
+                "optional_fields": [
+                    "count",
+                    "search_radius",
+                    "timeout_ms",
+                ],
                 "security_level": "low",
             },
             "place": {
@@ -4680,8 +4690,9 @@ class MinecraftConnector(VesselConnectorBase):
                     "can see, name that thing structurally: set 'target_kind' to "
                     "'block' or 'entity' and 'target_name' to its EXACT id from "
                     "what you observed (e.g. target_kind='block', "
-                    "target_name='oak_log'; or target_kind='entity', "
-                    "target_name='cow'). Pick the name verbatim from your scan — "
+                    "target_name='<exact observed block id>'; or "
+                    "target_kind='entity', target_name='<exact observed entity id>'). "
+                    "Pick the name verbatim from your scan — "
                     "do not invent one. Your body will then head straight to the "
                     "nearest one. Use 'coordinate' only when you mean a bare "
                     "spot with the destination fields."

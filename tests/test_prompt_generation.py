@@ -113,6 +113,29 @@ class TestPromptGeneration(unittest.IsolatedAsyncioTestCase):
             len(minified["vessel_minecraft_say"]["brief"]), 420
         )
 
+    def test_lite_vessel_catalog_keeps_payload_keys_without_full_schema(self):
+        """Lite action entries retain payload guidance without schema bulk."""
+        from core.prompt_engine import minify_actions_block
+
+        minified = minify_actions_block(
+            {
+                "vessel_minecraft_mine": {
+                    "description": "Break " + ("a nearby block " * 80),
+                    "required_fields": ["target"],
+                    "optional_fields": ["search_radius", "timeout_ms"],
+                }
+            },
+            lite=True,
+        )
+
+        action = minified["vessel_minecraft_mine"]
+        self.assertIn("payload_keys", action)
+        self.assertEqual(
+            action["payload_keys"], ["target", "search_radius", "timeout_ms"]
+        )
+        self.assertEqual(action["required_payload_keys"], ["target"])
+        self.assertNotIn("schema", action)
+
     @patch("core.core_initializer.core_initializer.actions_block")
     def test_actions_block_population(self, mock_actions_block):
         """Test that the actions block is properly populated."""
