@@ -11,6 +11,7 @@ from core.soul.compiler import (
 )
 from core.soul.models import (
     CuratorDecision,
+    DspExtraction,
     EmotionalTag,
     ForesightSignal,
     MemCell,
@@ -415,3 +416,103 @@ async def test_rule_based_dsp_extractor_keeps_user_preferences_separate() -> Non
     assert "concise technical responses" in result.user_preferences
     assert "direct" in result.user_preferences
     assert result.ai_self_facts == []
+
+
+def _dsp_extraction(
+    *, facts: list[str], prefs: list[str] | None = None
+) -> DspExtraction:
+    return DspExtraction(
+        id=f"dsp-extract:{facts[0] if facts else 'empty'}:{len(facts)}",
+        session_id="session-x",
+        extracted_at=datetime(2026, 5, 5, tzinfo=timezone.utc),
+        user_facts=facts,
+        user_preferences=prefs or [],
+        ai_self_facts=[],
+    )
+
+
+@pytest.mark.asyncio
+async def test_dsp_builder_keeps_only_recurring_facts() -> None:
+    builder = RuleBasedDspBuilder()
+    # A stable fact ("User works on SynthHeart") appears in two extractions, so
+    # it survives. A one-off status line ("User says they are fixing it now")
+    # appears only once, so it is dropped.
+    stable = _dsp_extraction(
+        facts=["User works on SynthHeart", "User says they are fixing it now"],
+        prefs=["Prefers concise technical responses"],
+    )
+    repeated = _dsp_extraction(
+        facts=["User works on SynthHeart"],
+        prefs=["Prefers concise technical responses"],
+    )
+
+    profile = await builder.build_initial(extractions=[stable, repeated])
+
+    assert "User works on SynthHeart" in profile
+    assert "fixing it now" not in profile
+    assert "Prefers concise technical responses" in profile
+    assert "<user_profile>" in profile
+
+
+@pytest.mark.asyncio
+async def test_dsp_builder_keeps_preferences_without_recurrence() -> None:
+    builder = RuleBasedDspBuilder()
+    # Communication preferences are explicit standing requests, not one-off
+    # status lines — they stay even with a single occurrence.
+    extraction = _dsp_extraction(
+        facts=["User works on SynthHeart"], prefs=["Please be direct"]
+    )
+
+    profile = await builder.build_initial(extractions=[extraction])
+
+    assert "User works on SynthHeart" not in profile
+    assert "Please be direct" in profile
+
+
+@pytest.mark.asyncio
+async def test_dsp_builder_empty_when_no_stable_facts() -> None:
+    builder = RuleBasedDspBuilder()
+    one_off = _dsp_extraction(facts=["User says they are fixing it now"])
+
+    profile = await builder.build_initial(extractions=[one_off])
+
+    assert "No stable facts yet." in profile
+    assert "fixing it now" not in profile
+
+
+@pytest.mark.asyncio
+async def test_dsp_builder_update_preserves_current_when_no_new_stable_fact() -> None:
+    builder = RuleBasedDspBuilder()
+    current = "<user_profile>User works on SynthHeart</user_profile>"
+    # New extraction carries only a one-off status line: nothing stable to add,
+    # so build_update must return the current profile untouched.
+    extraction = _dsp_extraction(facts=["User says they are fixing it now"])
+
+    result = await builder.build_update(current_dsp=current, extractions=[extraction])
+
+    assert result == current
+
+
+@pytest.mark.asyncio
+async def test_dsp_builder_update_incorporates_new_stable_fact() -> None:
+    builder = RuleBasedDspBuilder()
+    current = "<user_profile>User works on SynthHeart</user_profile>"
+    twice = _dsp_extraction(facts=["User works on SynthHeart", "User is the trainer"])
+
+    result = await builder.build_update(current_dsp=current, extractions=[twice, twice])
+
+    assert "User works on SynthHeart" in result
+    assert "User is the trainer" in result
+
+
+@pytest.mark.asyncio
+async def test_dsp_builder_caps_profile_words() -> None:
+    builder = RuleBasedDspBuilder()
+    long_facts = [" ".join(["word"] * 80)] * 2  # 2 identical long facts
+    extraction = _dsp_extraction(facts=long_facts)
+
+    profile = await builder.build_initial(extractions=[extraction, extraction])
+
+    # The cap limits the rendered profile body well below the raw fact length.
+    body = profile.replace("<user_profile>", "").replace("</user_profile>", "")
+    assert len(body.split()) <= builder.MAX_PROFILE_WORDS + 1

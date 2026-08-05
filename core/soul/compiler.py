@@ -361,7 +361,7 @@ class SoulCompiler:
             elif active_dsp is not None and len(recent) >= self.dsp_update_batch_size:
                 content = await self.dsp_builder.build_update(
                     current_dsp=active_dsp.content,
-                    extractions=recent[: self.dsp_update_batch_size],
+                    extractions=recent,
                 )
                 if content.strip() != active_dsp.content.strip():
                     await self.repository.set_active_dsp(
@@ -530,22 +530,84 @@ class RuleBasedSummaryBuilder:
 
 
 class RuleBasedDspBuilder:
+    """Deterministic DSP builder (fallback when no LLM compiler is configured).
+
+    Keeps only *stable* profile content so the injected user profile reads like
+    a compact cheat-sheet, not a dump of recent chat. Stability is structural:
+    a user fact is kept only when it recurs across multiple daily extractions
+    (``MIN_STABLE_OCCURRENCES``), so one-off status telemetry (e.g. "user says
+    they are fixing it now") drops out, while genuinely recurring identity facts
+    (name, role, standing preference) survive. Output is capped to a tight word
+    budget and wrapped in ``<user_profile>`` tags.
+
+    ``build_update`` prefers stability: if the supplied extractions yield no
+    stable content, or the freshly-rebuilt profile is unchanged, the existing
+    DSP is returned untouched.
+    """
+
+    MIN_STABLE_OCCURRENCES = 2
+    MAX_PROFILE_WORDS = 150
+
     async def build_initial(self, *, extractions: list[DspExtraction]) -> str:
-        facts: list[str] = []
-        prefs: list[str] = []
-        for item in extractions:
-            facts.extend(item.user_facts)
-            prefs.extend(item.user_preferences)
-        facts_text = "; ".join(dict.fromkeys(facts)) or "No stable facts yet."
-        prefs_text = "; ".join(dict.fromkeys(prefs))
-        if prefs_text:
-            return f"<user_profile>{facts_text}\nCOMMUNICATION PREFERENCES: {prefs_text}</user_profile>"
-        return f"<user_profile>{facts_text}</user_profile>"
+        facts, prefs = self._stable_profile(extractions)
+        return self._render(facts, prefs)
 
     async def build_update(
         self, *, current_dsp: str, extractions: list[DspExtraction]
     ) -> str:
-        updated = await self.build_initial(extractions=extractions)
-        if updated.strip() == "<user_profile>No stable facts yet.</user_profile>":
+        facts, prefs = self._stable_profile(extractions)
+        if not facts and not prefs:
+            # No stable signal at all — keep whatever we already have rather
+            # than wipe a good profile on a quiet day.
+            return current_dsp
+        updated = self._render(facts, prefs)
+        if updated.strip() == (current_dsp or "").strip():
             return current_dsp
         return updated
+
+    def _stable_profile(
+        self, extractions: list[DspExtraction]
+    ) -> tuple[list[str], list[str]]:
+        fact_counts: dict[str, int] = {}
+        for item in extractions:
+            for fact in item.user_facts:
+                fact = str(fact or "").strip()
+                if fact:
+                    fact_counts[fact] = fact_counts.get(fact, 0) + 1
+
+        stable = [
+            fact
+            for fact, count in fact_counts.items()
+            if count >= self.MIN_STABLE_OCCURRENCES
+        ]
+
+        prefs: list[str] = []
+        for item in extractions:
+            for pref in item.user_preferences:
+                pref = str(pref or "").strip()
+                if pref and pref not in prefs:
+                    prefs.append(pref)
+
+        return self._cap_words(stable, self.MAX_PROFILE_WORDS), prefs
+
+    @staticmethod
+    def _cap_words(facts: list[str], max_words: int) -> list[str]:
+        capped: list[str] = []
+        word_count = 0
+        for fact in facts:
+            fact_words = len(fact.split())
+            if fact_words <= 0:
+                continue
+            if word_count + fact_words > max_words:
+                break
+            capped.append(fact)
+            word_count += fact_words
+        return capped
+
+    @staticmethod
+    def _render(facts: list[str], prefs: list[str]) -> str:
+        facts_text = "; ".join(facts) or "No stable facts yet."
+        prefs_text = "; ".join(prefs)
+        if prefs_text:
+            return f"<user_profile>{facts_text}\nCOMMUNICATION PREFERENCES: {prefs_text}</user_profile>"
+        return f"<user_profile>{facts_text}</user_profile>"

@@ -6,6 +6,7 @@ from typing import Any, Sequence
 
 from core.prompt_engine import (
     _build_context_summary,
+    _build_soul_turn_delta_prefix,
     build_json_prompt,
     build_live_prompt_request,
     build_live_system_instruction,
@@ -153,6 +154,61 @@ def test_build_context_summary_humanizes_diary_entries() -> None:
     assert "Diary entry from 07/05/26:0335: First memory. | Second memory." in summary
     assert "Thought from 07/05/26:0335: Private note." in summary
     assert "| thought:" not in summary
+
+
+def test_build_context_summary_no_session_state_when_no_foresight() -> None:
+    summary = _build_context_summary(
+        {
+            "soul_active_foresight": [],
+            "soul_session_state": "<session_state>…</session_state>",
+        }
+    )
+
+    assert "[Session state]" not in summary
+
+
+def test_build_context_summary_includes_session_state_with_foresight() -> None:
+    session_state = (
+        "<session_state>\ninterface_path: telegram_bot/x\n"
+        "active_foresight:\n- Upcoming user event around 2026-08-10\n"
+        'emotion_snapshot: {"joy": 0.0, "fear": 0.0, "sad": 0.0, "anger": 0.0}\n'
+        "</session_state>"
+    )
+    summary = _build_context_summary(
+        {
+            "soul_active_foresight": [
+                {"content": "Upcoming user event around 2026-08-10", "trigger": "date"}
+            ],
+            "soul_session_state": session_state,
+        }
+    )
+
+    assert "[Session state]" in summary
+    assert "Upcoming user event around 2026-08-10" in summary
+
+
+def test_build_soul_turn_delta_prefix_empty_when_quiet() -> None:
+    prefix = _build_soul_turn_delta_prefix(
+        {
+            "soul_turn_emotion_delta": '{"e": {"joy": 0.0, "fear": 0.0, "sad": 0.0, "anger": 0.0}}'
+        }
+    )
+    assert prefix == ""
+
+
+def test_build_soul_turn_delta_prefix_empty_when_missing() -> None:
+    assert _build_soul_turn_delta_prefix({}) == ""
+
+
+def test_build_soul_turn_delta_prefix_present_when_substantive() -> None:
+    prefix = _build_soul_turn_delta_prefix(
+        {
+            "soul_turn_emotion_delta": '{"e": {"joy": 0.0, "fear": 0.4, "sad": 0.0, "anger": 0.0}}'
+        }
+    )
+    assert prefix.startswith('{"e":')
+    assert "0.4" in prefix
+    assert prefix.endswith("\n")
 
 
 def test_build_live_system_instruction_enforces_identity_rules(monkeypatch):
