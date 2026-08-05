@@ -34,6 +34,18 @@ def test_describe_capabilities() -> None:
     assert caps["local"] is True
 
 
+def test_world_actions_use_exact_item_ids_and_expose_drop() -> None:
+    actions = MinecraftConnector().get_world_actions()
+
+    assert actions["drop"]["required_fields"] == ["item"]
+    assert "count" in actions["drop"]["optional_fields"]
+    craft_description = actions["craft"]["description"]
+    assert "oak_planks" in craft_description
+    assert "stick" in craft_description
+    assert "wooden_pickaxe" in craft_description
+    assert "sticks" not in craft_description
+
+
 def test_resolve_base_url_from_settings() -> None:
     conn = MinecraftConnector()
     url = conn._resolve_base_url({"bridge_host": "10.0.0.5", "bridge_port": 9000})

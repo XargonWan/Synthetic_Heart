@@ -4516,11 +4516,23 @@ class MinecraftConnector(VesselConnectorBase):
                 "optional_fields": [],
                 "security_level": "low",
             },
+            "drop": {
+                "description": (
+                    "Drop an item you are carrying at your current position "
+                    "for a nearby player to pick up (item, given by its exact "
+                    "Minecraft id, e.g. wooden_pickaxe or stick). Optionally "
+                    "drop several items with count."
+                ),
+                "required_fields": ["item"],
+                "optional_fields": ["count"],
+                "security_level": "low",
+            },
             "craft": {
                 "description": (
                     "Make a new item out of the materials you are carrying, "
-                    "given by its exact name (item), e.g. planks, sticks or a "
-                    "tool. Optionally craft several at once (count). If the "
+                    "given by its exact Minecraft id (item), e.g. oak_planks, "
+                    "stick or wooden_pickaxe. Do not pluralize or paraphrase "
+                    "the id. Optionally craft several at once (count). If the "
                     "recipe needs a workbench you walk to a nearby crafting "
                     "table on your own. This is how you turn what you gathered "
                     "into something more useful."

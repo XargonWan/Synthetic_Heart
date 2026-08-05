@@ -2918,6 +2918,51 @@ async function runAction(action, payload) {
         return { ok: false, detail: String(err && err.message ? err.message : err), data: {} };
       }
     }
+    case 'drop': {
+      // Drop an exact inventory item at the bot's current position so a nearby
+      // player can collect it. The item id is structural; never infer it from
+      // natural-language text. Keep the requested count bounded by the live
+      // stack so an empty handoff is reported rather than silently claiming
+      // success.
+      const itemName = String(payload.item || '').trim().toLowerCase();
+      if (!itemName) return { ok: false, detail: 'item name required', data: {} };
+      const held = botInventory().find((it) => it.name.toLowerCase() === itemName);
+      if (!held) {
+        return { ok: false, detail: `not carrying '${itemName}'`, data: {} };
+      }
+      const requested = parseInt(payload.count || String(held.count), 10);
+      const count = Math.min(
+        Math.max(Number.isFinite(requested) ? requested : held.count, 1),
+        held.count,
+      );
+      try {
+        if (count === held.count && typeof bot.tossStack === 'function') {
+          await bot.tossStack(held);
+        } else if (typeof bot.toss === 'function') {
+          await bot.toss(held.type, held.metadata || null, count);
+        } else {
+          return {
+            ok: false,
+            detail: 'dropping unavailable (mineflayer toss API missing)',
+            data: {},
+          };
+        }
+        pushEvent({
+          environment: ENVIRONMENT,
+          event_type: 'drop',
+          summary: `Dropped ${count}x ${itemName}`,
+          actor: bot.username,
+          data: { item: itemName, count },
+        });
+        return {
+          ok: true,
+          detail: `dropped ${count}x ${itemName}`,
+          data: { item: itemName, count },
+        };
+      } catch (err) {
+        return { ok: false, detail: String(err && err.message ? err.message : err), data: {} };
+      }
+    }
     case 'inventory': {
       // Read-only: what the bot is carrying.
       const items = botInventory();

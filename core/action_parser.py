@@ -1896,11 +1896,18 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
             log_debug(f"[action_parser] Running action {idx}: {action_type}")
             result = await run_action(action, context, bot, original_message)
 
-            # Check if run_action returned error info
-            if isinstance(result, dict) and "error" in result:
-                collected_errors.append(result["error"])
+            # Plugins use both the legacy ``{"error": ...}`` shape and the
+            # structured ``{"status": "error", "message": ...}`` shape.
+            # Treat both as failed dispatches. In particular, Vessel actions
+            # can reach the world successfully at the transport level while
+            # the connector rejects the requested operation; classifying that
+            # as processed suppresses selective correction and leaves the model
+            # believing that a failed action happened.
+            result_error = _action_result_error(result)
+            if result_error is not None:
+                collected_errors.append(result_error)
                 failed_actions.append(
-                    {"index": idx, "action": action, "errors": [result["error"]]}
+                    {"index": idx, "action": action, "errors": [result_error]}
                 )
             else:
                 processed_actions.append(action)
@@ -2057,6 +2064,21 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
         "failed_actions": failed_actions,
         "action_outputs": action_outputs,
     }
+
+
+def _action_result_error(result: Any) -> str | None:
+    """Extract a failure message from either supported action-result shape."""
+
+    if not isinstance(result, dict):
+        return None
+    if "error" in result:
+        value = result.get("error")
+        return str(value or "action failed")
+    status = str(result.get("status") or "").strip().lower()
+    if status in {"error", "failed"}:
+        value = result.get("message") or result.get("detail")
+        return str(value or "action failed")
+    return None
 
 
 def _llm_already_provided_diary_content(processed_actions: list) -> bool:

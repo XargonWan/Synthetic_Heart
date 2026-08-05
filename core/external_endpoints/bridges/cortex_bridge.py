@@ -69,6 +69,33 @@ _NATIVE_TOOLS_ENABLED = False
 # ``max_tools`` extra-config key.
 _VENICE_MAX_NATIVE_TOOLS = 20
 
+# When a connected Vessel catalog exceeds a provider's native-tool limit, keep
+# the actions needed for the embodiment loop available. These are action-name
+# suffixes, not intent words: the connected world's prefix remains dynamic.
+_VESSEL_CORE_TOOL_SUFFIXES: tuple[str, ...] = (
+    "say",
+    "move",
+    "look",
+    "use",
+    "attack",
+    "follow",
+    "unfollow",
+    "respawn",
+    "status",
+    "observe",
+)
+_VESSEL_CONNECTED_PRIORITY_SUFFIXES: tuple[str, ...] = (
+    "craft",
+    "inventory",
+    "place",
+    "drop",
+    "mine",
+    "collect_block",
+    "goto",
+    "equip",
+    "climb_staircase",
+)
+
 # This marker is appended to the system instruction only when the endpoint is
 # actually sending native function declarations.  The normal prompt still
 # contains the legacy JSON-action format for endpoints that do not support
@@ -530,6 +557,31 @@ class ExternalCortexEngine(AIPluginBase):
             or interface_path.startswith("vessel/")
         )
 
+    @staticmethod
+    def _vessel_tool_suffix_matches(name: str, suffix: str) -> bool:
+        """Match a namespaced Vessel action by its structural verb suffix."""
+
+        return name == f"vessel_{suffix}" or name.endswith(f"_{suffix}")
+
+    @classmethod
+    def _connected_vessel_tool_sort_key(
+        cls, item: tuple[int, Any]
+    ) -> tuple[int, int, int]:
+        """Sort connected Vessel tools by embodiment usefulness, stably."""
+
+        index, manifest = item
+        name = str(getattr(manifest, "name", "") or "").strip()
+        if name == "vessel_disconnect":
+            return (0, 0, index)
+        for rank, suffix in enumerate(_VESSEL_CORE_TOOL_SUFFIXES):
+            if cls._vessel_tool_suffix_matches(name, suffix):
+                return (1, rank, index)
+        for rank, suffix in enumerate(_VESSEL_CONNECTED_PRIORITY_SUFFIXES):
+            if cls._vessel_tool_suffix_matches(name, suffix):
+                return (2, rank, index)
+        # Keep the remaining world-specific actions in their registry order.
+        return (3, 0, index)
+
     def _select_native_tool_manifests(self, prompt_request: Any) -> list[Any]:
         """Scope and cap manifests before rendering provider tool schemas.
 
@@ -566,17 +618,16 @@ class ExternalCortexEngine(AIPluginBase):
                 continue
             filtered.append((index, manifest))
 
-        # The Vessel plugin emits its core verbs before world-specific extras.
-        # Promote the universal disconnect verb so a capped list never strands
-        # the session; the stable source order then keeps all core verbs and
-        # the connector's first world-specific verbs (including mine/collect).
-        if is_vessel:
-            filtered.sort(
-                key=lambda item: (
-                    0 if getattr(item[1], "name", "") == "vessel_disconnect" else 1,
-                    item[0],
-                )
-            )
+        # Only a live/connected Vessel needs gameplay prioritisation. The
+        # connection-driven catalog exposes ``vessel_disconnect`` alongside the
+        # connected world's verbs; a disconnected catalog should remain a
+        # simple ``vessel_connect`` entry and must not be treated as embodied.
+        connected_vessel = is_vessel and any(
+            getattr(manifest, "name", "") == "vessel_disconnect"
+            for _, manifest in filtered
+        )
+        if connected_vessel:
+            filtered.sort(key=self._connected_vessel_tool_sort_key)
 
         selected = [manifest for _, manifest in filtered]
         limit = self._max_native_tools()

@@ -1434,6 +1434,7 @@ def test_venice_native_tools_are_scoped_and_capped_for_vessel_turns():
         "vessel_minecraft_mine",
         "vessel_minecraft_collect_block",
         "vessel_minecraft_place",
+        "vessel_minecraft_drop",
         "vessel_minecraft_craft",
         "vessel_minecraft_smelt",
         "vessel_minecraft_equip",
@@ -1483,6 +1484,11 @@ def test_venice_native_tools_are_scoped_and_capped_for_vessel_turns():
     assert "vessel_disconnect" in tool_names
     assert "vessel_minecraft_mine" in tool_names
     assert "vessel_minecraft_collect_block" in tool_names
+    assert "vessel_minecraft_craft" in tool_names
+    assert "vessel_minecraft_inventory" in tool_names
+    assert "vessel_minecraft_drop" in tool_names
+    assert "vessel_minecraft_climb_staircase" in tool_names
+    assert "vessel_minecraft_shoot" not in tool_names
     assert kwargs["tool_choice"] == "required"
     assert kwargs["parallel_tool_calls"] is False
     assert "SYNTH NATIVE TOOL MODE" in prompt.system_instruction
