@@ -743,6 +743,28 @@ def _vessel_say_delivered(processed: Any) -> bool:
     return False
 
 
+def _contains_vessel_disconnect_action(actions: Any) -> bool:
+    """Return True when an action collection contains ``vessel_disconnect``.
+
+    ``vessel_disconnect`` is a terminal lifecycle action for an in-world chat
+    turn.  Once it succeeds, the world-specific ``vessel_<world>_say`` action
+    is intentionally removed from the live action set, so the generic
+    user-facing missing-reply corrector must not ask the model to emit one.
+    Detection is based on the registered action name, never on message text.
+    """
+    if not isinstance(actions, list):
+        return False
+    for item in actions:
+        name: str | None = None
+        if isinstance(item, dict):
+            name = item.get("action") or item.get("type")
+        elif isinstance(item, str):
+            name = item
+        if name == "vessel_disconnect":
+            return True
+    return False
+
+
 def _last_self_vessel_utterance(ctx: dict[str, Any], interface_path: str) -> str | None:
     """Return the text of Synth's most recent own reply in this vessel chat.
 
@@ -1261,6 +1283,10 @@ async def handle_incoming_message(
     # in-world player chat: if the loop ends without one, we deterministically
     # speak a fallback so the player never gets total silence from a weak cortex.
     vessel_reply_delivered = False
+    # A successful disconnect intentionally ends the in-world turn without a
+    # spoken reply. Keep this across correction iterations because successful
+    # actions are removed from retry payloads.
+    vessel_disconnect_succeeded = False
 
     while True:
         log_info(
@@ -2865,6 +2891,7 @@ async def handle_incoming_message(
                             is_user_facing
                             and not is_grillo_internal
                             and not is_internal_chat
+                            and not _contains_vessel_disconnect_action(actions)
                         ):
                             log_warning(
                                 f"[message_chain] ⚠️ LLM generated no outbound message action for user-facing interface '{interface_path}' — user will receive no reply"
@@ -3047,6 +3074,8 @@ async def handle_incoming_message(
                         processed = result.get("processed", [])
                         failed = result.get("failed_actions", [])
                         errors = result.get("errors", [])
+                        if _contains_vessel_disconnect_action(processed):
+                            vessel_disconnect_succeeded = True
                         # A non-empty action_outputs means run_actions already
                         # enqueued an LLM delivery follow-up (terminal output, or a
                         # deliver_to_llm fetch action like recall_last_dream). That
@@ -3162,6 +3191,7 @@ async def handle_incoming_message(
                                 and not reply_present
                                 and not has_user_output_action
                                 and not delivered_to_llm
+                                and not vessel_disconnect_succeeded
                             ):
                                 missing_user_reply = True
 
@@ -3240,6 +3270,7 @@ async def handle_incoming_message(
                                 and not reply_present
                                 and not has_user_output_action
                                 and not delivered_to_llm
+                                and not vessel_disconnect_succeeded
                             ):
                                 log_warning(
                                     f"[message_chain] ⚠️ LLM generated no outbound message action for user-facing interface '{interface_path}' — triggering corrector for missing reply"

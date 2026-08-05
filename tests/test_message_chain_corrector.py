@@ -1312,3 +1312,37 @@ async def test_reactive_vessel_chat_inworld_say_suppresses_corrector(monkeypatch
     assert not corrector_calls, (
         "an in-world vessel_*_say reply must suppress the missing-reply corrector"
     )
+
+
+@pytest.mark.asyncio
+async def test_reactive_vessel_disconnect_suppresses_missing_reply_corrector(monkeypatch):
+    # Disconnect is a successful terminal lifecycle action. It removes the
+    # world-specific say verb immediately, so demanding a spoken reply after it
+    # would manufacture an action that is no longer valid.
+    corrector_calls = _corrector_harness(
+        monkeypatch,
+        [{"type": "vessel_disconnect", "payload": {}}],
+        supported_types={"vessel_disconnect"},
+    )
+
+    msg = SimpleNamespace(
+        chat_id="vessel/minecraft",
+        interface_path="vessel/minecraft",
+        from_cortex=True,
+    )
+
+    result = await message_chain.handle_incoming_message(
+        bot=None,
+        message=msg,
+        text='{"actions":[{"type":"vessel_disconnect","payload":{}}]}',
+        source="llm",
+        context={
+            "interface_path": "vessel/minecraft",
+            "vessel_player_chat": True,
+        },
+    )
+
+    assert result == message_chain.ACTIONS_EXECUTED
+    assert not corrector_calls, (
+        "a successful vessel_disconnect must not trigger a missing-reply correction"
+    )
