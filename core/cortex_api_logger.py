@@ -46,6 +46,7 @@ _langfuse_ctx: contextvars.ContextVar[Sequence[dict[str, Any]]] = (
     contextvars.ContextVar("cortex_api_langfuse_ctx", default=())
 )
 _langfuse_warning_keys: set[str] = set()
+_langfuse_sdk_handler_marker = "_synth_langfuse_sdk_handler"
 
 # Separator widths
 _WIDTH = 90
@@ -109,6 +110,151 @@ def _warn_langfuse_once(
         logger.warning(message)
         return
     logger.warning("%s: %s", message, exc, exc_info=exc)
+
+
+class _LangfuseSdkDiagnosticHandler(logging.Handler):
+    """Forward Langfuse SDK warnings/errors into the SyntH runtime log.
+
+    The SDK uses the unrelated ``langfuse`` logger hierarchy. SyntH's runtime
+    logger deliberately does not propagate to the root logger, so SDK ingestion
+    failures otherwise disappear from both ``synth.log`` and
+    ``synth_errors.log``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        setattr(self, _langfuse_sdk_handler_marker, True)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = record.getMessage()
+            runtime_logger = _get_runtime_logger()
+            runtime_logger.warning(
+                "[langfuse-sdk:%s] %s",
+                record.name,
+                message,
+                exc_info=record.exc_info if record.exc_info else None,
+            )
+        except Exception:
+            # Diagnostics must never interfere with the application's logger.
+            pass
+
+
+def _install_langfuse_sdk_diagnostics() -> None:
+    """Route SDK ingestion diagnostics through SyntH's configured logger."""
+    try:
+        sdk_logger = logging.getLogger("langfuse")
+        if not any(
+            getattr(handler, _langfuse_sdk_handler_marker, False)
+            for handler in sdk_logger.handlers
+        ):
+            sdk_logger.addHandler(_LangfuseSdkDiagnosticHandler())
+        sdk_logger.setLevel(logging.WARNING)
+        sdk_logger.propagate = False
+    except Exception:
+        # Langfuse is optional; logging setup must remain fail-safe.
+        pass
+
+
+def _langfuse_http_response_hook(response: Any) -> None:
+    """Log safe, compact details for failed Langfuse HTTP responses."""
+    try:
+        status = int(getattr(response, "status_code", 0) or 0)
+        path = str(getattr(getattr(response, "url", None), "path", "") or "")
+        body = ""
+        # HTTPX response hooks run before the response body is consumed. Read
+        # it here so safe error details are available to the diagnostic log.
+        read_fn = getattr(response, "read", None)
+        if callable(read_fn):
+            read_fn()
+        if hasattr(response, "text"):
+            body = str(response.text or "")
+
+        # 207 is the normal batch-ingestion response, but it can contain
+        # per-event errors. Do not log the full response because future SDK
+        # versions may echo request data in an error body.
+        has_batch_errors = False
+        if status == 207:
+            try:
+                parsed = json.loads(body)
+                has_batch_errors = bool(parsed.get("errors"))
+                if has_batch_errors:
+                    body = json.dumps(
+                        {
+                            "errors": parsed.get("errors", [])[:5],
+                        },
+                        ensure_ascii=False,
+                        default=str,
+                    )
+            except Exception:
+                has_batch_errors = bool(body.strip())
+
+        if status < 400 and not has_batch_errors:
+            return
+
+        if len(body) > 1000:
+            body = body[:1000] + "…"
+        _get_runtime_logger().warning(
+            "[langfuse-sdk] HTTP delivery response status=%s path=%s body=%s",
+            status,
+            path or "<unknown>",
+            body or "<empty>",
+        )
+    except Exception:
+        # A response hook is observability-only and must never break delivery.
+        pass
+
+
+def _build_langfuse_http_client() -> Any | None:
+    """Build the SDK client with a safe response hook when httpx is present."""
+    try:
+        import httpx
+
+        return httpx.Client(
+            event_hooks={"response": [_langfuse_http_response_hook]},
+        )
+    except Exception as exc:
+        _warn_langfuse_once(
+            f"langfuse-http-client:{type(exc).__name__}",
+            "Could not install Langfuse HTTP diagnostics; using SDK defaults",
+            exc=exc,
+        )
+        return None
+
+
+def _langfuse_client_health(client: Any) -> str:
+    """Return compact private-SDK worker health for diagnostics."""
+    try:
+        task_manager = getattr(client, "task_manager", None)
+        if task_manager is None:
+            return "task_manager=unavailable"
+        queue = getattr(task_manager, "_ingestion_queue", None)
+        queue_size = queue.qsize() if queue is not None else "unknown"
+        consumers = getattr(task_manager, "_ingestion_consumers", []) or []
+        dead = sum(1 for consumer in consumers if not consumer.is_alive())
+        return f"queue={queue_size} consumers={len(consumers)} dead={dead}"
+    except Exception as exc:
+        return f"health_error={type(exc).__name__}"
+
+
+def _flush_langfuse_client(client: Any, *, context: str) -> None:
+    """Flush Langfuse and report worker health without affecting the caller."""
+    try:
+        flush_fn = getattr(client, "flush", None)
+        if callable(flush_fn):
+            flush_fn()
+        health = _langfuse_client_health(client)
+        if "dead=" in health and "dead=0" not in health:
+            _warn_langfuse_once(
+                f"langfuse-worker-health:{health}",
+                f"Langfuse worker health is abnormal after {context}: {health}",
+            )
+    except Exception as exc:
+        _warn_langfuse_once(
+            f"langfuse-flush:{type(exc).__name__}",
+            f"Failed to flush Langfuse client after {context}",
+            exc=exc,
+        )
 
 
 def _ts() -> str:
@@ -394,6 +540,7 @@ def _get_langfuse_client() -> Any | None:
         return None
 
     try:
+        _install_langfuse_sdk_diagnostics()
         langfuse_module = import_module("langfuse")
         langfuse_cls = getattr(langfuse_module, "Langfuse", None)
         if langfuse_cls is None:
@@ -402,7 +549,11 @@ def _get_langfuse_client() -> Any | None:
                 "Langfuse tracing is enabled but the installed langfuse package does not expose Langfuse().",
             )
             return None
-        _langfuse_client = langfuse_cls()
+        http_client = _build_langfuse_http_client()
+        if http_client is None:
+            _langfuse_client = langfuse_cls()
+        else:
+            _langfuse_client = langfuse_cls(httpx_client=http_client)
         return _langfuse_client
     except Exception as exc:
         _warn_langfuse_once(
@@ -551,16 +702,7 @@ def log_cortex_request(
     if lf_enabled and _langfuse_flush_each_call():
         client = _get_langfuse_client()
         if client is not None:
-            try:
-                flush_fn = getattr(client, "flush", None)
-                if callable(flush_fn):
-                    flush_fn()
-            except Exception as exc:
-                _warn_langfuse_once(
-                    f"langfuse-request-flush:{type(exc).__name__}",
-                    "Failed to flush Langfuse client after cortex API request",
-                    exc=exc,
-                )
+            _flush_langfuse_client(client, context="cortex API request")
 
     if logger is None:
         return
@@ -599,6 +741,12 @@ def log_cortex_response(
 
     logger = _get_logger() if file_log_enabled else None
     lf_item = _pop_langfuse_request(engine=engine, model=model)
+    if lf_enabled and lf_item is None:
+        _warn_langfuse_once(
+            f"langfuse-response-context:{engine}",
+            "Langfuse response had no matching request context for "
+            f"engine={engine} model={model}; response payload was not attached",
+        )
     request_id = lf_item.get("request_id") if isinstance(lf_item, dict) else None
 
     trace = lf_item.get("trace") if isinstance(lf_item, dict) else None
@@ -642,10 +790,17 @@ def log_cortex_response(
                 }
             )
             if hasattr(trace, "update"):
-                trace.update(
-                    output=_coerce_for_langfuse(output_payload),
-                    metadata=response_metadata,
-                )
+                try:
+                    trace.update(
+                        output=_coerce_for_langfuse(output_payload),
+                        metadata=response_metadata,
+                    )
+                except Exception as exc:
+                    _warn_langfuse_once(
+                        f"langfuse-response-update:{type(exc).__name__}",
+                        f"Failed to update Langfuse response trace for engine={engine}",
+                        exc=exc,
+                    )
 
             # Emit a generation record to populate model/token columns.
             if _langfuse_capture_generations() and hasattr(trace, "generation"):
@@ -697,25 +852,22 @@ def log_cortex_response(
                             gen_kwargs.pop("start_time", None)
                             gen_kwargs.pop("end_time", None)
                             trace.generation(**gen_kwargs)
+                except Exception as exc:
+                    _warn_langfuse_once(
+                        f"langfuse-generation:{type(exc).__name__}",
+                        f"Failed to create Langfuse generation for engine={engine}",
+                        exc=exc,
+                    )
         except Exception as exc:
             _warn_langfuse_once(
                 f"langfuse-response-trace:{type(exc).__name__}",
-                f"Failed to update Langfuse response trace for engine={engine}",
+                f"Failed to prepare Langfuse response trace for engine={engine}",
                 exc=exc,
             )
 
     client = _get_langfuse_client()
     if client is not None and _langfuse_flush_each_call():
-        try:
-            flush_fn = getattr(client, "flush", None)
-            if callable(flush_fn):
-                flush_fn()
-        except Exception as exc:
-            _warn_langfuse_once(
-                f"langfuse-flush:{type(exc).__name__}",
-                "Failed to flush Langfuse client after cortex API call",
-                exc=exc,
-            )
+        _flush_langfuse_client(client, context="cortex API call")
 
     if logger is None:
         return

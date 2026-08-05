@@ -164,10 +164,22 @@ keys. Common ones:
   global ``LLM_GENERATION_TIMEOUT_SEC`` for this endpoint.
 - ``enable_thinking`` (bool): opt into thinking/reasoning (default: ``false``).
   ``disable_thinking`` remains accepted for backwards compatibility, but is no
-  longer needed.
+  longer needed. For Venice endpoints, SyntH translates this at the adapter
+  boundary to the nested ``venice_parameters.disable_thinking`` request field;
+  the alias is never sent at the top level or into action payloads.
 - ``enable_tools`` (bool): opt this endpoint into native function/tool calling.
   Native tools remain disabled by default globally; ``disable_tools`` or
   ``force_action_grammar`` still takes precedence when present.
+  For OpenAI-compatible endpoints, SyntH requests one required function call
+  per turn and disables parallel tool calls. This keeps a model that is
+  returning actions from flooding the message chain with a large batch. If a
+  provider returns a successful plain ``actions`` JSON response instead of a
+  native tool call, SyntH keeps only the first offered action as a fail-safe.
+- ``max_tools`` (positive integer): cap the number of native tool definitions
+  sent to this endpoint. Venice's current Gemma endpoint is automatically capped
+  at 20 even when this key is omitted; an explicit value can lower that cap.
+  On Vessel turns, the native set is scoped to Vessel/world actions first, with
+  the core embodiment verbs retained ahead of optional world verbs.
 - ``disable_tools`` (bool): stop advertising native function/tool-calling to this
   endpoint and use the legacy in-prompt JSON-action protocol instead. The full
   action catalog is folded into the system prompt, so nothing is lost — only the

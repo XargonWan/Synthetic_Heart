@@ -67,6 +67,7 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         self._api_key = api_key or "sk-nokey"
         self._timeout = timeout
         self._client: Any = None
+        self._last_completion_metadata: dict[str, Any] = {}
 
     def _get_client(self) -> Any:
         if self._client is None:
@@ -193,6 +194,216 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
     # Chat
     # ------------------------------------------------------------------
 
+    def _is_venice_endpoint(self) -> bool:
+        """Return whether this OpenAI-compatible adapter targets Venice.
+
+        Venice keeps its provider-specific request options in the nested
+        ``venice_parameters`` object.  Do not send that object to arbitrary
+        OpenAI-compatible servers: many of them reject unknown request keys.
+        The URL is the primary signal; the engine label is a fallback for
+        installations that route Venice through a local proxy URL.
+        """
+        try:
+            host = (urlparse(self._base_url).hostname or "").lower()
+        except Exception:
+            host = ""
+        label = str(getattr(self, "_engine_label", "") or "").lower()
+        return (
+            host == "api.venice.ai"
+            or host.endswith(".venice.ai")
+            or label.startswith("venice")
+        )
+
+    def _resolve_disable_thinking(
+        self, kwargs: dict[str, Any], extra_body: dict[str, Any] | None = None
+    ) -> bool:
+        """Translate SyntH's thinking alias to the Venice request envelope.
+
+        SyntH exposes ``enable_thinking`` as the readable opt-in setting, but
+        Venice accepts only ``venice_parameters.disable_thinking``.  Keep the
+        translation at the adapter boundary so neither internal alias leaks
+        into action payloads or middleware.  Non-Venice OpenAI-compatible
+        endpoints receive no Venice-specific key.
+        """
+        body = extra_body if isinstance(extra_body, dict) else {}
+        enabled = kwargs.pop("enable_thinking", None)
+        legacy_disabled = kwargs.pop("disable_thinking", None)
+        body.pop("enable_thinking", None)
+        top_level_disabled = body.pop("disable_thinking", None)
+        venice_body = body.get("venice_parameters")
+        nested_disabled = (
+            venice_body.get("disable_thinking")
+            if isinstance(venice_body, dict)
+            else None
+        )
+
+        if enabled is not None:
+            disabled = not bool(enabled)
+        elif legacy_disabled is not None:
+            disabled = bool(legacy_disabled)
+        elif nested_disabled is not None:
+            disabled = bool(nested_disabled)
+        elif top_level_disabled is not None:
+            disabled = bool(top_level_disabled)
+        else:
+            disabled = True
+
+        if self._is_venice_endpoint():
+            if not isinstance(venice_body, dict):
+                venice_body = {}
+            venice_body["disable_thinking"] = disabled
+            body["venice_parameters"] = venice_body
+        else:
+            # A top-level disable_thinking is invalid for Venice and is also
+            # not a portable OpenAI-compatible extension.  Drop it for other
+            # providers rather than turning a default-off setting into a 400.
+            body.pop("venice_parameters", None)
+            # Preserve explicit opt-in for providers that use the common
+            # OpenAI-compatible extension, while keeping the default request
+            # free of an unknown provider-specific key.
+            if enabled is True:
+                body["enable_thinking"] = True
+        return disabled
+
+    @staticmethod
+    def _is_thinking_parameter_rejection(exc: BaseException) -> bool:
+        """Recognize Venice rejecting a thinking transport parameter."""
+        message = str(exc).lower()
+        return ("disable_thinking" in message or "enable_thinking" in message) and (
+            "unrecognized" in message or "unknown" in message
+        )
+
+    @staticmethod
+    def _is_native_transport_rejection(exc: BaseException) -> bool:
+        """Recognize a provider rejecting optional native-tool controls."""
+        message = str(exc).lower()
+        mentions_control = "tool_choice" in message or "parallel_tool_calls" in message
+        return mentions_control and any(
+            marker in message
+            for marker in (
+                "unrecognized",
+                "unknown",
+                "unsupported",
+                "invalid",
+                "bad request",
+                "400",
+            )
+        )
+
+    @staticmethod
+    def _model_with_thinking_suffix(model: str, disabled: bool) -> str:
+        """Append or replace Venice's documented model feature suffix."""
+        suffix = f"disable_thinking={'true' if disabled else 'false'}"
+        if ":disable_thinking=" in model.lower():
+            return re.sub(
+                r":disable_thinking=(?:true|false)",
+                f":{suffix}",
+                model,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+        return f"{model}:{suffix}"
+
+    async def _create_chat_completion(
+        self,
+        client: Any,
+        messages: list[dict[str, Any]],
+        model: str,
+        *,
+        stream: bool,
+        filtered: dict[str, Any],
+        extra_body: dict[str, Any],
+        disable_thinking: bool,
+    ) -> Any:
+        """Create a chat request with a compatibility fallback for Venice.
+
+        The nested ``venice_parameters`` form is the primary wire format. A
+        proxy or older OpenAI-compatible wrapper may reject that field even
+        though the upstream Venice API supports it. In that case, retry once
+        using Venice's documented model suffix, then once without the thinking
+        override so a provider option can never take down the message path.
+        """
+        request_kwargs = dict(filtered)
+        request_kwargs["extra_body"] = extra_body or None
+        try:
+            return await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                stream=stream,
+                **request_kwargs,
+            )
+        except Exception as exc:
+            if self._is_native_transport_rejection(exc) and (
+                "tool_choice" in filtered or "parallel_tool_calls" in filtered
+            ):
+                # Some OpenAI-compatible proxies implement ``tools`` but not
+                # the newer selection/parallelism controls.  Degrade the
+                # optional controls while keeping the actual tool declarations
+                # so a compatibility quirk cannot become a user-visible API
+                # failure.
+                compatibility_kwargs = dict(filtered)
+                compatibility_kwargs.pop("parallel_tool_calls", None)
+                if "tool_choice" in str(exc).lower():
+                    compatibility_kwargs["tool_choice"] = "auto"
+                log_warning(
+                    "[openai_compat] Provider rejected native-tool transport "
+                    "controls; retrying with compatibility settings"
+                )
+                try:
+                    return await client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        stream=stream,
+                        extra_body=extra_body or None,
+                        **compatibility_kwargs,
+                    )
+                except Exception as compatibility_exc:
+                    # Continue into the Venice thinking fallback below when
+                    # that is the actual rejected field; otherwise preserve
+                    # the provider's original error for useful diagnostics.
+                    if not self._is_thinking_parameter_rejection(compatibility_exc):
+                        raise
+            if not (
+                self._is_venice_endpoint()
+                and self._is_thinking_parameter_rejection(exc)
+            ):
+                raise
+
+            fallback_body = {
+                key: value
+                for key, value in extra_body.items()
+                if key != "venice_parameters"
+            }
+            suffix_model = self._model_with_thinking_suffix(model, disable_thinking)
+            log_warning(
+                "[openai_compat] Venice rejected the thinking request field; "
+                f"retrying model feature suffix for {model}"
+            )
+            suffix_kwargs = dict(filtered)
+            suffix_kwargs["extra_body"] = fallback_body or None
+            try:
+                return await client.chat.completions.create(
+                    model=suffix_model,
+                    messages=messages,
+                    stream=stream,
+                    **suffix_kwargs,
+                )
+            except Exception as suffix_exc:
+                if not self._is_thinking_parameter_rejection(suffix_exc):
+                    raise
+                log_warning(
+                    "[openai_compat] Venice rejected the model thinking suffix; "
+                    "retrying once without a thinking override"
+                )
+                bare_kwargs = dict(filtered)
+                bare_kwargs["extra_body"] = fallback_body or None
+                return await client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    stream=stream,
+                    **bare_kwargs,
+                )
+
     async def chat_completion(
         self,
         messages: list[dict[str, Any]],
@@ -206,18 +417,11 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
 
         # Pull out vendor-extension keys that need to travel via ``extra_body``
         # (the OpenAI SDK rejects unknown root-level kwargs, but accepts extra_body).
-        # ``enable_thinking`` — Qwen3.5 / LM Studio: disables chain-of-thought so
-        # reasoning tokens don't fill the context window before the response, and
-        # don't bleed into message content where they corrupt action parsing.
-        # Defaulting to False here matches the behaviour of the vision path and of
-        # Gemini/OpenRouter which never expose thinking in the response content.
-        # Thinking is opt-in for direct adapter callers as well. The bridge
-        # supplies the endpoint's explicit value when configured.
+        # ``enable_thinking`` is an internal opt-in alias. Venice receives the
+        # provider-specific ``venice_parameters.disable_thinking`` envelope;
+        # the translation is performed before the OpenAI SDK call.
         extra_body: dict[str, Any] = kwargs.pop("extra_body", {}) or {}
-        if "enable_thinking" not in kwargs:
-            kwargs["enable_thinking"] = False
-        if "enable_thinking" in kwargs:
-            extra_body["enable_thinking"] = kwargs.pop("enable_thinking")
+        disable_thinking = self._resolve_disable_thinking(kwargs, extra_body)
 
         filtered = {
             k: v for k, v in kwargs.items() if k not in ("model", "messages", "stream")
@@ -236,12 +440,15 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         _req_start = _time.monotonic()
 
         try:
-            response = await client.chat.completions.create(
-                model=request_model,
-                messages=messages,
+            self._last_completion_metadata = {}
+            response = await self._create_chat_completion(
+                client,
+                messages,
+                request_model,
                 stream=False,
-                extra_body=extra_body or None,
-                **filtered,
+                filtered=filtered,
+                extra_body=extra_body,
+                disable_thinking=disable_thinking,
             )
             choice = response.choices[0]
             usage = {}
@@ -261,6 +468,9 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                 if isinstance(choice.message, dict)
                 else getattr(choice.message, "tool_calls", None)
             )
+            self._last_completion_metadata = {
+                "native_tool_calls": bool(_raw_tool_calls),
+            }
             if _raw_tool_calls:
                 content = self._extract_tool_call_actions(choice.message)
             else:
@@ -303,11 +513,15 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         client = self._get_client()
         request_model = model or "default"
         engine_tag = f"openai_compat:{self._engine_label or 'default'}"
+        extra_body: dict[str, Any] = kwargs.pop("extra_body", {}) or {}
+        disable_thinking = self._resolve_disable_thinking(kwargs, extra_body)
         filtered = {
             k: v for k, v in kwargs.items() if k not in ("model", "messages", "stream")
         }
         logged_payload: dict[str, Any] = {"messages": messages, "stream": True}
         logged_payload.update(filtered)
+        if extra_body:
+            logged_payload["extra_body"] = extra_body
 
         log_cortex_request(
             engine_tag,
@@ -319,11 +533,14 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         _accumulated: list[str] = []
 
         try:
-            stream = await client.chat.completions.create(
-                model=request_model,
-                messages=messages,
+            stream = await self._create_chat_completion(
+                client,
+                messages,
+                request_model,
                 stream=True,
-                **filtered,
+                filtered=filtered,
+                extra_body=extra_body,
+                disable_thinking=disable_thinking,
             )
             async for chunk in stream:
                 delta = chunk.choices[0].delta if chunk.choices else None
@@ -798,10 +1015,10 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         vision_timeout = float(kwargs.pop("vision_timeout", self._timeout or 600.0))
 
         # Disable chain-of-thought thinking for vision calls unless explicitly
-        # requested. Some OpenAI-compatible providers spend the whole budget on
-        # reasoning tokens for image tasks, which hurts latency and reliability.
-        if "enable_thinking" not in kwargs:
-            kwargs["enable_thinking"] = False
+        # requested. The adapter translates the internal opt-in alias to
+        # Venice's nested provider-specific request envelope.
+        extra_body: dict[str, Any] = kwargs.pop("extra_body", {}) or {}
+        self._resolve_disable_thinking(kwargs, extra_body)
 
         # Gemma 4 (and most vision-capable models) attend better when the image
         # comes before the text prompt rather than after it.
@@ -824,8 +1041,7 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             "max_tokens": kwargs.get("max_tokens", 1024),
             "stream": False,
         }
-        if "enable_thinking" in kwargs:
-            payload["enable_thinking"] = kwargs["enable_thinking"]
+        payload.update(extra_body)
 
         headers = {
             "Authorization": f"Bearer {self._api_key}",

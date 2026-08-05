@@ -140,6 +140,21 @@ async def stop_interfaces() -> None:
             log_warning(f"[main] Error stopping interface '{name}': {e}")
 
 
+async def stop_synth_mcp() -> None:
+    """Close Synth-owned MCP sessions before the event loop is torn down."""
+    try:
+        from core.mcp_bridge.client import mcp_client_bridge
+
+        await asyncio.wait_for(mcp_client_bridge.disconnect_all(), timeout=10)
+        log_debug("[main] Stopped Synth MCP client")
+    except TimeoutError:
+        log_warning("[main] Synth MCP client did not stop within 10s")
+    except Exception as exc:
+        # MCP is optional; a failed teardown must never prevent the rest of
+        # the application from shutting down cleanly.
+        log_warning(f"[main] Error stopping Synth MCP client: {exc}")
+
+
 def signal_handler(signum, frame):
     """Request a graceful shutdown; never blocks or exits from this raw signal frame.
 
@@ -463,6 +478,7 @@ if __name__ == "__main__":
                 if shutdown_wait in done:
                     log_info("[main] Shutdown requested - cleaning up...")
                     await stop_interfaces()
+                    await stop_synth_mcp()
                     cleanup_components()
                     log_info("[main] Shutdown cleanup complete - exiting...")
                     break
@@ -472,6 +488,7 @@ if __name__ == "__main__":
                         "[main] 🔄 Restart requested - cleaning up and restarting..."
                     )
 
+                    await stop_synth_mcp()
                     # Cleanup components
                     cleanup_components()
 
@@ -497,6 +514,7 @@ if __name__ == "__main__":
             except KeyboardInterrupt:
                 log_info("[main] Received shutdown signal, exiting...")
                 await stop_interfaces()
+                await stop_synth_mcp()
                 cleanup_components()
                 break
 

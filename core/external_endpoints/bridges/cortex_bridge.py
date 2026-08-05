@@ -57,19 +57,25 @@ _LOCAL_MAX_TOKENS_DEFAULT = 4096
 # budget.
 _DEFAULT_DOWNSTREAM_CHAR_BUDGET = 24000
 
-# --- NATIVE TOOLS ACCANTONATI GLOBALMENTE (2026-07-04) ---
-# I tool nativi (function-calling OpenAI/Gemini/Anthropic) sono disattivati
-# finché non implementeremo la funzionalità agentica (PR futura già pianificata).
-# Con questo flag a True, TUTTI gli endpoint usano il protocollo in-prompt: il
-# catalogo azioni viene iniettato come testo nel system prompt, così anche gli
-# engine senza tool-calling nativo (es. selenium-llm-engine, automazione browser)
-# vedono tutte le actions (incluso tts_speak).
-# Per riattivare i tool nativi quando arriverà la parte agentica: riportare
-# questo flag a False. La logica originale del ramo tools resta intatta sotto.
 # Native tools remain off by default for compatibility with endpoints/models
 # that do not support function calling. Individual endpoints may opt in with
 # ``extra_config.enable_tools: true``.
 _NATIVE_TOOLS_ENABLED = False
+
+# Venice currently rejects requests containing more than 20 function
+# definitions for the affected Gemma endpoint.  Keep this as a provider
+# default rather than making every OpenAI-compatible endpoint pay the same
+# restriction; arbitrary endpoints can opt into their own limit with the
+# ``max_tools`` extra-config key.
+_VENICE_MAX_NATIVE_TOOLS = 20
+
+# This marker is appended to the system instruction only when the endpoint is
+# actually sending native function declarations.  The normal prompt still
+# contains the legacy JSON-action format for endpoints that do not support
+# tools; without an explicit transport instruction, tool-capable small models
+# tend to obey that older format and emit a large ``{"actions": [...]}``
+# content response instead of making a function call.
+_NATIVE_TOOL_MODE_MARKER = "=== SYNTH NATIVE TOOL MODE ==="
 
 
 # ---------------------------------------------------------------------------
@@ -365,11 +371,12 @@ class ExternalCortexEngine(AIPluginBase):
 
         Supported keys (set inside the endpoint's *Extra Config* JSON field):
 
-        * ``disable_thinking`` (bool) — pass ``enable_thinking=False`` to the
-          API.  Supported by Qwen3 / LM Studio: prevents the model from spending
-          the entire context window on chain-of-thought tokens before generating
-          a response.  Drastically reduces latency on models that default to
-          extended thinking mode.
+        * ``enable_thinking`` (bool) — opt into thinking. The bridge keeps this
+          as an internal setting; the OpenAI-compatible adapter translates it
+          to Venice's nested provider-facing ``disable_thinking`` key. Thinking
+          is off by default.
+        * ``disable_thinking`` (bool) — legacy compatibility alias for the
+          provider-facing setting.
         * ``force_json_object`` (bool) — request ``response_format={"type":
           "json_object"}`` so the server constrains decoding to syntactically
           valid JSON.  Recommended for small local quants (llama.cpp / LM Studio)
@@ -399,9 +406,15 @@ class ExternalCortexEngine(AIPluginBase):
         extra = self._endpoint.extra_config or {}
         kwargs: dict[str, Any] = {}
         if self._endpoint.protocol is EndpointProtocol.OPENAI:
-            # Thinking is opt-in. The legacy disable_thinking key remains
-            # readable in old configs, but the default is now explicit false.
-            kwargs["enable_thinking"] = extra.get("enable_thinking") is True
+            # Thinking is opt-in. Keep the readable alias as the internal
+            # setting and translate it at the adapter boundary; old configs
+            # using disable_thinking are inverted here for compatibility.
+            if "enable_thinking" in extra:
+                kwargs["enable_thinking"] = extra.get("enable_thinking") is True
+            elif "disable_thinking" in extra:
+                kwargs["enable_thinking"] = not bool(extra.get("disable_thinking"))
+            else:
+                kwargs["enable_thinking"] = False
 
         # Cap completion length. An explicit value always wins; otherwise apply a
         # safe default ONLY for local-model endpoints (disable_tools /
@@ -459,6 +472,196 @@ class ExternalCortexEngine(AIPluginBase):
             return False
         extra = self._endpoint.extra_config or {}
         return bool(_NATIVE_TOOLS_ENABLED or extra.get("enable_tools") is True)
+
+    def _max_native_tools(self) -> int | None:
+        """Return the native tool cap for this endpoint, if one is known.
+
+        ``max_tools`` is deliberately an endpoint-level escape hatch because
+        tool-count limits vary by provider and model.  Venice's current
+        OpenAI-compatible Gemma endpoint has a hard limit of 20, so apply that
+        default automatically when the adapter identifies Venice.  A positive
+        explicit value can lower the cap; a non-positive value disables the
+        generic cap but cannot disable Venice's known provider limit.
+        """
+        extra = self._endpoint.extra_config or {}
+        explicit = extra.get("max_tools")
+        explicit_limit: int | None = None
+        if explicit is not None and not isinstance(explicit, bool):
+            try:
+                parsed = int(explicit)
+                if parsed > 0:
+                    explicit_limit = parsed
+                elif parsed < 0:
+                    log_warning(
+                        f"[cortex_bridge:{self._endpoint.name}] max_tools={parsed} "
+                        "is invalid; ignoring it"
+                    )
+            except (TypeError, ValueError):
+                log_warning(
+                    f"[cortex_bridge:{self._endpoint.name}] invalid max_tools="
+                    f"{explicit!r}; ignoring it"
+                )
+        is_venice = False
+        detector = getattr(self._adapter, "_is_venice_endpoint", None)
+        if callable(detector):
+            try:
+                is_venice = bool(detector())
+            except Exception:
+                is_venice = False
+        if not is_venice:
+            is_venice = str(self._endpoint.name or "").lower().startswith("venice")
+        if explicit_limit is not None:
+            # Never allow an operator override to recreate a known provider
+            # 400.  For other providers the explicit endpoint value wins.
+            if is_venice:
+                return min(explicit_limit, _VENICE_MAX_NATIVE_TOOLS)
+            return explicit_limit
+        return _VENICE_MAX_NATIVE_TOOLS if is_venice else None
+
+    @staticmethod
+    def _is_vessel_prompt_request(prompt_request: Any) -> bool:
+        """Detect an embodied turn from routing metadata only."""
+        runtime_ctx = getattr(prompt_request, "runtime_ctx", None)
+        interface_name = str(getattr(runtime_ctx, "interface_name", "") or "").strip()
+        interface_path = str(getattr(runtime_ctx, "interface_path", "") or "").strip()
+        return (
+            interface_name == "vessel"
+            or interface_path == "vessel"
+            or interface_path.startswith("vessel/")
+        )
+
+    def _select_native_tool_manifests(self, prompt_request: Any) -> list[Any]:
+        """Scope and cap manifests before rendering provider tool schemas.
+
+        The prompt engine's action whitelist protects textual prompt size, but
+        provider tool arrays have a separate limit.  Keep this final boundary
+        check here because it also covers stale/live action catalogs and any
+        caller that constructs a ``PromptRequest`` directly.
+
+        Vessel turns are intentionally vessel-only when native tools are on:
+        ``say`` is the in-world reply path, so unrelated chat, scheduling, and
+        developer actions only compete with the embodiment verbs.  For ordinary
+        interfaces, message actions for other interfaces are removed while the
+        rest of the scoped action set is preserved.
+        """
+        manifests = list(getattr(prompt_request, "tool_declarations", None) or [])
+        if not manifests:
+            return []
+
+        runtime_ctx = getattr(prompt_request, "runtime_ctx", None)
+        interface_name = str(getattr(runtime_ctx, "interface_name", "") or "").strip()
+        is_vessel = self._is_vessel_prompt_request(prompt_request)
+        filtered: list[tuple[int, Any]] = []
+        for index, manifest in enumerate(manifests):
+            name = str(getattr(manifest, "name", "") or "").strip()
+            if not name:
+                continue
+            if is_vessel and not name.startswith("vessel_"):
+                continue
+            if (
+                interface_name
+                and name.startswith("message_")
+                and name != f"message_{interface_name}"
+            ):
+                continue
+            filtered.append((index, manifest))
+
+        # The Vessel plugin emits its core verbs before world-specific extras.
+        # Promote the universal disconnect verb so a capped list never strands
+        # the session; the stable source order then keeps all core verbs and
+        # the connector's first world-specific verbs (including mine/collect).
+        if is_vessel:
+            filtered.sort(
+                key=lambda item: (
+                    0 if getattr(item[1], "name", "") == "vessel_disconnect" else 1,
+                    item[0],
+                )
+            )
+
+        selected = [manifest for _, manifest in filtered]
+        limit = self._max_native_tools()
+        if limit is not None and len(selected) > limit:
+            original_count = len(manifests)
+            log_warning(
+                f"[cortex_bridge:{self._endpoint.name}] native tool set reduced "
+                f"from {original_count} submitted/{len(selected)} scoped to "
+                f"{limit}; provider/model tool limit"
+            )
+            selected = selected[:limit]
+        elif len(selected) != len(manifests):
+            log_debug(
+                f"[cortex_bridge:{self._endpoint.name}] native tool set scoped "
+                f"from {len(manifests)} to {len(selected)} for "
+                f"interface={interface_name or 'unknown'}"
+            )
+        return selected
+
+    @staticmethod
+    def _add_native_tool_instruction(prompt_request: Any) -> None:
+        """Tell the model which response transport is active for this turn.
+
+        ``PromptRequest.system_instruction`` is also used by the OpenAI
+        renderer, so this keeps the transport contract adjacent to the tool
+        declarations.  It is deliberately structural: it does not try to
+        infer intent from the user's words or maintain a keyword list.
+        """
+        instruction = str(getattr(prompt_request, "system_instruction", "") or "")
+        if _NATIVE_TOOL_MODE_MARKER in instruction:
+            return
+        prompt_request.system_instruction = instruction + (
+            "\n\n"
+            f"{_NATIVE_TOOL_MODE_MARKER}\n"
+            "The API tools supplied with this turn are the only action interface. "
+            "Call exactly one supplied function for the single most important "
+            "action in this turn. Do not emit an actions JSON object, action list, "
+            "tool name, or tool arguments as message text. Do not invent a function "
+            "name. The next turn will provide the result and any follow-up action."
+        )
+
+    def _guard_plain_native_action_response(
+        self,
+        content: Any,
+        selected_manifests: list[Any] | None,
+    ) -> str:
+        """Contain a model that ignored native tools and emitted action JSON.
+
+        A few tool-capable model/provider combinations return HTTP 200 with a
+        plain ``{"actions": [...]}`` completion instead of ``tool_calls``.
+        Passing that list through lets one response enqueue dozens of repeated
+        world actions.  Keep the first action that was actually offered to the
+        model and discard the rest; native tool responses are already normalized
+        by the adapter and do not need this fallback.
+        """
+        text = str(content or "").strip()
+        if not text or not selected_manifests:
+            return text
+        try:
+            parsed = json.loads(text)
+        except (TypeError, ValueError):
+            return text
+        if not isinstance(parsed, dict):
+            return text
+        actions = parsed.get("actions")
+        if not isinstance(actions, list) or len(actions) <= 1:
+            return text
+
+        offered = {
+            str(getattr(manifest, "name", "") or "").strip()
+            for manifest in selected_manifests
+        }
+        valid_actions = [
+            action
+            for action in actions
+            if isinstance(action, dict)
+            and str(action.get("type", "") or "").strip() in offered
+        ]
+        parsed["actions"] = valid_actions[:1]
+        log_warning(
+            f"[cortex_bridge:{self._endpoint.name}] native tool endpoint returned "
+            f"plain action JSON ({len(actions)} actions); keeping "
+            f"{len(parsed['actions'])} offered action and discarding the rest"
+        )
+        return json.dumps(parsed, ensure_ascii=False)
 
     def _build_action_grammar(self, prompt_request: Any) -> str | None:
         """Build a GBNF grammar for the action JSON, or ``None``.
@@ -581,9 +784,7 @@ class ExternalCortexEngine(AIPluginBase):
             runtime_interface = str(
                 getattr(runtime_ctx, "interface_path", "") or ""
             ).strip()
-            runtime_name = str(
-                getattr(runtime_ctx, "interface_name", "") or ""
-            ).strip()
+            runtime_name = str(getattr(runtime_ctx, "interface_name", "") or "").strip()
             is_vessel_turn = (
                 runtime_interface == "vessel"
                 or runtime_interface.startswith("vessel/")
@@ -744,18 +945,43 @@ class ExternalCortexEngine(AIPluginBase):
                 return {}
 
             prompt_request.supports_tool_calling = True
+            selected_manifests = self._select_native_tool_manifests(prompt_request)
+            if not selected_manifests:
+                prompt_request.supports_tool_calling = False
+                return {}
+
+            self._add_native_tool_instruction(prompt_request)
+
+            # Render a shallow request copy so the caller retains its complete
+            # action registry for dispatch/validation.  Only the provider-facing
+            # tool declaration list is scoped/capped.
+            render_request = copy.copy(prompt_request)
+            render_request.tool_declarations = selected_manifests
+            render_request.supports_tool_calling = True
 
             if self._endpoint.protocol is EndpointProtocol.GEMINI:
-                rendered = GeminiRenderer(prompt_request).render()
+                rendered = GeminiRenderer(render_request).render()
                 tools = rendered.get("tools") or []
                 return {"tools": tools} if tools else {}
 
             if self._endpoint.protocol is EndpointProtocol.OPENAI:
-                tools = OpenAIRenderer(prompt_request).tool_schemas()
-                return {"tools": tools, "tool_choice": "auto"} if tools else {}
+                tools = OpenAIRenderer(render_request).tool_schemas()
+                if not tools:
+                    return {}
+                # SyntH's LLM-to-interface contract requires an action.  Ask
+                # Venice/OpenAI-compatible providers to make one native call
+                # and disable parallel calls so a model cannot turn one turn
+                # into an unbounded action batch.  Both fields are standard
+                # Chat Completions options; the adapter still owns provider
+                # specific translation.
+                return {
+                    "tools": tools,
+                    "tool_choice": "required",
+                    "parallel_tool_calls": False,
+                }
 
             if self._endpoint.protocol is EndpointProtocol.ANTHROPIC:
-                rendered = AnthropicRenderer(prompt_request).render()
+                rendered = AnthropicRenderer(render_request).render()
                 tools = rendered.get("tools") or []
                 if not tools:
                     return {}
@@ -852,24 +1078,53 @@ class ExternalCortexEngine(AIPluginBase):
                     ),
                     timeout=request_timeout,
                 )
-                response_metadata: dict[str, Any] = {
-                    "model": getattr(chat_resp, "model", None) or model,
-                    "finish_reason": getattr(chat_resp, "finish_reason", None)
-                    or "stop",
-                    "empty_response": not bool(getattr(chat_resp, "content", "")),
-                }
+                response_content = chat_resp.content
                 adapter_response_metadata = getattr(
                     self._adapter,
                     "_last_completion_metadata",
                     None,
                 )
+                native_tool_calls = (
+                    adapter_response_metadata.get("native_tool_calls")
+                    if isinstance(adapter_response_metadata, dict)
+                    else None
+                )
+                if "tools" in extra_kwargs and native_tool_calls is not True:
+                    # The provider returned content instead of a structured
+                    # tool call.  Re-derive the exact provider-facing set so
+                    # unsupported plain-content actions cannot leak into the
+                    # normal action parser either.
+                    from core.prompt_request import PromptRequest
+
+                    prompt_request = (
+                        messages if isinstance(messages, PromptRequest) else None
+                    )
+                    if prompt_request is None and isinstance(messages, dict):
+                        candidate = messages.get("__prompt_request")
+                        if isinstance(candidate, PromptRequest):
+                            prompt_request = candidate
+                    selected_manifests = (
+                        self._select_native_tool_manifests(prompt_request)
+                        if prompt_request is not None
+                        else None
+                    )
+                    response_content = self._guard_plain_native_action_response(
+                        response_content,
+                        selected_manifests,
+                    )
+                response_metadata: dict[str, Any] = {
+                    "model": getattr(chat_resp, "model", None) or model,
+                    "finish_reason": getattr(chat_resp, "finish_reason", None)
+                    or "stop",
+                    "empty_response": not bool(response_content),
+                }
                 if isinstance(adapter_response_metadata, dict):
                     for key, value in adapter_response_metadata.items():
                         if value is None or value == "":
                             continue
                         response_metadata[key] = value
                 self._last_response_metadata = response_metadata
-                return chat_resp.content
+                return response_content
             except asyncio.TimeoutError:
                 log_warning(
                     f"[cortex_bridge:{self._endpoint.name}] generate_response timed out "
@@ -1214,7 +1469,7 @@ class ExternalCortexEngine(AIPluginBase):
 
     # NOTE: generate_response already uses _extra_api_kwargs(), so all call
     # paths (Recon via generate_response, main LLM via handle_incoming_message)
-    # benefit from extra_config settings such as ``disable_thinking``.
+    # benefit from extra_config settings such as ``enable_thinking``.
 
     # ------------------------------------------------------------------
     # Model / capability info

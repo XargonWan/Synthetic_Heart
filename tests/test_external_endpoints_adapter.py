@@ -1,3 +1,4 @@
+import json
 import sys
 import types
 from types import SimpleNamespace
@@ -1374,11 +1375,294 @@ def test_thinking_is_opt_in_and_native_tools_are_per_endpoint():
     assert enabled._extra_api_kwargs()["enable_thinking"] is True
     assert enabled._native_tools_enabled() is True
 
+    legacy_thinking = ExternalCortexEngine(
+        _openai_endpoint({"disable_thinking": False}),
+        cast(Any, SimpleNamespace()),
+    )
+    assert legacy_thinking._extra_api_kwargs()["enable_thinking"] is True
+
     legacy_override = ExternalCortexEngine(
         _openai_endpoint({"enable_tools": True, "disable_tools": True}),
         cast(Any, SimpleNamespace()),
     )
     assert legacy_override._native_tools_enabled() is False
+
+
+def test_venice_native_tools_are_scoped_and_capped_for_vessel_turns():
+    """Venice receives only embodied tools and never more than its model limit."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from core.prompt_request import PromptRequest, RuntimeContext
+
+    endpoint = ExternalEndpoint(
+        id=77,
+        name="Venice2",
+        display_label="Venice",
+        protocol=EndpointProtocol.OPENAI,
+        base_url="https://api.venice.ai/api/v1",
+        api_key_enc=None,
+        enabled=True,
+        capabilities={"cortex": True},
+        subsystem_map={"cortex": True},
+        available_models=["gemma-4-uncensored"],
+        default_model="gemma-4-uncensored",
+        probe_status="success",
+        last_probe_at=None,
+        extra_config={"enable_tools": True},
+    )
+    names = [
+        "event",
+        "schedule_message",
+        "message_telegram_bot",
+        "message_discord_bot",
+        "message_synth_webui",
+        "message_reddit",
+        "message_x",
+        "message_matrix_chat",
+        "message_ollama_serve",
+        "vessel_minecraft_say",
+        "vessel_minecraft_move",
+        "vessel_minecraft_look",
+        "vessel_minecraft_use",
+        "vessel_minecraft_attack",
+        "vessel_minecraft_follow",
+        "vessel_minecraft_unfollow",
+        "vessel_minecraft_respawn",
+        "vessel_minecraft_status",
+        "vessel_minecraft_observe",
+        "vessel_minecraft_shoot",
+        "vessel_minecraft_goto",
+        "vessel_minecraft_mine",
+        "vessel_minecraft_collect_block",
+        "vessel_minecraft_place",
+        "vessel_minecraft_craft",
+        "vessel_minecraft_smelt",
+        "vessel_minecraft_equip",
+        "vessel_minecraft_inventory",
+        "vessel_minecraft_wander",
+        "vessel_minecraft_dig_staircase",
+        "vessel_minecraft_return_surface",
+        "vessel_minecraft_climb_staircase",
+        "vessel_minecraft_scan",
+        "vessel_minecraft_goals",
+        "vessel_minecraft_set_goal",
+        "vessel_minecraft_update_goal",
+        "vessel_minecraft_lookup_knowledge",
+        "vessel_minecraft_set_base",
+        "vessel_minecraft_list_bases",
+        "vessel_minecraft_build_base",
+        "vessel_disconnect",
+        "message_fluxer_bot",
+        "message_integration",
+    ]
+    manifests = [
+        SimpleNamespace(name=name, description=name, parameters=[])
+        for name in names
+    ]
+    prompt = PromptRequest(
+        system_instruction="Use tools.",
+        current_text="get wood",
+        tool_declarations=manifests,
+        runtime_ctx=RuntimeContext(
+            interface_name="vessel",
+            interface_path="vessel/minecraft/player",
+        ),
+    )
+    engine = ExternalCortexEngine(
+        endpoint,
+        OpenAICompatAdapter(
+            base_url="https://api.venice.ai/api/v1", api_key="test"
+        ),
+    )
+
+    kwargs = engine._tool_api_kwargs(prompt)
+    tool_names = [tool["function"]["name"] for tool in kwargs["tools"]]
+
+    assert len(tool_names) == 20
+    assert "event" not in tool_names
+    assert "message_telegram_bot" not in tool_names
+    assert "vessel_disconnect" in tool_names
+    assert "vessel_minecraft_mine" in tool_names
+    assert "vessel_minecraft_collect_block" in tool_names
+    assert kwargs["tool_choice"] == "required"
+    assert kwargs["parallel_tool_calls"] is False
+    assert "SYNTH NATIVE TOOL MODE" in prompt.system_instruction
+    assert prompt.supports_tool_calling is True
+    # The caller's full registry remains intact for action validation/dispatch.
+    assert len(prompt.tool_declarations) == len(names)
+
+
+@pytest.mark.asyncio
+async def test_plain_native_action_json_is_capped_when_provider_ignores_tools():
+    """A 200/plain-JSON fallback cannot flood one vessel turn with actions."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from core.prompt_request import PromptRequest, RuntimeContext
+
+    endpoint = _openai_endpoint({"enable_tools": True})
+    captured: dict[str, Any] = {}
+
+    class FakeAdapter:
+        async def chat_completion(self, messages, model=None, **kwargs):
+            captured["kwargs"] = kwargs
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "actions": [
+                            {"type": "vessel_minecraft_say", "payload": {"text": "hi"}},
+                            {"type": "vessel_minecraft_mine", "payload": {"block": "*_log"}},
+                            {"type": "vessel_minecraft_mine", "payload": {"block": "*_log"}},
+                        ]
+                    }
+                ),
+                model=model,
+            )
+
+    manifests = [
+        SimpleNamespace(name="vessel_minecraft_say", description="say", parameters=[]),
+        SimpleNamespace(name="vessel_minecraft_mine", description="mine", parameters=[]),
+    ]
+    prompt = PromptRequest(
+        system_instruction="Use tools.",
+        current_text="get wood",
+        tool_declarations=manifests,
+        runtime_ctx=RuntimeContext(
+            interface_name="vessel",
+            interface_path="vessel/minecraft/player",
+        ),
+    )
+    engine = ExternalCortexEngine(endpoint, cast(Any, FakeAdapter()))
+
+    response = await engine.handle_incoming_message(None, None, prompt)
+
+    assert json.loads(response) == {
+        "actions": [
+            {"type": "vessel_minecraft_say", "payload": {"text": "hi"}}
+        ]
+    }
+    assert captured["kwargs"]["tool_choice"] == "required"
+    assert captured["kwargs"]["parallel_tool_calls"] is False
+
+
+def test_thinking_alias_uses_nested_venice_disable_key():
+    """The internal alias becomes Venice's nested provider parameter."""
+    default_adapter = OpenAICompatAdapter(
+        base_url="https://api.venice.ai/api/v1", api_key="x"
+    )
+    default_kwargs: dict[str, Any] = {}
+    default_body: dict[str, Any] = {}
+    assert default_adapter._resolve_disable_thinking(
+        default_kwargs, default_body
+    ) is True
+    assert default_kwargs == {}
+    assert default_body == {
+        "venice_parameters": {"disable_thinking": True}
+    }
+
+    enabled_kwargs = {"enable_thinking": True}
+    enabled_body: dict[str, Any] = {}
+    assert default_adapter._resolve_disable_thinking(
+        enabled_kwargs, enabled_body
+    ) is False
+    assert enabled_kwargs == {}
+    assert enabled_body == {
+        "venice_parameters": {"disable_thinking": False}
+    }
+
+    generic_adapter = OpenAICompatAdapter(
+        base_url="http://127.0.0.1:8081/v1", api_key="x"
+    )
+    generic_body: dict[str, Any] = {}
+    generic_adapter._resolve_disable_thinking({}, generic_body)
+    assert generic_body == {}
+    generic_opt_in_body: dict[str, Any] = {}
+    generic_adapter._resolve_disable_thinking(
+        {"enable_thinking": True}, generic_opt_in_body
+    )
+    assert generic_opt_in_body == {"enable_thinking": True}
+
+
+@pytest.mark.asyncio
+async def test_openai_compat_venice_request_nests_thinking_parameter(monkeypatch):
+    """The SDK call must serialize Venice's parameter at the documented depth."""
+    adapter = OpenAICompatAdapter(
+        base_url="https://api.venice.ai/api/v1", api_key="x"
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeCompletions:
+        async def create(self, **kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content='{"actions": []}'),
+                        finish_reason="stop",
+                    )
+                ],
+                model="gemma-4",
+                usage=None,
+            )
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=FakeCompletions())
+    )
+    monkeypatch.setattr(adapter, "_get_client", lambda: fake_client)
+    await adapter.chat_completion(
+        [{"role": "user", "content": "get wood"}],
+        model="gemma-4",
+        enable_thinking=False,
+    )
+
+    assert captured["extra_body"] == {
+        "venice_parameters": {"disable_thinking": True}
+    }
+    assert "enable_thinking" not in captured
+    assert "disable_thinking" not in captured
+
+
+@pytest.mark.asyncio
+async def test_openai_compat_venice_thinking_rejection_falls_back(monkeypatch):
+    """An incompatible proxy cannot kill the chat path over thinking config."""
+    adapter = OpenAICompatAdapter(
+        base_url="https://api.venice.ai/api/v1", api_key="x"
+    )
+    calls: list[dict[str, Any]] = []
+
+    class FakeCompletions:
+        async def create(self, **kwargs: Any) -> Any:
+            calls.append(kwargs)
+            if len(calls) < 3:
+                raise RuntimeError(
+                    "400 Unrecognized key(s) in object: 'disable_thinking'"
+                )
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content='{"actions": []}'),
+                        finish_reason="stop",
+                    )
+                ],
+                model="gemma-4",
+                usage=None,
+            )
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=FakeCompletions())
+    )
+    monkeypatch.setattr(adapter, "_get_client", lambda: fake_client)
+    response = await adapter.chat_completion(
+        [{"role": "user", "content": "get wood"}],
+        model="gemma-4",
+        enable_thinking=False,
+    )
+
+    assert response.content == '{"actions": []}'
+    assert calls[0]["extra_body"] == {
+        "venice_parameters": {"disable_thinking": True}
+    }
+    assert calls[1]["model"] == "gemma-4:disable_thinking=true"
+    assert calls[1]["extra_body"] is None
+    assert calls[2]["model"] == "gemma-4"
+    assert calls[2]["extra_body"] is None
 
 
 @pytest.mark.asyncio
