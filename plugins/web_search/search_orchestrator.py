@@ -142,7 +142,9 @@ def _is_self_initiated(context_memory: dict[str, Any] | None) -> bool:
         if context_memory.get("vessel_focus"):
             return True
         path = context_memory.get("interface_path")
-        if isinstance(path, str) and path.startswith("vessel"):
+        from core.interface_path_utils import is_vessel_interface_path
+
+        if is_vessel_interface_path(path):
             return True
     except Exception:
         return False

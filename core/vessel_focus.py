@@ -5,7 +5,8 @@ originates from a Vessel embodiment ("SyntH is in the world"). The decision is
 made purely from routing metadata — never from message text (project rule: no
 keyword logic) — using three independent structural signals:
 
-1. the routing ``interface_path`` starts with ``vessel`` (``vessel/<world>...``);
+1. the routing ``interface_path`` is ``vessel`` or starts with
+   ``vessel/`` (``vessel/<world>...``);
 2. an explicit ``vessel_focus`` flag is set on the context memory;
 3. the message's chat type is ``vessel``.
 
@@ -45,7 +46,9 @@ def is_vessel_turn(
         path = interface_path
         if path is None and message is not None:
             path = getattr(message, "interface_path", None)
-        if isinstance(path, str) and path.startswith("vessel"):
+        from core.interface_path_utils import is_vessel_interface_path
+
+        if is_vessel_interface_path(path):
             return True
 
         if isinstance(context_memory, dict) and context_memory.get("vessel_focus"):

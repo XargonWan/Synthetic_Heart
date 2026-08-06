@@ -222,6 +222,13 @@ moments (and at end-of-session, when the experience buffer is flushed to a
 single diary entry). The gate is additive and guarded: if detection fails, the
 normal full-context path is used.
 
+Vessel chat rows remain durable for the Vessel Activities/history UI after
+logout, but they are not ordinary cross-interface context. Grillo's observer,
+dream/reflection collectors, recon prompts, live recent-history injection, and
+the unified history engine structurally exclude ``vessel/...`` rows from
+non-Vessel prompts. This prevents an ended world from resurfacing merely
+because its cached messages are recent.
+
 **Action speed.** In-world actions already run on the Fast Lane as a single
 connector round-trip. :meth:`plugins.rift_vessel.vessel_plugin.VesselPlugin.act`
 logs that round-trip time at ``INFO`` (``act('...') dispatched via '...' in N

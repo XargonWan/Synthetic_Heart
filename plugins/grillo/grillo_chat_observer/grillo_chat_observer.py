@@ -618,6 +618,15 @@ class GrilloChatObserverPlugin:
                 if not chat_path:
                     continue
                 chat_path = str(chat_path)
+                # Vessel history is world-scoped and must never be treated as
+                # ordinary cross-conversation observer input.  Ended sessions
+                # intentionally retain their durable activity/chat rows for
+                # the Vessel history UI, so recency alone cannot be an
+                # eligibility signal here.
+                from core.interface_path_utils import is_vessel_interface_path
+
+                if is_vessel_interface_path(chat_path):
+                    continue
                 try:
                     messages = await load_chat_history(chat_path)
                     # if the most recent message belongs to the synth and it was
@@ -737,6 +746,10 @@ class GrilloChatObserverPlugin:
                 if not chat_path:
                     continue
                 chat_path = str(chat_path)
+                from core.interface_path_utils import is_vessel_interface_path
+
+                if is_vessel_interface_path(chat_path):
+                    continue
                 # Skip live voice paths — audio-only, cannot receive text.
                 if "_live_" in chat_path:
                     continue

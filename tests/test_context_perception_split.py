@@ -85,3 +85,20 @@ async def test_plain_conversation_untouched_when_no_vessel() -> None:
     assert [m.get("text") for m in conv] == ["hi", "there"]
     # No perception buffer created for a non-vessel path.
     assert path not in ccm.get_perception_memory()
+
+
+@pytest.mark.asyncio
+async def test_vessel_rehydration_does_not_broaden_to_sibling_world_paths(
+    monkeypatch,
+) -> None:
+    calls: list[tuple[str, bool]] = []
+
+    async def fake_load(path: str, match_chat_level: bool = False):
+        calls.append((path, match_chat_level))
+        return []
+
+    monkeypatch.setattr("core.chat_history_cache.load_chat_history", fake_load)
+
+    await ccm.load_chat_history("vessel/minecraft/old-server")
+
+    assert calls == [("vessel/minecraft/old-server", False)]

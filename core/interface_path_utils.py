@@ -143,6 +143,27 @@ def get_interface_from_path(interface_path: str) -> str:
     return interface_name
 
 
+def is_vessel_interface_path(interface_path: Any) -> bool:
+    """Return whether a path belongs to the Rift Vessel interface.
+
+    Interface paths are structural routing metadata.  Match the complete
+    interface segment so an unrelated path such as ``vessel_preview/...`` is
+    not treated as an embodiment path.
+    """
+    return isinstance(interface_path, str) and (
+        interface_path == "vessel" or interface_path.startswith("vessel/")
+    )
+
+
+def is_vessel_history_entry(entry: Any) -> bool:
+    """Return whether a persisted/in-memory history entry is from a Vessel."""
+    if not isinstance(entry, dict):
+        return False
+    return is_vessel_interface_path(
+        entry.get("interface_path") or entry.get("source_path")
+    )
+
+
 def get_level_from_path(interface_path: str, level: int) -> Optional[str]:
     """Extract a specific level from an interface path.
 
@@ -220,7 +241,7 @@ def is_vessel_embodiment_context(context: Optional[Dict[str, Any]]) -> bool:
             return True
         for key in ("interface_path", "chat_id"):
             val = context.get(key)
-            if isinstance(val, str) and val.startswith("vessel"):
+            if is_vessel_interface_path(val):
                 return True
     except Exception:
         return False

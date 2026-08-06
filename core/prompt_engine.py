@@ -3668,8 +3668,21 @@ async def build_live_prompt_request(
     # (Telegram, Matrix, other Discord channels) so it stays consistent.
     try:
         from core.chat_history_cache import load_global_chat_history
+        from core.interface_path_utils import is_vessel_history_entry
+        from core.vessel_focus import is_vessel_turn
 
         recent_msgs = await load_global_chat_history(limit=15)
+        vessel_focus = is_vessel_turn(
+            message,
+            context_memory,
+            getattr(message, "interface_path", None) if message is not None else None,
+        )
+        if vessel_focus:
+            recent_msgs = []
+        else:
+            recent_msgs = [
+                msg for msg in recent_msgs if not is_vessel_history_entry(msg)
+            ]
         if recent_msgs:
             history_lines: list[str] = []
             for msg in recent_msgs:

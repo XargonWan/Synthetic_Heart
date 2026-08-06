@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Tuple
 from core.logging_utils import log_debug, log_info, log_warning
 from core.config_manager import config_registry
 from core.beat_utils import is_outbound_beat
+from core.interface_path_utils import is_vessel_history_entry, is_vessel_interface_path
+from core.vessel_focus import is_vessel_turn
 
 _RECON_HINT_CACHE: dict[str, dict[str, Any]] = {}
 _lingua_detector: Any | None = None
@@ -357,6 +359,7 @@ async def _build_recon_history_texts_async(
     global_lines: list[str] = []
 
     interface_path = getattr(message, "interface_path", None)
+    vessel_focus = is_vessel_turn(message, context_memory, interface_path)
     # Resolve the raw incoming path the same way messages are resolved when
     # persisted (alias/link map + Unified Lane), so the local-history lookup
     # keys line up with how the rows were stored.
@@ -397,7 +400,12 @@ async def _build_recon_history_texts_async(
             # chat (e.g. Telegram reply-in-thread), leaving local history empty
             # while global history (unfiltered) survives. Chat-level matching
             # keeps the two consistent across restarts.
-            cached = await load_chat_history(interface_path, match_chat_level=True)
+            cached = await load_chat_history(
+                interface_path,
+                match_chat_level=(
+                    not vessel_focus and not is_vessel_interface_path(interface_path)
+                ),
+            )
             for item in list(cached)[-6:]:
                 sender = item.get("sender_name") or "unknown"
                 content = item.get("text") or ""
@@ -405,6 +413,12 @@ async def _build_recon_history_texts_async(
                     local_lines.append(f"[{sender}] {content}")
 
         global_cached = await load_global_chat_history(limit=6)
+        if vessel_focus:
+            global_cached = []
+        else:
+            global_cached = [
+                item for item in global_cached if not is_vessel_history_entry(item)
+            ]
         for item in list(global_cached)[-6:]:
             sender = item.get("sender_name") or "unknown"
             content = item.get("text") or ""

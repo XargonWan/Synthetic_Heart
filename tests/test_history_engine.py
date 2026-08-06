@@ -131,3 +131,49 @@ async def test_history_engine_ignores_cortex_scope_override_notifications(
     assert "alright, done" in joined
     assert "override for grillo" not in joined
     assert "override for trainer" not in joined
+
+
+@pytest.mark.asyncio
+async def test_history_engine_excludes_vessel_rows_from_non_vessel_context(
+    monkeypatch,
+) -> None:
+    from core.history_engine import HistoryEngine
+
+    current_path = "telegram_bot/123"
+    monkeypatch.setattr(
+        "core.chat_history_cache.load_chat_history",
+        AsyncMock(return_value=deque()),
+    )
+    monkeypatch.setattr(
+        "core.chat_history_cache.load_global_chat_history",
+        AsyncMock(
+            return_value=deque(
+                [
+                    {
+                        "sender_name": "player",
+                        "text": "stale vessel line",
+                        "timestamp": "2026-08-05T14:09:13+00:00",
+                        "interface_path": "vessel/minecraft/old-server",
+                    },
+                    {
+                        "sender_name": "Alice",
+                        "text": "ordinary chat line",
+                        "timestamp": "2026-08-06T09:00:00+00:00",
+                        "interface_path": "telegram_bot/456",
+                    },
+                ]
+            )
+        ),
+    )
+    monkeypatch.setattr("core.core_initializer.PLUGIN_REGISTRY", {})
+
+    context = await HistoryEngine().build_context(
+        message=SimpleNamespace(interface_path=current_path),
+        context_memory={current_path: deque()},
+        interface_name="telegram_bot",
+        text="current input",
+    )
+
+    joined = "\n".join(context["history_current_chat"] + context["history_recent"])
+    assert "ordinary chat line" in joined
+    assert "stale vessel line" not in joined

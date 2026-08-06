@@ -339,7 +339,15 @@ async def load_chat_history(interface_path: str) -> None:
         from core.chat_history_cache import load_chat_history as cache_load
 
         interface_path = _resolve_context_path(interface_path)
-        history = await cache_load(interface_path, match_chat_level=True)
+        from core.interface_path_utils import is_vessel_interface_path
+
+        # Vessel paths identify a concrete world/session context.  Broad
+        # chat-level matching would merge sibling worlds/old server targets
+        # back into the active context after a restart.
+        history = await cache_load(
+            interface_path,
+            match_chat_level=not is_vessel_interface_path(interface_path),
+        )
         context = get_or_create_chat_context(interface_path)
         perception_ctx = get_or_create_perception_context(interface_path)
         # IMPORTANT: This function is used to rehydrate memory from persistence.

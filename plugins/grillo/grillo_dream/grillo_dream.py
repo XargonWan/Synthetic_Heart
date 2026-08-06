@@ -573,6 +573,10 @@ class GrilloDreamPlugin:
                     if not chat_path:
                         continue
                     chat_path = str(chat_path)
+                    from core.interface_path_utils import is_vessel_interface_path
+
+                    if is_vessel_interface_path(chat_path):
+                        continue
                     try:
                         messages = await load_chat_history(chat_path)
                         # take up to 2 messages per chat (most recent)

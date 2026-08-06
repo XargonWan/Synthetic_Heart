@@ -117,6 +117,38 @@ async def test_collect_recent_snippets_includes_sender_and_timestamp(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_collect_recent_snippets_excludes_vessel_paths(monkeypatch):
+    plugin = gco.GrilloChatObserverPlugin()
+    loaded_paths = []
+
+    async def fake_recent_paths(limit):
+        return [
+            {"interface_path": "vessel/minecraft/old-server"},
+            {"interface_path": "telegram_bot/123"},
+        ]
+
+    async def fake_load_chat_history(path):
+        loaded_paths.append(path)
+        return [
+            {
+                "text": "ordinary message",
+                "sender_name": "Alice",
+                "timestamp": "2026-08-06T09:00:00+00:00",
+            }
+        ]
+
+    monkeypatch.setattr("core.interface_paths.get_recent_interface_paths", fake_recent_paths)
+    monkeypatch.setattr(
+        "core.chat_history_cache.load_chat_history", fake_load_chat_history
+    )
+
+    snippets = await plugin._collect_recent_snippets(5)
+
+    assert loaded_paths == ["telegram_bot/123"]
+    assert all("vessel/" not in snippet for snippet in snippets)
+
+
+@pytest.mark.asyncio
 async def test_collect_recent_snippets_skips_recent_bot_messages(monkeypatch):
     plugin = gco.GrilloChatObserverPlugin()
     plugin.self_skip_window = 3600  # 1h

@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence
 
 from core.config_manager import config_registry
+from core.interface_path_utils import is_vessel_history_entry, is_vessel_interface_path
 from core.logging_utils import log_debug
 from core.variables_engine import register_exposed_var
 
@@ -675,7 +676,13 @@ class HistoryEngine:
                             load_chat_history as cache_load,
                         )
 
-                        cached = await cache_load(interface_path, match_chat_level=True)
+                        cached = await cache_load(
+                            interface_path,
+                            match_chat_level=(
+                                not vessel_focus
+                                and not is_vessel_interface_path(interface_path)
+                            ),
+                        )
                         combined = list(msgs) + list(cached)
                         msgs = combined[-verbosity:]
                     except Exception as e:
@@ -701,6 +708,14 @@ class HistoryEngine:
                             global_hist = await load_global_chat_history(
                                 limit=verbosity * 5 if verbosity > 0 else 100
                             )
+                            if vessel_focus:
+                                global_hist = []
+                            else:
+                                global_hist = [
+                                    m
+                                    for m in global_hist
+                                    if not is_vessel_history_entry(m)
+                                ]
                             # merge and sort by timestamp so chronology is preserved
                             combined = list(msgs) + list(global_hist)
 
@@ -846,6 +861,18 @@ class HistoryEngine:
                         f"[history_engine] Failed to load global chat history: {db_e}"
                     )
 
+                # Vessel conversations are a private embodiment context, not
+                # ordinary cross-interface memory.  They remain available on a
+                # Vessel turn through the local path, but must not enter a
+                # non-Vessel unified prompt merely because their rows are
+                # recent in the durable cache.
+                if not vessel_focus:
+                    unified_candidates = [
+                        m
+                        for m in unified_candidates
+                        if not is_vessel_history_entry(m)
+                    ]
+
                 if isinstance(chat_map, dict):
                     for k, q in chat_map.items():
                         # Skip metadata keys
@@ -875,10 +902,17 @@ class HistoryEngine:
                                     and not m.get("interface_path")
                                     and not m.get("source_path")
                                 ):
+                                    if not vessel_focus and is_vessel_interface_path(k):
+                                        continue
                                     unified_candidates.append(
                                         {**m, "interface_path": k}
                                     )
                                 else:
+                                    if not vessel_focus and (
+                                        is_vessel_interface_path(k)
+                                        or is_vessel_history_entry(m)
+                                    ):
+                                        continue
                                     unified_candidates.append(m)
 
                 def _uni_sort_key(m: Any) -> float:
@@ -1032,6 +1066,11 @@ class HistoryEngine:
                             continue
                         for m in list(q or []):
                             if isinstance(m, dict):
+                                if not vessel_focus and (
+                                    is_vessel_interface_path(ip)
+                                    or is_vessel_history_entry(m)
+                                ):
+                                    continue
                                 candidates.append(m)
                     except Exception:
                         continue
@@ -1118,6 +1157,8 @@ class HistoryEngine:
                 for raw in list(c.entries)[
                     : max_items or (verbosity if verbosity > 0 else None)
                 ]:
+                    if not vessel_focus and is_vessel_history_entry(raw):
+                        continue
                     if _is_ignored_prompt_history_entry(raw):
                         continue
                     line = _entry_to_text_with_source(
