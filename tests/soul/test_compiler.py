@@ -298,6 +298,7 @@ async def test_rule_based_dsp_extractor_drops_roleplay_speech() -> None:
             '[05/05/26:1234] Alice: "I love you too baby."',
             '[05/05/26:1234] Alice: "I love my little princess."',
             '[05/05/26:1234] Alice: "I love it heheh keep me safe while i sleep."',
+            '[05/05/26:1234] Alice: "I love it mmmmmwah."',
             '[05/05/26:1234] Alice: "I work on SynthHeart though, for real."',
         ]
     )
@@ -316,6 +317,8 @@ async def test_rule_based_dsp_extractor_drops_roleplay_speech() -> None:
     assert not any("little princess" in fact for fact in result.user_facts)
     assert not any("heheh" in fact for fact in result.user_facts)
     assert not any("keep me safe" in fact for fact in result.user_facts)
+    # Emote-tailed roleplay value is dropped too.
+    assert not any("mmmmwah" in fact for fact in result.user_facts)
     # The genuine biographical fact still survives.
     assert any("works on SynthHeart" in fact for fact in result.user_facts)
 

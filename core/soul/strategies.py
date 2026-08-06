@@ -377,6 +377,18 @@ class RuleBasedDspExtractor:
         }
     )
 
+    # Emote clusters ("mmmmwah", "heheheh", "ahhhh", "mmm") are roleplay/chat
+    # fillers, not biographical noun-phrases. Any variant spelling with one or
+    # more repeated letters from {m, h, w, a} qualifies. A fact value that ends
+    # in such a cluster — or is *entirely* one — is speech, not description.
+    # Anchored to the end so legitimate values with mid-word double letters
+    # ("User likes swimming") are preserved.
+    _EMOTE_TAIL_RE = re.compile(r"(?i)([mhw])\1{1,}(?:wah|ah|hh)*\s*$")
+
+    # Alternating laughter ("heheheh", "hehehe", "hahaha") is a chat filler
+    # that repeated-letter matching cannot catch; match the alternating run.
+    _LAUGHTER_RE = re.compile(r"(?i)(?:he){2,}h?|(?:ha){2,}")
+
     @classmethod
     def _is_bound_fact(cls, value: str) -> bool:
         """Reject captured fragments that are clearly not a short biographical fact.
@@ -386,7 +398,8 @@ class RuleBasedDspExtractor:
         - trailing question/imperative punctuation is dropped;
         - a value that still addresses a person (first/second-person pronouns)
           or is filled with conversational endearments/laughter is speech
-          directed at someone, not a stable self-description, so it is dropped.
+          directed at someone, not a stable self-description, so it is dropped;
+        - a value that ends in (or is entirely) an emote cluster is speech.
         """
         stripped = (value or "").strip()
         if not stripped or len(stripped) < 2:
@@ -404,6 +417,11 @@ class RuleBasedDspExtractor:
             + r")\b",
             lowered,
         ):
+            return False
+        # Pure emote / emote-tailed values are speech, not description.
+        if cls._EMOTE_TAIL_RE.search(lowered):
+            return False
+        if cls._LAUGHTER_RE.search(lowered):
             return False
         return True
 
