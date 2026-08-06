@@ -89,6 +89,23 @@ register_exposed_var(
     component="soul_plugin",
 )
 
+register_exposed_var(
+    "SOUL_DSP_INJECT_ENABLED",
+    label="Inject DSP user profile into prompts",
+    default=0,
+    value_type=int,
+    ui_type="bool",
+    description=(
+        "Inject the compiled SOUL user profile (DSP) into the user-role context "
+        "of every turn so Synth always knows who she is talking to. Intended for "
+        "a clean, LLM-compiled profile only — the rule-based extractor can still "
+        "produce speech-shaped content. When off, only session-state and the "
+        "per-turn emotion delta are injected."
+    ),
+    scope="plugins",
+    component="soul_plugin",
+)
+
 
 @dataclass(slots=True)
 class _SessionState:

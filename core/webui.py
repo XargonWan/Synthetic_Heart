@@ -6104,6 +6104,7 @@ class SynthWebUIInterface:
             "action_safety": "Action execution safety policy settings.",
             "weather_plugin": "Weather plugin scheduling and delivery settings.",
             "cortex": "Cortex engine selection for base, trainer, agent, Grillo and Rift Vessel scopes.",
+            "soul_plugin": "SOUL memory/emotion orchestration: compile, rollup, curator and prompt-injection toggles.",
         }
 
         try:
