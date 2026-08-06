@@ -604,6 +604,47 @@ class GrilloChatObserverPlugin:
         except Exception as e:
             log_error(f"[grillo_chat_observer] Unexpected error in _run_observer: {e}")
 
+    @staticmethod
+    def _is_self_sender(sender: str) -> bool:
+        """True when ``sender`` is the synth itself (self/synth/synthetic)."""
+        return str(sender or "").strip().lower() in ("self", "synth", "synthetic")
+
+    @staticmethod
+    def _is_placeholder_path(interface_path: str) -> bool:
+        """True when an interface path contains a placeholder/garbage segment.
+
+        The model must never be handed an unroutable destination. Real
+        interface paths are ``<interface>/<chat_id>`` with an optional numeric
+        thread id; anything with a placeholder thread segment (literal
+        "no thread..."/"not_provided"/"conversation_..."/"dm"/"each_...",
+        overflow-length numbers) is not a real routable path and must be
+        filtered out of snippets and eligible targets.
+        """
+        path = str(interface_path or "").strip()
+        if not path or "/" not in path:
+            return False
+        segments = path.split("/")
+        last = segments[-1].lower()
+        if len(segments) > 2:
+            if any(
+                token in last
+                for token in (
+                    "no thread",
+                    "not_provided",
+                    "not provided",
+                    "conversation_",
+                    "each_",
+                    "indicated",
+                    "unknown",
+                )
+            ):
+                return True
+            if last == "dm":
+                return True
+            if len(segments[-1]) > 20:
+                return True
+        return False
+
     async def _collect_recent_snippets(self, limit: int) -> List[str]:
         snippets = []
         try:
@@ -618,6 +659,10 @@ class GrilloChatObserverPlugin:
                 if not chat_path:
                     continue
                 chat_path = str(chat_path)
+                # Never surface chats whose stored path is a placeholder —
+                # the model would copy the garbage path into an action.
+                if self._is_placeholder_path(chat_path):
+                    continue
                 # Vessel history is world-scoped and must never be treated as
                 # ordinary cross-conversation observer input.  Ended sessions
                 # intentionally retain their durable activity/chat rows for
@@ -662,7 +707,11 @@ class GrilloChatObserverPlugin:
                     except Exception:
                         # defensively ignore any parsing errors and continue
                         pass
-                    # take up to 2 recent messages per chat
+                    # take up to 2 recent messages per chat — HUMAN-authored
+                    # only. Synth's own messages must never be surfaced as
+                    # snippets to "naturally reply to": a small model cannot
+                    # reliably distinguish its own output from a human turn and
+                    # will talk to itself (self-reply spam).
                     taken = 0
                     for msg in reversed(list(messages)):
                         if not isinstance(msg, dict):
@@ -671,6 +720,8 @@ class GrilloChatObserverPlugin:
                         sender = (
                             msg.get("sender_name") or msg.get("sender_id") or "unknown"
                         )
+                        if self._is_self_sender(sender):
+                            continue
                         timestamp = msg.get("timestamp") or ""
                         if text:
                             snippet = text.strip()
@@ -746,6 +797,10 @@ class GrilloChatObserverPlugin:
                 if not chat_path:
                     continue
                 chat_path = str(chat_path)
+                # Skip placeholder/garbage paths so the model is never offered
+                # an unroutable destination.
+                if self._is_placeholder_path(chat_path):
+                    continue
                 from core.interface_path_utils import is_vessel_interface_path
 
                 if is_vessel_interface_path(chat_path):

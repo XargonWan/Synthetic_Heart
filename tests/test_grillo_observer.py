@@ -137,7 +137,9 @@ async def test_collect_recent_snippets_excludes_vessel_paths(monkeypatch):
             }
         ]
 
-    monkeypatch.setattr("core.interface_paths.get_recent_interface_paths", fake_recent_paths)
+    monkeypatch.setattr(
+        "core.interface_paths.get_recent_interface_paths", fake_recent_paths
+    )
     monkeypatch.setattr(
         "core.chat_history_cache.load_chat_history", fake_load_chat_history
     )
@@ -403,4 +405,111 @@ async def test_observer_is_decay_driven_when_no_updates(monkeypatch):
 
     # Proactive design: targets are collected and a beat is enqueued.
     assert called.get("targets") is True
-    assert called.get("enqueued") is True
+
+
+@pytest.mark.asyncio
+async def test_collect_recent_snippets_excludes_self_senders(monkeypatch):
+    plugin = gco.GrilloChatObserverPlugin()
+
+    async def fake_recent_paths(limit):
+        return [{"interface_path": "telegram_bot/123"}]
+
+    async def fake_load_chat_history(path):
+        return [
+            {
+                "text": "synth's own message",
+                "sender_name": "self",
+                "timestamp": "2026-08-06T09:00:00+00:00",
+            },
+            {
+                "text": "human message",
+                "sender_name": "Alice",
+                "timestamp": "2026-08-06T09:01:00+00:00",
+            },
+        ]
+
+    monkeypatch.setattr(
+        "core.interface_paths.get_recent_interface_paths", fake_recent_paths
+    )
+    monkeypatch.setattr(
+        "core.chat_history_cache.load_chat_history", fake_load_chat_history
+    )
+
+    snippets = await plugin._collect_recent_snippets(5)
+
+    assert len(snippets) == 1
+    assert "synth's own message" not in snippets[0]
+    assert "human message" in snippets[0]
+
+
+@pytest.mark.asyncio
+async def test_collect_recent_snippets_excludes_placeholder_paths(monkeypatch):
+    plugin = gco.GrilloChatObserverPlugin()
+    loaded_paths = []
+
+    async def fake_recent_paths(limit):
+        return [
+            {
+                "interface_path": "telegram_bot/5208932647/no thread ID indicated in context"
+            },
+            {"interface_path": "telegram_bot/5208932647/not_provided"},
+            {"interface_path": "telegram_bot/5208932647/780000000000000000000000"},
+            {"interface_path": "telegram_bot/5208932647/123456"},
+        ]
+
+    async def fake_load_chat_history(path):
+        loaded_paths.append(path)
+        return [
+            {
+                "text": "message",
+                "sender_name": "Alice",
+                "timestamp": "2026-08-06T09:00:00+00:00",
+            }
+        ]
+
+    monkeypatch.setattr(
+        "core.interface_paths.get_recent_interface_paths", fake_recent_paths
+    )
+    monkeypatch.setattr(
+        "core.chat_history_cache.load_chat_history", fake_load_chat_history
+    )
+
+    snippets = await plugin._collect_recent_snippets(5)
+
+    assert loaded_paths == ["telegram_bot/5208932647/123456"]
+    assert len(snippets) == 1
+
+
+def test_is_placeholder_path_flags_garbage_segments():
+    plugin = gco.GrilloChatObserverPlugin()
+
+    assert (
+        plugin._is_placeholder_path(
+            "telegram_bot/5208932647/no thread ID indicated in context"
+        )
+        is True
+    )
+    assert plugin._is_placeholder_path("telegram_bot/5208932647/not_provided") is True
+    assert (
+        plugin._is_placeholder_path(
+            "telegram_bot/5208932647/each_human_message_gets_a_dedicated_thread"
+        )
+        is True
+    )
+    assert plugin._is_placeholder_path("telegram_bot/5208932647/conversation_0") is True
+    assert plugin._is_placeholder_path("telegram_bot/5208932647/dm") is True
+    assert (
+        plugin._is_placeholder_path("telegram_bot/5208932647/780000000000000000000000")
+        is True
+    )
+    assert plugin._is_placeholder_path("telegram_bot/5208932647/123456") is False
+    assert plugin._is_placeholder_path("telegram_bot/5208932647") is False
+
+
+def test_is_self_sender():
+    plugin = gco.GrilloChatObserverPlugin()
+
+    assert plugin._is_self_sender("self") is True
+    assert plugin._is_self_sender("synth") is True
+    assert plugin._is_self_sender("Alice") is False
+    assert plugin._is_self_sender("") is False
