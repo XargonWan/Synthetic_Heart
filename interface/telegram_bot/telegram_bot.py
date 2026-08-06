@@ -2903,9 +2903,17 @@ class TelegramInterface:
             f"[telegram_interface] Resolved: chat_id={chat_id}, final_thread_id={thread_id}"
         )
 
-        # Ensure thread_id is a string if present
+        # Ensure thread_id is a string if present — and only a *valid* one.
+        # Telegram thread IDs are always integers. An LLM can hallucinate a
+        # placeholder (e.g. "no thread ID indicated in context"), which must
+        # not become a routing segment or a persisted garbage interface_path.
         if thread_id is not None:
-            thread_id = str(thread_id)
+            thread_id = str(thread_id).strip()
+            if not thread_id.isdigit():
+                log_warning(
+                    f"[telegram_interface] Discarding non-numeric thread_id {thread_id!r}"
+                )
+                thread_id = None
 
         # Ensure chat_id is a string
         if chat_id is not None:
