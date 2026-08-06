@@ -7,6 +7,7 @@ from typing import Any, Sequence
 from core.prompt_engine import (
     _build_context_summary,
     _build_soul_turn_delta_prefix,
+    _build_soul_user_profile_prefix,
     build_json_prompt,
     build_live_prompt_request,
     build_live_system_instruction,
@@ -209,6 +210,76 @@ def test_build_soul_turn_delta_prefix_present_when_substantive() -> None:
     assert prefix.startswith('{"e":')
     assert "0.4" in prefix
     assert prefix.endswith("\n")
+
+
+def test_build_soul_dsp_prefix_empty_when_missing() -> None:
+    assert _build_soul_user_profile_prefix({}) == ""
+
+
+def test_build_soul_dsp_prefix_empty_when_placeholder() -> None:
+    prefix = _build_soul_user_profile_prefix(
+        {"soul_user_profile": "<user_profile>No profile compiled yet.</user_profile>"}
+    )
+    assert prefix == ""
+
+
+def test_build_soul_dsp_prefix_present_when_profiled() -> None:
+    prefix = _build_soul_user_profile_prefix(
+        {"soul_user_profile": "<user_profile>User is Scarlet (trainer).</user_profile>"}
+    )
+    assert prefix.startswith("[About the person you're talking to]")
+    assert "User is Scarlet (trainer)." in prefix
+
+
+def test_soul_delta_suppresses_legacy_emotion_prefix(monkeypatch) -> None:
+    async def dummy_gather(message, ctx):
+        return {
+            "persona": "You are SynthA.",
+            "current_emotions_nl": "happy (8.0 - high)",
+            # substantive SOUL delta -> legacy emotion suppressed
+            "soul_turn_emotion_delta": '{"e": {"joy": 0.9, "fear": 0.0, "sad": 0.0, "anger": 0.0}}',
+        }
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+
+    message = SimpleNamespace(
+        chat_id=1,
+        text="hello",
+        message_id=1,
+        from_user=SimpleNamespace(full_name="user", username="user"),
+        date=datetime.now(timezone.utc),
+        reply_to_message=None,
+    )
+    result = asyncio.run(build_json_prompt(message, {}, interface_name="telegram_bot"))
+    pr = result.get("__prompt_request")
+    assert pr is not None
+    # No legacy runtime prefix emotion line when SOUL delta is present.
+    assert pr.runtime_ctx.emotions is None
+
+
+def test_soul_delta_quiet_keeps_legacy_emotion(monkeypatch) -> None:
+    async def dummy_gather(message, ctx):
+        return {
+            "persona": "You are SynthA.",
+            "current_emotions_nl": "neutral (5.0 - moderate)",
+            # quiet SOUL delta -> legacy emotion retained
+            "soul_turn_emotion_delta": '{"e": {"joy": 0.0, "fear": 0.0, "sad": 0.0, "anger": 0.0}}',
+        }
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+
+    message = SimpleNamespace(
+        chat_id=1,
+        text="hello",
+        message_id=1,
+        from_user=SimpleNamespace(full_name="user", username="user"),
+        date=datetime.now(timezone.utc),
+        reply_to_message=None,
+    )
+    result = asyncio.run(build_json_prompt(message, {}, interface_name="telegram_bot"))
+    pr = result.get("__prompt_request")
+    assert pr is not None
+    assert pr.runtime_ctx.emotions == "neutral (5.0 - moderate)"
 
 
 def test_build_live_system_instruction_enforces_identity_rules(monkeypatch):

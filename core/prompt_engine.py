@@ -695,6 +695,26 @@ def _turn_requests_explicit_runtime_facts(text: str | None) -> bool:
 
 _SOUL_TURN_DELTA_MIN = 0.05
 
+_DSP_EMPTY_MARKERS = ("No profile compiled yet.", "No stable facts yet.")
+
+
+def _build_soul_user_profile_prefix(context_section: dict[str, Any]) -> str:
+    """Build the standing SOUL user-profile (DSP) prefix for the current turn.
+
+    The DSP is placed in the *user* role (prepended to the user turn) rather than
+    the system message, per the SOUL Context Tower design: a mistake in it then
+    degrades one reply instead of corrupting the whole character. Emits nothing
+    when the profile is empty or still a placeholder, keeping the normal case
+    ~0 tokens.
+    """
+    raw = context_section.get("soul_user_profile")
+    text = str(raw or "").strip()
+    if not text or "<user_profile>" not in text:
+        return ""
+    if any(marker in text for marker in _DSP_EMPTY_MARKERS):
+        return ""
+    return "[About the person you're talking to]\n" + text + "\n"
+
 
 def _build_soul_turn_delta_prefix(context_section: dict[str, Any]) -> str:
     """Build the per-turn SOUL mood-delta prefix for the current user turn.
@@ -1483,6 +1503,18 @@ def _assemble_prompt_request(  # noqa: PLR0913
 
     emotions_nl: str | None = context_section.get("current_emotions_nl") or None
 
+    # SOUL per-turn mood delta. A substantive delta (any |value| >= threshold)
+    # is the *single* emotion signal for this turn, so it suppresses the legacy
+    # `emotions:` runtime prefix — the two never compete on a small model. A
+    # quiet/fresh session yields no delta, so the legacy signal fills in and
+    # behaviour is unchanged.
+    try:
+        _soul_delta = _build_soul_turn_delta_prefix(context_section)
+    except Exception:
+        _soul_delta = ""
+    if _soul_delta:
+        emotions_nl = None
+
     # Effective scope: use context_section's recorded scope or default to "local"
     scope: str = str(context_section.get("history_scope") or "local")
 
@@ -1543,25 +1575,25 @@ def _assemble_prompt_request(  # noqa: PLR0913
     # ── Attachments ─────────────────────────────────────────────────────────
     pr_attachments = _build_pr_attachments(image_data, attachments)
 
-    # Per-turn SOUL mood delta. Prepended to the current user turn, gated so it
-    # only fires when the SOUL emotional state is actually substantive (any
-    # |value| >= SOUL_TURN_DELTA_MIN). A fresh/quiet session sits at 0, so
-    # ordinary turns carry no delta and never compete with the legacy emotion
-    # signal in the runtime prefix.
+    # SOUL user-role context, prepended to the current user turn. The standing
+    # DSP (who you're talking to) plus the per-turn mood delta, each gated so a
+    # quiet / unprofiled session contributes ~0 tokens.
     try:
-        _soul_delta = _build_soul_turn_delta_prefix(context_section)
+        _soul_dsp_prefix = _build_soul_user_profile_prefix(context_section)
     except Exception:
-        _soul_delta = ""
+        _soul_dsp_prefix = ""
 
     # ── Determine mode ───────────────────────────────────────────────────────
     mode: str = "grillo" if is_grillo_internal else "chat"
+
+    _soul_user_prefix = f"{_soul_dsp_prefix}{_soul_delta}"
 
     return PromptRequest(
         system_instruction=system_instruction,
         tool_declarations=tool_declarations,
         context_summary=context_summary,
         conversation_history=conversation_history,
-        current_text=(_soul_delta + text) if _soul_delta else text,
+        current_text=(_soul_user_prefix + text) if _soul_user_prefix else text,
         runtime_ctx=runtime_ctx,
         attachments=pr_attachments,
         reply_to=reply_to_dict,
