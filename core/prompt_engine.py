@@ -1584,7 +1584,7 @@ def _assemble_prompt_request(  # noqa: PLR0913
     # pollutes every turn on small models. Re-enable only when a clean,
     # LLM-compiled profile is available.
     _soul_dsp_prefix = ""
-    if config_registry.get_value("SOUL_DSP_INJECT_ENABLED", False):
+    if config_registry.get_value("SOUL_DSP_INJECT_ENABLED", 0, value_type=int):
         try:
             _soul_dsp_prefix = _build_soul_user_profile_prefix(context_section)
         except Exception:

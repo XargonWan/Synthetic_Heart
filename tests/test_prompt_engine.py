@@ -268,7 +268,7 @@ def test_soul_dsp_injected_when_enabled(monkeypatch) -> None:
     monkeypatch.setattr(
         config_registry,
         "get_value",
-        lambda key, default=None: key == "SOUL_DSP_INJECT_ENABLED",
+        lambda key, default=None, **kwargs: key == "SOUL_DSP_INJECT_ENABLED",
     )
 
     message = SimpleNamespace(
