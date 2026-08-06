@@ -1362,9 +1362,7 @@ def test_thinking_is_opt_in_and_native_tools_are_per_endpoint():
     """Thinking and native tools stay off unless an endpoint opts in."""
     from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
 
-    plain = ExternalCortexEngine(
-        _openai_endpoint({}), cast(Any, SimpleNamespace())
-    )
+    plain = ExternalCortexEngine(_openai_endpoint({}), cast(Any, SimpleNamespace()))
     assert plain._extra_api_kwargs()["enable_thinking"] is False
     assert plain._native_tools_enabled() is False
 
@@ -1456,8 +1454,7 @@ def test_venice_native_tools_are_scoped_and_capped_for_vessel_turns():
         "message_integration",
     ]
     manifests = [
-        SimpleNamespace(name=name, description=name, parameters=[])
-        for name in names
+        SimpleNamespace(name=name, description=name, parameters=[]) for name in names
     ]
     prompt = PromptRequest(
         system_instruction="Use tools.",
@@ -1470,9 +1467,7 @@ def test_venice_native_tools_are_scoped_and_capped_for_vessel_turns():
     )
     engine = ExternalCortexEngine(
         endpoint,
-        OpenAICompatAdapter(
-            base_url="https://api.venice.ai/api/v1", api_key="test"
-        ),
+        OpenAICompatAdapter(base_url="https://api.venice.ai/api/v1", api_key="test"),
     )
 
     kwargs = engine._tool_api_kwargs(prompt)
@@ -1497,6 +1492,70 @@ def test_venice_native_tools_are_scoped_and_capped_for_vessel_turns():
     assert len(prompt.tool_declarations) == len(names)
 
 
+def test_venice_native_tools_not_forced_on_ordinary_chat():
+    """Ordinary (non-vessel) chat does not enter single-tool native mode.
+
+    Venice2 opts into native tools via ``enable_tools: true`` in its endpoint
+    config, but that contract (tool_choice required + exactly one call) cannot
+    express the reply + bookkeeping a normal chat turn needs.  A small model
+    then picks the emotion action, never replies, and every manual turn trips
+    the missing-reply corrector (which drops all chat context).  Native
+    single-tool mode must therefore be gated to Vessel turns; ordinary chat
+    keeps the in-prompt JSON-action protocol, so the model can emit both the
+    outgoing message and supplementary actions together.
+    """
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from core.prompt_request import PromptRequest, RuntimeContext
+
+    endpoint = ExternalEndpoint(
+        id=78,
+        name="Venice3",
+        display_label="Venice",
+        protocol=EndpointProtocol.OPENAI,
+        base_url="https://api.venice.ai/api/v1",
+        api_key_enc=None,
+        enabled=True,
+        capabilities={"cortex": True},
+        subsystem_map={"cortex": True},
+        available_models=["gemma-4-uncensored"],
+        default_model="gemma-4-uncensored",
+        probe_status="success",
+        last_probe_at=None,
+        extra_config={"enable_tools": True},
+    )
+    manifests = [
+        SimpleNamespace(
+            name="message_telegram_bot", description="reply", parameters=[]
+        ),
+        SimpleNamespace(
+            name="update_emotion_state", description="bookkeeping", parameters=[]
+        ),
+        SimpleNamespace(
+            name="create_personal_diary_entry", description="diary", parameters=[]
+        ),
+    ]
+    prompt = PromptRequest(
+        system_instruction="Use tools.",
+        current_text="hello",
+        tool_declarations=manifests,
+        runtime_ctx=RuntimeContext(
+            interface_name="telegram_bot",
+            interface_path="telegram_bot/5208932647",
+        ),
+    )
+    engine = ExternalCortexEngine(
+        endpoint,
+        OpenAICompatAdapter(base_url="https://api.venice.ai/api/v1", api_key="test"),
+    )
+
+    kwargs = engine._tool_api_kwargs(prompt)
+
+    # Ordinary chat: no native single-tool forcing.
+    assert "tools" not in kwargs
+    assert "tool_choice" not in kwargs
+    assert prompt.supports_tool_calling is False
+
+
 @pytest.mark.asyncio
 async def test_plain_native_action_json_is_capped_when_provider_ignores_tools():
     """A 200/plain-JSON fallback cannot flood one vessel turn with actions."""
@@ -1514,8 +1573,14 @@ async def test_plain_native_action_json_is_capped_when_provider_ignores_tools():
                     {
                         "actions": [
                             {"type": "vessel_minecraft_say", "payload": {"text": "hi"}},
-                            {"type": "vessel_minecraft_mine", "payload": {"block": "*_log"}},
-                            {"type": "vessel_minecraft_mine", "payload": {"block": "*_log"}},
+                            {
+                                "type": "vessel_minecraft_mine",
+                                "payload": {"block": "*_log"},
+                            },
+                            {
+                                "type": "vessel_minecraft_mine",
+                                "payload": {"block": "*_log"},
+                            },
                         ]
                     }
                 ),
@@ -1524,7 +1589,9 @@ async def test_plain_native_action_json_is_capped_when_provider_ignores_tools():
 
     manifests = [
         SimpleNamespace(name="vessel_minecraft_say", description="say", parameters=[]),
-        SimpleNamespace(name="vessel_minecraft_mine", description="mine", parameters=[]),
+        SimpleNamespace(
+            name="vessel_minecraft_mine", description="mine", parameters=[]
+        ),
     ]
     prompt = PromptRequest(
         system_instruction="Use tools.",
@@ -1540,9 +1607,7 @@ async def test_plain_native_action_json_is_capped_when_provider_ignores_tools():
     response = await engine.handle_incoming_message(None, None, prompt)
 
     assert json.loads(response) == {
-        "actions": [
-            {"type": "vessel_minecraft_say", "payload": {"text": "hi"}}
-        ]
+        "actions": [{"type": "vessel_minecraft_say", "payload": {"text": "hi"}}]
     }
     assert captured["kwargs"]["tool_choice"] == "required"
     assert captured["kwargs"]["parallel_tool_calls"] is False
@@ -1555,23 +1620,19 @@ def test_thinking_alias_uses_nested_venice_disable_key():
     )
     default_kwargs: dict[str, Any] = {}
     default_body: dict[str, Any] = {}
-    assert default_adapter._resolve_disable_thinking(
-        default_kwargs, default_body
-    ) is True
+    assert (
+        default_adapter._resolve_disable_thinking(default_kwargs, default_body) is True
+    )
     assert default_kwargs == {}
-    assert default_body == {
-        "venice_parameters": {"disable_thinking": True}
-    }
+    assert default_body == {"venice_parameters": {"disable_thinking": True}}
 
     enabled_kwargs = {"enable_thinking": True}
     enabled_body: dict[str, Any] = {}
-    assert default_adapter._resolve_disable_thinking(
-        enabled_kwargs, enabled_body
-    ) is False
+    assert (
+        default_adapter._resolve_disable_thinking(enabled_kwargs, enabled_body) is False
+    )
     assert enabled_kwargs == {}
-    assert enabled_body == {
-        "venice_parameters": {"disable_thinking": False}
-    }
+    assert enabled_body == {"venice_parameters": {"disable_thinking": False}}
 
     generic_adapter = OpenAICompatAdapter(
         base_url="http://127.0.0.1:8081/v1", api_key="x"
@@ -1589,9 +1650,7 @@ def test_thinking_alias_uses_nested_venice_disable_key():
 @pytest.mark.asyncio
 async def test_openai_compat_venice_request_nests_thinking_parameter(monkeypatch):
     """The SDK call must serialize Venice's parameter at the documented depth."""
-    adapter = OpenAICompatAdapter(
-        base_url="https://api.venice.ai/api/v1", api_key="x"
-    )
+    adapter = OpenAICompatAdapter(base_url="https://api.venice.ai/api/v1", api_key="x")
     captured: dict[str, Any] = {}
 
     class FakeCompletions:
@@ -1608,9 +1667,7 @@ async def test_openai_compat_venice_request_nests_thinking_parameter(monkeypatch
                 usage=None,
             )
 
-    fake_client = SimpleNamespace(
-        chat=SimpleNamespace(completions=FakeCompletions())
-    )
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
     monkeypatch.setattr(adapter, "_get_client", lambda: fake_client)
     await adapter.chat_completion(
         [{"role": "user", "content": "get wood"}],
@@ -1618,9 +1675,7 @@ async def test_openai_compat_venice_request_nests_thinking_parameter(monkeypatch
         enable_thinking=False,
     )
 
-    assert captured["extra_body"] == {
-        "venice_parameters": {"disable_thinking": True}
-    }
+    assert captured["extra_body"] == {"venice_parameters": {"disable_thinking": True}}
     assert "enable_thinking" not in captured
     assert "disable_thinking" not in captured
 
@@ -1628,9 +1683,7 @@ async def test_openai_compat_venice_request_nests_thinking_parameter(monkeypatch
 @pytest.mark.asyncio
 async def test_openai_compat_venice_thinking_rejection_falls_back(monkeypatch):
     """An incompatible proxy cannot kill the chat path over thinking config."""
-    adapter = OpenAICompatAdapter(
-        base_url="https://api.venice.ai/api/v1", api_key="x"
-    )
+    adapter = OpenAICompatAdapter(base_url="https://api.venice.ai/api/v1", api_key="x")
     calls: list[dict[str, Any]] = []
 
     class FakeCompletions:
@@ -1651,9 +1704,7 @@ async def test_openai_compat_venice_thinking_rejection_falls_back(monkeypatch):
                 usage=None,
             )
 
-    fake_client = SimpleNamespace(
-        chat=SimpleNamespace(completions=FakeCompletions())
-    )
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
     monkeypatch.setattr(adapter, "_get_client", lambda: fake_client)
     response = await adapter.chat_completion(
         [{"role": "user", "content": "get wood"}],
@@ -1662,9 +1713,7 @@ async def test_openai_compat_venice_thinking_rejection_falls_back(monkeypatch):
     )
 
     assert response.content == '{"actions": []}'
-    assert calls[0]["extra_body"] == {
-        "venice_parameters": {"disable_thinking": True}
-    }
+    assert calls[0]["extra_body"] == {"venice_parameters": {"disable_thinking": True}}
     assert calls[1]["model"] == "gemma-4:disable_thinking=true"
     assert calls[1]["extra_body"] is None
     assert calls[2]["model"] == "gemma-4"

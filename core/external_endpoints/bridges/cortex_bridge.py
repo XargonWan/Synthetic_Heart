@@ -987,7 +987,21 @@ class ExternalCortexEngine(AIPluginBase):
             # action catalog into the system prompt, and leave
             # supports_tool_calling False so the renderer expects a
             # JSON-in-content reply rather than tool_calls.
-            if not self._native_tools_enabled():
+            #
+            # The single-native-tool contract (tool_choice required + one call)
+            # is only suitable for a single-action embodiment loop (the Vessel).
+            # Ordinary user-facing chat must return BOTH an outward reply and
+            # bookkeeping (emotion/diary) in one turn, which that contract can
+            # never express — with "call exactly one function" a small model
+            # picks the bookkeeping action, never emits a reply, and every
+            # manual turn trips the missing-reply corrector (which re-runs with
+            # no chat history, losing all context).  So even when an endpoint
+            # opts into native tools, they are applied only to Vessel turns;
+            # ordinary chat keeps the in-prompt JSON-action protocol.
+            use_native = self._native_tools_enabled() and (
+                _NATIVE_TOOLS_ENABLED or self._is_vessel_prompt_request(prompt_request)
+            )
+            if not use_native:
                 prompt_request.supports_tool_calling = False
                 self._inject_actions_into_prompt(prompt_request)
                 grammar = self._build_action_grammar(prompt_request)
