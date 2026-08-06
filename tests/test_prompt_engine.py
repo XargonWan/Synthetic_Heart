@@ -231,6 +231,60 @@ def test_build_soul_dsp_prefix_present_when_profiled() -> None:
     assert "User is Scarlet (trainer)." in prefix
 
 
+def test_soul_dsp_not_injected_by_default(monkeypatch) -> None:
+    async def dummy_gather(message, ctx):
+        return {
+            "persona": "You are SynthA.",
+            "soul_user_profile": "<user_profile>User is Scarlet (trainer).</user_profile>",
+        }
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+
+    message = SimpleNamespace(
+        chat_id=1,
+        text="hello",
+        message_id=1,
+        from_user=SimpleNamespace(full_name="user", username="user"),
+        date=datetime.now(timezone.utc),
+        reply_to_message=None,
+    )
+    result = asyncio.run(build_json_prompt(message, {}, interface_name="telegram_bot"))
+    pr = result.get("__prompt_request")
+    assert pr is not None
+    # SOUL_DSP_INJECT_ENABLED defaults to False -> DSP stays out of the turn.
+    assert "[About the person you're talking to]" not in pr.current_text
+
+
+def test_soul_dsp_injected_when_enabled(monkeypatch) -> None:
+    from core.config_manager import config_registry
+
+    async def dummy_gather(message, ctx):
+        return {
+            "persona": "You are SynthA.",
+            "soul_user_profile": "<user_profile>User is Scarlet (trainer).</user_profile>",
+        }
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+    monkeypatch.setattr(
+        config_registry,
+        "get_value",
+        lambda key, default=None: key == "SOUL_DSP_INJECT_ENABLED",
+    )
+
+    message = SimpleNamespace(
+        chat_id=1,
+        text="hello",
+        message_id=1,
+        from_user=SimpleNamespace(full_name="user", username="user"),
+        date=datetime.now(timezone.utc),
+        reply_to_message=None,
+    )
+    result = asyncio.run(build_json_prompt(message, {}, interface_name="telegram_bot"))
+    pr = result.get("__prompt_request")
+    assert pr is not None
+    assert "[About the person you're talking to]" in pr.current_text
+
+
 def test_soul_delta_suppresses_legacy_emotion_prefix(monkeypatch) -> None:
     async def dummy_gather(message, ctx):
         return {

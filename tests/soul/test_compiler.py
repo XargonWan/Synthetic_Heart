@@ -251,15 +251,62 @@ async def test_rule_based_dsp_extractor_parses_speaker_tagged_transcript() -> No
         current_date=date(2026, 5, 5),
     )
 
-    assert any("making small tweaks to your core" in fact for fact in result.user_facts)
-    assert any("doing better today" in fact for fact in result.user_facts)
-    assert any(
-        "centered, grounded, and completely yours" in fact
-        for fact in result.ai_self_facts
+    # Transient status speech ("doing better today", "making small tweaks to
+    # your core") must NOT become standing user-profile facts.
+    assert not result.user_facts
+    assert not any("making small tweaks" in fact for fact in result.user_facts)
+    assert not any("doing better today" in fact for fact in result.user_facts)
+    # AI self-facts keep only bounded biographical preds (none here).
+    assert result.ai_self_facts == []
+
+
+@pytest.mark.asyncio
+async def test_rule_based_dsp_extractor_pulls_stable_biography() -> None:
+    extractor = RuleBasedDspExtractor()
+    transcript = "\n".join(
+        [
+            '[05/05/26:1234] Alice: "I am a developer, I work on SynthHeart, and I prefer concise technical responses."',
+            '[05/05/26:1234] Alice: "I live in Berlin and I am from Germany."',
+        ]
     )
-    assert any(
-        "thinking about the quiet here today" in fact for fact in result.ai_self_facts
+
+    result = await extractor.extract_dsp(
+        transcript=transcript,
+        current_date=date(2026, 5, 5),
     )
+
+    facts = " ; ".join(result.user_facts)
+    assert "User is a developer" in facts
+    assert "User works on SynthHeart" in facts
+    assert "User lives in Berlin" in facts
+    assert "User is from Germany" in facts
+    assert "User prefers concise technical responses" in facts
+    # Run-on coordination is cut at the clause boundary.
+    assert "and I am from Germany" not in facts
+
+
+@pytest.mark.asyncio
+async def test_rule_based_dsp_extractor_drops_roleplay_speech() -> None:
+    extractor = RuleBasedDspExtractor()
+    # Real example surfaced from the live trace: roleplay dialogue must not
+    # become a standing user-profile fact.
+    transcript = "\n".join(
+        [
+            '[05/05/26:1234] Alice: "I\'m right here baby, go ahead and collect a bunch of wood."',
+            '[05/05/26:1234] Alice: "I\'m so fucking ready for you, just tell me where you want me."',
+            '[05/05/26:1234] Alice: "I work on SynthHeart though, for real."',
+        ]
+    )
+
+    result = await extractor.extract_dsp(
+        transcript=transcript,
+        current_date=date(2026, 5, 5),
+    )
+
+    assert not any("right here baby" in fact for fact in result.user_facts)
+    assert not any("fucking ready" in fact for fact in result.user_facts)
+    # The genuine biographical fact still survives.
+    assert any("works on SynthHeart" in fact for fact in result.user_facts)
 
 
 @pytest.mark.asyncio

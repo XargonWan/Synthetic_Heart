@@ -1578,10 +1578,17 @@ def _assemble_prompt_request(  # noqa: PLR0913
     # SOUL user-role context, prepended to the current user turn. The standing
     # DSP (who you're talking to) plus the per-turn mood delta, each gated so a
     # quiet / unprofiled session contributes ~0 tokens.
-    try:
-        _soul_dsp_prefix = _build_soul_user_profile_prefix(context_section)
-    except Exception:
-        _soul_dsp_prefix = ""
+    #
+    # DSP injection is OFF by default (SOUL_DSP_INJECT_ENABLED): the rule-based
+    # DSP extractor turns roleplay/status speech into a "user profile", which
+    # pollutes every turn on small models. Re-enable only when a clean,
+    # LLM-compiled profile is available.
+    _soul_dsp_prefix = ""
+    if config_registry.get_value("SOUL_DSP_INJECT_ENABLED", False):
+        try:
+            _soul_dsp_prefix = _build_soul_user_profile_prefix(context_section)
+        except Exception:
+            _soul_dsp_prefix = ""
 
     # ── Determine mode ───────────────────────────────────────────────────────
     mode: str = "grillo" if is_grillo_internal else "chat"

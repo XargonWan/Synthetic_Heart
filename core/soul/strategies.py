@@ -207,25 +207,7 @@ class RuleBasedDspExtractor:
         return user_lines, self_lines
 
     def _extract_user_facts(self, text: str) -> list[str]:
-        facts: list[str] = []
-
-        facts.extend(self._extract_first_person_facts(text, subject="User"))
-
-        leading_status_patterns = [
-            (r"^\s*doing\s+([^,\n!?]+)", "User reports doing {value}"),
-            (r"^\s*feeling\s+([^,\n!?]+)", "User reports feeling {value}"),
-            (r"^\s*staying\s+([^,\n!?]+)", "User is staying {value}"),
-            (r"^\s*recovering\s+([^,\n!?]+)", "User reports recovering {value}"),
-        ]
-        for line in text.splitlines():
-            for pattern, template in leading_status_patterns:
-                match = re.search(pattern, line, flags=re.IGNORECASE)
-                if match is None:
-                    continue
-                value = self._clean_fact_value(match.group(1))
-                if value:
-                    facts.append(template.format(value=value))
-
+        facts = list(self._extract_biographical_facts(text, subject="User"))
         return list(dict.fromkeys(facts))
 
     def _extract_preferences(self, text: str) -> list[str]:
@@ -256,31 +238,118 @@ class RuleBasedDspExtractor:
     def _extract_ai_self_facts(self, text: str) -> list[str]:
         if not text.strip():
             return []
-        return list(dict.fromkeys(self._extract_first_person_facts(text, subject="AI")))
+        return list(dict.fromkeys(self._extract_biographical_facts(text, subject="AI")))
 
-    def _extract_first_person_facts(self, text: str, *, subject: str) -> list[str]:
-        patterns = [
-            (r"\bI(?:'m| am)\s+([^\.\n!?]+)", f"{subject} says they are {{value}}"),
-            (r"\bI feel\s+([^\.\n!?]+)", f"{subject} feels {{value}}"),
-            (r"\bI(?:'ve| have) been\s+([^\.\n!?]+)", f"{subject} has been {{value}}"),
-            (r"\bI work on\s+([^\.\n!?]+)", f"{subject} works on {{value}}"),
+    def _extract_biographical_facts(self, text: str, *, subject: str) -> list[str]:
+        """Extract short, bounded biographical facts from ``text``.
+
+        Only *stable* identity facts are worth placing in a standing <user_profile>:
+        name, role/occupation, origin, residence, age, and clear tastes. Each
+        predicate is anchored and reads only up to the first clause boundary
+        (`, . ! ? \\n`), so a long conversational clause — roleplay dialogue,
+        one-off status, or stream-of-consciousness — never becomes a standing
+        "fact". This is what keeps the DSP a cheat-sheet about the person, not a
+        dump of what they recently said.
+
+        ``subject`` labels the fact ("User" or "AI"). Finite-state structural
+        matching only; no keyword salience.
+        """
+        _R = r"[^.,;\n!?]"
+        templates: list[tuple[str, str]] = [
+            # name
             (
-                r"\bI(?:'m| am) working on\s+([^\.\n!?]+)",
-                f"{subject} is working on {{value}}",
+                r"\bmy name is\s+({R}{2,48})".replace("{R}", _R),
+                "{subject}'s name is {value}",
             ),
-            (r"\bI(?:'m| am) making\s+([^\.\n!?]+)", f"{subject} is making {{value}}"),
-            (r"\bI need to\s+([^\.\n!?]+)", f"{subject} needs to {{value}}"),
-            (r"\bI want to\s+([^\.\n!?]+)", f"{subject} wants to {{value}}"),
-            (r"\bI (?:like|love)\s+([^\.\n!?]+)", f"{subject} likes {{value}}"),
+            (
+                r"\bI am called\s+({R}{2,48})".replace("{R}", _R),
+                "{subject}'s name is {value}",
+            ),
+            # role / occupation
+            (
+                r"\bI work on\s+({R}{2,60})".replace("{R}", _R),
+                "{subject} works on {value}",
+            ),
+            (
+                r"\bI work as\s+({R}{2,40})".replace("{R}", _R),
+                "{subject} works as {value}",
+            ),
+            (r"\bI am a\s+({R}{2,40})".replace("{R}", _R), "{subject} is a {value}"),
+            (r"\bI'm a\s+({R}{2,40})".replace("{R}", _R), "{subject} is a {value}"),
+            # origin / residence
+            (
+                r"\bI am from\s+({R}{2,40})".replace("{R}", _R),
+                "{subject} is from {value}",
+            ),
+            (
+                r"\bI'm from\s+({R}{2,40})".replace("{R}", _R),
+                "{subject} is from {value}",
+            ),
+            (
+                r"\bI live in\s+({R}{2,40})".replace("{R}", _R),
+                "{subject} lives in {value}",
+            ),
+            # age
+            (
+                r"\bI am\s+(\d{1,3})\s+years old".replace("{R}", _R),
+                "{subject} is {value} years old",
+            ),
+            (
+                r"\bI'm\s+(\d{1,3})\s+years old".replace("{R}", _R),
+                "{subject} is {value} years old",
+            ),
+            # tastes
+            (r"\bI like\s+({R}{2,40})".replace("{R}", _R), "{subject} likes {value}"),
+            (r"\bI love\s+({R}{2,40})".replace("{R}", _R), "{subject} loves {value}"),
+            (
+                r"\bI prefer\s+({R}{2,40})".replace("{R}", _R),
+                "{subject} prefers {value}",
+            ),
         ]
 
         facts: list[str] = []
-        for pattern, template in patterns:
+        for pattern, template in templates:
+            rendered_template = template.replace("{subject}", subject)
             for match in re.finditer(pattern, text, flags=re.IGNORECASE):
                 value = self._clean_fact_value(match.group(1))
-                if value:
-                    facts.append(template.format(value=value))
+                value = self._first_clause(value)
+                if value and self._is_bound_fact(value):
+                    facts.append(rendered_template.format(value=value))
         return facts
+
+    @staticmethod
+    def _first_clause(value: str) -> str:
+        """Cut a captured value at a coordinated second clause, if any.
+
+        Biographical predicates should yield one short fact ("User lives in
+        Berlin"), not a run-on ("User lives in Berlin and I am from Germany").
+        We stop before a coordinating conjunction that starts a new finite
+        clause (" and I/we/you …", " so I …", " but I …", " then I …"). This is
+        a clause-boundary parse on the extracted fragment, not a keyword filter.
+        """
+        match = re.search(
+            r"\s+(?:and|so|but|then)\s+(?:i|we|you)\b", value, flags=re.IGNORECASE
+        )
+        if match:
+            return value[: match.start()].strip()
+        return value
+
+    @staticmethod
+    def _is_bound_fact(value: str) -> bool:
+        """Reject captured fragments that are clearly not a short biographical fact.
+
+        Structural guard: drops values that are conversationally frame-y (a
+        trailing question/imperative) or implausibly long, so roleplay/status
+        clauses that slip past the clause-boundary stop are still not surfaced.
+        """
+        stripped = value.strip()
+        if not stripped or len(stripped) < 2:
+            return False
+        if len(stripped) > 120:
+            return False
+        if stripped[-1] in "?!.":
+            return False
+        return True
 
     @staticmethod
     def _clean_fact_value(value: str) -> str:
