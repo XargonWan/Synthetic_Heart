@@ -423,7 +423,16 @@ class SoulPlugin(PluginBase):
         if not lines:
             return 0
 
-        transcript = "\n".join(lines)
+        # Roleplay/explicit turns stay in the buffer (they still drive emotion
+        # and memory recall) but are excluded from what gets compiled into
+        # memcells — in-character fiction is not a durable event record.
+        from core.soul.roleplay import strip_roleplay_lines
+
+        transcript = strip_roleplay_lines("\n".join(lines))
+        if not transcript.strip():
+            self._buffers[interface_path] = []
+            return 0
+
         safe_session_id = self._normalize_session_id(interface_path)
 
         created = await self._compiler.post_session_compile(
@@ -546,7 +555,13 @@ class SoulPlugin(PluginBase):
                         parts.append(
                             f"{prefix}{speaker}: {json.dumps(message_text, ensure_ascii=False)}"
                         )
-                    return "\n".join(parts)
+                    transcript = "\n".join(parts)
+                    # Roleplay/explicit turns are in-character fiction, not a
+                    # stable record of the user — keep them out of the DSP
+                    # profile input (structural data-cleaning, never routing).
+                    from core.soul.roleplay import strip_roleplay_lines
+
+                    return strip_roleplay_lines(transcript)
         except Exception as exc:
             log_debug(f"[soul_plugin] Falling back to buffered transcript: {exc}")
 
