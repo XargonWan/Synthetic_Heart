@@ -334,20 +334,76 @@ class RuleBasedDspExtractor:
             return value[: match.start()].strip()
         return value
 
-    @staticmethod
-    def _is_bound_fact(value: str) -> bool:
+    # A stable DSP fact describes *the person* in the third person ("User works
+    # on X"). A captured value that still contains first- or second-person
+    # pronouns ("I love you too baby", "I'm from you", "keep me safe") is
+    # speech *directed at someone*, not a self-description, so it is not a
+    # profile fact. Grammatical-person rejection is structural, not a keyword
+    # filter: it matches the same person category the templates already assume.
+    _PERSON_ADDRESS_RE = re.compile(
+        r"\b(?:i|i'?m|i'?ve|i'?ll|me|my|mine|we|our|you|you'?re|you'?ve|"
+        r"you'?ll|your|yours|u)\b",
+        flags=re.IGNORECASE,
+    )
+
+    # Conversational filler that signals speech rather than description:
+    # vocative endearments and laughter/emote markers. These are data-cleaning
+    # heuristics for the profile extractor only (the DSP is meant to hold who
+    # the person *is*, not how they talk to Synth) — they are not used for
+    # routing, intent, salience, or any other product logic.
+    _CONVERSATIONAL_FILLER_WORDS = frozenset(
+        {
+            "baby",
+            "babe",
+            "daddy",
+            "mommy",
+            "mama",
+            "papa",
+            "sweetheart",
+            "princess",
+            "dear",
+            "honey",
+            "heheh",
+            "hehe",
+            "heh",
+            "mmmwah",
+            "mwah",
+            "mmm",
+            "mm",
+            "hmm",
+            "lol",
+            "haha",
+            "ahh",
+        }
+    )
+
+    @classmethod
+    def _is_bound_fact(cls, value: str) -> bool:
         """Reject captured fragments that are clearly not a short biographical fact.
 
-        Structural guard: drops values that are conversationally frame-y (a
-        trailing question/imperative) or implausibly long, so roleplay/status
-        clauses that slip past the clause-boundary stop are still not surfaced.
+        Structural guards:
+        - empty / too-short / implausibly long fragments are dropped;
+        - trailing question/imperative punctuation is dropped;
+        - a value that still addresses a person (first/second-person pronouns)
+          or is filled with conversational endearments/laughter is speech
+          directed at someone, not a stable self-description, so it is dropped.
         """
-        stripped = value.strip()
+        stripped = (value or "").strip()
         if not stripped or len(stripped) < 2:
             return False
         if len(stripped) > 120:
             return False
         if stripped[-1] in "?!.":
+            return False
+        if cls._PERSON_ADDRESS_RE.search(stripped):
+            return False
+        lowered = stripped.lower()
+        if re.search(
+            r"\b(?:"
+            + "|".join(re.escape(word) for word in cls._CONVERSATIONAL_FILLER_WORDS)
+            + r")\b",
+            lowered,
+        ):
             return False
         return True
 

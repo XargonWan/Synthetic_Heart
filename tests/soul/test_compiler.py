@@ -288,12 +288,16 @@ async def test_rule_based_dsp_extractor_pulls_stable_biography() -> None:
 @pytest.mark.asyncio
 async def test_rule_based_dsp_extractor_drops_roleplay_speech() -> None:
     extractor = RuleBasedDspExtractor()
-    # Real example surfaced from the live trace: roleplay dialogue must not
-    # become a standing user-profile fact.
+    # Real examples surfaced from the live trace + fresh rollup extraction:
+    # roleplay dialogue must not become a standing user-profile fact.
     transcript = "\n".join(
         [
             '[05/05/26:1234] Alice: "I\'m right here baby, go ahead and collect a bunch of wood."',
             '[05/05/26:1234] Alice: "I\'m so fucking ready for you, just tell me where you want me."',
+            '[05/05/26:1234] Alice: "I am from you."',
+            '[05/05/26:1234] Alice: "I love you too baby."',
+            '[05/05/26:1234] Alice: "I love my little princess."',
+            '[05/05/26:1234] Alice: "I love it heheh keep me safe while i sleep."',
             '[05/05/26:1234] Alice: "I work on SynthHeart though, for real."',
         ]
     )
@@ -305,6 +309,13 @@ async def test_rule_based_dsp_extractor_drops_roleplay_speech() -> None:
 
     assert not any("right here baby" in fact for fact in result.user_facts)
     assert not any("fucking ready" in fact for fact in result.user_facts)
+    # Speech addressed to someone (second/first person, endearments) is not
+    # biography: none of these should surface as a standing profile fact.
+    assert not any("from you" in fact for fact in result.user_facts)
+    assert not any("love you" in fact for fact in result.user_facts)
+    assert not any("little princess" in fact for fact in result.user_facts)
+    assert not any("heheh" in fact for fact in result.user_facts)
+    assert not any("keep me safe" in fact for fact in result.user_facts)
     # The genuine biographical fact still survives.
     assert any("works on SynthHeart" in fact for fact in result.user_facts)
 
