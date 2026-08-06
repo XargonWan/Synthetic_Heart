@@ -478,6 +478,20 @@ class ExternalCortexEngine(AIPluginBase):
         extra = self._endpoint.extra_config or {}
         return bool(extra.get("retry_on_timeout", False))
 
+    def _retry_on_empty(self) -> bool:
+        """True when an empty-content LLM response should be re-requested.
+
+        Providers (notably Venice's OpenAI-compat endpoint with thinking
+        models) occasionally return HTTP 200 with non-zero completion tokens
+        but an empty ``message.content``. The turn then fails with no reply
+        and no error. Retrying the *same request* inside the bridge is safe:
+        the user message was already persisted upstream by the interface, and
+        the empty response is never logged or sent — so a retry neither
+        duplicates the input in the DB nor writes a spurious empty reply.
+        """
+        extra = self._endpoint.extra_config or {}
+        return bool(extra.get("retry_on_empty", True))
+
     def _disable_tools(self) -> bool:
         """True when this endpoint opts out of native tool-calling.
 
@@ -1115,6 +1129,7 @@ class ExternalCortexEngine(AIPluginBase):
         max_retries, backoff = self._get_retry_settings()
         request_timeout = self._get_request_timeout()
         retry_on_timeout = self._retry_on_timeout()
+        retry_on_empty = self._retry_on_empty()
         attempt = 0
         while True:
             attempt += 1
@@ -1177,6 +1192,21 @@ class ExternalCortexEngine(AIPluginBase):
                         response_content,
                         selected_manifests,
                     )
+                # Empty-content fallback: some providers return 200 with
+                # non-zero completion tokens but an empty message.content.
+                # Retry the identical request in-bridge — the user message was
+                # already persisted upstream by the interface, and this empty
+                # result is discarded (never logged to the DB nor sent), so a
+                # retry neither duplicates the input nor writes an empty reply.
+                if not response_content and retry_on_empty and attempt < max_retries:
+                    delay = backoff * (2 ** (attempt - 1))
+                    log_warning(
+                        f"[cortex_bridge:{self._endpoint.name}] empty response from "
+                        f"{model} (attempt {attempt}/{max_retries}); re-requesting "
+                        f"in {delay:.1f}s"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
                 response_metadata: dict[str, Any] = {
                     "model": getattr(chat_resp, "model", None) or model,
                     "finish_reason": getattr(chat_resp, "finish_reason", None)
