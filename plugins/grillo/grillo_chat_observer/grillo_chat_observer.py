@@ -570,6 +570,7 @@ class GrilloChatObserverPlugin:
                     context_memory=context,
                     interface_id="grillo",
                     original_message=None,
+                    priority=message_queue.PRIORITY_BACKGROUND,
                 )
                 log_info(
                     "[grillo_chat_observer] Observer prompt enqueued for LLM processing"

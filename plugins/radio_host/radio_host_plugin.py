@@ -1529,6 +1529,7 @@ class RadioHostPlugin:
                 context_memory=context_memory,
                 interface_id="radio_host",
                 original_message=None,
+                priority=message_queue.PRIORITY_RADIO,
             )
             if pre_generate:
                 log_info(

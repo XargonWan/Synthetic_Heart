@@ -36,7 +36,12 @@ async def test_observer_builds_prompt_and_collects(monkeypatch):
     called = {}
 
     async def fake_enqueue(
-        bot, message, context_memory=None, interface_id=None, original_message=None
+        bot,
+        message,
+        context_memory=None,
+        interface_id=None,
+        original_message=None,
+        priority=None,
     ):
         called["ctx"] = context_memory
         called["text"] = getattr(message, "text", None)
@@ -236,7 +241,12 @@ async def test_observer_propose_only_flag_in_prompt(monkeypatch):
     captured = {}
 
     async def fake_enqueue(
-        bot, message, context_memory=None, interface_id=None, original_message=None
+        bot,
+        message,
+        context_memory=None,
+        interface_id=None,
+        original_message=None,
+        priority=None,
     ):
         captured["text"] = getattr(message, "text", None)
 
@@ -278,7 +288,12 @@ async def test_observer_runs_when_updates_present(monkeypatch):
     monkeypatch.setattr(plugin, "_collect_recent_snippets", fake_collect)
 
     async def fake_enqueue(
-        bot, message, context_memory=None, interface_id=None, original_message=None
+        bot,
+        message,
+        context_memory=None,
+        interface_id=None,
+        original_message=None,
+        priority=None,
     ):
         called["enqueued"] = True
 
@@ -337,7 +352,12 @@ async def test_observer_db_check_updates_and_advances_last_run_ts(monkeypatch):
     monkeypatch.setattr(plugin, "_collect_recent_snippets", fake_collect)
 
     async def fake_enqueue(
-        bot, message, context_memory=None, interface_id=None, original_message=None
+        bot,
+        message,
+        context_memory=None,
+        interface_id=None,
+        original_message=None,
+        priority=None,
     ):
         called["enqueued"] = True
 
@@ -392,7 +412,12 @@ async def test_observer_is_decay_driven_when_no_updates(monkeypatch):
     monkeypatch.setattr(plugin, "_collect_eligible_targets", fake_collect_targets)
 
     async def fake_enqueue(
-        bot, message, context_memory=None, interface_id=None, original_message=None
+        bot,
+        message,
+        context_memory=None,
+        interface_id=None,
+        original_message=None,
+        priority=None,
     ):
         called["enqueued"] = True
 

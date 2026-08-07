@@ -114,14 +114,12 @@ Run this migration in a maintenance window; the operation is fast and safe but r
 Priority System
 ---------------
 
-G.R.I.L.L.O. beats use the message queue's priority system:
+G.R.I.L.L.O. beats use ``PRIORITY_BACKGROUND`` (2) — the **absolute bottom**
+of the 0–11 urgency scale. This ensures autonomous beats never block or compete
+with any user interaction; they are processed only when the queue is completely
+idle. The full priority scale is documented in :doc:`architecture`.
 
-- **HIGH_PRIORITY (0):** Scheduled events, critical notifications
-- **NORMAL_PRIORITY (1):** User messages, standard interactions
-- **AGENT_PRIORITY (2):** Agentic turns / tool work (above beats, below user traffic)
-- **LOW_PRIORITY (3):** G.R.I.L.L.O. beats
-
-Low-priority beats are only processed when no higher-priority messages are waiting, ensuring user interactions are never delayed by autonomous reflections.
+Beats are enqueued via ``message_queue.enqueue_low_priority(..., priority=message_queue.PRIORITY_BACKGROUND)``.
 
 Anti-Flooding Mechanism
 ------------------------
@@ -401,10 +399,10 @@ Adjust interval:
 Beats Interrupting Conversations
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-This should never happen due to LOW_PRIORITY queuing. If it does:
+This should never happen due to ``PRIORITY_BACKGROUND`` queuing. If it does:
 
-1. Verify ``LOW_PRIORITY = 3`` exists in ``core/message_queue.py``
-2. Check ``_enqueue_with_low_priority()`` is using correct priority value
+1. Verify ``PRIORITY_BACKGROUND = 2`` exists in ``core/message_queue.py``
+2. Check ``_enqueue_with_low_priority()`` passes ``priority=message_queue.PRIORITY_BACKGROUND``
 3. Examine queue consumer to ensure priority ordering
 
 See Also

@@ -488,6 +488,7 @@ class GrilloPlugin(AIPluginBase):
                 context_memory=item.get("context"),
                 interface_id="grillo",
                 original_message=None,
+                priority=message_queue.PRIORITY_BACKGROUND,
             )
             # Reset pending flag after small delay to avoid flooding.
             # The reset task reference is already managed in _grillo_beat_loop
