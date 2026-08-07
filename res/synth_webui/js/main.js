@@ -2616,7 +2616,333 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
         (function(){
             'use strict';
 
-            async function loadComponentsSummary() {
+            // -----------------------------------------------------------------------------
+        // Structured engine-config editor + named presets (Engines tab)
+        // -----------------------------------------------------------------------------
+
+        // Known structured extra_config fields. Bool fields render as toggle
+        // switches; number fields as value boxes (empty = keep engine default,
+        // the key is omitted on save).
+        const ENGINE_CONFIG_FIELDS = [
+            { key: 'enable_thinking', id: 'cfg-bool-enable-thinking', type: 'bool', label: 'Enable thinking', desc: 'Opt-in model thinking (translated to disable_thinking for providers that nest it).' },
+            { key: 'enable_tools', id: 'cfg-bool-enable-tools', type: 'bool', label: 'Enable tools', desc: 'Opt-in native function calling (tool definitions).' },
+            { key: 'enable_tools_parallel', id: 'cfg-bool-enable-tools-parallel', type: 'bool', label: 'Parallel tool calls', desc: 'Allow parallel native tool-calling.' },
+            { key: 'disable_tools', id: 'cfg-bool-disable-tools', type: 'bool', label: 'Disable tools', desc: 'Force the legacy in-prompt JSON protocol instead of native tools.' },
+            { key: 'force_action_grammar', id: 'cfg-bool-force-action-grammar', type: 'bool', label: 'Force action grammar', desc: 'Strongest constraint: GBNF-constrain output to the action schema (implies disable_tools).' },
+            { key: 'force_json_object', id: 'cfg-bool-force-json-object', type: 'bool', label: 'Force JSON object', desc: 'Request response_format={"type":"json_object"}.' },
+            { key: 'retry_on_timeout', id: 'cfg-bool-retry-on-timeout', type: 'bool', label: 'Retry on timeout', desc: 'Retry the request when it times out.' },
+            { key: 'retry_on_empty', id: 'cfg-bool-retry-on-empty', type: 'bool', label: 'Retry on empty', desc: 'Retry when the provider returns an empty-content 200 (engine default: on).' },
+            { key: 'max_tools', id: 'cfg-num-max-tools', type: 'number', label: 'Max tools', desc: 'Cap on native tool definitions (Venice default: 20).', step: 1, min: 0 },
+            { key: 'max_tokens', id: 'cfg-num-max-tokens', type: 'number', label: 'Max tokens', desc: 'Cap on completion length. Blank = no cap (or 4096 on local-model endpoints).', step: 1, min: 1 },
+            { key: 'timeout', id: 'cfg-num-timeout', type: 'number', label: 'Timeout (s)', desc: 'Per-endpoint request timeout in seconds.', step: 1, min: 1 },
+            { key: 'retry_attempts', id: 'cfg-num-retry-attempts', type: 'number', label: 'Retry attempts', desc: 'Max retries (default 3).', step: 1, min: 0 },
+            { key: 'retry_backoff', id: 'cfg-num-retry-backoff', type: 'number', label: 'Retry backoff (s)', desc: 'Backoff between retries (default 0.5).', step: 0.1, min: 0 },
+            { key: 'downstream_char_budget', id: 'cfg-num-char-budget', type: 'number', label: 'Char budget', desc: 'Hard char clamp on assembled messages; ≤ 0 disables (default 24000).', step: 500, min: 0 },
+        ];
+
+        let _engineCfgActive = null;    // current active external engine (model source for presets)
+        let _engineCfgPresets = [];     // cached preset list
+
+        // The model currently configured in the Engine Configuration card.  The
+        // live model-picker input is authoritative when visible (so a model just
+        // picked in this card — without a full components reload — is captured
+        // too); otherwise fall back to the engine's cached current_model.
+        function currentEngineConfigModel() {
+            const picker = document.getElementById('cortex-model-picker');
+            const search = document.getElementById('cortex-model-search');
+            if (picker && search && picker.style.display !== 'none') {
+                const picked = (search.value || '').trim();
+                if (picked) return picked;
+            }
+            return (_engineCfgActive && _engineCfgActive.current_model) || '';
+        }
+
+        function _engineCfgInputStyle() {
+            return 'min-width:110px; padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:6px; font-size:0.85rem;';
+        }
+
+        function renderEngineConfigForm(active) {
+            _engineCfgActive = active || null;
+            const fieldsEl = document.getElementById('engine-config-fields');
+            const grammarEl = document.getElementById('cortex-engine-config-grammar');
+            const rfEl = document.getElementById('cortex-engine-config-response-format');
+            const rawEl = document.getElementById('cortex-engine-config-raw');
+            if (!fieldsEl) return;
+            const ec = (active && active.extra_config) || {};
+            fieldsEl.innerHTML = '';
+
+            // Boolean toggles — compact responsive grid
+            const boolGrid = document.createElement('div');
+            boolGrid.style.cssText = 'display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:6px 16px;';
+            for (const f of ENGINE_CONFIG_FIELDS) {
+                if (f.type !== 'bool') continue;
+                const row = document.createElement('div');
+                row.style.cssText = 'display:flex; align-items:center; gap:8px; padding:5px 8px; border:1px solid var(--border,#444); border-radius:8px; background:var(--background,#1a1a22);';
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.id = f.id;
+                cb.checked = !!ec[f.key];
+                const toggleLbl = document.createElement('label');
+                toggleLbl.className = 'toggle-switch';
+                toggleLbl.setAttribute('for', f.id);
+                const slider = document.createElement('span');
+                slider.className = 'toggle-slider';
+                toggleLbl.appendChild(slider);
+                const textWrap = document.createElement('div');
+                textWrap.style.cssText = 'flex:1; min-width:0;';
+                const tLabel = document.createElement('div');
+                tLabel.style.cssText = 'font-size:0.85rem; font-weight:600; color:var(--text);';
+                tLabel.textContent = f.label;
+                textWrap.appendChild(tLabel);
+                if (f.desc) {
+                    const tDesc = document.createElement('div');
+                    tDesc.style.cssText = 'font-size:0.74rem; color:var(--muted); line-height:1.25;';
+                    tDesc.textContent = f.desc;
+                    textWrap.appendChild(tDesc);
+                }
+                row.appendChild(cb);
+                row.appendChild(toggleLbl);
+                row.appendChild(textWrap);
+                boolGrid.appendChild(row);
+            }
+            fieldsEl.appendChild(boolGrid);
+
+            // Number fields — label + value box grid
+            const numGrid = document.createElement('div');
+            numGrid.style.cssText = 'display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:8px 16px; margin-top:10px;';
+            for (const f of ENGINE_CONFIG_FIELDS) {
+                if (f.type !== 'number') continue;
+                const col = document.createElement('div');
+                col.style.cssText = 'display:flex; flex-direction:column; gap:3px;';
+                const lbl = document.createElement('label');
+                lbl.setAttribute('for', f.id);
+                lbl.style.cssText = 'font-size:0.82rem; font-weight:600; color:var(--text);';
+                lbl.textContent = f.label;
+                const inp = document.createElement('input');
+                inp.type = 'number';
+                inp.id = f.id;
+                if (f.step !== undefined) inp.step = String(f.step);
+                if (f.min !== undefined) inp.min = String(f.min);
+                inp.placeholder = 'default';
+                inp.style.cssText = _engineCfgInputStyle();
+                const v = ec[f.key];
+                if (v !== undefined && v !== null) inp.value = v;
+                col.appendChild(lbl);
+                col.appendChild(inp);
+                if (f.desc) {
+                    const desc = document.createElement('div');
+                    desc.style.cssText = 'font-size:0.74rem; color:var(--muted); line-height:1.25;';
+                    desc.textContent = f.desc;
+                    col.appendChild(desc);
+                }
+                numGrid.appendChild(col);
+            }
+            fieldsEl.appendChild(numGrid);
+
+            // Advanced textareas (grammar / response_format / other keys)
+            if (grammarEl) grammarEl.value = typeof ec.grammar === 'string' ? ec.grammar : '';
+            if (rfEl) {
+                const rf = ec.response_format;
+                rfEl.value = (rf && typeof rf === 'object') ? JSON.stringify(rf, null, 2) : '';
+            }
+            if (rawEl) {
+                const known = new Set(ENGINE_CONFIG_FIELDS.map(f => f.key));
+                known.add('grammar');
+                known.add('response_format');
+                const rest = {};
+                for (const k of Object.keys(ec)) {
+                    if (!known.has(k)) rest[k] = ec[k];
+                }
+                rawEl.value = Object.keys(rest).length ? JSON.stringify(rest, null, 2) : '';
+            }
+        }
+
+        function collectEngineConfig() {
+            const cfg = {};
+            for (const f of ENGINE_CONFIG_FIELDS) {
+                const el = document.getElementById(f.id);
+                if (!el) continue;
+                if (f.type === 'bool') {
+                    cfg[f.key] = el.checked;
+                } else {
+                    const raw = (el.value || '').trim();
+                    if (raw === '') continue;
+                    const n = Number(raw);
+                    if (Number.isFinite(n)) cfg[f.key] = n;
+                }
+            }
+            const grammarEl = document.getElementById('cortex-engine-config-grammar');
+            if (grammarEl && grammarEl.value.trim()) cfg.grammar = grammarEl.value;
+            const rfEl = document.getElementById('cortex-engine-config-response-format');
+            if (rfEl && rfEl.value.trim()) cfg.response_format = JSON.parse(rfEl.value); // caller validates
+            const rawEl = document.getElementById('cortex-engine-config-raw');
+            if (rawEl && rawEl.value.trim()) {
+                const extra = JSON.parse(rawEl.value); // caller validates
+                if (extra && typeof extra === 'object' && !Array.isArray(extra)) {
+                    Object.assign(cfg, extra);
+                }
+            }
+            return cfg;
+        }
+
+        async function loadEngineConfigPresets(selectName) {
+            try {
+                const res = await fetch('/api/engine-config-presets');
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const data = await res.json();
+                _engineCfgPresets = Array.isArray(data.presets) ? data.presets : [];
+            } catch (e) {
+                console.error('[synth_webui] Failed to load engine config presets', e);
+                _engineCfgPresets = [];
+            }
+            populateEngineConfigPresetSelect(selectName || '');
+            return _engineCfgPresets;
+        }
+
+        function populateEngineConfigPresetSelect(selectName) {
+            const sel = document.getElementById('engine-config-preset-select');
+            if (!sel) return;
+            const keep = selectName || sel.value || '';
+            sel.innerHTML = '';
+            const none = document.createElement('option');
+            none.value = '';
+            none.textContent = '— no preset selected —';
+            sel.appendChild(none);
+            for (const p of _engineCfgPresets) {
+                const opt = document.createElement('option');
+                opt.value = p.name;
+                opt.textContent = p.model ? `${p.name} · ${p.model}` : p.name;
+                if (p.name === keep) opt.selected = true;
+                sel.appendChild(opt);
+            }
+            if (keep) sel.value = keep;
+        }
+
+        function initEngineConfigEditor() {
+            const cfgStatus = document.getElementById('cortex-engine-config-status');
+            const setCfgStatus = (msg, ok) => {
+                if (!cfgStatus) return;
+                cfgStatus.textContent = msg;
+                cfgStatus.style.color = ok ? 'var(--success,#27ae60)' : 'var(--danger,#c0392b)';
+            };
+            const currentEndpointId = () => {
+                const el = document.getElementById('cortex-engine-config-wrap');
+                return el && el.dataset.endpointId ? Number(el.dataset.endpointId) : null;
+            };
+
+            const cfgSave = document.getElementById('cortex-engine-config-save');
+            if (cfgSave && !cfgSave.dataset.bound) {
+                cfgSave.dataset.bound = '1';
+                cfgSave.addEventListener('click', async () => {
+                    const epId = currentEndpointId();
+                    if (epId == null) { setCfgStatus('No endpoint selected.', false); return; }
+                    let cfg;
+                    try {
+                        cfg = collectEngineConfig();
+                    } catch (err) {
+                        setCfgStatus('Invalid JSON in advanced/other keys: ' + err.message, false);
+                        return;
+                    }
+                    try {
+                        const res = await fetch(`/api/external-endpoints/${epId}`, {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ extra_config: cfg }),
+                        });
+                        if (!res.ok) throw new Error('HTTP ' + res.status);
+                        setCfgStatus('Saved — applied to this engine.', true);
+                        if (window.showToast) window.showToast('Engine config saved', false);
+                    } catch (err) {
+                        setCfgStatus('Save failed: ' + err.message, false);
+                    }
+                });
+            }
+
+            const sel = document.getElementById('engine-config-preset-select');
+            const applyBtn = document.getElementById('engine-config-preset-apply-btn');
+            const delBtn = document.getElementById('engine-config-preset-delete-btn');
+            const savePresetBtn = document.getElementById('engine-config-preset-save-btn');
+            const nameInput = document.getElementById('engine-config-preset-name');
+
+            if (applyBtn && !applyBtn.dataset.bound) {
+                applyBtn.dataset.bound = '1';
+                applyBtn.addEventListener('click', async () => {
+                    const epId = currentEndpointId();
+                    const name = sel ? sel.value : '';
+                    if (epId == null) { setCfgStatus('No endpoint selected.', false); return; }
+                    if (!name) { setCfgStatus('Select a preset to apply.', false); return; }
+                    try {
+                        const res = await fetch('/api/engine-config-presets/apply', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ ep_id: epId, name }),
+                        });
+                        const data = await res.json().catch(() => ({}));
+                        if (!res.ok) throw new Error((data && data.detail) || ('HTTP ' + res.status));
+                        setCfgStatus(`Applied "${name}".`, true);
+                        if (window.showToast) window.showToast(`Engine preset "${name}" applied`, false);
+                        await loadComponentsSummary();
+                    } catch (err) {
+                        setCfgStatus('Apply failed: ' + err.message, false);
+                    }
+                });
+            }
+
+            if (delBtn && !delBtn.dataset.bound) {
+                delBtn.dataset.bound = '1';
+                delBtn.addEventListener('click', async () => {
+                    const name = sel ? sel.value : '';
+                    if (!name) { setCfgStatus('Select a preset to delete.', false); return; }
+                    if (!window.confirm(`Delete engine preset "${name}"?`)) return;
+                    try {
+                        const res = await fetch(`/api/engine-config-presets?name=${encodeURIComponent(name)}`, { method: 'DELETE' });
+                        if (!res.ok) {
+                            const data = await res.json().catch(() => ({}));
+                            throw new Error((data && data.detail) || ('HTTP ' + res.status));
+                        }
+                        await loadEngineConfigPresets();
+                        setCfgStatus('Preset deleted.', true);
+                        if (window.showToast) window.showToast('Engine preset deleted', false);
+                    } catch (err) {
+                        setCfgStatus('Delete failed: ' + err.message, false);
+                    }
+                });
+            }
+
+            if (savePresetBtn && !savePresetBtn.dataset.bound) {
+                savePresetBtn.dataset.bound = '1';
+                savePresetBtn.addEventListener('click', async () => {
+                    const epId = currentEndpointId();
+                    if (epId == null) { setCfgStatus('No endpoint selected.', false); return; }
+                    const presetName = nameInput ? nameInput.value.trim() : '';
+                    if (!presetName) { setCfgStatus('Enter a preset name first.', false); return; }
+                    let cfg;
+                    try {
+                        cfg = collectEngineConfig();
+                    } catch (err) {
+                        setCfgStatus('Invalid JSON in advanced/other keys: ' + err.message, false);
+                        return;
+                    }
+                    const model = currentEngineConfigModel();
+                    try {
+                        const res = await fetch('/api/engine-config-presets', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ name: presetName, model, extra_config: cfg }),
+                        });
+                        const data = await res.json().catch(() => ({}));
+                        if (!res.ok) throw new Error((data && data.detail) || ('HTTP ' + res.status));
+                        await loadEngineConfigPresets(presetName);
+                        setCfgStatus(`Preset "${presetName}" saved.`, true);
+                        if (window.showToast) window.showToast(`Engine preset "${presetName}" saved`, false);
+                    } catch (err) {
+                        setCfgStatus('Preset save failed: ' + err.message, false);
+                    }
+                });
+            }
+        }
+
+        async function loadComponentsSummary() {
                 try {
                     const componentsCortexSummaryEl = document.getElementById('components-cortex-summary');
                     const componentsCortexListEl = document.getElementById('components-cortex-list');
@@ -2803,6 +3129,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                                 body: JSON.stringify({ engine: active.name, model: m })
                                             }).then((res) => {
                                                 if (!res.ok) throw new Error('HTTP ' + res.status);
+                                                if (_engineCfgActive) _engineCfgActive.current_model = m;
                                                 if (engineModelLabel) engineModelLabel.textContent = `model: ${m}`;
                                                 if (window.showToast) window.showToast('Saved', false);
                                             }).catch((err) => {
@@ -2845,6 +3172,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                                     body: JSON.stringify({ engine: active.name, model: val })
                                                 }).then((res) => {
                                                     if (!res.ok) throw new Error('HTTP ' + res.status);
+                                                    if (_engineCfgActive) _engineCfgActive.current_model = val;
                                                     if (engineModelLabel) engineModelLabel.textContent = `model: ${val}`;
                                                     if (window.showToast) window.showToast('Saved', false);
                                                 }).catch((err) => {
@@ -2886,56 +3214,21 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                         // --- Per-endpoint extra config editor (external endpoints only) ---
                         const cfgWrap = document.getElementById('cortex-engine-config-wrap');
-                        const cfgArea = document.getElementById('cortex-engine-config');
-                        const cfgSave = document.getElementById('cortex-engine-config-save');
                         const cfgStatus = document.getElementById('cortex-engine-config-status');
-                        if (cfgWrap && cfgArea) {
+                        if (cfgWrap) {
                             if (active && active.is_external && active.endpoint_id != null) {
                                 cfgWrap.style.display = '';
-                                const ec = active.extra_config || {};
-                                cfgArea.value = Object.keys(ec).length ? JSON.stringify(ec, null, 2) : '';
+                                cfgWrap.dataset.endpointId = String(active.endpoint_id);
                                 if (cfgStatus) cfgStatus.textContent = '';
-                                if (cfgSave) {
-                                    cfgSave._epId = active.endpoint_id;
-                                    if (!cfgSave.dataset.bound) {
-                                        cfgSave.dataset.bound = '1';
-                                        cfgSave.addEventListener('click', async () => {
-                                            const setCfgStatus = (msg, ok) => {
-                                                if (!cfgStatus) return;
-                                                cfgStatus.textContent = msg;
-                                                cfgStatus.style.color = ok ? 'var(--success,#27ae60)' : 'var(--danger,#c0392b)';
-                                            };
-                                            const raw = (cfgArea.value || '').trim();
-                                            let parsed = {};
-                                            if (raw) {
-                                                try {
-                                                    parsed = JSON.parse(raw);
-                                                } catch (err) {
-                                                    setCfgStatus('Invalid JSON: ' + err.message, false);
-                                                    return;
-                                                }
-                                                if (typeof parsed !== 'object' || Array.isArray(parsed) || parsed === null) {
-                                                    setCfgStatus('Extra Config must be a JSON object.', false);
-                                                    return;
-                                                }
-                                            }
-                                            try {
-                                                const res = await fetch(`/api/external-endpoints/${cfgSave._epId}`, {
-                                                    method: 'PUT',
-                                                    headers: { 'Content-Type': 'application/json' },
-                                                    body: JSON.stringify({ extra_config: parsed }),
-                                                });
-                                                if (!res.ok) throw new Error('HTTP ' + res.status);
-                                                setCfgStatus('Saved — reload this engine to apply.', true);
-                                                if (window.showToast) window.showToast('Engine config saved', false);
-                                            } catch (err) {
-                                                setCfgStatus('Save failed: ' + err.message, false);
-                                            }
-                                        });
-                                    }
+                                if (!cfgWrap.dataset.bound) {
+                                    cfgWrap.dataset.bound = '1';
+                                    initEngineConfigEditor();
                                 }
+                                renderEngineConfigForm(active);
+                                if (!_engineCfgPresets.length) loadEngineConfigPresets();
                             } else {
                                 cfgWrap.style.display = 'none';
+                                cfgWrap.dataset.endpointId = '';
                             }
                         }
                     };
@@ -4628,6 +4921,43 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             }
                         });
                         irisModelSel.dataset.bound = '1';
+                    }
+                    // ────────────────────────────────────────────────────────
+
+                    // ── Iris vision prompt (sent to the Iris engine; its description is injected into the next turn as context) ──
+                    const irisPromptWrap = document.getElementById('iris-prompt-wrap');
+                    const irisPrompt = document.getElementById('iris-default-prompt');
+                    const irisPromptSave = document.getElementById('iris-default-prompt-save');
+                    const irisPromptStatus = document.getElementById('iris-default-prompt-status');
+                    const setIrisPromptStatus = (msg, ok) => {
+                        if (!irisPromptStatus) return;
+                        irisPromptStatus.textContent = msg;
+                        irisPromptStatus.style.color = ok ? 'var(--success,#27ae60)' : 'var(--danger,#c0392b)';
+                    };
+                    if (irisPromptWrap && irisPrompt) {
+                        if (Array.isArray(data.iris) && data.iris.length) {
+                            irisPromptWrap.style.display = '';
+                        }
+                        irisPrompt.value = data.iris_default_prompt || '';
+                        if (irisPromptSave && !irisPromptSave.dataset.bound) {
+                            irisPromptSave.dataset.bound = '1';
+                            irisPromptSave.addEventListener('click', async () => {
+                                const value = (irisPrompt.value || '').trim();
+                                try {
+                                    const r = await fetch('/api/config', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ key: 'IRIS_DEFAULT_PROMPT', value }),
+                                    });
+                                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                                    setIrisPromptStatus('Saved — used by the next vision turn.', true);
+                                    window.showToast && window.showToast('Iris vision prompt saved', false);
+                                } catch (e) {
+                                    console.error('[synth_webui] Failed to set IRIS_DEFAULT_PROMPT', e);
+                                    setIrisPromptStatus('Save failed: ' + e.message, false);
+                                }
+                            });
+                        }
                     }
                     // ────────────────────────────────────────────────────────
 

@@ -186,6 +186,22 @@ VESSEL_CORTEX = config_registry.get_var(
     allow_env_override=False,
 )
 
+# Named engine-configuration presets (extra_config + optional model bundles)
+# edited from the Engines tab.  Stored as a JSON list; hidden from the generic
+# settings grid because it is managed by the dedicated preset UI in
+# core/engine_config_presets.py.
+ENGINE_CONFIG_PRESETS = config_registry.get_var(
+    "ENGINE_CONFIG_PRESETS",
+    [],
+    label="Engine Config Presets",
+    description="Named provider/model engine-config presets (JSON list).",
+    group="core",
+    component="cortex",
+    hidden=True,
+    value_type=list,
+    allow_env_override=False,
+)
+
 # LLM generation request timeout. Caps how long the synth waits for a single
 # cortex generation before aborting. On slow hardware a long reply can exceed a
 # short timeout, which aborts the HTTP request and makes llama.cpp cancel the

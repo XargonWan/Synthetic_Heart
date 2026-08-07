@@ -64,16 +64,54 @@
                 </div>
 
                 <!-- Per-endpoint extra config — shown only for external endpoints -->
-                <div id="cortex-engine-config-wrap" style="display:none; margin-top:14px; max-width:680px;">
-                    <label style="display:block; margin-bottom:4px; font-weight:600;">Engine Configuration <span style="color:var(--muted); font-weight:400; font-size:0.85rem;">(JSON — applies to this endpoint)</span></label>
-                    <textarea id="cortex-engine-config" rows="5" spellcheck="false" placeholder='{"enable_thinking": true, "enable_tools": true, "max_tools": 20, "max_tokens": 4096}'
-                        style="width:100%; padding:9px 12px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:8px; font-family:monospace; font-size:0.85rem; resize:vertical;"></textarea>
+                <div id="cortex-engine-config-wrap" style="display:none; margin-top:14px; max-width:720px;">
+                    <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
+                        <label style="font-weight:600; margin:0;">Engine Configuration</label>
+                        <span style="color:var(--muted); font-weight:400; font-size:0.85rem;">(applies to this endpoint)</span>
+                    </div>
+
+                    <!-- Preset bar: save the current settings as a named preset and swap presets with one click -->
+                    <div id="engine-config-preset-row" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px; padding:8px 10px; border:1px solid var(--border,#444); border-radius:8px; background:var(--background,#1a1a22);">
+                        <span style="font-size:0.82rem; font-weight:600; color:var(--muted);">Preset</span>
+                        <select id="engine-config-preset-select" style="min-width:220px; padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:6px; font-size:0.85rem;">
+                            <option value="">— no preset selected —</option>
+                        </select>
+                        <button id="engine-config-preset-apply-btn" class="pill" type="button" title="Apply the selected preset (config + model) to this endpoint">Apply</button>
+                        <button id="engine-config-preset-delete-btn" class="pill danger" type="button" title="Delete the selected preset">Delete</button>
+                        <span style="width:1px; height:20px; background:var(--border,#444);"></span>
+                        <input id="engine-config-preset-name" type="text" placeholder="New preset name…" autocomplete="off"
+                            style="min-width:180px; padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:6px; font-size:0.85rem;">
+                        <button id="engine-config-preset-save-btn" class="pill secondary" type="button" title="Save the current settings (and selected model) as a named preset">＋ Save current as preset</button>
+                    </div>
+
+                    <!-- Structured editor: toggles + value boxes rendered from the current extra_config -->
+                    <div id="engine-config-fields" style="display:flex; flex-direction:column; gap:10px;"></div>
+
+                    <!-- Advanced keys (grammar / response_format / anything not covered above) -->
+                    <details id="engine-config-advanced" style="margin-top:12px;">
+                        <summary style="cursor:pointer; font-size:0.82rem; font-weight:600; color:var(--muted);">Advanced / raw keys</summary>
+                        <div style="display:flex; flex-direction:column; gap:10px; margin-top:10px;">
+                            <div>
+                                <label for="cortex-engine-config-grammar" style="display:block; margin-bottom:3px; font-size:0.82rem; font-weight:600;">grammar <span style="color:var(--muted); font-weight:400;">(GBNF grammar string, sent via extra_body)</span></label>
+                                <textarea id="cortex-engine-config-grammar" rows="3" spellcheck="false" placeholder="root ::= ..."
+                                    style="width:100%; padding:8px 10px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:8px; font-family:monospace; font-size:0.82rem; resize:vertical;"></textarea>
+                            </div>
+                            <div>
+                                <label for="cortex-engine-config-response-format" style="display:block; margin-bottom:3px; font-size:0.82rem; font-weight:600;">response_format <span style="color:var(--muted); font-weight:400;">(JSON object, forwarded verbatim)</span></label>
+                                <textarea id="cortex-engine-config-response-format" rows="2" spellcheck="false" placeholder='{"type": "json_object"}'
+                                    style="width:100%; padding:8px 10px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:8px; font-family:monospace; font-size:0.82rem; resize:vertical;"></textarea>
+                            </div>
+                            <div>
+                                <label for="cortex-engine-config-raw" style="display:block; margin-bottom:3px; font-size:0.82rem; font-weight:600;">Other keys <span style="color:var(--muted); font-weight:400;">(provider-specific keys not covered above — JSON object, merged on save)</span></label>
+                                <textarea id="cortex-engine-config-raw" rows="3" spellcheck="false" placeholder='{"venice_parameters": {...}}'
+                                    style="width:100%; padding:8px 10px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:8px; font-family:monospace; font-size:0.82rem; resize:vertical;"></textarea>
+                            </div>
+                        </div>
+                    </details>
+
                     <div style="margin-top:5px; font-size:0.8rem; color:var(--muted);">
-                        Cortex keys: <code>timeout</code> (request seconds), <code>max_tokens</code> (caps reply length), <code>max_tools</code> (caps native tool definitions; Venice defaults to 20),
-                        <code>enable_thinking</code> (opt-in; disabled by default), <code>enable_tools</code> (opt-in native function calling), <code>disable_tools</code> (legacy in-prompt JSON),
-                        and <code>force_action_grammar</code> (strongest — GBNF-constrains output to the action schema) /
-                        <code>force_json_object</code> / <code>grammar</code> to constrain output to valid JSON.
-                        Must be a JSON object; leave blank for defaults.
+                        Toggles and value boxes edit the <code>extra_config</code> of this endpoint. Leave a field empty to
+                        keep the engine default; save, or save the whole thing as a preset to swap between configurations.
                     </div>
                     <div style="display:flex; gap:10px; align-items:center; margin-top:8px;">
                         <button id="cortex-engine-config-save" class="pill" type="button">Save Config</button>
@@ -190,6 +228,21 @@
                         <div style="font-size:0.9rem; color:var(--muted);" id="iris-engine-description">—</div>
                     </div>
                 </div>
+
+                <!-- Vision prompt sent to the Iris engine; its returned description is injected into the next turn as context -->
+                <div id="iris-prompt-wrap" style="display:none; margin-bottom:14px; max-width:720px;">
+                    <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px; flex-wrap:wrap;">
+                        <label for="iris-default-prompt" style="font-weight:600; margin:0;">Vision prompt</label>
+                        <span style="color:var(--muted); font-weight:400; font-size:0.85rem;">(sent to the Iris engine when an image/video arrives; the description is injected into the next turn as context)</span>
+                    </div>
+                    <textarea id="iris-default-prompt" rows="3" spellcheck="false" placeholder="Describe this image in detail."
+                        style="width:100%; padding:8px 10px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:8px; font-size:0.85rem; resize:vertical; box-sizing:border-box;"></textarea>
+                    <div style="display:flex; gap:10px; align-items:center; margin-top:8px;">
+                        <button id="iris-default-prompt-save" class="pill" type="button">Save Prompt</button>
+                        <span id="iris-default-prompt-status" class="meta" style="font-size:0.85rem;"></span>
+                    </div>
+                </div>
+
                 <div class="components-list" id="components-iris-list"><div class="meta">Loading…</div></div>
             </div>
 

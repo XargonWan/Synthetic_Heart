@@ -1021,6 +1021,12 @@ class SynthWebUIInterface:
         self.app.put("/api/external-endpoints/{ep_id}/model")(
             self.set_external_endpoint_model
         )
+        self.app.get("/api/engine-config-presets")(self.list_engine_config_presets)
+        self.app.post("/api/engine-config-presets")(self.save_engine_config_preset)
+        self.app.post("/api/engine-config-presets/apply")(
+            self.apply_engine_config_preset
+        )
+        self.app.delete("/api/engine-config-presets")(self.delete_engine_config_preset)
         self.app.post("/api/database/backup")(self.create_database_backup_endpoint)
         self.app.get(
             "/api/database/backup/download",
@@ -7071,12 +7077,159 @@ class SynthWebUIInterface:
             if ep is None:
                 raise HTTPException(status_code=404, detail="Endpoint not found")
             await reg.set_default_model(ep_id, model)
+            # set_default_model only persists the DB row; reload the endpoint so
+            # the live engine bridges are rebuilt from the fresh row and the
+            # running engine starts using the model immediately.
+            await reg.reload_endpoint(ep_id)
             ep = await reg.get_endpoint(ep_id)
             return JSONResponse({"endpoint": ep.to_dict() if ep else {}})
         except HTTPException:
             raise
         except Exception as exc:
             log_error(f"{LOG_PREFIX} set_external_endpoint_model failed: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # ------------------------------------------------------------------
+    # Named engine-config presets (structured Engines-tab config editor)
+    # ------------------------------------------------------------------
+
+    async def list_engine_config_presets(self) -> JSONResponse:
+        """GET /api/engine-config-presets — list named engine-config presets."""
+        try:
+            from core.engine_config_presets import load_presets
+
+            return JSONResponse({"presets": load_presets()})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} list_engine_config_presets failed: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def save_engine_config_preset(self, request: Request) -> JSONResponse:
+        """POST /api/engine-config-presets — create or replace a named preset.
+
+        Body: ``{"name": ..., "model"?: ..., "description"?: ...,
+        "extra_config"?: {...}}``
+        """
+        try:
+            data = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
+        name = str(data.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Missing 'name'")
+        model = data.get("model")
+        model = str(model).strip() if model else None
+        description = str(data.get("description") or "").strip()
+        extra_config = data.get("extra_config")
+        if extra_config is not None and not isinstance(extra_config, dict):
+            raise HTTPException(
+                status_code=400, detail="'extra_config' must be an object"
+            )
+        try:
+            from core.engine_config_presets import save_preset
+
+            preset = await save_preset(
+                name,
+                model=model,
+                description=description,
+                extra_config=extra_config,
+            )
+            return JSONResponse({"preset": preset})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} save_engine_config_preset failed: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def delete_engine_config_preset(self, request: Request) -> JSONResponse:
+        """DELETE /api/engine-config-presets?name=... — remove a named preset."""
+        name = str(request.query_params.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Missing 'name' query param")
+        try:
+            from core.engine_config_presets import delete_preset
+
+            removed = await delete_preset(name)
+            if not removed:
+                raise HTTPException(
+                    status_code=404, detail=f"Preset '{name}' not found"
+                )
+            return JSONResponse({"status": "deleted"})
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} delete_engine_config_preset failed: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def apply_engine_config_preset(self, request: Request) -> JSONResponse:
+        """POST /api/engine-config-presets/apply — apply a preset to an endpoint.
+
+        Body: ``{"ep_id": ..., "name": ...}``.  Replaces the endpoint's
+        ``extra_config`` with the preset's bundle (and sets its default model
+        when the preset carries one), then re-probes the endpoint.
+        """
+        try:
+            data = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
+        try:
+            ep_id = int(data.get("ep_id", data.get("endpoint_id")))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Missing or invalid 'ep_id'")
+        name = str(data.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Missing 'name'")
+
+        try:
+            from core.engine_config_presets import apply_preset
+            from core.external_endpoints.crypto import decrypt_api_key
+            from core.external_endpoints.registry import (
+                get_external_endpoint_registry,
+            )
+
+            reg = get_external_endpoint_registry()
+            ep, preset = await apply_preset(ep_id, name)
+            if preset is None:
+                raise HTTPException(
+                    status_code=404, detail=f"Preset '{name}' not found"
+                )
+            if ep is None:
+                raise HTTPException(status_code=404, detail="Endpoint not found")
+
+            # When the preset carries a model, push it onto the live engine
+            # instance too.  apply_preset already re-synced the bridge from a
+            # DB row carrying the new default_model; this is a belt-and-
+            # suspenders push for instances that did not re-register, so the
+            # swap applies even without a probe round-trip.
+            preset_model = str(preset.get("model") or "").strip()
+            if preset_model:
+                try:
+                    from core.cortex_registry import get_cortex_registry
+
+                    instance = get_cortex_registry().get_engine(ep.engine_name())
+                    if instance is not None and hasattr(instance, "set_current_model"):
+                        instance.set_current_model(preset_model)
+                except Exception as exc:
+                    log_warning(
+                        f"{LOG_PREFIX} preset model '{preset_model}' could not be "
+                        f"applied to live engine '{ep.engine_name()}': {exc}"
+                    )
+
+            # Auto-probe after the config swap so the new settings are reflected
+            api_key = decrypt_api_key(ep.api_key_enc or "")
+            probe_data = await self._run_auto_probe(ep.id, api_key, reg)
+
+            ep_updated = await reg.get_endpoint(ep.id) or ep
+            return JSONResponse(
+                {
+                    "endpoint": ep_updated.to_dict(),
+                    "preset": preset,
+                    "probe": probe_data,
+                }
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} apply_engine_config_preset failed: {exc}")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     async def diary_summary(self, request: Request):
@@ -11385,8 +11538,12 @@ class SynthWebUIInterface:
                         endpoint_extra_config = _ep_fresh.extra_config
                         if not supported_models and _ep_fresh.available_models:
                             supported_models = list(_ep_fresh.available_models)
-                            if not current_model and _ep_fresh.default_model:
-                                current_model = _ep_fresh.default_model
+                        # The DB row is authoritative for the endpoint's default
+                        # model — the in-memory bridge copy can lag a DB-only
+                        # write, and the engine-config picker + presets must
+                        # reflect the model actually configured on the endpoint.
+                        if _ep_fresh.default_model:
+                            current_model = _ep_fresh.default_model
                 except Exception:
                     pass
 
@@ -12131,6 +12288,18 @@ class SynthWebUIInterface:
             "iris": iris_data,
             "iris_current_model": (
                 config_registry.get_value("IRIS_DEFAULT_MODEL", "") or ""
+            ),
+            "iris_default_prompt": (
+                config_registry.get_value(
+                    "IRIS_DEFAULT_PROMPT",
+                    "IMPORTANT: Respond in plain conversational text only. "
+                    "Do NOT use JSON, XML or any structured format. "
+                    "Simply describe what you see in the image.",
+                    value_type=str,
+                    group="plugins",
+                    component="iris_plugin",
+                )
+                or ""
             ),
             "vox_current_model": (
                 config_registry.get_value("VOX_DEFAULT_MODEL", "") or ""
