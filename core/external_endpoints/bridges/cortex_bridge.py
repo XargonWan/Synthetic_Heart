@@ -514,6 +514,27 @@ class ExternalCortexEngine(AIPluginBase):
         extra = self._endpoint.extra_config or {}
         return bool(_NATIVE_TOOLS_ENABLED or extra.get("enable_tools") is True)
 
+    def _parallel_tools_enabled(self) -> bool:
+        """Return whether this endpoint opts into PARALLEL native tool-calling.
+
+        Most LLMs cannot emit more than one tool call per turn, so this is
+        strictly opt-in via the endpoint's Extra Config JSON (WebUI). Both
+        ``enable_tools_parallel`` (canonical) and ``parallel_tool_calls``
+        (wire-level alias some configs use) are accepted. A model that natively
+        supports parallel calls (e.g. deepseek-4-flash) can emit the outward
+        reply plus bookkeeping actions (emotion state, diary) as parallel tool
+        calls in a single turn — the exact "message + reasoning + context at
+        once" shape the single-native-tool contract (vessel-only) could never
+        express. When enabled it also applies native tools to ordinary
+        (non-vessel) chat turns; Vessel turns keep the reliable single-call
+        contract.
+        """
+        extra = self._endpoint.extra_config or {}
+        return bool(
+            extra.get("enable_tools_parallel")
+            or extra.get("parallel_tool_calls") is True
+        )
+
     def _max_native_tools(self) -> int | None:
         """Return the native tool cap for this endpoint, if one is known.
 
@@ -596,6 +617,34 @@ class ExternalCortexEngine(AIPluginBase):
         # Keep the remaining world-specific actions in their registry order.
         return (3, 0, index)
 
+    @staticmethod
+    def _is_other_interface_delivery_action(name: str, interface_name: str) -> bool:
+        """True when ``name`` is a message-delivery action for a different channel.
+
+        The prompt engine's scope may expose several delivery families
+        (``message_*``, ``send_file_*``, ``audio_*``, ``send_<iface>_message``)
+        alongside the current chat's reply action.  Offering the other
+        interfaces' delivery actions in a normal chat turn makes a capable
+        parallel-calling model pick e.g. ``send_mate_message`` to "reply",
+        silently routing the reply to the wrong channel.  Only the current
+        interface's delivery action is kept (``message_<interface>``,
+        ``send_file_<interface>``, ``audio_<interface>``,
+        ``send_<interface>_message``).  Structural name matching only.
+        """
+        if not interface_name:
+            return False
+        lower = name.lower()
+        expected_by_prefix = {
+            "message_": f"message_{interface_name}",
+            "send_file_": f"send_file_{interface_name}",
+            "audio_": f"audio_{interface_name}",
+            "send_": f"send_{interface_name}_message",
+        }
+        for prefix, expected in expected_by_prefix.items():
+            if lower.startswith(prefix):
+                return name != expected
+        return False
+
     def _select_native_tool_manifests(self, prompt_request: Any) -> list[Any]:
         """Scope and cap manifests before rendering provider tool schemas.
 
@@ -624,11 +673,7 @@ class ExternalCortexEngine(AIPluginBase):
                 continue
             if is_vessel and not name.startswith("vessel_"):
                 continue
-            if (
-                interface_name
-                and name.startswith("message_")
-                and name != f"message_{interface_name}"
-            ):
+            if self._is_other_interface_delivery_action(name, interface_name):
                 continue
             filtered.append((index, manifest))
 
@@ -662,25 +707,43 @@ class ExternalCortexEngine(AIPluginBase):
         return selected
 
     @staticmethod
-    def _add_native_tool_instruction(prompt_request: Any) -> None:
+    def _add_native_tool_instruction(
+        prompt_request: Any, parallel: bool = False
+    ) -> None:
         """Tell the model which response transport is active for this turn.
 
         ``PromptRequest.system_instruction`` is also used by the OpenAI
         renderer, so this keeps the transport contract adjacent to the tool
         declarations.  It is deliberately structural: it does not try to
         infer intent from the user's words or maintain a keyword list.
+
+        ``parallel`` (from ``enable_tools_parallel``) lets a tool-capable model
+        emit the outward reply plus bookkeeping actions in one turn; the
+        default single-call wording is kept otherwise because most models
+        cannot make several parallel calls.
         """
         instruction = str(getattr(prompt_request, "system_instruction", "") or "")
         if _NATIVE_TOOL_MODE_MARKER in instruction:
             return
+        if parallel:
+            instruction_text = (
+                "The API tools supplied with this turn are the only action "
+                "interface. You MAY call MULTIPLE supplied functions in a single "
+                "turn: the outward reply (a message_* or say action) plus any "
+                "bookkeeping actions (update_emotion_state, diary entries). Do "
+                "not emit an actions JSON object, action list, tool name, or "
+                "tool arguments as message text. Do not invent a function name."
+            )
+        else:
+            instruction_text = (
+                "The API tools supplied with this turn are the only action interface. "
+                "Call exactly one supplied function for the single most important "
+                "action in this turn. Do not emit an actions JSON object, action list, "
+                "tool name, or tool arguments as message text. Do not invent a function "
+                "name. The next turn will provide the result and any follow-up action."
+            )
         prompt_request.system_instruction = instruction + (
-            "\n\n"
-            f"{_NATIVE_TOOL_MODE_MARKER}\n"
-            "The API tools supplied with this turn are the only action interface. "
-            "Call exactly one supplied function for the single most important "
-            "action in this turn. Do not emit an actions JSON object, action list, "
-            "tool name, or tool arguments as message text. Do not invent a function "
-            "name. The next turn will provide the result and any follow-up action."
+            f"\n\n{_NATIVE_TOOL_MODE_MARKER}\n{instruction_text}"
         )
 
     def _guard_plain_native_action_response(
@@ -1011,9 +1074,17 @@ class ExternalCortexEngine(AIPluginBase):
             # manual turn trips the missing-reply corrector (which re-runs with
             # no chat history, losing all context).  So even when an endpoint
             # opts into native tools, they are applied only to Vessel turns;
-            # ordinary chat keeps the in-prompt JSON-action protocol.
+            # ordinary chat keeps the in-prompt JSON-action protocol.  The
+            # exception: an endpoint that explicitly opts into PARALLEL native
+            # tool-calling (``enable_tools_parallel`` in Extra Config, only for
+            # models that support several calls per turn) can express reply +
+            # bookkeeping as parallel tool calls, so it gets native tools for
+            # ordinary chat too. Vessel turns always keep the single-call
+            # contract regardless.
+            _is_vessel_turn = self._is_vessel_prompt_request(prompt_request)
+            _parallel = self._parallel_tools_enabled() and not _is_vessel_turn
             use_native = self._native_tools_enabled() and (
-                _NATIVE_TOOLS_ENABLED or self._is_vessel_prompt_request(prompt_request)
+                _NATIVE_TOOLS_ENABLED or _is_vessel_turn or _parallel
             )
             if not use_native:
                 prompt_request.supports_tool_calling = False
@@ -1029,7 +1100,7 @@ class ExternalCortexEngine(AIPluginBase):
                 prompt_request.supports_tool_calling = False
                 return {}
 
-            self._add_native_tool_instruction(prompt_request)
+            self._add_native_tool_instruction(prompt_request, parallel=_parallel)
 
             # Render a shallow request copy so the caller retains its complete
             # action registry for dispatch/validation.  Only the provider-facing
@@ -1048,15 +1119,18 @@ class ExternalCortexEngine(AIPluginBase):
                 if not tools:
                     return {}
                 # SyntH's LLM-to-interface contract requires an action.  Ask
-                # Venice/OpenAI-compatible providers to make one native call
-                # and disable parallel calls so a model cannot turn one turn
-                # into an unbounded action batch.  Both fields are standard
-                # Chat Completions options; the adapter still owns provider
-                # specific translation.
+                # Venice/OpenAI-compatible providers to make a native call;
+                # parallel calls stay off unless the endpoint opted into them
+                # (``enable_tools_parallel``), so a non-parallel model cannot
+                # turn one turn into an unbounded action batch while a capable
+                # model can still emit reply + bookkeeping together.  Both
+                # fields are standard Chat Completions options; the adapter
+                # still owns provider-specific translation (and degrades the
+                # controls gracefully when a proxy rejects them).
                 return {
                     "tools": tools,
                     "tool_choice": "required",
-                    "parallel_tool_calls": False,
+                    "parallel_tool_calls": _parallel,
                 }
 
             if self._endpoint.protocol is EndpointProtocol.ANTHROPIC:

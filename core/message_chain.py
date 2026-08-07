@@ -3215,6 +3215,41 @@ async def handle_incoming_message(
                                     )
                                 )
 
+                            # Autonomous Rift Vessel turns (will/action/goal beats,
+                            # reflections, perceptions) have no human awaiting a reply.
+                            # When an action fails on such a turn, immediately re-invoking
+                            # the LLM to "correct" is wasteful — it burns a full LLM call
+                            # per retry and lets a weak model re-emit stray in-world `say`
+                            # spam (the reported duplicate-message flood). The failure is
+                            # already recorded above; the next (rate-limited) beat retries
+                            # on its own cadence. Reactive player chat (vessel_player_chat)
+                            # still gets correction so a person is always answered.
+                            _is_autonomous_vessel_turn = False
+                            try:
+                                from core.interface_path_utils import (
+                                    is_vessel_embodiment_context,
+                                )
+
+                                _is_autonomous_vessel_turn = (
+                                    is_vessel_embodiment_context(ctx or {})
+                                    and not is_reactive_vessel_chat
+                                )
+                            except Exception:  # pragma: no cover - defensive
+                                _is_autonomous_vessel_turn = False
+                            if (
+                                _is_autonomous_vessel_turn
+                                and len(failed) > 0
+                                and not missing_user_reply
+                                and not has_user_output_action
+                                and not delivered_to_llm
+                            ):
+                                log_warning(
+                                    "[message_chain] Skipping LLM correction for "
+                                    f"autonomous vessel turn ({len(failed)} failed "
+                                    "action(s)); next beat will retry"
+                                )
+                                return ACTIONS_EXECUTED
+
                             # Build correction context with info about what succeeded and what failed
                             correction_context = {
                                 "successful_actions": processed,

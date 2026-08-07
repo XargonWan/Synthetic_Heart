@@ -3,7 +3,14 @@
   "mcp": {
     "tencentdb-knowledge": {
       "type": "local",
-      "command": ["uv", "run", "python", "scripts/tencentdb_knowledge_mcp.py"],
+      "command": [
+        "D:\\dev\\D16\\synthetic_heart\\.venv\\Scripts\\python.exe",
+        "D:\\dev\\D16\\synthetic_heart\\scripts\\tencentdb_knowledge_mcp.py"
+      ],
+      "environment": {
+        "KNOWLEDGE_DATA_DIR": "D:\\tdbdata",
+        "KNOWLEDGE_DB_PATH": "D:\\tdbdata\\knowledge.db"
+      },
       "enabled": true
     },
     "synth-logs": {

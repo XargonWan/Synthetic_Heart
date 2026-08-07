@@ -132,6 +132,32 @@ async def test_openai_compat_http_chat_urls_include_api_v1_paths():
     assert any(url.endswith("/api/v1/chat") for url in urls)
 
 
+def test_extract_message_reasoning_from_dict():
+    adapter = OpenAICompatAdapter(base_url="http://localhost:14848")
+    assert (
+        adapter._extract_message_reasoning(
+            {"content": "reply", "reasoning_content": "let me think"}
+        )
+        == "let me think"
+    )
+
+
+def test_extract_message_reasoning_empty():
+    adapter = OpenAICompatAdapter(base_url="http://localhost:14848")
+    assert adapter._extract_message_reasoning({"content": "reply"}) == ""
+    assert adapter._extract_message_reasoning({}) == ""
+    assert adapter._extract_message_reasoning(None) == ""
+
+
+def test_extract_message_reasoning_from_object():
+    adapter = OpenAICompatAdapter(base_url="http://localhost:14848")
+
+    class _Msg:
+        reasoning_content = "step one"
+
+    assert adapter._extract_message_reasoning(_Msg()) == "step one"
+
+
 @pytest.mark.asyncio
 async def test_openai_compat_list_models_uses_adapter_timeout(monkeypatch):
     data = [{"id": "grok", "object": "model", "name": "Grok"}]
@@ -1554,6 +1580,187 @@ def test_venice_native_tools_not_forced_on_ordinary_chat():
     assert "tools" not in kwargs
     assert "tool_choice" not in kwargs
     assert prompt.supports_tool_calling is False
+
+
+def test_parallel_tools_is_opt_in_via_extra_config():
+    """parallel_tool_calls stays off unless the endpoint opts into it."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+
+    plain = ExternalCortexEngine(_openai_endpoint({}), cast(Any, SimpleNamespace()))
+    assert plain._parallel_tools_enabled() is False
+
+    parallel = ExternalCortexEngine(
+        _openai_endpoint({"enable_tools_parallel": True}),
+        cast(Any, SimpleNamespace()),
+    )
+    assert parallel._parallel_tools_enabled() is True
+
+    # Wire-level alias some endpoint configs use.
+    alias = ExternalCortexEngine(
+        _openai_endpoint({"parallel_tool_calls": True}),
+        cast(Any, SimpleNamespace()),
+    )
+    assert alias._parallel_tools_enabled() is True
+
+    # A non-boolean value must not enable it.
+    bogus = ExternalCortexEngine(
+        _openai_endpoint({"parallel_tool_calls": "auto"}),
+        cast(Any, SimpleNamespace()),
+    )
+    assert bogus._parallel_tools_enabled() is False
+
+
+def test_parallel_tools_enable_native_tools_for_ordinary_chat():
+    """An endpoint with enable_tools_parallel gets native tools on ordinary chat
+    turns too, with parallel calls allowed — so a capable model can emit the
+    reply + emotion + diary actions together (the "message, reasoning, context
+    at once" shape) instead of the in-prompt JSON protocol."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from core.prompt_request import PromptRequest, RuntimeContext
+
+    endpoint = _openai_endpoint({"enable_tools": True, "enable_tools_parallel": True})
+    manifests = [
+        SimpleNamespace(
+            name="message_telegram_bot", description="reply", parameters=[]
+        ),
+        SimpleNamespace(
+            name="update_emotion_state", description="bookkeeping", parameters=[]
+        ),
+        SimpleNamespace(
+            name="create_personal_diary_entry", description="diary", parameters=[]
+        ),
+    ]
+    prompt = PromptRequest(
+        system_instruction="Use tools.",
+        current_text="hello",
+        tool_declarations=manifests,
+        runtime_ctx=RuntimeContext(
+            interface_name="telegram_bot",
+            interface_path="telegram_bot/5208932647",
+        ),
+    )
+    engine = ExternalCortexEngine(
+        endpoint,
+        OpenAICompatAdapter(base_url="https://api.venice.ai/api/v1", api_key="test"),
+    )
+
+    kwargs = engine._tool_api_kwargs(prompt)
+
+    assert "tools" in kwargs
+    assert kwargs["tool_choice"] == "required"
+    assert kwargs["parallel_tool_calls"] is True
+    assert prompt.supports_tool_calling is True
+    # The parallel transport instruction tells the model it may call several
+    # functions in one turn (not the single-call contract).
+    assert "MULTIPLE supplied functions" in prompt.system_instruction
+    assert "SYNTH NATIVE TOOL MODE" in prompt.system_instruction
+
+
+def test_vessel_keeps_single_call_even_when_parallel_configured():
+    """Vessel turns keep the reliable single-call contract even on an endpoint
+    that opts into parallel tools (the embodiment loop wants one action)."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from core.prompt_request import PromptRequest, RuntimeContext
+
+    endpoint = _openai_endpoint({"enable_tools": True, "enable_tools_parallel": True})
+    manifests = [
+        SimpleNamespace(name="vessel_minecraft_say", description="say", parameters=[]),
+        SimpleNamespace(
+            name="vessel_minecraft_mine", description="mine", parameters=[]
+        ),
+    ]
+    prompt = PromptRequest(
+        system_instruction="Use tools.",
+        current_text="get wood",
+        tool_declarations=manifests,
+        runtime_ctx=RuntimeContext(
+            interface_name="vessel",
+            interface_path="vessel/minecraft/player",
+        ),
+    )
+    engine = ExternalCortexEngine(
+        endpoint,
+        OpenAICompatAdapter(base_url="https://api.venice.ai/api/v1", api_key="test"),
+    )
+
+    kwargs = engine._tool_api_kwargs(prompt)
+
+    assert kwargs["parallel_tool_calls"] is False
+    assert "Call exactly one supplied function" in prompt.system_instruction
+
+
+def test_chat_tool_scope_excludes_other_interfaces_delivery_actions():
+    """A Telegram chat turn must not be offered Mate's ``send_mate_message`` or
+    another interface's delivery actions — a parallel-capable model otherwise
+    "replies" with the wrong channel action."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+
+    engine = ExternalCortexEngine(_openai_endpoint({}), cast(Any, SimpleNamespace()))
+
+    # Current interface is telegram_bot.
+    assert (
+        engine._is_other_interface_delivery_action("send_mate_message", "telegram_bot")
+        is True
+    )
+    assert (
+        engine._is_other_interface_delivery_action(
+            "message_discord_bot", "telegram_bot"
+        )
+        is True
+    )
+    assert (
+        engine._is_other_interface_delivery_action(
+            "send_file_discord_bot", "telegram_bot"
+        )
+        is True
+    )
+    # The current interface's delivery actions stay.
+    assert (
+        engine._is_other_interface_delivery_action(
+            "message_telegram_bot", "telegram_bot"
+        )
+        is False
+    )
+    assert (
+        engine._is_other_interface_delivery_action(
+            "send_file_telegram_bot", "telegram_bot"
+        )
+        is False
+    )
+    assert (
+        engine._is_other_interface_delivery_action("audio_telegram_bot", "telegram_bot")
+        is False
+    )
+    # Non-delivery actions are untouched.
+    assert (
+        engine._is_other_interface_delivery_action(
+            "update_emotion_state", "telegram_bot"
+        )
+        is False
+    )
+    # On the mate interface itself, send_mate_message is the reply action.
+    assert (
+        engine._is_other_interface_delivery_action("send_mate_message", "mate") is False
+    )
+
+
+def test_update_emotion_state_tool_schema_requires_emotions():
+    """update_emotion_state used the legacy required_params format that produced
+    an empty native tool schema (model called it with {}). After the fix its
+    tool manifest must expose `emotions` as a required parameter."""
+    from core.live_tool_registry import _parameters_from_action_definition
+
+    from plugins.emotion_manager.emotion_manager import EmotionManager
+
+    actions = EmotionManager().get_supported_actions()
+    params = _parameters_from_action_definition(
+        "update_emotion_state", actions["update_emotion_state"]
+    )
+    by_name = {p.name: p for p in params}
+    assert by_name["emotions"].required is True
+    assert by_name["emotions"].type == "object"
+    assert (by_name["emotions"].schema or {}).get("minProperties") == 1
+    assert by_name["apply_balancing"].required is False
 
 
 @pytest.mark.asyncio

@@ -3747,6 +3747,20 @@ class MinecraftConnector(VesselConnectorBase):
             for row in rows:
                 event_type = row.get("event_type") or ""
                 meta = row.get("metadata") or {}
+                # Only a row proving the action actually SUCCEEDED counts as
+                # evidence of goal completion. ``action_*`` rows are the outbound
+                # ATTEMPT and carry a ``_result`` payload: failed attempts (e.g.
+                # craft(wooden_pickaxe) with no recipe, drop of an item not
+                # carried, collect_block with a malformed id) log ``ok: false``
+                # and must NOT mark a goal done — otherwise a goal is
+                # auto-completed from a failed attempt and the body just walks
+                # around with nothing to pursue. Verified world events
+                # (craft/gather/build, ``_provenance: world_event``) have no
+                # ``_result`` and are inherently successful. Structural check,
+                # never text.
+                _res = meta.get("_result")
+                if _res is not None and not bool(_res.get("ok")):
+                    continue
                 ids = {
                     str(meta.get(key)).strip()
                     for key in self._HISTORY_TARGET_KEYS

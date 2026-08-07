@@ -648,6 +648,26 @@ class VesselInterface:
             interface_path.split("/")[1] if "/" in interface_path else "unknown"
         )
         await manager.end_session(session_id, reason=reason)
+        # A fresh embodiment visit on the same world/server reuses the same
+        # interface_path, so the previous session's chat would otherwise leak
+        # into the next one's prompt (the reported "last session's craft +
+        # disconnect instructions echoed into a new session"). Purge the vessel
+        # chat context — in-memory deques AND the durable chat_history_cache —
+        # so each session starts clean. The goals table is left untouched: a
+        # goal survives across sessions by design. Guarded + fail-safe.
+        try:
+            if interface_path:
+                from core.chat_context_manager import clear_chat_context
+                from core.chat_history_cache import clear_chat_history
+
+                await clear_chat_history(interface_path)
+                clear_chat_context(interface_path)
+                log_debug(
+                    f"[vessel_interface] cleared chat context for "
+                    f"{interface_path} on session end"
+                )
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[vessel_interface] chat context clear failed: {exc}")
         await self._log_activity(
             session_id=session_id,
             interface_path=interface_path,
@@ -1126,10 +1146,7 @@ class VesselInterface:
             # keyword text.
             is_appraisal = event_type == "damage_appraisal"
             no_compact = (
-                is_player_chat
-                or is_reflection
-                or is_appraisal
-                or observation_followup
+                is_player_chat or is_reflection or is_appraisal or observation_followup
             )
 
             wrapped = SimpleNamespace(
@@ -1215,9 +1232,7 @@ class VesselInterface:
         if isinstance(world_state, dict):
             source = world_state
             extra = (
-                source.get("extra")
-                if isinstance(source.get("extra"), dict)
-                else source
+                source.get("extra") if isinstance(source.get("extra"), dict) else source
             )
         else:
             source = {
@@ -1276,9 +1291,7 @@ class VesselInterface:
             "health": source.get("health"),
             "position": compact_position(source.get("position")),
             "flags": {
-                key: flags[key]
-                for key in ("connected", "is_day")
-                if key in flags
+                key: flags[key] for key in ("connected", "is_day") if key in flags
             },
             "possible_actions": [
                 str(action)
@@ -1366,8 +1379,7 @@ class VesselInterface:
         summary = (
             "A live observation just returned exact nearby world ids and "
             "affordances. Choose one concrete world action now; do not only "
-            "observe again."
-            + exact_target_hint
+            "observe again." + exact_target_hint
         )
         await self._enqueue_perception(
             interface_path=interface_path,

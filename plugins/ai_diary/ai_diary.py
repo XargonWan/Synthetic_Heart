@@ -1596,7 +1596,7 @@ class DiaryPlugin:
                             "items": {"type": "string"},
                         },
                     },
-                    "required": ["interaction_summary"],
+                    "required": ["interaction_summary", "personal_thought"],
                 },
                 "brief": "Add a new diary entry to synth's memory - REQUIRED in every response. Never include weather/location data in summaries.",
                 "examples": {

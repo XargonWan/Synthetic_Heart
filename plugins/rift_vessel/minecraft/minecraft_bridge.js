@@ -663,8 +663,17 @@ function nearbyBlocks(radius, maxCount) {
   if (!bot || !bot.entity || typeof bot.blockAt !== 'function') return [];
   const r = Math.min(Math.max(parseInt(radius, 10) || 4, 1), 16);
   const origin = bot.entity.position.floored();
-  const seen = new Set();
-  const out = [];
+  const originVec = bot.entity.position;
+  // Track the NEAREST instance of each distinct block name. The old code kept
+  // the FIRST occurrence the sweep happened to hit and returned as soon as it
+  // had `maxCount` distinct names, so a block type that was actually right next
+  // to the bot could be reported at a much larger distance (and coordinates) —
+  // Synth then planned a long `goto`/`mine` around a "far" block when a match
+  // sat beside it. Sweeping the whole volume once and keeping the per-name
+  // nearest makes every listed distance/position truthful. Bounded memory (one
+  // entry per distinct block name), same O(volume) cost as before, and no
+  // palette-decode allocation burst (we only read loaded chunks via blockAt).
+  const best = new Map();
   for (let dx = -r; dx <= r; dx += 1) {
     for (let dy = -2; dy <= 2; dy += 1) {
       for (let dz = -r; dz <= r; dz += 1) {
@@ -676,22 +685,21 @@ function nearbyBlocks(radius, maxCount) {
           block = null;
         }
         if (!block || !block.name || block.name === 'air') continue;
-        // Deduplicate by block name to give a compact "what is around" view
-        // rather than thousands of stone/dirt cells.
-        if (seen.has(block.name)) continue;
-        seen.add(block.name);
-        const dist = bot.entity.position.distanceTo(block.position);
-        out.push({
-          name: block.name,
-          distance: Math.round(dist * 10) / 10,
-          position: roundVec(block.position),
-        });
-        if (out.length >= (maxCount || 24)) return out;
+        const dist = originVec.distanceTo(block.position);
+        const cur = best.get(block.name);
+        if (!cur || dist < cur.distance) {
+          best.set(block.name, {
+            name: block.name,
+            distance: dist,
+            position: roundVec(block.position),
+          });
+        }
       }
     }
   }
+  const out = Array.from(best.values());
   out.sort((a, b) => a.distance - b.distance);
-  return out;
+  return out.slice(0, Math.min(Math.max(parseInt(maxCount, 10) || 24, 1), 128));
 }
 
 function botInventory() {

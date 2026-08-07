@@ -341,3 +341,72 @@ async def test_history_loader_error_is_failsafe(monkeypatch: Any) -> None:
         {"target_kind": "block", "target_name": "stone"}, "s1"
     )
     assert res["satisfied"] is False
+
+
+async def test_history_failed_action_row_is_not_satisfied(monkeypatch: Any) -> None:
+    # A craft ATTEMPT that failed (logged with ``_result.ok: False``, e.g. no
+    # recipe / not enough materials) must NOT auto-complete the goal — otherwise
+    # a goal is closed from a failed attempt and the body just walks around with
+    # nothing to pursue (the reported bug).
+    _patch_rows(
+        monkeypatch,
+        [
+            {
+                "event_type": "action_craft",
+                "metadata": {
+                    "item": "wooden_pickaxe",
+                    "_result": {"ok": False, "detail": "no craftable recipe"},
+                },
+            }
+        ],
+    )
+    conn = _conn()
+    res = await conn.evaluate_goal_completion_from_history(
+        {"description": "craft a wooden pickaxe"}, "s1"
+    )
+    assert res["satisfied"] is False
+
+
+async def test_history_failed_block_action_row_is_not_satisfied(
+    monkeypatch: Any,
+) -> None:
+    _patch_rows(
+        monkeypatch,
+        [
+            {
+                "event_type": "action_mine",
+                "metadata": {
+                    "target": "stone",
+                    "_result": {"ok": False, "detail": "need a better tool"},
+                },
+            }
+        ],
+    )
+    conn = _conn()
+    res = await conn.evaluate_goal_completion_from_history(
+        {"target_kind": "block", "target_name": "stone"}, "s1"
+    )
+    assert res["satisfied"] is False
+
+
+async def test_history_successful_action_row_is_satisfied(monkeypatch: Any) -> None:
+    # A craft attempt that SUCCEEDED (``_result.ok: True``) is real progress and
+    # still auto-completes the goal.
+    _patch_rows(
+        monkeypatch,
+        [
+            {
+                "event_type": "action_craft",
+                "metadata": {
+                    "item": "wooden_pickaxe",
+                    "_result": {"ok": True, "detail": "crafted 1x wooden_pickaxe"},
+                },
+            }
+        ],
+    )
+    conn = _conn()
+    res = await conn.evaluate_goal_completion_from_history(
+        {"description": "craft a wooden pickaxe"}, "s1"
+    )
+    assert res["satisfied"] is True
+    assert res["item"] == "wooden_pickaxe"

@@ -479,12 +479,23 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             if finish_reason == "tool_calls":
                 finish_reason = "tool_call"
 
+            # Capture the model's private reasoning (chain-of-thought) when the
+            # provider returns it in ``reasoning_content`` (Venice/DeepSeek with
+            # thinking enabled). It is ephemeral (never fed back to the model),
+            # but it must still appear in the response log so the operator can
+            # see *why* Synth picked an action — the "thoughts missing from the
+            # response log" gap. ``content`` stays the exact dispatch payload.
+            reasoning = self._extract_message_reasoning(choice.message)
+            logged_body: dict[str, Any] | str = content
+            if reasoning:
+                logged_body = {"reasoning": reasoning, "content": content}
+
             _elapsed = (_time.monotonic() - _req_start) * 1000
             log_cortex_response(
                 engine_tag,
                 model=response.model or request_model,
                 status=200,
-                body=content,
+                body=logged_body,
                 usage=usage or None,
                 elapsed_ms=_elapsed,
             )
@@ -690,6 +701,18 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             f"{base_path}/{path.lstrip('/')}" if base_path else f"/{path.lstrip('/')}"
         )
         return urlunparse(parsed._replace(path=joined_path))
+
+    @staticmethod
+    def _extract_message_reasoning(message: Any) -> str:
+        """Return the model's private reasoning text (``reasoning_content``).
+
+        Reasoning models (Venice/DeepSeek with thinking enabled) emit chain-of-
+        thought in ``reasoning_content``, separate from ``content``/``tool_calls``.
+        This text is logged for observability and never returned to the model.
+        """
+        if isinstance(message, dict):
+            return str(message.get("reasoning_content") or "").strip()
+        return str(getattr(message, "reasoning_content", "") or "").strip()
 
     @staticmethod
     def _extract_message_content(message: Any) -> str:

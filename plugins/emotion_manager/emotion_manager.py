@@ -266,13 +266,29 @@ class EmotionManager(PluginBase):
                 },
             },
             "update_emotion_state": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "emotions": {
+                            "type": "object",
+                            "description": (
+                                "Map of emotion name to intensity (0.0-10.0). "
+                                "MUST contain at least one emotion, e.g. "
+                                '{"joy": 7.5, "love": 8.0}'
+                            ),
+                            "minProperties": 1,
+                        },
+                        "apply_balancing": {
+                            "type": "boolean",
+                            "description": (
+                                "Apply Plutchik opposite balancing (default: true)"
+                            ),
+                        },
+                    },
+                    "required": ["emotions"],
+                },
+                "brief": "Update multiple emotions using structured payload data",
                 "description": "Update multiple emotions using structured payload data",
-                "required_params": {
-                    "emotions": "object - map of emotion name to intensity (0.0-10.0)",
-                },
-                "optional_params": {
-                    "apply_balancing": "bool - apply Plutchik opposite balancing (default: true)",
-                },
             },
         }
 

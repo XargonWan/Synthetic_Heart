@@ -537,6 +537,73 @@ def _normalize_text_field_alias(action_type: str, payload: dict) -> None:
             return
 
 
+# Vessel actions: the canonical structural field each verb family requires.
+# Small models frequently emit a synonym (``recipe``/``block``/``id``/
+# ``amount``) instead of the required field, which fails validation/dispatch and,
+# for an autonomous beat, silently drops the whole action (the "walks around,
+# does nothing" symptom). Renaming is safe: only applied when the canonical key
+# is absent and only for ``vessel_*`` actions.
+_VESSEL_ITEM_FIELD_VERBS = frozenset({"craft", "smelt", "drop", "place", "equip"})
+_VESSEL_NAME_FIELD_VERBS = frozenset({"collect_block"})
+_VESSEL_TARGET_FIELD_VERBS = frozenset({"mine", "goto", "follow", "attack"})
+_VESSEL_ALL_VERBS = (
+    _VESSEL_ITEM_FIELD_VERBS | _VESSEL_NAME_FIELD_VERBS | _VESSEL_TARGET_FIELD_VERBS
+)
+
+
+def _rename_first_payload_alias(
+    payload: dict, canonical: str, aliases: tuple[str, ...]
+) -> None:
+    """Rename the first present alias to ``canonical`` (only when canonical absent)."""
+    if payload.get(canonical):
+        return
+    for alias in aliases:
+        value = payload.get(alias)
+        if isinstance(value, str) and value.strip():
+            payload[canonical] = payload.pop(alias)
+            log_debug(
+                f"[action_parser] Normalized payload: renamed '{alias}' -> "
+                f"'{canonical}'"
+            )
+            return
+
+
+def _vessel_action_verb(action_type: str) -> str | None:
+    """Return the bare verb of a namespaced ``vessel_<world>_<verb>`` action.
+
+    Both the world token and the verb may be underscore-joined (e.g.
+    ``vessel_minecraft_collect_block`` -> ``collect_block``), so the verb is
+    matched as the longest known ``_<verb>`` suffix, never by splitting on
+    underscores (which would truncate multi-word verbs).
+    """
+    for verb in sorted(_VESSEL_ALL_VERBS, key=len, reverse=True):
+        if action_type.endswith("_" + verb):
+            return verb
+    return None
+
+
+def _normalize_vessel_payload_alias(action_type: str, payload: dict) -> None:
+    """Map common misnamed vessel payload keys to the canonical field names."""
+    if not action_type.startswith("vessel_"):
+        return
+    verb = _vessel_action_verb(action_type)
+    if verb in _VESSEL_ITEM_FIELD_VERBS:
+        _rename_first_payload_alias(
+            payload, "item", ("recipe", "id", "block", "block_name", "name")
+        )
+    elif verb in _VESSEL_NAME_FIELD_VERBS:
+        _rename_first_payload_alias(
+            payload, "name", ("block", "block_name", "id", "type", "target")
+        )
+    elif verb in _VESSEL_TARGET_FIELD_VERBS:
+        _rename_first_payload_alias(
+            payload, "target", ("block", "block_name", "name", "entity", "type", "id")
+        )
+    if "count" not in payload and "amount" in payload:
+        payload["count"] = payload.pop("amount")
+        log_debug("[action_parser] Normalized payload: renamed 'amount' -> 'count'")
+
+
 def _normalize_payload(action_type: str, payload: dict) -> None:
     """Normalize a payload in-place so quoted numbers become real numbers.
 
@@ -556,6 +623,7 @@ def _normalize_payload(action_type: str, payload: dict) -> None:
     """
 
     _normalize_text_field_alias(action_type, payload)
+    _normalize_vessel_payload_alias(action_type, payload)
 
     def _coerce_int(value):
         """Convert a clean integer string to ``int``; otherwise return as-is."""
