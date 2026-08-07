@@ -113,3 +113,33 @@ def test_normalize_payload_applies_vessel_alias():
     _normalize_payload("vessel_minecraft_craft", payload)
 
     assert payload["item"] == "wooden_pickaxe"
+
+
+def test_normalize_payload_renames_emotion_feelings_to_emotions():
+    """Models place the prompt's 'feelings' object inside the
+    update_emotion_state payload instead of the response top level; that payload
+    fails validation (required 'emotions'). Normalization must rename it and
+    scale the 0-1 values to the 0-10 schema scale."""
+    payload = {"feelings": {"shyness": 0.7, "affection": 0.6}}
+
+    _normalize_payload("update_emotion_state", payload)
+
+    assert "feelings" not in payload
+    assert payload["emotions"] == {"shyness": 7.0, "affection": 6.0}
+
+
+def test_normalize_payload_emotion_keeps_existing_emotions():
+    payload = {"emotions": {"joy": 8}, "feelings": {"shyness": 0.7}}
+
+    _normalize_payload("update_emotion_state", payload)
+
+    assert payload["emotions"] == {"joy": 8}
+    assert "feelings" not in payload
+
+
+def test_normalize_payload_emotion_leaves_other_actions_alone():
+    payload = {"feelings": {"shyness": 0.7}}
+
+    _normalize_payload("message_telegram_bot", payload)
+
+    assert payload == {"feelings": {"shyness": 0.7}}

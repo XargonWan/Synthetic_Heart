@@ -1210,7 +1210,12 @@ class TestHistoryToTurns:
         assert turns[0].content == "Replying now"
         assert turns[1].content == "Thanks"
 
-    def test_coalesces_consecutive_same_role_turns(self) -> None:
+    def test_coalesces_consecutive_assistant_turns_only(self) -> None:
+        """ASSISTANT streaks (Synth's own outreach/split self-replies) are
+        coalesced for provider well-formedness, but consecutive USER turns are
+        NEVER merged — each human message is a distinct turn, and collapsing two
+        separate messages into one jumbles the context the model sees (the
+        "outputs feel out of order" bug, Langfuse f3a0aa68)."""
         lines = [
             '[13/04/26:0924] Alice: "First part"',
             '[13/04/26:0925] Alice: "Second part"',
@@ -1220,9 +1225,30 @@ class TestHistoryToTurns:
 
         turns = self._call(lines, {"syntha"})
 
-        assert [turn.role for turn in turns] == ["user", "assistant"]
-        assert turns[0].content == "First part\n\nSecond part"
-        assert turns[1].content == "First answer\n\nSecond answer"
+        # User turns stay separate; assistant turns coalesce.
+        assert [turn.role for turn in turns] == ["user", "user", "assistant"]
+        assert turns[0].content == "First part"
+        assert turns[1].content == "Second part"
+        assert turns[2].content == "First answer\n\nSecond answer"
+
+    def test_distinct_user_messages_never_merged(self) -> None:
+        """Regression: two separate user messages (sent minutes apart with no
+        reply between, e.g. after a failed correction output) must stay two
+        turns — the old coalescing merged them into one jumbled message."""
+        lines = [
+            '[26/08/07:1232] Scar: "Okay that broke from the other fix, but no '
+            'matter, how are you feeling cutie patootie"',
+            '[26/08/07:1256] Scar: "Okay that broke from the other fix even more, '
+            'but no matter, how are you feeling cutie patootie"',
+            '[26/08/07:1256] self: "Mmm... a little flustered and shy"',
+        ]
+
+        turns = self._call(lines, {"dee"})
+
+        assert [turn.role for turn in turns] == ["user", "user", "assistant"]
+        assert "First part" not in turns[0].content
+        assert "even more" in turns[1].content
+        assert "\n\n" not in turns[0].content
 
     def test_peer_synth_sender_tagged_not_collapsed_into_anonymous_user(
         self, monkeypatch
@@ -1296,9 +1322,12 @@ class TestHistoryToTurns:
 
         turns = self._call(lines, {"synth"})
 
-        assert len(turns) == 1
+        # Peer turns are user-role turns; they are never merged either — each
+        # message stays a distinct turn (the "context out of order" fix).
+        assert len(turns) == 2
         assert turns[0].role == "user"
-        assert turns[0].content == "[SynthA]: peer line one\n\n[SynthA]: peer line two"
+        assert turns[0].content == "[SynthA]: peer line one"
+        assert turns[1].content == "[SynthA]: peer line two"
 
     def test_consecutive_human_turns_still_coalesce_with_peer_configured(
         self, monkeypatch
@@ -1311,6 +1340,8 @@ class TestHistoryToTurns:
 
         turns = self._call(lines, {"synth"})
 
-        assert len(turns) == 1
+        # Human user turns are never merged — each message is a distinct turn.
+        assert len(turns) == 2
         assert turns[0].role == "user"
-        assert turns[0].content == "First part\n\nSecond part"
+        assert turns[0].content == "First part"
+        assert turns[1].content == "Second part"

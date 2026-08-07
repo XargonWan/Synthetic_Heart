@@ -604,6 +604,50 @@ def _normalize_vessel_payload_alias(action_type: str, payload: dict) -> None:
         log_debug("[action_parser] Normalized payload: renamed 'amount' -> 'count'")
 
 
+def _normalize_emotion_payload_alias(payload: dict) -> None:
+    """update_emotion_state: accept the ``feelings`` object the prompt asks for.
+
+    The JSON instructions tell models "Emotions MUST be provided in the
+    'feelings' metadata object", and a model reliably places that object inside
+    the ``update_emotion_state`` payload (``payload['feelings']``) instead of at
+    the response top level. The action schema requires ``payload['emotions']``,
+    so without normalization the action fails validation and the whole turn's
+    output is rejected — the "output failure" seen on Telegram. Rename the
+    payload-level ``feelings`` dict to ``emotions`` when ``emotions`` is absent.
+    The feelings values use a 0-1 scale while the schema/executor use 0-10, so
+    they are scaled up only when every value is a 0-1 float.
+    """
+    if "emotions" not in payload and isinstance(payload.get("feelings"), dict):
+        feelings = payload.pop("feelings")
+        try:
+            values = [
+                float(v) for v in feelings.values() if isinstance(v, (int, float))
+            ]
+        except (TypeError, ValueError):
+            values = []
+        if values and all(0.0 <= v <= 1.0 for v in values):
+            feelings = {
+                k: float(v) * 10.0
+                for k, v in feelings.items()
+                if isinstance(v, (int, float))
+            }
+            log_debug(
+                "[action_parser] update_emotion_state: scaled 'feelings' "
+                "0-1 values to the 0-10 'emotions' scale"
+            )
+        else:
+            log_debug(
+                "[action_parser] update_emotion_state: renamed payload "
+                "'feelings' -> 'emotions'"
+            )
+        payload["emotions"] = feelings
+    elif "feelings" in payload and "emotions" in payload:
+        # A stray payload-level 'feelings' object next to a valid 'emotions'
+        # map is not an action field (the 'feelings' metadata belongs at the
+        # response top level); drop it so nothing downstream trips on it.
+        payload.pop("feelings")
+
+
 def _normalize_payload(action_type: str, payload: dict) -> None:
     """Normalize a payload in-place so quoted numbers become real numbers.
 
@@ -624,6 +668,8 @@ def _normalize_payload(action_type: str, payload: dict) -> None:
 
     _normalize_text_field_alias(action_type, payload)
     _normalize_vessel_payload_alias(action_type, payload)
+    if action_type == "update_emotion_state":
+        _normalize_emotion_payload_alias(payload)
 
     def _coerce_int(value):
         """Convert a clean integer string to ``int``; otherwise return as-is."""
@@ -2161,8 +2207,14 @@ def _llm_already_provided_diary_content(processed_actions: list) -> bool:
         if action.get("type") != "create_personal_diary_entry":
             continue
         payload = action.get("payload") or {}
-        content = (payload.get("content") or "").strip()
-        if content:
+        if (payload.get("content") or "").strip():
+            return True
+        # The model often provides interaction_summary / personal_thought without
+        # `content`; the diary plugin now writes those directly too, so the
+        # automatic summary must also detect them to avoid a duplicate entry.
+        if (payload.get("interaction_summary") or "").strip():
+            return True
+        if (payload.get("personal_thought") or "").strip():
             return True
     return False
 

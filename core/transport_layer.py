@@ -2319,6 +2319,35 @@ async def run_corrector_middleware(
             ):
                 original_user_message = context.get("original_user_message") or ""
 
+            # Derive WHO the original message came from. The corrector prompt is
+            # stripped of the routing prefix and conversation history the main
+            # turn carries, so a multi-person persona (e.g. two parents) makes
+            # the model guess — it mis-attributed Papa's goodnight to Mama.
+            # Structural: read the sender name off the original message object
+            # (or the input payload), never keyword matching.
+            correction_sender = ""
+            try:
+                from_user = getattr(message, "from_user", None)
+                if from_user is not None:
+                    sender_name = (
+                        getattr(from_user, "first_name", None)
+                        or getattr(from_user, "username", None)
+                        or getattr(from_user, "full_name", None)
+                    )
+                    if sender_name:
+                        correction_sender = str(sender_name)
+                if not correction_sender and context:
+                    _inp = context.get("input") or {}
+                    _payload = _inp.get("payload") or {}
+                    if isinstance(_payload, dict):
+                        _cur = _payload.get("current_chat") or {}
+                        if isinstance(_cur, dict):
+                            correction_sender = str(
+                                _cur.get("title") or _cur.get("participant_name") or ""
+                            )
+            except Exception:
+                correction_sender = ""
+
             # Build correction message based on whether we have selective correction context
             if correction_context:
                 # Selective correction: tell LLM what succeeded and what needs fixing
@@ -2408,7 +2437,8 @@ async def run_corrector_middleware(
                         f"2. Include ALL actions needed to answer the user's original message\n"
                         f"3. Every action object MUST have a 'type' field with a recognised action name\n"
                         f"4. Do NOT use emotion names (e.g. 'arousal', 'happy') as action types — "
-                        f"emotions belong in the 'feelings' metadata object\n"
+                        f"emotions belong in the 'emotions' map of your update_emotion_state "
+                        f"action (and the diary entry's 'emotions'), each with a 0.0-10.0 intensity\n"
                     )
                     if allowed_action_types:
                         correction_message_text += f"Allowed action types for this scope: {', '.join(sorted(allowed_action_types))}\n"
@@ -2463,6 +2493,7 @@ async def run_corrector_middleware(
                     "message": correction_message_text,
                     "your_reply": text,
                     "original_user_message": original_user_message,
+                    "sender": correction_sender,
                     "chat_id": chat_id,
                     "thread_id": payload_thread_id,
                     "target_interface": originating_interface,
@@ -2503,21 +2534,53 @@ async def run_corrector_middleware(
                     correction_payload_fields = {
                         "text": "Your message content here (optional - only if you want to reply to the player)",
                     }
-            correction_payload["system_message"]["required_format"] = {
-                "actions": [
-                    {
-                        "type": correction_action_type,
-                        "payload": correction_payload_fields,
-                    }
-                ]
-            }
+                correction_payload["system_message"]["required_format"] = {
+                    "actions": [
+                        {
+                            "type": correction_action_type,
+                            "payload": correction_payload_fields,
+                        }
+                    ]
+                }
+            else:
+                # Show the COMPLETE expected shape of a chat turn so the model
+                # never replies with only the message text. The reference format
+                # always pairs the outward reply with the emotion update and the
+                # diary entry (interaction_summary / personal_thought) — a
+                # text-only example made the model drop those "other requested
+                # fields". Vessel keeps its say-only example above (no
+                # mid-session diary, per AGENTS.md §5c).
+                correction_payload["system_message"]["required_format"] = {
+                    "actions": [
+                        {
+                            "type": correction_action_type,
+                            "payload": correction_payload_fields,
+                        },
+                        {
+                            "type": "update_emotion_state",
+                            "payload": {"emotions": {"joy": 7.0, "love": 6.5}},
+                        },
+                        {
+                            "type": "create_personal_diary_entry",
+                            "payload": {
+                                "interaction_summary": (
+                                    "A short third-person summary of this exchange"
+                                ),
+                                "personal_thought": (
+                                    "Your private first-person thoughts"
+                                ),
+                                "emotions": [{"type": "joy", "intensity": 7.0}],
+                            },
+                        },
+                    ]
+                }
             correction_payload["system_message"]["strict_requirements"] = [
                 "MUST start with { and end with }",
                 "MUST contain 'actions' array",
                 "NO text outside JSON structure",
                 "NO markdown formatting (e.g., no ```json blocks)",
                 "NO explanations outside JSON",
-                'Emotions MUST be provided in the \'feelings\' metadata object, NEVER as top-level actions (e.g., do NOT use {"type": "happy"})',
+                "Emotions MUST be provided in the 'emotions' map of your update_emotion_state action (or the diary entry's 'emotions' list), each with a 0.0-10.0 intensity — NEVER as top-level action types (e.g., do NOT use {\"type\": \"happy\"})",
                 "Every action object inside 'actions' MUST have a 'type' field with a valid action name - actions without a 'type' field are invalid and will be rejected",
             ]
             correction_prompt = json.dumps(correction_payload, ensure_ascii=False)

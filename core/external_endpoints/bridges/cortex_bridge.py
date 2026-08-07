@@ -104,6 +104,16 @@ _VESSEL_CONNECTED_PRIORITY_SUFFIXES: tuple[str, ...] = (
 # content response instead of making a function call.
 _NATIVE_TOOL_MODE_MARKER = "=== SYNTH NATIVE TOOL MODE ==="
 
+# Appended to the current user message on JSON-protocol turns so the format
+# requirement is adjacent to the content being answered (the huge system prompt
+# buries it, and a capable chat model replies with plain prose instead of JSON,
+# forcing a correction round-trip every turn).
+_JSON_FORMAT_REMINDER = (
+    "\n\nRespond with ONLY valid JSON — your ENTIRE reply must be the JSON "
+    "actions object. No prose, no markdown, no text before or after the JSON. "
+    'Format: {"actions": [{"type": "action_name", "payload": { ... }}]}'
+)
+
 
 # ---------------------------------------------------------------------------
 # Multimodal extraction helper
@@ -538,31 +548,44 @@ class ExternalCortexEngine(AIPluginBase):
     def _max_native_tools(self) -> int | None:
         """Return the native tool cap for this endpoint, if one is known.
 
-        ``max_tools`` is deliberately an endpoint-level escape hatch because
-        tool-count limits vary by provider and model.  Venice's current
-        OpenAI-compatible Gemma endpoint has a hard limit of 20, so apply that
-        default automatically when the adapter identifies Venice.  A positive
-        explicit value can lower the cap; a non-positive value disables the
-        generic cap but cannot disable Venice's known provider limit.
+        ``max_tools`` (endpoint Extra Config JSON) is the escape hatch: a
+        positive value caps the tool count for any provider (Venice included —
+        the operator knows their model's real limit); ``0`` disables the cap
+        entirely so the full scoped tool set is sent.
+
+        Without an explicit value, the conservative Venice-20 default (a hard
+        limit of the old Gemma endpoint) applies ONLY to Venice endpoints that
+        have NOT opted into parallel native tool-calling.  A parallel-capable
+        model (``enable_tools_parallel``/``parallel_tool_calls``) sends the
+        full scoped set so structurally important actions are never crowded out
+        by alphabetical ordering — e.g. ``vessel_connect`` sits at "v" and was
+        silently dropped from Telegram turns, leaving the model unable to
+        honour a "connect to the vessel" request.
         """
         extra = self._endpoint.extra_config or {}
         explicit = extra.get("max_tools")
-        explicit_limit: int | None = None
         if explicit is not None and not isinstance(explicit, bool):
             try:
                 parsed = int(explicit)
                 if parsed > 0:
-                    explicit_limit = parsed
-                elif parsed < 0:
+                    return parsed
+                if parsed == 0:
                     log_warning(
-                        f"[cortex_bridge:{self._endpoint.name}] max_tools={parsed} "
-                        "is invalid; ignoring it"
+                        f"[cortex_bridge:{self._endpoint.name}] max_tools=0: "
+                        "native tool cap disabled (full scoped tool set sent)"
                     )
+                    return None
+                log_warning(
+                    f"[cortex_bridge:{self._endpoint.name}] max_tools={parsed} "
+                    "is invalid (must be >0 or 0); ignoring it"
+                )
             except (TypeError, ValueError):
                 log_warning(
                     f"[cortex_bridge:{self._endpoint.name}] invalid max_tools="
                     f"{explicit!r}; ignoring it"
                 )
+        if self._parallel_tools_enabled():
+            return None
         is_venice = False
         detector = getattr(self._adapter, "_is_venice_endpoint", None)
         if callable(detector):
@@ -572,12 +595,6 @@ class ExternalCortexEngine(AIPluginBase):
                 is_venice = False
         if not is_venice:
             is_venice = str(self._endpoint.name or "").lower().startswith("venice")
-        if explicit_limit is not None:
-            # Never allow an operator override to recreate a known provider
-            # 400.  For other providers the explicit endpoint value wins.
-            if is_venice:
-                return min(explicit_limit, _VENICE_MAX_NATIVE_TOOLS)
-            return explicit_limit
         return _VENICE_MAX_NATIVE_TOOLS if is_venice else None
 
     @staticmethod
@@ -728,11 +745,14 @@ class ExternalCortexEngine(AIPluginBase):
         if parallel:
             instruction_text = (
                 "The API tools supplied with this turn are the only action "
-                "interface. You MAY call MULTIPLE supplied functions in a single "
-                "turn: the outward reply (a message_* or say action) plus any "
-                "bookkeeping actions (update_emotion_state, diary entries). Do "
-                "not emit an actions JSON object, action list, tool name, or "
-                "tool arguments as message text. Do not invent a function name."
+                "interface. In a human chat turn you MUST include the outward "
+                "reply (a message_* action for the current chat, or the vessel "
+                "say action when embodied) among your tool calls — never respond "
+                "with bookkeeping actions alone. You may call several functions "
+                "in one turn: the reply plus update_emotion_state (with at least "
+                "one emotion) and create_personal_diary_entry. Do not emit an "
+                "actions JSON object, action list, tool name, or tool arguments "
+                "as message text. Do not invent a function name."
             )
         else:
             instruction_text = (
@@ -1074,17 +1094,19 @@ class ExternalCortexEngine(AIPluginBase):
             # manual turn trips the missing-reply corrector (which re-runs with
             # no chat history, losing all context).  So even when an endpoint
             # opts into native tools, they are applied only to Vessel turns;
-            # ordinary chat keeps the in-prompt JSON-action protocol.  The
-            # exception: an endpoint that explicitly opts into PARALLEL native
-            # tool-calling (``enable_tools_parallel`` in Extra Config, only for
-            # models that support several calls per turn) can express reply +
-            # bookkeeping as parallel tool calls, so it gets native tools for
-            # ordinary chat too. Vessel turns always keep the single-call
-            # contract regardless.
-            _is_vessel_turn = self._is_vessel_prompt_request(prompt_request)
-            _parallel = self._parallel_tools_enabled() and not _is_vessel_turn
+            # ordinary chat keeps the in-prompt JSON-action protocol.
+            #
+            # The PARALLEL native-tool opt-in (``enable_tools_parallel`` in Extra
+            # Config) remains supported for Vessel turns' tool-call transport,
+            # but it does NOT enable native tools for ordinary chat: in practice
+            # the current Venice model returns a single tool call per response,
+            # so a chat first attempt degenerates to a lone bookkeeping call
+            # (``update_emotion_state {}``) and every turn needs a correction —
+            # while the in-prompt JSON protocol with the concrete response
+            # example reliably produces the full reply + emotion + diary triple
+            # in one shot. Vessel turns keep the single-call contract.
             use_native = self._native_tools_enabled() and (
-                _NATIVE_TOOLS_ENABLED or _is_vessel_turn or _parallel
+                _NATIVE_TOOLS_ENABLED or self._is_vessel_prompt_request(prompt_request)
             )
             if not use_native:
                 prompt_request.supports_tool_calling = False
@@ -1100,7 +1122,7 @@ class ExternalCortexEngine(AIPluginBase):
                 prompt_request.supports_tool_calling = False
                 return {}
 
-            self._add_native_tool_instruction(prompt_request, parallel=_parallel)
+            self._add_native_tool_instruction(prompt_request, parallel=False)
 
             # Render a shallow request copy so the caller retains its complete
             # action registry for dispatch/validation.  Only the provider-facing
@@ -1118,19 +1140,18 @@ class ExternalCortexEngine(AIPluginBase):
                 tools = OpenAIRenderer(render_request).tool_schemas()
                 if not tools:
                     return {}
-                # SyntH's LLM-to-interface contract requires an action.  Ask
-                # Venice/OpenAI-compatible providers to make a native call;
-                # parallel calls stay off unless the endpoint opted into them
-                # (``enable_tools_parallel``), so a non-parallel model cannot
-                # turn one turn into an unbounded action batch while a capable
-                # model can still emit reply + bookkeeping together.  Both
-                # fields are standard Chat Completions options; the adapter
-                # still owns provider-specific translation (and degrades the
-                # controls gracefully when a proxy rejects them).
+                # SyntH's LLM-to-interface contract requires an action.  This
+                # branch only runs for Vessel turns (ordinary chat uses the
+                # in-prompt JSON protocol), which keep the single-call contract
+                # — parallel_tool_calls stays off so a model cannot turn one
+                # embodiment turn into an unbounded action batch.  Both fields
+                # are standard Chat Completions options; the adapter still owns
+                # provider-specific translation (and degrades the controls
+                # gracefully when a proxy rejects them).
                 return {
                     "tools": tools,
                     "tool_choice": "required",
-                    "parallel_tool_calls": _parallel,
+                    "parallel_tool_calls": False,
                 }
 
             if self._endpoint.protocol is EndpointProtocol.ANTHROPIC:
@@ -1479,7 +1500,7 @@ class ExternalCortexEngine(AIPluginBase):
         return messages
 
     def _build_messages(self, prompt: Any) -> list[dict[str, Any]]:
-        """Convert a SyntH prompt into an OpenAI-style messages list.
+        """Convert a SyntH prompt into role-separated provider messages.
 
         Extracts ``instructions_verbose`` (or ``instructions``) from a SyntH prompt
         dict and places it as a ``system`` role message so the LLM receives explicit
@@ -1494,11 +1515,14 @@ class ExternalCortexEngine(AIPluginBase):
                 mm_parts = self._build_mm_parts_from_prompt_request(prompt)
                 if mm_parts:
                     supports_vision = self._supports_vision_for_mm_parts(mm_parts)
-                    return renderer.render_with_multimodal(
+                    messages = renderer.render_with_multimodal(
                         mm_parts,
                         supports_vision=supports_vision,
                     )
-                return renderer.render()
+                else:
+                    messages = renderer.render()
+                self._append_json_format_reminder(messages, prompt)
+                return messages
         except Exception as exc:
             log_debug(
                 f"[cortex_bridge] direct PromptRequest rendering fallback to text: {exc}"
@@ -1531,11 +1555,14 @@ class ExternalCortexEngine(AIPluginBase):
                     mm_parts = self._build_mm_parts_from_prompt_request(prompt_request)
                     if mm_parts:
                         supports_vision = self._supports_vision_for_mm_parts(mm_parts)
-                        return renderer.render_with_multimodal(
+                        messages = renderer.render_with_multimodal(
                             mm_parts,
                             supports_vision=supports_vision,
                         )
-                    return renderer.render()
+                    else:
+                        messages = renderer.render()
+                    self._append_json_format_reminder(messages, prompt_request)
+                    return messages
             except Exception as exc:
                 log_debug(
                     f"[cortex_bridge] PromptRequest rendering fallback to dict path: {exc}"
@@ -1579,6 +1606,35 @@ class ExternalCortexEngine(AIPluginBase):
             ]
         return [{"role": "user", "content": user_msg_content}]
 
+    @staticmethod
+    def _append_json_format_reminder(
+        messages: list[dict[str, Any]], prompt: Any
+    ) -> None:
+        """Append a salient JSON-format reminder to the current user message.
+
+        The JSON-action protocol is enforced only via the (huge) system prompt,
+        so a capable chat model routinely replies with plain in-character prose
+        instead of the required JSON on the FIRST attempt — then the corrector
+        repairs it, costing an extra round-trip every turn. The corrector works
+        because its format requirements sit in the last user message; mirror
+        that salience for ordinary JSON-protocol turns. Native-tool turns
+        declare the contract via tools (``supports_tool_calling`` True) and are
+        skipped.
+        """
+        try:
+            if getattr(prompt, "supports_tool_calling", True):
+                return
+            if not messages:
+                return
+            last = messages[-1]
+            if not isinstance(last, dict) or last.get("role") != "user":
+                return
+            content = last.get("content")
+            if isinstance(content, str):
+                last["content"] = content + _JSON_FORMAT_REMINDER
+        except Exception as exc:
+            log_debug(f"[cortex_bridge] format reminder skip: {exc}")
+
     def _build_correction_messages(
         self, payload: dict[str, Any]
     ) -> list[dict[str, Any]]:
@@ -1598,7 +1654,17 @@ class ExternalCortexEngine(AIPluginBase):
 
         user_parts: list[str] = []
         if original_user_message:
-            user_parts.append(f"Original user message:\n{original_user_message}")
+            # Include WHO sent the message — the corrector is stripped of the
+            # routing prefix and history, so a multi-person persona otherwise
+            # makes the model guess the sender (Papa's message answered as
+            # "mama"). Structural field from the original message, never text.
+            sender = str(sm.get("sender") or "").strip()
+            if sender:
+                user_parts.append(
+                    f"Original user message (from {sender}):\n{original_user_message}"
+                )
+            else:
+                user_parts.append(f"Original user message:\n{original_user_message}")
         if required_format:
             user_parts.append(
                 f"Required format:\n{json.dumps(required_format, ensure_ascii=False)}"

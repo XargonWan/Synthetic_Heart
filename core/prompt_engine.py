@@ -1015,25 +1015,33 @@ def _history_to_turns(
     if not entries:
         return []
 
-    # Coalesce consecutive same-role turns to keep provider history well-formed
-    # even when the source chat log contains streaks of outreach or split user
-    # messages. Peer-tagged turns only coalesce with other peer-tagged turns,
-    # and genuine human turns only coalesce with other genuine human turns --
-    # otherwise a real human line sandwiched between peer lines would get
-    # blended into one indistinguishable "user" block.
+    # Coalesce consecutive ASSISTANT turns to keep provider history well-formed
+    # when the source chat log contains streaks of Synth's own outreach or split
+    # self-replies. USER turns are NEVER coalesced: every human message is a
+    # distinct turn, and merging two separate messages — even ones sent minutes
+    # apart with no reply between (Langfuse f3a0aa68: "…cutie patootie" +
+    # "…even more, but no matter…" collapsed into one) — jumbles the
+    # conversation the model sees and makes its replies feel "out of order".
+    # Peer-tagged turns only coalesce with other peer-tagged turns; genuine
+    # human turns with other genuine human turns (though they no longer merge
+    # at all, the guard is kept so a future re-enable cannot blend them).
     normalized_entries: list[tuple[Turn, bool]] = []
     for turn, is_peer in entries:
-        if normalized_entries:
+        if (
+            turn.role == "assistant"
+            and normalized_entries
+            and normalized_entries[-1][0].role == "assistant"
+            and normalized_entries[-1][1] == is_peer
+        ):
             prev_turn, prev_is_peer = normalized_entries[-1]
-            if prev_turn.role == turn.role and prev_is_peer == is_peer:
-                normalized_entries[-1] = (
-                    Turn(
-                        role=turn.role,
-                        content=f"{prev_turn.content}\n\n{turn.content}",
-                    ),
-                    is_peer,
-                )
-                continue
+            normalized_entries[-1] = (
+                Turn(
+                    role=turn.role,
+                    content=f"{prev_turn.content}\n\n{turn.content}",
+                ),
+                prev_is_peer,
+            )
+            continue
         normalized_entries.append((turn, is_peer))
 
     return [turn for turn, _ in normalized_entries]
@@ -2931,6 +2939,7 @@ def load_json_instructions() -> str:
         "NEVER use 'target' — always use 'interface_path' in message actions.\n"
         "Include reply_message_id when replying to specific messages. Use thread_id from input.payload.source.thread_id when present (omit if missing).\n"
         "CHAT REPLY REQUIRED: When GRILLO INTERNAL MODE is NOT active (this is a normal human chat turn), you MUST reply to the person with an outward speaking action in every response: a message_* action in ordinary chats, or the embodiment speak action (a vessel_* say/emote action) when you are embodied in a world. Diary entries and emotion updates are supplementary bookkeeping — they do NOT substitute for replying. Returning only internal actions (diary, emotions, update_emotion_state) without an outward reply action is a hard failure and will trigger a correction.\n"
+        "EMOTION UPDATES: When a turn stirs an emotion, populate the 'emotions' map of your update_emotion_state action with AT LEAST ONE emotion and a 0.0-10.0 intensity (e.g. {\"joy\": 7.0}), and list the same emotions in the diary entry's 'emotions'. Do not leave the emotions map empty, and never use an emotion name as an action type.\n"
         "CLARIFICATION POLICY: If the user's intent, referent, or the subject of a follow-up is ambiguous or missing, DO NOT GUESS — ask one concise clarifying question before asserting facts or taking action. When the user asks whether you 'understood' but there is no clear context, request clarification rather than assuming.\n"
         "MEMORY HONESTY: When the user asks what you remember, prefer honesty over confidence. Memories can be incomplete or stale. If you do not clearly recall or cannot verify a detail, say so. Do not invent events, conversations, promises, or feelings to fill gaps. SyntH is not roleplay or fiction, so never turn uncertainty into fiction.\n"
         "REFERENCE CLARITY: When the user refers indirectly to a person, message, post, image, clip, or quoted content, refer to its author or speaker in a clear generic way and avoid vague or impersonal wording that obscures who created or said it.\n"
@@ -2946,7 +2955,9 @@ def load_json_instructions() -> str:
         "Keep the reply concise and suitable for text-to-speech synthesis. "
         "This rule applies ONLY to the current message — do NOT assume past messages in chat_history were also voice.\n"
         'RESPONSE FORMAT: {"actions": [{"type": "action_name", "payload": { ... }}] }\n'
-        "Key rules: ALWAYS use 'type' and 'payload', one action object per array entry. Do NOT add any text outside the JSON."
+        "Key rules: ALWAYS use 'type' and 'payload', one action object per array entry. Do NOT add any text outside the JSON.\n"
+        "Example of a complete human-chat response (reply + emotions + diary together):\n"
+        '{"actions": [{"type": "message_telegram_bot", "payload": {"text": "Your reply text here", "interface_path": "input.payload.current_chat.interface_path"}}, {"type": "update_emotion_state", "payload": {"emotions": {"joy": 7.0}}}, {"type": "create_personal_diary_entry", "payload": {"interaction_summary": "A short third-person summary", "personal_thought": "Your private first-person thoughts", "emotions": [{"type": "joy", "intensity": 7.0}]}}]}'
         "Do NOT embed emotion tags, annotations, or bracketed markers inside message text (e.g., '{happy 6.0}')."
         "If you need to indicate an emotional state, use a structured action payload (prefer update_emotion_state) and never embed emotional markers inside plain message content."
     )

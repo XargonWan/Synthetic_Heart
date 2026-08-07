@@ -273,8 +273,9 @@ class EmotionManager(PluginBase):
                             "type": "object",
                             "description": (
                                 "Map of emotion name to intensity (0.0-10.0). "
-                                "MUST contain at least one emotion, e.g. "
-                                '{"joy": 7.5, "love": 8.0}'
+                                "This map MUST NOT be empty: include at least one "
+                                'emotion the turn stirred, e.g. {"joy": 7.5, '
+                                '"love": 8.0}. An empty {} is a failed update.'
                             ),
                             "minProperties": 1,
                         },

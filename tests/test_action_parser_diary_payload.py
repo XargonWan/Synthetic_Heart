@@ -8,7 +8,11 @@ import core.action_parser as ap
 
 
 @pytest.mark.asyncio
-async def test_diary_uses_llm_payload_for_thoughts_and_emotions(monkeypatch):
+async def test_diary_auto_summary_skips_when_llm_provided_metadata(monkeypatch):
+    """The diary plugin now writes entries directly when the LLM provides
+    interaction_summary / personal_thought (even without ``content``), so the
+    automatic post-turn summary must skip those actions to avoid a duplicate
+    entry."""
     captured = {}
 
     fake_diary_module = types.ModuleType("plugins.ai_diary")
@@ -44,16 +48,9 @@ async def test_diary_uses_llm_payload_for_thoughts_and_emotions(monkeypatch):
 
     await ap._create_diary_entry_for_actions(actions, ctx, msg)
 
-    assert (
-        captured["interaction_summary"]
-        == "Discussione emotiva con tensione relazionale"
-    )
-    assert (
-        captured["personal_thought"]
-        == "Mi sento in conflitto e voglio riparare la fiducia"
-    )
-    assert captured["emotions"] == [{"type": "conflicted", "intensity": 7}]
-    assert captured["context_tags"] == ["relationship", "conflict"]
+    # The plugin's execute_action handles this diary action directly; the auto
+    # summary must not add a second entry.
+    assert captured == {}
 
 
 @pytest.mark.asyncio
