@@ -42,14 +42,18 @@ from core.user_utils import ensure_message_user_fields
 # inserted between HIGH and URGENT (bumping EMERGENCY→11, URGENT→10) so a Vessel
 # "stop and think about my goal" turn can jump ahead of ordinary in-world player
 # chat yet still yield to a real-world emergency/safety notification.
+# BACKGROUND(2) was split below LOW(3) so G.R.I.L.L.O. background beats sit at
+# the absolute bottom and never contend with anything else.
 PRIORITY_EMERGENCY = 11  # Reserved top band — a real emergency, above everything
-PRIORITY_URGENT = 10  # Scheduled events, auto_response(priority=True), safety
+PRIORITY_URGENT = 10  # Calendar reminders, auto_response(priority=True), safety
 PRIORITY_REFLECTION = 9  # Vessel "pause & reflect on my goal" turn (above player chat)
 PRIORITY_HIGH = 8  # Direct prioritised human input (e.g. in-world player chat)
 PRIORITY_TRAINER = 7  # The trainer — must always reach Synth promptly
-PRIORITY_GENERAL = 6  # Ordinary user chat (telegram/discord/matrix/webui/ollama…)
+PRIORITY_RADIO = 6  # Radio-host DJ banter (on-the-fly LLM generation during playback)
+PRIORITY_GENERAL = 5  # Ordinary user chat (telegram/discord/matrix/webui/ollama…)
 PRIORITY_AMBIENT = 4  # Autonomous vessel perceptions / will-beats (below humans)
-PRIORITY_LOW = 3  # Background beats (G.R.I.L.L.O.), radio, reminders, 2nd-turn search
+PRIORITY_LOW = 3  # Background-adjacent (web-search 2nd-pass, misc fallback)
+PRIORITY_BACKGROUND = 2  # G.R.I.L.L.O. beats — absolute bottom, never starves anything
 
 # Anything at or below this band is treated as background/cancellable by the
 # consumer loop (run without blocking user-facing traffic, cancellable when a
@@ -76,9 +80,11 @@ _PRIORITY_LABELS: dict[int, str] = {
     PRIORITY_REFLECTION: "Reflection",
     PRIORITY_HIGH: "High",
     PRIORITY_TRAINER: "Trainer",
+    PRIORITY_RADIO: "Radio",
     PRIORITY_GENERAL: "General",
     PRIORITY_AMBIENT: "Ambient",
     PRIORITY_LOW: "Low",
+    PRIORITY_BACKGROUND: "Background",
 }
 
 
@@ -1093,16 +1099,24 @@ async def enqueue_low_priority(
     history_scope: str | None = None,
     interface_id: str = None,
     original_message=None,
+    priority: int = PRIORITY_LOW,
 ) -> None:
-    """Enqueue a low-priority (background) message into the global queue.
+    """Enqueue a low/background-priority message into the global queue.
 
     This is a convenience wrapper for plugins that want to submit background
-    messages that must never block other user messages. It performs the same
-    normalization and persistence steps as :func:`enqueue` but pushes the
-    item at PRIORITY_LOW (the background band).
+    messages at a specific priority band. By default items are pushed at
+    PRIORITY_LOW; callers that need a different band (e.g. radio-host banter at
+    PRIORITY_RADIO, G.R.I.L.L.O. beats at PRIORITY_BACKGROUND, or calendar
+    reminders at PRIORITY_URGENT) pass an explicit ``priority``.
+
+    Items at or below PRIORITY_BACKGROUND_THRESHOLD are treated as non-blocking
+    background work by the consumer loop; items above it are awaited normally
+    and will block the consumer until they complete.
 
     Args:
         history_scope: Optional per-message history scope propagated to the consumer/prompt builder.
+        priority: Semantic priority band (default PRIORITY_LOW).  Use the named
+                  ``PRIORITY_*`` constants.
     """
     if context_memory is None:
         context_memory = get_context_memory()
@@ -1160,10 +1174,10 @@ async def enqueue_low_priority(
 
     global _counter
     _counter += 1
-    # Use the background priority band
-    await _get_queue().put((_heap_key(PRIORITY_LOW), _counter, item))
+    await _get_queue().put((_heap_key(priority), _counter, item))
     log_debug(
-        f"[QUEUE] Low-priority message enqueued from {item['interface']} chat {chat_id} thread {thread_id}"
+        f"[QUEUE] enqueue_low_priority: {priority_label(priority)} "
+        f"from {item['interface']} chat {chat_id} thread {thread_id}"
     )
 
 

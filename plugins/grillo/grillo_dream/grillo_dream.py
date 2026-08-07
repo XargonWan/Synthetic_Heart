@@ -505,6 +505,7 @@ class GrilloDreamPlugin:
                     context_memory=item.get("context"),
                     interface_id="grillo",
                     original_message=None,
+                    priority=message_queue.PRIORITY_BACKGROUND,
                 )
                 log_info("[grillo_dream] Dream enqueued for LLM processing")
             except Exception as e:

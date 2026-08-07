@@ -1,3 +1,31 @@
+### refactor(message-queue): restructure global priority scale — dedicated Radio and Background bands  <!-- 2026-08-07 -->
+**Why (user, IT):** *"metti nel changelog sta cosa che vediamo come va, in caso se vediamo che sta nuova priorità fa schifo la possiamo cambiare ancora"* — the radio_host banter was starved because it used `PRIORITY_LOW` (3) while ordinary chat used `PRIORITY_GENERAL` (6). The single consumer always picked chat first, so banter's 60s polling timeout expired before it ever dequeued. Continuous Logchat traffic made the starvation permanent.
+**What (core + all callers):** Introduced a new, flatter priority scale with dedicated bands so each category of autonomous traffic has its own unambiguous rung:
+
+| Constant | Value | Band | Behavior |
+|----------|-------|------|----------|
+| `PRIORITY_EMERGENCY` | 11 | Emergency | Always first |
+| `PRIORITY_URGENT` | 10 | Urgent (incl. calendar reminders) | Always first |
+| `PRIORITY_REFLECTION` | 9 | Vessel reflection pause | Above player chat |
+| `PRIORITY_HIGH` | 8 | Direct human input (player chat) | Above general chat |
+| `PRIORITY_TRAINER` | 7 | Trainer | Above general chat |
+| `PRIORITY_RADIO` | 6 | Radio banter **(NEW)** | Above general chat, **blocking** |
+| `PRIORITY_GENERAL` | 5 | Ordinary chat (was 6) | Normal user traffic |
+| `PRIORITY_AMBIENT` | 4 | Autonomous vessel perceptions | Below all humans |
+| `PRIORITY_LOW` | 3 | Low-priority (background threshold) | Non-blocking |
+| `PRIORITY_BACKGROUND` | 2 | Grillo beats **(NEW)** | Absolute bottom, never blocking |
+
+Key changes:
+- **`enqueue_low_priority()` now accepts an optional `priority` parameter** so callers choose their band instead of being hardcoded to `PRIORITY_LOW`.
+- **Grillo beats (×3 callers)** → `PRIORITY_BACKGROUND` (2, absolute bottom — sleeps below everything, never blocks the consumer).
+- **Calendar reminders (×2 callers)** → `PRIORITY_URGENT` (10) so time-sensitive notifications arrive promptly.
+- **Radio banter** → `PRIORITY_RADIO` (6, above ordinary chat at 5) so banter generation is never starved by chat traffic.
+- **Ordinary chat** dropped from 6 → 5 so Radio can sit above it without disrupting the URGENT/HIGH/TRAINER bands.
+
+**Tradeoff (explicit, reversible):** Radio banter at priority 6 is **above the background threshold** (`PRIORITY_LOW` = 3), meaning a 30–90s banter generation with the Selenium engine will **briefly block** the consumer. Chat at 5 yields to radio. If this causes unacceptable chat latency, Radio can be dropped back to 5 or below; the `priority` kwarg makes re-tuning a one-line change per caller.
+**Location (edited):** `core/message_queue.py` (constants + labels + `enqueue_low_priority` signature); `plugins/grillo/grillo_impl.py`; `plugins/grillo/grillo_chat_observer/grillo_chat_observer.py`; `plugins/grillo/grillo_dream/grillo_dream.py`; `plugins/event_plugin/event_plugin.py` (×2); `plugins/radio_host/radio_host_plugin.py`. Tests: `tests/test_grillo_enqueue.py` (3 mock sigs), `tests/test_grillo_logging.py` (2 mock sigs), `tests/test_grillo_observer.py` (5 mock sigs).
+**Status:** code + tests + docs done. `ruff format`/`ruff check --fix` clean; scoped pytest → 34/36 pass (2 pre-existing DB-connection failures unrelated). In-world verification pending `docker compose up -d --build`. If the new priority scale proves problematic, revert or re-tune — the `priority` kwarg makes it cheap.
+
 ### feat(vessel): always-on staticity ward — relocate the body when it lingers parked too long  <!-- 2026-08-09 -->
 **Why (user, IT):** *"mettiamo un ward di staticità: se il synth è fermo per troppo tempo in un punto lo facciamo muovere altrove"* — the existing tick-to-tick stuck-body watchdog (`_stuck_position_ticks`) only runs *after* the `if not goal` early-return and only while the motor is actively driving, so a **goalless** body — or one endlessly `mine`/`use`-ing an in-reach block without displacing — could stay pinned in one spot forever.
 **What (Minecraft adapter scope; purely positional/numeric, no keyword logic, fail-safe):** `MinecraftConnector._update_staticity_ward(position)` runs **first** each motor tick, right after the survival guard and *before* the `no goal` early-return. It tracks a moving anchor (`_static_anchor` x/z) + an idle counter (`_static_ward_ticks`): staying within `_static_ward_radius` of the anchor accrues ticks; stepping outside re-anchors and zeroes the counter (so genuine travel never trips it). After `_static_ward_limit` consecutive idle ticks it fires — `motor_step` rotates `_explore_heading` by `_EXPLORE_TURN_RAD` and `goto`s a fresh reprojected waypoint (fallback `wander`), returning `{"acted": True, "action": "goto"|"wander", "reason": "staticity_ward"}` — then re-arms the anchor on the current spot. A bad/missing position resets tracking and never fires. Broader than the tick-to-tick watchdog: it also catches a goalless or physically-inert body the other watchdog misses.

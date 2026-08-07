@@ -1446,6 +1446,7 @@ class EventPlugin(AIPluginBase):
                 context_memory=context_memory,
                 interface_id="grillo",
                 original_message=None,
+                priority=message_queue.PRIORITY_URGENT,
             )
             log_debug(f"[event_plugin] enqueued external reminder beat for '{summary}'")
         except Exception as e:
@@ -1641,6 +1642,7 @@ class EventPlugin(AIPluginBase):
                 context_memory=context_memory,
                 interface_id="grillo",
                 original_message=None,
+                priority=message_queue.PRIORITY_URGENT,
             )
             return True
         except Exception as e:

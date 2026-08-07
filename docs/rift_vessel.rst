@@ -175,18 +175,20 @@ is *concentrating on the game* rather than multitasking every chat:
 **Priority — a pure 0–11 numeric ranking (higher = more urgent), with NO
 de-prioritisation.** Each message is assigned an absolute urgency from its
 **structural origin only** (never from message text, never conditional on
-whether a session is active): a reflection-pause turn (``_vessel_reflection``) →
+whether a session is active): an emergency → ``PRIORITY_EMERGENCY`` (11); an
+urgent (``priority=True``) message or calendar reminder → ``PRIORITY_URGENT``
+(10); a reflection-pause turn (``_vessel_reflection``) →
 ``PRIORITY_REFLECTION`` (9, above player chat so a stop-and-think turn is
 consumed before ordinary in-world traffic, yet below urgent/emergency); a real
-in-world **player** chat → ``PRIORITY_HIGH`` (8); Synth's **own** autonomous
-perception/will-beat → ``PRIORITY_AMBIENT`` (4, below every human); the trainer
-→ ``PRIORITY_TRAINER`` (7); ordinary chat → ``PRIORITY_GENERAL`` (6); an urgent
-(``priority=True``) message → ``PRIORITY_URGENT`` (10); an emergency →
-``PRIORITY_EMERGENCY`` (11). Ordinary chat is **never demoted** because Synth
-happens to be embodied — a person addressing Synth is always answered promptly,
-and the game's own perceptions simply sit at a lower rung so they yield to
-humans. The whole block is lazily imported and fully guarded, so removing the
-Vessel plugin leaves queueing untouched.
+in-world **player** chat → ``PRIORITY_HIGH`` (8); the trainer →
+``PRIORITY_TRAINER`` (7); radio banter → ``PRIORITY_RADIO`` (6, above ordinary
+chat); ordinary chat → ``PRIORITY_GENERAL`` (5); Synth's **own** autonomous
+perception/will-beat → ``PRIORITY_AMBIENT`` (4, below every human); background
+Grillo beats → ``PRIORITY_BACKGROUND`` (2). Ordinary chat is **never demoted**
+because Synth happens to be embodied — a person addressing Synth is always
+answered promptly, and the game's own perceptions simply sit at a lower rung so
+they yield to humans. The whole block is lazily imported and fully guarded, so
+removing the Vessel plugin leaves queueing untouched.
 
 **Connection-driven session lifecycle (3 states).** Whether the game generates
 work is tied to the **real** connection, tracked by

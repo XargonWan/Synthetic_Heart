@@ -948,10 +948,7 @@ async def send_llm_fallback_message(
         from core.interface_path_utils import is_vessel_embodiment_context
 
         _is_reactive_vessel_chat = bool((context or {}).get("vessel_player_chat"))
-        if (
-            is_vessel_embodiment_context(context or {})
-            and not _is_reactive_vessel_chat
-        ):
+        if is_vessel_embodiment_context(context or {}) and not _is_reactive_vessel_chat:
             log_warning(
                 "[message_chain] Suppressing in-world '😵' fallback for autonomous "
                 f"vessel turn (interface_path={interface_path}, reason={failure_reason}); "
