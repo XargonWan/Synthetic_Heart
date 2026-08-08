@@ -2520,9 +2520,21 @@ async def run_corrector_middleware(
             # actions themselves had succeeded.
             iface_label = originating_interface or "<interface>"
             correction_action_type = f"message_{iface_label}"
+            # Build the example interface_path WITHOUT a trailing slash. The old
+            # unconditional ``.../{thread or ''}`` produced e.g.
+            # ``telegram_bot/5208932647/`` when ``thread_id`` was None, which the
+            # model copied into its correction reply; if that reply ever reached
+            # the interface it would be stored under a DIFFERENT history key than
+            # the canonical ``telegram_bot/5208932647`` and the model would never
+            # see its own message again (a "forgot what itself said" gap).
+            _correction_interface_path = f"{iface_label}/{chat_id or '<chat_id>'}"
+            if payload_thread_id is not None:
+                _correction_interface_path = (
+                    f"{_correction_interface_path}/{payload_thread_id}"
+                )
             correction_payload_fields: dict[str, Any] = {
                 "text": "Your message content here (optional - only if you want to reply to user)",
-                "interface_path": f"{iface_label}/{chat_id or '<chat_id>'}/{payload_thread_id if payload_thread_id is not None else ''}",
+                "interface_path": _correction_interface_path,
             }
             if iface_label == "vessel":
                 world = ""

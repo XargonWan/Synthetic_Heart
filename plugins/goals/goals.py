@@ -302,6 +302,33 @@ async def get_active_goal(
     return _row_to_goal(row)
 
 
+async def get_most_recent_active_goal() -> Dict[str, Any] | None:
+    """Return the most recently set active goal across ALL scopes, or None.
+
+    Structural fallback for unscoped goal actions from ordinary chats: lets an
+    unscoped ``goal_update`` / ``goal_list`` act on "the goal I just
+    set/mentioned" even when that goal was created under an explicit scope
+    tuple (e.g. ``scope='game', game='minecraft'`` — the mismatch that caused
+    ``no_active_goal`` when a goal_set honoured an explicit scope but the
+    follow-up goal_update passed none). Read-only; fail-safe; never inspects
+    goal text — recency is ``id DESC``.
+    """
+    await init_goal_table()
+    try:
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"SELECT {_GOAL_COLS} FROM goals "
+                    "WHERE status = %s ORDER BY id DESC LIMIT 1",
+                    (STATUS_ACTIVE,),
+                )
+                row = await cur.fetchone()
+    except Exception as exc:
+        log_debug(f"{LOG_PREFIX} get_most_recent_active_goal failed: {exc}")
+        return None
+    return _row_to_goal(row)
+
+
 async def list_recent_goals(
     limit: int = 10,
     scope: Any = SCOPE_NONE,
@@ -983,6 +1010,35 @@ class GoalsPlugin(PluginBase):
         payload = action.get("payload") or {}
         ctx = context or {}
         sc, gm, wd = self._resolve_scope(payload, ctx, original_message)
+        # Scope fallback for plain-chat goal actions. ``_resolve_scope`` derives
+        # ``(none, none, none)`` for a non-vessel chat (telegram/webui/etc.), but
+        # the goal may have been created moments earlier under an EXPLICIT scope
+        # tuple (e.g. ``goal_set`` with ``scope="game", game="minecraft"`` from
+        # the same chat — the exact mismatch that produced ``no_active_goal`` on
+        # the follow-up ``goal_update``). When the neutral scope has no active
+        # goal and the caller passed no explicit scope, act on the most recently
+        # set active goal in ANY scope. Structural (DB recency), fail-safe (no
+        # goal anywhere -> unchanged neutral-scope behaviour), never a keyword
+        # parse; vessel turns keep their own scope because their derived tuple
+        # is non-neutral.
+        if (
+            action_name in ("goal_update", "goal_list")
+            and (sc, gm, wd) == (SCOPE_NONE, SCOPE_NONE, SCOPE_NONE)
+            and not any(
+                payload.get(k) not in (None, "") for k in ("scope", "game", "world")
+            )
+        ):
+            active_here = await get_active_goal(scope=sc, game=gm, world=wd)
+            if active_here is None:
+                latest = await get_most_recent_active_goal()
+                if latest is not None:
+                    sc = _coerce_scope(latest.get("scope"))
+                    gm = _coerce_scope(latest.get("game"))
+                    wd = _coerce_scope(latest.get("world"))
+                    log_info(
+                        f"{LOG_PREFIX} unscoped chat goal action fell back to "
+                        f"most recent active goal scope=({sc}/{gm}/{wd})"
+                    )
         try:
             if action_name == "goal_list":
                 active = await get_active_goal(scope=sc, game=gm, world=wd)

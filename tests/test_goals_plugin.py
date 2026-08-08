@@ -222,6 +222,13 @@ class _FakeStore:
             matches.sort(key=lambda r: r["id"], reverse=True)
             self._result = [self._tuple(matches[0])] if matches else []
             return 0
+        # get_most_recent_active_goal: WHERE status = %s ORDER BY id DESC LIMIT 1
+        if s.startswith("SELECT") and "WHERE status = %s ORDER BY id DESC" in s:
+            (status,) = params
+            matches = [r for r in self.rows if r["status"] == status]
+            matches.sort(key=lambda r: r["id"], reverse=True)
+            self._result = [self._tuple(matches[0])] if matches else []
+            return 0
         # list_recent_goals: WHERE scope/game/world ... LIMIT %s
         if s.startswith("SELECT") and "WHERE scope = %s AND game = %s" in s:
             sc, gm, wd, lim = params
@@ -371,6 +378,124 @@ async def test_list_recent_goals_scoped_newest_first(fake_db: _FakeStore) -> Non
     await goals.set_goal("personal")  # different scope, must be excluded
     recent = await goals.list_recent_goals(scope="vessel", game="minecraft")
     assert [g["description"] for g in recent] == ["b", "a"]
+
+
+# ----------------------------------------------------------------------
+# Plain-chat scope fallback (goal_set explicit scope vs unscoped goal_update)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_most_recent_active_goal_across_scopes(fake_db: _FakeStore) -> None:
+    assert await goals.get_most_recent_active_goal() is None
+    await goals.set_goal("old vessel goal", scope="vessel", game="minecraft")
+    await goals.set_goal("newer personal goal")
+    latest = await goals.get_most_recent_active_goal()
+    assert latest is not None
+    assert latest["description"] == "newer personal goal"
+    assert latest["scope"] == goals.SCOPE_NONE
+
+
+@pytest.mark.asyncio
+async def test_unscoped_chat_goal_update_falls_back_to_explicit_scope(
+    fake_db: _FakeStore,
+) -> None:
+    """An unscoped goal_update from a plain chat acts on the goal just set.
+
+    Regression: a ``goal_set`` that honoured an explicit scope tuple (e.g.
+    ``scope='game', game='minecraft'``, as a telegram-originated set did) was
+    followed by an unscoped ``goal_update``; the update resolved to the neutral
+    ``(none, none, none)`` chat scope, found no active goal there, and returned
+    ``no_active_goal`` — so Synth told the user "all goals cleared" while the
+    goal stayed ``active`` in the DB. The plugin now falls back to the most
+    recently set active goal in ANY scope for unscoped update/list actions.
+    """
+    plugin = goals.GoalsPlugin()
+    set_res = await plugin.execute_action(
+        {
+            "type": "goal_set",
+            "payload": {
+                "description": "make a wooden pickaxe",
+                "scope": "game",
+                "game": "minecraft",
+            },
+        },
+        context={"interface_path": "telegram_bot/5208932647"},
+    )
+    assert set_res["status"] == "ok"
+    # The goal lives under the explicit scope, not the neutral chat scope.
+    assert await goals.get_active_goal() is None
+    assert await goals.get_active_goal(scope="game", game="minecraft") is not None
+
+    # Unscoped update from the same chat must find it via the fallback.
+    upd_res = await plugin.execute_action(
+        {"type": "goal_update", "payload": {"status": "done"}},
+        context={"interface_path": "telegram_bot/5208932647"},
+    )
+    assert upd_res["status"] == "ok"
+    assert upd_res.get("goal_status") == goals.STATUS_DONE
+    assert await goals.get_active_goal(scope="game", game="minecraft") is None
+
+
+@pytest.mark.asyncio
+async def test_unscoped_chat_goal_list_falls_back_to_explicit_scope(
+    fake_db: _FakeStore,
+) -> None:
+    plugin = goals.GoalsPlugin()
+    await plugin.execute_action(
+        {
+            "type": "goal_set",
+            "payload": {
+                "description": "build a cottage",
+                "scope": "vessel",
+                "game": "minecraft",
+                "world": "w1",
+            },
+        },
+        context={"interface_path": "telegram_bot/5208932647"},
+    )
+    res = await plugin.execute_action(
+        {"type": "goal_list", "payload": {}},
+        context={"interface_path": "telegram_bot/5208932647"},
+    )
+    assert res["status"] == "ok"
+    assert res["current_goal"] is not None
+    assert res["current_goal"]["description"] == "build a cottage"
+    assert res["scope"] == {"scope": "vessel", "game": "minecraft", "world": "w1"}
+
+
+@pytest.mark.asyncio
+async def test_unscoped_chat_goal_update_no_goal_anywhere_still_fails(
+    fake_db: _FakeStore,
+) -> None:
+    """No goal anywhere -> the fallback is a no-op and behaviour is unchanged."""
+    plugin = goals.GoalsPlugin()
+    res = await plugin.execute_action(
+        {"type": "goal_update", "payload": {"status": "done"}},
+        context={"interface_path": "telegram_bot/5208932647"},
+    )
+    assert res == {"status": "error", "message": "no_active_goal"}
+
+
+@pytest.mark.asyncio
+async def test_explicit_scope_goal_update_does_not_fall_back(
+    fake_db: _FakeStore,
+) -> None:
+    """An explicit scope on the update is never overridden by the fallback."""
+    await goals.set_goal("game goal", scope="game", game="minecraft")
+    await goals.set_goal("personal goal")
+    plugin = goals.GoalsPlugin()
+    res = await plugin.execute_action(
+        {
+            "type": "goal_update",
+            "payload": {"status": "done", "scope": "none", "game": "none"},
+        },
+        context={"interface_path": "telegram_bot/5208932647"},
+    )
+    assert res["status"] == "ok"
+    assert res.get("goal_status") == goals.STATUS_DONE
+    # The game-scoped goal is untouched.
+    assert await goals.get_active_goal(scope="game", game="minecraft") is not None
 
 
 # ----------------------------------------------------------------------
