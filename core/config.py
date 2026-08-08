@@ -600,25 +600,21 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
         ):
             available.discard("anthropic")
 
-        # General rule for *every* cortex scope: an engine that is registered
-        # (probe may even read "success") but whose external endpoint is NOT
-        # actually cortex-capable is guaranteed to fail as an LLM backend --
-        # e.g. AGENT_CORTEX='logfare-mykey', an endpoint whose auto-probe found
-        # no cortex capability (capabilities.cortex=false) yet 401s on
-        # generate_response. Such an engine passes the plain ``chosen in
-        # available`` registration check and would be returned verbatim,
-        # starving the scope. Prune every non-cortex external endpoint from
-        # ``available`` up front so ``chosen`` (or ``base``/``sibling``) falls
+        # The external-endpoint registry uses the effective subsystem map as
+        # the source of truth for whether a configured endpoint is a Cortex
+        # engine. The resolver must use the same structural decision.
+        # Endpoints whose effective map disables Cortex are excluded from
+        # ``available`` so ``chosen`` (or ``base``/``sibling``) falls
         # into the override→Base degradation below.
         #
-        # Key off the *auto-probed* ``capabilities`` map, NOT the merged
-        # ``effective_subsystem_map()``: the latter lets a manual
-        # ``subsystem_map`` override force cortex=true on top of a failed probe
-        # (the exact logfare-mykey/logfare-claude misconfiguration -- probe
-        # says cortex=false, operator override says true, endpoint 401s). The
-        # honest structural signal of real cortex capability is the probe
-        # result. Detection stays purely structural (the capability map),
-        # never keyword/string matching.
+        # A provider probe may be conservative (Venice is one example), while
+        # an explicit effective subsystem map enables Cortex. Do not reject an
+        # endpoint that the registry deliberately registered as a Cortex
+        # engine just because its raw probe capability is false.
+        #
+        # The effective map remains structural and never depends on keyword
+        # or phrase matching.
+        #
         try:
             from core.external_endpoints.registry import (
                 get_external_endpoint_registry,
@@ -630,7 +626,7 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
             _non_cortex = {
                 ep.engine_name()
                 for ep in _all_endpoints
-                if not ep.capabilities.get("cortex")
+                if not ep.effective_subsystem_map().get("cortex")
             }
             if _non_cortex:
                 available.difference_update(_non_cortex)
@@ -659,24 +655,18 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
                 endpoints = await get_external_endpoint_registry().list_endpoints(
                     enabled_only=True
                 )
-                # Only keep ``chosen`` if it is a configured external endpoint
-                # that the auto-probe found genuinely *cortex*-capable. An
-                # endpoint whose probed ``capabilities.cortex`` is False (e.g. an
-                # STT/vision-only key, or one whose cortex probe failed) is
-                # guaranteed to fail as an LLM engine -- keeping it here would
-                # starve the scope (the exact AGENT_CORTEX=logfare-mykey 401
-                # case). We deliberately read the probed ``capabilities`` and
-                # NOT ``effective_subsystem_map()``, because a manual
-                # ``subsystem_map`` override can force cortex=true on top of a
-                # failed probe -- which is precisely the misconfiguration this
-                # guards against. Detection is purely structural (the capability
-                # map), never keyword/string matching. This makes the
+                # Only keep ``chosen`` if the configured endpoint's effective
+                # subsystem map exposes Cortex. This is the same structural
+                # decision used by the external-endpoint registry when it
+                # registers engines. A conservative provider probe may report
+                # ``capabilities.cortex=False`` even when the explicit map
+                # enables Cortex, so the effective map is authoritative here.
                 # override→Base degradation below the *general rule* for every
                 # scope, not just a one-off transient-registration escape hatch.
                 cortex_endpoints = {
                     ep.engine_name()
                     for ep in endpoints
-                    if ep.capabilities.get("cortex")
+                    if ep.effective_subsystem_map().get("cortex")
                 }
                 if chosen in cortex_endpoints:
                     log_warning(
@@ -1149,6 +1139,10 @@ async def switch_active_cortex_engine(name: str, use_hot_swap: bool = True):
 # `LOG_CHAT_ID` config key (e.g. "telegram_bot/-28475648/6"). The cache holds
 # that raw path; the interface name, chat id and thread id are derived from it.
 _log_chat_path: str | None = None  # cached log chat interface_path
+_log_chat_path_loaded: bool = False  # distinguishes loaded empty value from cache miss
+_loading_log_chat_path: bool = (
+    False  # prevents logging/config re-entry during bootstrap
+)
 
 
 def _parse_log_chat_path(path: str | None) -> tuple[str | None, int | None, int | None]:
@@ -1178,16 +1172,28 @@ def _parse_log_chat_path(path: str | None) -> tuple[str | None, int | None, int 
 
 def _load_log_chat_path() -> str | None:
     """Load and cache the raw LogChat interface_path from config_registry."""
-    global _log_chat_path
+    global _log_chat_path, _log_chat_path_loaded, _loading_log_chat_path
+    if _log_chat_path_loaded:
+        return _log_chat_path
     if _log_chat_path is None:
+        # Loading LOG_CHAT_ID can itself emit a log record. LogChat handling
+        # then calls this function again, so return the safe empty value for
+        # that nested call instead of recursing forever.
+        if _loading_log_chat_path:
+            return None
+        _loading_log_chat_path = True
         try:
             raw = config_registry.get_value("LOG_CHAT_ID", "")
             _log_chat_path = raw if raw else None
+            _log_chat_path_loaded = True
             log_debug(
                 f"[config] 📥 Loaded LOG_CHAT_ID (path) via config_registry: {_log_chat_path}"
             )
         except Exception as e:
+            _log_chat_path_loaded = True
             log_error(f"[config] ❌ Error in _load_log_chat_path(): {repr(e)}")
+        finally:
+            _loading_log_chat_path = False
     return _log_chat_path
 
 
@@ -1198,8 +1204,9 @@ def _on_log_chat_id_changed(new_value: object) -> None:
     generic exposed-var endpoint), bypassing set_log_chat_id_and_thread, so the
     module-level cache must be refreshed on every change.
     """
-    global _log_chat_path
+    global _log_chat_path, _log_chat_path_loaded
     _log_chat_path = str(new_value) if new_value else None
+    _log_chat_path_loaded = True
 
 
 try:
@@ -1239,12 +1246,13 @@ async def set_log_chat_id_and_thread(
     The interface, chat id and optional thread id are joined into one canonical
     interface_path (e.g. "telegram_bot/-28475648/6") stored in `LOG_CHAT_ID`.
     """
-    global _log_chat_path
+    global _log_chat_path, _log_chat_path_loaded
 
     from core.interface_path_utils import build_interface_path_from_legacy
 
     path = build_interface_path_from_legacy(interface, chat_id, thread_id)
     _log_chat_path = path
+    _log_chat_path_loaded = True
 
     try:
         await config_registry.set_value("LOG_CHAT_ID", path)

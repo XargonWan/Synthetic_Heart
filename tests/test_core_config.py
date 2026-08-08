@@ -71,6 +71,7 @@ async def test_log_chat_persistence_uses_config_registry(monkeypatch):
     import core.config_manager as cm
 
     conf._log_chat_path = None
+    conf._log_chat_path_loaded = False
     mock = AsyncMock()
     monkeypatch.setattr(cm.config_registry, "set_value", mock)
 
@@ -89,6 +90,7 @@ async def test_log_chat_persistence_omits_empty_thread(monkeypatch):
     import core.config_manager as cm
 
     conf._log_chat_path = None
+    conf._log_chat_path_loaded = False
     mock = AsyncMock()
     monkeypatch.setattr(cm.config_registry, "set_value", mock)
 
@@ -103,6 +105,7 @@ def test_get_log_chat_reads_from_config_registry(monkeypatch):
     import core.config_manager as cm
 
     conf._log_chat_path = None
+    conf._log_chat_path_loaded = False
     monkeypatch.setattr(
         cm.config_registry,
         "get_value",
@@ -133,6 +136,7 @@ def test_log_chat_listener_invalidates_cache(monkeypatch):
 
     # Seed the cache with an initial value.
     conf._log_chat_path = "telegram_bot/111"
+    conf._log_chat_path_loaded = True
     assert conf.get_log_chat_id_sync() == 111
 
     # Simulate the config_registry listener firing on a new value.
@@ -144,6 +148,35 @@ def test_log_chat_listener_invalidates_cache(monkeypatch):
     # An empty value clears the cache.
     conf._on_log_chat_id_changed("")
     assert conf.get_log_chat_id_sync() is None
+
+
+def test_log_chat_loader_is_reentrant_safe(monkeypatch):
+    """Config/logging bootstrap must not recurse while loading LOG_CHAT_ID."""
+    from core import config as conf
+    import core.config_manager as cm
+
+    conf._log_chat_path = None
+    conf._log_chat_path_loaded = False
+    conf._loading_log_chat_path = False
+    monkeypatch.setattr(conf, "log_debug", lambda _message: None)
+    monkeypatch.setattr(conf, "log_error", lambda _message: None)
+
+    calls = 0
+
+    def reentrant_get_value(key, default=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            assert conf._load_log_chat_path() is None
+        return default
+
+    monkeypatch.setattr(cm.config_registry, "get_value", reentrant_get_value)
+
+    assert conf._load_log_chat_path() is None
+    assert calls == 1
+    assert conf._load_log_chat_path() is None
+    assert calls == 1
+    assert conf._loading_log_chat_path is False
 
 
 @pytest.mark.asyncio
@@ -232,7 +265,10 @@ async def test_get_active_cortex_engine_keeps_pending_external_endpoint(monkeypa
             return "anthropic"
 
     class FakeEndpoint:
-        capabilities = {"cortex": True}
+        # The provider probe may be conservative, but the explicit effective
+        # subsystem map is what caused the registry to expose this endpoint as
+        # a Cortex engine.
+        capabilities = {"cortex": False}
 
         def engine_name(self):
             return "Venice2"
@@ -422,12 +458,7 @@ async def test_get_active_cortex_engine_allows_anthropic_when_key_configured(
 async def test_get_active_cortex_engine_registered_noncortex_endpoint_falls_back(
     monkeypatch,
 ):
-    """Primary-path gap: an override engine that IS registered (and whose probe
-    even read 'success') but whose external endpoint advertises cortex=False must
-    still degrade to Base and reset the override to 'Default'. This is the exact
-    live AGENT_CORTEX=logfare-mykey case -- it passed the plain `chosen in
-    available` check and was returned verbatim, 401ing every turn. Unlike the
-    sibling test above, here `logfare-mykey` IS in get_available_engines()."""
+    """A registered endpoint with effective Cortex disabled falls back to Base."""
     from core import config as conf
     import core.config_manager as cm
 
@@ -440,18 +471,15 @@ async def test_get_active_cortex_engine_registered_noncortex_endpoint_falls_back
             return "selenium-llm-engine"
 
     class FakeEndpoint:
-        # logfare-mykey's auto-probe found no cortex capability. A manual
-        # subsystem_map override forcing cortex=true must NOT rescue it -- the
-        # resolver keys off the probed capabilities, so effective_subsystem_map
-        # returning True here would be a trap the fix must ignore.
+        # The endpoint is explicitly not configured for Cortex, so it must not
+        # be kept merely because a stale registry entry still contains it.
         capabilities = {"cortex": False}
 
         def engine_name(self):
             return "logfare-mykey"
 
         def effective_subsystem_map(self):
-            # Simulate the live misconfiguration: operator override says cortex.
-            return {"cortex": True}
+            return {"cortex": False}
 
     class FakeExternalEndpointRegistry:
         async def list_endpoints(self, enabled_only=False):

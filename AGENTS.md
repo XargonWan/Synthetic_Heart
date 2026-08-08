@@ -1007,6 +1007,20 @@ Before finishing a code task, verify:
 | `CHAT_SLEEP_COMMANDS` | Commands that put Synth into sleep/quiet mode |
 | `CHAT_WAKE_COMMANDS` | Commands that wake Synth from sleep mode |
 
+### External Cortex selection reverted to Anthropic after a successful switch  <!-- 2026-08-08 -->
+**Symptom:** The WebUI reports a successful switch to an external engine such as Venice, but the next prompt logs that the engine is unregistered and persists `BASE_CORTEX=anthropic`.
+**Location:** `core/config.py::get_active_cortex_engine`; `core/external_endpoints/registry.py::_sync_registries`.
+**Status:** fixed 2026-08-08.
+**Root cause:** The external registry registers endpoints using `effective_subsystem_map()`, while the resolver pruned endpoints using only raw probe capabilities. Venice had `capabilities.cortex=False` but an explicit effective `cortex=True` map, so the two paths disagreed.
+**Fix:** The resolver now uses `effective_subsystem_map()` consistently. Endpoints whose effective map disables Cortex still fall back normally.
+
+### Engine Config save caused the active WebUI to replace its endpoint card tree  <!-- 2026-08-08 -->
+**Symptom:** Changing an Engine Configuration toggle such as `enable_tools` could make the WebUI appear as a full blue/blocked surface immediately after saving.
+**Location:** `res/synth_webui/js/main.js` Engine Config editor; `res/synth_webui/js/engines.js::loadEndpoints`.
+**Status:** fixed 2026-08-08.
+**Root cause:** The save path called `refreshEndpoints()` after the backend save. That rebuilt the entire external-endpoint card DOM while the active Engine Config editor and its event handlers were still attached to the old tree. The failure was introduced by the in-place endpoint-refresh change; D17 does not contain that refresh on this path.
+**Fix:** Engine Config save/apply no longer rebuilds the endpoint cards. The backend still persists and applies the configuration, while the active editor remains stable.
+
 Final responses should state:
 
 1. what changed;

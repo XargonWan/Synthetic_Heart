@@ -2852,11 +2852,6 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         if (!res.ok) throw new Error('HTTP ' + res.status);
                         setCfgStatus('Saved — applied to this engine.', true);
                         if (window.showToast) window.showToast('Engine config saved', false);
-                        // The save re-probes server-side; refresh the endpoint
-                        // cards so probe results / models update in place.
-                        if (window.SynthWebUI && typeof window.SynthWebUI.refreshEndpoints === 'function') {
-                            window.SynthWebUI.refreshEndpoints();
-                        }
                     } catch (err) {
                         setCfgStatus('Save failed: ' + err.message, false);
                     }
@@ -2887,12 +2882,6 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         setCfgStatus(`Applied "${name}".`, true);
                         if (window.showToast) window.showToast(`Engine preset "${name}" applied`, false);
                         await loadComponentsSummary();
-                        // The apply re-probes server-side; refresh the endpoint
-                        // cards too so the new default model / probe results
-                        // show without a manual reload.
-                        if (window.SynthWebUI && typeof window.SynthWebUI.refreshEndpoints === 'function') {
-                            window.SynthWebUI.refreshEndpoints();
-                        }
                     } catch (err) {
                         setCfgStatus('Apply failed: ' + err.message, false);
                     }
