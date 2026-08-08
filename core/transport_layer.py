@@ -22,6 +22,11 @@ JsonMetadata: TypeAlias = dict[str, Any]
 # Format: {chat_id: timestamp} to allow timeout cleanup
 _EXPECTING_SYSTEM_REPLY: dict = {}
 
+# Cap on how many entities/blocks/affordances are rendered in the vessel
+# world-state block embedded in correction prompts (see
+# ``_render_vessel_world_state_block``). Keeps the correction turn lean.
+_MAX_WORLD_STATE_RECORDS = 12
+
 # Register the timeout used when waiting for a system reply to a correction prompt.
 AWAIT_RESPONSE_TIMEOUT = config_registry.get_var(
     "AWAIT_RESPONSE_TIMEOUT",
@@ -2068,6 +2073,118 @@ def _get_attempted_action_full_description(
         return None
 
 
+def _render_vessel_world_state_block(world_state: Any) -> str:
+    """Render a compact structural vessel world-state block for correction prompts.
+
+    The corrector prompt is a fresh single-message turn with no history, so a
+    failed in-world action (e.g. craft/drop) is corrected blind: the model has no
+    idea what it is carrying, where it is, or what is around it, and guesses
+    recipe chains that fail again. This block surfaces the same bounded snapshot
+    the reactive main turn attaches at ``input.payload.vessel_world_state``
+    (produced by ``VesselInterface._compact_reactive_world_state``) — inventory
+    counts, position, health, nearby blocks/entities, and affordances — purely
+    structural (ids, counts, distances), never keyword logic. Fully fail-safe:
+    any missing/malformed field degrades to "unknown"/"none" and the whole block
+    returns ``""`` when nothing usable is present, so a non-vessel correction is
+    untouched.
+    """
+    if not isinstance(world_state, dict):
+        return ""
+    try:
+        lines: list[str] = ["[LIVE WORLD STATE — use this for the current action]"]
+
+        position = world_state.get("position")
+        if isinstance(position, dict):
+            parts: list[str] = []
+            for axis in ("x", "y", "z"):
+                val = position.get(axis)
+                if val is None:
+                    continue
+                try:
+                    parts.append(f"{axis}={float(val):.0f}")
+                except (TypeError, ValueError):
+                    parts.append(f"{axis}={val}")
+            lines.append(f"- Position: {' '.join(parts) if parts else 'unknown'}")
+
+        health = world_state.get("health")
+        if isinstance(health, (int, float)):
+            lines.append(f"- Health: {float(health):.0f}")
+
+        inventory_counts = world_state.get("inventory_counts")
+        if isinstance(inventory_counts, dict):
+            inv_items = [
+                f"{name} x{count}"
+                for name, count in list(inventory_counts.items())[:20]
+                if isinstance(name, str)
+                and isinstance(count, (int, float))
+                and count > 0
+            ]
+            lines.append(
+                f"- Inventory: {', '.join(inv_items) if inv_items else 'none'}"
+            )
+
+        def _fmt_records(records: Any, fields: tuple[str, ...]) -> list[str]:
+            if not isinstance(records, list):
+                return []
+            out: list[str] = []
+            for record in records[:_MAX_WORLD_STATE_RECORDS]:
+                if not isinstance(record, dict):
+                    continue
+                label = next(
+                    (
+                        str(record[field])
+                        for field in fields
+                        if record.get(field) not in (None, "")
+                    ),
+                    None,
+                )
+                if not label:
+                    continue
+                distance = record.get("distance")
+                if isinstance(distance, (int, float)):
+                    out.append(f"{label} ({float(distance):.0f}m)")
+                else:
+                    out.append(label)
+            return out
+
+        entities = _fmt_records(
+            world_state.get("entities"), ("name", "type", "username")
+        )
+        if entities:
+            lines.append(f"- Nearby entities: {', '.join(entities)}")
+
+        blocks = _fmt_records(world_state.get("blocks"), ("name",))
+        if blocks:
+            lines.append(f"- Nearby blocks: {', '.join(blocks)}")
+
+        affordances = world_state.get("affordances")
+        if isinstance(affordances, list):
+            aff_lines: list[str] = []
+            for aff in affordances[:_MAX_WORLD_STATE_RECORDS]:
+                if not isinstance(aff, dict):
+                    continue
+                verb = aff.get("verb")
+                target = aff.get("target")
+                if not verb or not target:
+                    continue
+                distance = aff.get("distance")
+                if isinstance(distance, (int, float)):
+                    aff_lines.append(f"{verb} → {target} ({float(distance):.0f}m)")
+                else:
+                    aff_lines.append(f"{verb} → {target}")
+            if aff_lines:
+                lines.append(
+                    f"- Things you could interact with: {'; '.join(aff_lines)}"
+                )
+
+        if len(lines) <= 1:
+            return ""
+        return "\n".join(lines)
+    except Exception as exc:  # pragma: no cover - defensive
+        log_debug(f"[corrector_middleware] vessel world-state render failed: {exc}")
+        return ""
+
+
 async def run_corrector_middleware(
     text: str,
     bot=None,
@@ -2486,6 +2603,33 @@ async def run_corrector_middleware(
                         )
             except Exception as _pe:
                 log_debug(f"[corrector_middleware] persona prepend skipped: {_pe}")
+
+            # Carry the live vessel world state into the correction prompt. The
+            # corrector is a fresh single-message turn with no history, so a
+            # failed in-world action (craft/drop/etc.) would otherwise be fixed
+            # blind: the model cannot see its inventory, position, or what is
+            # nearby, and guesses recipe chains that fail again (observed in
+            # production: repeated craft/drop corrections for a wooden pickaxe
+            # with an empty inventory). The reactive main turn already attaches
+            # this snapshot at ``input.payload.vessel_world_state``; mirror it
+            # here so the retry is grounded in the same structural facts.
+            # Purely structural, fully guarded (absent for non-vessel turns).
+            try:
+                if isinstance(context, dict):
+                    _vws = context.get("vessel_world_state")
+                    if isinstance(_vws, dict) and _vws:
+                        _vws_block = _render_vessel_world_state_block(_vws)
+                        if _vws_block:
+                            correction_message_text = (
+                                f"{correction_message_text}\n\n{_vws_block}"
+                            )
+                            log_debug(
+                                "[corrector_middleware] Appended live vessel world-state block to correction prompt"
+                            )
+            except Exception as _vws_exc:
+                log_debug(
+                    f"[corrector_middleware] vessel world-state block skipped: {_vws_exc}"
+                )
 
             correction_payload = {
                 "system_message": {

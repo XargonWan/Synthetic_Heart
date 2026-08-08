@@ -173,15 +173,27 @@ def _tokens(text: str) -> List[str]:
     return re.findall(r"[a-z0-9_]+", text.lower())
 
 
+def _match_needles(game_id: str) -> Tuple[str, ...]:
+    """Return whole-word regex needles for ``game_id`` (canonical + spaced).
+
+    The canonical underscore form (``oak_log``) matches exactly; the spaced
+    form (``oak log``) additionally tolerates a trailing plural ``s``
+    (``oak logs``) so natural goal text ("gather 20 oak logs", "craft 3
+    crafting tables") resolves to the same id. Purely structural: it only
+    broadens *how* a known id is spelled, never what an id means.
+    """
+    spaced = game_id.replace("_", " ")
+    return (
+        r"(?<![a-z0-9_])" + re.escape(game_id) + r"(?![a-z0-9_])",
+        r"(?<![a-z0-9_])" + re.escape(spaced) + r"s?(?![a-z0-9_])",
+    )
+
+
 def _match_canonical_id(text_lower: str) -> Optional[str]:
     """Return the first canonical id that appears as a whole word/phrase."""
     for game_id in _ORDERED_IDS:
-        # id may contain underscores (oak_log); match it delimited by
-        # non-word chars OR spaces where the underscore reads as a space.
-        spaced = game_id.replace("_", " ")
-        for needle in (game_id, spaced):
-            pattern = r"(?<![a-z0-9_])" + re.escape(needle) + r"(?![a-z0-9_])"
-            if re.search(pattern, text_lower):
+        for needle in _match_needles(game_id):
+            if re.search(needle, text_lower):
                 return game_id
     return None
 
@@ -303,11 +315,89 @@ def derive_products(description: Optional[str]) -> List[str]:
     text_lower = description.lower()
     found: List[str] = []
     for game_id in _ORDERED_PRODUCT_IDS:
-        spaced = game_id.replace("_", " ")
-        for needle in (game_id, spaced):
-            pattern = r"(?<![a-z0-9_])" + re.escape(needle) + r"(?![a-z0-9_])"
-            if re.search(pattern, text_lower):
+        for needle in _match_needles(game_id):
+            if re.search(needle, text_lower):
                 if game_id not in found:
                     found.append(game_id)
                 break
     return found
+
+
+# Default quantity when the goal text states no number for an item.
+_DEFAULT_QTY = 1
+# A "stack" is 64 of an item in vanilla Minecraft (structural constant).
+_STACK_SIZE = 64
+
+
+def derive_quantity(description: Optional[str], game_id: str) -> int:
+    """Return how many of ``game_id`` the goal text asks for, default 1.
+
+    A goal like *"gather 20 oak logs"* or *"craft 3 torches"* carries an
+    explicit count; *"gather oak logs"* means one. This extracts that count so
+    the goal debrief can judge completion against the *stated* target, not just
+    presence >= 1. Patterns (all structural number scans around the exact id,
+    never intent detection):
+
+    * ``"20 oak logs"`` / ``"20 oak_log"`` — a number directly before the id;
+    * ``"oak logs x20"`` / ``"oak logs ×20"`` — a ``x``/``×`` suffix;
+    * ``"a stack of oak logs"`` — one stack (64);
+    * ``"2 stacks of oak logs"`` — two stacks (128).
+
+    Matching tolerates a trailing plural ``s`` on the spaced form (``"oak
+    logs"``), mirroring the whole-word matcher used for id derivation. Any miss
+    / malformed input degrades to :data:`_DEFAULT_QTY` (1), the pre-existing
+    presence semantics. Fully fail-safe.
+    """
+    if not isinstance(description, str) or not description.strip():
+        return _DEFAULT_QTY
+    if not isinstance(game_id, str) or not game_id.strip():
+        return _DEFAULT_QTY
+    text_lower = description.lower()
+    # Whole-word needles (canonical + spaced, the spaced form tolerating a
+    # trailing plural ``s``) — the same needles used for id derivation, so a
+    # quantity is only read for an id the goal text actually names.
+    needles = _match_needles(game_id.lower())
+
+    # "N stacks of <id>" / "a stack of <id>"
+    for n_needle in needles:
+        stack_multi = re.search(r"(\d+)\s+stacks?\s+of\s+" + n_needle, text_lower)
+        if stack_multi:
+            try:
+                return max(1, int(stack_multi.group(1)) * _STACK_SIZE)
+            except (TypeError, ValueError):
+                pass
+        if re.search(r"(?:^|\W)(?:a|one|an)\s+stack\s+of\s+" + n_needle, text_lower):
+            return _STACK_SIZE
+
+    # "<id> x<N>" / "<id> ×<N>"
+    for n_needle in needles:
+        suffix = re.search(n_needle + r"\s*[x×]\s*(\d+)", text_lower)
+        if suffix:
+            try:
+                return max(1, int(suffix.group(1)))
+            except (TypeError, ValueError):
+                pass
+
+    # "<N> <id>"
+    for n_needle in needles:
+        prefix = re.search(r"(\d+)\s+" + n_needle, text_lower)
+        if prefix:
+            try:
+                return max(1, int(prefix.group(1)))
+            except (TypeError, ValueError):
+                pass
+
+    return _DEFAULT_QTY
+
+
+def derive_product_quantities(description: Optional[str]) -> Dict[str, int]:
+    """Return ``{game_id: quantity}`` for every product a goal text names.
+
+    Combines :func:`derive_products` (which ids are named) with
+    :func:`derive_quantity` (how many each asks for). Purely structural; fully
+    fail-safe (empty text / no products → ``{}``).
+    """
+    out: Dict[str, int] = {}
+    for game_id in derive_products(description):
+        out[game_id] = derive_quantity(description, game_id)
+    return out

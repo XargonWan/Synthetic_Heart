@@ -1412,6 +1412,78 @@ function resolveTargetBlock(target, maxDistance) {
   return null;
 }
 
+// Place a held block adjacent to the bot, returning the placed block or null.
+// Reuses the same reference-face scan as the 'place' verb: pick a solid block
+// around the feet whose exposed air-face yields a cell the bot does NOT occupy,
+// look at it, then place. Used by the craft verb so a carried crafting_table
+// becomes usable for 3x3 recipes without requiring a separate `place` action.
+async function placeCarriedBlockNearby(itemName) {
+  const wanted = itemName != null ? String(itemName).trim().toLowerCase() : '';
+  if (!wanted || !bot || typeof bot.placeBlock !== 'function') return null;
+  const held = botInventory().find((it) => it.name && it.name.toLowerCase() === wanted);
+  if (!held) return null;
+  try {
+    const item = bot.inventory.items().find((it) => it.slot === held.slot) || null;
+    if (item && typeof bot.equip === 'function') await bot.equip(item, 'hand');
+    const Vec3 = bot.entity.position.constructor;
+    const feet = bot.entity.position.floored();
+    const bodyCells = [feet, feet.offset(0, 1, 0)];
+    const isBodyCell = (p) =>
+      bodyCells.some((b) => b.x === p.x && b.y === p.y && b.z === p.z);
+    const faces = [
+      new Vec3(0, 1, 0),
+      new Vec3(1, 0, 0),
+      new Vec3(-1, 0, 0),
+      new Vec3(0, 0, 1),
+      new Vec3(0, 0, -1),
+    ];
+    const around = [
+      feet.offset(0, -1, 0),
+      feet.offset(1, -1, 0),
+      feet.offset(-1, -1, 0),
+      feet.offset(0, -1, 1),
+      feet.offset(0, -1, -1),
+      feet.offset(1, 0, 0),
+      feet.offset(-1, 0, 0),
+      feet.offset(0, 0, 1),
+      feet.offset(0, 0, -1),
+    ];
+    let chosenRef = null;
+    let chosenFace = null;
+    for (const refPos of around) {
+      const refBlock = bot.blockAt(refPos);
+      if (!refBlock || refBlock.name === 'air') continue;
+      for (const face of faces) {
+        const targetPos = refPos.offset(face.x, face.y, face.z);
+        if (isBodyCell(targetPos)) continue;
+        const targetBlock = bot.blockAt(targetPos);
+        if (targetBlock && targetBlock.name === 'air') {
+          chosenRef = refBlock;
+          chosenFace = face;
+          break;
+        }
+      }
+      if (chosenRef) break;
+    }
+    if (!chosenRef || !chosenFace) return null;
+    const lookAt = chosenRef.position
+      .offset(0.5, 0.5, 0.5)
+      .offset(chosenFace.x * 0.5, chosenFace.y * 0.5, chosenFace.z * 0.5);
+    try {
+      await bot.lookAt(lookAt, true);
+    } catch (_lookErr) {
+      /* non-fatal */
+    }
+    await bot.placeBlock(chosenRef, chosenFace);
+    // Small settle so the server block-update lands before we query it.
+    await sleep(300);
+    const placedPos = chosenRef.position.offset(chosenFace.x, chosenFace.y, chosenFace.z);
+    return bot.blockAt(placedPos) || null;
+  } catch (e) {
+    return null;
+  }
+}
+
 // Run pathfinder toward a goal and resolve when it arrives, errors, or times
 // out. Emits an 'arrival' perception event on success. Fully guarded so a
 // missing pathfinder or an unreachable goal degrades gracefully.
@@ -3667,6 +3739,23 @@ async function runAction(action, payload) {
             await navigateToGoal(new pathfinder.goals.GoalNear(p.x, p.y, p.z, 2), payload.timeout_ms);
           }
           craftingTable = tableBlock;
+        } else if (inventoryCountByName('crafting_table') > 0) {
+          // No table is placed within reach, but the bot CARRIES one. Auto-place
+          // it adjacent and use it — otherwise every 3x3 recipe (wooden_pickaxe,
+          // crafting_table, …) fails with "a crafting table may be required and
+          // none is reachable" and the model, blind to that gap, loops trying to
+          // craft or crafts a second table instead of placing the first.
+          const placed = await placeCarriedBlockNearby('crafting_table');
+          if (placed) {
+            craftingTable = placed;
+            pushEvent({
+              environment: ENVIRONMENT,
+              event_type: 'build',
+              summary: 'Placed crafting_table for crafting',
+              actor: bot.username,
+              data: { item: 'crafting_table' },
+            });
+          }
         }
         // recipesFor(itemId, metadata, minResultCount, craftingTable) returns
         // only recipes the bot can actually make with what it is holding.
@@ -3682,9 +3771,25 @@ async function runAction(action, payload) {
           // Structural shortfall report so the caller can surface a
           // "you need N/M <material>" cue for a few turns.
           const shortfall = craftMissingIngredients(itemDef, mcData, craftingTable);
+          // Name the missing materials in the failure text itself. The reactive
+          // correction path surfaces only this detail string (the structured
+          // `data` shortfall is dropped by the action-result classifier), so
+          // without this the model retries the craft blind, not knowing what to
+          // gather first. Purely structural (item ids + counts), never keywords.
+          let missingTxt = '';
+          const shortfallMissing =
+            shortfall && Array.isArray(shortfall.missing) ? shortfall.missing : [];
+          if (shortfallMissing.length) {
+            missingTxt =
+              ' (missing: ' +
+              shortfallMissing
+                .map((m) => `${m.item} x${m.need}`)
+                .join(', ') +
+              ')';
+          }
           return {
             ok: false,
-            detail: `no craftable recipe for '${itemName}' with current materials${needsTable}`,
+            detail: `no craftable recipe for '${itemName}' with current materials${missingTxt}${needsTable}`,
             data: shortfall || { wanted: itemName, missing: [] },
           };
         }

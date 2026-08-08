@@ -278,6 +278,51 @@ def _fmt_craft_deficit(craft_deficit: Any) -> list[str]:
     ]
 
 
+def _fmt_goal_deficit(goal_deficit: Any) -> list[str]:
+    """Render the active-goal material shortfall as prompt lines.
+
+    ``goal_deficit`` is the opaque dict the connector placed in
+    ``extra["goal_deficit"]`` — ``{"items": [{"item", "have", "need"}, ...]}`` —
+    meaning the active goal needs items Synth does not yet hold in the required
+    quantities. This is the *goal-level* counterpart of ``craft_deficit``: it
+    tells Synth exactly what its own goal is short on (e.g. *"gather 20 oak
+    logs"* with 5 in hand), so the will/action beats can pick the concrete next
+    step (gather more logs) instead of drifting. Returns an empty list when
+    there is nothing to show. Purely structural rendering of ids + counts; it
+    never inspects anything for keywords.
+    """
+    if not isinstance(goal_deficit, dict):
+        return []
+    items = goal_deficit.get("items")
+    if not isinstance(items, list) or not items:
+        return []
+    parts: list[str] = []
+    for entry in items:
+        if not isinstance(entry, dict):
+            continue
+        item = str(entry.get("item") or "").strip()
+        if not item:
+            continue
+        try:
+            have = int(entry.get("have") or 0)
+            need = int(entry.get("need") or 0)
+        except (TypeError, ValueError):
+            continue
+        if need <= 0:
+            continue
+        if have >= need:
+            continue
+        parts.append(f"{have}/{need} {item}")
+    if not parts:
+        return []
+    return [
+        "",
+        "Your current goal still needs materials you are short on (have/need): "
+        f"{', '.join(parts)}. Make gathering/crafting the missing quantities "
+        "your concrete next step.",
+    ]
+
+
 def _fmt_bases(bases: Any) -> list[str]:
     """Render Synth's registered bases (homes) as prompt lines.
 
@@ -624,6 +669,13 @@ def build_will_prompt(world_state: Any, world: str) -> str:
     # Synth knows what intermediate material to gather next instead of retrying
     # the same impossible craft. Structural (item ids + counts), keyword-free.
     lines.extend(_fmt_craft_deficit(extra.get("craft_deficit")))
+
+    # Goal-level material shortfall. The connector computes what the ACTIVE goal
+    # still needs (have/need per named product/target) and places it in
+    # ``extra["goal_deficit"]``. Surface it so the will beat can pick the
+    # concrete next step (gather the missing quantity) instead of drifting —
+    # the "runs around with nothing to do" gap. Structural, keyword-free.
+    lines.extend(_fmt_goal_deficit(extra.get("goal_deficit")))
 
     # Structural survival cue. When the self-preservation reflex recently acted
     # on a danger (drowning, fire/lava, a hostile mob, or death), the connector
@@ -1096,6 +1148,11 @@ def build_action_prompt(world_state: Any, world: str) -> str:
     # so the action beat gathers the missing intermediate instead of retrying
     # the impossible craft. Structural (item ids + counts), keyword-free.
     lines.extend(_fmt_craft_deficit(extra.get("craft_deficit")))
+
+    # Goal-level material shortfall (see build_will_prompt). Surface it here too
+    # so the action beat picks the concrete "gather the missing quantity" step
+    # instead of drifting with nothing to do. Structural, keyword-free.
+    lines.extend(_fmt_goal_deficit(extra.get("goal_deficit")))
 
     # Registered bases (homes), keyword-free — so a concrete step can head home
     # to build/store instead of leaving resources scattered.

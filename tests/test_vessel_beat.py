@@ -686,6 +686,52 @@ def test_craft_deficit_absent_or_malformed() -> None:
     assert "wished to build" not in build_will_prompt(bad2, "minecraft")
 
 
+# --- _fmt_goal_deficit — active-goal material shortfall cue ------------------
+
+
+def _state_with_goal_deficit() -> dict[str, Any]:
+    state = _rich_world_state()
+    state["extra"]["goal_deficit"] = {
+        "items": [
+            {"item": "oak_log", "have": 5, "need": 20},
+            {"item": "torch", "have": 2, "need": 3},
+        ]
+    }
+    return state
+
+
+def test_build_will_prompt_renders_goal_deficit() -> None:
+    prompt = build_will_prompt(_state_with_goal_deficit(), "minecraft")
+    assert "current goal still needs materials" in prompt
+    assert "5/20 oak_log" in prompt
+    assert "2/3 torch" in prompt
+
+
+def test_build_action_prompt_renders_goal_deficit() -> None:
+    prompt = build_action_prompt(_state_with_goal_deficit(), "minecraft")
+    assert "current goal still needs materials" in prompt
+    assert "5/20 oak_log" in prompt
+
+
+def test_goal_deficit_absent_or_malformed() -> None:
+    # No cue → nothing rendered.
+    assert "current goal still needs" not in build_will_prompt(
+        _rich_world_state(), "minecraft"
+    )
+    bad = _rich_world_state()
+    bad["extra"]["goal_deficit"] = {"items": []}
+    assert "current goal still needs" not in build_will_prompt(bad, "minecraft")
+    bad2 = _rich_world_state()
+    bad2["extra"]["goal_deficit"] = {"items": "nope"}
+    assert "current goal still needs" not in build_will_prompt(bad2, "minecraft")
+    # A satisfied item (have >= need) is skipped.
+    sat = _rich_world_state()
+    sat["extra"]["goal_deficit"] = {
+        "items": [{"item": "oak_log", "have": 20, "need": 20}]
+    }
+    assert "current goal still needs" not in build_will_prompt(sat, "minecraft")
+
+
 # ---------------------------------------------------------------------------
 # build_damage_appraisal_prompt — post-damage cognitive appraisal
 # ---------------------------------------------------------------------------

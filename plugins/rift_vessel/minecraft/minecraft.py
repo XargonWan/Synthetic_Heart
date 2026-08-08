@@ -1965,6 +1965,16 @@ class MinecraftConnector(VesselConnectorBase):
                 # auto-computed progress; Synth judges its own progress.
                 "current_goal": current_goal,
                 "recent_goals": recent_goals,
+                # Goal-level material shortfall: what the ACTIVE goal still
+                # needs (have/need per named product/target) vs the live
+                # inventory. Rendered by the will/action beats as a "your goal
+                # still needs N/M <item>" cue so Synth picks the concrete next
+                # step instead of drifting (the "runs around" gap). Structural
+                # (canonical ids + counts), never chat text. None when the goal
+                # names nothing countable or is fully satisfied.
+                "goal_deficit": self._compute_goal_deficit(
+                    current_goal, inventory_counts
+                ),
                 # Structural 3-state feedback on the last named target the motor
                 # tried to reach (arrived / not_found / unreachable). Lets the
                 # slow will beat see *why* a target failed and re-plan (pick
@@ -2202,6 +2212,62 @@ class MinecraftConnector(VesselConnectorBase):
         except Exception as exc:  # pragma: no cover - defensive
             log_debug(f"{LOG_PREFIX} base resolution failed: {exc}")
             return []
+
+    def _compute_goal_deficit(
+        self,
+        goal: Dict[str, Any] | None,
+        inventory_counts: Dict[str, int],
+    ) -> Dict[str, Any] | None:
+        """Compute the active goal's material shortfall (have/need), or None.
+
+        Structural counterpart of :meth:`_update_craft_deficit` for the *goal*
+        itself: reads the goal's named products/targets
+        (:func:`target_names.derive_product_quantities` /
+        :func:`target_names.derive_quantity`) and diffs them against the live
+        inventory counts. Returns ``{"items": [{"item", "have", "need"}]}``
+        listing only items still short (``have < need``), or ``None`` when the
+        goal names nothing countable or is fully satisfied. Rendered by the
+        will/action beats as a "your goal still needs N/M <item>" cue, so Synth
+        picks the concrete "gather the missing quantity" step instead of
+        drifting. Purely structural (canonical ids + numeric counts), never
+        parses free text for intent. Fail-safe.
+        """
+        try:
+            if not isinstance(goal, dict):
+                return None
+            if not isinstance(inventory_counts, dict):
+                return None
+            description = " ".join(
+                str(goal.get(field) or "") for field in ("description", "note")
+            ).strip()
+            products = mc_target_names.derive_product_quantities(description)
+            needs: Dict[str, int] = dict(products)
+            target_name = goal.get("target_name")
+            if not target_name:
+                derived = mc_target_names.derive_target(description)
+                if derived:
+                    target_name = derived.get("target_name")
+            if isinstance(target_name, str) and target_name:
+                needs[target_name] = mc_target_names.derive_quantity(
+                    description, target_name
+                )
+            items: list[Dict[str, Any]] = []
+            for item, need in needs.items():
+                try:
+                    have = int(inventory_counts.get(item, 0))
+                    need_i = int(need)
+                except (TypeError, ValueError):
+                    continue
+                if need_i <= 0:
+                    continue
+                if have < need_i:
+                    items.append({"item": item, "have": have, "need": need_i})
+            if not items:
+                return None
+            return {"items": items}
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} goal deficit computation failed: {exc}")
+            return None
 
     async def _resolve_quest(
         self,
@@ -3600,8 +3666,27 @@ class MinecraftConnector(VesselConnectorBase):
             logs"*): the derived ``target_name`` — from the goal's explicit
             field or :func:`target_names.derive_target` — sits in the inventory.
           * **Craft/build goals** (a produced item, e.g. *"craft a crafting
-            table"*): any product id named in the goal text
-            (:func:`target_names.derive_products`) sits in the inventory.
+            table"*): the product ids named in the goal text
+            (:func:`target_names.derive_products`) sit in the inventory.
+
+        **Multi-part goals need ALL their products.** A goal that names several
+        distinct products (e.g. *"a proper door, a warm torch, four walls and a
+        roof"*) is only satisfied when **every** named product is in the
+        inventory. Completing on *any one* product auto-closed multi-part build
+        goals the moment a single ingredient landed (observed churn: a cottage
+        goal re-authored every ~60 s because one torch/plank/table in inventory
+        marked the whole goal done). A derived raw-material target (e.g.
+        ``oak_log`` from *"gather a bit more wood"*) is an **ingredient** of a
+        product-naming goal, never its outcome, so it does not satisfy such a
+        goal. Stepped goals (a non-empty ``steps`` plan) drive their own
+        progression in the goal store and are never auto-completed here.
+
+        **Quantities are honoured.** *"Gather 20 oak logs"* requires 20 in the
+        inventory, not just one: the goal text's stated count
+        (:func:`target_names.derive_quantity`) is compared against the live
+        count, so a goal is not auto-closed the moment a single item lands
+        (observed: "gather a bit more wood" goals completing on one log). A text
+        without a number keeps the pre-existing presence semantics (>= 1).
 
         This is the exact Minecraft-name exception the rest of this adapter
         already relies on: matching against canonical game item ids is
@@ -3621,19 +3706,33 @@ class MinecraftConnector(VesselConnectorBase):
                 str(goal.get(field) or "") for field in ("description", "note")
             ).strip()
 
-            # 1) Crafted/produced outcome already in inventory (craft/build goal).
-            for product in mc_target_names.derive_products(description):
-                try:
-                    if int(inv.get(product, 0)) >= 1:
-                        return {
-                            "satisfied": True,
-                            "reason": "product_in_inventory",
-                            "item": product,
-                        }
-                except (TypeError, ValueError):
-                    continue
+            # A stepped goal self-completes when its step plan is exhausted
+            # (goal store ``update_active_goal``). The debrief must not close a
+            # plan mid-flight from a partial inventory match.
+            steps = goal.get("steps")
+            if isinstance(steps, list) and steps:
+                return {"satisfied": False}
 
-            # 2) Gather target already in inventory (explicit field, else derived).
+            products = mc_target_names.derive_product_quantities(description)
+            if products:
+                # Craft/build goal: the outcome is the FULL named product set,
+                # each at its stated quantity. ALL products must exist in that
+                # count — a single ingredient is progress, not completion, and
+                # never closes a multi-part build goal.
+                for product, qty in products.items():
+                    try:
+                        if int(inv.get(product, 0)) < qty:
+                            return {"satisfied": False}
+                    except (TypeError, ValueError):
+                        return {"satisfied": False}
+                return {
+                    "satisfied": True,
+                    "reason": "product_in_inventory",
+                    "item": next(iter(products)),
+                }
+
+            # No named product: a pure gather/hunt goal — single target check,
+            # also quantity-aware.
             target_name = goal.get("target_name")
             if not target_name:
                 derived = mc_target_names.derive_target(description)
@@ -3641,7 +3740,8 @@ class MinecraftConnector(VesselConnectorBase):
                     target_name = derived.get("target_name")
             if isinstance(target_name, str) and target_name:
                 try:
-                    if int(inv.get(target_name, 0)) >= 1:
+                    qty = mc_target_names.derive_quantity(description, target_name)
+                    if int(inv.get(target_name, 0)) >= qty:
                         return {
                             "satisfied": True,
                             "reason": "target_in_inventory",
@@ -3700,6 +3800,26 @@ class MinecraftConnector(VesselConnectorBase):
           * **crafted product** (from :func:`target_names.derive_products`) → a
             logged ``craft``/``smelt`` of that exact item id.
 
+        **Multi-part goals need ALL their products.** When the goal names
+        several distinct products, every named product must have a matching
+        successful craft/smelt row — completing on *any one* action auto-closed
+        multi-part build goals the moment a single ingredient step succeeded
+        (observed churn: a cottage goal completed because one ``collect_block
+        oak_log`` row matched a raw-material target the goal merely mentioned as
+        an intermediate step). A derived raw-material target (e.g. ``oak_log``
+        from *"gather a bit more wood"*) is an **ingredient** of a
+        product-naming goal and never satisfies it; only a goal naming *no
+        product* falls back to its single block/entity target. Stepped goals (a
+        non-empty ``steps`` plan) drive their own progression and are never
+        auto-completed here.
+
+        **Quantities are honoured.** Each matching row's logged result
+        (``_result.data`` — ``collected`` for mine/collect, ``count`` for
+        craft/smelt) is summed toward the goal's stated quantity
+        (:func:`target_names.derive_quantity`). *"Gather 20 oak logs"* is only
+        satisfied when the session's successful collects total >= 20. When a row
+        carries no count (older rows / world events) each match counts as 1.
+
         Matching is purely structural, by canonical Minecraft id (the same
         authorized id exception this adapter already uses) — it never parses the
         goal's or the log's free text for intent. Fully fail-safe: any error /
@@ -3713,8 +3833,53 @@ class MinecraftConnector(VesselConnectorBase):
                 str(goal.get(field) or "") for field in ("description", "note")
             ).strip()
 
-            # Resolve the goal's concrete structural target(s): the explicit
-            # field first, else the id derived from the free text.
+            # A stepped goal self-completes when its step plan is exhausted
+            # (goal store ``update_active_goal``). The debrief must not close a
+            # plan mid-flight from a partial history match.
+            steps = goal.get("steps")
+            if isinstance(steps, list) and steps:
+                return {"satisfied": False}
+
+            products = mc_target_names.derive_product_quantities(description)
+            if products:
+                # Craft/build goal: the outcome is the FULL named product set,
+                # each at its stated quantity. ALL products must be evidenced by
+                # successful craft/smelt rows whose logged counts sum to the
+                # quantity — a single ingredient action is progress, not
+                # completion.
+                from core.vessel_diary_compactor import load_activity_rows
+
+                rows = await load_activity_rows(session_id)
+                matched: Dict[str, int] = {}
+                for row in rows:
+                    event_type = row.get("event_type") or ""
+                    if event_type not in self._HISTORY_CRAFT_EVENTS:
+                        continue
+                    meta = row.get("metadata") or {}
+                    _res = meta.get("_result")
+                    if _res is not None and not bool(_res.get("ok")):
+                        continue
+                    ids = {
+                        str(meta.get(key)).strip()
+                        for key in self._HISTORY_TARGET_KEYS
+                        if isinstance(meta.get(key), (str, int))
+                        and str(meta.get(key)).strip()
+                    }
+                    count = self._row_result_count(_res, default=1)
+                    for product in products:
+                        if product in ids:
+                            matched[product] = matched.get(product, 0) + count
+                for product, qty in products.items():
+                    if int(matched.get(product, 0)) < qty:
+                        return {"satisfied": False}
+                return {
+                    "satisfied": True,
+                    "reason": "action_in_history",
+                    "event_type": "action_craft",
+                    "item": next(iter(products)),
+                }
+
+            # No named product: a pure gather/hunt goal — single target check.
             target_kind = goal.get("target_kind")
             target_name = goal.get("target_name")
             if not target_name:
@@ -3723,7 +3888,6 @@ class MinecraftConnector(VesselConnectorBase):
                     target_kind = derived.get("target_kind")
                     target_name = derived.get("target_name")
 
-            products = set(mc_target_names.derive_products(description))
             wanted_block = (
                 target_name
                 if isinstance(target_name, str)
@@ -3738,26 +3902,17 @@ class MinecraftConnector(VesselConnectorBase):
                 and target_kind == "entity"
                 else None
             )
-            if not (wanted_block or wanted_entity or products):
+            if not (wanted_block or wanted_entity):
                 return {"satisfied": False}
 
+            qty = mc_target_names.derive_quantity(description, target_name or "")
             from core.vessel_diary_compactor import load_activity_rows
 
             rows = await load_activity_rows(session_id)
+            matched_total = 0
             for row in rows:
                 event_type = row.get("event_type") or ""
                 meta = row.get("metadata") or {}
-                # Only a row proving the action actually SUCCEEDED counts as
-                # evidence of goal completion. ``action_*`` rows are the outbound
-                # ATTEMPT and carry a ``_result`` payload: failed attempts (e.g.
-                # craft(wooden_pickaxe) with no recipe, drop of an item not
-                # carried, collect_block with a malformed id) log ``ok: false``
-                # and must NOT mark a goal done — otherwise a goal is
-                # auto-completed from a failed attempt and the body just walks
-                # around with nothing to pursue. Verified world events
-                # (craft/gather/build, ``_provenance: world_event``) have no
-                # ``_result`` and are inherently successful. Structural check,
-                # never text.
                 _res = meta.get("_result")
                 if _res is not None and not bool(_res.get("ok")):
                     continue
@@ -3769,38 +3924,28 @@ class MinecraftConnector(VesselConnectorBase):
                 }
                 if not ids:
                     continue
+                hit = False
                 if (
                     wanted_block
                     and event_type in self._HISTORY_BLOCK_EVENTS
                     and wanted_block in ids
                 ):
-                    return {
-                        "satisfied": True,
-                        "reason": "action_in_history",
-                        "event_type": event_type,
-                        "item": wanted_block,
-                    }
+                    hit = True
                 if (
                     wanted_entity
                     and event_type in self._HISTORY_ENTITY_EVENTS
                     and wanted_entity in ids
                 ):
+                    hit = True
+                if not hit:
+                    continue
+                matched_total += self._row_result_count(_res, default=1)
+                if matched_total >= qty:
                     return {
                         "satisfied": True,
                         "reason": "action_in_history",
                         "event_type": event_type,
-                        "item": wanted_entity,
-                    }
-                if (
-                    products
-                    and event_type in self._HISTORY_CRAFT_EVENTS
-                    and (products & ids)
-                ):
-                    return {
-                        "satisfied": True,
-                        "reason": "action_in_history",
-                        "event_type": event_type,
-                        "item": sorted(products & ids)[0],
+                        "item": wanted_block or wanted_entity,
                     }
             return {"satisfied": False}
         except Exception as exc:  # pragma: no cover - defensive
@@ -3808,6 +3953,32 @@ class MinecraftConnector(VesselConnectorBase):
                 f"[minecraft] evaluate_goal_completion_from_history failed: {exc}"
             )
             return {"satisfied": False}
+
+    @staticmethod
+    def _row_result_count(_res: Any, default: int = 1) -> int:
+        """Extract the item count a logged action result reports, else ``default``.
+
+        The connector logs ``_result.data`` with a per-verb count field:
+        ``collected`` for mine/collect_block, ``count`` for craft/smelt. Reads
+        those structurally (int/float coercion, bounded to >= 1). Missing or
+        malformed data degrades to ``default`` (1) so older rows still count as
+        one match. Purely structural — never inspects text.
+        """
+        try:
+            if not isinstance(_res, dict):
+                return default
+            data = _res.get("data")
+            if not isinstance(data, dict):
+                return default
+            raw = data.get("collected")
+            if raw is None:
+                raw = data.get("count")
+            if raw is None:
+                return default
+            count = int(raw)
+            return max(1, count)
+        except (TypeError, ValueError, Exception):
+            return default
 
     async def get_active_goal(self) -> Dict[str, Any] | None:
         """Return the active Minecraft goal from the scoped goal store."""
