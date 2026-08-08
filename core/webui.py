@@ -1009,6 +1009,9 @@ class SynthWebUIInterface:
         self.app.post("/api/external-endpoints/{ep_id}/ping")(
             self.ping_external_endpoint
         )
+        self.app.post("/api/external-endpoints/{ep_id}/vision-test")(
+            self.test_external_endpoint_vision
+        )
         self.app.post("/api/external-endpoints/{ep_id}/enable")(
             self.enable_external_endpoint
         )
@@ -6996,6 +6999,143 @@ class SynthWebUIInterface:
             raise
         except Exception as exc:
             log_error(f"{LOG_PREFIX} ping_external_endpoint failed: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def test_external_endpoint_vision(
+        self, ep_id: int, request: Request
+    ) -> JSONResponse:
+        """POST /api/external-endpoints/{ep_id}/vision-test — test vision support.
+
+        Sends a small generated test image through the endpoint's
+        ``describe_image`` adapter and returns the resulting description, so
+        the WebUI can verify the endpoint actually understands images (not just
+        the probe's capability flag).  Never mutates endpoint state.
+
+        Body: ``{"model"?: ...}`` — optional model override; otherwise the
+        endpoint's default model is used, falling back to a probed model
+        flagged vision-capable.
+        """
+        import struct
+        import zlib
+
+        def _test_image_bytes() -> bytes:
+            """Build a small 64x64 RGB gradient PNG in pure Python."""
+            width = 64
+            height = 64
+
+            def _chunk(tag: bytes, data: bytes) -> bytes:
+                return (
+                    struct.pack(">I", len(data))
+                    + tag
+                    + data
+                    + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+                )
+
+            rows = bytearray()
+            for y in range(height):
+                rows.append(0)  # filter: none
+                for x in range(width):
+                    rows.extend(((x * 255) // width, (y * 255) // height, 128))
+            ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+            return (
+                b"\x89PNG\r\n\x1a\n"
+                + _chunk(b"IHDR", ihdr)
+                + _chunk(b"IDAT", zlib.compress(bytes(rows)))
+                + _chunk(b"IEND", b"")
+            )
+
+        try:
+            body: dict = {}
+            try:
+                body = await request.json()
+            except Exception:
+                pass
+            model = str(body.get("model") or "").strip() or None
+
+            from core.external_endpoints.crypto import decrypt_api_key
+            from core.external_endpoints.probe import get_adapter_for_endpoint
+            from core.external_endpoints.registry import (
+                get_external_endpoint_registry,
+            )
+
+            reg = get_external_endpoint_registry()
+            ep = await reg.get_endpoint(ep_id)
+            if ep is None:
+                raise HTTPException(status_code=404, detail="Endpoint not found")
+
+            if not model and ep.default_model:
+                model = ep.default_model
+            if not model and ep.available_models:
+                # Prefer a probed model flagged vision-capable (structural).
+                for candidate in ep.available_models:
+                    meta = next(
+                        (
+                            m
+                            for m in (ep.models_metadata or [])
+                            if str(m.get("id") or "") == candidate
+                        ),
+                        None,
+                    )
+                    caps = (meta or {}).get("capabilities") or {}
+                    if isinstance(caps, dict) and caps.get("vision"):
+                        model = candidate
+                        break
+                else:
+                    model = ep.available_models[0]
+
+            api_key = decrypt_api_key(ep.api_key_enc or "")
+            adapter = get_adapter_for_endpoint(ep, api_key)
+
+            prompt = "Describe what you see in this image in one short sentence."
+            timeout_seconds = float(
+                os.getenv(
+                    "EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS",
+                    str(EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS),
+                )
+            )
+            description: str | None = None
+            try:
+                description = await asyncio.wait_for(
+                    adapter.describe_image(
+                        _test_image_bytes(),
+                        "image/png",
+                        prompt,
+                        model=model,
+                    ),
+                    timeout=timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "model": model or "",
+                        "error": (
+                            f"Vision request timed out after {timeout_seconds:.0f}s"
+                        ),
+                    }
+                )
+            except Exception as exc:
+                return JSONResponse(
+                    {"ok": False, "model": model or "", "error": str(exc)}
+                )
+
+            desc = (description or "").strip()
+            if not desc:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "model": model or "",
+                        "error": (
+                            "No description returned — the model/endpoint may "
+                            "not support vision"
+                        ),
+                    }
+                )
+            return JSONResponse({"ok": True, "model": model or "", "description": desc})
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} test_external_endpoint_vision failed: {exc}")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     async def enable_external_endpoint(self, ep_id: int) -> JSONResponse:

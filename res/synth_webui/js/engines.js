@@ -287,6 +287,9 @@
         card.querySelector('.ext-ep-model-test').addEventListener('click', () => {
             handleTestModel(ep.id, readModel(), card);
         });
+        card.querySelector('.ext-ep-vision-test').addEventListener('click', () => {
+            handleTestVision(ep.id, readModel(), card);
+        });
 
         return card;
     }
@@ -404,6 +407,31 @@
                     echoEl.style.color = 'var(--success,#27ae60)';
                 } else {
                     echoEl.textContent = `✗ ${result.echo}`;
+                    echoEl.style.color = 'var(--danger,#c0392b)';
+                }
+            }
+        } catch (e) {
+            if (echoEl) {
+                echoEl.textContent = `✗ ${e.message}`;
+                echoEl.style.color = 'var(--danger,#c0392b)';
+            }
+        }
+    }
+
+    async function handleTestVision(id, model, card) {
+        const echoEl = card ? card.querySelector('.ext-ep-vision-test-echo') : null;
+        if (echoEl) { echoEl.textContent = 'Testing vision…'; echoEl.style.color = 'var(--muted)'; }
+        try {
+            const result = await apiFetch(`/api/external-endpoints/${id}/vision-test`, {
+                method: 'POST',
+                body: JSON.stringify({ model: model || null }),
+            });
+            if (echoEl) {
+                if (result.ok && result.description) {
+                    echoEl.textContent = `✓ "${String(result.description).slice(0, 100)}"`;
+                    echoEl.style.color = 'var(--success,#27ae60)';
+                } else {
+                    echoEl.textContent = `✗ ${result.error || 'no description returned'}`;
                     echoEl.style.color = 'var(--danger,#c0392b)';
                 }
             }
@@ -903,6 +931,9 @@
     // For data-tab="engines" → initEnginesTab (handles both endpoint CRUD and engine configuration)
     window.SynthWebUI = window.SynthWebUI || {};
     window.SynthWebUI['initEnginesTab'] = initEnginesTab;
+    // Public hook so other UI (e.g. the engine-config preset Apply handler in
+    // main.js) can re-render the endpoint cards after a server-side change.
+    window.SynthWebUI['refreshEndpoints'] = loadEndpoints;
 
     // If the tab is already visible, initialize now
     (function () {
