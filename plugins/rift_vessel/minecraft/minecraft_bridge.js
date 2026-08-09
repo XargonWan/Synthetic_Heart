@@ -1260,6 +1260,14 @@ function worldSnapshot(opts) {
     entities: nearbyEntities(maxEntities, radius),
     blocks: nearbyBlocks(radius, maxBlocks),
     inventory: botInventory(),
+    // The item id currently in the bot's hand (mineflayer ``bot.heldItem``),
+    // or null when punching with bare hands. Structural equipment telemetry
+    // so Synth can SEE "I am using my bare hands" and reason to craft tools
+    // instead of punching trees forever.
+    equipped_item:
+      bot && bot.heldItem && bot.heldItem.name
+        ? String(bot.heldItem.name)
+        : null,
     // --- Self-preservation telemetry (all guarded, null when unavailable) ---
     // Remaining air ticks (0..20 on vanilla). Drops while submerged; the motor
     // reflex surfaces the bot before it hits 0 and starts drowning.

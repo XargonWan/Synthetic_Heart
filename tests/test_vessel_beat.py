@@ -160,6 +160,18 @@ def test_prompt_surfaces_structured_state() -> None:
     assert "night" in prompt
 
 
+def test_prompt_surfaces_equipment() -> None:
+    """The world-state block shows what the body is holding — or bare hands."""
+    state = _rich_world_state()
+    # No equipped_item → explicit bare-hands line.
+    assert "- Equipment: none — you are using your bare hands" in build_decision_prompt(
+        state, "minecraft"
+    )
+    state["extra"] = dict(state.get("extra") or {})
+    state["extra"]["equipped_item"] = "wooden_axe"
+    assert "- Equipment: wooden_axe" in build_decision_prompt(state, "minecraft")
+
+
 def test_prompt_handles_empty_world_state() -> None:
     prompt = build_decision_prompt({}, "minecraft")
     # Degrades gracefully — no crash, sane placeholders.
@@ -1003,3 +1015,36 @@ def test_fmt_items_renders_distance() -> None:
     assert "sheep (12m)" in rendered
     assert "remuraine (Scar - your papa) (2m)" in rendered
     assert "oak_log (5m)" in rendered
+
+
+def test_fmt_equipment_renders_held_item_or_bare_hands() -> None:
+    """The equipment line surfaces what the body is holding — or that it is
+    punching with bare hands — so cognition can reason to craft tools."""
+    from core.vessel_beat import _fmt_equipment
+
+    assert _fmt_equipment({"equipped_item": "wooden_axe"}) == (
+        "- Equipment: wooden_axe"
+    )
+    assert _fmt_equipment({"equipped_item": "   "}) == (
+        "- Equipment: none — you are using your bare hands"
+    )
+    assert _fmt_equipment({}) == "- Equipment: none — you are using your bare hands"
+    assert _fmt_equipment({"equipped_item": None}) == (
+        "- Equipment: none — you are using your bare hands"
+    )
+    # Bare-handed with enough planks: the structural tool-gap fact is appended.
+    gap = _fmt_equipment(
+        {
+            "equipped_item": None,
+            "inventory_counts": {"oak_planks": 68, "oak_log": 31, "dirt": 12},
+        }
+    )
+    assert gap.startswith("- Equipment: none — you are using your bare hands —")
+    assert "wooden axe" in gap
+    # Too few planks (or none held) → no tool hint.
+    assert "wooden axe" not in _fmt_equipment(
+        {"equipped_item": None, "inventory_counts": {"oak_planks": 2}}
+    )
+    assert "wooden axe" not in _fmt_equipment(
+        {"equipped_item": None, "inventory_counts": {"dirt": 12}}
+    )

@@ -49,6 +49,38 @@ from typing import Any
 _MAX_LIST_ITEMS = 8
 
 
+def _fmt_equipment(extra: dict[str, Any]) -> str:
+    """Render the equipped-item line for the world-state block.
+
+    Structural equipment telemetry: the connector passes the item id the body
+    is currently holding (the bridge's ``bot.heldItem``), or nothing for bare
+    hands — so Synth can SEE "Equipment: none — you are using your bare hands"
+    while holding planks and logs, and reason to craft tools instead of
+    punching trees forever. Purely factual; never a directive. When the body
+    is bare-handed and its inventory already holds enough planks to craft
+    sticks and a wooden tool, that structural fact is appended (id-suffix
+    ``*_planks`` aggregation, never text parsing) — the same nudge the KB
+    milestone gives, made concrete against the live inventory.
+    """
+    equipped = extra.get("equipped_item")
+    if isinstance(equipped, str) and equipped.strip():
+        return f"- Equipment: {equipped.strip()}"
+    tool_hint = ""
+    counts = extra.get("inventory_counts")
+    if isinstance(counts, dict):
+        planks = sum(
+            int(v)
+            for k, v in counts.items()
+            if isinstance(k, str) and k.endswith("_planks") and isinstance(v, int)
+        )
+        if planks >= 5:
+            tool_hint = (
+                " — you carry enough planks to craft sticks and a wooden axe "
+                "or pickaxe right now"
+            )
+    return f"- Equipment: none — you are using your bare hands{tool_hint}"
+
+
 def _fmt_position(position: dict[str, Any] | None) -> str:
     """Render a position dict as ``x=.. y=.. z=..`` or ``unknown``."""
     if not isinstance(position, dict):
@@ -538,6 +570,7 @@ def build_will_prompt(world_state: Any, world: str) -> str:
     ]
     if when_txt:
         lines.append(f"- Time: {when_txt}")
+    lines.append(_fmt_equipment(extra))
     lines.extend(
         [
             f"- Nearby entities/NPCs: {entities_txt}",
@@ -849,6 +882,7 @@ def build_reflection_prompt(world_state: Any, world: str) -> str:
         "Where you are right now:",
         f"- Health: {health_txt}",
         f"- Position: {position_txt}",
+        _fmt_equipment(extra),
         f"- Nearby entities/NPCs: {entities_txt}",
         f"- Nearby blocks of interest: {blocks_txt}",
         f"- Inventory: {inventory_txt}",
@@ -970,6 +1004,7 @@ def build_goal_prompt(world_state: Any, world: str) -> str:
         "Where you are right now:",
         f"- Health: {health_txt}",
         f"- Position: {position_txt}",
+        _fmt_equipment(extra),
         f"- Nearby entities/NPCs: {entities_txt}",
         f"- Nearby blocks of interest: {blocks_txt}",
         f"- Inventory: {inventory_txt}",
@@ -1102,6 +1137,7 @@ def build_action_prompt(world_state: Any, world: str) -> str:
         "Where you are right now:",
         f"- Health: {health_txt}",
         f"- Position: {position_txt}",
+        _fmt_equipment(extra),
         f"- Nearby entities/NPCs: {entities_txt}",
         f"- Nearby blocks of interest: {blocks_txt}",
         f"- Inventory: {inventory_txt}",
@@ -1260,6 +1296,7 @@ def build_damage_appraisal_prompt(world_state: Any, world: str) -> str:
         f"- You took about {damage_txt} damage.",
         f"- Health now: {health_txt}",
         f"- Position: {position_txt}",
+        _fmt_equipment(extra),
         f"- Around you: {entities_txt}",
         f"- Things you could interact with: {affordances_txt}",
         f"- Inventory: {inventory_txt}",

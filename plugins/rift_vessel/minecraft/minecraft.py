@@ -1971,6 +1971,12 @@ class MinecraftConnector(VesselConnectorBase):
                 "dimension": data.get("dimension"),
                 "time_of_day": data.get("time_of_day"),
                 "is_day": data.get("is_day"),
+                # The item id the body is currently holding (the bridge's
+                # ``bot.heldItem``), None for bare hands. Structural equipment
+                # telemetry rendered into the world-state prompt so Synth can
+                # SEE it is punching with its hands and reason to craft tools
+                # instead of never noticing.
+                "equipped_item": (str(data.get("equipped_item") or "").strip() or None),
                 "entities": entities,
                 "blocks": blocks,
                 "inventory": inventory,
