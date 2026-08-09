@@ -92,6 +92,7 @@ _CMD_LONG_RUNNING_VERBS = frozenset(
         "use",
         "craft",
         "follow",
+        "attack",
         "build_base",
         "shelter",
         "climb_staircase",
@@ -2314,12 +2315,25 @@ class MinecraftConnector(VesselConnectorBase):
             ).strip()
             products = mc_target_names.derive_product_quantities(description)
             needs: Dict[str, int] = dict(products)
+            target_kind = str(goal.get("target_kind") or "").strip().lower()
             target_name = goal.get("target_name")
             if not target_name:
                 derived = mc_target_names.derive_target(description)
                 if derived:
                     target_name = derived.get("target_name")
-            if isinstance(target_name, str) and target_name:
+                    target_kind = (
+                        str(derived.get("target_kind") or target_kind).strip().lower()
+                    )
+            if (
+                isinstance(target_name, str)
+                and target_name
+                # A living-entity target (e.g. a sheep to shear/kill) is never an
+                # inventory material: counting it as a shortfall would tell Synth
+                # to "gather 1 sheep" — the wrong verb on the wrong thing (the
+                # observed live "0/1 sheep" deficit driving collect_block(sheep)
+                # loops). Only blocks/items are countable inventory targets.
+                and target_kind != "entity"
+            ):
                 needs[target_name] = mc_target_names.derive_quantity(
                     description, target_name
                 )

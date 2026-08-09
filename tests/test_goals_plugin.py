@@ -526,25 +526,33 @@ async def test_advance_past_last_step_auto_completes(fake_db: _FakeStore) -> Non
 
 
 @pytest.mark.asyncio
-async def test_stepless_goal_completes_on_advance(fake_db: _FakeStore) -> None:
-    """A free-text goal with no plan auto-completes when Synth signals advance.
+async def test_stepless_goal_advance_is_noop(fake_db: _FakeStore) -> None:
+    """A stepless goal is NOT completed by a reflexive ``advance``.
 
-    A stepless goal has a single implicit step (the goal itself), so declaring
-    "I advanced/finished it" *is* its completion. Without this a stepless goal
-    stayed ``active`` forever (the ``advanced to plan step 0/0`` no-op), so no
-    self-authored stepless goal could ever reach ``done``.
+    Synth signals ``advance`` as a generic "keep going" while its own note says
+    the first step is still ahead — auto-completing on that falsely closed a
+    fresh goal before its Drone-expanded plan landed, re-triggering the goal
+    beat and a churn of re-authored goals (observed live). A stepless goal
+    completes only EXPLICITLY (``status='done'``) or via the goal debrief.
     """
     await goals.set_goal("wander around", scope="vessel", game="minecraft")
     r = await goals.update_active_goal(advance=True, scope="vessel", game="minecraft")
-    assert r["goal_status"] == goals.STATUS_DONE
-    assert r["completed"] is True
-    assert r["auto_completed"] is True
-    assert await goals.get_active_goal(scope="vessel", game="minecraft") is None
+    assert r["goal_status"] == goals.STATUS_ACTIVE
+    assert r["completed"] is False
+    assert r["auto_completed"] is False
+    assert await goals.get_active_goal(scope="vessel", game="minecraft") is not None
+
+    # Explicit status='done' still completes a stepless goal.
+    r2 = await goals.update_active_goal(
+        status=goals.STATUS_DONE, scope="vessel", game="minecraft"
+    )
+    assert r2["goal_status"] == goals.STATUS_DONE
+    assert r2["completed"] is True
 
 
 @pytest.mark.asyncio
 async def test_stepless_goal_note_only_stays_active(fake_db: _FakeStore) -> None:
-    """A stepless goal only completes on ``advance`` — a plain note keeps it active."""
+    """A plain note keeps a stepless goal active."""
     await goals.set_goal("wander around", scope="vessel", game="minecraft")
     r = await goals.update_active_goal(
         note="still going", scope="vessel", game="minecraft"

@@ -1351,6 +1351,22 @@ function resolveTargetEntity(target) {
   return nearest;
 }
 
+// Exact-name entity lookup (unlike resolveTargetEntity, which falls back to the
+// nearest entity when nothing matches). Used by the collect/mine entity hint so
+// a block name like 'wool' never resolves to an unrelated nearby sheep.
+function hasEntityNamed(target) {
+  if (!bot || !bot.entities) return null;
+  const wanted = target != null ? String(target).trim().toLowerCase() : '';
+  if (!wanted) return null;
+  for (const e of Object.values(bot.entities)) {
+    if (!e || e === bot.entity || !e.position) continue;
+    const uname = e.username ? String(e.username).toLowerCase() : '';
+    const ename = e.name ? String(e.name).toLowerCase() : '';
+    if (uname === wanted || ename === wanted) return e;
+  }
+  return null;
+}
+
 // Resolve the nearest block matching a canonical 'target' name (the block name
 // reported by nearbyBlocks/scan). Returns the block object or null. Purely
 // structural: the caller supplies a game id and only that exact block id is
@@ -2372,27 +2388,44 @@ async function runAction(action, payload) {
         // 2) Close the gap. bot.attack only lands within reach, so pathfind
         //    toward a moving target if it is out of melee range. GoalFollow
         //    keeps re-pathing as the mob moves; it is cleared right after.
+        //    A fleeing mob (e.g. a sheep the bot already missed) stays just
+        //    out of reach: the chase budget must outlast it (the bot walks
+        //    faster than a sheep), or the verb fails with a spurious
+        //    "out of reach" and cognition loops on the same blind attack.
         let dist = bot.entity.position.distanceTo(entity.position);
-        if (dist > MELEE_REACH && pathfinder && pathfinder.goals && bot.pathfinder) {
-          try {
-            bot.pathfinder.setGoal(
-              new pathfinder.goals.GoalFollow(entity, 2),
-              true
-            );
-            const deadline = Date.now() + 2500;
-            while (Date.now() < deadline) {
-              await sleep(150);
-              if (!entity.isValid) break;
-              dist = bot.entity.position.distanceTo(entity.position);
-              if (dist <= MELEE_REACH) break;
-            }
-          } catch (e) {
-            /* pathing failed — try swinging from where we are */
-          } finally {
+        const CHASE_RADIUS = 20;
+        const CHASE_DEADLINE_MS = 9000;
+        if (dist > MELEE_REACH) {
+          if (dist > CHASE_RADIUS) {
+            return {
+              ok: false,
+              detail:
+                `${name} out of reach (${Math.round(dist)}m away) — ` +
+                'walk closer or follow it first',
+              data: { target: name, distance: dist },
+            };
+          }
+          if (pathfinder && pathfinder.goals && bot.pathfinder) {
             try {
-              bot.pathfinder.setGoal(null);
+              bot.pathfinder.setGoal(
+                new pathfinder.goals.GoalFollow(entity, 2),
+                true
+              );
+              const deadline = Date.now() + CHASE_DEADLINE_MS;
+              while (Date.now() < deadline) {
+                await sleep(150);
+                if (!entity.isValid) break;
+                dist = bot.entity.position.distanceTo(entity.position);
+                if (dist <= MELEE_REACH) break;
+              }
             } catch (e) {
-              /* ignore */
+              /* pathing failed — try swinging from where we are */
+            } finally {
+              try {
+                bot.pathfinder.setGoal(null);
+              } catch (e) {
+                /* ignore */
+              }
             }
           }
         }
@@ -2695,8 +2728,9 @@ async function runAction(action, payload) {
       if (!block) {
         // Same structural entity hint as collect_block: a 'mine sheep' request
         // means the model mistook a living entity for a block — say so
-        // precisely instead of "no matching block to mine nearby".
-        const entity = resolveTargetEntity(payload.target);
+        // precisely instead of "no matching block to mine nearby". Exact-name
+        // lookup only (see hasEntityNamed).
+        const entity = hasEntityNamed(payload.target);
         if (entity) {
           return {
             ok: false,
@@ -2837,10 +2871,13 @@ async function runAction(action, payload) {
         if (!block) {
           // The requested name may be a living entity rather than a block
           // (e.g. the model asks to 'collect sheep' for wool). Resolve it
-          // structurally (exact entity id) and surface a precise reason so
-          // cognition picks the right verb instead of looping on a failed
-          // gather. Keyword-free: the id is the game's own entity id.
-          const entity = resolveTargetEntity(name);
+          // structurally (exact entity id — hasEntityNamed, NOT
+          // resolveTargetEntity which falls back to the nearest entity and
+          // would mislabel e.g. 'wool' as the nearby sheep) and surface a
+          // precise reason so cognition picks the right verb instead of
+          // looping on a failed gather. Keyword-free: the id is the game's
+          // own entity id.
+          const entity = hasEntityNamed(name);
           if (entity) {
             lastDetail =
               `'${name}' is a living entity, not a block — ` +

@@ -983,3 +983,23 @@ def test_fmt_items_renders_known_player_identity() -> None:
     rendered = _fmt_items(items)
     assert "remuraine (Scar - your papa)" in rendered
     assert "sheep" in rendered
+
+
+def test_fmt_items_renders_distance() -> None:
+    """A numeric distance is shown so cognition does not act on blind targets."""
+    from core.vessel_beat import _fmt_items
+
+    items: list[dict[str, Any]] = [
+        {"name": "sheep", "kind": "mob", "distance": 12.3},
+        {
+            "name": "remuraine",
+            "kind": "player",
+            "known_as": "Scar - your papa",
+            "distance": 2.0,
+        },
+        {"name": "oak_log", "kind": "block", "distance": 4.6},
+    ]
+    rendered = _fmt_items(items)
+    assert "sheep (12m)" in rendered
+    assert "remuraine (Scar - your papa) (2m)" in rendered
+    assert "oak_log (5m)" in rendered

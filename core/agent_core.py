@@ -16,7 +16,7 @@ import asyncio
 import importlib
 import json
 import sys
-from typing import Any, Dict, Optional
+from typing import Any, Coroutine, Dict, Optional
 
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.config_manager import config_registry
@@ -227,6 +227,32 @@ def _looks_like_internal_monologue(text: str) -> list[str]:
         pass
 
     return signals
+
+
+async def _call_with_hard_timeout(
+    coro: Coroutine[Any, Any, str], timeout: float
+) -> str:
+    """Await ``coro`` with a hard deadline WITHOUT waiting for its cancellation.
+
+    ``asyncio.wait_for`` (with or without ``asyncio.shield``) cancels the inner
+    task and then *awaits* it to finish cancelling — when the engine call is
+    stuck in non-cancellable code (e.g. a wedged socket read inside an engine
+    adapter), ``wait_for`` never returns and the whole agentic/Drone loop hangs
+    silently (observed live: goal-expansion Drones went silent mid-loop, leaving
+    their ``agent_tasks`` rows ``pending`` forever and goals stepless — 30 stuck
+    rows in one day). ``asyncio.wait`` never cancels anything: on expiry the
+    task is still in the pending set, we cancel it best-effort WITHOUT awaiting
+    it (the stuck call drains in the background, one bounded orphan per
+    genuinely hung call) and raise ``TimeoutError`` immediately — the caller
+    always proceeds. Callers treat ``TimeoutError`` exactly like the previous
+    ``wait_for`` timeout path.
+    """
+    task = asyncio.create_task(coro)
+    done, _pending = await asyncio.wait({task}, timeout=timeout)
+    if task in done:
+        return task.result()
+    task.cancel()
+    raise asyncio.TimeoutError()
 
 
 # DB helper is imported lazily inside methods for testability/mocking
@@ -1105,14 +1131,14 @@ class AgentLoopManager:
                     # override) — call it directly through the Cortex registry so
                     # the agentic loop actually runs on the selected engine
                     # instead of the generic active plugin.
-                    raw_response = await asyncio.wait_for(
+                    raw_response = await _call_with_hard_timeout(
                         self._call_engine_direct(prompt, engine, cortex_scope),
                         timeout=per_call_timeout,
                     )
                 else:
                     from core import plugin_instance
 
-                    raw_response = await asyncio.wait_for(
+                    raw_response = await _call_with_hard_timeout(
                         plugin_instance.handle_incoming_message(
                             bot=None, message=None, context_memory_or_prompt=prompt
                         ),
@@ -1143,7 +1169,7 @@ class AgentLoopManager:
                     remaining_after_primary = max(
                         1.0, timeout_seconds - (time.monotonic() - start)
                     )
-                    fallback_text = await asyncio.wait_for(
+                    fallback_text = await _call_with_hard_timeout(
                         self._call_engine_direct(prompt, engine, cortex_scope),
                         timeout=max(2.0, min(engine_timeout, remaining_after_primary)),
                     )
@@ -2037,7 +2063,11 @@ class AgentLoopManager:
             }
             if context:
                 prompt["context"] = context
-            text = await self._call_engine_direct(prompt, engine)
+            # Bounded (and detachable): a hung engine must not freeze the turn
+            # that is trying to tell the user it needs more turns.
+            text = await _call_with_hard_timeout(
+                self._call_engine_direct(prompt, engine), timeout=30.0
+            )
             return text.strip() if isinstance(text, str) else ""
         except Exception as exc:
             log_debug(f"[agent_core] _compose_pause_message failed: {exc}")

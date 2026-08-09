@@ -97,6 +97,14 @@ def _fmt_items(items: list[Any], key: str | None = None) -> str:
                 # its raw id. Purely structural — never parsed for keywords.
                 known_as = entry.get("known_as")
                 text = f"{label} ({known_as})" if known_as else str(label)
+                # A numeric distance (connector-supplied, e.g. an entity or
+                # block scan) tells cognition how far the thing is, so it picks
+                # goto/follow when far and act when close instead of acting
+                # blind (the observed live "attack sheep" on a sheep the bot
+                # could not reach). Structural; omitted when absent.
+                dist = entry.get("distance")
+                if isinstance(dist, (int, float)):
+                    text = f"{text} ({round(float(dist))}m)"
                 count = entry.get("count")
                 rendered.append(f"{text} x{count}" if count else text)
         else:

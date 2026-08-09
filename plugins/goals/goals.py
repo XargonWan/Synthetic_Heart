@@ -649,19 +649,20 @@ async def update_active_goal(
     else:
         new_idx = 0
 
-    # Structural auto-completion — two structural cases, never a keyword parse:
+    # Structural auto-completion — never a keyword parse:
     #   (a) A *stepped* goal whose pointer has reached the end of its plan
     #       (``current_step >= total_steps``): Synth advanced past the last step.
-    #   (b) A *stepless* goal on which Synth signalled ``advance`` — a goal with
-    #       no ordered plan has a single implicit step (the goal itself), so
-    #       declaring "I advanced/finished it" *is* its completion. Without this,
-    #       ``advance`` on a stepless goal only produced ``advanced to plan step
-    #       0/0`` (clamped no-op) and the goal stayed ``active`` forever, so no
-    #       self-authored goal could ever reach ``done`` unless Synth also
-    #       remembered to pass ``status='done'`` explicitly (which it never did).
-    # Either case is suppressed when Synth explicitly abandoned the goal.
+    # A *stepless* goal is only ever completed EXPLICITLY (``status='done'``) or
+    # by the goal debrief when its outcome is structurally satisfied. Rule (b)
+    # — auto-completing a stepless goal on ``advance`` — was removed: Synth
+    # habitually signals ``advance`` as a generic "keep going" while its own
+    # note says the first step is still ahead (observed live: a fresh wool-bed
+    # goal was auto-completed 54 s after being set, before its Drone-expanded
+    # plan had landed, re-triggering the goal beat and a churn of re-authored
+    # goals). ``advance`` on a stepless goal is now a harmless no-op.
+    # Auto-completion is suppressed when Synth explicitly abandoned the goal.
     auto_completed = explicit_status != STATUS_ABANDONED and (
-        (total_steps > 0 and new_idx >= total_steps) or (total_steps == 0 and advance)
+        total_steps > 0 and new_idx >= total_steps
     )
     new_status = STATUS_DONE if auto_completed else explicit_status
     try:

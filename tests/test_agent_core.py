@@ -1,7 +1,6 @@
 import asyncio
 import pytest
-
-from core.agent_core import AgentCore
+from core.agent_core import AgentLoopManager, _call_with_hard_timeout
 
 
 class FakeEngine:
@@ -18,6 +17,10 @@ class FakeEngine:
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(
+    reason="legacy AgentCore attach/proposal API removed in 5310ce4a; "
+    "AgentLoopManager has no attach_agent"
+)
 async def test_attach_to_engine_calls_attach(monkeypatch):
     fake_engine = FakeEngine()
 
@@ -36,7 +39,7 @@ async def test_attach_to_engine_calls_attach(monkeypatch):
         "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
     )
 
-    agent = AgentCore()
+    agent = AgentLoopManager()
     agent._enabled = True
 
     await agent.attach_to_active_engine()
@@ -46,6 +49,7 @@ async def test_attach_to_engine_calls_attach(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="legacy AgentCore proposal/approval API removed in 5310ce4a")
 async def test_propose_and_approve_flow(monkeypatch):
     called = {}
 
@@ -67,7 +71,7 @@ async def test_propose_and_approve_flow(monkeypatch):
         called["ran"] = cmd
         return "OUTPUT: " + cmd
 
-    agent = AgentCore()
+    agent = AgentLoopManager()
     agent._notify_fn = fake_notify
     agent._create_activity_log = fake_create
     agent._update_activity_log = fake_update
@@ -113,7 +117,7 @@ async def test_diary_only_executed_at_start_and_end(monkeypatch):
 
     # Engine emits, on every iteration, a working tool call (keeps the loop
     # alive) plus a diary tool call (which should be suppressed mid-task).
-    async def fake_call_engine_direct(prompt, engine_name):
+    async def fake_call_engine_direct(prompt, engine_name, cortex_scope="agent"):
         return json.dumps(
             {
                 "actions": [
@@ -162,3 +166,41 @@ async def test_diary_only_executed_at_start_and_end(monkeypatch):
     work_execs = [n for n in executed if n == "agent_read_file"]
     assert len(work_execs) == max_iterations
     assert result is not None
+
+
+@pytest.mark.asyncio
+async def test_call_with_hard_timeout_returns_on_success() -> None:
+    """A prompt completion within the deadline returns its value unchanged."""
+
+    async def _fast() -> str:
+        return "done"
+
+    assert await _call_with_hard_timeout(_fast(), timeout=5.0) == "done"
+
+
+@pytest.mark.asyncio
+async def test_call_with_hard_timeout_raises_without_awaiting_cancel() -> None:
+    """A hung engine call must NOT freeze the caller past the deadline.
+
+    Regression test for the live-observed Drone hang: goal-expansion Drones went
+    silent mid-loop and their ``agent_tasks`` rows stayed ``pending`` forever
+    because the engine call was stuck in non-cancellable code and
+    ``asyncio.wait_for`` awaited the stuck task's cancellation. This helper must
+    raise ``TimeoutError`` promptly even when the inner coroutine never
+    terminates.
+    """
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _stuck() -> str:
+        started.set()
+        await release.wait()  # never released — the call is "hung"
+        return "late"
+
+    task = asyncio.create_task(_call_with_hard_timeout(_stuck(), timeout=0.05))
+    await started.wait()
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(task, timeout=5.0)
+    # The helper returned on time; release the orphan so the test loop drains.
+    release.set()
+    await asyncio.sleep(0)

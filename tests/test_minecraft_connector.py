@@ -768,3 +768,30 @@ def test_annotate_known_players_labels_only_known_players() -> None:
     assert "known_as" not in out[1]
     assert "known_as" not in out[2]
     assert "known_as" not in entities[0]
+
+
+def test_goal_deficit_excludes_entity_targets() -> None:
+    """A living-entity goal target is never an inventory material."""
+    conn = MinecraftConnector()
+    deficit = conn._compute_goal_deficit(
+        {
+            "description": "Shear the sheep beside me to gather wool",
+            "target_kind": "entity",
+            "target_name": "sheep",
+        },
+        {},
+    )
+    # No countable shortfall: the entity target must NOT surface as "0/1 sheep".
+    assert deficit is None or all(
+        e.get("item") != "sheep" for e in deficit.get("items", [])
+    )
+
+    block_deficit = conn._compute_goal_deficit(
+        {
+            "description": "Gather oak logs",
+            "target_kind": "block",
+            "target_name": "oak_log",
+        },
+        {"oak_log": 0},
+    )
+    assert block_deficit == {"items": [{"item": "oak_log", "have": 0, "need": 1}]}
