@@ -116,9 +116,22 @@ async def test_collect_recent_snippets_includes_sender_and_timestamp(monkeypatch
     snippets = await plugin._collect_recent_snippets(2)
     assert isinstance(snippets, list)
     assert len(snippets) >= 1
-    # Ensure sender and timestamp metadata are included
+    # Ensure sender and (relative) age metadata are included
     assert "sender:" in snippets[0]
-    assert "2026" in snippets[0]
+    # The 2026-01-11 fixtures are months old — the age label must be present
+    # instead of the raw ISO timestamp (staleness must be model-visible).
+    assert "|" in snippets[0]
+    assert any(tok in snippets[0] for tok in ("d", "h", "m", "?"))
+
+
+def test_relative_age_label(monkeypatch):
+    plugin = gco.GrilloChatObserverPlugin()
+    now = datetime.now(timezone.utc)
+    assert plugin._relative_age_label(None) == "?"
+    assert plugin._relative_age_label("not-a-date") == "?"
+    assert plugin._relative_age_label((now - timedelta(minutes=5)).isoformat()) == "5m"
+    assert plugin._relative_age_label((now - timedelta(minutes=90)).isoformat()) == "1h"
+    assert plugin._relative_age_label((now - timedelta(days=2)).isoformat()) == "2d"
 
 
 @pytest.mark.asyncio

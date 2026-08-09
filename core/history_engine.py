@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
 from core.config_manager import config_registry
@@ -189,6 +189,17 @@ register_exposed_var(
     component="history_engine",
 )
 
+register_exposed_var(
+    "HISTORY_AGE_MARKER_MINUTES",
+    label="History Age Marker (minutes)",
+    default=10,
+    value_type=int,
+    ui_type="number",
+    description="Conversation-history turns older than this many minutes are annotated with a relative-age marker (e.g. '[3 hours earlier]') so the model can see how stale past turns are. Prevents outreach/beats from grounding in an hours-old thread as if it were live. Set 0 to disable.",
+    scope="core",
+    component="history_engine",
+)
+
 
 def _get_int(key: str, default: int) -> int:
     try:
@@ -230,6 +241,55 @@ def _format_ts(ts: Any) -> str:
     return str(ts or "")
 
 
+def _relative_age_marker(ts: Any, now: datetime | None = None) -> str:
+    """Return a compact relative-age annotation (e.g. ``[3 hours earlier]``).
+
+    Used to make temporal distance model-visible in conversation history: an
+    absolute timestamp like ``[09/08/26:0218]`` is hard for a small model to
+    translate into "3 hours ago", so beats/outreach treat an hours-old thread
+    as live (CHANGELOG 2026-07-05 staleness issue). The marker is only emitted
+    for entries older than ``HISTORY_AGE_MARKER_MINUTES`` (default 10); fresh
+    entries get ``""`` so live conversation stays uncluttered. ``0`` disables.
+
+    Args:
+        ts:  Raw timestamp (ISO string or datetime) as stored in the cache.
+        now: Optional "now" reference for deterministic tests; defaults to UTC.
+
+    Returns:
+        A bracketed marker like ``"[3 hours earlier]"``, or ``""`` when the
+        entry is fresh, the timestamp is unusable, or markers are disabled.
+    """
+    threshold_min = _get_int("HISTORY_AGE_MARKER_MINUTES", 10)
+    if threshold_min <= 0:
+        return ""
+    try:
+        if isinstance(ts, str):
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        elif hasattr(ts, "isoformat"):
+            dt = ts
+        else:
+            return ""
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        now = now or datetime.now(timezone.utc)
+        age_s = (now - dt).total_seconds()
+        if age_s < threshold_min * 60:
+            return ""
+        if age_s < 3600:
+            minutes = max(1, int(age_s // 60))
+            unit = "minute" if minutes == 1 else "minutes"
+            return f"[{minutes} {unit} earlier]"
+        if age_s < 86400:
+            hours = max(1, int(age_s // 3600))
+            unit = "hour" if hours == 1 else "hours"
+            return f"[{hours} {unit} earlier]"
+        days = max(1, int(age_s // 86400))
+        unit = "day" if days == 1 else "days"
+        return f"[{days} {unit} earlier]"
+    except Exception:
+        return ""
+
+
 def _entry_to_text(entry: HistoryEntry) -> str:
     if isinstance(entry, str):
         return entry
@@ -268,6 +328,9 @@ def _entry_to_text(entry: HistoryEntry) -> str:
             reply_suffix = f' [replied to {reply_sender}: "{reply_text_safe}"]'
 
     safe_text = str(text).replace('"', "'")
+    age_marker = _relative_age_marker(ts)
+    if age_marker:
+        safe_text = f"{age_marker} {safe_text}"
     return f'[{_format_ts(ts)}] {sender}{reply_suffix}: "{safe_text}"'.strip()
 
 
@@ -872,7 +935,6 @@ class HistoryEngine:
                         for m in unified_candidates
                         if not is_vessel_history_entry(m)
                     ]
-
                 if isinstance(chat_map, dict):
                     for k, q in chat_map.items():
                         # Skip metadata keys

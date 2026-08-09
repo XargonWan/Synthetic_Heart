@@ -1,10 +1,101 @@
 from __future__ import annotations
 
 from collections import deque
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+
+
+def test_relative_age_marker_thresholds(monkeypatch) -> None:
+    """Entries older than HISTORY_AGE_MARKER_MINUTES get a relative-age marker;
+    fresh entries and disabled markers get none."""
+    from core import history_engine
+
+    now = datetime.now(timezone.utc)
+    # Fresh — below the 10-minute default threshold.
+    assert (
+        history_engine._relative_age_marker(
+            (now - timedelta(minutes=5)).isoformat(), now=now
+        )
+        == ""
+    )
+    # Older than threshold but sub-hour → minutes.
+    assert (
+        history_engine._relative_age_marker(
+            (now - timedelta(minutes=25)).isoformat(), now=now
+        )
+        == "[25 minutes earlier]"
+    )
+    # 1 hour → singular unit.
+    assert (
+        history_engine._relative_age_marker(
+            (now - timedelta(hours=1, minutes=2)).isoformat(), now=now
+        )
+        == "[1 hour earlier]"
+    )
+    # 3 hours.
+    assert (
+        history_engine._relative_age_marker(
+            (now - timedelta(hours=3)).isoformat(), now=now
+        )
+        == "[3 hours earlier]"
+    )
+    # 2 days.
+    assert (
+        history_engine._relative_age_marker(
+            (now - timedelta(days=2)).isoformat(), now=now
+        )
+        == "[2 days earlier]"
+    )
+    # Unusable timestamps → no marker.
+    assert history_engine._relative_age_marker(None, now=now) == ""
+    assert history_engine._relative_age_marker("garbage", now=now) == ""
+
+
+def test_relative_age_marker_disabled_when_threshold_zero(monkeypatch) -> None:
+    """HISTORY_AGE_MARKER_MINUTES=0 turns the marker off entirely."""
+    from core import history_engine
+
+    monkeypatch.setattr(
+        "core.history_engine._get_int",
+        lambda key, default: 0 if key == "HISTORY_AGE_MARKER_MINUTES" else default,
+    )
+    now = datetime.now(timezone.utc)
+    assert (
+        history_engine._relative_age_marker(
+            (now - timedelta(hours=5)).isoformat(), now=now
+        )
+        == ""
+    )
+
+
+def test_entry_to_text_includes_age_marker_for_old_messages(monkeypatch) -> None:
+    """An hours-old chat line carries the relative-age marker inside its quoted
+    content so the model can see it is stale (CHANGELOG 2026-07-05)."""
+    from core import history_engine
+
+    now = datetime.now(timezone.utc)
+    old = {
+        "sender_name": "Scar",
+        "text": "nighty night bubu",
+        "timestamp": (now - timedelta(hours=3)).isoformat(),
+        "interface_path": "telegram_bot/123",
+    }
+    line = history_engine._entry_to_text(old)
+    assert "[3 hours earlier]" in line
+    assert "nighty night bubu" in line
+
+    fresh = {
+        "sender_name": "Scar",
+        "text": "hi there",
+        "timestamp": (now - timedelta(minutes=1)).isoformat(),
+        "interface_path": "telegram_bot/123",
+    }
+    line = history_engine._entry_to_text(fresh)
+    assert "[1 minute earlier]" not in line
+    assert "hi there" in line
 
 
 @pytest.mark.asyncio

@@ -321,6 +321,44 @@ class TimestampedRotatingFileHandler(RotatingFileHandler):
             self.stream = self._open()
 
 
+class _SafeConsoleStreamHandler(logging.StreamHandler):
+    """Stream handler that never raises on non-ASCII log lines.
+
+    When SyntH runs directly on a Windows host, ``sys.stdout`` inherits the
+    terminal's cp1252 encoding; logging a line containing emoji, ✓, etc.
+    then raises ``UnicodeEncodeError`` inside ``emit``, which the logging
+    machinery reports as a multi-line ``--- Logging error ---`` traceback
+    for every such line. This handler re-encodes with ``errors="replace"``
+    (also on the stream's own encoding) so non-ASCII degrades to ``?`` on
+    the console instead of crashing the handler. File handlers are
+    unaffected — they already use ``encoding="utf-8"``. The Linux container
+    (UTF-8) never hits the fallback path.
+    """
+
+    def emit(self, record) -> None:
+        try:
+            msg = self.format(record)
+            stream = self.stream
+            stream.write(msg + self.terminator)
+            self.flush()
+        except UnicodeEncodeError:
+            # Re-encode the formatted line with replacement characters using
+            # the stream's declared encoding (cp1252 on Windows hosts).
+            try:
+                encoding = getattr(stream, "encoding", None) or "utf-8"
+                safe = (
+                    (msg + self.terminator)
+                    .encode(encoding, errors="replace")
+                    .decode(encoding, errors="replace")
+                )
+                stream.write(safe)
+                self.flush()
+            except Exception:
+                self.handleError(record)
+        except Exception:
+            self.handleError(record)
+
+
 def _write_to_separate_log(level: str, message: str, log_file: str) -> None:
     """Write log message to a separate log file.
 
@@ -396,7 +434,7 @@ def setup_logging() -> logging.Logger:
             "%Y-%m-%d %H:%M:%S",
         )
         # Always add a stream handler so logs are available on stdout/stderr
-        ch = logging.StreamHandler(sys.stdout)
+        ch = _SafeConsoleStreamHandler(sys.stdout)
         ch.setFormatter(formatter)
         logger.addHandler(ch)
 

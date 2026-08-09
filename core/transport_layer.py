@@ -2514,13 +2514,30 @@ async def run_corrector_middleware(
 
                     if allowed_action_types:
                         correction_message_text += f"\nAllowed action types for this scope: {', '.join(sorted(allowed_action_types))}\n"
+                    # If a message action already delivered on an earlier pass,
+                    # the model must NOT re-send a reply — that is what caused
+                    # duplicate Telegram messages (CHANGELOG 2026-06-26). The
+                    # "create ALL actions" requirement below is dropped so it
+                    # cannot override this; structural type-prefix detection.
+                    delivered_message_types = [
+                        str(t)
+                        for t in successful_types
+                        if str(t).startswith("message_")
+                    ]
+                    if delivered_message_types:
+                        correction_message_text += (
+                            "\nIMPORTANT: A reply was ALREADY delivered to the user "
+                            f"(executed action(s): {', '.join(delivered_message_types)}). "
+                            "Do NOT include ANY message_* action in your response — "
+                            "the user has already received the reply. Emit ONLY the "
+                            "failed actions listed above.\n"
+                        )
                     correction_message_text += (
                         "\nRequirements:\n"
                         "1. Respond with ONLY valid JSON\n"
                         "2. Include ONLY the missing/failed actions - do NOT repeat successful ones\n"
                         "3. Fix validation errors in the failed actions\n"
-                        "4. Ensure you've created ALL actions from the user's original request\n"
-                        "5. Every action object MUST have a 'type' field with a valid action name\n"
+                        "4. Every action object MUST have a 'type' field with a valid action name\n"
                     )
                 else:
                     # Nothing succeeded — treat as full correction so the LLM

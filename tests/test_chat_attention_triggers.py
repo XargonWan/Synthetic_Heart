@@ -191,6 +191,21 @@ async def test_start_bot_failure_resets_state_and_schedules_retry(monkeypatch):
         def pool_timeout(self, _timeout):
             return self
 
+        def get_updates_connection_pool_size(self, _size):
+            return self
+
+        def get_updates_pool_timeout(self, _timeout):
+            return self
+
+        def get_updates_connect_timeout(self, _timeout):
+            return self
+
+        def get_updates_read_timeout(self, _timeout):
+            return self
+
+        def get_updates_write_timeout(self, _timeout):
+            return self
+
         def build(self):
             return FailingApp()
 
@@ -319,6 +334,21 @@ async def test_start_bot_retries_transient_timeout_inline(monkeypatch):
             return self
 
         def pool_timeout(self, _timeout):
+            return self
+
+        def get_updates_connection_pool_size(self, _size):
+            return self
+
+        def get_updates_pool_timeout(self, _timeout):
+            return self
+
+        def get_updates_connect_timeout(self, _timeout):
+            return self
+
+        def get_updates_read_timeout(self, _timeout):
+            return self
+
+        def get_updates_write_timeout(self, _timeout):
             return self
 
         def build(self):

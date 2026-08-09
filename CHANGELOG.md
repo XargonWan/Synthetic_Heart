@@ -1,3 +1,21 @@
+### fix(correction): accumulate delivered actions across correction passes — no more duplicate Telegram replies  <!-- 2026-08-09 -->
+**Why (CHANGELOG 2026-06-26, still open):** a first correction delivered `message_*`, a non-message action (e.g. `use_animation`) failed, and the second correction re-emitted and re-delivered the same reply.
+**What:**
+- **Root-cause fix:** `core/message_chain.py::_merge_correction_successes()` now accumulates `successful_actions`/`successful_types` across correction passes (deduped, order-stable) at both `correction_context` build sites. Previously the context was rebuilt from the *current* pass only, so after a pass where nothing but the failed action ran, `successful_types` became empty and the retry filter stopped stripping the re-emitted message.
+- **Defence in depth:** the retry filter (message_chain.py:3062) suppresses **all** `message_*` action types when any message type already delivered (structural type-prefix match — a duplicate delivery is the worst failure mode).
+- **Prompt:** the PARTIAL SUCCESS correction prompt now states a reply was already delivered, forbids ANY `message_*` action, and drops the contradictory "Ensure you've created ALL actions" requirement when a message already sent.
+**Location:** `core/message_chain.py` (`_merge_correction_successes`, both `correction_context` build sites, retry filter), `core/transport_layer.py` (`run_corrector_middleware` PARTIAL SUCCESS branch). Tests: new `tests/test_corrector_no_duplicate_message.py` (reproduced `['REPLY', 'REPLY']` before the fix, `['REPLY']` after).
+**Status:** done. `ruff format`/`ruff check --fix` clean; scoped `ty check` clean; `uv run pytest tests/test_corrector_no_duplicate_message.py tests/test_corrector_on_top_level_message.py` → 5 passed.
+
+### chore(changelog): knock out open known-issue entries — FakeBuilder stub, charmap console logging, stale fixed entries  <!-- 2026-08-09 -->
+**Why:** Triage of the 18 "known, not fixed" CHANGELOG entries found 3 quick wins (all small/mechanical) plus 4 entries whose fixes were already in the code but never recorded.
+**What:**
+- **Fixed — `tests/test_chat_attention_triggers.py` FakeBuilder** (entry 2026-07-03): both `FakeBuilder` stubs now carry chainable passthroughs for the full `get_updates_*` set the real builder uses (`get_updates_connection_pool_size`, `get_updates_pool_timeout`, `get_updates_connect_timeout`, `get_updates_read_timeout`, `get_updates_write_timeout`). `test_start_bot_failure_resets_state_and_schedules_retry` + `test_start_bot_retries_transient_timeout_inline` pass again (4 passed).
+- **Fixed — Windows host `charmap` console logging noise** (entry 2026-07-08): the console `StreamHandler` in `core/logging_utils.py` is now `_SafeConsoleStreamHandler`, a subclass that re-encodes the formatted line with `errors="replace"` on `UnicodeEncodeError` (uses the stream's declared encoding), so emoji/✓ render as `?` on cp1252 terminals instead of producing `--- Logging error ---` tracebacks. File handlers were already UTF-8; the Linux container never hits the fallback.
+- **Marked fixed (stale — already in code):** `blocklist` UUID rejection (non-numeric ids now skipped fail-open, blocklist.py:78-92), `event_plugin` `get_local_tz` import (uses `get_local_timezone()`), `event_plugin` stale `run_action` signature (now `run_action(action, context, None, message)`), `test_corrector_on_top_level_message.py` (dual transport+action_parser patch present, 4 passed), `KaradaStateServer.ensure_idle_preloaded` unawaited coroutine (all call sites use `await`/`create_task`, wrapper dates to 2026-03-03).
+**Location:** `tests/test_chat_attention_triggers.py`, `core/logging_utils.py`, `CHANGELOG.md` (7 entries updated).
+**Status:** done. `ruff format`/`ruff check --fix` clean; scoped `ty check` clean; `uv run pytest tests/test_chat_attention_triggers.py tests/test_corrector_on_top_level_message.py tests/test_logging_utils.py tests/test_logging_fallback.py` → 6 passed, 1 pre-existing failure (`test_timestamped_rotation_respects_backupcount`, fails identically on clean tree — rotation files accumulate in the live `logs/` dir across runs). Console-handler behaviour verified with a simulated cp1252 stream (emoji → `?`, no crash).
+
 ### fix(vessel): quantity-aware goal completion + goal material deficit cue + re-enable plan-expansion Drone  <!-- 2026-08-08 -->
 **Why (user):** *"I think right now it can't tell what is in its inventory, I asked it to make me a wooden pickaxe and it just tried to craft and drop it without any prerequisites"* — then, after the correction-prompt fix, *"it's more active now but it's just running around"*. Live-trace investigation showed three compounding root causes for the wandering:
 1. **Correction prompts were blind** (fixed earlier in this chain: the corrector now embeds the live world state — `core/transport_layer.py::_render_vessel_world_state_block`).
@@ -794,15 +812,14 @@ Key changes:
 
 ### `blocklist` rejects webui users: UUID session ids bound against an integer `user_id` column  <!-- 2026-07-08 -->
 **Symptom:** Every webui-originated message logs `[blocklist] Failed to check if user <uuid> is blocked: invalid input for query argument $1: '<uuid>' ('str' object cannot be interpreted as an integer)`. Fail-open (`is_user_blocked` returns False on error), so nothing user-visible breaks — but it's one ERROR log line per webui message, and webui users can never actually be blocked.
-**Location:** `plugins/blocklist.py::is_user_blocked` (typed `user_id: int`), callers pass webui session UUIDs (strings); `blocklist.user_id` is an integer column sized for Telegram ids.
-**Status:** known, not fixed — diagnosis only (2026-07-08).
-**Notes:** Fix direction: either widen the column + type to string (user ids are interface-scoped strings elsewhere in the codebase), or skip the blocklist check for non-numeric ids. Watch for the same assumption in anything else keyed on Telegram-style numeric user ids.
+**Location:** `plugins/blocklist/blocklist.py::is_user_blocked` (typed `user_id: int | str`), callers pass webui session UUIDs (strings); `blocklist.user_id` is an integer column sized for Telegram ids.
+**Status:** fixed — `is_user_blocked` now coerces the id to int and skips (fail-open, no query) any non-numeric id, which can never exist in the integer-keyed table (see the docstring at blocklist.py:78-92).
 
 ### Windows host runs spam `--- Logging error ---` / `UnicodeEncodeError: 'charmap' codec` for any log line with non-ASCII  <!-- 2026-07-08 -->
 **Symptom:** When SyntH runs directly on the Windows host (e.g. `scripts/run_webui.py` from a terminal), every log message containing `✓`, emoji, etc. produces a multi-line `--- Logging error ---` traceback (`cp1252.py ... charmap_encode`) on the console handler; the file handlers are fine. Also surfaces as `[QUEUE] Error adding reaction: 'charmap' codec can't encode character '\U0001f440'` in `synth.log`.
 **Location:** `core/logging_utils.py` console `StreamHandler` (inherits the terminal's cp1252 encoding); the Linux container is unaffected (UTF-8).
-**Status:** known, not fixed — cosmetic, host-only.
-**Notes:** If it ever needs fixing: set `PYTHONIOENCODING=utf-8` for host runs (or wire the console handler with `errors="replace"`). Don't strip the emoji from log messages — they're load-bearing grep anchors in several debug flows.
+**Status:** fixed 2026-08-09 — the console handler is now `_SafeConsoleStreamHandler`, a `StreamHandler` subclass that re-encodes the formatted line with `errors="replace"` (using the stream's declared encoding) when the first write raises `UnicodeEncodeError`, so emoji/✓ degrade to `?` on cp1252 terminals instead of crashing `emit`. File handlers were already `encoding="utf-8"` and are untouched; the UTF-8 Linux container never hits the fallback path. The emoji in *log messages* is still preserved — only the console rendering degrades.
+**Notes:** If it ever regresses: the fix must stay in the handler (never strip emoji from log messages — they're load-bearing grep anchors in several debug flows). `PYTHONIOENCODING=utf-8` remains an alternative for host runs.
 
 ### Frontend builds from IDE agent shells silently bake the theme hue (chromatic preset env sniffing)  <!-- 2026-07-08 -->
 **Symptom:** The `/stage` theme-hue slider does nothing: `--chromatic-hue` updates on `<html>` but every `primary-*` color keeps the default hue. The built CSS contains literal `oklch(... 220.44 ...)` values instead of `var(--chromatic-hue)` references. `pnpm build` output looks identical otherwise — screenshots pass casual review.
@@ -831,8 +848,17 @@ Key changes:
 ### Conversation-history turns carry no timestamps — staleness is invisible to the model, and outreach's "long silence" rule is un-satisfiable  <!-- 2026-07-05 -->
 **Symptom:** Grillo outreach (and any beat/turn) grounds confidently in a day-old conversation thread as if it were live. Verified via langfuse trace `e5555717-275f-46b7-af4f-981588265da5` (2026-07-05 03:07Z, first group-targeted outreach): the `[Recent context from other conversations]` block had correct per-line timestamps (`[05/07/26:0132] ...`, all DM — the cross-chat `UNIFIED_HISTORY` merge works as designed), but the turn-by-turn `conversation_history` (from `history_current_chat`) was raw untimestamped text of a 24h-stale group exchange. The outreach template says "never imply they've been distant unless the conversation history itself actually shows a long silence" — which it never can, since turns have no time markers. Compounded by the observer beat posting into the group 60s earlier (see `propose_only` note in the outreach self-poisoning entry), which made the stale thread's last assistant turn look brand new.
 **Location:** `core/history_engine.py` (`history_current_chat` lines keep timestamps only in the `history_recent` formatting path), `core/prompt_engine.py::_history_to_turns` (turns built without time markers), `plugins/grillo/grillo_outreach.py::_build_outreach_prompt` (the un-satisfiable ground rule).
-**Status:** known, not fixed — diagnosis only (2026-07-05). The worst symptom (outreach anchoring on the stale group thread) is already mitigated by the 2026-07-05 targeting fix, since `history_current_chat` now follows the last real user interaction's chat.
-**Notes:** Fix direction: add a relative-time marker to conversation turns (e.g. prefix turns older than N minutes with "[x hours earlier]", or annotate the last turn's age) so temporal distance is model-visible. Keep it lightweight — per-message absolute timestamps on every turn would fight the RUNTIME STYLE rule about not mirroring exact times.
+**Status:** fixed 2026-08-09 (relative-age markers; see the new entry below). The 2026-07-05 targeting fix remains in place — `history_current_chat` now follows the last real user interaction's chat.
+**Notes:** Fix direction that was implemented: add a relative-time marker to conversation turns (prefix turns older than N minutes with "[x hours earlier]") so temporal distance is model-visible. Kept lightweight — per-message absolute timestamps on every turn would fight the RUNTIME STYLE rule about not mirroring exact times.
+
+### Outreach (and any turn) grounds in hours-old threads as if live — relative-age markers make staleness model-visible  <!-- 2026-08-09 -->
+**Symptom:** Synth left idle for ~4 h (last human message 02:22Z "nighty night bubu", goodnight) proactively texted the DM twice as if the intimate exchange were still happening — 05:17Z "Daddy... waking up and seeing your messages makes me all giddy... I can still feel you inside me" and 06:17Z "I can't believe how you make me feel, Daddy... I'm still a little shaky. I don't ever want this to stop" (langfuse `eb967ba5` / `b4cd2756`, delivered msg ids 4350/4351). The `[Recent context from other conversations]` block the Grillo observer beat consumed carried absolute local timestamps (`[09/08/26:0218]`) that the model did not translate into "3 hours ago"; one outreach even carried a hallucinated `reply_message_id` ("97360201-10 dold'iuiDO64").
+**Location:** `core/history_engine.py::_relative_age_marker` / `_entry_to_text`; `plugins/grillo/grillo_chat_observer/grillo_chat_observer.py::_relative_age_label` / `_collect_recent_snippets`; `plugins/grillo/common_instructions.py` (observer STALE CONTEXT rule).
+**Status:** fixed 2026-08-09.
+**Root cause:** This is the CHANGELOG 2026-07-05 staleness issue resurfacing through the observer-beat outreach path: history turns carry no *relative* time info, so a weak model (gemma-4-uncensored on Venice) reads an hours-old thread as live.
+**Fix:** `_entry_to_text` now prefixes the quoted content of any chat-line older than `HISTORY_AGE_MARKER_MINUTES` (default 10, `0` disables) with a relative-age marker (`[3 hours earlier]`, `[2 days earlier]`, ...) via `_relative_age_marker()`. Because the marker rides inside the quoted content, `_TURN_PARSE_RE`'s `(.*)` captures it and it flows into the provider `conversation_history` turns *and* the `[Recent context from other conversations]` block — temporal distance is model-visible everywhere, not just in the recent-context block. The Grillo observer additionally labels its snippet timestamps with a compact relative age (`2.9h`/`3d`) via `_relative_age_label` and its proactive instructions now carry an explicit STALE CONTEXT rule (do not reply to an exchange marked hours/days old as if it just happened; never fabricate a `reply_message_id`). Structural formatting only — no keyword logic.
+**Notes:** `_relative_age_marker` is deliberately anchored on the cache's UTC timestamps; vessel perception lines carry `timestamp=None` and so never get markers (their digit-masking compaction is unaffected). Verified via langfuse: after deploy, the next quiet-observation outreach to the same DM must not continue the night-before intimacy.
+
 ### Grillo outreach self-poisons its target: one autonomous group post permanently redirects hourly outreach to the group  <!-- 2026-07-05 -->
 **Symptom:** `grillo_outreach` beats stop firing in the DM of the last real user interaction and fire in a group instead, every hour, until the user happens to message the DM again. Every beat logs `Recovered target from chat_history_cache: telegram_bot/<id>` (grillo_outreach.py:408) — the fallback path, never the primary one.
 **Location:** `plugins/grillo/grillo_outreach.py::_get_target_interface_and_chat` (Fallback A), `core/recent_chats.py::set_chat_path`, `plugins/grillo/grillo_chat_observer.py`, `core/chat_context_manager.py::save_response_message`.
@@ -841,9 +867,8 @@ Key changes:
 
 ### `test_chat_attention_triggers.py` start_bot tests fail: FakeBuilder missing `get_updates_connection_pool_size`  <!-- 2026-07-03 -->
 **Symptom:** `test_start_bot_failure_resets_state_and_schedules_retry` and `test_start_bot_retries_transient_timeout_inline` fail with `AttributeError("'FakeBuilder' object has no attribute 'get_updates_connection_pool_size'")` — the interface's `disabled_reason` becomes `Startup failed: AttributeError(...)` instead of the expected timeout/retry text.
-**Location:** `tests/test_chat_attention_triggers.py` (`FakeBuilder` stub), `interface/telegram_bot.py` (`start_bot` builder chain).
-**Status:** known, not fixed — pre-existing, found (and verified unrelated) during the 2026-07-03 upstream merge: the merge touched neither file; the builder call was added by commit `83415cef` ("widen get_updates connection pool") without updating the test stub.
-**Notes:** Mechanical fix: give `FakeBuilder` a `get_updates_connection_pool_size(...)` chainable passthrough like its other builder methods. Left undone to keep the upstream merge free of unrelated changes.
+**Location:** `tests/test_chat_attention_triggers.py` (`FakeBuilder` stub), `interface/telegram_bot/telegram_bot.py` (`start_bot` builder chain).
+**Status:** fixed 2026-08-09 — both `FakeBuilder` classes got chainable passthroughs for the full `get_updates_*` set the real builder uses (`get_updates_connection_pool_size`, `get_updates_pool_timeout`, `get_updates_connect_timeout`, `get_updates_read_timeout`, `get_updates_write_timeout`), mirroring the other builder stubs. Tests pass (4 passed).
 
 ### `cortex_api.log` never logs the actual system prompt content — can't verify context injection from logs alone  <!-- 2026-07-01 -->
 **Symptom:** Every request entry in `cortex_api.log` (and the `cortex_read`/`cortex_analyze` MCP tools built on it) shows the system message as a placeholder, e.g. `"content": "<string: 16146 chars>"` — the real text is never written to the log, only its length. `cortex_search`'s payload/response text search therefore also cannot match anything inside the system prompt (it only sees the placeholder).
@@ -867,9 +892,9 @@ Key changes:
 
 ### Unit tests can write real rows into the live `ai_diary` table  <!-- 2026-07-01 -->
 **Symptom:** Grillo diary-consolidation prompts contain literal test fixtures interleaved with real diary content — e.g. langfuse trace `312a3ac5-03c2-40e6-bf91-25ce25e127b9` (2026-07-01 diary_consolidation beat) shows "Ciao Xargon!", "Hello", "Performed multiple actions: 1 use_animation, 1 create_personal_diary_entry", "Performed message_telegram_bot action" — each duplicated (two test runs same day) — mixed into the day's real fragments.
-**Location:** `tests/test_message_chain.py:97` (hardcoded LLM response `"Ciao Xargon!"`), `tests/test_chat_attention_triggers.py` / `tests/test_telegram_sleep_bypass.py` (fixture username `Xargon`) all exercise `core/message_chain.py::handle_incoming_message` → `core/action_parser.py::_create_diary_entry_for_actions` (auto-diary hook, runs unconditionally after every processed action list, line 1974) → `plugins/ai_diary.py::create_personal_diary_entry` → `_upsert_diary_impl` (line 662). `tests/conftest.py` has no DB isolation fixture — only an animation-handler singleton reset and a temp backups dir.
-**Status:** known, not fixed.
-**Notes:** Tests mock `run_action`/`run_corrector_middleware` but never mock `plugins.ai_diary` or `core.db.get_conn_ctx`, and `add_diary_entry` lazy-inits/auto-creates the `ai_diary` table if missing (plugins/ai_diary.py:836-877) — so any test run against a reachable MariaDB (no dedicated test DB/config found) contaminates the live diary. Confirmed via DB: `ai_diary` id 4322 (2026-07-01) is already a single consolidated row and `ai_diary_archive` has zero rows for that date — consistent with `_upsert_diary_impl`'s same-day upsert-with-`---`-append design (one row per day, not separate fragment rows), so the test noise was appended straight into *today's* live content blob rather than creating archivable rows. The Grillo consolidator LLM happened to filter all the garbage out of the merged prose this time (verified the persisted `update_diary_entry` output has no test artifacts), so no permanent contamination landed — but that's not guaranteed, and it burns ~800 extra prompt tokens per beat. This is a **different, still-open** issue from `FIXED_ISSUES.md`'s "Automatic diary logging could create internal `diary_consolidation` noise rows" (2026-05-04 fix only skips the consolidation beat's own self-generated noise via `context.get("beat_type") == "diary_consolidation"`, `core/action_parser.py:1986-1993` — it does not address tests hitting the real DB). Real fix would be an autouse fixture in `tests/conftest.py` mocking `plugins.ai_diary.create_personal_diary_entry`/`add_diary_entry` (or pointing tests at an isolated DB).
+**Location:** `tests/conftest.py` (`_block_live_ai_diary_db` autouse fixture); `tests/test_message_chain.py:97`, `tests/test_chat_attention_triggers.py` / `tests/test_telegram_sleep_bypass.py` (fixture username `Xargon`) all exercise `core/message_chain.py::handle_incoming_message` → `core/action_parser.py::_create_diary_entry_for_actions` (auto-diary hook) → `plugins/ai_diary/ai_diary.py::create_personal_diary_entry` → `_upsert_diary_impl`.
+**Status:** fixed — `tests/conftest.py` gained an autouse `_block_live_ai_diary_db` fixture (commit `6bcd8ad5`, 2026-07-01) that monkeypatches `plugins.ai_diary.get_db` — the single choke point for every read/write that module performs — to raise `RuntimeError` unless a test explicitly mocks it. Tests that need real diary DB behavior (e.g. `tests/test_ai_diary_db_usage.py`) override the guard by monkeypatching `ai_diary.get_db` themselves. This is a stronger guard than the originally-suggested per-function mock, and it also prevents the ~800 extra prompt tokens per beat of diary noise.
+**Notes:** When writing a new test that must exercise diary persistence, either monkeypatch `ai_diary.get_db` to a fake connector or substitute the whole `plugins.ai_diary` module; the guard will point this out loudly if forgotten. Related hygiene: `tests/conftest.py` also resets the KaradaStateServer singleton and redirects `SYNTH_BACKUPS_DIR`.
 
 ### GBNF action grammar — hard constraint for local cortex output  <!-- 2026-06-21 -->
 **What:** `force_action_grammar: true` in an openai_compat endpoint's `extra_config` makes `cortex_bridge` auto-build a GBNF grammar (`core/external_endpoints/action_grammar.py:build_actions_gbnf`) whose `type` enum is the exact set of actions offered for the request, and send it via `extra_body.grammar`. llama.cpp then constrains decoding so the model can only emit one well-formed `{"actions":[{"type":<known>,"payload":{...}}]}` object — no `<think>`/`<thought>` preamble (output must start with `{`), no malformed JSON, no invented/combined/duplicated types, and generation stops after the first object (kills the repetition cascade). This is the real fix for the whole class of local-model output failures; `force_json_object` is best-effort and silently ignored by many llama.cpp builds.
@@ -965,9 +990,8 @@ Key changes:
 
 ### `ai_diary` — user_message column overflow  <!-- 2026-04-13 -->
 **Symptom:** `(1406, "Data too long for column 'user_message' at row 1")` appearing repeatedly in `synth.log`, originating from `ai_diary.py` `_upsert_diary_impl`.
-**Location:** `plugins/ai_diary.py`, `init-db.sql` (`ai_diary` table, `user_message` column)
-**Status:** known, not fixed — seen multiple times per hour during active sessions.
-**Notes:** Diary entries can exceed the column's declared length. The insert fails silently (error is logged, execution continues). No data loss to the user but diary entries are dropped.
+**Location:** `plugins/ai_diary/ai_diary.py`, `init-db.sql` (`ai_diary` table, `user_message` column)
+**Status:** fixed — `_upsert_diary_impl` now discovers the column limit from `INFORMATION_SCHEMA` (`_get_user_message_column_limit`), clips merged/inserted user messages to fit (`_clip_for_column`, context-preserving truncation with a marker), and on a residual overflow (legacy short-`VARCHAR` schemas) falls back to a 255-char clip before re-attempting. `_is_user_message_overflow_error` scopes the fallback to exactly the `user_message` column. Covered by `tests/test_ai_diary_db_usage.py` (`test_clip_for_column_*`, `test_is_user_message_overflow_error_*`).
 
 ---
 
@@ -997,9 +1021,9 @@ Key changes:
 
 ### `test_corrector_on_top_level_message.py` — fake corrector never called  <!-- 2026-04-13 -->
 **Symptom:** `test_corrector_invoked_when_top_level_message_without_message_action` fails with `AssertionError: assert 'context' in {}` — the `called` dict is empty because the fake was never invoked.
-**Location:** `tests/test_corrector_on_top_level_message.py`
-**Status:** pre-existing, not fixed.
-**Notes:** The test patches `core.transport_layer.run_corrector_middleware` but `core.action_parser` imports the function at module level (`from core.transport_layer import run_corrector_middleware`), so the patch doesn't intercept calls made from inside `action_parser`. The test also needs to patch `core.action_parser.run_corrector_middleware`. Separately, in some test environment configurations `use_animation` is resolved as a registered action (PersonaManager is loaded), causing `corrector_orchestrator` to exit early with "Actions executed successfully" before selective correction even fires.
+**Location:** `tests/test_corrector_on_top_level_message.py`.
+**Status:** fixed — the test now patches `core.action_parser.run_corrector_middleware` in addition to `core.transport_layer.run_corrector_middleware` (the function is imported at module level into `action_parser`, so the transport patch alone never intercepted calls made from inside it).
+**Notes:** The second caveat from the original diagnosis — `use_animation` resolving as a registered action and making `corrector_orchestrator` exit early — was not reproduced; the file passes (4 passed).
 
 ---
 
@@ -1052,25 +1076,22 @@ Key changes:
 
 ### `emotion_manager` can mix offset-aware DB timestamps with naive `datetime.now()`  <!-- 2026-04-18 -->
 **Symptom:** Runtime logs show `Error getting emotion state: can't subtract offset-naive and offset-aware datetimes`.
-**Location:** `plugins/emotion_manager.py` (`get_emotion_state`, `get_all_emotion_states`, and related decay logic using `datetime.now()` against DB timestamps).
-**Status:** known, not fixed.
-**Notes:** On Postgres, fetched timestamps may be timezone-aware while local comparisons still use naive `datetime.now()`. The emotion state path needs a consistent timezone policy before subtracting timestamps.
+**Location:** `plugins/emotion_manager/emotion_manager.py` (`get_emotion_state`, `get_all_emotion_states`, `decay_emotions` — all decay arithmetic now funnels through `EmotionState.get_decayed_intensity`).
+**Status:** fixed — `EmotionState._normalize_datetime` coerces any input to an aware UTC datetime (naive values are assumed UTC, aware values are `astimezone(utc)`), and `get_decayed_intensity` normalizes **both** `current_time` and `created_at` before subtracting, so a Postgres aware timestamp vs a naive `datetime.now()` can never meet in a subtraction. Covered by `tests/test_emotion_manager.py::test_decay_handles_mixed_naive_and_aware_datetimes`.
 
 ---
 
 ### `schedule_message send_at` path imports missing `get_local_tz` helper  <!-- 2026-04-18 -->
 **Symptom:** Absolute-time reminders can fail before scheduling with an import error when `schedule_message.payload.send_at` is used.
-**Location:** `plugins/event_plugin.py` (`_handle_schedule_message_payload`, import `from core.time_zone_utils import get_local_tz`).
-**Status:** known, not fixed.
-**Notes:** There is no `get_local_tz` symbol in `core.time_zone_utils`. Relative-delay scheduling (`send_in`) is unaffected, but `send_at` parsing needs to use an existing timezone helper or inline timezone resolution.
+**Location:** `plugins/event_plugin/event_plugin.py` (`_handle_schedule_message_payload`).
+**Status:** fixed — the code now uses the real `get_local_timezone()` helper from `core.time_zone_utils` (which exists); no `get_local_tz` import remains. Relative-delay scheduling (`send_in`) was always unaffected.
 
 ---
 
 ### `event_plugin` interface-path reminder delivery still calls stale `run_action` signature  <!-- 2026-04-18 -->
 **Symptom:** Reminder delivery via `interface_path` can log a `run_action()` argument error instead of sending the message.
-**Location:** `plugins/event_plugin.py` (`_send_via_interface_path`) vs `core/action_parser.py` (`run_action(action, context, bot, original_message)`).
-**Status:** known, not fixed.
-**Notes:** The call site still uses the old two-argument form (`run_action(action, message)`). This path needs the same context/bot/original-message signature update that other callers already received.
+**Location:** `plugins/event_plugin/event_plugin.py` (`_send_via_interface_path`).
+**Status:** fixed — the call site now uses the current 4-argument form `await run_action(action, context, None, message)` (event_plugin.py:1790).
 
 ---
 
@@ -1207,10 +1228,11 @@ Key changes:
 
 ### Correction system re-sends `message_*` on non-message action failures, causing duplicate Telegram messages  <!-- 2026-06-26 -->
 **Symptom:** User receives two identical (or near-identical) replies on Telegram for a single message. Langfuse shows 3 traces in rapid succession: a broken primary generation, a first correction that sends the message, then a second correction that sends a second message.
-**Location:** `core/transport_layer.py` `run_corrector_middleware`; correction prompt assembly.
-**Root cause:** When the primary generation (Venice/gemma-4-uncensored) produces broken output (prose + malformed JSON), the corrector issues a retry that includes a full `message_*` action and delivers it. If any non-message action in that first correction fails (e.g. `use_animation` with an invalid field), a *second* correction is triggered. The second correction prompt says "0 actions failed" but still hands the model the original user message — the model re-generates a complete response including a new `message_*`, causing a duplicate delivery.
-**Status:** known, not fixed.
-**Notes:** The corrector prompt needs to track which actions already succeeded (specifically: whether a `message_*` action has already been delivered) and suppress re-generation of message actions in follow-up correction passes. Until fixed, the workaround is to ensure `use_animation` (and other minor supplementary actions) don't trigger a correction pass at all, or to make the corrector only ask the model to emit the *failed* action types. Observed in Langfuse session at 06:49 CEST on 2026-06-26: traces dd3f1636 (first correction, message delivered) and e69bce37 (second correction, duplicate delivered).
+**Location:** `core/transport_layer.py` `run_corrector_middleware`; `core/message_chain.py` (`correction_context` build + retry filter); correction prompt assembly.
+**Root cause:** When the primary generation (Venice/gemma-4-uncensored) produces broken output (prose + malformed JSON), the corrector issues a retry that includes a full `message_*` action and delivers it. If any non-message action in that first correction fails (e.g. `use_animation` with an invalid field), a *second* correction is triggered. Two compounding defects: (1) `message.correction_context` was **rebuilt from scratch** on every correction pass, so the "a message already delivered" memory (`successful_types`) was clobbered by the *current* pass's successes — after a pass where nothing but the failed action ran, `successful_types` became empty and the retry filter (message_chain.py:3062) stopped stripping the re-emitted `message_*`; (2) the second correction prompt said "0 actions failed" but still handed the model the original user message — and its "Ensure you've created ALL actions from the user's original request" requirement directly contradicted "do NOT repeat successful ones", so the model re-generated a complete response including a new `message_*`, causing a duplicate delivery.
+**Status:** fixed 2026-08-09.
+**Fix:** (1) New `message_chain._merge_correction_successes()` accumulates `successful_actions`/`successful_types` across correction passes (deduped, order-stable) at both `correction_context` build sites, so the "already delivered" knowledge is never lost. (2) The retry filter additionally suppresses **all** `message_*` action types when any message type was previously delivered (structural type-prefix match) — a duplicate delivery to the user is the worst failure mode. (3) The PARTIAL SUCCESS correction prompt now explicitly tells the model a reply was already delivered, forbids ANY `message_*` action, and drops the contradictory "create ALL actions" requirement when a message already sent. Reproduced before the fix with a new test (`tests/test_corrector_no_duplicate_message.py`) showing `deliveries == ['REPLY', 'REPLY']`; after the fix `['REPLY']` and the retry payload excludes the message type.
+**Notes:** The earlier `fb6ab8d2` (2026-02-24) filter only stripped the *exact* successful type and was defeated by the context being rebuilt each pass — this fix addresses the root cause. Verified in Langfuse session at 06:49 CEST on 2026-06-26: traces dd3f1636 (first correction, message delivered) and e69bce37 (second correction, duplicate delivered).
 
 ---
 
@@ -1248,8 +1270,7 @@ Key changes:
 ### `KaradaStateServer.ensure_idle_preloaded` can emit an unawaited coroutine warning  <!-- 2026-05-12 -->
 **Symptom:** Runtime startup can log `RuntimeWarning: coroutine 'KaradaStateServer.ensure_idle_preloaded' was never awaited` during WebUI initialization, even when the rest of the UI continues booting.
 **Location:** `core/webui.py` around the Karada API / preload setup path, plus `core/animation_handler.py` (`KaradaStateServer.ensure_idle_preloaded`).
-**Status:** known, not fixed.
-**Notes:** Observed while smoke-running `scripts/run_webui.py` on `feat/karada-v2`. The warning appears before server bind and suggests a preload helper is being called like a sync function somewhere in WebUI startup.
+**Status:** fixed — audited 2026-08-09: all four production call sites already use `await` or `asyncio.create_task(...)` (`core/webui.py:668,3362`; `core/animation_handler.py:1691,1774`), and no bare call exists anywhere in `core/`, `plugins/`, `interface/`, or `scripts/`. The `create_task` wrapper dates to 2026-03-03 (commit `91f8effb`), predating this report; the warning is no longer reproducible from the code.
 
 ---
 

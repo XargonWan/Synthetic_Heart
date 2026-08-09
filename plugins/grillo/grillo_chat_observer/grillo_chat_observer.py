@@ -739,9 +739,9 @@ class GrilloChatObserverPlugin:
                             snippet = text.strip()
                             if len(snippet) > 300:
                                 snippet = snippet[:300] + "..."
-                            age_label = self._humanize_age(age_seconds)
+                            age_label = self._relative_age_label(timestamp)
                             snippets.append(
-                                f"(chat:{chat_path} | sender:{sender} | {timestamp} | {age_label}) {snippet}"
+                                f"(chat:{chat_path} | sender:{sender} | {age_label}) {snippet}"
                             )
                             taken += 1
                         if taken >= 2 or len(snippets) >= limit:
@@ -925,6 +925,29 @@ class GrilloChatObserverPlugin:
             return ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts
         except Exception:
             return None
+
+    @staticmethod
+    def _relative_age_label(value: Any) -> str:
+        """Compact relative age (e.g. ``2.9h``, ``3d``) for a snippet timestamp.
+
+        Snippets used to carry the raw ISO timestamp, which a small model does
+        not translate into "hours ago" — so an hours-old thread read as live and
+        outreach replied mid-intimacy as if it were happening now (CHANGELOG
+        2026-07-05 staleness issue). A relative label keeps the temporal
+        distance model-visible. Fail-safe: returns ``"?"`` on any parse error.
+        """
+        ts = GrilloChatObserverPlugin._parse_ts(value)
+        if ts is None:
+            return "?"
+        try:
+            age_s = (datetime.now(timezone.utc) - ts).total_seconds()
+            if age_s < 3600:
+                return f"{max(1, int(age_s // 60))}m"
+            if age_s < 86400:
+                return f"{int(age_s // 3600)}h"
+            return f"{int(age_s // 86400)}d"
+        except Exception:
+            return "?"
 
     async def _store_passive_memories(self, snippets: List[str]) -> None:
         """Persist observer snippets as passive memories when enabled."""

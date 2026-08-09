@@ -1281,6 +1281,22 @@ class TestHistoryToTurns:
         assert turns[0].role == "user"
         assert turns[0].content == "Hey there"
 
+    def test_relative_age_marker_rides_into_turn_content(self) -> None:
+        """The relative-age marker emitted by history_engine (e.g. '[3 hours
+        earlier]') lives inside the quoted content, so _history_to_turns must
+        carry it into the turn content -- that is what makes staleness
+        model-visible in the provider messages array (CHANGELOG 2026-07-05)."""
+        lines = [
+            '[09/08/26:0218] Scar: "[3 hours earlier] nighty night bubu"',
+            '[09/08/26:0222] self: "[3 hours earlier] Goodnight, Daddy!"',
+        ]
+
+        turns = self._call(lines, {"dee"})
+
+        assert [turn.role for turn in turns] == ["user", "assistant"]
+        assert turns[0].content == "[3 hours earlier] nighty night bubu"
+        assert turns[1].content == "[3 hours earlier] Goodnight, Daddy!"
+
     def test_peer_lookup_failure_falls_back_to_plain_user(self, monkeypatch) -> None:
         def _raise():
             raise RuntimeError("config unavailable")

@@ -26,7 +26,7 @@ is treated as a correctable error; the corrector will request valid JSON format.
 
 import asyncio
 from types import SimpleNamespace
-from typing import Any, Dict, Optional, cast
+from typing import Any, Dict, List, Optional, cast
 
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.config_manager import config_registry
@@ -1052,6 +1052,55 @@ async def send_llm_fallback_message(
     except Exception as e:
         log_error(f"[message_chain] Failed to send fallback message: {e}")
         return fallback_text
+
+
+def _merge_correction_successes(
+    previous: Any, current: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Merge newly-executed actions into the accumulated correction context.
+
+    ``message.correction_context`` is rebuilt on every correction pass. Naively
+    replacing it with the *current* pass's successes loses the memory that a
+    ``message_*`` action already delivered on an earlier pass — so the retry
+    filter (``successful_types``) stops stripping it and the model's re-emitted
+    reply gets delivered a second time (CHANGELOG 2026-06-26 duplicate
+    Telegram messages). This merges the previous context's successful
+    actions/types (deduplicated, order-stable) with the current pass's, so the
+    "already delivered" knowledge accumulates across passes.
+    """
+    merged_actions: List[Dict[str, Any]] = []
+    merged_types: List[str] = []
+    seen_types: set = set()
+
+    prev = previous if isinstance(previous, dict) else {}
+    prev_actions = prev.get("successful_actions") or []
+    prev_types = prev.get("successful_types") or []
+    if isinstance(prev_actions, list):
+        for a in prev_actions:
+            if isinstance(a, dict):
+                atype = a.get("type") or a.get("action")
+                if atype not in seen_types:
+                    seen_types.add(atype)
+                    merged_actions.append(a)
+                    merged_types.append(atype)
+    if isinstance(prev_types, (list, tuple, set)):
+        for atype in prev_types:
+            if atype not in seen_types:
+                seen_types.add(atype)
+                merged_types.append(atype)
+
+    for a in current.get("successful_actions") or []:
+        if isinstance(a, dict):
+            atype = a.get("type") or a.get("action")
+            if atype not in seen_types:
+                seen_types.add(atype)
+                merged_actions.append(a)
+                merged_types.append(atype)
+
+    merged = dict(current)
+    merged["successful_actions"] = merged_actions
+    merged["successful_types"] = merged_types
+    return merged
 
 
 async def handle_incoming_message(
@@ -3013,7 +3062,20 @@ async def handle_incoming_message(
                         if attempt > 0:
                             cc = getattr(message, "correction_context", None) or {}
                             successful_types = cc.get("successful_types", [])
+                            if isinstance(successful_types, (list, tuple, set)):
+                                successful_types = list(successful_types)
                             if successful_types and isinstance(actions, list):
+                                # If a message action already delivered on an
+                                # earlier pass, suppress ALL message types on
+                                # the retry — a duplicate delivery to the user
+                                # is the worst failure mode, and the model
+                                # re-emitting the reply is the CHANGELOG
+                                # 2026-06-26 duplicate. Structural type-prefix
+                                # match; never keyword logic.
+                                delivered_message = any(
+                                    str(t).startswith("message_")
+                                    for t in successful_types
+                                )
                                 filtered = []
                                 for act in actions:
                                     atype = None
@@ -3022,6 +3084,12 @@ async def handle_incoming_message(
                                     if atype in successful_types:
                                         log_debug(
                                             f"[message_chain] Removing previously successful action type '{atype}' from retry payload"
+                                        )
+                                    elif delivered_message and str(
+                                        atype or ""
+                                    ).startswith("message_"):
+                                        log_debug(
+                                            f"[message_chain] Suppressing re-emitted message action '{atype}' on retry (already delivered)"
                                         )
                                     else:
                                         filtered.append(act)
@@ -3251,18 +3319,21 @@ async def handle_incoming_message(
                                 return ACTIONS_EXECUTED
 
                             # Build correction context with info about what succeeded and what failed
-                            correction_context = {
-                                "successful_actions": processed,
-                                "successful_types": [
-                                    (a.get("type") or a.get("action"))
-                                    for a in processed
-                                    if isinstance(a, dict)
-                                ],
-                                "failed_actions": failed,
-                                "errors": errors_list,
-                                "had_json_errors": metadata.get("recovered", False),
-                                "original_text": text,
-                            }
+                            correction_context = _merge_correction_successes(
+                                getattr(message, "correction_context", None),
+                                {
+                                    "successful_actions": processed,
+                                    "successful_types": [
+                                        (a.get("type") or a.get("action"))
+                                        for a in processed
+                                        if isinstance(a, dict)
+                                    ],
+                                    "failed_actions": failed,
+                                    "errors": errors_list,
+                                    "had_json_errors": metadata.get("recovered", False),
+                                    "original_text": text,
+                                },
+                            )
 
                             # Store this in the message for the corrector to use
                             if hasattr(message, "__dict__"):
@@ -3307,35 +3378,39 @@ async def handle_incoming_message(
                                 log_warning(
                                     f"[message_chain] ⚠️ LLM generated no outbound message action for user-facing interface '{interface_path}' — triggering corrector for missing reply"
                                 )
-                                correction_context = {
-                                    "successful_actions": processed,
-                                    "successful_types": [
-                                        (a.get("type") or a.get("action"))
-                                        for a in processed
-                                        if isinstance(a, dict)
-                                    ],
-                                    "failed_actions": [],
-                                    "errors": [
-                                        _build_missing_reply_hint(
-                                            interface_path,
-                                            is_reactive_vessel_chat,
-                                            current_player_message=(
-                                                ctx.get("original_user_message") or text
-                                                if is_reactive_vessel_chat
-                                                else None
-                                            ),
-                                            last_self_line=(
-                                                _last_self_vessel_utterance(
-                                                    ctx, str(interface_path or "")
-                                                )
-                                                if is_reactive_vessel_chat
-                                                else None
-                                            ),
-                                        )
-                                    ],
-                                    "had_json_errors": False,
-                                    "original_text": text,
-                                }
+                                correction_context = _merge_correction_successes(
+                                    getattr(message, "correction_context", None),
+                                    {
+                                        "successful_actions": processed,
+                                        "successful_types": [
+                                            (a.get("type") or a.get("action"))
+                                            for a in processed
+                                            if isinstance(a, dict)
+                                        ],
+                                        "failed_actions": [],
+                                        "errors": [
+                                            _build_missing_reply_hint(
+                                                interface_path,
+                                                is_reactive_vessel_chat,
+                                                current_player_message=(
+                                                    ctx.get("original_user_message")
+                                                    or text
+                                                    if is_reactive_vessel_chat
+                                                    else None
+                                                ),
+                                                last_self_line=(
+                                                    _last_self_vessel_utterance(
+                                                        ctx, str(interface_path or "")
+                                                    )
+                                                    if is_reactive_vessel_chat
+                                                    else None
+                                                ),
+                                            )
+                                        ],
+                                        "had_json_errors": False,
+                                        "original_text": text,
+                                    },
+                                )
                                 if hasattr(message, "__dict__"):
                                     message.correction_context = correction_context
                                 parsed = None
