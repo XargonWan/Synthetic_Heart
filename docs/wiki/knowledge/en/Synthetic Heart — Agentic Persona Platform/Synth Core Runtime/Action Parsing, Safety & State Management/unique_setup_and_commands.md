@@ -1,0 +1,1 @@
+Module initialization requires calling `register_action_safety_config()` (auto-invoked at import of `action_safety`) and `init_action_state_manager()` or `get_action_state_manager()` before pushing actions. The `CORRECTOR_RETRIES` variable is read dynamically from `config_registry` so it can be changed at runtime via WebUI/API without restart.

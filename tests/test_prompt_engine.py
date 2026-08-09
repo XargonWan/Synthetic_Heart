@@ -6,6 +6,8 @@ from typing import Any, Sequence
 
 from core.prompt_engine import (
     _build_context_summary,
+    _build_soul_turn_delta_prefix,
+    _build_soul_user_profile_prefix,
     build_json_prompt,
     build_live_prompt_request,
     build_live_system_instruction,
@@ -153,6 +155,185 @@ def test_build_context_summary_humanizes_diary_entries() -> None:
     assert "Diary entry from 07/05/26:0335: First memory. | Second memory." in summary
     assert "Thought from 07/05/26:0335: Private note." in summary
     assert "| thought:" not in summary
+
+
+def test_build_context_summary_no_session_state_when_no_foresight() -> None:
+    summary = _build_context_summary(
+        {
+            "soul_active_foresight": [],
+            "soul_session_state": "<session_state>…</session_state>",
+        }
+    )
+
+    assert "[Session state]" not in summary
+
+
+def test_build_context_summary_includes_session_state_with_foresight() -> None:
+    session_state = (
+        "<session_state>\ninterface_path: telegram_bot/x\n"
+        "active_foresight:\n- Upcoming user event around 2026-08-10\n"
+        'emotion_snapshot: {"joy": 0.0, "fear": 0.0, "sad": 0.0, "anger": 0.0}\n'
+        "</session_state>"
+    )
+    summary = _build_context_summary(
+        {
+            "soul_active_foresight": [
+                {"content": "Upcoming user event around 2026-08-10", "trigger": "date"}
+            ],
+            "soul_session_state": session_state,
+        }
+    )
+
+    assert "[Session state]" in summary
+    assert "Upcoming user event around 2026-08-10" in summary
+
+
+def test_build_soul_turn_delta_prefix_empty_when_quiet() -> None:
+    prefix = _build_soul_turn_delta_prefix(
+        {
+            "soul_turn_emotion_delta": '{"e": {"joy": 0.0, "fear": 0.0, "sad": 0.0, "anger": 0.0}}'
+        }
+    )
+    assert prefix == ""
+
+
+def test_build_soul_turn_delta_prefix_empty_when_missing() -> None:
+    assert _build_soul_turn_delta_prefix({}) == ""
+
+
+def test_build_soul_turn_delta_prefix_present_when_substantive() -> None:
+    prefix = _build_soul_turn_delta_prefix(
+        {
+            "soul_turn_emotion_delta": '{"e": {"joy": 0.0, "fear": 0.4, "sad": 0.0, "anger": 0.0}}'
+        }
+    )
+    assert prefix.startswith('{"e":')
+    assert "0.4" in prefix
+    assert prefix.endswith("\n")
+
+
+def test_build_soul_dsp_prefix_empty_when_missing() -> None:
+    assert _build_soul_user_profile_prefix({}) == ""
+
+
+def test_build_soul_dsp_prefix_empty_when_placeholder() -> None:
+    prefix = _build_soul_user_profile_prefix(
+        {"soul_user_profile": "<user_profile>No profile compiled yet.</user_profile>"}
+    )
+    assert prefix == ""
+
+
+def test_build_soul_dsp_prefix_present_when_profiled() -> None:
+    prefix = _build_soul_user_profile_prefix(
+        {"soul_user_profile": "<user_profile>User is Scarlet (trainer).</user_profile>"}
+    )
+    assert prefix.startswith("[About the person you're talking to]")
+    assert "User is Scarlet (trainer)." in prefix
+
+
+def test_soul_dsp_not_injected_by_default(monkeypatch) -> None:
+    async def dummy_gather(message, ctx):
+        return {
+            "persona": "You are SynthA.",
+            "soul_user_profile": "<user_profile>User is Scarlet (trainer).</user_profile>",
+        }
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+
+    message = SimpleNamespace(
+        chat_id=1,
+        text="hello",
+        message_id=1,
+        from_user=SimpleNamespace(full_name="user", username="user"),
+        date=datetime.now(timezone.utc),
+        reply_to_message=None,
+    )
+    result = asyncio.run(build_json_prompt(message, {}, interface_name="telegram_bot"))
+    pr = result.get("__prompt_request")
+    assert pr is not None
+    # SOUL_DSP_INJECT_ENABLED defaults to False -> DSP stays out of the turn.
+    assert "[About the person you're talking to]" not in pr.current_text
+
+
+def test_soul_dsp_injected_when_enabled(monkeypatch) -> None:
+    from core.config_manager import config_registry
+
+    async def dummy_gather(message, ctx):
+        return {
+            "persona": "You are SynthA.",
+            "soul_user_profile": "<user_profile>User is Scarlet (trainer).</user_profile>",
+        }
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+    monkeypatch.setattr(
+        config_registry,
+        "get_value",
+        lambda key, default=None, **kwargs: key == "SOUL_DSP_INJECT_ENABLED",
+    )
+
+    message = SimpleNamespace(
+        chat_id=1,
+        text="hello",
+        message_id=1,
+        from_user=SimpleNamespace(full_name="user", username="user"),
+        date=datetime.now(timezone.utc),
+        reply_to_message=None,
+    )
+    result = asyncio.run(build_json_prompt(message, {}, interface_name="telegram_bot"))
+    pr = result.get("__prompt_request")
+    assert pr is not None
+    assert "[About the person you're talking to]" in pr.current_text
+
+
+def test_soul_delta_suppresses_legacy_emotion_prefix(monkeypatch) -> None:
+    async def dummy_gather(message, ctx):
+        return {
+            "persona": "You are SynthA.",
+            "current_emotions_nl": "happy (8.0 - high)",
+            # substantive SOUL delta -> legacy emotion suppressed
+            "soul_turn_emotion_delta": '{"e": {"joy": 0.9, "fear": 0.0, "sad": 0.0, "anger": 0.0}}',
+        }
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+
+    message = SimpleNamespace(
+        chat_id=1,
+        text="hello",
+        message_id=1,
+        from_user=SimpleNamespace(full_name="user", username="user"),
+        date=datetime.now(timezone.utc),
+        reply_to_message=None,
+    )
+    result = asyncio.run(build_json_prompt(message, {}, interface_name="telegram_bot"))
+    pr = result.get("__prompt_request")
+    assert pr is not None
+    # No legacy runtime prefix emotion line when SOUL delta is present.
+    assert pr.runtime_ctx.emotions is None
+
+
+def test_soul_delta_quiet_keeps_legacy_emotion(monkeypatch) -> None:
+    async def dummy_gather(message, ctx):
+        return {
+            "persona": "You are SynthA.",
+            "current_emotions_nl": "neutral (5.0 - moderate)",
+            # quiet SOUL delta -> legacy emotion retained
+            "soul_turn_emotion_delta": '{"e": {"joy": 0.0, "fear": 0.0, "sad": 0.0, "anger": 0.0}}',
+        }
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+
+    message = SimpleNamespace(
+        chat_id=1,
+        text="hello",
+        message_id=1,
+        from_user=SimpleNamespace(full_name="user", username="user"),
+        date=datetime.now(timezone.utc),
+        reply_to_message=None,
+    )
+    result = asyncio.run(build_json_prompt(message, {}, interface_name="telegram_bot"))
+    pr = result.get("__prompt_request")
+    assert pr is not None
+    assert pr.runtime_ctx.emotions == "neutral (5.0 - moderate)"
 
 
 def test_build_live_system_instruction_enforces_identity_rules(monkeypatch):
@@ -501,6 +682,208 @@ def test_build_json_prompt_derives_default_interface_action_scope(monkeypatch):
         core_initializer.actions_block = original_actions_block
 
 
+def test_build_json_prompt_outbound_grillo_exposes_offered_target_interfaces(
+    monkeypatch,
+):
+    async def dummy_gather(message, ctx):
+        return {}
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+
+    from core.core_initializer import core_initializer
+
+    monkeypatch.setattr(
+        "core.core_initializer.INTERFACE_REGISTRY",
+        {
+            "grillo": object(),
+            "telegram_bot": object(),
+            "discord_bot": object(),
+            "webui": object(),
+        },
+        raising=False,
+    )
+
+    original_actions_block = core_initializer.actions_block
+    core_initializer.actions_block = {
+        "available_actions": {
+            "create_personal_diary_entry": {
+                "schema": {"type": "object", "properties": {}, "required": []},
+                "brief": "Create diary entry.",
+                "source": "ai_diary",
+            },
+            "message_telegram_bot": {
+                "schema": {"type": "object", "properties": {}, "required": []},
+                "brief": "Send Telegram message.",
+                "source": "message_plugin, telegram_bot",
+            },
+            "message_discord_bot": {
+                "schema": {"type": "object", "properties": {}, "required": []},
+                "brief": "Send Discord message.",
+                "source": "message_plugin, discord_bot",
+            },
+            "message_webui": {
+                "schema": {"type": "object", "properties": {}, "required": []},
+                "brief": "Send WebUI message.",
+                "source": "message_plugin, webui",
+            },
+        }
+    }
+
+    try:
+        message = SimpleNamespace(
+            chat_id=-1,
+            text="observer beat",
+            message_id=1,
+            from_user=SimpleNamespace(full_name="grillo", username="grillo"),
+            date=datetime.now(timezone.utc),
+            interface_path="grillo/-1",
+        )
+        context_memory = {
+            "grillo_beat": True,
+            "beat_type": "observer",
+            "grillo_snippets": [
+                "(chat:telegram_bot/-100 | sender:alice | timestamp) hello",
+            ],
+            "grillo_targets": [
+                {"interface_path": "discord_bot/42"},
+            ],
+        }
+
+        result = asyncio.run(
+            build_json_prompt(message, context_memory, interface_name="grillo")
+        )
+
+        assert sorted(result["actions"].keys()) == [
+            "create_personal_diary_entry",
+            "message_discord_bot",
+            "message_telegram_bot",
+        ]
+    finally:
+        core_initializer.actions_block = original_actions_block
+
+
+def test_build_json_prompt_suppresses_diary_actions_on_vessel_turn(monkeypatch):
+    """AGENTS.md §5c: a Vessel embodiment turn must not expose diary/memory-write
+    actions in the prompt (the single 'lived experience' entry is written only at
+    end-of-session). The in-world reply action must survive."""
+
+    async def dummy_gather(message, ctx):
+        return {}
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+
+    from core.core_initializer import core_initializer
+
+    monkeypatch.setattr(
+        "core.core_initializer.INTERFACE_REGISTRY",
+        {"vessel": object(), "matrix_chat": object()},
+        raising=False,
+    )
+
+    original_actions_block = core_initializer.actions_block
+    core_initializer.actions_block = {
+        "available_actions": {
+            "create_personal_diary_entry": {
+                "schema": {"type": "object", "properties": {}, "required": []},
+                "brief": "Create diary entry.",
+                "source": "ai_diary",
+            },
+            "update_diary_entry": {
+                "schema": {"type": "object", "properties": {}, "required": []},
+                "brief": "Replace diary entry content.",
+                "source": "ai_diary",
+            },
+            "vessel_minecraft_say": {
+                "schema": {"type": "object", "properties": {}, "required": []},
+                "brief": "Say something in-world.",
+                "source": "vessel_plugin, vessel",
+            },
+            "message_matrix_chat": {
+                "schema": {"type": "object", "properties": {}, "required": []},
+                "brief": "Send Matrix message.",
+                "source": "message_plugin, matrix_chat",
+            },
+        }
+    }
+
+    try:
+        message = SimpleNamespace(
+            chat_id="minecraft",
+            text="Rekku, ci sei?",
+            message_id=1,
+            from_user=SimpleNamespace(full_name="player", username="player"),
+            date=datetime.now(timezone.utc),
+            interface_path="vessel/minecraft",
+        )
+
+        result = asyncio.run(build_json_prompt(message, {}, interface_name="vessel"))
+
+        action_keys = set(result["actions"].keys())
+        # Diary/memory-write actions must be gone on a vessel turn (§5c).
+        assert "create_personal_diary_entry" not in action_keys
+        assert "update_diary_entry" not in action_keys
+        # The in-world reply action must survive.
+        assert "vessel_minecraft_say" in action_keys
+        # A cross-interface message channel must not be offered on a vessel turn.
+        assert "message_matrix_chat" not in action_keys
+    finally:
+        core_initializer.actions_block = original_actions_block
+
+
+def test_vessel_prompt_merges_live_connection_actions(monkeypatch):
+    """A prompt built before the async action-cache refresh must still expose
+    the currently connected world's actions."""
+
+    async def dummy_gather(message, ctx):
+        return {}
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+
+    from core.core_initializer import core_initializer
+
+    original_actions_block = core_initializer.actions_block
+    core_initializer.actions_block = {
+        "available_actions": {
+            "vessel_connect": {
+                "schema": {"type": "object", "properties": {}, "required": []},
+                "brief": "Connect to a world.",
+            }
+        }
+    }
+
+    class LiveVessel:
+        def get_supported_actions(self):
+            return {
+                "vessel_minecraft_say": {
+                    "schema": {"type": "object", "properties": {}, "required": []},
+                    "brief": "Speak in Minecraft.",
+                }
+            }
+
+        def _action_world(self):
+            return "minecraft"
+
+    monkeypatch.setattr(
+        "core.core_initializer.PLUGIN_REGISTRY", {"vessel_plugin": LiveVessel()}
+    )
+
+    try:
+        message = SimpleNamespace(
+            chat_id="minecraft",
+            text="hello",
+            message_id=1,
+            from_user=SimpleNamespace(full_name="player", username="player"),
+            date=datetime.now(timezone.utc),
+            interface_path="vessel/minecraft",
+        )
+
+        result = asyncio.run(build_json_prompt(message, {}, interface_name="vessel"))
+
+        assert "vessel_minecraft_say" in result["actions"]
+    finally:
+        core_initializer.actions_block = original_actions_block
+
+
 def test_prompt_request_attached_to_result(monkeypatch):
     """build_json_prompt must attach a PromptRequest under '__prompt_request'."""
     from core.prompt_request import PromptRequest
@@ -827,7 +1210,12 @@ class TestHistoryToTurns:
         assert turns[0].content == "Replying now"
         assert turns[1].content == "Thanks"
 
-    def test_coalesces_consecutive_same_role_turns(self) -> None:
+    def test_coalesces_consecutive_assistant_turns_only(self) -> None:
+        """ASSISTANT streaks (Synth's own outreach/split self-replies) are
+        coalesced for provider well-formedness, but consecutive USER turns are
+        NEVER merged — each human message is a distinct turn, and collapsing two
+        separate messages into one jumbles the context the model sees (the
+        "outputs feel out of order" bug, Langfuse f3a0aa68)."""
         lines = [
             '[13/04/26:0924] Alice: "First part"',
             '[13/04/26:0925] Alice: "Second part"',
@@ -837,9 +1225,30 @@ class TestHistoryToTurns:
 
         turns = self._call(lines, {"syntha"})
 
-        assert [turn.role for turn in turns] == ["user", "assistant"]
-        assert turns[0].content == "First part\n\nSecond part"
-        assert turns[1].content == "First answer\n\nSecond answer"
+        # User turns stay separate; assistant turns coalesce.
+        assert [turn.role for turn in turns] == ["user", "user", "assistant"]
+        assert turns[0].content == "First part"
+        assert turns[1].content == "Second part"
+        assert turns[2].content == "First answer\n\nSecond answer"
+
+    def test_distinct_user_messages_never_merged(self) -> None:
+        """Regression: two separate user messages (sent minutes apart with no
+        reply between, e.g. after a failed correction output) must stay two
+        turns — the old coalescing merged them into one jumbled message."""
+        lines = [
+            '[26/08/07:1232] Scar: "Okay that broke from the other fix, but no '
+            'matter, how are you feeling cutie patootie"',
+            '[26/08/07:1256] Scar: "Okay that broke from the other fix even more, '
+            'but no matter, how are you feeling cutie patootie"',
+            '[26/08/07:1256] self: "Mmm... a little flustered and shy"',
+        ]
+
+        turns = self._call(lines, {"dee"})
+
+        assert [turn.role for turn in turns] == ["user", "user", "assistant"]
+        assert "First part" not in turns[0].content
+        assert "even more" in turns[1].content
+        assert "\n\n" not in turns[0].content
 
     def test_peer_synth_sender_tagged_not_collapsed_into_anonymous_user(
         self, monkeypatch
@@ -913,9 +1322,12 @@ class TestHistoryToTurns:
 
         turns = self._call(lines, {"synth"})
 
-        assert len(turns) == 1
+        # Peer turns are user-role turns; they are never merged either — each
+        # message stays a distinct turn (the "context out of order" fix).
+        assert len(turns) == 2
         assert turns[0].role == "user"
-        assert turns[0].content == "[SynthA]: peer line one\n\n[SynthA]: peer line two"
+        assert turns[0].content == "[SynthA]: peer line one"
+        assert turns[1].content == "[SynthA]: peer line two"
 
     def test_consecutive_human_turns_still_coalesce_with_peer_configured(
         self, monkeypatch
@@ -928,6 +1340,8 @@ class TestHistoryToTurns:
 
         turns = self._call(lines, {"synth"})
 
-        assert len(turns) == 1
+        # Human user turns are never merged — each message is a distinct turn.
+        assert len(turns) == 2
         assert turns[0].role == "user"
-        assert turns[0].content == "First part\n\nSecond part"
+        assert turns[0].content == "First part"
+        assert turns[1].content == "Second part"

@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: core_runtime/live_session
+title: Gemini Live API Session & Tool Execution Runtime
+scope:
+    - core/live_session_manager.py
+    - core/live_tool_executor.py
+    - core/live_tool_registry.py
+    - core/live_api_logger.py
+source_files: []
+depends_on: []
+related_to: []

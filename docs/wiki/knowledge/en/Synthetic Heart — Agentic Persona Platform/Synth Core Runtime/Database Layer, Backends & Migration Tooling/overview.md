@@ -1,0 +1,1 @@
+Provides the async database connection pool, cross-backend SQL compatibility (MariaDB/PostgreSQL), one-shot startup migrations, scheduled backups, and legacy MySQL-to-PostgreSQL cutover/migration tooling for the application.

@@ -1,0 +1,5 @@
+- New engines, interfaces, and plugins register themselves through shared registry classes in `core.cortex_registry` and `core.core_initializer` rather than direct imports.
+- Provider-specific credentials and endpoints are declared as JSON files under `providers/*.json` consumed at runtime instead of hardcoded values.
+- Experimental or unstable code lives in `*_dev` packages gated by a global `_dev_components_enabled` flag checked via `are_dev_components_enabled()` before loading.
+- Async shutdown paths use explicit `stop()` methods on registered components, invoked sequentially from `main.stop_interfaces()` with per-component timeouts.
+- Configuration and feature toggles are loaded from `.env` (via `python-dotenv`) and `pyproject.toml` optional-dependency groups rather than CLI flags.

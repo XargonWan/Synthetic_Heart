@@ -1,0 +1,1 @@
+Vue 3 + TypeScript + Vite build, Pinia for state, UnoCSS for utility-first styles, Three.js with `@pixiv/three-vrm` for VRM rendering, and Playwright for end-to-end smoke tests. Backend proxy configured in `vite.config.ts` forwards `/api`, `/ws`, `/skins`, `/uploads`, `/avatars` to `SYNTH_BACKEND_ORIGIN` (default `https://localhost:8080`) with `secure: false` for self-signed TLS.

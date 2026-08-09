@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: core_runtime/prompt_engineering
+title: Prompt Engineering & Variable Registry
+scope:
+    - core/prompt_engine.py
+    - core/prompt_renderers.py
+    - core/prompt_request.py
+    - core/variables_engine.py
+source_files: []
+depends_on: []
+related_to: []

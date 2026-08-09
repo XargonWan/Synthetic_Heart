@@ -1,0 +1,42 @@
+{
+  "$schema": "https://app.kilo.ai/config.json",
+  "mcp": {
+    "tencentdb-knowledge": {
+      "type": "local",
+      "command": [
+        "D:\\dev\\D16\\synthetic_heart\\.venv\\Scripts\\python.exe",
+        "D:\\dev\\D16\\synthetic_heart\\scripts\\tencentdb_knowledge_mcp.py"
+      ],
+      "environment": {
+        "KNOWLEDGE_DATA_DIR": "D:\\tdbdata",
+        "KNOWLEDGE_DB_PATH": "D:\\tdbdata\\knowledge.db"
+      },
+      "enabled": true
+    },
+    "synth-logs": {
+      "type": "local",
+      "command": ["uv", "run", "python", "mcp_servers/synth_logs.py"],
+      "enabled": true
+    },
+    "synth-db": {
+      "type": "local",
+      "command": ["uv", "run", "python", "mcp_servers/synth_db.py"],
+      "enabled": true
+    },
+    "synth-cortex": {
+      "type": "local",
+      "command": ["uv", "run", "python", "mcp_servers/synth_cortex.py"],
+      "enabled": true
+    },
+    "synth-langfuse": {
+      "type": "local",
+      "command": ["uv", "run", "python", "mcp_servers/synth_langfuse.py"],
+      "enabled": true
+    },
+    "affine": {
+      "type": "local",
+      "command": ["affine-mcp"],
+      "enabled": true
+    }
+  }
+}

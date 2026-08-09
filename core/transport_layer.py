@@ -22,12 +22,33 @@ JsonMetadata: TypeAlias = dict[str, Any]
 # Format: {chat_id: timestamp} to allow timeout cleanup
 _EXPECTING_SYSTEM_REPLY: dict = {}
 
+# Cap on how many entities/blocks/affordances are rendered in the vessel
+# world-state block embedded in correction prompts (see
+# ``_render_vessel_world_state_block``). Keeps the correction turn lean.
+_MAX_WORLD_STATE_RECORDS = 12
+
 # Register the timeout used when waiting for a system reply to a correction prompt.
 AWAIT_RESPONSE_TIMEOUT = config_registry.get_var(
     "AWAIT_RESPONSE_TIMEOUT",
     2400,
     label="Await Response Timeout",
     description="Maximum time in seconds to wait for a system reply after requesting a correction before the expectation expires. Kept above LLM_GENERATION_TIMEOUT_SEC so a slow corrected generation is not abandoned early.",
+    value_type=int,
+    group="core",
+    component="core",
+)
+
+# Dedicated, short timeout for a SINGLE corrector LLM call. The corrector runs
+# inside the single synchronous message-queue consumer, so a slow/uncancellable
+# engine (e.g. the stateful browser-driven selenium engine) hanging for the full
+# AWAIT_RESPONSE_TIMEOUT would starve every chat and beat. Each corrector attempt
+# is bounded by this value so a hung correction fails fast and releases the
+# consumer instead of blocking up to AWAIT_RESPONSE_TIMEOUT per attempt.
+CORRECTOR_TIMEOUT_SEC = config_registry.get_var(
+    "CORRECTOR_TIMEOUT_SEC",
+    60,
+    label="Corrector Timeout (seconds)",
+    description="Per-attempt wall-clock budget for a single JSON-corrector LLM call. Runs on the single message-queue consumer, so it is kept much shorter than AWAIT_RESPONSE_TIMEOUT: a hung correction fails fast and frees the consumer instead of deadlocking every chat.",
     value_type=int,
     group="core",
     component="core",
@@ -219,17 +240,43 @@ async def _call_interface_send(interface_send_func, *args, **kwargs):
             return await result
         return result
     except TypeError as exc:
-        if "message_thread_id" not in kwargs or "message_thread_id" not in str(exc):
-            raise
-        retry_kwargs = dict(kwargs)
-        retry_kwargs.pop("message_thread_id", None)
-        log_debug(
-            "[transport] Retrying send without message_thread_id after unsupported kwarg"
-        )
-        result = interface_send_func(*args, **retry_kwargs)
-        if isawaitable(result):
-            return await result
-        return result
+        # Retry 1: some bots (or test fakes) don't accept 'message_thread_id'.
+        if "message_thread_id" in kwargs and "message_thread_id" in str(exc):
+            retry_kwargs = dict(kwargs)
+            retry_kwargs.pop("message_thread_id", None)
+            log_debug(
+                "[transport] Retrying send without message_thread_id after unsupported kwarg"
+            )
+            result = interface_send_func(*args, **retry_kwargs)
+            if isawaitable(result):
+                return await result
+            return result
+        # Retry 2: payload-style interfaces (e.g. Telegram/Discord/Matrix) expose
+        # ``send_message(payload: dict, original_message=None)`` and do NOT accept a
+        # ``text=`` keyword. universal_send/_send_text forward ``text=`` directly,
+        # which the normal action path never does (it passes a payload dict
+        # positionally — see action_parser._handle_plugin_action). When the callee
+        # rejects ``text`` (or another payload key) as an unexpected keyword, rebuild
+        # the call as a single positional payload dict mirroring the action path.
+        if "text" in kwargs and "text" in str(exc) and "unexpected keyword" in str(exc):
+            payload: dict = {}
+            # Leading positional arg (if any) is the chat/target id used by callers
+            # such as send_llm_fallback_message(universal_send(bot.send_message, chat_id, ...)).
+            if args:
+                payload["target"] = args[0]
+            # Map known payload keys; unknown kwargs are ignored to avoid another
+            # unexpected-keyword mismatch against the payload-dict signature.
+            for key in ("text", "interface_path", "thread_id", "chat_name", "caption"):
+                if key in kwargs and kwargs[key] is not None:
+                    payload[key] = kwargs[key]
+            log_debug(
+                "[transport] Retrying send as positional payload dict after unsupported 'text' kwarg"
+            )
+            result = interface_send_func(payload)
+            if isawaitable(result):
+                return await result
+            return result
+        raise
 
 
 def _get_system_reply_timeout():
@@ -614,6 +661,32 @@ def extract_json_from_text(
         except Exception as _e:
             log_debug(f"[extract_json_from_text] json_repair failed: {_e}")
 
+    # Last-resort structural recovery for models that emit an ALTERNATIVE
+    # tool-call dialect instead of the SyntH `{"actions":[{"type","payload"}]}`
+    # schema — e.g. weak models routed to a non-native-tools engine that fall
+    # back on shapes like ``{"tool":"NAME","params":{...}}`` or
+    # ``[tool:NAME] {"params": ["k":v, ...]}``. Neither standard parsing nor
+    # json_repair yields an ``actions`` list for these, so the whole turn is
+    # lost. This normaliser is purely STRUCTURAL (it keys off JSON shape, never
+    # off intent words) and only runs when we still have no usable actions.
+    _still_no_actions = not (
+        isinstance(found_json, dict)
+        and isinstance(found_json.get("actions"), list)
+        and found_json["actions"]
+    )
+    if _still_no_actions:
+        _dialect = _recover_tool_call_dialect(text)
+        if _dialect is not None:
+            found_json = _dialect
+            metadata["had_errors"] = False
+            metadata["recovered"] = True
+            metadata["recovery_attempts"] = metadata.get("recovery_attempts", 0) + 1
+            metadata["tool_dialect_recovered"] = True
+            log_info(
+                "[extract_json_from_text] ✅ Recovered alternative tool-call "
+                "dialect into SyntH actions schema"
+            )
+
     if not found_json:
         log_debug("[extract_json_from_text] No valid JSON found in text")
         log_debug(
@@ -665,6 +738,115 @@ def extract_json_from_text(
             log_debug(f"[extract_json_from_text] Action recovery failed: {e}")
 
     return (found_json, metadata) if return_metadata else found_json
+
+
+def _pseudo_params_to_dict(raw: str) -> dict[str, Any]:
+    """Parse a malformed ``params`` blob into a flat payload dict.
+
+    Weak models sometimes emit the arguments object as a JSON *array* that
+    illegally contains ``key: value`` pairs, e.g. ``["query": "x", "limit": "5"]``
+    (a list cannot hold key:value, so :func:`json.loads` and ``json_repair``
+    both give up). They may also emit a normal object ``{"query": "x"}`` that
+    only failed to parse because of surrounding corruption.
+
+    This extracts every ``"key": <json-value>`` pair by structure alone — it
+    never inspects the key or value for meaning — and returns them as a dict.
+    Values are JSON-decoded when possible, otherwise kept as trimmed strings.
+    Returns an empty dict when nothing parseable is found.
+    """
+    params: dict[str, Any] = {}
+    if not raw:
+        return params
+    # Match  "key" : <value>  where <value> is a quoted string, number,
+    # boolean, null, or a bracketed/braced literal. Structural only.
+    pair_re = re.compile(
+        r'"([^"]+)"\s*:\s*'
+        r'("(?:[^"\\]|\\.)*"|\[[^\]]*\]|\{[^}]*\}|-?\d+(?:\.\d+)?|true|false|null)'
+    )
+    for m in pair_re.finditer(raw):
+        key = m.group(1)
+        rawval = m.group(2)
+        try:
+            params[key] = json.loads(rawval)
+        except Exception:
+            params[key] = rawval.strip().strip('"')
+    return params
+
+
+def _recover_tool_call_dialect(text: str) -> Optional[dict[str, Any]]:
+    """Normalise an alternative tool-call dialect into the SyntH schema.
+
+    Some models (typically weak ones served by a non-native-tools engine, so
+    they fall back to the in-prompt JSON-action protocol) do not emit the
+    canonical ``{"actions": [{"type": ..., "payload": {...}}]}`` shape. Instead
+    they produce shapes such as::
+
+        {"tool": "NAME", "params": {"query": "x"}}
+        {"tool": "NAME", "params": ["query": "x", "limit": "5"]}
+        [tool:NAME] {"params": ["query": "x"]}
+        {"name": "NAME", "arguments": {...}}
+
+    Returned as ``{"actions": [{"type": NAME, "payload": {...}}]}`` when at
+    least one tool call is recovered, else ``None``.
+
+    Purely STRUCTURAL: it keys off the JSON/pseudo-JSON shape (a tool-name
+    string next to a params/arguments blob), never off any intent keyword, so
+    it is safe in a multi-language deployment.
+    """
+    if not text:
+        return None
+    actions: list[dict[str, Any]] = []
+    try:
+        # Case A: a name key ("tool"/"name"/"action") paired with a params blob
+        # ("params"/"arguments"/"parameters"/"input"). The params blob may be a
+        # normal object {...} or the illegal pseudo-list [...]; both are grabbed
+        # non-greedily up to the first closing bracket/brace.
+        name_re = re.compile(
+            r'"(?:tool|name|action)"\s*:\s*"([^"]+)"'
+            r'(?:\s*,\s*"(?:params|arguments|parameters|input)"\s*:\s*'
+            r"(\{[^{}]*\}|\[[^\[\]]*\]))?"
+        )
+        for m in name_re.finditer(text):
+            tool_name = (m.group(1) or "").strip()
+            if not tool_name:
+                continue
+            payload = _pseudo_params_to_dict(m.group(2) or "")
+            actions.append({"type": tool_name, "payload": payload})
+
+        # Case B: the ``[tool:NAME] {...}`` pseudo-markup form. Only add it when
+        # Case A did not already capture the same tool name.
+        markup_re = re.compile(
+            r"\[tool:\s*([^\]\s]+)\s*\]\s*(\{[^{}]*\})?", re.IGNORECASE
+        )
+        seen = {a["type"] for a in actions}
+        for m in markup_re.finditer(text):
+            tool_name = (m.group(1) or "").strip()
+            if not tool_name or tool_name in seen:
+                continue
+            payload = _pseudo_params_to_dict(m.group(2) or "")
+            # Unwrap a nested params/arguments wrapper: the markup form often
+            # emits ``{"params": [...]}`` right after ``[tool:NAME]``, so the
+            # real arguments live one level down. Structural, key-shape only.
+            if len(payload) == 1:
+                only_key = next(iter(payload))
+                if only_key in ("params", "arguments", "parameters", "input"):
+                    inner = m.group(2) or ""
+                    inner_match = re.search(
+                        r'"(?:params|arguments|parameters|input)"\s*:\s*'
+                        r"(\{[^{}]*\}|\[[^\[\]]*\])",
+                        inner,
+                    )
+                    if inner_match:
+                        payload = _pseudo_params_to_dict(inner_match.group(1))
+            actions.append({"type": tool_name, "payload": payload})
+            seen.add(tool_name)
+    except Exception as exc:  # never raise from a best-effort recovery
+        log_debug(f"[_recover_tool_call_dialect] recovery error: {exc}")
+        return None
+
+    if not actions:
+        return None
+    return {"actions": actions}
 
 
 def _attempt_recover_actions_from_text(
@@ -1443,6 +1625,48 @@ async def universal_send(interface_send_func, *args, text: str | None = None, **
                 ):
                     actions = [json_data]
 
+            # Drop leaked Recon-schema entries. A state-retaining browser engine
+            # (e.g. selenium-llm-engine) can echo the separate Recon call's JSON
+            # keys (tone_hint, agent_intent, language_hint, ...) back into the
+            # main-pass ``actions`` array. Those keys are preflight metadata, not
+            # executable actions; validating them yields "Unsupported type"
+            # errors that starve the turn and dead-end in the correction/fallback
+            # loop. The drop-set is derived reflectively from registered recon
+            # plugins (no keyword list), so it stays correct as plugins change.
+            if isinstance(actions, list) and actions:
+                try:
+                    from core.recon import get_registered_recon_keys
+
+                    _recon_keys = get_registered_recon_keys()
+                except Exception:
+                    _recon_keys = set()
+                if _recon_keys:
+
+                    def _leaked_recon_type(candidate: Any) -> str | None:
+                        if not isinstance(candidate, dict):
+                            return None
+                        atype = (
+                            candidate.get("type")
+                            or candidate.get("function")
+                            or candidate.get("name")
+                            or candidate.get("plugin")
+                            or candidate.get("action")
+                            or candidate.get("command")
+                        )
+                        if isinstance(atype, str) and atype.strip() in _recon_keys:
+                            return atype.strip()
+                        return None
+
+                    _kept = [a for a in actions if _leaked_recon_type(a) is None]
+                    _dropped = len(actions) - len(_kept)
+                    if _dropped:
+                        log_warning(
+                            f"[transport] Dropped {_dropped} leaked Recon-schema "
+                            f"action(s) from main-pass response (engine state "
+                            f"contamination); {len(_kept)} deliverable action(s) remain"
+                        )
+                        actions = _kept
+
             if not actions:
                 log_debug(f"[transport] No actions found in JSON: {json_data}")
                 return await _send_text(text)
@@ -1849,6 +2073,118 @@ def _get_attempted_action_full_description(
         return None
 
 
+def _render_vessel_world_state_block(world_state: Any) -> str:
+    """Render a compact structural vessel world-state block for correction prompts.
+
+    The corrector prompt is a fresh single-message turn with no history, so a
+    failed in-world action (e.g. craft/drop) is corrected blind: the model has no
+    idea what it is carrying, where it is, or what is around it, and guesses
+    recipe chains that fail again. This block surfaces the same bounded snapshot
+    the reactive main turn attaches at ``input.payload.vessel_world_state``
+    (produced by ``VesselInterface._compact_reactive_world_state``) — inventory
+    counts, position, health, nearby blocks/entities, and affordances — purely
+    structural (ids, counts, distances), never keyword logic. Fully fail-safe:
+    any missing/malformed field degrades to "unknown"/"none" and the whole block
+    returns ``""`` when nothing usable is present, so a non-vessel correction is
+    untouched.
+    """
+    if not isinstance(world_state, dict):
+        return ""
+    try:
+        lines: list[str] = ["[LIVE WORLD STATE — use this for the current action]"]
+
+        position = world_state.get("position")
+        if isinstance(position, dict):
+            parts: list[str] = []
+            for axis in ("x", "y", "z"):
+                val = position.get(axis)
+                if val is None:
+                    continue
+                try:
+                    parts.append(f"{axis}={float(val):.0f}")
+                except (TypeError, ValueError):
+                    parts.append(f"{axis}={val}")
+            lines.append(f"- Position: {' '.join(parts) if parts else 'unknown'}")
+
+        health = world_state.get("health")
+        if isinstance(health, (int, float)):
+            lines.append(f"- Health: {float(health):.0f}")
+
+        inventory_counts = world_state.get("inventory_counts")
+        if isinstance(inventory_counts, dict):
+            inv_items = [
+                f"{name} x{count}"
+                for name, count in list(inventory_counts.items())[:20]
+                if isinstance(name, str)
+                and isinstance(count, (int, float))
+                and count > 0
+            ]
+            lines.append(
+                f"- Inventory: {', '.join(inv_items) if inv_items else 'none'}"
+            )
+
+        def _fmt_records(records: Any, fields: tuple[str, ...]) -> list[str]:
+            if not isinstance(records, list):
+                return []
+            out: list[str] = []
+            for record in records[:_MAX_WORLD_STATE_RECORDS]:
+                if not isinstance(record, dict):
+                    continue
+                label = next(
+                    (
+                        str(record[field])
+                        for field in fields
+                        if record.get(field) not in (None, "")
+                    ),
+                    None,
+                )
+                if not label:
+                    continue
+                distance = record.get("distance")
+                if isinstance(distance, (int, float)):
+                    out.append(f"{label} ({float(distance):.0f}m)")
+                else:
+                    out.append(label)
+            return out
+
+        entities = _fmt_records(
+            world_state.get("entities"), ("name", "type", "username")
+        )
+        if entities:
+            lines.append(f"- Nearby entities: {', '.join(entities)}")
+
+        blocks = _fmt_records(world_state.get("blocks"), ("name",))
+        if blocks:
+            lines.append(f"- Nearby blocks: {', '.join(blocks)}")
+
+        affordances = world_state.get("affordances")
+        if isinstance(affordances, list):
+            aff_lines: list[str] = []
+            for aff in affordances[:_MAX_WORLD_STATE_RECORDS]:
+                if not isinstance(aff, dict):
+                    continue
+                verb = aff.get("verb")
+                target = aff.get("target")
+                if not verb or not target:
+                    continue
+                distance = aff.get("distance")
+                if isinstance(distance, (int, float)):
+                    aff_lines.append(f"{verb} → {target} ({float(distance):.0f}m)")
+                else:
+                    aff_lines.append(f"{verb} → {target}")
+            if aff_lines:
+                lines.append(
+                    f"- Things you could interact with: {'; '.join(aff_lines)}"
+                )
+
+        if len(lines) <= 1:
+            return ""
+        return "\n".join(lines)
+    except Exception as exc:  # pragma: no cover - defensive
+        log_debug(f"[corrector_middleware] vessel world-state render failed: {exc}")
+        return ""
+
+
 async def run_corrector_middleware(
     text: str,
     bot=None,
@@ -1987,6 +2323,48 @@ async def run_corrector_middleware(
                 if llm_plugin is None:
                     llm_plugin = getattr(plugin_instance_module, "plugin", None)
 
+            # ── Scope-aware engine resolution ───────────────────────────────
+            # The correction turn MUST use the same cortex engine the original
+            # turn used, not the global active engine. Otherwise a vessel turn
+            # (scoped to the fast VESSEL_CORTEX) would be corrected against the
+            # global BASE_CORTEX (e.g. the slow, stateful, uncancellable
+            # selenium browser engine), which hangs on the single consumer and
+            # deadlocks every chat. Mirror the resolution used by
+            # core/plugin_instance.py: derive_cortex_scope(context) ->
+            # get_active_cortex_scope(scope) -> cortex registry. Purely
+            # structural routing metadata; falls back to the global plugin on
+            # any error so removing the vessel subsystem never breaks it.
+            corrector_model: str | None = None
+            try:
+                from core.config import (
+                    derive_cortex_scope,
+                    get_active_cortex_scope,
+                )
+                from core.cortex_registry import get_cortex_registry
+
+                _scope = derive_cortex_scope(
+                    context if isinstance(context, dict) else None
+                )
+                _engine_name, corrector_model = await get_active_cortex_scope(
+                    scope=_scope
+                )
+                _reg = get_cortex_registry()
+                _resolved = _reg.get_engine(_engine_name)
+                if _resolved is None:
+                    _resolved = _reg.load_engine(_engine_name)
+                if _resolved is not None and _resolved is not llm_plugin:
+                    log_info(
+                        f"[corrector_middleware] Engine resolved from registry: "
+                        f"'{_engine_name}' (scope={_scope!r}) — using scoped engine "
+                        f"for correction instead of global active plugin"
+                    )
+                    llm_plugin = _resolved
+            except Exception as scope_exc:
+                log_warning(
+                    f"[corrector_middleware] Scope routing failed, falling back to "
+                    f"global plugin: {scope_exc}"
+                )
+
             # Log plugin discovery
             try:
                 if llm_plugin is None:
@@ -2057,6 +2435,35 @@ async def run_corrector_middleware(
                 and context.get("original_user_message") is not None
             ):
                 original_user_message = context.get("original_user_message") or ""
+
+            # Derive WHO the original message came from. The corrector prompt is
+            # stripped of the routing prefix and conversation history the main
+            # turn carries, so a multi-person persona (e.g. two parents) makes
+            # the model guess — it mis-attributed Papa's goodnight to Mama.
+            # Structural: read the sender name off the original message object
+            # (or the input payload), never keyword matching.
+            correction_sender = ""
+            try:
+                from_user = getattr(message, "from_user", None)
+                if from_user is not None:
+                    sender_name = (
+                        getattr(from_user, "first_name", None)
+                        or getattr(from_user, "username", None)
+                        or getattr(from_user, "full_name", None)
+                    )
+                    if sender_name:
+                        correction_sender = str(sender_name)
+                if not correction_sender and context:
+                    _inp = context.get("input") or {}
+                    _payload = _inp.get("payload") or {}
+                    if isinstance(_payload, dict):
+                        _cur = _payload.get("current_chat") or {}
+                        if isinstance(_cur, dict):
+                            correction_sender = str(
+                                _cur.get("title") or _cur.get("participant_name") or ""
+                            )
+            except Exception:
+                correction_sender = ""
 
             # Build correction message based on whether we have selective correction context
             if correction_context:
@@ -2147,7 +2554,8 @@ async def run_corrector_middleware(
                         f"2. Include ALL actions needed to answer the user's original message\n"
                         f"3. Every action object MUST have a 'type' field with a recognised action name\n"
                         f"4. Do NOT use emotion names (e.g. 'arousal', 'happy') as action types — "
-                        f"emotions belong in the 'feelings' metadata object\n"
+                        f"emotions belong in the 'emotions' map of your update_emotion_state "
+                        f"action (and the diary entry's 'emotions'), each with a 0.0-10.0 intensity\n"
                     )
                     if allowed_action_types:
                         correction_message_text += f"Allowed action types for this scope: {', '.join(sorted(allowed_action_types))}\n"
@@ -2196,12 +2604,40 @@ async def run_corrector_middleware(
             except Exception as _pe:
                 log_debug(f"[corrector_middleware] persona prepend skipped: {_pe}")
 
+            # Carry the live vessel world state into the correction prompt. The
+            # corrector is a fresh single-message turn with no history, so a
+            # failed in-world action (craft/drop/etc.) would otherwise be fixed
+            # blind: the model cannot see its inventory, position, or what is
+            # nearby, and guesses recipe chains that fail again (observed in
+            # production: repeated craft/drop corrections for a wooden pickaxe
+            # with an empty inventory). The reactive main turn already attaches
+            # this snapshot at ``input.payload.vessel_world_state``; mirror it
+            # here so the retry is grounded in the same structural facts.
+            # Purely structural, fully guarded (absent for non-vessel turns).
+            try:
+                if isinstance(context, dict):
+                    _vws = context.get("vessel_world_state")
+                    if isinstance(_vws, dict) and _vws:
+                        _vws_block = _render_vessel_world_state_block(_vws)
+                        if _vws_block:
+                            correction_message_text = (
+                                f"{correction_message_text}\n\n{_vws_block}"
+                            )
+                            log_debug(
+                                "[corrector_middleware] Appended live vessel world-state block to correction prompt"
+                            )
+            except Exception as _vws_exc:
+                log_debug(
+                    f"[corrector_middleware] vessel world-state block skipped: {_vws_exc}"
+                )
+
             correction_payload = {
                 "system_message": {
                     "type": "correction",
                     "message": correction_message_text,
                     "your_reply": text,
                     "original_user_message": original_user_message,
+                    "sender": correction_sender,
                     "chat_id": chat_id,
                     "thread_id": payload_thread_id,
                     "target_interface": originating_interface,
@@ -2220,26 +2656,87 @@ async def run_corrector_middleware(
                     f"[corrector_middleware] Added full action schema for {attempted_action_info['action_type']}"
                 )
 
-            # Add required format examples — use concrete interface name when known
+            # Add required format examples — use concrete interface name when known.
+            # Vessel is an internal world channel, not a conventional
+            # ``message_<interface>`` interface.  The old generic example
+            # therefore produced ``message_vessel``, which is not registered;
+            # a correction response was silently dropped even after the game
+            # actions themselves had succeeded.
             iface_label = originating_interface or "<interface>"
-            correction_payload["system_message"]["required_format"] = {
-                "actions": [
-                    {
-                        "type": f"message_{iface_label}",
-                        "payload": {
-                            "text": "Your message content here (optional - only if you want to reply to user)",
-                            "interface_path": f"{iface_label}/{chat_id or '<chat_id>'}/{payload_thread_id if payload_thread_id is not None else ''}",
-                        },
-                    }
-                ]
+            correction_action_type = f"message_{iface_label}"
+            # Build the example interface_path WITHOUT a trailing slash. The old
+            # unconditional ``.../{thread or ''}`` produced e.g.
+            # ``telegram_bot/5208932647/`` when ``thread_id`` was None, which the
+            # model copied into its correction reply; if that reply ever reached
+            # the interface it would be stored under a DIFFERENT history key than
+            # the canonical ``telegram_bot/5208932647`` and the model would never
+            # see its own message again (a "forgot what itself said" gap).
+            _correction_interface_path = f"{iface_label}/{chat_id or '<chat_id>'}"
+            if payload_thread_id is not None:
+                _correction_interface_path = (
+                    f"{_correction_interface_path}/{payload_thread_id}"
+                )
+            correction_payload_fields: dict[str, Any] = {
+                "text": "Your message content here (optional - only if you want to reply to user)",
+                "interface_path": _correction_interface_path,
             }
+            if iface_label == "vessel":
+                world = ""
+                chat_parts = str(chat_id or "").split("/")
+                if len(chat_parts) >= 2 and chat_parts[0] == "vessel":
+                    world = chat_parts[1].strip()
+                if world:
+                    correction_action_type = f"vessel_{world}_say"
+                    correction_payload_fields = {
+                        "text": "Your message content here (optional - only if you want to reply to the player)",
+                    }
+                correction_payload["system_message"]["required_format"] = {
+                    "actions": [
+                        {
+                            "type": correction_action_type,
+                            "payload": correction_payload_fields,
+                        }
+                    ]
+                }
+            else:
+                # Show the COMPLETE expected shape of a chat turn so the model
+                # never replies with only the message text. The reference format
+                # always pairs the outward reply with the emotion update and the
+                # diary entry (interaction_summary / personal_thought) — a
+                # text-only example made the model drop those "other requested
+                # fields". Vessel keeps its say-only example above (no
+                # mid-session diary, per AGENTS.md §5c).
+                correction_payload["system_message"]["required_format"] = {
+                    "actions": [
+                        {
+                            "type": correction_action_type,
+                            "payload": correction_payload_fields,
+                        },
+                        {
+                            "type": "update_emotion_state",
+                            "payload": {"emotions": {"joy": 7.0, "love": 6.5}},
+                        },
+                        {
+                            "type": "create_personal_diary_entry",
+                            "payload": {
+                                "interaction_summary": (
+                                    "A short third-person summary of this exchange"
+                                ),
+                                "personal_thought": (
+                                    "Your private first-person thoughts"
+                                ),
+                                "emotions": [{"type": "joy", "intensity": 7.0}],
+                            },
+                        },
+                    ]
+                }
             correction_payload["system_message"]["strict_requirements"] = [
                 "MUST start with { and end with }",
                 "MUST contain 'actions' array",
                 "NO text outside JSON structure",
                 "NO markdown formatting (e.g., no ```json blocks)",
                 "NO explanations outside JSON",
-                'Emotions MUST be provided in the \'feelings\' metadata object, NEVER as top-level actions (e.g., do NOT use {"type": "happy"})',
+                "Emotions MUST be provided in the 'emotions' map of your update_emotion_state action (or the diary entry's 'emotions' list), each with a 0.0-10.0 intensity — NEVER as top-level action types (e.g., do NOT use {\"type\": \"happy\"})",
                 "Every action object inside 'actions' MUST have a 'type' field with a valid action name - actions without a 'type' field are invalid and will be rejected",
             ]
             correction_prompt = json.dumps(correction_payload, ensure_ascii=False)
@@ -2279,16 +2776,43 @@ async def run_corrector_middleware(
             except Exception:
                 pass
 
-            # Call plugin directly and await returned value when available
+            # Call plugin directly and await returned value when available.
+            # Bound each attempt by CORRECTOR_TIMEOUT_SEC so a slow/uncancellable
+            # engine cannot block the single message-queue consumer for the full
+            # AWAIT_RESPONSE_TIMEOUT. Apply the scoped model override (mirroring
+            # core/plugin_instance.py) so an external bridge engine uses the
+            # scope's configured model for the correction call.
+            from core.config import scope_model_override
+
+            corrector_timeout = int(
+                getattr(CORRECTOR_TIMEOUT_SEC, "value", CORRECTOR_TIMEOUT_SEC)
+            )
             try:
-                corrected = await llm_plugin.handle_incoming_message(
-                    bot, correction_message, correction_prompt
+                with scope_model_override(llm_plugin, corrector_model):
+                    try:
+                        corrected = await asyncio.wait_for(
+                            llm_plugin.handle_incoming_message(
+                                bot, correction_message, correction_prompt
+                            ),
+                            timeout=corrector_timeout,
+                        )
+                    except TypeError:
+                        # Some plugins expect different signature; try fallback
+                        corrected = await asyncio.wait_for(
+                            llm_plugin.handle_incoming_message(
+                                bot, correction_message, correction_prompt
+                            ),
+                            timeout=corrector_timeout,
+                        )
+            except asyncio.TimeoutError:
+                # A hung correction: abandon this attempt and free the consumer.
+                log_warning(
+                    f"[corrector_middleware] Correction attempt {attempt}/{max_retries} "
+                    f"timed out after {corrector_timeout}s; abandoning to avoid "
+                    f"blocking the message-queue consumer"
                 )
-            except TypeError:
-                # Some plugins expect different signature; try fallback
-                corrected = await llm_plugin.handle_incoming_message(
-                    bot, correction_message, correction_prompt
-                )
+                await asyncio.sleep(1)
+                continue
             # Normalize plugin output to string; some engines may erroneously
             # return integers or other types which would crash subsequent
             # len() calls.  Coerce and log a warning so author can fix the

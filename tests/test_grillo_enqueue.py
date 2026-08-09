@@ -5,7 +5,12 @@ async def test_grillo_uses_enqueue_low_priority(monkeypatch):
     called = {}
 
     async def fake_enqueue_low_priority(
-        bot, message, context_memory=None, interface_id=None, original_message=None
+        bot,
+        message,
+        context_memory=None,
+        interface_id=None,
+        original_message=None,
+        priority=None,
     ):
         called["args"] = {
             "bot": bot,
@@ -43,7 +48,12 @@ async def test_grillo_enqueue_populates_activity_metadata(monkeypatch):
         return 321
 
     async def fake_enqueue_low_priority(
-        bot, message, context_memory=None, interface_id=None, original_message=None
+        bot,
+        message,
+        context_memory=None,
+        interface_id=None,
+        original_message=None,
+        priority=None,
     ):
         captured["message"] = message
         return None
@@ -73,7 +83,12 @@ async def test_grillo_diary_consolidation_only_allows_update(monkeypatch):
     called = {}
 
     async def fake_enqueue_low_priority(
-        bot, message, context_memory=None, interface_id=None, original_message=None
+        bot,
+        message,
+        context_memory=None,
+        interface_id=None,
+        original_message=None,
+        priority=None,
     ):
         called["context_memory"] = context_memory
         return None

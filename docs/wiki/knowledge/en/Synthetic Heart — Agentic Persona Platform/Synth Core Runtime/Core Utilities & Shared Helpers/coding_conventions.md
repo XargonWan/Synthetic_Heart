@@ -1,0 +1,5 @@
+- Heavy or optional dependencies are imported lazily inside functions (e.g. `log_archive`, `chat_history_cache`, `session_meta`) to avoid circular imports and slow startup.
+- External-facing I/O and parsing paths wrap calls in try/except with `log_warning`/`log_debug` and return safe defaults rather than raising, keeping the system resilient to malformed input.
+- Configuration values are exposed via `config_registry.get_var(...)` with explicit `label`, `description`, `group`, `component`, and optional `constraints`/`tags` metadata instead of bare `os.getenv` calls.
+- Public helper functions accept `Optional[...]` inputs and return sensible defaults (e.g. `"Unknown"`, `None`, empty strings) when inputs are missing, avoiding `AttributeError` on lightweight objects like `SimpleNamespace`.
+- Log messages are prefixed with the module name in brackets (e.g. `[extract_json_from_text]`, `[calendar_utils]`, `[corrector_utils]`) for easy grepping across the consolidated log files.

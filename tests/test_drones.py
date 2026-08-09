@@ -151,10 +151,12 @@ async def test_drone_engine_override_forwarded(monkeypatch):
         timeout_seconds=None,
         original_message=None,
         preplanned_calls=None,
+        cortex_scope="agent",
     ):
         captured["engine"] = engine
         captured["context"] = context
         captured["max_iterations"] = max_iterations
+        captured["cortex_scope"] = cortex_scope
         return {
             "iterations": 1,
             "observations": [],
@@ -171,12 +173,114 @@ async def test_drone_engine_override_forwarded(monkeypatch):
         engine="my-tool-cortex",
         parent_task_id=5,
         max_iterations=2,
+        cortex_scope="vessel",
     )
 
     assert out["final_text"] == "ok"
     assert captured["engine"] == "my-tool-cortex"
     assert captured["context"]["drone"] == {"is_drone": True, "parent_task_id": 5}
     assert captured["max_iterations"] == 2
+    assert captured["cortex_scope"] == "vessel"
+
+
+@pytest.mark.asyncio
+async def test_agent_drone_uses_agent_budget_and_stays_single_level(monkeypatch):
+    """run_agent_drone runs the agentic loop with the AGENT budget (not the tight
+    Drone budget) while keeping every Drone safety property.
+
+    It must:
+    * default max_iterations to AGENT_MAX_ITERATIONS (30), not DRONE (3);
+    * default timeout to AGENT_TURN_TIMEOUT_SEC (120), not DRONE (90);
+    * tag the context as a Drone (is_drone) AND as an agent Drone so it can never
+      spawn further Drones (single-level delegation);
+    * forward the allowed_tools allow-list and the cortex_scope.
+    """
+    captured: dict[str, Any] = {}
+
+    async def fake_run_agentic_turn(
+        *,
+        goal,
+        engine=None,
+        context=None,
+        max_iterations=None,
+        timeout_seconds=None,
+        original_message=None,
+        preplanned_calls=None,
+        cortex_scope="agent",
+    ):
+        captured["max_iterations"] = max_iterations
+        captured["timeout_seconds"] = timeout_seconds
+        captured["context"] = context
+        captured["cortex_scope"] = cortex_scope
+        return {
+            "iterations": 1,
+            "observations": [],
+            "final_text": "planned",
+            "stop_reason": "model_done",
+            "task_id": None,
+        }
+
+    from core.config_manager import config_registry
+
+    manager = AgentLoopManager()
+    monkeypatch.setattr(manager, "run_agentic_turn", fake_run_agentic_turn)
+    monkeypatch.setattr(
+        config_registry,
+        "get_var",
+        lambda key, default=None: {
+            "AGENT_MAX_ITERATIONS": 30,
+            "AGENT_TURN_TIMEOUT_SEC": 120,
+            "DRONE_MAX_ITERATIONS": 3,
+            "DRONE_TURN_TIMEOUT_SEC": 90,
+        }.get(key, default),
+    )
+
+    out = await manager.run_agent_drone(
+        goal="break the goal into a plan",
+        parent_task_id=9,
+        allowed_tools={
+            "vessel_minecraft_lookup_knowledge",
+            "vessel_minecraft_update_goal",
+        },
+        cortex_scope="vessel",
+    )
+
+    assert out["final_text"] == "planned"
+    # Agent budget, not the tight Drone budget.
+    assert captured["max_iterations"] == 30
+    assert captured["timeout_seconds"] == 120.0
+    assert captured["cortex_scope"] == "vessel"
+    drone_meta = captured["context"]["drone"]
+    # Single-level delegation: flagged as a Drone so it cannot spawn Drones.
+    assert drone_meta["is_drone"] is True
+    assert drone_meta["is_agent_drone"] is True
+    assert drone_meta["parent_task_id"] == 9
+    assert drone_meta["allowed_tools"] == [
+        "vessel_minecraft_lookup_knowledge",
+        "vessel_minecraft_update_goal",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_agent_drone_respects_explicit_budget_override(monkeypatch):
+    """An explicit max_iterations/timeout on run_agent_drone wins over defaults."""
+    captured: dict[str, Any] = {}
+
+    async def fake_run_agentic_turn(**kwargs):
+        captured.update(kwargs)
+        return {"final_text": "ok", "iterations": 1, "stop_reason": "model_done"}
+
+    manager = AgentLoopManager()
+    monkeypatch.setattr(manager, "run_agentic_turn", fake_run_agentic_turn)
+
+    await manager.run_agent_drone(
+        goal="do it",
+        max_iterations=12,
+        timeout_seconds=45.0,
+    )
+
+    assert captured["max_iterations"] == 12
+    assert captured["timeout_seconds"] == 45.0
 
 
 @pytest.mark.asyncio

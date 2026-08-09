@@ -25,7 +25,8 @@ try:
             "the main prompt when the conversation is about the radio."
         ),
         scope="recon",
-        component="recon",
+        component="recon_radio_status",
+        hidden=True,
     )
 except Exception:
     config_registry.get_var(
@@ -38,7 +39,8 @@ except Exception:
             "the main prompt when the conversation is about the radio."
         ),
         group="recon",
-        component="recon",
+        component="recon_radio_status",
+        hidden=True,
     )
 
 

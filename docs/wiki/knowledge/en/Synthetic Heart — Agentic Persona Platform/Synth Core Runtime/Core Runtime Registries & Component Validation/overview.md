@@ -1,0 +1,1 @@
+Provides the central registries that discover, validate, and dispatch commands, tools, interfaces, and component actions across Synth's agentic runtime.

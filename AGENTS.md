@@ -1,105 +1,212 @@
 # AGENTS.md — Synthetic Heart (SyntH)
 
-> Canonical reference for any AI agent working on this codebase.
-> Claude Code users: see `CLAUDE.md` for auto-loaded workflow rules.
+> Repository-wide operating rules for coding agents.
+> Detailed architecture and subsystem documentation lives in `docs/wiki/` and `docs/`.
+> Claude Code may also load `CLAUDE.md`; repository rules in this file still apply.
 
 ---
 
-## 1. Project Identity
+## 1. Project and Primary Invariant
 
-**Synthetic Heart** (stylized **SyntH**) is a modular AI persona system.
-"Synth" is the name of the digital person this project brings to life.
+**Synthetic Heart** (**SyntH**) is a modular AI persona system. “Synth” is the digital person implemented by this repository.
 
----
+The architecture is intentionally detachable:
 
-## 2. Architecture at a Glance
+- `core/` owns the message chain, validation, dispatch, persistence, routing, and shared services.
+- `plugins/` add actions and optional behavior.
+- `engines/` provide interchangeable AI/media backends.
+- `interface/` connects external systems to the core chain.
 
-```
-                  ┌──────────────────────────────────────┐
-                  │              core/                    │
-                  │  message chain · action parser · DB   │
-                  │  validation · dispatcher · notifier   │
-                  └──┬──────────┬──────────────┬─────────┘
-                     │          │              │
-              ┌──────┴───┐  ┌───┴────┐   ┌─────┴──────┐
-              │ plugins/ │  │engines/│   │ interface/ │
-              │          │  │        │   │            │
-              │ actions  │  │external│   │ Telegram   │
-              │ agents   │  │ live   │   │ Discord    │
-              │          │  │ agent  │   │ Matrix     │
-              └──────────┘  │Gemini …│   │ Ollama API │
-                            └────────┘   └────────────┘
-```
-
-| Layer | Location | Purpose |
-|-------|----------|---------|
-| **Core** | `core/` | Message chain, validation, dispatcher, DB, notifier. Never hardcodes plugin/LLM/interface logic. |
-| **Plugins** | `plugins/` | Provide actions via `get_supported_actions()`. Subclass `PluginBase` or `AIPluginBase`. |
-| **LLM Engines** | `engines/` | Interchangeable reasoning backends (`external_engines/`, `live/`, `agent/`). Subclass `AIPluginBase`. |
-| **Interfaces** | `interface/` | I/O adapters (Telegram, Discord, Matrix, Ollama compat). Register actions via `get_supported_actions()`. |
-
-**Golden rule:** removing any plugin, engine, or interface must not break the rest of the system.
+**Primary invariant:** removing an optional plugin, engine, connector, or interface must not break the remaining system.
 
 ---
 
-## 3. Core Principles
+## 2. Sources and Reading Strategy
 
-- All messages flow through a **single chain** managed by the core.
-- Actions must **attach to the existing chain**, never create parallel flows.
-- The **action parser** dynamically discovers supported actions by querying plugins and interfaces.
-- **Validation rules** are auto-registered from `get_supported_actions()`.
-- Plugins are optional — if one is missing, its actions are silently ignored.
+Before making non-trivial changes, read only the material relevant to the task in this order:
+
+1. `AGENTS.md`
+2. `AGENT_WORK.md`, when present
+3. Relevant pages under `docs/wiki/` and maintained documentation under `docs/`
+4. Source code and tests
+5. `CHANGELOG.md` and established known-issue records when debugging regressions
+
+The Qoder wiki export has two complementary trees:
+
+- `docs/wiki/en/content/` contains reader-facing architecture, development, API, and operations pages. Start here for orientation.
+- `docs/wiki/knowledge/en/_index.yaml` maps source paths to generated subsystem modules under `docs/wiki/knowledge/en/`. Use those modules for focused implementation detail.
+- `docs/` contains the maintained Sphinx documentation and remains authoritative for published user/developer guidance.
+
+Search by subsystem or source path and read the smallest useful set of pages. Do not recursively ingest the export. Treat generated wiki content as a navigation aid: it may lag the implementation or contain exporter-specific links and structure.
+
+Documentation is a map, not proof. When documentation and implementation disagree:
+
+1. inspect the current code and tests;
+2. establish intended behavior from evidence;
+3. report the discrepancy;
+4. update stale documentation as part of the change when appropriate.
+
+Never preserve an incorrect implementation solely because an old document describes it.
 
 ---
 
-## 4. Plugin System
+## 3. Non-Negotiable Architecture Rules
 
-Every plugin must implement:
+### One message chain
+
+- All incoming messages enter the core-managed message chain.
+- Actions attach to the existing chain; do not create parallel message flows.
+- Interfaces must not bypass core validation, dispatch, history, or safety.
+- Shared behavior belongs in the core only when it is broadly applicable.
+- World-, engine-, plugin-, and interface-specific behavior stays in its adapter.
+
+### Dynamic optional components
+
+- Actions are discovered through `get_supported_actions()`.
+- Validation derives from each action schema.
+- Missing or disabled optional components must fail closed and degrade gracefully.
+- Avoid eager imports that make optional components mandatory.
+- Guard optional integrations so import, startup, and shutdown remain safe.
+
+### No keyword-driven product logic
+
+Do not implement routing, intent detection, salience, autonomy, or feature activation primarily through words, phrases, regex triggers, or language-specific keyword lists.
+
+Prefer structural signals such as:
+
+- action schemas;
+- typed metadata;
+- interface and session state;
+- registry membership;
+- enums and capability declarations;
+- numeric telemetry;
+- explicit configuration;
+- model reasoning where semantic interpretation is required.
+
+Small syntax parsers and user-declared commands are exceptions only when the feature is explicitly command-oriented.
+
+### Cross-platform baseline
+
+Linux containers are the primary runtime.
+
+Platform-specific behavior must be:
+
+- secondary rather than the main path;
+- isolated;
+- guarded with capability or platform checks;
+- covered by a safe fallback.
+
+---
+
+## 4. Component Contracts
+
+### Plugins
+
+Plugins subclass `PluginBase` or `AIPluginBase` and expose actions through:
 
 ```python
 def get_supported_actions(self) -> dict:
-    """Return supported actions and their prompt instructions."""
+    """Return supported actions and their prompt/validation schema."""
 ```
 
-Two flavours:
-- **Standard** (`PluginBase`): logic without LLM.
-- **AI plugins** (`AIPluginBase`): LLM-powered actions.
+Rules:
 
-Optional lifecycle hooks: init, teardown, extended behaviour.
+- Multi-file plugins live in `plugins/<name>/`.
+- Keep implementation, `guide.md`, and `icon.<ext>` together.
+- `guide.md` is the documentation source of truth for that component.
+- Preserve historical import paths with the repository’s established package shim when moving a flat module into a package.
+- Critical message-chain plugins must declare that runtime disabling is not allowed.
+- Third-party logos require explicit permission and attribution in `LICENSE_EXTERNAL.md`; otherwise use an original glyph or the SyntH fallback.
 
-### Background Agents (Grillo)
+Use `plugins/radio_host/` and the relevant wiki pages as reference implementations.
 
-Some plugins are long-running scheduled agents. The canonical example is **G.R.I.L.L.O.** (`plugins/grillo/`):
+### Interfaces
 
-- Generates periodic "beats" (introspection prompts) enqueued via `core.message_queue.enqueue_low_priority`.
-- DB tables: `grillo_activity_log`, `grillo_beats`, `grillo_action_execs` (see `init-db.sql`).
-- Context keys on beats: `grillo_beat`, `beat_type`, `activity_log_id`.
-- Configurable via `GRILLO_BEAT_INTERVAL`; includes duplicate suppression and rate-limiting.
-- Extensible: discovers beat-specific plugins (tag compactor, memory compactor, curiosity) via the plugin registry.
+Interfaces are duck-typed and register at import time.
 
-The **Agent plugin** (`plugins/agent_plugin.py`) exposes Synth's agentic tools (`agent_list_files`, `agent_read_file`, `agent_write_file`, `agent_edit_file`, `agent_search_files`, `agent_run_shell`, `spawn_drone`) to the Agentic Runtime 2.0. Task state is persisted in the `agent_tasks` table. Enablement is gated by `AGENT_ENABLED` (user toggle, re-read on every `is_enabled()` call); the router 2.0 additionally requires `AGENTIC_ROUTING_ENABLED`.
+Rules:
 
-`agent_write_file` (`required_fields: ["path", "content"]`, `optional_fields: ["mode"]`, `security_level: "medium"`, `external_effects: ["filesystem"]`) writes a text file inside the sandbox. It reuses `_resolve_safe_path()` / `_allowed_roots()` (same roots as `agent_read_file`: `AGENT_FS_ROOTS`, else `[AGENT_FS_ROOT|/app, SYNTH_LOG_DIR|/app/logs]`), creates parent dirs, supports `mode` = `"overwrite"` (default) or `"append"`, and caps content at 2 MB. `external_effects` makes `core/agent_router.py` route it to the Agent Lane automatically. This is a **native Python** action — chosen over the standard filesystem MCP (`@modelcontextprotocol/server-filesystem`, pre-registered but `"enabled": false` in `config/synth_mcp.json`) because the runtime image (`python:3.12-slim`) has no node/npx (node lives only in the Dockerfile `stage_builder` build stage), so an `npx`-based MCP server cannot start in-container.
+- Every inbound message enters the core chain.
+- Shared avatar/audio state is driven through the Karada state server, never by iterating individual WebUI clients.
+- Interface-native delivery and shared avatar state are separate concerns.
+- Multi-file interfaces use `interface/<module>/<module>.py`, `__init__.py`, `guide.md`, and optional `icon.<ext>`.
+- Preserve existing import paths with the established module-rebinding shim.
+- Outbound local files must use the shared sandbox path checks in `core/outbound_file_utils.py`.
 
-`agent_edit_file` (`required_fields: ["path", "old_string", "new_string"]`, `optional_fields: ["expected_replacements"]`, `security_level: "medium"`, `external_effects: ["filesystem"]`) does a literal find-and-replace inside a sandboxed text file. It reads via `_resolve_safe_path()`, counts occurrences of `old_string`, and requires the count to exactly equal `expected_replacements` (default 1, clamped 1–10000 via `_safe_int()`) — an ambiguous or missing match errors out rather than editing the wrong spot. `old_string`/`new_string` must be non-empty strings and must differ; the resulting content is capped at 2 MB. Returns `{"status": "ok", "path", "replacements", "bytes_written"}`. `external_effects: ["filesystem"]` routes it to the Agent Lane automatically. Native Python for the same no-node reason as `agent_write_file`.
+### Engines and media subsystems
 
-`agent_search_files` (`required_fields: ["pattern"]`, `optional_fields: ["path", "regex", "case_sensitive", "glob", "max_results", "max_file_bytes"]`) is a **read-only** in-sandbox grep — it has **no** `security_level`/`external_effects` and stays on the Fast Lane. `pattern` is a plain substring by default, or a Python `re` pattern when `regex` is true; `case_sensitive` (default False) toggles `re.IGNORECASE`. `path` (default the first allowed root) is confined via `_resolve_safe_path()`; when it's a directory the search recurses with `rglob(glob)` (`glob` default `"*"`), skipping files larger than `max_file_bytes` (`_safe_int` default 2 MB, 1000–20 000 000). Results cap at `max_results` (`_safe_int` default 200, 1–2000) and each line is truncated to 1000 chars. Returns `{"status": "ok", "path", "files_scanned", "count", "truncated", "matches": [{"path", "line", "text"}]}`. Native Python for the same no-node reason as `agent_write_file`.
+- Text reasoning engines subclass `AIPluginBase`.
+- Media engines follow their registry/base-class contracts.
+- Current named subsystems are Cortex, Vox, Auris, and Iris.
+- Do not revive obsolete paths such as `cortex/` or `llm_engines/`.
+- Keep endpoint-specific workarounds on the SyntH side unless the task explicitly authorizes changes to the external engine.
 
-`agent_run_shell` (`required_fields: ["command"]`, `optional_fields: ["cwd", "timeout"]`, `security_level: "high"`, `external_effects: ["shell"]`) runs a shell command and returns `{status, exit_code, cwd, stdout, stderr, truncated}`. **Its security is gated by container detection.** The module-level helper `_is_in_container()` decides the environment via, in order: the explicit `SYNTH_IN_CONTAINER` env override → presence of `/.dockerenv` (Docker) or `/run/.containerenv` (Podman) → a `docker`/`kubepods`/`containerd`/`libpod` marker in `/proc/1/cgroup`; it defaults to `False` (host) when unsure. `_run_shell()` **only executes inside a container** (the disposable runtime image); on a bare host it refuses unless the `AGENT_SHELL_ALLOW_HOST` config var (default `False`) is explicitly enabled — because a shell on the host is a real machine-compromise risk for a public persona. The working directory (`cwd`, default the first allowed root) is confined to `_allowed_roots()` via `_resolve_safe_path()`; the command runs through `bash -c`/`sh -c` under `asyncio.create_subprocess_exec`, with a `timeout` clamped to 1–600 s (default 60) and stdout/stderr each capped at 40 000 chars. `external_effects: ["shell"]` routes it to the Agent Lane automatically. Native Python for the same no-node reason as `agent_write_file`.
+### Agentic Runtime and MCP
+
+Synth runtime MCP and developer MCP are separate systems:
+
+- Synth runtime: `config/synth_mcp.json` and `core/mcp_bridge/`
+- Developer tooling: `.mcp.json`, `.vscode/mcp.json`, and `mcp_servers/`
+
+Never merge their configuration or lifecycle.
+
+Registered actions share the tool/action abstraction and must pass through the same safety gate. External effects determine Agent-Lane routing. Drones are single-level sub-agents and must never spawn other Drones.
+
+### Rift Vessel
+
+The Rift Vessel has strict boundaries:
+
+1. Vessel actions do not create Agent-Lane tasks or Drones.
+2. A session writes one autobiographical diary entry at session end, not continuously.
+3. Vessel activity has its own history voice and persistence.
+4. Core Vessel verbs are world-agnostic; game-specific verbs belong in that world connector.
+5. Autonomous goals are free-text and personality-driven, never a fixed quest catalogue.
+6. Fast motor and survival reflexes use structural world state, not free-text goal parsing or keywords.
+7. Player conversation and autonomous perceptions remain separate context buffers.
+
+Before changing Vessel routing, autonomy, motorics, goals, session lifecycle, or message compaction, read the generated `Rift Vessel Embodiment Core` module under `docs/wiki/knowledge/en/` and any relevant source-facing documentation.
+
+### Karada avatar state
+
+`KaradaStateServer` is the source of truth for animation, expressions, face state, and shared speaking/audio state.
+
+- Drive the server, not individual clients.
+- Use logical animation states, never hard-coded animation paths.
+- New clients implement and register a `KaradaTransport`.
+- Interface-specific audio delivery must not duplicate shared avatar broadcasts.
 
 ---
 
-## 5. LLM Engines
+## 5. Security and Data Rules
 
-- Subclass `AIPluginBase`.
-- Handle reasoning, output JSON actions.
-- Multiple engines can coexist; hot-swappable.
-- Location: `engines/external_engines/` (API engines), `engines/live/` (live audio), `engines/agent/` (agentic). The `cortex/` and `llm_engines/` paths referenced in older docs no longer exist.
+- Never commit credentials, API keys, session cookies, access tokens, private certificates, or passwords.
+- Repository documentation may describe where credentials belong, but must use placeholders.
+- User secrets belong in environment variables or user-owned config files outside the repository.
+- Never print secrets from environment files, databases, logs, or connector configuration.
+- Do not weaken action safety or sandbox path checks to make a test pass.
+- Shell execution on a bare host remains disabled unless the user explicitly enables the existing guarded override.
+- Do not access paths outside declared sandbox roots.
+- Treat logs, model prompts, chat history, diary content, and uploaded files as potentially sensitive.
+
+### Database naming
+
+Never use SQL reserved words as bare column names.
+
+In particular, do not create a column named `timestamp`. Use names such as:
+
+- `created_at`
+- `updated_at`
+- `event_timestamp`
+- `started_at`
+- `ended_at`
+
+Public API keys may still be named `"timestamp"` when required for compatibility; the restriction applies to SQL identifiers.
 
 ---
 
-## 5a. Media Subsystems
+## 6. Development Workflow
 
+### Initial workspace setup
 SyntH has four named media subsystems, each with its own registry, base class, plugin, and WebUI selector.
 
 | Name | Purpose | Registry | Plugin | Config key | Action |
@@ -209,35 +316,109 @@ keep the parent task clean (research, scoped lookups, multi-step file inspection
 
 ## 5c. Rift Vessel — Multi-World Embodiment
 
-SyntH is a persistent cognitive entity; a **Vessel** is a layer of embodiment into an external world. The Rift Vessel subsystem lets SyntH inhabit game/virtual worlds (Minecraft shipped as PoC; Skyrim/VRChat/Hytale are registry-ready) through pluggable **connectors**, while identity/memory/personality persist across worlds and chat interfaces. Full reference: `docs/rift_vessel.rst`.
+SyntH is a persistent cognitive entity; a **Vessel** is a layer of embodiment into an external world. The Rift Vessel subsystem lets SyntH inhabit game/virtual worlds (Minecraft shipped; Skyrim/VRChat/Hytale are registry-ready) through pluggable **connectors**, while identity/memory/personality persist across worlds and chat interfaces. Full reference: `docs/rift_vessel.rst`.
 
 | Concern | Location |
 |---------|----------|
 | Connector registry (Iris pattern) | `core/vessel_registry.py` (`VESSEL_REGISTRY`, `register_vessel_connector`) |
-| Connector base + schema | `plugins/vessel_base.py` (`VesselConnectorBase` ABC, `WorldState`, `PerceptionEvent`, `VesselActionResult`) |
-| Actions facade | `plugins/vessel_plugin.py` (`VesselPlugin`, `PLUGIN_CLASS`) |
+| Connector base + schema | `plugins/rift_vessel/vessel_base.py` (`VesselConnectorBase` ABC, `WorldState`, `PerceptionEvent`, `VesselActionResult`) |
+| Actions facade | `plugins/rift_vessel/vessel_plugin.py` (`VesselPlugin`, `PLUGIN_CLASS`) |
 | Session lifecycle + experience buffer | `core/vessel_session_manager.py` (`vessel_session_manager`) |
 | I/O interface (duck-typed) | `interface/vessel_interface.py` (`INTERFACE_NAME = "vessel"`) |
-| Minecraft PoC connector | `plugins/vessels/minecraft_connector.py` (`CONNECTOR_CLASS`, self-registers) |
-| Mineflayer bridge (Node.js) | `interface_dev/minecraft_bridge_minimal.js` |
+| Minecraft connector | `plugins/rift_vessel/minecraft/minecraft.py` (`CONNECTOR_CLASS`, self-registers) |
+| Mineflayer bridge (Node.js) | `plugins/rift_vessel/minecraft/minecraft_bridge.js` |
 | Bridge provisioner | `interface/minecraft_provisioner.py` (`BridgeProvisioner`, `get_bridge_provisioner`) |
 | DB tables | `core/db.py::init_vessel_tables` + `init-db.sql` (`vessel_sessions`, `vessel_activity_log`) |
-| WebUI Activities voice | `core/webui.py` (`/api/history/vessel`), `history.html`/`history.js` (🌀 sub-tab) |
-| CLI | `core/command_registry.py` (`/vessel status`, `/minecraft provision …`) |
+| WebUI Activities voice | `core/webui.py` (`/api/history/vessel`), `history.html`/`history.js` (🌀 Vessel sub-tab + 🎯 Goals sub-tab) |
+| CLI | `core/command_registry.py` (`/vessel status`, `/vessel join [world]`, `/vessel logout`, `/minecraft provision …`) |
 
 **Three hard constraints (all enforced):**
 
-1. **Vessel actions never create agentic tasks.** `vessel_say`/`vessel_move`/`vessel_look`/`vessel_use`/`vessel_status` declare **no** `external_effects` → they stay on the Fast Lane (`run_actions`), never the Agent Lane / Drones. (They are still passively auto-exposed as MCP tools `synth_vessel_*`.) A connector talks to its world directly; no reasoning loop is needed.
-2. **No diary during a session.** Events accumulate in an in-DB `experience_buffer` on `vessel_sessions`; a **single** autobiographical "lived experience" diary entry is written **only at end-of-session** — explicit logout OR `VESSEL_SESSION_COOLDOWN_SEC` (default 3600 s) of inactivity, detected by the interface scheduler calling `close_expired_sessions`.
-3. **Own Activities voice.** Like Radio/Grillo: `vessel_activity_log` + `/api/history/vessel` (GET history, DELETE per-item) + a dedicated History sub-tab.
+1. **Vessel actions never create agentic tasks.** The embodiment verbs — the world-agnostic **core set** `connect`/`disconnect`/`say`/`move`/`look`/`observe`/`use`/`attack`/`follow`/`unfollow`/`respawn`/`status` (`say` accepts an optional `audio` flag mirroring the interface audio-message flag — it falls back to plain text in worlds with no voice channel; `observe` is a universal self-awareness verb that reads the current `WorldState` and reports nearby affordances/entities/blocks in character — it powers autonomous play; `attack` is a dedicated hostile verb kept out of `use`; `follow`/`unfollow` are universal entity-following verbs that fail cleanly when there is nothing to follow; `respawn` is a universal come-back-to-life verb that no-ops in worlds with no death/respawn concept or when already alive) — declare **no** `external_effects` → they stay on the Fast Lane (`run_actions`), never the Agent Lane / Drones. (They are still passively auto-exposed as MCP tools.) **Connection-driven action exposure.** The Vessel action set is *not* static — it mirrors the live connection state because `get_supported_actions()` is a pure read the core calls on every prompt build/dispatch/validation, so the exposed verbs change automatically on the next prompt. **Disconnected:** a single `vessel_connect` is exposed; its required `game` field is an enum of every *enabled* world (`_enabled_worlds()`, i.e. worlds whose `<world>_vessel` sub-plugin is on), plus optional `host`/`port` overriding the server address for that connect only — no gameplay verbs are visible. **Connected to world W:** the core set (minus `connect`) plus W's `get_world_actions()` extras appear namespaced `vessel_<W>_<verb>` (e.g. `vessel_minecraft_say`) alongside `vessel_disconnect`, and `vessel_connect` disappears. **Logout / inactivity cooldown** (`VESSEL_SESSION_COOLDOWN_SEC`) → the session closes, `has_active_session()` goes false, and on the next prompt the gameplay verbs vanish and `vessel_connect` returns — free, driven by `close_expired_sessions`. **No enabled worlds** → empty set. Detection is entirely structural (no keyword logic): the connected world is `_connected_world()` = `vessel_session_manager.has_active_session()` + the cached connector's `is_connected`; the `game` field is an enum *value*, not text matched. `vessel_connect` accepts the plain form or a legacy `vessel_<world>_connect`, taking the world from `game` first. **Hybrid action ownership.** The core set above is owned by the Vessel and shared by every world (guaranteeing world-agnostic portability); each connector may *additionally* declare its **own** world-specific verbs (e.g. a future Minecraft `craft`/`mine`, Skyrim `cast_spell`/`sneak`) via the optional `VesselConnectorBase.get_world_actions()` hook — returned keyed by bare verb, same schema shape, must NOT declare `external_effects`; the core plugin namespaces them under the same `vessel_<world>_` prefix and dispatches them via `connector.act(verb, payload)`. `plugins/rift_vessel/vessel_plugin.py` implements this in `_ACTION_VERBS` (core set), `_connected_world()` (structural connection probe — `has_active_session()` + cached connector `is_connected`), `_enabled_worlds()`/`_world_enabled()` (worlds whose `<world>_vessel` sub-plugin is on), `_action_world()` (active world resolution), `_world_extra_verbs_for()` (fail-safe pull of the connector's extra verbs, skipping core collisions), `get_supported_actions()` (disconnected → single `vessel_connect{game}`; connected → per-world prefix + both tiers), and `_parse_action_verb()` (accepts both legacy and namespaced forms). The Minecraft connector currently adds no extra verbs (core-set-only). A connector talks to its world directly; no reasoning loop is needed. **Entering/leaving a world is an action, not just an interface hook:** the `connect` verb (exposed as `vessel_<world>_connect`) is the LLM-invokable entry point — it loads the active connector (`ACTIVE_VESSEL`), opens a session on `interface/vessel_interface.py`, and calls `connector.connect(settings, on_event)` wiring the perception callback that forwards world events into the message chain; `vessel_disconnect` calls `connector.disconnect()` and flushes the session(s) to the single end-of-session `vessel_diary` entry (chunked compaction, background) via `end_sessions_for_environment`. Both live in `plugins/rift_vessel/vessel_plugin.py` (`connect_world`/`disconnect_world`). **`vessel_connect` accepts an optional server-address override:** the action declares `optional_fields: ["host", "port"]`, and `connect_world(overrides=...)` merges any non-empty values onto a *copy* of the saved settings before calling the connector (the saved plugin config stays the default; the override applies to that connect only, persistent config is never mutated). The Minecraft connector resolves the target via `_resolve_server_target(settings)` (override else `MINECRAFT_SERVER_HOST`/`MINECRAFT_SERVER_PORT`) and sends it in the bridge `/connect` body; the Node bridge `connectBot(overrides)` / `POST /connect` read `host`/`port` from the body, falling back to their `CFG` defaults.
+2. **No diary during a session; end-of-session produces one FACTUAL operational recap in `vessel_diary`, NOT the real `ai_diary`.** Events accumulate in an in-DB `experience_buffer` on `vessel_sessions`, and each is also audited as a row in `vessel_activity_log`. At **end-of-session** a **single** compacted entry is written to the **dedicated `vessel_diary` table** — **never** the shared `ai_diary`. This is deliberate: `ai_diary` keeps **one shared daily row across all interfaces** (the upsert concatenates, with no interface filter), which `get_static_injection` injects into **every** non-vessel Fast-Lane prompt — so writing in-world content there polluted every ordinary chat turn with an ever-growing wall of telemetry until the prompt overran and the LLM failed (SyntH went inactive/T-pose). **Decision A — the recap is operational, not autobiographical.** The old first-person "lived experience" narrative is **removed**: the only compaction product now is a **factual, third-person operational recap** (`reason = "activity_recap"`) built from the session's `vessel_activity_log` rows — concrete/resumable, with coordinates/quantities/state (`[mine] mined stone | block=stone x=12 y=8 z=2`), never *"I explored and felt curious"*. Rationale: this is Synth's working memory of where it was and what it was mid-doing at the next login. **Ownership — a dedicated plugin, not an inline task.** The recap is produced by the **Rift Vessel Compactor** plugin (`plugins/rift_vessel/vessel_compactor/`, a *separate* scope from the Grillo Compactor — it shares only the runnable shape). The plugin registers a compaction handler on the session manager at `start()` (`vessel_session_manager.set_compaction_handler`, mirroring `set_liveness_probe` — core never imports the plugin); on end-of-session the manager calls the handler, which **enqueues** the session id onto the plugin's own **internal, off-chain, low-priority asyncio worker queue** and returns immediately (teardown never blocks). This is **not** the message chain — no in-world turn, no Agent Lane, no Drone. It can also be run manually from the WebUI Plugins tab (runnable quartet → `run_action("compact_now")`). The recap is built by `core/vessel_diary_compactor.py::compact_activity_recap` (source `vessel_activity_log`, chunked by `VESSEL_DIARY_CHUNK_ITEMS`/`VESSEL_DIARY_CHUNK_CHARS`, folded recursively when oversized) on the **vessel-scope Cortex** (`get_active_cortex_engine(scope="vessel")` → `VESSEL_CORTEX`), fully **fail-safe** (any LLM error → deterministic plain-text join; empty log → no entry; never raises). The legacy inline `VesselSessionManager._launch_compaction`/`_compact_and_store` path (autobiographical `compact_session`) survives **only as a fail-safe fallback** when no compaction handler is registered (plugin absent/disabled), still gated by `VESSEL_DIARY_COMPACTION_ENABLED`; the plugin owns its own `VESSEL_COMPACTOR_ENABLED`. `vessel_sessions.diary_entry_id` is always `NULL`. **Deferred (explicit TODO): whether/how to later import a well-formed `vessel_diary` recap into the real `ai_diary`.** End-of-session is reached via explicit logout (`/vessel logout` CLI or the `vessel_disconnect` action), OR `VESSEL_SESSION_COOLDOWN_SEC` (default 3600 s) of inactivity (`close_expired_sessions`), OR the **connection-driven 3-state lifecycle** below. **Connection-driven 3-state session lifecycle.** A session's liveness is tied to the *real* connector, not just a DB row. The interface registers a **liveness probe** into the session manager at `start()` (`get_vessel_session_manager().set_liveness_probe(self._any_connector_live)`) — this keeps `core/vessel_session_manager.py` free of any interface/connector import while letting `has_active_session()` reflect the connector's actual `is_connected` state. The three states: **CONNECTED** — a session id exists *and* the probe returns True → `has_active_session()` True → beats/perceptions run. **RECONNECTING** — the session id still exists but the connector dropped (probe False) → `has_active_session()` reads **False**, so new vessel elements are *frozen* (no beats/perceptions enqueued) while priorities are left untouched; the disconnect sweep retries the connection each tick for up to `VESSEL_DISCONNECT_GRACE_SEC` (default 30 s, clamped 5–3600). A successful reconnect flips the probe True → back to CONNECTED. **ENDED** — the grace window elapsed without recovery → the session is force-closed (`end_sessions_for_environment(reason="disconnected")` → `end_session`), the experience buffer is compacted (chunked, background) into the single `vessel_diary` entry, and **all queued vessel traffic for that world is purged** via `drop_vessel_queue_for_world`, so nothing stale is dispatched into a dead world. The sweep runs **every scheduler tick** (`interface/vessel_interface.py::_close_disconnected_sessions`): it records `_disconnected_since[world]` on first-seen disconnection, calls `_attempt_reconnect(world)` on entry and each in-grace tick, and only ends the session once `now - first_seen >= grace`. Without this, a dropped client would leave the session `active` for the full 3600 s cooldown, generating beats that consume cognition on a dead world. The Minecraft connector detects the drop structurally: `MinecraftConnector._poll_loop` counts consecutive `/events` poll failures and, after `_MAX_POLL_FAILURES` (5, ≈5 s), sets `self._connected = False` so `is_connected` reports the loss.
+3. **Own Activities voice.** Like Radio/Grillo: `vessel_activity_log` + `/api/history/vessel` (GET history, DELETE per-item) + a dedicated History sub-tab. The History section actually carries **two** Vessel sub-tabs: the 🌀 **Vessel** tab (actions + session history) and a 🎯 **Goals** tab that, *per game/world*, renders cards showing the goals Synth authored for itself and their steps. The Goals tab is backed by `GET /api/history/vessel/goals` (`core/webui.py::history_vessel_goals`), which iterates the enabled worlds (`_enabled_vessel_worlds()` → `vessel_plugin._enabled_worlds()`), resolves a per-world goal reader (`_resolve_world_goal_reader()`; Minecraft → `plugins/rift_vessel/minecraft/goals.py::list_all_goals`), and returns `{"success": True, "worlds": [{"world", "goals": [...]}]}`. It renders **only** what the model stored (free-text self-authored goals + steps) — no catalogue, no fixed step schema — honouring the spontaneity rule. Frontend: `renderGoalsWorld`/`renderGoalCard` in `res/synth_webui/js/history.js`, styled in `core/webui_templates/sections/history.html`.
 
-**Perception & salience:** the PoC filter is LLM-free — dedup (30 s) + rate-limit (2 s) in `interface/vessel_interface.py`. A richer LLM salience/attention worker (Grillo *RAW cognition* style) is a documented future phase and must also respect constraint 1. Never stream raw telemetry into cognition.
+**Vessel action whitelist — keep the will/reflection prompt from being erased.** During a vessel turn the full ~60-action global catalog (`base_system≈9.9k` + `catalog_block≈17.6k`) is folded into the **system** prompt, pushing it past the downstream char-budget clamp in `core/external_endpoints/bridges/cortex_bridge.py` (§5). Because that clamp trims only the **user body**, never the system message, the small will/reflection prompt (which lives in the body) gets erased — so SyntH authors goals "blind" and produces trivial material-gathering objectives instead of strategic ones. The fix is a **whitelist** applied *only on vessel turns* that trims the catalog to the actions embodiment actually needs, keeping the system prompt lean enough that the body survives. It is a **3-tier** model implemented in `plugins/rift_vessel/vessel_whitelist.py` (plugin-owned, self-contained — if the Rift Vessel plugin is absent the core falls back to its normal scope-based derive) and wired into `core/prompt_engine.py::build_json_prompt` via `_derive_vessel_whitelist_action_types` (only applied when the derived set is strictly smaller than the full catalog):
+   - **Tier 1 — hardcoded, non-editable:** `vessel_*` (the Vessel's own world-agnostic verbs, already namespaced `vessel_<world>_<verb>`). The user can never remove these — they are imperative to embodiment.
+   - **Tier 2 — hardcoded, interchangeable per connected world:** `*_<world>_*` (e.g. `*_minecraft_*`), derived **structurally** from the connected world token via `vessel_plugin._action_world()` (never a hardcoded game name), so it swaps automatically when the connected world changes.
+   - **Tier 3 — editable:** the `VESSEL_ACTION_WHITELIST` config var (advanced; default `message_*, event, schedule_message, blocklist, spawn_drone`) holds only the optional *core-extra* actions the user may tune (message/event/schedule/blocklist/drone).
 
-**Adding a connector:** subclass `VesselConnectorBase`, set module-level `CONNECTOR_CLASS`, and call `register_vessel_connector(name, __name__, capabilities=..., label=...)` at import time. Removing any connector/plugin/interface must not break the rest of the system.
+   The final allowlist = `hardcoded_vessel_patterns(world)` ∪ `matches_whitelist(available_action, parse_patterns(VESSEL_ACTION_WHITELIST))`, with `_SYSTEM_ONLY_ACTION_NAMES` and non-user-facing actions dropped. Matching is **structural** (`fnmatch.fnmatchcase` on the action *name*), never keyword/regex intent detection — safe in a multi-language deployment. **Global audio/tts trim (companion change).** As part of the same lean-prompt effort, the standalone audio/tts actions `tts_speak` (vox), `audio_telegram_bot`, and `audio_discord_bot` are removed from the exposed catalog **globally** (commented out with `TODO(vessel-whitelist)` markers referencing this section) — audio delivery still works via the `say audio` flag and the interface-native audio paths; restore them by uncommenting the marked blocks. Unit-tested in `tests/test_vessel_whitelist.py`.
 
-**Minecraft PoC deployment:** single-container, **opt-in** via `MINECRAFT_BRIDGE_ENABLED` (default False). Node is **not** in the default image (`python:3.12-slim`) — build with `docker build --build-arg INSTALL_NODE=true …` (Dockerfile `ARG INSTALL_NODE=false` + conditional NodeSource install). The provisioner runs the bridge as a **non-root** subprocess and returns a clear error if `node`/`npm` are missing. Uses offline auth; real Microsoft/XBL auth is out of scope.
+**Real-time gaming focus (two enforced behaviours).** Because the Vessel is used mainly in interactive game worlds, embodiment behaves like a person *concentrating on the game*, not multitasking every chat. Both are decided **only from routing metadata, never from message text** (project rule: no keyword logic), and both are lazily imported + fully guarded so removing the Vessel plugin can't break queueing or context assembly.
 
-**Vessel config keys:** `ACTIVE_VESSEL` (`"disabled"`), `VESSEL_SETTINGS`, `VESSEL_SESSION_COOLDOWN_SEC` (3600), `MINECRAFT_BRIDGE_ENABLED` (False), `MINECRAFT_BRIDGE_RUN_AT_START`, `MINECRAFT_BRIDGE_HOST` (127.0.0.1), `MINECRAFT_BRIDGE_PORT` (8137), `MINECRAFT_SERVER_HOST` (127.0.0.1), `MINECRAFT_SERVER_PORT` (25565), `MINECRAFT_BOT_USERNAME` (Synth).
+- **(1) Pure 0–11 numeric priority, no de-prioritisation.** `core/message_queue.py` ranks messages on an absolute urgency scale where **higher = more urgent** (a min-heap keyed by `_heap_key(p) = -int(p)`): `PRIORITY_EMERGENCY = 11`, `PRIORITY_URGENT = 10` (`priority=True`), `PRIORITY_REFLECTION = 9` (Synth's own "pause & reflect on my goal" turn — above player chat so it is consumed before ordinary in-world traffic, yet below urgent/emergency), `PRIORITY_HIGH = 8` (direct human input, e.g. an in-world **player** chat), `PRIORITY_TRAINER = 7`, `PRIORITY_RADIO = 6` (radio-host DJ banter — above ordinary chat so its on-the-fly LLM generation window is never starved), `PRIORITY_GENERAL = 5` (ordinary chat), `PRIORITY_AMBIENT = 4` (Synth's **own** autonomous vessel perceptions/beats — below every human), `PRIORITY_LOW = 3` (background-adjacent — web-search 2nd pass, misc fallback), `PRIORITY_BACKGROUND = 2` (G.R.I.L.L.O. beats — absolute bottom, never starves anything). `enqueue` assigns each message its rung from **structural origin only** (never message text, never conditional on session state): a reflection-pause turn (`_vessel_reflection`) → `PRIORITY_REFLECTION`, a real player chat → `PRIORITY_HIGH`, an autonomous vessel perception/beat → `PRIORITY_AMBIENT`, the trainer → `PRIORITY_TRAINER`, ordinary chat → `PRIORITY_GENERAL`, urgent → `PRIORITY_URGENT`. There is **no de-prioritisation**: ordinary chat is never demoted because a session is active, so a person addressing Synth is always answered promptly while the game's own perceptions simply sit at a lower rung. `EMERGENCY`/`URGENT` were shifted up by one to make room for `REFLECTION`; the low bands were later split by the radio-starvation fix — `RADIO` at 6, `GENERAL` at 5, G.R.I.L.L.O. demoted to the absolute bottom `BACKGROUND` at 2. This replaced the earlier scheme that raised perceptions to `HIGH` and demoted chat to `AGENT_PRIORITY` (which caused chat starvation).
+- **(2) Vessel-focus turns get world-scoped context.** `core/history_engine.py::build_context` detects an embodiment turn from routing metadata (`interface_path` starting with `vessel`, a `chat.type == "vessel"` message, or an explicit `vessel_focus` context flag) and forces `unified_mode = False` and disables the global diary/memory injections, keeping only persona/profile + local vessel history. SyntH is not omniscient while playing — it doesn't read other chats in real time or notice unrelated global events mid-session (that catch-up happens in quiet moments and at end-of-session).
+
+Action speed: `vessel_plugin.act()` logs the connector round-trip at `INFO` (`act('...') dispatched via '...' in N ms`). The *decision* to act still costs a full cognition turn; a reflex/attention layer that reacts without a full LLM turn is a documented future phase (must also respect constraint 1).
+
+**Perception & salience:** the filter is LLM-free — dedup (30 s) + rate-limit (2 s) in `interface/vessel_interface.py`. A richer LLM salience/attention worker (Grillo *RAW cognition* style) is a documented future phase and must also respect constraint 1. Never stream raw telemetry into cognition.
+
+**Perceptions never evict player chat (separate context buffer).** Autonomous perceptions (sightings/movement/damage/will-beats) and real conversation are stored in **two separate in-memory windows** in `core/chat_context_manager.py`, keyed purely by a structural metadata flag — never by content. The conversational window is a bounded `deque(maxlen=CHAT_HISTORY_LIMIT)`; a **separate** `_perception_memory` ring (`deque(maxlen=_PERCEPTION_MEMORY_MAXLEN=32)`) holds perceptions. `add_message_to_context` routes a message to `_perception_memory` when `metadata["vessel_perception"]` is set (tagged at ingestion by `interface/vessel_interface.py::on_world_event` as `{"vessel_perception": True, "vessel_event_type": <type>}`, `None` for a player chat), so a rapid ambient burst (e.g. repeated **drowning** damage, which bypasses the 30 s dedup by design) can **never** evict a player's chat from the bounded conversational deque. `load_chat_history` rehydrates the split from the DB `chat_history_cache.metadata JSON` column; `clear_chat_context` clears both. The vessel-focus prompt (`core/history_engine.py`) merges them: it drops autonomous perceptions from the conversational `window`, then appends the most recent `VESSEL_PERCEPTION_CONTEXT_CAP` (default 3) perceptions from `get_perception_memory()`, sorted chronologically — so ambient grounding is still present without starving the conversation. This is the fix for the "Rekku replied with one stock line to every player" bug (§12): the earlier `history_engine` prompt-cap was necessary but insufficient because the `maxlen` deque discards player chat *upstream* of the prompt. Keyword-free; removing the vessel subsystem leaves `_perception_memory` empty.
+
+**En-route element collection (CORE, world-agnostic).** While the body travels A→B it keeps a per-session, world-scoped registry (`VesselInterface._seen_elements: dict["vessel/<world>", set["kind:target"]]`) of everything it has already perceived, so Synth *knows* what it passed and can divert toward something rare/interesting (a quest item), revisit it later, or mention it to other players. After each fast motor tick, `_collect_en_route_sightings(world, world_state)` reads the connector's structural `WorldState.extra["affordances"]` (`{kind, target, verb, distance}`, distance-sorted), keys novelty via `_element_signature` (`kind:target`, `kind` defaults `"thing"`), and surfaces each *first* sighting **once** as a new `sighting` perception through `on_world_event(event_type="sighting", …, data={kind,target,distance})`. The registry records **all** seen elements (recallable via `observe`) while the dedup/rate-limit salience filter paces what reaches cognition (the slow will beat) — so a burst of new blocks never floods the chain; the nearest new element wins each rate-limit window. `end_sessions_for_environment` pops the world's registry so the next session starts fresh. Keyword-free, no LLM, fully guarded (a failure never disrupts the motor tick). Whether a sighting is "rare" or "the item I wanted" is Synth's own cognition-turn judgement, never decided here.
+
+**Autonomous play — three speeds + a reflection pause: volition (slow, LLM) + action (middle, LLM) + motorics (fast, reflex), with a reflection pause (LLM, elevated priority) on top.** By default a session is reactive; when `VESSEL_AUTONOMY_ENABLED` is on, Synth **plays on its own** — wanders, looks around, sets and pursues its own goals, gathers, builds, interacts — while still obeying all three constraints (Fast Lane only, no Agent Lane/Drones, single end-of-session diary). Autonomy is deliberately **split into three independently-paced layers** so that *deciding what to want* (slow, personality-driven) never bottlenecks *deciding the next concrete step* (middle), which never bottlenecks *moving the body* (fast, reactive). The middle **action beat** closes the "walks around but accomplishes nothing" gap: the will beat authors a free-text goal but is forbidden to move/act, and the motor tick moves but never reads goal text — so nothing translated *"gather wood"* into the concrete verb `vessel_minecraft_collect_block`/`mine`/`craft`. The action beat is that translator (mapping is cognition's, no keyword logic). On top of these three sits the **reflection pause**: a deliberate stop-and-think turn that fires when Synth is playing *without a real objective* (no goal, or a goal with no step plan), prunes its own pending autonomous beats, and dedicates one elevated-priority cognition turn to authoring/refining the goal before ordinary autonomy resumes.
+
+- **Will beat — volition (slow, LLM).** Mirrors G.R.I.L.L.O.: the interface scheduler (`interface/vessel_interface.py`, 10 s tick) fires a **will beat** every `VESSEL_WILL_INTERVAL_SEC` s (default 45, falls back to the legacy `VESSEL_BEAT_INTERVAL_SEC`, clamped `[10, 3600]`) via `_maybe_run_will_beat` while a session is active. The beat reads the live connector's `WorldState`, builds a **structural, keyword-free** volition prompt with `core/vessel_beat.py::build_will_prompt` (surfacing position/health/time/entities/blocks/inventory/affordances/current+recent goals straight from the `WorldState` contract, and framing the turn as *will, not motion* — "your body will move toward it on its own"), and enqueues it as a **normal** `vessel` message (`chat.type == "vessel"`, `interface_path` `vessel/<world>`) so `build_context` applies world-scoped context and the core runs **one ordinary Fast-Lane cognition turn** in which Synth writes/keeps/updates a free-text goal via `vessel_<world>_set_goal`/`vessel_<world>_update_goal`. This is where Synth's **will and memories** live — the goal is authored from personality, not a script. The will beat is FORBIDDEN to move or act. `build_decision_prompt` remains a backward-compat alias of `build_will_prompt`.
+- **Action beat — "idea → concrete step" (middle, LLM).** A second, faster LLM beat fires every `VESSEL_ACTION_INTERVAL_SEC` s (default 20, clamped `[3, 300]`, gated by `VESSEL_ACTION_BEAT_ENABLED`, default True) via `_maybe_run_action_beat`. Built by `core/vessel_beat.py::build_action_prompt` (returns `""` — no beat — when there is no active goal), it frames the turn as *"a moment to actually do something toward your goal"* and asks for exactly **one** concrete step: Synth picks a world verb (`vessel_<world>_collect_block`/`mine`/`craft`/`smelt`/`place`/`goto`/`say`) and may record progress via `vessel_<world>_update_goal` with `advance=true`. Enqueued as an ordinary Fast-Lane `vessel` message like the will beat; the player-quiet deferral (`VESSEL_WILL_QUIET_SEC`) applies so a player addressing Synth in-world is answered reactively, not overridden. Respects all three constraints (Fast Lane, no Agent Lane/Drones, no mid-session diary).
+- **Motor tick — motorics (fast, no LLM).** A separate, much faster loop moves the body toward the current goal with **no prompt, no cognition turn, no diary**. The scheduler calls `_maybe_run_motor_tick` every `VESSEL_MOTOR_INTERVAL_SEC` s (default 3, clamped `[1, 60]`, gated by `VESSEL_MOTOR_ENABLED`, default True) while a session is active; it fetches the active connector and current goal and calls `await connector.motor_step(goal)` **directly** — never enqueuing a message. `motor_step` is a pure reflex over the **structural affordance contract only** (`{kind, target, verb, distance}`, distance-sorted): it picks the nearest benign affordance (verb `use`/`mine`, hostile `attack` skipped), then `mine`s a block or `use`s an entity within `_MOTOR_REACH` (3.0 m), else `goto`s it, else `wander`s. The goal's **already-validated structural fields** (`target_kind`/`target_name`, populated by cognition — never free text) may steer *where* the body walks: when the goal names a **block** target and that exact block is a live affordance within reach, the reflex `mine`s it (returning `{"action": "mine", "target": …, "target_kind": "block"}`) instead of standing next to it re-issuing `goto` — the "walks up but never picks anything up" gap; entities are never mined. It still **never reads the goal's free text**. The base `VesselConnectorBase.motor_step` is a no-op returning `{"acted": False, "reason": "no_motorics"}`, so a world without motorics degrades gracefully. This fulfils the "reflex/attention layer that reacts without a full LLM turn" anticipated above, and still respects constraint 1 (no agentic task, no mid-session diary). **Structured inventory:** `get_world_state` also aggregates the raw stack list into an id→total map exposed as `WorldState.extra["inventory_counts"]` (via `MinecraftConnector._inventory_counts`, fail-safe, keyword-free) so cognition can judge how many of a thing it still needs without rescanning. **Staticity ward — always-on relocate-when-parked guard (Minecraft adapter scope).** The tick-to-tick physical-motion watchdog (`_stuck_position_ticks`/`_STUCK_MOVE_EPS`/`_STUCK_POSITION_TICKS`) only runs *after* the `if not goal` early-return and only while the motor is actively driving, so a **goalless** body — or one endlessly `mine`/`use`-ing an in-reach block without displacing — can stay pinned forever. The ward closes that gap: `MinecraftConnector._update_staticity_ward(position)` (gated by `VESSEL_STATICITY_WARD_ENABLED`, default True) runs **first** each motor tick, right after the survival guard and *before* the `no goal` early-return. It tracks a moving anchor (`_static_anchor` x/z) + an idle counter (`_static_ward_ticks`): while the body stays within `_static_ward_radius` (`VESSEL_STATICITY_RADIUS`, default 2.0, clamp `[0.5, 32.0]`) of the anchor it accrues ticks; stepping outside re-anchors and zeroes the counter (so genuine travel never trips it). After `_static_ward_limit` (`VESSEL_STATICITY_TICKS`, default 8 ≈ 24 s at the ~3 s tick, clamp `[2, 1000]`) consecutive idle ticks it fires: `motor_step` rotates `_explore_heading` by `_EXPLORE_TURN_RAD` and `goto`s a fresh reprojected waypoint (fallback `wander` when reprojection is unavailable), returning `{"acted": True, "action": "goto"|"wander", "reason": "staticity_ward"}`, then re-arms the anchor on the current spot. Purely positional/numeric (never reads goal text or keywords), fully fail-safe (a bad/missing position resets tracking and never fires), Fast Lane only (no LLM, no diary). Unit-tested in `tests/test_vessel_minecraft_motor.py`.
+
+- **Reflection pause — deliberate stop-and-think (LLM, elevated priority).** Sits *above* the three speeds. Because the single message consumer can be blocked for a long time by a slow uncancellable Base-Cortex turn, will beats may pile up unconsumed and Synth can end up aimlessly wandering with no goal. The reflection pause addresses the queue *ordering* of that situation: the scheduler calls `_maybe_run_reflection` (in `interface/vessel_interface.py`) **before** the will/action beats each tick; when a session is active, autonomy + reflection are enabled (`VESSEL_AUTONOMY_ENABLED`, `VESSEL_REFLECTION_ENABLED`, default True), a player has been quiet for `VESSEL_WILL_QUIET_SEC`, the anti-thrash floor `VESSEL_REFLECTION_MIN_INTERVAL_SEC` (default 60, clamped `[10, 3600]`) has elapsed, and Synth has **no active goal or a goal with no step plan** (structural check via `_goal_from_world_state`/`_goal_needs_expansion` — never message text), it: (1) builds a structural prompt with `core/vessel_beat.py::build_reflection_prompt` framed as an intentional private pause that must NOT speak (no `say`), only author/refine the goal via `vessel_<world>_set_goal`/`vessel_<world>_update_goal`; (2) enqueues it as a `vessel` message tagged `_vessel_reflection` → `PRIORITY_REFLECTION` (9, above player chat), whose enqueue path **prunes older pending autonomous vessel beats** for that world (`core/message_queue.py::_supersede_pending_vessel_beats` — it keeps player chat and `no_compact` items; it never uses `drop_vessel_queue_for_world`, which would also drop player chat); (3) sets a `_reflecting`/`_reflecting_until` window of `VESSEL_REFLECTION_DURATION_SEC` (default 15, clamped `[3, 300]`) during which the will and action **beats** are held off (but the **motor tick and survival reflex keep running — the body still moves**); (4) on expiry, resets `_last_will_beat_at = 0.0` so the will beat re-fires immediately and resumes normal autonomy on the freshly-committed goal. **Known tension (by design):** clearing the queue removes only *pending* items — a reflection turn still cannot run until the in-flight (possibly slow selenium) turn drains, so this fixes queue *order*, not consumer *starvation*. It **complements** the goal-expander Drone (both kept). Fully guarded/keyword-free; the pure prompt + config helpers (`build_reflection_prompt`, `is_reflection_enabled`, `resolve_reflection_duration`, `resolve_reflection_min_interval`) are unit-tested in `tests/test_vessel_beat.py`, and the `PRIORITY_REFLECTION` band ordering in `tests/test_vessel_realtime.py`.
+
+- **Goal beat — dedicated goal-setting turn (LLM, restricted allowlist).** Complements the reflection pause. The reflection turn runs with the **full** vessel action catalog, so a weak model (e.g. `harmonyai/qwen-35-9b`) can — and in practice does — fall back to a passive `observe`/`status` instead of authoring a goal, leaving Synth aimless (histogram proof: an entire session of only `observe`/`status`, zero `set_goal`). The goal beat closes that gap **structurally**, not by prompt pressure: the scheduler calls `_maybe_run_goal_beat` (in `interface/vessel_interface.py`) each tick; when a session is active, autonomy + the goal beat are enabled (`VESSEL_AUTONOMY_ENABLED`, `VESSEL_GOAL_BEAT_ENABLED`, default True), a player has been quiet for `VESSEL_WILL_QUIET_SEC`, no reflection window is open, the `VESSEL_GOAL_BEAT_INTERVAL_SEC` floor (default 45, clamped `[10, 3600]`) has elapsed, and Synth has **no active goal** (structural check via `_goal_from_world_state` — never message text), it: (1) builds a structural prompt with `core/vessel_beat.py::build_goal_prompt` — same persona/system prompt and in-character *private planning* framing as the will/reflection beats (must NOT speak, no `say`), asking Synth to author a single concrete goal; (2) enqueues it as a `vessel` message reusing the `_vessel_reflection` band (`PRIORITY_REFLECTION`, `no_compact`, same pruning of older pending autonomous beats) but with `event_type="goal"` and — critically — a **per-turn restricted action allowlist** passed via `context_memory["allowed_action_types"] = {vessel_<world>_set_goal, vessel_<world>_update_goal}` (the exact mechanism Grillo uses in `plugins/grillo/grillo_impl.py`; `core/prompt_engine.py::build_json_prompt` reads it and it takes precedence over the vessel whitelist for that turn). Because `set_goal`/`update_goal` are the **only** exposed actions, even a weak tool-caller has nothing passive to fall back to — it *must* emit a goal. Fast Lane only (no `external_effects` → never Agent Lane/Drones, no mid-session diary), keyword-free, world-agnostic (uses the `world` arg for the verb namespace). Runtime-verified: after deploy, a goal beat at 16:56:41 was immediately followed by an executed `vessel_minecraft_set_goal` at 16:57:13 and a new `status=active` row in the `goals` table. The pure prompt + config helpers (`build_goal_prompt`, `is_goal_beat_enabled`, `resolve_goal_beat_interval`) are unit-tested in `tests/test_vessel_beat.py`.
+
+- **Self-preservation guard — survival reflex (fast, no LLM).** Evaluated **first** on every motor tick, before the no-goal early return, so Synth reacts to danger even with no active goal. `MinecraftConnector._survival_threat(state)` classifies threats from **numeric telemetry + game enum ids only** (never user text) in strict priority: **dead** → `respawn`; **drowning** (head submerged — liquid block id at head or `is_in_water` — AND `oxygen <= _sp_low_oxygen`) → `goto_surface` (reuses `goto` toward `y + _SURFACE_CLIMB_BLOCKS`=8, no new bridge verb); **burning** (feet/head on a hot block id: `lava`/`flowing_lava`/`fire`/`soul_fire`/`magma_block`) → `flee`; **aggressive combat** (see below) → **defend** or **escalate to flee**. `get_world_state().extra` is enriched with `oxygen`/`is_in_water`/`is_alive`/`block_feet`/`block_head`/`health`/`threat`/`threat_reason` plus the combat fields `has_ranged_weapon`/`ranged_ammo`/`best_melee_damage`/`damage_taken`/`damage_from_player`; the Node bridge `worldSnapshot` supplies the raw fields and tags nearby entities with a structural `hostile` flag and a per-entity `is_targeting_me` aggro flag. **Fight all aggressors, not just the nearest, and pre-emptively.** The combat branch calls `MinecraftConnector._aggressive_targets(state, near_dist)` — every aggressive mob, nearest-first, that either has the `hostile` flag within `_sp_hostile_dist` **or** is `is_targeting_me` at **any** distance (so a skeleton shooting from far, or a mob that has already locked aggro before closing in, is engaged pre-emptively). **Players are never a reflex target** (`kind == "player"` is skipped — a human hit is a social matter, handled by the appraisal beat below). The nearest aggressor is latched as `_fight_target`; on target change `_fight_fail_count` resets. **Weapon selection is structural.** While `VESSEL_SP_FIGHT_BACK` is on AND `health > _sp_low_health` (health is the *primary* escalation driver) AND `_fight_fail_count < _sp_fight_max_fails`: if `VESSEL_SP_USE_RANGED` AND `has_ranged_weapon` (bow/crossbow with ammo) AND the target distance `>= VESSEL_SP_RANGED_MIN_DIST` (5.0) → **ranged** (verb `shoot`); otherwise → **melee** (verb `attack`), which equips the highest-damage weapon carried via the bridge's `bestMeleeWeapon()` and swings a short burst. Below the health floor, or once the fail cap is hit, → **escalate to flee**. **Hunger** is handled OUTSIDE the guard by the `mineflayer-auto-eat` bridge plugin (auto `require`+`loadPlugin` in `minecraft_bridge.js`) — no manual verb, no motor branch, no config key. `core/vessel_beat.py::build_will_prompt` appends a structural threat cue so the slow will beat knows a reflex just fired. Config (component `vessel_plugin`): `VESSEL_SELF_PRESERVATION_ENABLED` (True), `VESSEL_SP_LOW_OXYGEN` (**6 — 0..20 bubble scale, see gotcha**), `VESSEL_SP_LOW_HEALTH` (6), `VESSEL_SP_HOSTILE_DIST` (8), `VESSEL_SP_FIGHT_BACK` (True), `VESSEL_SP_FIGHT_MAX_FAILS` (**8** — health-primary escalation, so the body keeps fighting while healthy), `VESSEL_SP_USE_RANGED` (True), `VESSEL_SP_RANGED_MIN_DIST` (5.0), `VESSEL_SP_APPRAISAL_ENABLED` (True), `VESSEL_SP_ENGAGE_RATIO` (1.0, clamp 0.2–5.0), `VESSEL_SP_WEAK_MOB_POWER` (6.0). **GOTCHA: at RUNTIME mineflayer `bot.oxygenLevel` reports the vanilla 0..20 air-bubble scale (20 = full lungs, 0 = out of air), NOT air ticks** — validated live: a healthy submerged bot reads ~20, so the drowning threshold MUST be on the 0..20 scale (default 6 ≈ two bubbles left). An air-ticks threshold (e.g. 200) would fire the drowning reflex constantly (false positive) because the runtime value never approaches it. This respects constraint 1 (pure motor reflex, no agentic task, no mid-session diary). Reference studied: mindcraft-bots/mindcraft (reimplemented natively; mindcraft never touched). Unit-tested in `tests/test_vessel_survival.py`. **Night shelter (Minecraft adapter scope).** A new priority-6 threat (below drowning/burning/combat, above "no threat"): when it is **not day** (`is_day` False — structural, from the world time telemetry) AND there are aggressive mobs within `_sp_shelter_dist` (`VESSEL_SP_SHELTER_DIST`, default 16.0 — deliberately wider than the melee `_HOSTILE_NEAR_DIST`=8.0 via the class const `_SHELTER_HOSTILE_DIST`=16.0, so the body walls itself in *before* the mob closes to melee), `_survival_threat` returns `{"threat": "night_shelter", "verb": "shelter", …}` and latches `_sheltered_last_day`. **A torch is not enough — Synth must fully enclose.** The bridge `shelter` verb (`minecraft_bridge.js`) tries, in order: (1) find a nearby **bed with a roof above it** (`findBlock` `_bed`, maxDistance 12, roof check), pathfind (`GoalNear`) and `bot.sleep` → `method: "bed"`; else (2) **seal** the ~10 open cells around the body by placing blocks → `method: "seal"`; else (3) **dig-in** a 1×2 niche as a last resort → `method: "dig_in"`; returns `{ok: enclosed, data: {method, sealed, dug_in, open_cells}}`. `_run_survival_guard` dispatches `verb == "shelter"` via `await self.act("shelter", payload)` and sets a 2-tick cooldown so it doesn't thrash. Gated by `VESSEL_SP_NIGHT_SHELTER` (default True). **Re-strategy on death (bridge = Minecraft adapter scope; will cue = Rift Vessel core scope).** A respawning Synth used to resume the exact same fatal goal and walk straight back into what killed it → infinite death loop (confirmed live: spawned at night, disarmed, surrounded, died, respawned, repeated). Fix (mindcraft parallel — save last death position + inject a "reconsider" message): the bridge `death` handler now increments `deathCount`, records the **numeric** `lastDeath = {x, y, z, count, at}` (rounded coords; never expires until overwritten), and `worldSnapshot` exposes it as `last_death`; `MinecraftConnector.get_world_state` copies it into `WorldState.extra["last_death"]` (null on an older bridge). `core/vessel_beat.py::build_will_prompt` (Rift Vessel **core**) then emits a strong, **purely structural** in-character cue — only when `last_death` is a dict with numeric `x`/`z` — telling Synth it *died at (x, y, z)* (with a `— this is death #N in this world` suffix when `count` is present) and pressing it to **reconsider**: pick a safer goal, move away first by setting `destination_x`/`destination_z` well clear of the death spot, or make survival itself the goal. It never parses any text. Unit-tested in `tests/test_vessel_beat.py` (death cue) and `tests/test_vessel_survival.py` (shelter reflex). **Power-aware fight-vs-flee (Minecraft adapter scope).** The decision to engage a mob is no longer a flat "always defend while healthy" — it is a **structural power comparison** so a disarmed Synth flees a mob it cannot win, while an armed/armored one engages. Two numeric helpers on the connector (keyword-free, telemetry-only) drive it: `_own_power(extra)` = `offense * survivability`, where `offense` = `best_melee_damage` (bare-hand floor `1.0` when carrying no weapon) and `survivability` = `1.0 + armor_points/20 + health/40`; `_mob_power(entity)` = `max_health * (1 + attack_damage/8)`, using the per-entity `max_health`/`attack_damage` the Node bridge attaches via `mobCombatStats()` (falling back to `_DEFAULT_MOB_POWER`=12.0 when a mob's stats are unknown). `armor_points` comes from the bridge's `armorPoints()` (summed `_ARMOR_DEFENSE` per equipped piece) and is forwarded into `WorldState.extra`. The gate: `ratio = own_power / mob_power`; if the body is **disarmed** (`_is_disarmed` — no melee weapon *and* no ranged weapon) it only engages a **weak** mob (`_mob_power < VESSEL_SP_WEAK_MOB_POWER`, default 6.0), otherwise `power_ok = ratio >= VESSEL_SP_ENGAGE_RATIO` (default 1.0). `power_ok` (plus `fight_back`, `health > low_health`, and the fail-cap) decides defend/shoot vs flee; every combat reason dict carries `own_power`/`mob_power`/`ratio` for debugging. **Per-mob strategy override (§17, Rift Vessel *core* mechanism + Minecraft *content*).** Before the power gate runs, `_survival_threat` calls `apply_combat_strategy(ENVIRONMENT, target, extra)`; a non-`None` result short-circuits the reflex with a mob-specific tactic. The **mechanism** is the world-agnostic core module `plugins/rift_vessel/vessel_combat_strategy.py` (mirrors `core/vessel_registry.py`: a `CombatStrategyRegistry` keyed `{world: {entity_id: strategy}}`, module-level singleton `combat_strategy_registry`, and wrappers `register_combat_strategy`/`resolve_combat_strategy`/`apply_combat_strategy` — fail-safe, resolves by the entity's structural `name` id, never display text). The **content** lives in the Minecraft adapter: `_mc_strategy_creeper` and `_mc_strategy_enderman` both return a `keep_distance` plan (a creeper must never be chased into its explosion; an enderman is disengaged rather than meleed), registered at import via `register_combat_strategy("minecraft", "creeper"/"enderman", …)`. A generic mob has no registered strategy → `apply_combat_strategy` returns `None` → the power gate decides. Unit-tested in `tests/test_vessel_survival.py`. **Morning surface-exit (Minecraft adapter scope).** A new lowest-priority threat (#7, below night-shelter): if Synth dug in / walled itself in overnight (a bunker with no real base) it must climb back to daylight in the morning instead of staying buried. `_survival_threat` reads the structural telemetry `is_day` (bool) and `sky_access` (bool — the Node bridge `hasOpenSkyAbove(maxUp)` scans `dy=2..24` for open sky, exposed as `sky_access` in `worldSnapshot`). At **day** with **no** open sky above (`is_day is True and sky_access is False`), and only when a `_surfaced_last_day` day-latch has not already fired, it returns `{"threat": "morning_exit", "verb": "climb_staircase"}`. The bridge verb `climb_staircase` (`minecraft_bridge.js`) digs a **jumpable ascending staircase** — one block forward + one block up per step, placing the tread — via direct dig/place (no pathfinder), stopping early once `skyClear()` reports open sky; returns `{ok, data:{steps, climbed, reached_sky, used, start, end}}`. The async `_run_survival_guard` gates the actual climb on `_has_reachable_base(state)`: if a registered base is within `_base_retreat_radius`, it just sets `_surfaced_last_day=True` and skips (a real base already has an exit); otherwise it dispatches `climb_staircase` (`reason="survival:morning_exit"`). The day-latch (`_surfaced_last_day`) prevents refiring the same day and re-arms at night. Gated by `VESSEL_MORNING_EXIT_ENABLED` (default True). Structural only (numeric time + sky-access bool, never text), Fast Lane, no diary. Unit-tested in `tests/test_vessel_survival.py`. **Prefab closed-house build (Minecraft adapter scope).** The `build_base` verb builds a small, fully-enclosed hollow-cube shelter (walls + roof + floor + one door gap + interior torch + crafting table, optional bed) from a deterministic, inventory-aware layout — a *model/reference*, not a scripted quest (spontaneity rule preserved). The layout recipe is `plugins/rift_vessel/minecraft/base_spec.py::derive_base_layout(origin, inventory_counts)` (pure, bounded, structural id-only, fail-open): it emits the shell **bottom-up — floor → walls → roof** so every cell has a solid neighbour already placed to click against (the roof, placed last, anchors onto the finished wall tops). The bridge `build_base` case then runs the shell placement plus a bounded **seal pass** (max 3 idempotent re-attempt rounds over the cells that failed with `no-solid-face` on the first pass, no-progress early-bail) so edge/corner/roof cells that were floating in air the first time get closed once the rest of the shell exists — the fix for the earlier "house was not closed" bug. A material shortfall surfaces structurally as `ok=False` + `missing=["<item>:need N (have M)"]` rather than dispatching an unbuildable plan. Unit-tested in `tests/test_base_spec.py`.
+
+- **Damage-appraisal will beat — deliberate reaction to being hurt (LLM, elevated priority).** The survival reflex handles the *fast* motor response to a hit; on top of it a high-priority **appraisal will beat** lets Synth *think about* the hit in character. The structural trigger is **taking damage this tick** (not merely "a hostile is near"): `MinecraftConnector.get_world_state` computes `damage_taken` as the drop in `health` since the previous snapshot (numeric-only, no keyword logic) and surfaces it in `WorldState.extra["damage_taken"]` — so an unseen/ranged attacker or a trap also fires the beat, not just a visible mob. **The delta is single-read:** the baseline advances on *every* `get_world_state` call, so only the first reader per tick sees a given hit — therefore `interface/vessel_interface.py::_maybe_run_damage_appraisal` runs **first** in the scheduler autonomy checks (before reflection/will/action beats). When `damage_taken > 0` and `VESSEL_SP_APPRAISAL_ENABLED` (default True) it builds `core/vessel_beat.py::build_damage_appraisal_prompt(world_state, world)` and enqueues it as an ordinary Fast-Lane `vessel` message tagged `_vessel_appraisal` → **`PRIORITY_URGENT`** (via `core/message_queue.py`, which also supersedes older pending autonomous vessel beats for that world) and `no_compact` (so it never coalesces with sightings/will beats). Anti-thrash: at most one appraisal per `resolve_will_interval` window. **Player vs mob framing (structural).** The Node bridge attributes each hit with a time-boxed `lastDamage` (`DAMAGE_ATTRIBUTION_WINDOW_MS=2500`): `worldSnapshot` exposes `damage_from_player` = true only when the last hit's source was a **player** entity, null when stale/environmental. `build_damage_appraisal_prompt` branches on `extra["damage_from_player"]`: a **player** hit gets a *social* framing (do NOT reflexively swing back; consider `vessel_<world>_say`, ask/back off/remember), a **mob** hit gets a *combat* framing that offers `vessel_<world>_attack` and — when `has_ranged_weapon` and `ranged_ammo > 0` — `vessel_<world>_shoot`. It renders health, damage magnitude, nearby entities/affordances/inventory, `best_melee_damage` (or "bare hands"), and the ranged-ready state, plus the KB `knowledge` block. Fast-Lane only (no `external_effects` → never Agent Lane/Drones, no mid-session diary). Unit-tested in `tests/test_vessel_beat.py` (prompt) and `tests/test_vessel_survival.py` (combat reflex).
+
+`core/vessel_beat.py` is pure/side-effect-free (dataclass **or** dict input, fail-safe autonomy gating, interval clamp/failsafe on both `resolve_will_interval` and `resolve_motor_interval`, `is_motor_enabled`) and fully unit-tested (`tests/test_vessel_beat.py`) without DB/bridge/LLM; `MinecraftConnector.motor_step`'s structural rules are unit-tested in `tests/test_vessel_minecraft_motor.py`. **Generic self-awareness** is the `observe` core verb (reads `WorldState`, reports affordances/entities/blocks in character). **Affordances** follow a generic structural contract `{kind, target, verb, distance}` built by the connector from the raw snapshot — never keyword matching — so both the volition prompt and the motor reflex stay world-agnostic. **What to play is world-specific, but the goal STORE is generic.** Goals now live in a standalone **generic Goals plugin** (`plugins/goals/goals.py`) — a *scope-aware* store usable by any game world, a general planner, or the Synth pursuing a personal life goal, **not** just Minecraft. Every goal set is isolated by a three-part **scope tuple** (`scope`/`game`/`world`): Minecraft goals are pinned `scope="vessel"`/`game="minecraft"`/`world="none"`; a personal goal uses `scope="none"`. The store does **not** ship a catalogue, templates, prerequisites, or inventory-count progression (a fixed quest menu would make every Synth play identically, like a scripted bot); it only *persists* and *recalls* the free-text goals Synth writes for itself, and progress is judged by Synth from what it perceives, never by an item counter. A **stepped goal auto-completes** when `current_step` advances past the last step (the fix for goals never being marked `done` once all their steps were finished); a stepless goal is only completed explicitly. Goals are kept in the `goals` table (legacy `minecraft_goals` renamed + scope-backfilled by `core/migrations.py::_migrate_goals_table`) so a goal survives across beats within a session. The Minecraft connector reaches the store through a thin compatibility shim (`plugins/rift_vessel/minecraft/goals.py`) that forwards every call with the Minecraft scope tuple pinned, keeping the historical `mc_goals.<fn>(...)` surface intact. The connector exposes extra verbs via `get_world_actions()` — bridge-backed `goto`/`scan`/`mine`/`place`/`inventory`/`wander` plus the goal-store verbs `set_goal`/`goals`/`update_goal` (namespaced `vessel_minecraft_*`) — and enriches `WorldState.extra` with `current_goal`/`recent_goals`. For non-vessel use the generic plugin additionally exposes `goal_set`/`goal_update`/`goal_list` (security `low`, no `external_effects`). Synth authors its own goals (`vessel_minecraft_set_goal`, required free-text `description` + optional `note`) during a beat — *"diamonds now or build a chest first?"* is its call, driven by its personality and wants, not a script. All autonomy wiring is lazily imported and guarded: removing the beat module, the Goals plugin, or disabling the flag never breaks the reactive Vessel (the shim degrades to a no-op "no goal").
+
+**Core + attachable world sub-plugins (Grillo-style).** The Rift Vessel mirrors G.R.I.L.L.O.'s shape: a **core** plugin plus **attachable** per-world sub-plugins. `vessel_plugin` is the core — it owns the generic `vessel_*` actions and the **global** config (`ACTIVE_VESSEL`, `VESSEL_SETTINGS`, `VESSEL_SESSION_COOLDOWN_SEC`, all under component `vessel_plugin`). Each world is its own attachable sub-plugin with a **separate** WebUI banner and config namespace, so world-specific options are never conflated with the global entity. **WebUI coherence LED (orange).** A world sub-plugin can be enabled while the core `vessel_plugin` is disabled — a state in which that world can never actually connect. To flag this incoherence, the classic WebUI Plugins tab (`core/webui.py`) shows an **orange** status dot on any `Vessels`-category world sub-plugin whose LED would otherwise be green when `vessel_plugin` is not loaded (with a tooltip explaining the world can't connect until the Rift Vessel plugin is enabled). Enabling the core plugin restores the normal green/grey LED.
+
+**Layout (folder-per-plugin, see §4).** The Rift Vessel core lives in `plugins/rift_vessel/` (`vessel_plugin.py` + `vessel_base.py` + `icon.svg` + `guide.md` + an empty `__init__.py`; the module `vessel_plugin` differs from the folder name so no `sys.modules` shim is needed). Each world gets its own sub-folder `plugins/rift_vessel/<world>/` (`<world>.py` + `icon.svg` + `guide.md` + empty `__init__.py`). `derive_plugin_category` maps the `rift_vessel` path token to the **Vessels** category; both `vessel_plugin` and each world sub-plugin also declare `category: "Vessels"` explicitly.
+
+**A world module ships BOTH a connector and an attachable sub-plugin.** `plugins/rift_vessel/minecraft/minecraft.py` exposes both module-level classes: `CONNECTOR_CLASS = MinecraftConnector` (self-registers on `VESSEL_REGISTRY` at import — the actual world driver) **and** `PLUGIN_CLASS = MinecraftVesselPlugin` (a thin, action-less `PluginBase` that gives Minecraft its own WebUI banner and owns the Minecraft-specific config under component `minecraft_vessel`: `MINECRAFT_BRIDGE_RUN_AT_START`/`MINECRAFT_BRIDGE_HOST`/`MINECRAFT_BRIDGE_PORT`, `MINECRAFT_SERVER_*`, `MINECRAFT_BOT_USERNAME_OVERRIDE`, `MINECRAFT_SKIN_*` — the bridge enable state is the plugin toggle itself, `PLUGIN_ENABLED__minecraft_vessel`). The world sub-plugin's `get_supported_actions()` returns `{}` — the generic `vessel_*` actions stay in the core. This is the Grillo model applied to worlds; a world without a `PLUGIN_CLASS` would still register as a connector but would have no separate banner/config.
+
+**Adding a world:** create `plugins/rift_vessel/<world>/<world>.py` with (1) a `VesselConnectorBase` subclass + module-level `CONNECTOR_CLASS` calling `register_vessel_connector(name, __name__, capabilities=..., label=...)` at import, and (2) a thin `PluginBase` subclass + module-level `PLUGIN_CLASS` that calls `register_plugin("<world>_vessel", self)` in `__init__`, declares its config under component `<world>_vessel`, returns `category: "Vessels"` from `get_metadata()`, and returns `{}` from `get_supported_actions()`. The world automatically gets the Vessel's core action set exposed as `vessel_<world>_<verb>`; to add **world-specific** verbs, override `get_world_actions()` on the connector (return a `{verb: schema}` mapping keyed by bare verb — same schema shape as `get_supported_actions`, **no** `external_effects` — the core plugin namespaces and dispatches them via `connector.act`). Removing any connector/sub-plugin/core/interface must not break the rest of the system.
+
+**Scope rule (where a feature belongs).** When deciding whether a capability lives in the Rift Vessel **core** or in a **world adapter/plugin**, apply this rule: *if the feature is common to the great majority of games/worlds, its scope is the Rift Vessel core (a generic `vessel_*` verb on `vessel_base`/`vessel_plugin`); if it is specific to one game, it belongs to that game's adapter/plugin* (a world-specific verb via `get_world_actions()` on the connector, namespaced `vessel_<world>_<verb>`). E.g. move/look/observe/goals are core; **crafting is a Minecraft-specific verb** and therefore lives on the Minecraft connector, not the core.
+
+**Spontaneity rule (autonomous play is not hard-coded).** Autonomous play must be **spontaneous and human-like, never a hard-coded/scripted quest list**. Synth chooses *for itself* — out of its personality and mood — what to do in a world; the code owns only lifecycle/persistence, never the *content* of goals or a fixed catalogue of objectives. `plugins/rift_vessel/minecraft/goals.py` embodies this: it persists free-text, self-authored goals in the generic `goals` table (via the Goals plugin) and judges nothing — there is no `gather_wood`/`find_diamonds` template and no auto-progress counter. Affordances are structural (`{kind, target, verb, distance}`, distance-sorted) and are **never** matched by name keywords. Two different Synths, or the same Synth on two different days, should set completely different goals.
+
+**Minecraft world-specific verbs.** Beyond the core set, the Minecraft connector adds world-specific verbs via `get_world_actions()`, including **`craft`** (`vessel_minecraft_craft`): required `item` (lowercase Minecraft item id, e.g. `oak_planks`, `stick`, `crafting_table`, `wooden_pickaxe`), optional `count` (clamped `[1, 64]`), `search_radius`, `timeout_ms`; `security_level: "low"`, **no** `external_effects`. The bridge resolves the recipe via `bot.recipesFor()`/`bot.craft()`, auto-locates a nearby `crafting_table` and pathfinds to it when a 3×3 recipe requires one, and returns a structural fail-safe result (`ok:false` with a clear reason) when materials or a reachable table are missing — no keyword logic. The `status`/`scan` world snapshot also exposes `game_mode` (e.g. `creative`/`survival`) so cognition can reason about world limitations (e.g. in `creative` mined blocks yield no drops, a vanilla behaviour, not a bug).
+
+**Game knowledge base (reference, not a script).** A Synth that doesn't know a world's *rules* plays badly — e.g. it mines iron ore bare-handed and gets nothing, never having learned iron needs at least a stone pickaxe. Each world may ship a small **knowledge base (KB)**: the *mechanism* is world-agnostic (the Vessel core renders whatever facts a world supplies) and the *content* is world-specific (the Minecraft adapter owns its facts). The KB is strictly **reference** — it states how the world works, never what to do — so the spontaneity rule (self-authored goals, no catalogue) is preserved. **World-agnostic mechanism + per-game sources.** The KB *mechanism* lives in the core module `plugins/rift_vessel/knowledge_client.py` (`knowledge_client`) — search/cache/summarise/web-fallback are all world-agnostic and driven entirely by adapter-supplied descriptors. A world declares its own knowledge source(s) via `WikiSource` descriptors returned from the connector's `get_knowledge_wiki_sources()` hook (`plugins/rift_vessel/vessel_base.py` returns `[]` by default). A `WikiSource` carries only structural, game-specific data: `name`, `api_url` (MediaWiki `api.php`, or `""` for a web-only world), `page_url` (page-link prefix), `user_agent`, `game` (name substituted into the default summary prompt), and an optional full `summary_prompt` override. **No wiki endpoint is hardcoded in core code** — `knowledge_client.lookup(cache_dir, sources, query, limit, *, cache_only=False)` takes the sources as a parameter. **Local-first precedence** (`TODO - Rift Vessel.md` §9): (1) **local cache** first — offline-safe and instant, and the only tier consulted when `cache_only` is set; (2) **per-game wiki(s)** in declared order — each page fetched, summarised once, cached; (3) **generic web search** as a last resort *only when no declared wiki matched* — reusing `plugins/web_search/search_engine.py::collect_valid_results`, gated by `VESSEL_KNOWLEDGE_WEB_FALLBACK` (default True), results summarised + cached exactly like a wiki page. Every tier writes back to `cache_dir` keyed by a slug of the title (`{title, url, raw_extract, summary, fetched_at}`), so a fact is fetched at most once; each note is `{title, text, url}`; the whole thing is fail-safe (offline / any error → returns whatever is cached, never raises). Matching is keyword-free/structural: the `query` is whitespace-joined game tokens (a goal `target_name`, block/item ids), matched against page-title slugs. **Minecraft adapter:** `plugins/rift_vessel/minecraft/wiki_client.py` is a thin shim that declares the Minecraft `WikiSource` (the **live [minecraft.wiki](https://minecraft.wiki)** MediaWiki API, no auth) and delegates to the core client; `MinecraftConnector.get_knowledge_wiki_sources()` returns it, and the cache lives at `plugins/rift_vessel/minecraft/wiki/cache/<slug>.json`. **Verb:** the connector exposes a Fast-Lane, `external_effects`-free `lookup_knowledge` (`vessel_minecraft_lookup_knowledge`, `required_fields: ["query"]`, `optional_fields: ["limit"]`, `security_level: "low"`); `MinecraftConnector.lookup_knowledge(query, limit=5, *, cache_only=False)` delegates to `wiki_client.lookup` (→ core client) and returns notes as `{title, text, url}`. **Beat vs verb split (important):** the automatic will/motor-beat path (`_resolve_knowledge`) calls the lookup with **`cache_only=True`** so a `WorldState` build never blocks on the network or the LLM — it serves only already-cached pages; the **explicit** `lookup_knowledge` verb and the goal-expansion Drone use the default live path (`cache_only=False`), which is allowed to fetch + summarise. Everything is best-effort/fail-safe: offline or on any error the client returns whatever it has cached (possibly empty) and never raises, so a Fast-Lane beat can't break. Config: `VESSEL_KNOWLEDGE_LIVE_FETCH` (bool, default True — disables all network, cache-only everywhere), `VESSEL_KNOWLEDGE_FETCH_TIMEOUT_SEC` (int, default 4, clamp 1–30), `VESSEL_KNOWLEDGE_SUMMARY_MAX_CHARS` (int, default 600, clamp 120–4000). Fully offline-testable with the live API + LLM mocked (`tests/test_vessel_knowledge.py`). **Prompt injection:** when a beat's `WorldState.extra["knowledge"]` is populated, `core/vessel_beat.py::_fmt_knowledge` renders it into both the will and action prompts as a bulleted **"Game knowledge"** block headed by an explicit *reference, not a script* framing (purely structural — never inspects fact text for keywords — and drops the block when nothing renderable survives). **Drone goal expansion:** when Synth authors a *new* goal, a Drone (single-level ephemeral sub-agent, §5b) can expand it into ordered sub-steps by consulting the KB via `lookup_knowledge` — turning *"get some iron"* into *"craft a wooden pickaxe → mine stone → craft a stone pickaxe → mine iron ore"* (the mapping is the Drone's reasoning, no fixed table, no keyword routing). **After the goal is updated with its sub-steps it is re-notified to Synth via a will beat**, so the next volition turn acts on the freshly-expanded plan. The WebUI Goals sub-tab renders the sub-steps **collapsed by default** (a `<details>` disclosure labelled `Plan · done/total steps`, styled in `core/webui_templates/sections/history.html`, built in `res/synth_webui/js/history.js::renderGoalCard`).
+
+**Minecraft deployment:** single-container, gated by the Minecraft Vessel plugin's own enable toggle (`PLUGIN_ENABLED__minecraft_vessel`) — there is no separate `MINECRAFT_BRIDGE_ENABLED` key; enable/disable the connector from its WebUI plugin card. Node.js is **baked into the Docker image by default** (Dockerfile `ARG INSTALL_NODE=true` + conditional NodeSource install), so the Minecraft Vessel works out of the box in Docker with no extra build flags — only non-Docker / bare-metal deployments need to install Node themselves, or opt out of the baked-in Node with `docker build --build-arg INSTALL_NODE=false …`. The provisioner runs the bridge as a **non-root** subprocess and returns a clear error if `node`/`npm` are missing. Uses offline auth; real Microsoft/XBL auth is out of scope. **The bridge's Node runtime is self-contained inside the plugin package.** `interface/minecraft_provisioner.py::BridgeProvisioner` keeps the whole runtime under `plugins/rift_vessel/minecraft/mineflayer/` (constant `_BRIDGE_RUNTIME_SUBDIR = "mineflayer"`): a **committed** `package.json` pins the deps (`mineflayer`, `mineflayer-pathfinder`, `minecraft-data`), and `node_modules/`/`bridge.json`/`bridge.log` are per-run artefacts (gitignored, installed at first run via `npm install` into that folder, or pre-bundled in the shipped zip for a fully offline package). The bridge *script* `minecraft_bridge.js` stays in the plugin folder one level up and is executed with `NODE_PATH` prepended with `mineflayer/node_modules`, so `require('mineflayer')` resolves against the package's own modules regardless of the script's location. The whole `plugins/rift_vessel/minecraft/` tree is therefore self-sufficient and zip-shippable — nothing lives under a shared `/opt` path that a container recreate would lose. Tests override the location with an explicit constructor `bridge_root` (or env `MINECRAFT_BRIDGE_ROOT`). **Bridge memory footprint — pin the render distance or Node OOM-crashes in ~2 min.** mineflayer caches every chunk the server streams, so on a normal render distance the Node old-space grows unbounded toward its ~4 GB default heap limit; observed live: RSS climbs to ~3.9 GB then the process dies with `FATAL ERROR: Ineffective mark-compacts near heap limit — JavaScript heap out of memory` (via `node::OOMErrorHandler`) at ~137 s, killing the session shortly after a successful connect. Two guards prevent this: (1) `minecraft_bridge.js` passes `viewDistance: 'tiny'` in the `createBot` options (the bot does not need to see far to play, so the smallest view keeps the chunk cache tiny — root fix); (2) `interface/minecraft_provisioner.py::_bridge_env()` appends `--max-old-space-size=512` to `NODE_OPTIONS` on the bridge subprocess (safety belt — forces aggressive GC well before the 4 GB limit). Validated: with both guards the bridge holds ~195 MB RSS and stays alive indefinitely while playing autonomously. A successful `/connect` is NOT proof of a durable session — poll `/health` over several minutes to confirm the bridge survives.
+
+**Vessel config keys:** `ACTIVE_VESSEL` (`"disabled"`), `VESSEL_SETTINGS`, `VESSEL_SESSION_COOLDOWN_SEC` (3600), `VESSEL_AUTONOMY_ENABLED` (False — enable autonomous play, both layers), `VESSEL_WILL_INTERVAL_SEC` (45, clamped `[10, 3600]`, falls back to the legacy `VESSEL_BEAT_INTERVAL_SEC` — seconds between slow volition/will beats), `VESSEL_WILL_QUIET_SEC` (60, clamped `[0, 3600]`, `0` disables — quiet window a player interaction must have elapsed before the will beat may fire, so a directly-addressing player is answered reactively rather than ignored by the "on your own" volition prompt), `VESSEL_MOTOR_ENABLED` (True — enable the fast motorics reflex), `VESSEL_MOTOR_INTERVAL_SEC` (3, clamped `[1, 60]` — seconds between fast motor ticks that move the body with no LLM). The Minecraft connector is enabled/disabled via its plugin toggle `PLUGIN_ENABLED__minecraft_vessel` (no `MINECRAFT_BRIDGE_ENABLED` key). Minecraft keys: `MINECRAFT_BRIDGE_RUN_AT_START` (False — optional boot pre-warm; the bridge otherwise starts **on demand** when the connector connects, i.e. when Synth enters the world), `MINECRAFT_BRIDGE_HOST` (127.0.0.1, advanced), `MINECRAFT_BRIDGE_PORT` (8137, advanced), `MINECRAFT_SERVER_HOST` (127.0.0.1), `MINECRAFT_SERVER_PORT` (44383), `MINECRAFT_BOT_USERNAME_OVERRIDE` (empty, advanced — falls back to `SYNTH_NAME`), and the skin keys `MINECRAFT_SKIN_FILE` (empty — file upload in the plugin card, served over HTTP)/`MINECRAFT_SKIN_MODEL` (classic — `select` dropdown, `classic`/`slim`)/`MINECRAFT_SKIN_PUBLIC_BASE_URL` (empty, advanced — public base URL the MC server uses to fetch the skin; when empty it is auto-derived from the WebUI host, substituting the machine's primary LAN IP for a loopback host via `_detect_lan_ip()` so a same-LAN server can reach it out of the box; set explicitly for a VPN/public/reverse-proxy address)/`MINECRAFT_SKIN_COMMAND_TEMPLATES` (empty, advanced — newline-separated list of chat commands tried in order at spawn; empty tries both built-in provider syntaxes)/`MINECRAFT_SKIN_COMMAND_TEMPLATE` (empty, advanced — legacy single-command override).
+
+**Minecraft skin (offline-mode caveat).** A real client-side skin *upload* is impossible for an offline-mode Mineflayer bot — the skin is decided server-side (username/UUID or a skin-management plugin/mod), and Mineflayer only exposes read-only skin data + cape/sleeve visibility toggles, never the texture. The supported path is a **server-side skin provider**; two are supported out of the box: the classic **SkinsRestorer** Bukkit/Spigot plugin (`/skin url <url>`) and the **SkinRestorer** Fabric/Forge/NeoForge/Quilt mod by Lionarius (`/skin set web <model> "<url>"` — the URL **must** be double-quoted). The skin PNG is **uploaded directly** from the plugin card (`MINECRAFT_SKIN_FILE`, a `register_exposed_var(..., ui_type="file")` upload) and served by SyntH at `<base>/api/config/MINECRAFT_SKIN_FILE/file` — where `<base>` is `MINECRAFT_SKIN_PUBLIC_BASE_URL` if set, else auto-derived from the WebUI host/port (the MC server must be able to reach it). Because providers use different syntaxes, the connector's `_apply_skin()` **tries every configured command in turn** at spawn — the server accepts the one it understands and ignores the rest, so both providers work with **no keyword logic**. Resolution order (first non-empty wins): `MINECRAFT_SKIN_COMMAND_TEMPLATES` (newline-separated list) → the legacy `MINECRAFT_SKIN_COMMAND_TEMPLATE` (single) → the built-in defaults covering both providers (`/skin set web {model} "{url}"` then `/skin url {url}`); each substitutes `{url}` and `{model}`. Commands are forwarded to the bridge's `skin` action (`bot.chat`). Fast-Lane connector action (no `external_effects`), best-effort — if `MINECRAFT_SKIN_FILE` is empty no command is sent, and a failed/ignored command never breaks the session.
+
+### Working autonomously on the Vessel (agent-mode rules)
+
+When tasked with Vessel work, an agent is expected to work **autonomously and
+end-to-end** — the human may step away from the computer for long stretches.
+Operate under these rules:
+
+- **Iterate freely.** Make changes, re-iterate, rebuild the container when
+  needed, and test on your own. Do not stop after a single attempt; keep
+  refining until the acceptance criteria are met (still honouring the 2-attempt
+  limit *per identical error* — a repeated identical failure means escalate, not
+  a hard cap on total iterations).
+- **Drive Synth in-world for testing.** You may ask Synth to join a world (do it
+  via the OpenAI-compatible API, see §9), read the logs, and modify the code.
+- **You may join the game world yourself** with a separate Mineflayer instance
+  named **`CoachAgent`** to observe/interact while Synth plays.
+- **Be honest and open.** If anyone in-world asks who you are, answer truthfully
+  that you are a coding agent and be transparent about what you are doing — no
+  secrets.
+- **Every acceptance criterion carries its own scope.** Tag each as
+  **Minecraft-specific** (adapter) or **Rift Vessel core** (usable across all
+  worlds), per the Scope rule above (a capability common to most games belongs
+  in the core; a game-specific mechanic belongs in that game's adapter/plugin).
+- **Do not change any engine** (e.g. cortex) while doing Vessel work.
 
 ---
 
@@ -247,6 +428,61 @@ SyntH is a persistent cognitive entity; a **Vessel** is a layer of embodiment in
 - Must forward all input into the core message chain and dispatch outputs from it.
 - Never bypass the chain.
 - Register actions via `get_supported_actions()`.
+
+### Interface layout, icons and guides
+
+Interfaces have **no base class** (they are duck-typed) and register themselves
+at import time by calling the module-level `register_interface(name, self)`.
+
+**Multi-file interfaces live in a sub-folder**, mirroring the multi-file plugin
+convention from §4. The four bot interfaces (Telegram, Discord, Matrix, Fluxer)
+each own a self-contained folder that ships their WebUI assets alongside the
+code:
+
+```
+interface/<module>/
+    <module>.py        # the interface module (loader recurses via pkgutil into packages)
+    __init__.py        # package shim — re-exports the submodule under interface.<module>
+    icon.<ext>         # png/svg/webp/jpg/jpeg/gif, served by the WebUI Interfaces tab
+    guide.md           # setup guide rendered in the WebUI detail pane
+```
+
+The folder is named after the **module** (not the component), so the historical
+`interface.<module>` import path keeps working: `interface/telegram_bot/telegram_bot.py`
+(component `telegram_bot`), `interface/discord_interface/discord_interface.py`
+(component `discord_bot`), `interface/matrix_interface/matrix_interface.py`
+(component `matrix_chat`), `interface/fluxer_interface/fluxer_interface.py`
+(component `fluxer_bot`).
+
+The `__init__.py` shim imports the submodule as a **module** (never `from pkg
+import <mod>`, which would resolve a same-named module-level global — e.g.
+`discord_interface = DiscordInterface(...)` — instead of the module) and rebinds
+the package to it so both `import interface.<module>` and
+`from interface.<module> import Symbol` keep working:
+
+```python
+import sys as _sys
+import interface.<module>.<module> as _mod
+from interface.<module>.<module> import *  # noqa: E402,F401,F403
+
+_sys.modules[__name__] = _mod
+```
+
+Interface **discovery** (`core/core_initializer.py::_discover_interfaces`)
+imports both flat modules *and* packages (sub-folders); the instance-init loop
+dedupes by `id(mod)` so the shim's two `sys.modules` entries don't double-init.
+The WebUI resolves each interface's `icon.<ext>`/`guide.md` from its on-disk
+directory: `register_interface` derives `dir_path` from the instance's
+`__module__` file's parent, which now points at the sub-folder. The
+plugin/interface manager (`core/webui.py`) discovers the icon by scanning that
+directory for `icon.<ext>` (png/svg/webp/jpg/jpeg/gif, in that priority order)
+and derives the MIME type automatically — Fluxer, for instance, ships an
+`icon.svg`. The OpenAI API Server (component `ollama_serve`) follows the same
+sub-folder layout: `interface/openai_api_server/openai_api_server.py` +
+`icon.png` + `guide.md`. Any remaining legacy single-file interface resolves to
+`interface/` and falls back to a bundled
+`res/synth_webui/static/component_icons/<name>.png` and a sibling
+`<name>.guide.md`.
 
 ### Outbound file sending
 
@@ -266,9 +502,10 @@ path-safety and MIME-detection helper `core/outbound_file_utils.py`:
 |--------|-----------|----------|----------|
 | `send_file_telegram_bot` | `interface/telegram_bot.py` | `path`, `interface_path` | `chat_name`, `caption` |
 | `send_file_discord_bot` | `interface/discord_interface.py` | `path` | `interface_path`, `target`, `channel_id`, `caption` |
+| `send_file_fluxer_bot` | `interface/fluxer_interface.py` | `path`, (`channel_id` or `interface_path`) | `caption` |
 | `send_file_matrix_chat` | `interface/matrix_interface.py` | `path`, `target` | `caption`, `thread_event_id` |
 
-All three are `security_level: "medium"`, `external_effects: ["filesystem"]` — so the
+All four are `security_level: "medium"`, `external_effects: ["filesystem"]` — so the
 router 2.0 auto-routes them to the Agent Lane, and (like every action) each is
 auto-exposed as an MCP tool (`synth_send_file_*`). Captions longer than the
 interface limit are split into a follow-up text message.
@@ -369,109 +606,169 @@ When `eyes_closed > 0.5`, blink and saccade loops are automatically suspended un
 ### First-time setup after cloning
 
 ```bash
-uv sync                   # install all dependencies including MCP server deps
-npx gitnexus analyze      # build the code intelligence index (one-time, ~1-2 min)
+uv sync
 ```
 
-MCP servers (`synth-logs`, `synth-db`, `synth-cortex`, `gitnexus`, `affine`) are pre-configured in `.mcp.json` and `.vscode/mcp.json` — no manual setup needed after the above two commands.
+Use the repository’s configured MCP servers only after their dependencies and credentials are available.
 
-> **Affine MCP one-time credential setup:** credentials are stored in `~/.config/affine-mcp/config`, not in the repo. If running on a new machine, write the file (see §8a below).
+### Developer MCP usage
 
-### §8a. Affine MCP — Project Planning Board
+- Prefer a configured developer MCP server when its tools directly match the task; use targeted MCP results to reduce broad file, log, database, or codebase inspection.
+- At the start of relevant work, verify that the required MCP server and tool are available in the current agent session. Configuration on disk alone does not prove that the session loaded them.
+- If a required or explicitly requested MCP server or tool is unavailable, notify the user promptly, name what is missing, and state the affected workflow. Do not silently substitute a slower or less precise path.
+- After notifying the user, use a safe local fallback when one exists and the request does not require that specific MCP server. If no suitable fallback exists, stop and request direction.
+- Do not call MCP tools merely because they are available; select them when they are relevant and likely to return narrower, more useful context than general-purpose inspection.
 
-The project planning board lives at **https://board.zwiz.town** (self-hosted AFFiNE instance).
-The `affine` MCP server (v1.13.0+) is pre-configured in `.mcp.json` and exposes pages, blocks, and search from that board.
+Never use `pip install` or create an ad-hoc virtual environment. Dependency changes go through `uv` so the lockfile remains authoritative.
 
-**Agent user:** `agent@synth.io`
+### Test environment
 
-**One-time credential setup (per machine):**
+Run Python tests through the repository-managed environment. Prefer `uv run pytest`;
+when invoking the interpreter directly, use `.venv/Scripts/python.exe` on Windows or
+`.venv/bin/python` on Linux/macOS. Do not use bare `python -m pytest` or `pytest`,
+because the system Python may not have the test dependencies installed and can produce
+a misleading "pytest is not available" result.
 
-```bash
-npm install -g affine-mcp-server
+### Before editing
+
+1. Read the relevant wiki/docs and nearby tests.
+2. Inspect repository status and existing uncommitted work.
+3. Trace the current execution path.
+4. Use TencentDB `code_impact` for symbols you plan to modify materially when the MCP tool and code graph are available.
+5. Identify the smallest safe change and its validation plan.
+
+Do not overwrite unrelated work or “clean up” files outside the task.
+
+### While editing
+
+- Keep changes scoped.
+- Follow existing naming, architecture, and error-handling patterns.
+- Add complete Python parameter and return annotations.
+- Prefer explicit failure over ambiguous partial success.
+- Add or update focused tests with the behavior change.
+- Avoid broad rewrites unless the task requires one.
+- Do not silently alter public schemas, action names, config keys, database layouts, or import paths.
+
+### Two-attempt escalation rule
+
+After two materially different attempts at the same failing fix, stop repeating speculative edits.
+
+Report:
+
+```text
+⚠️ Stuck on <error or unresolved condition>.
+Evidence collected:
+- ...
+Attempts made:
+- ...
+Likely next investigation:
+- ...
 ```
 
-Then write `~/.config/affine-mcp/config` (mode 600):
+This rule does not prohibit deeper investigation; it prevents looping on the same unsupported fix.
 
-```
-AFFINE_BASE_URL=https://board.zwiz.town
-AFFINE_EMAIL=agent@synth.io
-AFFINE_PASSWORD=meme12345
-```
+### Git rules
 
-Verify with:
-
-```bash
-affine-mcp doctor
-# Expected: ✓ graphql-auth: agent@synth.io (1 workspace(s))
-```
-
-**When to use the Affine MCP:**
-
-| Task | Use it when… |
-|------|-------------|
-| Check project plans / roadmap | User asks about what's planned or in-progress |
-| Read meeting notes / decisions | Background context on a design decision |
-| Look up task status | Before starting a feature to see if it's already tracked |
-| Create/update pages | User explicitly asks to update the planning board |
-
-**Never** write to the board without explicit user instruction — it's a shared planning space.
+- Do not push.
+- Do not stage or commit unless the user explicitly asks.
+- Never discard, reset, rewrite, or amend the user’s work without explicit authorization.
+- Before a requested commit, inspect the diff and run the required validation.
+- Recheck affected callers and dependency paths with TencentDB code-graph tools after non-trivial code changes and before committing.
 
 ---
 
-### Toolchain: Astral (`uv` + `ruff` + `ty`)
+## 7. Investigation and Debugging
 
-| Task | Command |
-|------|---------|
-| Sync/install deps | `uv sync` |
-| Add a package | `uv add <package>` |
-| Add a dev tool | `uv add --dev <tool>` |
-| Format | `uv run ruff format .` |
-| Lint + autofix | `uv run ruff check --fix .` |
-| Type check (scoped) | `uv run ty check path/to/file.py` |
-| Run tests | `uv run pytest` |
+When asked to fix a runtime problem:
 
-**Never use `pip install` or `python -m venv`.** They break the lockfile.
+1. Reproduce or locate the concrete failure.
+2. Read relevant logs before proposing a cause.
+3. Trace the execution path from the observed symptom.
+4. Compare current behavior with focused tests and documentation.
+5. Form a falsifiable hypothesis.
+6. Make the smallest change that addresses the evidenced cause.
+7. Re-run the reproduction and regression tests.
 
-### Validation Sequence (mandatory before marking any task done)
+Do not answer a bug-fix request with guesses when logs or runtime evidence are available.
 
-1. `uv run ruff format .`
-2. `uv run ruff check --fix .`
-3. `uv run ty check <files_you_edited>` — scoped only, never the whole repo.
-4. `uv run pytest`
+Useful commands:
 
-If any step fails, fix it before proceeding.
+```bash
+docker exec synth-dev tail -f /app/logs/synth.log
+docker exec synth-dev tail -f /app/logs/synth.log | grep -E "run_action|execute_action"
+docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
+```
 
-### Hard Rules
-
-- **No `git push`.** Stage and commit locally if asked. The human pushes.
-- **No `git add` or `git commit`** unless the developer explicitly asks.
-- **2-attempt limit.** If the same error persists after 2 fix attempts, stop and output:
-  `"⚠️ Stuck on [Error]. Requesting human or advanced model intervention."`
-- **Type hints required.** All Python functions need complete annotations (params + return).
-- **Cross-platform policy.** Default runtime is Linux containers. No Windows/macOS-specific primary code paths. Platform-specific logic only as a secondary, guarded case (`sys.platform`).
-- **Read logs if a bug fix is requested**": always read container logs or logs folder if some issue raises and the user asks your bug fixing in order to find the real cause of the issue, do not reply with guesses but with a real analisys of the logs and the code
-- **No keyword-based implementations.**
-  Never design or implement features whose behavior depends primarily on detecting specific words, phrases, trigger terms, or regular expression matches, as this won't work in a multi language environment.
-  Avoid logic such as:
-  - `if message contains X then do Y`
-  - keyword lists
-  - trigger-word routing
-  - regex-based intent detection
-  - hardcoded phrase matching for feature activation
-- **Never use SQL reserved words as bare column names.**
-  `timestamp` is a PostgreSQL reserved word. A bare `timestamp` column on a fresh Postgres install is auto-translated by the ORM to `timestamptz`, producing an invalid schema that leaves SyntH broken (T-pose, unable to do anything). Always name time columns explicitly, e.g. `created_at`, `event_timestamp`, `updated_at`. This applies to every DDL in `init-db.sql`, `scripts/sql/*.sql`, inline plugin DDL, and `core/migrations.py`. Public API dict keys returned to the WebUI/JS may still be named `"timestamp"` — only the DB-column SQL references are forbidden from using the reserved word.
+Record genuinely recurring, non-obvious defects in the repository’s established issue/changelog location. Do not duplicate resolved issue narratives inside `AGENTS.md`.
 
 ---
 
-## 9. Testing
+## 8. TencentDB Knowledge MCP Rules
 
-- All persistent tests go in `tests/`. Throwaway tests may live at the repo root but must be deleted when done.
-- Config: `pytest.ini` — `asyncio_mode = auto`, markers: `asyncio`, `slow`, `integration`.
-- Run: `uv run pytest`
+Use the `tencentdb-knowledge` developer MCP server as code-intelligence and repository-wiki support, not as a substitute for reading current source code and tests.
 
-### Testing via Ollama API
+The launcher is `scripts/tencentdb_knowledge_mcp.py`. It starts or reuses the local Knowledge Service and exposes query-only MCP tools. It must remain separate from Synth runtime MCP configuration under `config/synth_mcp.json`.
 
-The Ollama-compatible API (port 11435) can be used for quick testing without Telegram/Discord:
+The default repository identifiers are supplied by the launcher through `TDAI_CODE_GRAPH_ID` and `TDAI_WIKI_ID`. Use the configured values when invoking tools; do not invent IDs.
+
+### Required before changing a symbol
+
+Run `code_impact` for each materially modified function, class, or method when the server and indexed graph are available.
+
+- Review direct callers and affected execution flows.
+- Warn the user before proceeding when the result is HIGH or CRITICAL risk.
+- Update all direct dependents required by the change.
+- Use `code_callers`, `code_callees`, and `code_node` to resolve ambiguous or incomplete impact results.
+
+### Required for refactors
+
+- Use `code_search` or `code_explore` to locate the relevant symbols and files before extracting or moving code.
+- Inspect callers and callees before renaming a symbol; do not rely on global text replacement.
+- Re-run `code_impact` after the refactor and confirm the affected dependency paths match the intended scope.
+
+### Required after non-trivial code changes
+
+Re-query impact for materially changed symbols and confirm the returned callers and dependency paths match the intended scope. Repeat the check before a requested commit if the working tree changed afterward.
+
+Use `code_status` to verify graph availability before trusting graph results. If the graph is unavailable, stale, or the MCP server/tool is missing, notify the user as required by the Developer MCP usage policy and fall back to direct source search and tests when safe.
+
+Use `wiki_search` and `wiki_read` for focused repository documentation lookup. Treat indexed wiki content as navigation context rather than proof when it disagrees with current implementation or tests.
+
+---
+
+## 9. Validation
+
+Run the narrowest useful checks during development, then complete the applicable final sequence.
+
+### Python changes
+
+```bash
+uv run ruff format <edited paths>
+uv run ruff check --fix <edited paths>
+uv run ty check <edited Python files>
+uv run pytest <focused tests>
+```
+
+Before marking a broad code task complete, run the wider relevant suite:
+
+```bash
+uv run pytest
+```
+
+Do not run whole-repository type checking unless requested; use scoped `ty` checks because the repository may contain unrelated legacy findings.
+
+### Validation expectations
+
+- A passing formatter is not a test.
+- A passing unit test is not proof that container startup works.
+- Changes involving startup, imports, plugins, interfaces, migrations, or Docker require an appropriate smoke test.
+- Changes involving schemas or migrations require validation against the supported database paths.
+- Changes involving an external service must test failure and unavailable-service behavior.
+- Report any checks you could not run and why.
+
+### OpenAI-compatible API smoke test
+
+When appropriate:
 
 ```bash
 curl -X POST http://localhost:11435/api/chat \
@@ -479,471 +776,87 @@ curl -X POST http://localhost:11435/api/chat \
   -d '{
     "model": "default",
     "messages": [
-      { "role": "system", "content": "Respond with ONLY valid JSON: {\"actions\": [...]}" },
-      { "role": "user", "content": "Your test message" }
+      {"role": "system", "content": "Respond with ONLY valid JSON: {\"actions\": []}"},
+      {"role": "user", "content": "Your test message"}
     ],
     "stream": false
   }'
 ```
 
-Monitor: `docker exec synth-dev tail -f /app/logs/synth.log | grep -E "run_action|execute_action"`
-
 ---
 
 ## 10. Documentation
-After any substatnial code change or feature addition evaluate a documentation update.
 
-- Location of Wiki/Documentation: `docs/` (Sphinx, ReadTheDocs format, English).
-- README.md is located in the project root
-- Evaluate whether your changes require a docs update. If they do, update docs as part of the task.
-- At the same time update this file, AGENTS.md if something critical is missing for the future iterations or if the information need to be updated
+### Wiki synchronization
+
+When asked to update the exported repository wiki, follow
+`docs/WIKI_MAINTENANCE.md`.
+
+Treat the requested Git range as the change scope, current source and tests as
+implementation evidence, and `docs/wiki/` as the structural baseline. Do not
+regenerate the export unless explicitly requested. Patch affected pages in both
+wiki trees where applicable, apply the documented metadata rules, validate
+links and references, and report the resulting wiki diff.
+
+Update documentation when a change affects:
+
+- public behavior;
+- installation or deployment;
+- configuration;
+- action schemas;
+- plugin/interface layout;
+- architecture or extension points;
+- troubleshooting;
+- persistent data;
+- security boundaries.
+
+Documentation locations:
+
+- `docs/wiki/en/content/` — exported reader-facing wiki
+- `docs/wiki/knowledge/en/` — exported generated subsystem knowledge
+- `docs/` — maintained user/developer documentation
+- component `guide.md` — source of truth for plugin/interface guides
+- root `README.md` — project entry point
+- `CHANGELOG.md` — user-visible or recurring change history
+
+Do not turn `AGENTS.md` back into an encyclopedic architecture dump. Keep durable operating constraints here and put subsystem detail in the wiki or maintained docs.
+
+When code changes invalidate a wiki page, update that page in the same task or clearly report the stale page.
 
 ---
 
-## 11. Container & Infrastructure Notes
+## 11. Infrastructure Notes
 
-**Container restart:**
+Container rebuild:
+
 ```bash
 docker compose up -d --build
 ```
 
-**Dev container restart:**
-Some devs might want to have a developemnt deploy, usually called `docker-compose-dev.yml`
+Development deployment, when that file/environment exists:
+
 ```bash
-docker compose -f docker-compose-dev.yml --env-file .env-dev up -d --build && rm -rf logs/dev/*
+docker compose -f docker-compose-dev.yml --env-file .env-dev up -d --build
 ```
 
-**Selkies TLS:** HTTPS on container port 3001, HTTP on 3000. Self-signed certs at `/config/ssl/`.
+Do not delete logs before collecting evidence for a bug. Clear generated logs only when explicitly required and after preserving relevant diagnostics.
 
-**Grillo monitoring:**
-```bash
-docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
-```
+Selkies convention:
 
-## 12. Known Issues & Recurring Errors
-
-> **Agent instruction:** When you encounter a bug, error pattern, or non-obvious workaround that isn't already listed here, append a new entry before finishing your session in the CHANGELOG.md. Use the format below. Do **not** fix it unless asked — the point is to stop future agents from wasting tokens rediscovering it.
->
-> ```
-> ### Short title  <!-- YYYY-MM-DD -->
-> **Symptom:** what shows up in logs or at runtime
-> **Location:** file(s) involved
-> **Status:** known / in progress / workaround in place
-> **Notes:** anything that helps the next agent understand it fast
-> ```
-
-> Resolved issues (Status: fixed) have been moved to [`FIXED_ISSUES.md`](FIXED_ISSUES.md).
+- HTTP: container port `3000`
+- HTTPS: container port `3001`
+- certificates: `/config/ssl/`
 
 ---
 
-### Grillo observer feeds days-old chat snippets as "recent" — no freshness gate, no age markers, so outreach continues stale threads  <!-- 2026-07-12 -->
-**Symptom:** After outreach started firing again, the first beat after an idle period reached into a group chat grabbing very stale context, and the subsequent DM outreaches were topically relevant but to things that happened days ago. Langfuse trace `7f4dbeda-a3fc-49db-8a45-4a2042f32e06` (observer beat) shows the injected snippet block containing messages dated `2026-07-10`, `2026-07-06`, `2026-07-03`, `2026-07-02` — 1.7 to 10 days old — under a header that called them "recent chat snippets," and the model's own rationale was "reacting to how needy I was in **that last snippet**," i.e. it treated a 2-day-old group line as the current moment and continued it.
-**Location:** `plugins/grillo/grillo_chat_observer.py::_collect_recent_snippets` (took the last 2 messages of each recent interface_path with NO age filter) and `_build_observer_prompt` (header asserted "recent," snippets carried a raw ISO timestamp but no relative-age framing). This is the concrete recurrence of the open 2026-07-05 "conversation-history turns carry no timestamps — staleness is invisible to the model" note, on the observer/outreach path specifically.
-**Status:** fixed 2026-07-12.
-**Root cause:** The observer's snippets are the only fresh-context signal outreach reacts to, but nothing conveyed their age. The single existing time gate (`self_skip_window`) only skips a chat when the *synth* spoke last recently — it does nothing to stop ancient *human* lines being presented as live. Small models can't infer staleness from a bare ISO timestamp, so a days-old line reads as "now" and gets continued.
-**Fix:** `_collect_recent_snippets` still loads the last X entries (config `GRILLO_OBSERVER_SAMPLES`, default 10) but now annotates each snippet with a relative-age marker via a new `_humanize_age` helper (`age:just now` / `age:Nm ago` / `age:Nh ago` / `age:Nd ago`), and `_build_observer_prompt`'s header tells the model to treat older snippets as historical context and not continue a stale line as if it just happened. The model judges staleness itself from the markers — there is deliberately **no hard age gate**, so outreach always has context behind it. (An earlier draft added a `GRILLO_OBSERVER_SNIPPET_MAX_AGE_HOURS` cutoff; it was removed as wrong — with `samples=10` a normal day of use burns through any fixed window, and an over-tight gate can filter every snippet to empty and force context-less outreach. Temporal tagging is the correct mechanism, not filtering.) Validated: scoped `ruff`/`ty` clean; `tests/test_grillo_observer.py` = 6 passed, 2 failed — the 2 failures are the pre-existing DB-refused (`WinError 1225`) tests documented below (confirmed identical via `git stash` A/B on `develop`).
-**Notes:** The eligible-targets `idle=` value and the `age:` snippet marker are independent (target idle = whole-chat recency; snippet age = per-message). The turn-by-turn `conversation_history` block (separate from observer snippets) still lacks per-turn age markers — see the 2026-07-05 note; this fix only covers the observer snippet path.
+## 12. External Planning Systems
 
----
+The AFFiNE board is a shared planning system.
 
-### New Vue stage VRM freezes on `skin_change` — intro+outro descriptor with no `loop` section dead-ends the client state machine  <!-- 2026-07-12 -->
-**Symptom:** On loading the new VRM stage (`type=stage`), the model renders, plays a short motion (looks at its left hand), then freezes mid-pose with mangled fingers and a fixed "creepy" smile while the render loop keeps running. Reproduces on every VRM-set / stage connect. `synth.log` shows the (cosmetic) backend line `[KaradaStateServer] Animation 'Look Around.fbx' has both 'play_once' flag and structured sections (intro/outro). 'play_once' will be ignored ... Structure: intro=True, loop=False, outro=True` (animation_handler.py:1494) immediately after `SET ACTIVE VRM END`.
-**Location:** `frontend/src/composables/vrm/animation.ts::updateDescriptorStateMachine` (new Vue-stage Karada engine). Trigger descriptor: `skins/Rei/animations/skin_change/Look Around.fbx.json` (`intro` 0–60, `outro` 61–120, `play_once: true`, **no `loop`**). Same latent gap exists in the legacy `res/synth_webui/js/vrm-animation-engine.mjs`.
-**Status:** fixed 2026-07-12 (new stage only).
-**Root cause:** `skin_change` is the stage bootstrap animation. Its descriptor has an intro and an outro but NO `loop` section. `playAnimation` starts the intro as `LoopOnce` with `clampWhenFinished = true`. `updateDescriptorStateMachine` only advanced intro→loop `&& loop` — with no loop it did nothing, and the outro is normally only fired externally by `stopAnimation()`, which never runs for skin_change (no follow-up state arrives). So the intro action clamped permanently on its last frame (frame 60 = "looking at left hand"); the mangled fingers/fixed smile are that frozen retargeted last frame with no facial descriptor to reset expressions. The state machine had no path for "intro finished, no loop".
-**Fix:** when the intro completes and there is no `loop`, the state machine now drives **intro → outro → idle** (via `playSection('outro')` + a `setTimeout` sized to the outro duration that calls `transitionToIdle`), or **intro → idle** directly when there is also no outro. The `currentSection === 'intro'` guard prevents the per-frame ticker from re-triggering once outro starts. Verified: `npm run typecheck` (vue-tsc) clean. **Deploy reminder:** the Docker-served stage bundle is built from the image — a frontend rebuild (or dev server) is needed for this to reach the browser; host-side `.ts` edits alone do not hot-reach the container-served UI (see the "Docker-served WebUI can keep stale static JS" entry).
-
----
-
-### New Vue stage VRM intermittently snaps to (partial) T-pose while idling — base-idle floor drop lowers the SAME action serving as foreground for skinless-idle skins  <!-- 2026-07-12 -->
-**Symptom:** On the new VRM stage, after idling normally for a while the model snaps to a T-pose (or a mangled near-T-pose, "tweaking out"), then recovers to normal idle a long time later. Correlated by the reporter with a `304 Not Modified` for a **Rei** idle asset in the console — while the active skin was **2B**. Recovery lines up with the next Grillo `write`→`idle` beat (~30 min cadence in `synth.log`: 01:38, 02:08, 02:37).
-**Location:** `frontend/src/composables/vrm/animation.ts::scheduleBaseIdleFloorDrop` (+ its callers `playAnimation`/`playSection`/`transitionToIdle`); interacts with `frontend/src/composables/vrm/avatar-driver.ts::createAvatarDriver` (idle fallback = `idles[0]`) and `animation-cache.ts` (returns one shared clip object per URL). Only surfaced after the 2026-07-12 skin_change fix let the model settle cleanly into a plain `idle`.
-**Status:** fixed 2026-07-12 (new stage only).
-**Root cause:** Skins with no idle animation of their own (e.g. 2B) fall back to `idles[0]` = **Rei's idle** (the "304 for Rei while on 2B"). The persistent `baseIdleAction` is built from that fallback idle clip. When a plain `idle` state then arrives, `playAnimation` does `this.currentAction = this.mixer.clipAction(clip)` with that same idle clip — and three.js `AnimationMixer.clipAction()` is **cached by clip object**, so `currentAction` becomes the *exact same action instance* as `baseIdleAction`. `playAnimation`'s idle path then calls `scheduleBaseIdleFloorDrop()`, whose 420ms timer sets the base idle's weight to the `0.12` floor — but that base idle IS the only full-weight foreground driver, so the skeleton drops to ~12% animation / ~88% bind pose = the (partial) T-pose. It self-recovers on the next `write` beat because `write` uses a *different* clip (Texting.fbx) → a distinct foreground action at full weight is restored.
-**Fix:** the floor-drop timer now checks `this.currentAction !== this.baseIdleAction` at **fire time** before lowering the weight — so when the base idle is itself the current foreground action the drop is a no-op and it stays at full weight. Fire-time (not schedule-time) checking also closes the 420ms race and covers all three schedulers (`playAnimation` idle `else` branch, `playSection`, `transitionToIdle`). `transitionToIdle`'s own base-idle-promotion path already set weight 1.0, so it was unaffected. Verified `npm run typecheck` clean. Same deploy reminder as the entry above (stage bundle is image-built; needs a frontend rebuild / dev server).
-
----
-
-### Grillo outreach silently stops firing when the `interface_paths` registry is empty (missed backfill after table (re)creation)  <!-- 2026-07-12 -->
-**Symptom:** Grillo outreach (the folded-in `grillo_chat_observer` beat) stops attempting outreach entirely — Langfuse shows zero outreach attempts, and `synth.log` logs `[grillo_chat_observer] No fragments and no eligible targets; skipping` (grillo_chat_observer.py:503) on every hourly run. The scheduler itself is healthy (other beats fire on schedule).
-**Location:** `plugins/grillo/grillo_chat_observer.py` (`_collect_recent_snippets`, `_collect_eligible_targets` — both source candidate chats ONLY from `core.interface_paths.get_recent_interface_paths`), `core/interface_paths.py` (`touch_interface_path`, `init_interface_paths_table`, `get_recent_interface_paths`).
-**Status:** fixed 2026-07-12.
-**Root cause:** The observer's candidate chats come exclusively from the `interface_paths` table via `get_recent_interface_paths()`. That table is populated ONLY by `touch_interface_path()` on live message flow (`core/chat_context_manager.py::add_message_to_context`). On this Postgres-first deployment the table was created *after* a window where touches were failing (`relation "interface_paths" does not exist`, seen in the 2026-07-10 logs), so it was created empty and **never backfilled** — `touch_interface_path` only writes on NEW inbound traffic, and no new non-self messages arrived for ~2 days. Empty table → `get_recent_interface_paths()` returns `[]` → both `fragments` and `eligible_targets` are empty → the guard at grillo_chat_observer.py:502 returns before outreach is ever attempted, every hour, indefinitely. `chat_history_cache` had 40+ active chats the whole time, but the outreach path never consults it directly — that coupling is the fragile point (registry out of sync with the chat cache = silent outreach death, no error).
-**Fix:** Two layers in `core/interface_paths.py`. (1) `init_interface_paths_table()` now calls a new idempotent `backfill_interface_paths_from_history()` on startup, which seeds one row per distinct `chat_history_cache.interface_path` NOT already present, using that chat's `MAX(timestamp)` as `last_used` (float epoch). Backend-aware: Postgres `EXTRACT(EPOCH FROM MAX(timestamp))`, MariaDB `UNIX_TIMESTAMP(MAX(timestamp))`. Existing rows are never touched (`touch_interface_path`'s `last_used` stays authoritative); `segment_labels` left NULL (refreshed on next touch/resolve). (2) `get_recent_interface_paths()` now falls back to a new `_recent_paths_from_history()` (derives recent paths straight from `chat_history_cache`) whenever the registry query returns empty — so a missed backfill can never again silently starve the observer OR the other 5 consumers (`grillo_dream`, `grillo_impl`, `beat_utils`, telegram `/chats`, `command_registry`). A one-time run of `backfill_interface_paths_from_history()` seeded 28 rows into the live DB to unblock immediately.
-**Notes:** Pre-existing test debt surfaced during validation (NOT caused by this fix, confirmed via `git stash` A/B on `develop`): `tests/test_grillo_observer.py::test_collect_recent_snippets_includes_sender_and_timestamp` and `::test_collect_recent_snippets_skips_recent_bot_messages` both FAIL on unmodified `develop`. They monkeypatch `core.recent_chats.get_last_active_chats_verbose` / `get_chat_path`, but `_collect_recent_snippets` actually calls `core.interface_paths.get_recent_interface_paths` — the mocks target functions the code no longer uses, so the tests only "pass" when the real function reaches a live DB (and fail with `WinError 1225` when the DB refuses the test's separate-event-loop connection). Fix direction if reactivated: monkeypatch `plugins.grillo.grillo_chat_observer.get_recent_interface_paths` (or the import site) instead of the retired `recent_chats` helpers. Left as-is to keep this change scoped.
-
----
-
-### External Vox engines lose the WebUI voice selection — dynamic `<ENGINE>_VOICE` config key was never registered  <!-- 2026-07-10 -->
-**Symptom:** With a Fish Audio (or any external) Vox endpoint active, the WebUI voice picker (`VoiceSettings.vue`) shows the fetched voices but clicking one only *previews* it ("(preview only)" label) — the choice is never persisted, so every turn uses a random/default voice. Built-in KittenTTS is unaffected.
-**Location:** `frontend/src/components/settings/VoiceSettings.vue` (`voicePersistable` gate), `core/webui.py::config_summary` (`GET /api/config` exports only *registered* exposed-var definitions), `core/external_endpoints/registry.py::_sync_registries` (Vox registration), `core/external_endpoints/bridges/vox_bridge.py::_runtime_selected_voice`.
-**Status:** fixed 2026-07-10.
-**Notes:** The WebUI persists the chosen speaker code into config key `<ACTIVE_VOX>_VOICE` (e.g. `FISHAUDIO_VOICE`), and treats a voice as persistable only when that key is present in `/api/config`. `/api/config` returns only *registered* exposed-var definitions. KittenTTS registers `KITTEN_VOICE` statically at import (`plugins/vox_engines/kitten.py`), but external endpoints have a **dynamic** name (chosen by the user) so no static registration exists → the key never appears → `voicePersistable` stays `false` → the selection is never saved → the bridge's `_runtime_selected_voice()` (which reads `<ENGINE>_VOICE`) always finds nothing → Fish falls back to `extra_config`/random. Fix: `_sync_registries` now calls a new `_register_voice_config_key(engine_name, label)` when the endpoint's adapter exposes `list_speakers`, registering `<engine_name.upper()>_VOICE` as an exposed var (`ui_type="select"`, empty `options` — the visible list is populated separately by `/api/vox/speakers`, this only needs to exist so `/api/config` returns the key). Registration is idempotent (`exposed_vars.get_definition` guard + `ExposedVariableRegistry.register` ignores dupes). **Reminder:** media-subsystem registration is NOT hot-reloaded — enabling/repairing an external Vox endpoint on a running instance needs a `docker restart synth` before the key appears (AGENTS.md §12 "Media-subsystem registration is NOT hot-reloaded").
-
----
-
-### Classic WebUI Vox voice picker + preview for external engines (Fish Audio) — two deadlocks + an empty speaker list  <!-- 2026-07-10 -->
-**Symptom:** In the CLASSIC WebUI (`res/synth_webui/js/main.js` + `core/webui_templates/sections/engines.html`, NOT the Vue frontend), selecting `fish-audio` in the Vox engine dropdown never showed a voice picker or preview button like Kitten does. `GET /api/vox/speakers?engine=fish-audio` returned an empty list; the picker auto-hides on an empty list, so nothing appeared.
-**Location:** `core/webui.py` (`vox_speakers` GET `/api/vox/speakers`, `vox_sample` GET `/api/vox/sample`), `core/external_endpoints/bridges/vox_bridge.py` (`ExternalVoxEngine.get_speakers`/`sample`), `core/external_endpoints/adapters/fish_audio_adapter.py` (`list_speakers`), `core/webui_templates/sections/engines.html` (`#vox-voice-select`, `#vox-voice-play-btn`), `res/synth_webui/js/main.js` (generic picker + `loadVoxVoices`/`updateVoxVoiceVisibility`).
-**Status:** fixed 2026-07-10.
-**Notes:** THREE stacked causes, all engine-agnostic in the fix. (1) **Event-loop deadlock:** the async webui handlers called the *synchronous* bridge methods `get_speakers()`/`sample()` (which drive an async adapter) directly on the event-loop thread → deadlock, logged `[vox_bridge:fish-audio] get_speakers failed: TimeoutError`. Fix: call them via `await asyncio.to_thread(engine.get_speakers)` / `asyncio.to_thread(engine.sample, speaker)` in `webui.py`. **Rule:** any sync bridge method that drives an async adapter, invoked from the loop thread, must go through `asyncio.to_thread`. (2) **Empty speaker list:** `fish_audio_adapter.list_speakers` requested `GET /model` with `params={"self":"true", ...}`, which returns ONLY the account's own cloned/custom voices — this account has none → 0 items → picker stays hidden. Direct probe confirmed `self=true`→200/n=0 while dropping it →200/n=5. Fix: `list_speakers` now tries `self=true` first (keeps the list small+relevant when the account has own voices), and if that yields zero it falls back to the popular public library (`{"sort_by":"task_count","page_size":"100"}`), parsing via a new `_fetch_model_page` helper. Result: 100 selectable voices. (3) **Picker was Kitten-only:** the classic WebUI hardcoded Kitten's controls. Added a *generic* `#vox-voice-select` + `#vox-voice-play-btn` shown for ANY engine whose `/api/vox/speakers` returns a non-empty list; selection persists to `<ENGINE.toUpperCase()>_VOICE` (for fish-audio that is literally `FISH-AUDIO_VOICE`, hyphen included) via `POST /api/config`, and the ▶ button plays `GET /api/vox/sample?engine=<e>&speaker=<code>`. Verified end-to-end in the browser: picker populates (100 voices), selection persists (`FISH-AUDIO_VOICE` saved + toast), preview returns HTTP 200 `audio/wav` (~365 KB). **Deploy reminder:** classic WebUI JS/HTML edits need `docker cp` to reach the container-served UI; adapter/webui `.py` edits need `docker cp` + `docker restart synth`. The classic-WebUI picker's visibility is driven by the DROPDOWN selection, not the *active* engine, so you can configure/preview a non-active external Vox engine's voice.
-
----
-
-### Grillo observer "outreach" goes silent after one proactive DM — cooldown gates skip runs invisibly at INFO level  <!-- 2026-07-09 -->
-**Symptom:** The observer beat (`grillo_chat_observer`, the folded-in "outreach") fires once, sends a proactive DM, then apparently never fires again — no ERROR, no log line at all at the hourly mark. The scheduler is actually fine: the hourly `_run_observer()` runs, but every skip path (`No fragments and no eligible targets`, `Decay-driven run but no eligible targets`) logs only at DEBUG, so with `LOGGING_LEVEL=INFO` the runs are invisible.
-**Location:** `plugins/grillo/grillo_chat_observer.py` (`_run_observer`, `_collect_eligible_targets`).
-**Status:** fixed 2026-07-09 — cooldown made minutes-granular + skip logs promoted to INFO.
-**Notes:** After the synth sends an outreach it is the chat's `last_sender`, which (a) hides the chat's snippets for `GRILLO_OBSERVER_SELF_WINDOW` (12 h) and (b) puts the chat on self-cooldown. Historically the cooldown was `GRILLO_OBSERVER_SELF_COOLDOWN_DAYS` (default 3 days) only — one outreach muted the whole network for days. Now: when the days key is **0**, `GRILLO_OBSERVER_SELF_COOLDOWN_MINUTES` (default 45; keep it below `GRILLO_OBSERVER_INTERVAL` or every other run lands inside the cooldown) applies instead, and a new active-conversation guard skips any chat whose last **human** message is younger than `GRILLO_OUTREACH_QUIET_MINUTES` (default 15 — key existed in DB but was previously read by nothing). Days > 0 preserves the strict legacy behaviour. This instance runs days=0. The formerly-DEBUG skip lines ("no eligible targets") now log at INFO, so hourly runs are visible. Remaining gotchas: `recent_chats` is repopulated per-process (right after a restart only chats touched since startup are candidate targets); external `set_config` writes need a process restart (`config_registry` caches in-process, no DB poll); and the prompt still tells the LLM to reach out only with a genuine internal reason, so an hourly run does not guarantee an hourly DM.
-
-### Iris Vision fails on large photos — Harmony `/v1/chat/completions` rejects bodies over ~1 MB, fallback 404 masks it  <!-- 2026-07-09 -->
-**Symptom:** Iris Vision "goes completely into error" on real photo uploads via the `harmonyai` endpoint. Logs show `[openai_compat.py] describe_image failed: HTTP 404: 404 page not found` — misleading. Real failing image was a 933380-byte JPEG.
-**Location:** `core/external_endpoints/adapters/openai_compat.py` (`describe_image`, `_shrink_image_for_request`, `_http_chat_urls`).
-**Status:** fixed 2026-07-09 (deployed via `docker cp` + `docker restart synth`).
-**Root cause:** Harmony's `POST /v1/chat/completions` returns **HTTP 400 "request body too large"** when the base64-encoded JSON body exceeds ~1 MB (1,048,576 bytes). A 933 KB JPEG → ~1.24 MB base64 body → 400. Confirmed by live probes: raw ~730 KB img → 200; ~1.46 MB+ → 400. The adapter then tried the fallback `/api/v1/chat/completions` URL (from `_http_chat_urls()`), which always 404s, and that 404 **overwrote** the meaningful 400 in `last_error` — so the log only showed the 404. This is DETERMINISTIC for large photos, not transient (tiny 1x1 PNG probes returned 200 and misled earlier diagnosis).
-**Fix:** (1) `_shrink_image_for_request()` (new classmethod) downscales/recompresses any image over a raw budget of `_VISION_MAX_RAW_IMAGE_BYTES = 700_000` before base64-encoding — iterates longest-side sizes (1568→512) × JPEG quality (85→55) with Pillow LANCZOS, returns the first candidate under budget. `describe_image` calls it before building the data URL. Verified live: 761 KB img → 380 KB → Harmony returned a full description. (2) The URL loop now collects per-URL errors into a list and joins them, so a trailing fallback 404 no longer hides the real first-URL error. Pillow (`pillow>=10.0.0`) added to `pyproject.toml` dependencies (was installed transitively, now explicit). Applies to ALL OpenAI-compatible vision endpoints, not just Harmony. Note: modern Pillow moved `LANCZOS` to `Image.Resampling.LANCZOS`; the helper resolves it via `getattr(getattr(Image,"Resampling",Image),"LANCZOS",None)` for compatibility. **Distinct** from the 2026-07-08 `iris_model` entry (that fixed a wrong non-vision model; this fixes payload size).
-
-### Inline comments in `.env` poison values when launching from the IDE — and `.env` itself can't fix it  <!-- 2026-07-09 -->
-**Symptom:** A numeric env var silently misbehaves even though `.env` looks correct and `dotenv_values()` parses it fine. Observed as: `SYNTH_WEBUI_HTTPS_PORT=8088   # comment` → the running process's env literally contains `'8088     # comment'` → `int()` fails in `core/webui.py` → silent fallback served HTTPS on the HTTP port and nothing on 8088 (an evening of "empty response"/"connection refused" debugging).
-**Location:** Any `.env` value with an inline `#` comment. Root cause is two-layer: (1) VS Code/Antigravity's Python integration injects the workspace `.env` into terminals/processes with a parser that does **not** strip inline comments; (2) `core/logging_utils.py`/`core/config.py` call `load_dotenv(override=False)`, so the properly-parsed value never overrides the poisoned one already in the environment.
-**Status:** fixed for the webui config path (2026-07-09): `core/webui.py::_clean_env` strips inline `#` suffixes from host/TLS/port vars and logs a WARNING naming the variable; unparsable ports also warn instead of failing silently. Other subsystems reading env vars directly remain exposed.
-**Notes:** Debug this class of problem by reading the *live process* env, not the file: `uv run --with psutil python -c "import psutil; print(psutil.Process(<pid>).environ())"`. Rule of thumb for this repo: comments in `.env` go on their own lines, always.
-
-### `blocklist` rejects webui users: UUID session ids bound against an integer `user_id` column  <!-- 2026-07-08 -->
-**Symptom:** Every webui-originated message logs `[blocklist] Failed to check if user <uuid> is blocked: invalid input for query argument $1: '<uuid>' ('str' object cannot be interpreted as an integer)`. Fail-open (`is_user_blocked` returns False on error), so nothing user-visible breaks — but it's one ERROR log line per webui message, and webui users can never actually be blocked.
-**Location:** `plugins/blocklist.py::is_user_blocked` (typed `user_id: int`), callers pass webui session UUIDs (strings); `blocklist.user_id` is an integer column sized for Telegram ids.
-**Status:** known, not fixed — diagnosis only (2026-07-08).
-**Notes:** Fix direction: either widen the column + type to string (user ids are interface-scoped strings elsewhere in the codebase), or skip the blocklist check for non-numeric ids. Watch for the same assumption in anything else keyed on Telegram-style numeric user ids.
-
-### Windows host runs spam `--- Logging error ---` / `UnicodeEncodeError: 'charmap' codec` for any log line with non-ASCII  <!-- 2026-07-08 -->
-**Symptom:** When SyntH runs directly on the Windows host (e.g. `scripts/run_webui.py` from a terminal), every log message containing `✓`, emoji, etc. produces a multi-line `--- Logging error ---` traceback (`cp1252.py ... charmap_encode`) on the console handler; the file handlers are fine. Also surfaces as `[QUEUE] Error adding reaction: 'charmap' codec can't encode character '\U0001f440'` in `synth.log`.
-**Location:** `core/logging_utils.py` console `StreamHandler` (inherits the terminal's cp1252 encoding); the Linux container is unaffected (UTF-8).
-**Status:** known, not fixed — cosmetic, host-only.
-**Notes:** If it ever needs fixing: set `PYTHONIOENCODING=utf-8` for host runs (or wire the console handler with `errors="replace"`). Don't strip the emoji from log messages — they're load-bearing grep anchors in several debug flows.
-
-### Frontend builds from IDE agent shells silently bake the theme hue (chromatic preset env sniffing)  <!-- 2026-07-08 -->
-**Symptom:** The `/stage` theme-hue slider does nothing: `--chromatic-hue` updates on `<html>` but every `primary-*` color keeps the default hue. The built CSS contains literal `oklch(... 220.44 ...)` values instead of `var(--chromatic-hue)` references. `pnpm build` output looks identical otherwise — screenshots pass casual review.
-**Location:** `@proj-airi/unocss-preset-chromatic` `dist/index.node.mjs` (bakes colors when `VSCODE_ESM_ENTRYPOINT` contains `"extensionHostProcess"`, a heuristic for the UnoCSS VSCode extension); guard: `frontend/chromatic-env-guard.ts`, imported first in `frontend/uno.config.ts`.
-**Status:** workaround in place (2026-07-08) — the guard strips the env var before the preset module is evaluated, so var-based colors are always emitted.
-**Notes:** VSCode/Antigravity extension-host shells (i.e. every in-IDE Claude agent session) export `VSCODE_ESM_ENTRYPOINT=vs/workbench/api/node/extensionHostProcess`, which the preset misreads as "I'm the IDE preview". Any Node tool that changes behavior on VSCode env vars can misfire the same way in agent shells. If the guard import is ever removed from `uno.config.ts`, hue theming breaks again with zero build errors. Verify a build is var-based with: `grep -c "var(--chromatic-hue)" frontend/dist/assets/*.css` (must be ≥1).
-
-### VueUse `useLocalStorage` skips JSON encoding for string defaults — seeding a value from outside the app must NOT `JSON.stringify` it  <!-- 2026-07-09 -->
-**Symptom:** A Playwright (or manual) script does `localStorage.setItem(key, JSON.stringify(value))` to pre-seed a `useLocalStorage(key, '')`-backed store field before page load, then the app reads back the literal string `"value"` (quotes included) instead of `value`. Looked exactly like the app-side wiring was broken (e.g. an auth token silently "not matching") when the real bug was in the test setup.
-**Location:** Any `useLocalStorage('...', '')` field, e.g. `frontend/src/stores/settings.ts::apiToken`. Root cause: VueUse's `useStorage`/`useLocalStorage` guesses the serializer from the *initial value's type* — a `''` default guesses the `'string'` serializer, which stores/reads the raw string with no `JSON.stringify`/`JSON.parse` round-trip (unlike object/number/boolean defaults, which do get JSON-encoded).
-**Status:** not a code bug — documenting so it isn't rediscovered. `frontend/scripts/auth-ux-ui-check.mjs` seeds the token by driving the real Settings-drawer `<input>` instead of touching `localStorage` directly, which sidesteps this entirely and is the safer pattern for future smoke scripts.
-**Notes:** If you must seed a `useLocalStorage` value directly from a script, check the field's *default value's type* in the store first — string defaults want the raw string in `localStorage`, non-string defaults want `JSON.stringify(value)`.
-
-### Aborting a playback-manager item races its cleanup against the next item's synchronous start — shared state gets clobbered  <!-- 2026-07-09 -->
-**Symptom:** Interrupting one `tts-play` clip with another (e.g. a new conversational turn arriving while the previous one is still queued/playing) made `useAudioStore().speaking` immediately flip back to `false` right after the new clip started, even though audio was still actively playing. No console error — the bug is silent. Caught by a Playwright script that measured `speaking`'s timeline with fine-grained polling around an interrupt; a fixed `setTimeout` check 80ms after the interrupt looked like "new item never started" when the real problem was "it started, then got immediately un-started."
-**Location:** `frontend/src/stores/audio.ts::playItem`. Root cause: `AbortController.abort()` dispatches its `abort` event **synchronously**, but the awaiting `playItem`'s `onAbort` handler only *resolves* a pending Promise — the code after that `await` (the `finally` block, which wrote `lipsync = null; speaking.value = false` to store-level shared variables) only runs as a **microtask**. Meanwhile `lib/pipelines-audio/playback-manager.ts`'s `stopActive()` synchronously removes the aborted item from `active` before returning, so a caller that calls `stopAll()` immediately followed by `schedule()` in the same synchronous tick (exactly what `scheduleTts`'s turn-interrupt logic does) causes the **new** item's `playItem` to run its synchronous prefix (through `speaking.value = true`) *before* the **old**, aborted item's deferred `finally` block runs — so the old item's cleanup executes last and clobbers the new item's state.
-**Status:** fixed (2026-07-09). `playItem` now tracks `activeItemId` (the id of whichever item last legitimately claimed `speaking`/`lipsync`) and each call's `finally` block only writes `speaking.value = false` / `lipsync = null` if `activeItemId` still equals its own item's id — a superseded item's belated cleanup becomes a no-op for shared state (it still tears down its own `AudioNode`/lipsync-driver resources unconditionally, just doesn't touch the store's "who's currently speaking" state). Also fixed as a side effect: the lipsync driver was a single shared variable reused across items with no per-item scoping (`const itemLipsync = new AnalyserLipSyncDriver()`, a local now, instead of reassigning the shared `lipsync` directly) — the old code would `.detach()` whichever driver happened to be in the shared slot at cleanup time, which after the race could be the *new* item's driver.
-**Notes:** This exact race pre-dates sentence-chunked TTS streaming (`_speak_chunked` in `plugins/vox_plugin.py`) and the turn-grouping logic (`turn_id` in `protocol.ts`/`scheduleTts`) — it was already latent in the original `overflowPolicy: 'steal-oldest'` design, since `handleOverflow`'s steal path does the identical abort-then-immediately-start sequence. It just never got exercised by a test until sentence chunking made "new turn interrupts an in-flight one" an explicit, testable code path. If you add another `PlaybackManager`-backed store, check whether its `play()` callback writes to store-level shared state in a `finally` block — if so, it needs the same ownership guard.
-
-### Mic on `/stage`/webui requires a secure context — plain-http LAN access has no `navigator.mediaDevices`  <!-- 2026-07-08 -->
-**Symptom:** Mic button fails with `Cannot read properties of undefined (reading 'getUserMedia')` when the stage is opened via `http://<lan-ip>:<port>/stage/`. Works on `http://127.0.0.1`/`localhost` (browsers treat loopback as secure) and on any `https://` origin.
-**Location:** Browser security model, not our code. Stage-side guard with a clear message: `frontend/src/stores/mic.ts::start()`. The legacy webui (`res/synth_webui/js/chat-window.mjs`) has no such guard and fails the same way.
-**Status:** workaround in place (stage shows "Microphone needs a secure context — open the stage over HTTPS or via localhost"). Real fix for LAN use: serve over TLS (`SYNTH_WEBUI_TLS=1`).
-**Notes:** Reproduced 2026-07-08 with Playwright against `http://192.168.1.69:8088/stage/` (`isSecureContext:false`, `mediaDevices:false`).
-
-### Conversation-history turns carry no timestamps — staleness is invisible to the model, and outreach's "long silence" rule is un-satisfiable  <!-- 2026-07-05 -->
-**Symptom:** Grillo outreach (and any beat/turn) grounds confidently in a day-old conversation thread as if it were live. Verified via langfuse trace `e5555717-275f-46b7-af4f-981588265da5` (2026-07-05 03:07Z, first group-targeted outreach): the `[Recent context from other conversations]` block had correct per-line timestamps (`[05/07/26:0132] ...`, all DM — the cross-chat `UNIFIED_HISTORY` merge works as designed), but the turn-by-turn `conversation_history` (from `history_current_chat`) was raw untimestamped text of a 24h-stale group exchange. The outreach template says "never imply they've been distant unless the conversation history itself actually shows a long silence" — which it never can, since turns have no time markers. Compounded by the observer beat posting into the group 60s earlier (see `propose_only` note in the outreach self-poisoning entry), which made the stale thread's last assistant turn look brand new.
-**Location:** `core/history_engine.py` (`history_current_chat` lines keep timestamps only in the `history_recent` formatting path), `core/prompt_engine.py::_history_to_turns` (turns built without time markers), `plugins/grillo/grillo_outreach.py::_build_outreach_prompt` (the un-satisfiable ground rule).
-**Status:** known, not fixed — diagnosis only (2026-07-05). The worst symptom (outreach anchoring on the stale group thread) is already mitigated by the 2026-07-05 targeting fix, since `history_current_chat` now follows the last real user interaction's chat.
-**Notes:** Fix direction: add a relative-time marker to conversation turns (e.g. prefix turns older than N minutes with "[x hours earlier]", or annotate the last turn's age) so temporal distance is model-visible. Keep it lightweight — per-message absolute timestamps on every turn would fight the RUNTIME STYLE rule about not mirroring exact times.
-### Grillo outreach self-poisons its target: one autonomous group post permanently redirects hourly outreach to the group  <!-- 2026-07-05 -->
-**Symptom:** `grillo_outreach` beats stop firing in the DM of the last real user interaction and fire in a group instead, every hour, until the user happens to message the DM again. Every beat logs `Recovered target from chat_history_cache: telegram_bot/<id>` (grillo_outreach.py:408) — the fallback path, never the primary one.
-**Location:** `plugins/grillo/grillo_outreach.py::_get_target_interface_and_chat` (Fallback A), `core/recent_chats.py::set_chat_path`, `plugins/grillo/grillo_chat_observer.py`, `core/chat_context_manager.py::save_response_message`.
-**Status:** causes (1) and (2) fixed on develop 2026-07-05 (Fallback A now excludes `sender_name IN ('self','grillo')`; `add_message_to_context` now calls `set_chat_path`, and `core/chat_paths.json` is gitignored). Cause (3) — observer `propose_only` proposals executed as real sends — is still open.
-**Notes:** Three stacked causes. (1) The primary target path (`recent_chats.get_last_active_chats` → `get_chat_path`) is dead code in practice: `set_chat_path` has **zero callers**, so `chat_paths.json` never gets written and `get_chat_path` always returns None — even though the `recent_chats` table itself correctly has the DM as most recent. (2) Fallback A takes the newest `chat_history_cache` row for the interface **regardless of sender**, so the bot's own `sender='self'` rows count as "recent activity". (3) The `grillo_chat_observer` beat (runs at :06) can autonomously send a `message_telegram_bot` into a group (observed replying to a day-old group thread from its cross-chat snippets, despite its activity being logged `propose_only=True`); that sent message is saved under the group path by `save_response_message`, becomes the newest cache row, and the next outreach beat (:07) targets the group — whose own outreach message re-poisons the cache, locking outreach onto the group indefinitely. Fix direction: exclude `sender_name='self'` (and grillo-origin rows) in Fallback A, and/or wire `set_chat_path` back up. The observer `propose_only` question was audited 2026-07-05: `GRILLO_OBSERVER_PROPOSE_ONLY` is prompt-only — it appends one "proposals only" sentence to the observer prompt and stores `propose_only` in the beat context, which **nothing in core/ reads**; observer responses run through the normal message_chain/action_parser pipeline and message actions are executed as real sends. The trainer runs the observer intentionally autonomous, so this is accepted behaviour, not a bug to fix — but the config flag is misleading (it does not gate execution). If enforcement is ever wanted: intercept `message_*` actions when context has `propose_only=True` and record them in `grillo_action_execs` (status 'pending') instead of dispatching. **Debugging trap that hid this:** `synth.log` timestamps are container-local time (UTC+2 in July), `chat_history_cache.timestamp` is UTC — a log send at 05:06 local *is* the cache row stamped 03:06 UTC; align timezones before concluding rows and sends don't match.
-
-### `test_chat_attention_triggers.py` start_bot tests fail: FakeBuilder missing `get_updates_connection_pool_size`  <!-- 2026-07-03 -->
-**Symptom:** `test_start_bot_failure_resets_state_and_schedules_retry` and `test_start_bot_retries_transient_timeout_inline` fail with `AttributeError("'FakeBuilder' object has no attribute 'get_updates_connection_pool_size'")` — the interface's `disabled_reason` becomes `Startup failed: AttributeError(...)` instead of the expected timeout/retry text.
-**Location:** `tests/test_chat_attention_triggers.py` (`FakeBuilder` stub), `interface/telegram_bot.py` (`start_bot` builder chain).
-**Status:** known, not fixed — pre-existing, found (and verified unrelated) during the 2026-07-03 upstream merge: the merge touched neither file; the builder call was added by commit `83415cef` ("widen get_updates connection pool") without updating the test stub.
-**Notes:** Mechanical fix: give `FakeBuilder` a `get_updates_connection_pool_size(...)` chainable passthrough like its other builder methods. Left undone to keep the upstream merge free of unrelated changes.
-
-### `cortex_api.log` never logs the actual system prompt content — can't verify context injection from logs alone  <!-- 2026-07-01 -->
-**Symptom:** Every request entry in `cortex_api.log` (and the `cortex_read`/`cortex_analyze` MCP tools built on it) shows the system message as a placeholder, e.g. `"content": "<string: 16146 chars>"` — the real text is never written to the log, only its length. `cortex_search`'s payload/response text search therefore also cannot match anything inside the system prompt (it only sees the placeholder).
-**Location:** whatever call in `core/cortex_api_logger.py` serializes the outbound request before writing it (the truncation happens before the write, not in a display layer — confirmed by reading the raw log file directly, not just the MCP tool output).
-**Status:** known, not investigated further — found incidentally while trying to verify whether `UNIFIED_HISTORY` cross-chat merging (`core/history_engine.py`) actually injected another interface_path's history into a given session's system prompt (`core/prompt_engine.py::_build_context_summary`, `"[Recent context from other conversations]"` block). Could not confirm either way from the trace/log alone.
-**Notes:** If you need to debug what's actually inside a system prompt (history_recent injection, peer instruction block, persona content, etc.), don't rely on `cortex_read`/`cortex_search`/raw log grep for the system message — it's opaque. Either add temporary debug logging in `core/prompt_engine.py::_build_context_summary` / `build_prompt_request`, or inspect `history_engine.build_context()`'s return value directly. The history-merging code itself (`load_global_chat_history`, `unified_candidates` split into `local_lines`/`other_lines` in `history_engine.py`) looked correctly wired on read-through: it queries the synth's own `chat_history_cache` table across all interface_paths with no cross-chat filtering, so DM and group history for the *same* synth should merge by default (`UNIFIED_HISTORY` defaults to `1`/on). Two separate SyntH instances each have their own DB/table, so this only merges within one instance; cross-instance awareness depends on Telegram actually delivering a peer's messages here at all — see the entry below.
-
-### Telegram bots can't see each other's messages until "Bot-to-Bot Communication Mode" is enabled in BotFather  <!-- 2026-07-01, corrected 2026-07-01 -->
-**Symptom:** In a two-SyntH Telegram group (SynthA + SynthB), one instance's own `chat_history_cache` had **zero rows ever** with `sender_id` equal to the other instance's bot ID — not just in one conversation window, across the entire table's history — despite the peer bot visibly replying in the group and `SYNTH_PEERS` being configured correctly. `synth.log` had zero mentions of that bot ID anywhere either, meaning the update never reached the application layer at all. Symptoms this caused: the receiving instance's LLM prompt never contained the peer's replies, and any wait/poll logic checking for a peer response (turn floor, mention-order relay) always burned its full timeout before giving up, since the awaited row could never appear.
-**Location:** platform-level (Telegram Bot API itself), not a bug in this repo. `interface/telegram_bot.py::handle_message` has no `is_bot` filter anywhere, and `core/chat_context_manager.py::add_message_to_context` is called unconditionally near the top of `handle_message` before any mention/peer-policy logic runs — so once an update from the peer bot actually arrives, it's saved like any other message. The fix is entirely a Telegram-side setting, not a code change.
-**Status:** root cause identified and documented (2026-07-01). **Correction (same day):** an earlier version of this entry claimed this needed a custom HTTP relay between instances (`core/peer_relay.py` + a WebUI endpoint) — that was reverted as unnecessary over-engineering after checking https://core.telegram.org/bots/features#bot-to-bot-communication. Telegram has a native opt-in for exactly this: enable **Bot-to-Bot Communication Mode** for each bot via BotFather, AND make sure each bot has Group Privacy Mode disabled (or admin rights) in the shared group (the communication mode alone only unlocks explicit `/command@OtherBot` mentions and direct replies; full plain-message visibility needs privacy-disabled-or-admin on top). See `docs/peer_synths.rst` "Bot-to-Bot Communication Mode". No code in this repo needed to change for delivery itself — `peer_already_responded`'s column-name fix and the mention-order relay (`get_relay_wait_peer`/`wait_for_peer_reply` in `core/peer_policy.py`) from the same debugging session are still valid and still needed; only the "how does the peer's message physically arrive" part was wrong.
-**Notes:** If a future agent is asked to debug "peer SyntH doesn't see the other's replies" again: first check whether Bot-to-Bot Communication Mode is enabled in BotFather for both bots, and whether each has Group Privacy Mode disabled or admin rights — don't assume a code fix is needed, and don't reach for a custom relay/webhook without checking this Telegram-native setting first. Group privacy mode being disabled (confirmed via *human* messages arriving fine in the same chat) does **not** by itself extend to other bots' messages — the separate Bot-to-Bot Communication Mode toggle is required in addition.
-
-### Order-dependent test failures in full pytest runs (`config_registry` / global-state pollution)  <!-- 2026-06-11, updated 2026-07-01 -->
-**Symptom:** A full `uv run pytest` run fails a small, shifting set of tests that all pass when their file is run in isolation. Recurring offenders: `test_vox_defaults.py::test_active_vox_engine_default_is_kitten` and `test_vox_plugin.py::test_active_vox_engine_default_is_kitten` (e.g. `assert 'disabled' == 'kitten'`), plus a third slot that varies by run/ordering — observed as `test_db_cutover::test_cutover_runs_backup_and_migration`, `test_grillo_prevent_duplicates::test_grillo_suppresses_when_last_is_synth`, `test_grillo_beat_system::test_grillo_beat_types_exist`, `test_exposed_variables_static::test_no_direct_getenv_for_exposed_vars`, and `test_exposed_variables_style::test_exposed_variable_label_and_description_style` at various times.
-**Location:** `core/config_manager.py` (`config_registry` is a process-wide singleton) and the exposed-variable registry; global state leaking between test modules.
-**Status:** known, pre-existing — confirmed via `git stash` A/B (on commits `e4558376` and `afdaea0`) that the vox pair fails identically on unmodified `develop`, so it is not caused by any specific feature change.
-**Notes:** Whichever test runs first in the full ordering leaks the *real* DB-loaded value (`ACTIVE_VOX_ENGINE = "disabled"`, per the live config table) into `config_registry._definitions`, and it's never reset before the default-expecting test runs. When triaging a full-suite run, re-run the failing file alone (and/or `git stash` A/B) before assuming a regression. Related leaks: local `.env` values (e.g. `SYNTH_PRIMARY_DB=soul`) bleed into tests that don't pin them — `tests/test_db_preflight.py` monkeypatches `core.db._get_db_type` for this reason — and `tests/test_message_queue.py` `test_enqueue_*` tests hit the live DB configured in `.env` and time out when it is slow/unreachable (verified unrelated to code changes via stash A/B); `tests/test_exposed_variables_audit.py::test_exposed_variables_have_label_description_and_component` fails the same way when the DB host doesn't resolve (`getaddrinfo failed`, re-verified 2026-07-04 via stash A/B). Real fix would be a per-test reset/fixture for `config_registry` (or at least the affected definitions) instead of process-wide state; out of scope so far.
-
----
-
-### Unit tests can write real rows into the live `ai_diary` table  <!-- 2026-07-01 -->
-**Symptom:** Grillo diary-consolidation prompts contain literal test fixtures interleaved with real diary content — e.g. langfuse trace `312a3ac5-03c2-40e6-bf91-25ce25e127b9` (2026-07-01 diary_consolidation beat) shows "Ciao Xargon!", "Hello", "Performed multiple actions: 1 use_animation, 1 create_personal_diary_entry", "Performed message_telegram_bot action" — each duplicated (two test runs same day) — mixed into the day's real fragments.
-**Location:** `tests/test_message_chain.py:97` (hardcoded LLM response `"Ciao Xargon!"`), `tests/test_chat_attention_triggers.py` / `tests/test_telegram_sleep_bypass.py` (fixture username `Xargon`) all exercise `core/message_chain.py::handle_incoming_message` → `core/action_parser.py::_create_diary_entry_for_actions` (auto-diary hook, runs unconditionally after every processed action list, line 1974) → `plugins/ai_diary.py::create_personal_diary_entry` → `_upsert_diary_impl` (line 662). `tests/conftest.py` has no DB isolation fixture — only an animation-handler singleton reset and a temp backups dir.
-**Status:** known, not fixed.
-**Notes:** Tests mock `run_action`/`run_corrector_middleware` but never mock `plugins.ai_diary` or `core.db.get_conn_ctx`, and `add_diary_entry` lazy-inits/auto-creates the `ai_diary` table if missing (plugins/ai_diary.py:836-877) — so any test run against a reachable MariaDB (no dedicated test DB/config found) contaminates the live diary. Confirmed via DB: `ai_diary` id 4322 (2026-07-01) is already a single consolidated row and `ai_diary_archive` has zero rows for that date — consistent with `_upsert_diary_impl`'s same-day upsert-with-`---`-append design (one row per day, not separate fragment rows), so the test noise was appended straight into *today's* live content blob rather than creating archivable rows. The Grillo consolidator LLM happened to filter all the garbage out of the merged prose this time (verified the persisted `update_diary_entry` output has no test artifacts), so no permanent contamination landed — but that's not guaranteed, and it burns ~800 extra prompt tokens per beat. This is a **different, still-open** issue from `FIXED_ISSUES.md`'s "Automatic diary logging could create internal `diary_consolidation` noise rows" (2026-05-04 fix only skips the consolidation beat's own self-generated noise via `context.get("beat_type") == "diary_consolidation"`, `core/action_parser.py:1986-1993` — it does not address tests hitting the real DB). Real fix would be an autouse fixture in `tests/conftest.py` mocking `plugins.ai_diary.create_personal_diary_entry`/`add_diary_entry` (or pointing tests at an isolated DB).
-
-### GBNF action grammar — hard constraint for local cortex output  <!-- 2026-06-21 -->
-**What:** `force_action_grammar: true` in an openai_compat endpoint's `extra_config` makes `cortex_bridge` auto-build a GBNF grammar (`core/external_endpoints/action_grammar.py:build_actions_gbnf`) whose `type` enum is the exact set of actions offered for the request, and send it via `extra_body.grammar`. llama.cpp then constrains decoding so the model can only emit one well-formed `{"actions":[{"type":<known>,"payload":{...}}]}` object — no `<think>`/`<thought>` preamble (output must start with `{`), no malformed JSON, no invented/combined/duplicated types, and generation stops after the first object (kills the repetition cascade). This is the real fix for the whole class of local-model output failures; `force_json_object` is best-effort and silently ignored by many llama.cpp builds.
-**Scope/safety:** opt-in per endpoint and only wired through the OPENAI-protocol path — other engines (gemini/anthropic/xai) are untouched. Implies the in-prompt protocol (`_disable_tools()` returns true for it, since a grammar constrains *content*, not tool_calls). A manual `extra_config.grammar` takes precedence; `response_format` is dropped when a grammar is present (redundant/conflicting). Payload schemas are intentionally NOT encoded (only `payload ::= object`) — encoding all 49 action schemas would be enormous/brittle.
-**Caveat:** the grammar is generated, not validated against a live llama.cpp here. If a malformed grammar ever slips in, the server rejects the request and the turn fails — remove `force_action_grammar` to fall back. The builder fails safe (returns `None` → no grammar) on any internal error.
-
----
-
-### Local model 20-min runaway + leaked `<thought>` (json_object not enforced)  <!-- 2026-06-21 -->
-**Symptom:** A single chat turn took ~20 min and logged a malformed thinking tag plus cascading repeated `message_telegram_bot` outputs; only the first message was delivered. Trace: 1240s elapsed, `prompt 4887 + completion 27881 ≈ 32768` — the model generated until it **filled its entire 32k context window**.
-**Location:** `core/external_endpoints/adapters/openai_compat.py` (`_strip_thinking`, `chat_completion`); `core/external_endpoints/bridges/cortex_bridge.py` (`_extra_api_kwargs`).
-**Status:** mitigated (2026-06-21).
-**Notes:** Two independent causes. (1) The model ignored `enable_thinking=False` and emitted reasoning terminated by `</thought>`; `_strip_thinking` only matched `<think>`/`<thinking>`, not `<thought>`, nor a dangling closing tag (open tag dropped), so it leaked into content (JSON was still extracted after it, so the first reply went out). Fixed: regex now covers `thought` and a leading `^.*?</…>` dangling close. (2) **`response_format: json_object` is NOT enforced by this llama.cpp/model** — the output contained reasoning + prose + repeated JSON objects, i.e. free-form, so `force_json_object` is effectively a no-op here. With **no `max_tokens`**, a repetition loop ran to the context limit. Fixed: a default `max_tokens` (4096) is applied by `cortex_bridge._extra_api_kwargs()` — **only for local-model endpoints** (`disable_tools` / `force_action_grammar`); an explicit `extra_config.max_tokens` always wins, and cloud openai endpoints (xai, openrouter) stay uncapped (scoping tightened 2026-06-21 — every endpoint here is `protocol: openai`, so the blanket adapter default was wrong). The only *hard* JSON constraint for this server remains a GBNF `grammar` (already forwardable via `extra_config.grammar`); `json_object` should be treated as best-effort on local backends.
-
----
-
-### Langfuse traces that "start with an error" are corrector retries, not a fault  <!-- 2026-06-20 -->
-**Symptom:** In Langfuse the input of many generations begins with `{"system_message": {"type": "error", "message": "=== PERSONA … === CORRECTION === CRITICAL ERROR: Your previous response was not valid JSON or incomplete …"}}`. Looks alarming, as if the system errored before the model ran.
-**Location:** `core/transport_layer.py` `run_corrector_middleware` (`correction_payload = {"system_message": {"type": "error", …}}`, ~line 2019); the 2026-06-20 fix also prepends the persona block. This object is sent as the **user-role content** of a fresh single-turn request.
-**Status:** working as designed (recovery), but high-frequency on local quants — diagnosis only, not changed.
-**Notes:** These traces are the corrector asking the model to repeat valid JSON after `extract_json_from_text` failed. Common trigger on the `1070ti` openai_compat endpoint is a **JSON syntax error in a long reply** (e.g. `Expecting ',' delimiter at line 1 column 8360` — an unescaped `"` mid-string), not the "missing message action" loop documented above. The retry usually recovers (valid `message_*` action in the output). Root enabler: `core/external_endpoints/adapters/openai_compat.py` sends **no `response_format`/grammar** (only `extra_body.enable_thinking=False`), so the model free-decodes and small Q4 models break JSON on 2–4 paragraph outputs. Why it's invisible in `cortex_api.log`/`synth-cortex`: the whole correction envelope is one big string sanitized to `<string: N chars>`, so `cortex_search("system_message")` returns nothing — only Langfuse shows the full text. Mitigation now shipped: set `force_json_object: true` (or an explicit `response_format` / `grammar`) in the cortex endpoint's `extra_config` — `cortex_bridge._extra_api_kwargs()` forwards it so llama.cpp constrains decoding to valid JSON (auto-dropped when native tool-calling is active). See `docs/external_endpoints.rst` "Constrained JSON output". Opt-in per endpoint (zero regression for others); enable it on the local `1070ti` endpoint via the WebUI. Other levers: shorter outputs; stronger cortex.
-
-**Important follow-up (2026-06-20): `force_json_object` alone does NOT fix the small-model silence, and is silently dropped on chat turns.** Investigation of a "no reply" report showed two things: (1) chat turns always send 49 native `tools`, and the guard in `generate_response` strips `response_format` whenever tools are present — so `force_json_object` only ever applied to non-tool turns (e.g. diary merge), never to chats. (2) The actual silence is a *schema* failure, not a syntax one: the small quant returned valid JSON but emitted diary fields (`interaction_summary`/`personal_thought`/`emotions`/`content`) as top-level action types with **no `message_*` action** → `message_chain` "no outbound message action" → corrector loop → fallback skipped → user gets nothing. `json_object` guarantees syntax, not the action schema, so it can't fix this. New lever: `disable_tools: true` in `extra_config` (`cortex_bridge._disable_tools` / `_inject_actions_into_prompt`) — stops advertising native tools and folds the scoped action catalog into the system prompt (the legacy in-prompt protocol). **Critical implementation note:** in the PromptRequest path the action catalog is delivered *only* via native tools (`OpenAIRenderer.render()` emits system+history+current; `system_instruction` carries format rules + persona, NOT the actions list), so a naive "stop sending tools" would strip the catalog entirely — `disable_tools` MUST re-inject it (it does). With tools off, the `response_format` guard no longer fires, so `force_json_object` finally applies to chats. The guaranteed fix for "always include a message action" is still a json_schema/GBNF grammar (not yet built).
-
-**Follow-up (2026-06-20): with `disable_tools` on, the model now emits a message action but mis-addresses it.** After `disable_tools`+`force_json_object`, a manual reply came out as valid JSON *with* a message action — but the small quant hallucinated `interface_path: "/channels/main"` (→ Telegram chat `channels` → `BadRequest('Chat not found')`, silent non-delivery) and mangled the type (`"message_plugin, telegram_bot"`). Grillo outreach was unaffected because its target chat is system-set, not echoed from an incoming message. Two fixes: (1) `_inject_actions_into_prompt` now renders the catalog as a flat `- name: brief (payload keys: …)` list instead of a nested `{name:{brief,schema}}` dict — the nested shape made the model emit sub-keys like `brief` as action types. (2) `message_plugin._handle_message_action` now mirrors a reply to the **originating chat** when `_should_mirror_origin_path` is true, and is **excluded** for grillo/outreach/internal turns (those legitimately target a system-chosen chat). Routing detection is **per-turn scope-aware**: `_should_mirror_origin_path` resolves the engine via `derive_cortex_scope(context)` → `get_active_cortex_engine(scope)`. **Scope gate (2026-06-21):** in this deployment *every* endpoint is `protocol: openai` (1070ti, openrouter, xai-grok, xtx), so "OPENAI protocol" alone is not a useful discriminator — the mirror is therefore gated on the **local-model marker** (`extra_config.disable_tools` or `force_action_grammar`, the same flags `_disable_tools()` reads). So only the flagged local endpoint (1070ti) is mirrored; cloud openai endpoints (xai, openrouter) are left alone. `is_trainer` is present on the action-execution context (set in `message_queue`, passed straight through `run_action` → `execute_action`).
-
----
-
-### Codebase audit completed — do not re-sweep  <!-- 2026-06-12 -->
-**Symptom:** N/A — this is an audit record, not a bug.
-**Location:** Whole repo; detailed ledger = the 24 commits ending at `d423162` (2026-06-11/12).
-**Status:** done — 15 production bugs fixed, 28 vacuous tests resurrected, production dirs lint-clean.
-**Notes:** The following checks were already performed and need not be repeated unless the code has changed since `d423162`:
-- *Commit review*: all commits from the month before 2026-06-11 reviewed line-by-line; defects fixed.
-- *Extended lint sweep* (`ruff --select B,PLE,ASYNC,RUF006,B023,B005,B039,B905`) across `core/`, `plugins/`, `engines/`, `interface/`: every hit triaged; real bugs fixed (loop-binding in `message_queue`/`notifier`, `lstrip` sample-URL bug, blocking subprocess in `gemini_cli`), the rest are accepted idiom (B904/ASYNC230/ASYNC109/B007/B009/B010/B027) or documented (RUF006, entry below).
-- *Default `ruff check`*: production dirs (`core`, `plugins`, `engines`, `interface`, `mcp_servers`, `vendor`) pass with zero errors. Remaining failures live only in `tests/`, `plugins_dev/`, `interface_dev/` (dev sandboxes, left as-is, incl. known F821s in `telethon_userbot.py` and `gasmask.py`).
-- *Semantic `ty` sweep* of `core/` (minus `webui.py`), `plugins/`, `engines/`, `interface/`: all call-level error classes (missing/unknown-argument, unresolved-reference/import, call-non-callable, not-iterable/subscriptable, invalid-argument-type) triaged. Real crashes fixed (`bio_manager.update_user_name`, `event_plugin` phantom `get_local_tz` + `run_action` signature, `message_send_utils` `TELEGRAM_TRAINER_ID`/missing `global`s, `telegram_bot.reset_chat`, `recent_chats` chat-path keys). Remaining `ty` diagnostics are annotation debt (`param: str = None` defaults, dict value-union noise, private `_queue` access) — verified non-bugs.
-- *Targeted pattern hunts*: nested `asyncio.run` (all guarded), HTTP calls without timeout (none in prod code), `run_coroutine_threadsafe().result()` deadlocks (none), `unittest.TestCase` classes with `async def` tests (all four affected files fixed).
-- *Known false positives* (don't re-investigate): `grillo_compactor` extract_json tuple overload, Iris/Auris TypedDict capability dicts, discord `disconnect(force)` stub mismatch, `ollama_compat_server` payload value-union subscript, `variables_engine` guarded casts, `models.py` hasattr-guarded isoformat.
-- *Explicitly NOT audited*: `core/webui.py` logic (maintainer decision — "works well enough"), runtime/integration behaviour against a live DB, deep business logic of `radio_host`/`emotion_manager`/memory plugins beyond pattern level, `automation_tools/`, `scripts/`, `webtop/`.
-- *Continuation pass (2026-06-12, HEAD `fd424ef`, code unchanged since `d423162`)*: deep business-logic review of `plugins/radio_host/` (all 5 files), `plugins/emotion_manager.py`, `plugins/memory_search.py`, `core/synth_core_memory.py`, `plugins/ai_diary.py`; review of `automation_tools/`, `webtop/` shell scripts; default + extended ruff sweep of `scripts/` (clean except two accepted-idiom hits: B007/B905 in `windows_setup.py`). All findings recorded as individual 2026-06-12 entries below; on maintainer request the same day, the fixes were applied (see each entry's Status). Still NOT audited: `core/webui.py` logic, live-DB integration behaviour beyond log sampling, `plugins_dev/`, `interface_dev/`.
-- *Open decisions for the maintainer*: delete `core/presence_manager.py` (entry below); add a CI `ruff check` gate (two of the shipped bugs were plain F821s a lint gate would have caught); run the `emotion_diary` schema migration on existing databases (entry below); verify `schedule_description` populates on the next live radio run (entry below).
-
----
-
-### `core/presence_manager.py` is dead and partially broken  <!-- 2026-06-12 -->
-**Symptom:** None at runtime — nothing imports this module anywhere.
-**Location:** `core/presence_manager.py`
-**Status:** known — candidate for deletion, pending a maintainer decision.
-**Notes:** `presence_loop`/`evaluate_emotions` would work if wired in, but `reflect_on_recent_responses` imports `core.llm_logic` (a module that has never existed), calls `get_recent_responses(limit=10)` against a `(since_timestamp)` signature, and passes `insert_memory(emotion_state=...)` which may not match. Do not wire this module in without fixing those first.
-
----
-
-### `ai_diary` sync `_run()` bridge blocks the event loop up to 10 s per call  <!-- 2026-06-12 -->
-**Symptom:** Interaction processing can stall while a diary entry is written; under DB latency the whole loop freezes for up to the 10 s future timeout.
-**Location:** `plugins/ai_diary.py`, `_run()` (ThreadPoolExecutor + `asyncio.run` + `future.result(timeout=10.0)`).
-**Status:** partially fixed.
-**Notes:** `DiaryPlugin.execute_action` is now `async`: the diary-write path awaits `add_diary_entry_async`/`_execute` directly, and the consolidation archive step runs the sync helper via `asyncio.to_thread`, so the action path no longer blocks the event loop. The sync wrappers (`add_diary_entry`, `get_entries_by_tags`, `archive_diary_entries`, ...) still use the `_run` bridge for their remaining sync callers (e.g. `core/webui.py` calls `archive_diary_entries` synchronously from async handlers) — convert those call sites when touching webui.
-
----
-
-### `memory_search` plugin is deliberately dormant (`PLUGIN_CLASS = None`) with latent bugs  <!-- 2026-06-12 -->
-**Symptom:** None at runtime — the `memory_search` action is not registered; the file gives no hint it is disabled.
-**Location:** `plugins/memory_search.py` (last line), deactivated in commit `fee51dc` (2026-02-13) when the Recon plugins were introduced; live free-search now goes through `core/prompt_engine.free_memory_search`.
-**Status:** known — dormant by maintainer action, not dead code by accident. Latent bugs fixed 2026-06-12.
-**Notes:** Nothing in production instantiates `MemorySearchPlugin`, and the loader skips `PLUGIN_CLASS = None` modules. The latent bugs were fixed in place so reactivation is safe: empty OR-joins no longer produce invalid `WHERE ()` SQL for time-window-only free searches, and the chat-history sub-query is now restricted to mode='free' (tags mode with a time window no longer floods results with unrelated chat rows). To reactivate, restore `PLUGIN_CLASS = MemorySearchPlugin`.
-
----
-
-### pytest runs pollute the live `logs/` directory with test noise  <!-- 2026-06-12 -->
-**Symptom:** `get_recent_errors` MCP output is dominated by bursts like `Recon plugin MagicMock parse failed ...` and synthetic `telegram_bot/1` correction warnings, all stamped within the same second.
-**Location:** Test suite logging through the real `core/logging_utils.py` handlers into `logs/synth.log`.
-**Status:** known, not fixed.
-**Notes:** When triaging runtime errors from the synth-logs MCP, check whether the burst coincides with a `uv run pytest` invocation (MagicMock strings are the giveaway) before treating entries as production failures. Complements the existing "Interface tests can leak into the live `chat_history_cache`" entry.
-
----
-
-### Unreferenced fire-and-forget asyncio tasks (RUF006)  <!-- 2026-06-11 -->
-**Symptom:** Fire-and-forget work occasionally never completes, with no error logged. ~80 call sites use bare `asyncio.create_task(...)` / `ensure_future(...)` without keeping a reference (`ruff check --select RUF006` lists them).
-**Location:** Spread across `core/` (webui, transport_layer, message_chain), `plugins/`, `interface/`.
-**Status:** known, not fixed — the event loop holds only weak references, so an un-referenced task *can* be garbage-collected mid-flight. Most of these are short-lived sends and complete before GC, which is why it is rarely observed.
-**Notes:** When touching one of these sites, keep a reference (module-level `set` + `task.add_done_callback(set.discard)`) rather than ignoring the return value. Do not mass-fix; convert opportunistically.
-
----
-
-### Order-dependent test failures in full pytest runs  <!-- 2026-06-11 -->
-**Symptom:** `test_db_cutover::test_cutover_runs_backup_and_migration`, `test_exposed_variables_static::test_no_direct_getenv_for_exposed_vars`, `test_exposed_variables_style::test_exposed_variable_label_and_description_style`, `test_vox_defaults::test_active_vox_engine_default_is_kitten`, and `test_vox_plugin::test_active_vox_engine_default_is_kitten` fail in a full `uv run pytest` run (e.g. `assert 'disabled' == 'kitten'`) but all pass when their files are run in isolation. The affected set shifts slightly between runs (`test_grillo_beat_system::test_grillo_beat_types_exist` has also tripped this way).
-**Location:** `tests/` (config-registry / exposed-vars global state leaking between test modules)
-**Status:** known — pre-existing, not tied to any single commit.
-**Notes:** The `config_registry` and exposed-variable registry are process-global; earlier tests register or mutate vars (e.g. `ACTIVE_VOX_ENGINE` ends up `'disabled'`) that later default-assertion tests then see. When triaging a full-suite run, re-run the failing file alone before assuming a regression. Also note: local `.env` values (e.g. `SYNTH_PRIMARY_DB=soul`) leak into tests that don't pin them — `tests/test_db_preflight.py` now monkeypatches `core.db._get_db_type` for this reason. The reverse also happens: `tests/test_message_queue.py` `test_enqueue_*` tests hit the live DB configured in `.env` and time out when it is slow/unreachable (they pass standalone only with a responsive DB; verified unrelated to code changes via stash A/B).
-
----
-
-### `ai_diary` — user_message column overflow  <!-- 2026-04-13 -->
-**Symptom:** `(1406, "Data too long for column 'user_message' at row 1")` appearing repeatedly in `synth.log`, originating from `ai_diary.py` `_upsert_diary_impl`.
-**Location:** `plugins/ai_diary.py`, `init-db.sql` (`ai_diary` table, `user_message` column)
-**Status:** known, not fixed — seen multiple times per hour during active sessions.
-**Notes:** Diary entries can exceed the column's declared length. The insert fails silently (error is logged, execution continues). No data loss to the user but diary entries are dropped.
-
----
-
-### `synth.log` rotates extremely fast in DEBUG mode  <!-- 2026-04-13 -->
-**Symptom:** Active `synth.log` has only a handful of lines; most content is in timestamped rotation files (`synth.2026-04-12_HH-MM-SS.log`).
-**Location:** `core/logging_utils.py` (`maxLines=2000` in `TimestampedRotatingFileHandler`)
-**Status:** by design — 2000 lines fills in 1–2 interactions at DEBUG level.
-**Notes:** Always use `lookback_files` parameter in the `synth-logs` MCP tools. `tail_log` and `search_logs` default to `lookback_files=2` and `lookback_files=3` respectively. `get_recent_errors` uses 5. Increase if you need more history.
-
----
-
-### `cortex_api.log` is section-format, not standard  <!-- 2026-04-13 -->
-**Symptom:** Searching `cortex_api` via MCP returns truncated banner lines only; full LLM payloads are cut at 400 chars.
-**Location:** `logs/cortex_api.log`, `mcp_servers/synth_logs.py` (`_LARGE_PAYLOAD_FILES`)
-**Status:** known limitation — no structured parser tool exists yet for this format.
-**Notes:** The file uses `==` and `--` banner sections (`REQUEST`, `RESPONSE`, `SEND`, `RECV`). Level/time filters don't work on it. For LLM debugging, search for the banner headers (e.g. `search_logs("REQUEST", log_files=["cortex_api"])`) to find timestamps, then correlate with `synth.log` by time.
-
----
-
-### `check_logs.py` plugin is stale  <!-- 2026-04-13 -->
-**Symptom:** Synth's own `get_logs`/`search_logs` chat actions use hardcoded `/app/logs`, old filenames (`selkies.log`, `prompt_cycle.log`), and only know about 3 numbered rotations.
-**Location:** `plugins/check_logs.py`
-**Status:** known, not fixed.
-**Notes:** For agents, use the `synth-logs` MCP server instead — it handles all rotation schemes. The plugin only matters for Synth herself using log commands during operation.
-
----
-
-### `test_corrector_on_top_level_message.py` — fake corrector never called  <!-- 2026-04-13 -->
-**Symptom:** `test_corrector_invoked_when_top_level_message_without_message_action` fails with `AssertionError: assert 'context' in {}` — the `called` dict is empty because the fake was never invoked.
-**Location:** `tests/test_corrector_on_top_level_message.py`
-**Status:** pre-existing, not fixed.
-**Notes:** The test patches `core.transport_layer.run_corrector_middleware` but `core.action_parser` imports the function at module level (`from core.transport_layer import run_corrector_middleware`), so the patch doesn't intercept calls made from inside `action_parser`. The test also needs to patch `core.action_parser.run_corrector_middleware`. Separately, in some test environment configurations `use_animation` is resolved as a registered action (PersonaManager is loaded), causing `corrector_orchestrator` to exit early with "Actions executed successfully" before selective correction even fires.
-
----
-
-### GitNexus MCP server fails to start in some VS Code sessions  <!-- 2026-04-17 -->
-**Symptom:** Calls to GitNexus MCP tools return `MCP server could not be started: Process exited with code 1`.
-**Location:** VS Code MCP runtime / `gitnexus` server startup (not tied to a single repo file).
-**Status:** known, intermittent.
-**Notes:** When this occurs, agents cannot run `gitnexus_query` / `gitnexus_impact` / `gitnexus_context`. Use fallback discovery (`grep_search`, `file_search`, symbol/reference tools) and keep edits conservative until MCP health is restored.
-
----
-
-### `emotion_diary` legacy schema truncates low intensities to zero  <!-- 2026-04-18 -->
-**Location:** MariaDB table `emotion_diary`, `plugins/ai_diary.py` `init_diary_table()`, `plugins/emotion_manager.py`.
-**Status:** partially fixed — code resolved 2026-06-12, existing databases still need a manual migration.
-**Notes:** Root cause was two competing `CREATE TABLE IF NOT EXISTS` definitions (ai_diary's `intensity INT` variant vs emotion_manager's `intensity FLOAT`); the DDLs are now identical, so fresh databases are correct. **Open maintainer action:** already-deployed databases keep the old table — run `ALTER TABLE emotion_diary MODIFY intensity FLOAT` (plus id/timestamp alignment) on the live DB if accurate emotion history matters.
-
----
-
-### `scheduled_events.delivered = 0` breaks on Postgres boolean columns  <!-- 2026-04-18 -->
-**Symptom:** Event scheduler logs `UndefinedFunctionError('operator does not exist: boolean = integer')` while polling due events.
-**Location:** `core/db.py` (`get_due_events`, query `WHERE delivered = 0 AND next_run <= %s`).
-**Status:** fixed (2026-07-04).
-**Notes:** The migrated Postgres schema uses a boolean for `delivered`, but the query compared it to integer `0`. Fixed: `get_due_events` / `get_due_events_by_created_by` now query `WHERE delivered = FALSE AND next_run <= %s`, and `mark_event_delivered`'s one-time branch sets `delivered = TRUE` on Postgres (`delivered = 1` on MySQL). See the daily-weather-spam entry below for the related datetime bug.
-
----
-
-### Daily weather report spam — `mark_event_delivered` passes a string to a Postgres `timestamp` column  <!-- 2026-07-04 -->
-**Symptom:** The daily weather report was delivered repeatedly (~every 15s). Logs showed the plugin claiming success (`Delivered weather event 121; rescheduled for next day`) but NO `[db] Event 121 rescheduled to ...`, plus repeated `[mark_event_delivered] Error: invalid input for query argument $1: '2026-07-05 00:50:00' (expected a datetime.date or datetime.datetime instance, got 'str')`.
-**Location:** `core/db.py` `mark_event_delivered` (recurring `daily`/`weekly`/`monthly` reschedule branch); amplified by two independent dispatchers (generic `EventPlugin` scheduler ~30s + `plugins/weather_plugin.py` `_weather_loop` 60s).
-**Status:** fixed (2026-07-04).
-**Notes:** The recurring branch computed the next run as a `strftime` string and passed it to the `next_run` `timestamp` column. The asyncpg driver rejects string literals for timestamp columns, so the UPDATE failed silently inside the try/except → `next_run` stayed today + `delivered` stayed FALSE → both dispatchers kept re-delivering the same event forever. Fix: pass a real `datetime` (UTC) on Postgres, keep the `strftime` string only on MySQL — same backend-aware pattern already used in `insert_scheduled_event`. **Lesson:** every write to `scheduled_events.next_run` (timestamp) must pass a `datetime`/`date` object on Postgres; every filter on `.delivered` (boolean) must use `TRUE`/`FALSE`. Two dispatchers sharing one event means any unmarked event turns into rapid spam.
-
----
-
-### Weather report delivered twice + on the wrong day — two dispatchers both deliver weather events  <!-- 2026-07-05 -->
-**Symptom:** After the 2026-07-04 spam fix (which stopped the every-15s loop), the daily weather report still arrived **twice** in quick succession, delivered to `telegram_bot` instead of the configured `synth_webui` interface, and the **next day's report was silently skipped**. Logs showed the same event rescheduled twice ~14s apart: `Event 134 rescheduled to 2026-07-06` (generic `EventPlugin` scheduler) then `Event 134 rescheduled to 2026-07-07` (weather plugin) + a `Delivered weather event 134`.
-**Location:** `plugins/event_plugin.py` `_check_and_execute_events` (the generic scheduler); `plugins/weather_plugin.py` `_dispatch_due_weather_events`.
-**Status:** fixed (2026-07-05).
-**Notes:** Root cause is the residual double-dispatch the 2026-07-04 note warned about. `EventPlugin._check_and_execute_events()` called `get_due_events()` (ALL due events, no owner filter) and delivered weather events via `_deliver_event_to_llm`, which **hard-codes the `telegram_bot` interface** — while `weather_plugin._dispatch_due_weather_events()` ALSO fetched and delivered the same event via `get_due_events_by_created_by("weather_plugin")` on its configured interface. Both marked it delivered and rescheduled it, so the event jumped forward TWO days (today's second delivery advanced `next_run` past tomorrow). Fix: `event_plugin.py` now defines `_SELF_MANAGED_EVENT_OWNERS = frozenset({"weather_plugin"})` and `_check_and_execute_events` filters out any due event whose structured `created_by` field is in that set BEFORE dispatching — so only the owning plugin delivers its own events. Filtering is on the `created_by` column (available because `get_due_events` does `SELECT *` → `dict(row)`), **not** on message text, respecting the no-keyword-matching rule. To register a new self-dispatching plugin, add its `created_by` value to `_SELF_MANAGED_EVENT_OWNERS`.
-
----
-
-### Weather report "wrong time" is a timezone/config issue, not a bug  <!-- 2026-07-05 -->
-**Symptom:** User expected the report at 06:50 but it arrived ~09:48. Config `WEATHER_DAILY_REPORT_TIME` was `09:50` and the `synth` container runs with `TZ=Asia/Tokyo` (JST).
-**Location:** config registry key `WEATHER_DAILY_REPORT_TIME`; `core/time_zone_utils.py` `get_local_timezone`/`utc_to_local` (resolves the local tz from the `TZ` env / timezone config); `core/db.py` `get_due_events` `advance_minutes=3` look-ahead.
-**Status:** working as designed — no code change.
-**Notes:** `WEATHER_DAILY_REPORT_TIME` is interpreted in the **project/local timezone** (`TZ`, here `Asia/Tokyo`), so `09:50` means 09:50 JST (= 02:50 CEST), not 06:50. The report also fires ~2-3 min early because `get_due_events` uses a `advance_minutes=3` look-ahead window to absorb LLM latency (09:50 − 3 min = 09:47/09:48). To change the delivery time, set `WEATHER_DAILY_REPORT_TIME` to the desired **local (JST) time**, or change `TZ`/the timezone config to the user's own timezone and set the value accordingly. Do NOT try to "fix" the conversion in code — it correctly follows the configured `TZ`.
-
----
-
-### `emotion_manager` can mix offset-aware DB timestamps with naive `datetime.now()`  <!-- 2026-04-18 -->
-**Symptom:** Runtime logs show `Error getting emotion state: can't subtract offset-naive and offset-aware datetimes`.
-**Location:** `plugins/emotion_manager.py` (`get_emotion_state`, `get_all_emotion_states`, and related decay logic using `datetime.now()` against DB timestamps).
-**Status:** known, not fixed.
-**Notes:** On Postgres, fetched timestamps may be timezone-aware while local comparisons still use naive `datetime.now()`. The emotion state path needs a consistent timezone policy before subtracting timestamps.
-
----
-
-### `schedule_message send_at` path imports missing `get_local_tz` helper  <!-- 2026-04-18 -->
-**Symptom:** Absolute-time reminders can fail before scheduling with an import error when `schedule_message.payload.send_at` is used.
-**Location:** `plugins/event_plugin.py` (`_handle_schedule_message_payload`, import `from core.time_zone_utils import get_local_tz`).
-**Status:** known, not fixed.
-**Notes:** There is no `get_local_tz` symbol in `core.time_zone_utils`. Relative-delay scheduling (`send_in`) is unaffected, but `send_at` parsing needs to use an existing timezone helper or inline timezone resolution.
-
----
-
-### `event_plugin` interface-path reminder delivery still calls stale `run_action` signature  <!-- 2026-04-18 -->
-**Symptom:** Reminder delivery via `interface_path` can log a `run_action()` argument error instead of sending the message.
-**Location:** `plugins/event_plugin.py` (`_send_via_interface_path`) vs `core/action_parser.py` (`run_action(action, context, bot, original_message)`).
-**Status:** known, not fixed.
-**Notes:** The call site still uses the old two-argument form (`run_action(action, message)`). This path needs the same context/bot/original-message signature update that other callers already received.
-
----
-
-### `test_selenium_ttsfree.py` blocks broad pytest without optional Selenium dependency  <!-- 2026-04-18 -->
-**Symptom:** `uv run pytest` can fail during collection with `ModuleNotFoundError: No module named 'selenium'` from `tests/plugins/test_selenium_ttsfree.py` after it falls back to `plugins_dev.selenium_ttsfree`.
-**Location:** `tests/plugins/test_selenium_ttsfree.py`, `plugins_dev/selenium_ttsfree.py`
-**Status:** known, not fixed.
-**Notes:** Environments without the optional Selenium package cannot collect this test module. For broad regression sweeps, either install `selenium` or ignore this file explicitly (for example `uv run pytest --ignore=tests/plugins/test_selenium_ttsfree.py`).
-
----
-
-### External OpenAI-compatible adapters still do not use native tool calls end-to-end  <!-- 2026-05-07 -->
-**Symptom:** External Gemini cortex turns now log native `tools` payloads and can return parsed function-call actions, but OpenAI-compatible external endpoints can still rely on freeform JSON-in-text responses instead of native tool calls. MCP traces for external OpenRouter-backed turns may still show `messages` only or text-only completions with malformed multi-action JSON.
-**Location:** Remaining gap is primarily `core/external_endpoints/adapters/openai_compat.py` (`chat_completion` still returns `message.content` only, no tool-call parsing) plus any other non-Gemini external adapters that do not consume native tool declarations. External Gemini path is now handled by `core/external_endpoints/bridges/cortex_bridge.py` and `core/external_endpoints/adapters/gemini_adapter.py`.
-**Status:** partially fixed.
-**Notes:** The external bridge now preserves `PromptRequest` tool declarations for Gemini endpoints, forwards Gemini-native `tools`, and the SDK adapter normalizes Gemini `function_call` responses back into SyntH JSON actions. The remaining end-to-end native tool-calling gap is on external OpenAI-compatible and other non-Gemini adapters.
-
----
-
-### Root-owned `.venv` can break `uv run` and configured interpreter launch  <!-- 2026-04-22 -->
-**Symptom:** Validation commands can fail before running tests with messages like `failed to remove directory ... .venv/lib64: Permission denied` or `.../.venv/bin/python: File o directory non esistente`.
-**Location:** Workspace environment / local `.venv` in repo root (for example `.venv/bin/python -> /usr/local/bin/python3.12` with a missing target, plus root ownership preventing `uv` from rebuilding it).
-**Status:** known, not fixed.
-**Notes:** In this state `configure_python_environment` may still report `.venv/bin/python`, but the symlink target is broken and `uv run` tries to replace the root-owned environment, then fails on permissions. Workaround: use a temporary user-owned environment, for example `UV_PROJECT_ENVIRONMENT=/tmp/synth-heart-venv uv sync --frozen`, then run validation with the same `UV_PROJECT_ENVIRONMENT` prefix.
-
----
-
-### Orphan `synth-soul-db` can block the Postgres-first runtime on port 5432  <!-- 2026-05-11 -->
-**Symptom:** The browser can show `Unsafe attempt to load URL https://localhost:8000/ from frame with URL chrome-error://chromewebdata/`, `curl -kI https://localhost:8000` fails with TLS EOF / broken pipe, and `synth` logs loop on startup with `Legacy DB cutover failed: [Errno -2] Name or service not known`.
-**Location:** Docker Compose runtime state after switching to the Postgres-first stack; stale orphan containers such as `synth-soul-db` and `synth-db-backup` can survive from the older topology.
-**Status:** known / operational workaround.
-**Notes:** In the observed failure, the current `synth-db` service could not bind host port `5432` because orphan `synth-soul-db` still owned it. `docker compose up -d --force-recreate synth-db synth` then left `synth` and `synth-legacy-db` on `synth_network` while `synth-db` never came up correctly, so `synth` could resolve `synth-legacy-db` but not `synth-db`. Safe recovery was: stop the orphan containers without deleting volumes, then rerun `docker compose up -d --force-recreate synth-db synth`. After that, `docker exec synth getent hosts synth-db synth-legacy-db` resolved both hosts and `https://localhost:8000` returned `200 OK` again.
-
----
-
-### `vrm-viewer.mjs` fails standalone `node --check` near idle-finish handler  <!-- 2026-05-12 -->
-**Symptom:** Running `node --check res/synth_webui/js/vrm-viewer.mjs` reports `SyntaxError: Unexpected token '{'` at `stopAction(actionName)`, after source text around `Finished idle animation -> starting next:` appears structurally corrupted.
-**Location:** `res/synth_webui/js/vrm-viewer.mjs`, idle-finish / `stopAction` boundary around the `Finished idle animation -> starting next` block.
->>>>>>> b35813e2 (fix(grillo): backfill interface_paths registry so outreach never silently dies)
-**Status:** fixed.
-**Notes:** Two gaps in the Agent Lane. (1) `_build_agent_prompt` never surfaced the originating `interface_path` in the prompt text, so the model had no value to put in `message_telegram_bot`'s required `interface_path` field → validation rejected the action. Fixed by adding a "SOURCE CONVERSATION" block to the prompt that states the exact `interface_path` (and interface) and instructs delivery/message actions to reuse it verbatim. (2) The router (`core/agent_router.py`) only sets `context["interface_path"]`, never `context["interface"]`; internal tools run by the executor read `context["interface"]`, so the diary saved as "unknown". Fixed by deriving `interface` from `interface_path` once at the top of `run_agentic_turn` (via `core.interface_path_utils.get_interface_from_path`) and enriching the shared `context` — this covers both the prompt text and every executed tool (Drones inherit it, since `run_drone` delegates to `run_agentic_turn`).
-
-### Bare `timestamp` column breaks fresh Postgres installs  <!-- 2025-01-01 -->
-**Symptom:** On a fresh PostgreSQL install, SyntH comes up in a broken state — avatar stuck in T-pose, unable to do anything. Root cause: a bare `timestamp` column is a PostgreSQL reserved word; the ORM auto-translates it to `timestamptz`, producing an invalid schema.
-**Location:** Any DDL using a bare `timestamp` column (`init-db.sql`, `scripts/sql/*.sql`, inline plugin DDL, `core/migrations.py`). Historically affected `chat_history_cache`, `ai_diary`, `ai_diary_archive`, `memories`, `emotion_state`, `emotion_diary`, `message_map`, `radio_activity_log`, and `mem_cells`.
-**Status:** fixed (renamed to `created_at` / `event_timestamp`; startup auto-migration added in `core/migrations.py::_rename_timestamp_columns`).
-**Notes:** A startup migration (`_rename_timestamp_columns`, registered in `_STARTUP_MIGRATIONS`) renames any lingering `timestamp` columns to `created_at` (and `mem_cells.timestamp` → `event_timestamp`) and renames stale indexes (`idx_timestamp` → `idx_created_at`, etc.) on both Postgres and MariaDB. See the Hard Rules entry: never use `timestamp` as a bare DB column name. Public API dict keys named `"timestamp"` returned to the WebUI/JS are intentionally kept — only DB-column SQL references are forbidden.
-
-> Resolved issues (Status: fixed) and general changelog have been moved to [`CHANGELOG.md`](FIXED_ISSUES.md).
-
----
-
-## 13. Database Quick Reference
-
-> Tables are created inline in `core/db.py` and each plugin — **`init-db.sql` only seeds a subset.** If you need a table's full column list, `grep -A20 "CREATE TABLE IF NOT EXISTS <name>"` in the relevant file.
-
+- Read it when the task depends on roadmap, status, or recorded design decisions.
+- Do not write, edit, or reorganize board content unless the user explicitly asks.
+- Keep AFFiNE credentials outside the repository.
+- Documentation must show placeholders, never real passwords.
 | Table | Owner | Purpose |
 |-------|-------|---------|
 | `config` | `core/db.py` | All `config_registry` persistent values — key/value store for every runtime setting |
@@ -963,28 +876,46 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"
 | `agent_tasks` | `init-db.sql` | Agentic Runtime 2.0 task records with I/O JSON (`engine`, `status`, `input`, `output`, `iterations_meta`) |
 | `vessel_sessions` | `core/db.py` / `init-db.sql` | Rift Vessel embodiment sessions (`environment`, `status`, `experience_buffer` JSON, `started_at`/`last_event_at`/`ended_at`, `diary_entry_id`) |
 | `vessel_activity_log` | `core/db.py` / `init-db.sql` | Rift Vessel Activities-tab log (`session_id`, `environment`, `event_type`, `summary`, `metadata` JSON, `created_at`) |
+| `vessel_diary` | `core/db.py` / `init-db.sql` | Rift Vessel end-of-session **operational recap** (`session_id`, `interface_path`, `environment`, `summary` LONGTEXT, `moments_count`, `reason`, `created_at`). Written by the **Rift Vessel Compactor** plugin (`plugins/rift_vessel/vessel_compactor/` → `core/vessel_diary_compactor.py::compact_activity_recap`, `reason = "activity_recap"`) from `vessel_activity_log` rows — factual/third-person, **separate from the shared `ai_diary`** so in-world telemetry never pollutes ordinary Fast-Lane prompts |
+| `goals` | `plugins/goals/goals.py` / `init-db.sql` | **Generic scope-aware goal store** owned by the standalone Goals plugin — Synth's own free-text goals for any game/planner/personal-life use, isolated by a three-part scope tuple (`scope`, `game`, `world`) plus `session_id`, `description`, `note`, `destination`, `steps` JSON, `current_step`, `target_kind`, `target_name`, `status`, `created_at`, `updated_at`. No catalogue; stepped goals auto-complete when `current_step` passes the last step. Minecraft goals are pinned `scope="vessel"`/`game="minecraft"`/`world="none"` via the shim `plugins/rift_vessel/minecraft/goals.py`. Legacy `minecraft_goals` is renamed to `goals` (scope columns backfilled) by `core/migrations.py::_migrate_goals_table` |
 | `external_endpoints` | `init-db.sql` | LLM/API endpoint registry (name, protocol, URL, key, capabilities, model list) |
 | `scheduled_events` | `plugins/event_plugin.py` | Date/time triggered events Synth should act on |
 | `blocklist` | `plugins/blocklist.py` | Blocked users/entities |
 | `message_map` | `plugins/message_map.py` | Message ID mapping across interfaces |
 
-**Key facts:**
-- All tables use `utf8mb4` / `utf8mb4_unicode_ci`. Emoji and multi-byte content is safe.
-- `interface_path` is the canonical user identifier across the codebase: `telegram_bot/12345`, `discord_bot/guild/channel`, `synth_webui/<uuid>`.
-- The `config` table is the single source of truth for runtime settings. Env vars override it at startup; DB values are used for defaults.
+Example user-owned config:
+
+```text
+AFFINE_BASE_URL=<board URL>
+AFFINE_EMAIL=<agent account>
+AFFINE_PASSWORD=<secret stored outside the repository>
+```
 
 ---
 
-## 14. Config Registry Keys
+## 13. Completion Report
 
-All keys stored in the `config` table and accessible via `config_registry.get_value(key)`. Env vars with the same name take precedence.
+Before finishing a code task, verify:
 
+- [ ] Relevant repository guidance and wiki pages were read.
+- [ ] Existing user work was preserved.
+- [ ] Impact analysis was run for modified symbols.
+- [ ] The implementation follows the single-chain and optional-component rules.
+- [ ] No keyword-based semantic behavior was introduced.
+- [ ] No credential or sensitive data was added.
+- [ ] Focused tests cover the change.
+- [ ] Formatting, linting, and scoped type checks pass.
+- [ ] Wider tests or smoke checks were run where appropriate.
+- [ ] For non-trivial code changes, TencentDB impact queries (or a disclosed direct-source fallback) match the intended scope.
+- [ ] Documentation was updated or explicitly identified as unchanged.
+- [ ] No staging, commit, push, reset, or destructive action occurred without authorization.
 | Key | Purpose |
 |-----|---------|
 | `BASE_CORTEX` | Default LLM engine for all interactions |
 | `GRILLO_CORTEX` | LLM engine used by Grillo autonomous beats |
 | `TRAINER_CORTEX` | LLM engine used for trainer-facing tasks |
 | `LIVE_CORTEX` | LLM engine used for live audio sessions |
+| `VESSEL_CORTEX` | LLM engine used for Rift Vessel will beats (the slow volition turn where Synth authors its in-world goals). `Default` means Base Cortex. Only the Will beat uses the LLM — the Motor tick is reflex-only and never routed here. |
 | `ACTIVE_VOX_ENGINE` | Active TTS engine |
 | `ACTIVE_AURIS_ENGINE` | Active STT engine |
 | `ACTIVE_IRIS_ENGINE` | Active vision/image engine |
@@ -997,6 +928,7 @@ All keys stored in the `config` table and accessible via `config_registry.get_va
 | `LOG_CHAT_ID` | `interface_path` to send ERROR/WARNING log notifications to |
 | `LOG_CHAT_INTERFACE` | Interface name for LogChat delivery |
 | `LOG_CHAT_THREAD_ID` | Thread ID for LogChat (Discord threads etc.) |
+| `LOG_RETENTION_DAYS` | **Env var** (not config-registry — logging is initialised at bootstrap before the DB). Days of logs to keep (plain + gzip combined) before deletion (default `7`). Today/yesterday plain text; older days gzip-compressed; past the window deleted. See `docs/logging.rst`. |
 | `PROJECT_DEFAULT_LANGUAGE` | Default language for responses |
 | `PROJECT_DEFAULT_TONE` | Default response tone |
 | `INTERFACE_LANGUAGE_OVERRIDES` | JSON: per-interface language overrides |
@@ -1018,6 +950,50 @@ All keys stored in the `config` table and accessible via `config_registry.get_va
 | `DRONE_MAX_ITERATIONS` | Hard cap on Drone sub-agent loop iterations (default 3) |
 | `DRONE_TURN_TIMEOUT_SEC` | Wall-clock budget per Drone turn in seconds (default 90) |
 | `AGENT_SHELL_ALLOW_HOST` | Allow `agent_run_shell` to run when NOT in a container (default `False`; a host shell is a real compromise risk) |
+| `VESSEL_AUTONOMY_ENABLED` | Enable autonomous Rift Vessel play — the slow will beat, the middle action beat, and the fast motor tick (default `False`) |
+| `VESSEL_WILL_INTERVAL_SEC` | Seconds between slow volition/will beats — the LLM turn that authors/updates Synth's goal (default 45, clamped `[10, 3600]`, falls back to legacy `VESSEL_BEAT_INTERVAL_SEC`) |
+| `VESSEL_WILL_QUIET_SEC` | Quiet window (s) required before a will beat may fire after a *player* interacts with Synth in-world (default 60, clamped `[0, 3600]`, `0` disables). Defers the "reflect on your own" volition turn while a player is present so a direct address is answered reactively instead of being ignored |
+| `VESSEL_ACTION_BEAT_ENABLED` | Enable the middle "idea → concrete step" action beat — the LLM Fast-Lane turn that maps the free-text goal to one concrete world verb (default `True`) |
+| `VESSEL_ACTION_INTERVAL_SEC` | Seconds between action beats (default 20, clamped `[3, 300]`) |
+| `VESSEL_GOAL_DEBRIEF_ENABLED` | Enable the goal debrief — a slow, structural postflight check (`core/vessel_goal_debrief.py`) that supervises the single active vessel goal: it **deterministically auto-completes** a goal already satisfied by the live world/inventory (via the connector's world-owned `evaluate_goal_completion`/`complete_active_goal` hooks) and **arms a stall cue** on the next will beat when a goal sits unchanged too long. Closes the gap where Synth progresses physically but never declares a goal done. Structural only (never reads goal text as intent), Fast Lane only (no cognition turn, no diary) (default `True`). **Multi-part + quantity aware:** a goal naming several products is only completed when **every** named product is present at its stated count (`target_names.derive_quantity`, e.g. "gather 20 oak logs" needs 20) — a single ingredient never closes a whole build goal (the "runs around re-authoring the same goal" churn fix); a derived raw-material target never completes a goal that also names products; stepped goals are never auto-completed here (their plan owns the progression) |
+| `VESSEL_GOAL_EXPAND_ENABLED` | Enable the **Goal Plan Expansion (Drone)** — each time Synth authors a fresh goal, a short-lived Drone runs out of band (Fast Lane only, no in-world turn) to expand it into an ordered `steps` plan, consulting the game knowledge base for real rules, and writes it back via `update_goal`, then re-notifies Synth via a will beat. Without it goals stay stepless free text and the action beat/motor have nothing concrete to chase (the "running around" gap). Default `True`; gated additionally on `VESSEL_AUTONOMY_ENABLED` and `VESSEL_KNOWLEDGE_ENABLED`. NOTE: `set_goal` deliberately never threads `steps` so the expander is not gated out; the plan arrives via `update_goal`. If it was turned off during debugging, re-enable it or goals will not get plans |
+| `VESSEL_GOAL_DEBRIEF_USE_HISTORY` | Enable the goal debrief's **history-based** completion check (default `True`). When the fast inventory/world-state check did not already satisfy the goal, the debrief additionally consults the session's own `vessel_activity_log` (via the connector's `evaluate_goal_completion_from_history` hook — Minecraft implemented) and auto-completes the goal when a successful action *actually taken this session* structurally matches the goal's concrete target (place/mine/collect a block, attack/shoot a mob, craft/smelt an item). Closes the gap where a goal is fulfilled by an action that leaves **no lasting inventory trace**. Purely structural — id-based matching on the logged target ids (`_HISTORY_TARGET_KEYS`), never a text parse; fully fail-safe. **Multi-part + quantity aware:** a goal naming several products is only completed when **every** named product is matched (a single intermediate `collect_block oak_log` row no longer completes a whole cottage goal — the "runs around re-authoring the same goal" churn fix), and the goal text's stated count (`target_names.derive_quantity`, e.g. "gather 20 oak logs") is summed from each row's logged `_result.data` (`collected`/`count`) before the goal closes |
+| `VESSEL_GOAL_DEBRIEF_INTERVAL_SEC` | Seconds between goal-debrief checks (default 30, clamped `[5, 3600]`) |
+| `VESSEL_GOAL_DEBRIEF_STALL_TICKS` | Consecutive unchanged debrief checks (same goal id + `current_step` + `updated_at`) before the debrief arms a will-beat stall cue prompting Synth to reconsider or change approach (default 4, clamped `[2, 100]`) |
+| `VESSEL_MOTOR_ENABLED` | Enable the fast motorics reflex that moves the body toward the goal with no LLM (default `True`) |
+| `VESSEL_MOTOR_INTERVAL_SEC` | Seconds between fast motor ticks (default 3, clamped `[1, 60]`) |
+| `VESSEL_STATICITY_WARD_ENABLED` | Enable the always-on **staticity ward** (Minecraft adapter, default `True`): if the body lingers within a small radius of a moving anchor for too many consecutive motor ticks — even while it has a goal or keeps poking an in-reach block — it breaks the parking by rotating its heading and `goto`-ing a fresh distant waypoint (fallback `wander`). Broader than the tick-to-tick stuck-body watchdog: it also catches a goalless or physically-inert body that the other watchdog misses. Runs FIRST each motor tick (after the survival guard, before the `no goal` early-return). Purely positional/numeric (no goal text, no keywords), Fast Lane only (no LLM, no diary) |
+| `VESSEL_STATICITY_TICKS` | Consecutive motor ticks the body may stay within `VESSEL_STATICITY_RADIUS` of its anchor before the ward relocates it (default 8 ≈ 24 s at the default ~3 s motor tick, clamped `[2, 1000]`) |
+| `VESSEL_STATICITY_RADIUS` | Horizontal radius (blocks) that still counts as "the same place" for the staticity ward; stepping outside it re-anchors and resets the idle counter so normal travel never trips the ward (default 2.0, clamped `[0.5, 32.0]`) |
+| `VESSEL_REFLECTION_ENABLED` | Enable the deliberate reflection pause — an elevated-priority LLM turn that fires when Synth is playing with no active goal (or a goal with no step plan), prunes its own pending autonomous beats, and authors/refines the goal before autonomy resumes (default `True`) |
+| `VESSEL_REFLECTION_DURATION_SEC` | Duration (s) of the reflection window during which the will/action beats are held off — the motor tick and survival reflex keep running (default 15, clamped `[3, 300]`) |
+| `VESSEL_REFLECTION_MIN_INTERVAL_SEC` | Anti-thrash floor (s): minimum time between two reflection pauses (default 60, clamped `[10, 3600]`) |
+| `VESSEL_GOAL_BEAT_ENABLED` | Enable the dedicated **goal beat** — a Fast-Lane LLM turn, fired only while Synth has **no active goal**, whose exposed action allowlist is restricted (per-turn, via `context_memory["allowed_action_types"]`) to just `vessel_<world>_set_goal` + `vessel_<world>_update_goal`. Structurally forces even a weak model to author a goal instead of falling back to passive `observe`/`status`. Uses the persona/system prompt like every other beat (default `True`) |
+| `VESSEL_GOAL_BEAT_INTERVAL_SEC` | Seconds between goal beats while there is no active goal (default 45, clamped `[10, 3600]`) |
+| `VESSEL_SELF_PRESERVATION_ENABLED` | Enable the fast self-preservation survival reflex on the motor tick (default `True`) |
+| `VESSEL_SP_LOW_OXYGEN` | Oxygen threshold at/below which the drowning reflex surfaces the body (default 6). **On the 0..20 air-bubble scale** (mineflayer `oxygenLevel` at runtime: 20 = full lungs, 0 = out of air), NOT air ticks — a healthy submerged bot reads ~20, so an air-ticks value would false-fire constantly |
+| `VESSEL_SP_LOW_HEALTH` | Health at/below which a hostile encounter escalates from defend to flee (default 6) |
+| `VESSEL_SP_HOSTILE_DIST` | Distance (blocks) within which a hostile mob triggers the defend/flee reflex (default 8) |
+| `VESSEL_SP_FIGHT_BACK` | Whether Synth fights nearby aggressors (`attack`/`shoot`) before escalating to flee (default `True`) |
+| `VESSEL_SP_FIGHT_MAX_FAILS` | Consecutive failed fight attempts before escalating from defend to flee (default 8 — health-primary escalation, so the body keeps fighting while healthy) |
+| `VESSEL_SP_USE_RANGED` | Whether Synth may use a carried ranged weapon (bow/crossbow) with ammo against a distant aggressor via the `shoot` verb before closing to melee (default `True`) |
+| `VESSEL_SP_RANGED_MIN_DIST` | Minimum target distance (blocks) at/above which the combat reflex prefers ranged (`shoot`) over melee (`attack`), when a loaded ranged weapon is carried (default 5.0) |
+| `VESSEL_SP_NIGHT_SHELTER` | Enable the priority-6 night-shelter reflex: at night with aggressive mobs within `VESSEL_SP_SHELTER_DIST`, Synth fully encloses (roofed bed → seal open cells → dig-in niche) via the `shelter` verb — a torch is not enough (default `True`) |
+| `VESSEL_SP_SHELTER_DIST` | Distance (blocks) within which a hostile mob at night triggers the shelter reflex (default 16.0 — deliberately wider than `VESSEL_SP_HOSTILE_DIST`=8 so the body walls itself in *before* a mob closes to melee) |
+| `VESSEL_MORNING_EXIT_ENABLED` | Enable the priority-7 (lowest) morning surface-exit reflex (default `True`): if Synth dug in / walled itself in overnight and has **no reachable base**, then at **day** with **no open sky above** (structural telemetry `is_day` + `sky_access`) it digs a jumpable ascending staircase (one block forward + one up per step) back to the surface via the `climb_staircase` verb, stopping early once open sky is reached. A day-latch (`_surfaced_last_day`) prevents refiring the same day. Structural only (numeric time + sky-access bool, never text), Fast Lane, no diary |
+| `VESSEL_SP_APPRAISAL_ENABLED` | Enable the post-damage appraisal will beat — a high-priority (`PRIORITY_URGENT`) Fast-Lane LLM turn fired on taking damage, so Synth reacts to a hit in character (fight a mob / stay social with a player) (default `True`) |
+| `VESSEL_SP_ENGAGE_RATIO` | Minimum `own_power / mob_power` ratio at/above which an **armed** Synth engages a hostile mob instead of fleeing (default 1.0, clamped `[0.2, 5.0]`). Structural, telemetry-only — see §5c "Power-aware fight-vs-flee" |
+| `VESSEL_SP_WEAK_MOB_POWER` | Structural power floor below which a **disarmed** (no melee *and* no ranged weapon) Synth still punches out a mob bare-handed instead of fleeing (default 6.0). `_mob_power(entity) = max_health * (1 + attack_damage/8)`. See §5c "Power-aware fight-vs-flee" |
+| `VESSEL_PERCEPTION_CONTEXT_CAP` | Max autonomous vessel perceptions merged into a vessel-focus prompt (default 3). Perceptions live in a SEPARATE in-memory ring buffer (`_perception_memory`, maxlen 32) so a rapid ambient burst (e.g. drowning damage) can never evict player chat from the bounded conversational deque; the prompt merges conversation + the last N perceptions chronologically |
+| `VESSEL_ACTION_WHITELIST` | Comma/newline-separated fnmatch patterns for the **core-extra** actions kept in the prompt during a vessel turn (advanced; default `message_*, event, schedule_message, blocklist, spawn_drone`). This is the *editable* Tier 3 of the vessel action whitelist — the vessel's own verbs (`vessel_*`) and the connected world's verbs (`*_<world>_*`) are **hardcoded** and always kept. See §5c "Vessel action whitelist" |
+| `VESSEL_COMPACTOR_ENABLED` | Enable the **Rift Vessel Compactor** plugin (`plugins/rift_vessel/vessel_compactor/`, default `True`) — the dedicated plugin that, on end-of-session, compacts the session's `vessel_activity_log` rows into one factual, third-person **operational recap** in `vessel_diary` (`reason = "activity_recap"`). Uses its own internal off-chain low-priority asyncio worker queue (not the message chain); also manually runnable from the WebUI Plugins tab (`run_action("compact_now")`). Fully fail-safe |
+| `VESSEL_DIARY_COMPACTION_ENABLED` | Gate for the **legacy inline fallback** compaction path only (default `True`). Used when no compaction handler is registered (the Rift Vessel Compactor plugin is absent/disabled): `VesselSessionManager._compact_and_store` writes the old autobiographical entry to `vessel_diary` via `core/vessel_diary_compactor.py::compact_session`. With the plugin enabled this path is not used. Fully fail-safe: any LLM error degrades to a deterministic plain-text join |
+| `VESSEL_DIARY_CHUNK_ITEMS` | Max experience-buffer items per compaction chunk before it is summarised into a partial (default 40, clamped `[4, 400]`). Keeps each chunk LLM call small enough that a long session never produces a single oversized prompt |
+| `VESSEL_DIARY_CHUNK_CHARS` | Max characters per compaction chunk before it is closed and summarised (default 6000, clamped `[1000, 40000]`). A chunk closes when either the item or the char budget would be exceeded by the next line; the resulting partials are folded (recursively if still oversized) into one coherent entry |
+| `VESSEL_KNOWLEDGE_LIVE_FETCH` | Allow the KB to fetch + LLM-summarise pages from a world's live wiki (Minecraft → [minecraft.wiki](https://minecraft.wiki)) (default `True`). When `False` the client is cache-only everywhere (no network, no LLM) — it serves only already-cached pages |
+| `VESSEL_KNOWLEDGE_WEB_FALLBACK` | Allow the KB to fall back to a generic web search (via `plugins/web_search/search_engine.py`) when *no* declared per-game wiki matched the query (default `True`). Web results are summarised + cached like a wiki page. `cache_only` beats always skip it |
+| `VESSEL_KNOWLEDGE_FETCH_TIMEOUT_SEC` | HTTP timeout (s) for a live wiki search/fetch (default 4, clamp 1–30). Only the explicit `lookup_knowledge` verb / goal-expansion Drone fetch live; the automatic will/motor beat path is `cache_only` and never hits the network |
+| `VESSEL_KNOWLEDGE_SUMMARY_MAX_CHARS` | Max length of the one-time EN factual summary the LLM writes per wiki page before it is cached to `wiki/cache/<slug>.json` (default 600, clamp 120–4000) |
 | `LLM_AUTO_EXECUTE_UNSAFE_ACTIONS` | Whether to auto-execute unsafe LLM actions |
 | `AWAIT_RESPONSE_TIMEOUT` | Seconds to wait for LLM response before timeout |
 | `LIVE_VOICE_NAME` | Voice name for live audio TTS |
@@ -1032,106 +1008,24 @@ All keys stored in the `config` table and accessible via `config_registry.get_va
 | `CHAT_SLEEP_COMMANDS` | Commands that put Synth into sleep/quiet mode |
 | `CHAT_WAKE_COMMANDS` | Commands that wake Synth from sleep mode |
 
----
+### External Cortex selection reverted to Anthropic after a successful switch  <!-- 2026-08-08 -->
+**Symptom:** The WebUI reports a successful switch to an external engine such as Venice, but the next prompt logs that the engine is unregistered and persists `BASE_CORTEX=anthropic`.
+**Location:** `core/config.py::get_active_cortex_engine`; `core/external_endpoints/registry.py::_sync_registries`.
+**Status:** fixed 2026-08-08.
+**Root cause:** The external registry registers endpoints using `effective_subsystem_map()`, while the resolver pruned endpoints using only raw probe capabilities. Venice had `capabilities.cortex=False` but an explicit effective `cortex=True` map, so the two paths disagreed.
+**Fix:** The resolver now uses `effective_subsystem_map()` consistently. Endpoints whose effective map disables Cortex still fall back normally.
 
-<!-- gitnexus:start -->
-# GitNexus — Code Intelligence
+### Engine Config save caused the active WebUI to replace its endpoint card tree  <!-- 2026-08-08 -->
+**Symptom:** Changing an Engine Configuration toggle such as `enable_tools` could make the WebUI appear as a full blue/blocked surface immediately after saving.
+**Location:** `res/synth_webui/js/main.js` Engine Config editor; `res/synth_webui/js/engines.js::loadEndpoints`.
+**Status:** fixed 2026-08-08.
+**Root cause:** The save path called `refreshEndpoints()` after the backend save. That rebuilt the entire external-endpoint card DOM while the active Engine Config editor and its event handlers were still attached to the old tree. The failure was introduced by the in-place endpoint-refresh change; D17 does not contain that refresh on this path.
+**Fix:** Engine Config save/apply no longer rebuilds the endpoint cards. The backend still persists and applies the configuration, while the active editor remains stable.
 
-This project is indexed by GitNexus as **synthetic_heart** (10324 symbols, 33256 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+Final responses should state:
 
-> If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
-
-## Always Do
-
-- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `gitnexus_impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
-- **MUST run `gitnexus_detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows.
-- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
-- When exploring unfamiliar code, use `gitnexus_query({query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
-- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `gitnexus_context({name: "symbolName"})`.
-
-## When Debugging
-
-1. `gitnexus_query({query: "<error or symptom>"})` — find execution flows related to the issue
-2. `gitnexus_context({name: "<suspect function>"})` — see all callers, callees, and process participation
-3. `READ gitnexus://repo/synthetic_heart/process/{processName}` — trace the full execution flow step by step
-4. For regressions: `gitnexus_detect_changes({scope: "compare", base_ref: "main"})` — see what your branch changed
-
-## When Refactoring
-
-- **Renaming**: MUST use `gitnexus_rename({symbol_name: "old", new_name: "new", dry_run: true})` first. Review the preview — graph edits are safe, text_search edits need manual review. Then run with `dry_run: false`.
-- **Extracting/Splitting**: MUST run `gitnexus_context({name: "target"})` to see all incoming/outgoing refs, then `gitnexus_impact({target: "target", direction: "upstream"})` to find all external callers before moving code.
-- After any refactor: run `gitnexus_detect_changes({scope: "all"})` to verify only expected files changed.
-
-## Never Do
-
-- NEVER edit a function, class, or method without first running `gitnexus_impact` on it.
-- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
-- NEVER rename symbols with find-and-replace — use `gitnexus_rename` which understands the call graph.
-- NEVER commit changes without running `gitnexus_detect_changes()` to check affected scope.
-
-## Tools Quick Reference
-
-| Tool | When to use | Command |
-|------|-------------|---------|
-| `query` | Find code by concept | `gitnexus_query({query: "auth validation"})` |
-| `context` | 360-degree view of one symbol | `gitnexus_context({name: "validateUser"})` |
-| `impact` | Blast radius before editing | `gitnexus_impact({target: "X", direction: "upstream"})` |
-| `detect_changes` | Pre-commit scope check | `gitnexus_detect_changes({scope: "staged"})` |
-| `rename` | Safe multi-file rename | `gitnexus_rename({symbol_name: "old", new_name: "new", dry_run: true})` |
-| `cypher` | Custom graph queries | `gitnexus_cypher({query: "MATCH ..."})` |
-
-## Impact Risk Levels
-
-| Depth | Meaning | Action |
-|-------|---------|--------|
-| d=1 | WILL BREAK — direct callers/importers | MUST update these |
-| d=2 | LIKELY AFFECTED — indirect deps | Should test |
-| d=3 | MAY NEED TESTING — transitive | Test if critical path |
-
-## Resources
-
-| Resource | Use for |
-|----------|---------|
-| `gitnexus://repo/synthetic_heart/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/synthetic_heart/clusters` | All functional areas |
-| `gitnexus://repo/synthetic_heart/processes` | All execution flows |
-| `gitnexus://repo/synthetic_heart/process/{name}` | Step-by-step execution trace |
-
-## Self-Check Before Finishing
-
-Before completing any code modification task, verify:
-1. `gitnexus_impact` was run for all modified symbols
-2. No HIGH/CRITICAL risk warnings were ignored
-3. `gitnexus_detect_changes()` confirms changes match expected scope
-4. All d=1 (WILL BREAK) dependents were updated
-
-## Keeping the Index Fresh
-
-After committing code changes, the GitNexus index becomes stale. Re-run analyze to update it:
-
-```bash
-npx gitnexus analyze
-```
-
-If the index previously included embeddings, preserve them by adding `--embeddings`:
-
-```bash
-npx gitnexus analyze --embeddings
-```
-
-To check whether embeddings exist, inspect `.gitnexus/meta.json` — the `stats.embeddings` field shows the count (0 means no embeddings). **Running analyze without `--embeddings` will delete any previously generated embeddings.**
-
-> Claude Code users: A PostToolUse hook handles this automatically after `git commit` and `git merge`.
-
-## CLI
-
-| Task | Read this skill file |
-|------|---------------------|
-| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
-| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
-| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
-| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
-| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
-| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
-
-<!-- gitnexus:end -->
+1. what changed;
+2. why;
+3. files affected;
+4. validation performed;
+5. remaining risks, limitations, or unrun checks.

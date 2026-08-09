@@ -1,0 +1,1 @@
+Pure Python with `asyncio.Lock` for concurrency control in the state manager; uses a centralized `config_registry` for runtime configuration (autonomy mode, security levels, allowed action lists); relies on a `validation_registry` for dynamic component-based payload validation rather than hardcoded rules.

@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: documentation
+title: Synthetic Heart Documentation (Sphinx Manual)
+scope:
+    - docs/
+source_files: []
+depends_on: []
+related_to: []

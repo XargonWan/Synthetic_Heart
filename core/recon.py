@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Tuple
 from core.logging_utils import log_debug, log_info, log_warning
 from core.config_manager import config_registry
 from core.beat_utils import is_outbound_beat
+from core.interface_path_utils import is_vessel_history_entry, is_vessel_interface_path
+from core.vessel_focus import is_vessel_turn
 
 _RECON_HINT_CACHE: dict[str, dict[str, Any]] = {}
 _lingua_detector: Any | None = None
@@ -357,6 +359,7 @@ async def _build_recon_history_texts_async(
     global_lines: list[str] = []
 
     interface_path = getattr(message, "interface_path", None)
+    vessel_focus = is_vessel_turn(message, context_memory, interface_path)
     # Resolve the raw incoming path the same way messages are resolved when
     # persisted (alias/link map + Unified Lane), so the local-history lookup
     # keys line up with how the rows were stored.
@@ -397,7 +400,12 @@ async def _build_recon_history_texts_async(
             # chat (e.g. Telegram reply-in-thread), leaving local history empty
             # while global history (unfiltered) survives. Chat-level matching
             # keeps the two consistent across restarts.
-            cached = await load_chat_history(interface_path, match_chat_level=True)
+            cached = await load_chat_history(
+                interface_path,
+                match_chat_level=(
+                    not vessel_focus and not is_vessel_interface_path(interface_path)
+                ),
+            )
             for item in list(cached)[-6:]:
                 sender = item.get("sender_name") or "unknown"
                 content = item.get("text") or ""
@@ -405,6 +413,12 @@ async def _build_recon_history_texts_async(
                     local_lines.append(f"[{sender}] {content}")
 
         global_cached = await load_global_chat_history(limit=6)
+        if vessel_focus:
+            global_cached = []
+        else:
+            global_cached = [
+                item for item in global_cached if not is_vessel_history_entry(item)
+            ]
         for item in list(global_cached)[-6:]:
             sender = item.get("sender_name") or "unknown"
             content = item.get("text") or ""
@@ -456,6 +470,47 @@ async def _normalize_keywords_list(raw_keywords: List[str] | None) -> List[str]:
     return out
 
 
+def get_registered_recon_keys() -> set[str]:
+    """Return the set of recon keys declared by currently registered plugins.
+
+    Recon plugins are preflight-only: they return ``{}`` from
+    ``get_supported_actions()`` and instead expose a single recon key via
+    ``get_recon_key()`` (e.g. ``tone_hint``, ``agent_intent``, ``language_hint``).
+    These keys are the schema of the *separate* Recon LLM call — they are never
+    valid main-pass actions.
+
+    State-retaining browser engines (e.g. ``selenium-llm-engine``) can leak the
+    Recon call's JSON schema into the immediately following main-pass response,
+    so the main pass emits an ``actions`` array made entirely of these recon
+    keys. Callers use this set to structurally drop such leaked entries before
+    validation, so a contaminated turn is not starved of deliverable actions.
+
+    The set is derived reflectively from ``PLUGIN_REGISTRY`` — no hardcoded
+    keyword list — so it stays correct as recon plugins are added or removed.
+    Fully guarded: any failure returns an empty set (drop nothing).
+    """
+    keys: set[str] = set()
+    try:
+        from core.core_initializer import PLUGIN_REGISTRY
+
+        plugins = list(PLUGIN_REGISTRY.values())
+    except Exception as e:  # pragma: no cover - defensive
+        log_warning(f"[recon] get_registered_recon_keys: registry unavailable: {e}")
+        return keys
+
+    for plugin in plugins:
+        get_key = getattr(plugin, "get_recon_key", None)
+        if not callable(get_key):
+            continue
+        try:
+            key = get_key()
+        except Exception:
+            continue
+        if isinstance(key, str) and key.strip():
+            keys.add(key.strip())
+    return keys
+
+
 async def gather_recon_contributions(
     message=None,
     context_memory=None,
@@ -463,10 +518,19 @@ async def gather_recon_contributions(
     tags: List[str] | None = None,
     keywords: List[str] | None = None,
     max_results: int | None = None,
+    recon_whitelist_patterns: List[str] | None = None,
 ) -> List[Dict[str, Any]]:
     """Call plugin hooks `get_recon_contributions` and merge results.
 
     Returns list of normalized contribution dicts.
+
+    ``recon_whitelist_patterns`` is the preflight counterpart of the vessel
+    action whitelist: when non-empty (an in-world embodiment turn), a recon
+    plugin is only kept if its ``get_recon_key()`` matches one of the fnmatch
+    patterns. This is structural name matching, never keyword/regex intent
+    detection. Fail-safe: a plugin missing a usable key, or whose key raises,
+    is excluded on a whitelisted turn; ``None``/empty patterns disable the
+    filter entirely (the normal, non-vessel behaviour).
     """
     enabled = bool(config_registry.get_var("ENABLE_RECON", True))
     # start-of-flow logging
@@ -503,6 +567,20 @@ async def gather_recon_contributions(
         log_warning(f"[recon] Failed to access PLUGIN_REGISTRY: {e}")
         plugins = []
 
+    # Preflight whitelist (vessel embodiment turn): resolve the matcher once.
+    _use_recon_whitelist = bool(recon_whitelist_patterns)
+    _matches_recon_whitelist = None
+    if _use_recon_whitelist:
+        try:
+            from plugins.rift_vessel.vessel_whitelist import matches_whitelist
+
+            _matches_recon_whitelist = matches_whitelist
+        except Exception:
+            # Rift Vessel plugin unavailable: cannot apply the whitelist. Fall
+            # back to the normal (unfiltered) path rather than dropping every
+            # plugin, matching the caller's "plugin absent -> full recon" intent.
+            _use_recon_whitelist = False
+
     eligible = []
     for p in plugins:
         has_combined = all(
@@ -516,6 +594,43 @@ async def gather_recon_contributions(
         if (has_combined or hasattr(p, "get_recon_contributions")) and _plugin_enabled(
             p, "RECON"
         ):
+            # In-world embodiment turn: keep only recon plugins whose recon key
+            # matches the vessel whitelist. Structural fnmatch on the key name
+            # (never message text). Fail-safe: no usable key -> excluded.
+            if _use_recon_whitelist and _matches_recon_whitelist is not None:
+                recon_key = ""
+                try:
+                    if hasattr(p, "get_recon_key"):
+                        recon_key = str(p.get_recon_key() or "").strip()
+                except Exception:
+                    recon_key = ""
+                if not recon_key or not _matches_recon_whitelist(
+                    recon_key, list(recon_whitelist_patterns or [])
+                ):
+                    log_debug(
+                        f"[recon] Plugin {p.__class__.__name__} recon_key="
+                        f"{recon_key!r} not in vessel recon whitelist; skipping"
+                    )
+                    continue
+            # Optional per-turn eligibility hook. A recon plugin may declare
+            # ``is_recon_eligible(message, context_memory) -> bool`` to opt out
+            # of a given turn *before* its key is baked into the combined recon
+            # prompt (returning [] from parse_recon_response is too late — the
+            # key is already in the single LLM call). Guarded and backward
+            # compatible: any error or a missing hook defaults to eligible.
+            if hasattr(p, "is_recon_eligible"):
+                try:
+                    if not p.is_recon_eligible(message, context_memory):
+                        log_debug(
+                            f"[recon] Plugin {p.__class__.__name__} opted out of "
+                            "this turn via is_recon_eligible; skipping"
+                        )
+                        continue
+                except Exception as exc:
+                    log_warning(
+                        f"[recon] is_recon_eligible failed for "
+                        f"{p.__class__.__name__}: {exc}; treating as eligible"
+                    )
             eligible.append(p)
 
     if not eligible:

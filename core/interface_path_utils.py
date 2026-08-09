@@ -143,6 +143,27 @@ def get_interface_from_path(interface_path: str) -> str:
     return interface_name
 
 
+def is_vessel_interface_path(interface_path: Any) -> bool:
+    """Return whether a path belongs to the Rift Vessel interface.
+
+    Interface paths are structural routing metadata.  Match the complete
+    interface segment so an unrelated path such as ``vessel_preview/...`` is
+    not treated as an embodiment path.
+    """
+    return isinstance(interface_path, str) and (
+        interface_path == "vessel" or interface_path.startswith("vessel/")
+    )
+
+
+def is_vessel_history_entry(entry: Any) -> bool:
+    """Return whether a persisted/in-memory history entry is from a Vessel."""
+    if not isinstance(entry, dict):
+        return False
+    return is_vessel_interface_path(
+        entry.get("interface_path") or entry.get("source_path")
+    )
+
+
 def get_level_from_path(interface_path: str, level: int) -> Optional[str]:
     """Extract a specific level from an interface path.
 
@@ -192,3 +213,36 @@ def is_valid_interface_path(interface_path: str) -> bool:
             return False
 
     return True
+
+
+def is_vessel_embodiment_context(context: Optional[Dict[str, Any]]) -> bool:
+    """Return True when a turn originates from a Rift Vessel embodiment.
+
+    This is the single, canonical structural detector for "SyntH is in the
+    world" turns. Detection is purely from routing metadata — never from
+    message text (project rule: no keyword logic) — mirroring
+    ``core.history_engine.build_context``:
+
+    * an explicit ``vessel_focus`` context flag, or
+    * ``context['interface'] == 'vessel'``, or
+    * ``context['interface_path']`` / ``context['chat_id']`` being ``vessel``
+      or a ``vessel/...`` path.
+
+    Fully guarded: any failure degrades to ``False`` so the caller's normal
+    path is untouched.
+    """
+    if not isinstance(context, dict):
+        return False
+    try:
+        if context.get("vessel_focus"):
+            return True
+        iface = context.get("interface")
+        if isinstance(iface, str) and iface == "vessel":
+            return True
+        for key in ("interface_path", "chat_id"):
+            val = context.get(key)
+            if is_vessel_interface_path(val):
+                return True
+    except Exception:
+        return False
+    return False

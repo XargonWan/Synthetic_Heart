@@ -1,0 +1,1 @@
+Python async/await with asyncio task groups for background services; SQLite/MariaDB/PostgreSQL via an async connection pool; Jinja2 HTML templates for the WebUI; structured logging with rotation and LogChat notification integration.

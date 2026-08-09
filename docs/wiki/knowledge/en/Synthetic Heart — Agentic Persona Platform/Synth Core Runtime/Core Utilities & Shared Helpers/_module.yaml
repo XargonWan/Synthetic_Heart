@@ -1,0 +1,17 @@
+schema_version: 1
+module_path: core_runtime/utilities
+title: Core Utilities & Shared Helpers
+scope:
+    - core/abstract_context.py
+    - core/beat_utils.py
+    - core/calendar_utils.py
+    - core/corrector_utils.py
+    - core/json_utils.py
+    - core/languages.py
+    - core/logging_utils.py
+    - core/text_utils.py
+    - core/time_zone_utils.py
+    - core/user_utils.py
+source_files: []
+depends_on: []
+related_to: []

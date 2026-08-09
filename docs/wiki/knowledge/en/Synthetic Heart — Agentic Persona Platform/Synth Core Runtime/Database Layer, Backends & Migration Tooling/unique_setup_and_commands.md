@@ -1,0 +1,1 @@
+Backups require external binaries `pg_dump` and/or `mysqldump` on PATH. Backup scheduling is toggled via `SYNTH_DB_BACKUP_ENABLED` and `SYNTH_DB_BACKUP_INTERVAL_HOURS`. Cutover state persists to `SYNTH_DB_CUTOVER_STATE_PATH` (default `/config/db-cutover-state.json`). Startup migrations run automatically through `core.db.ensure_plugin_tables` before any plugin code executes.

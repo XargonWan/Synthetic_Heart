@@ -151,6 +151,117 @@ CREATE TABLE IF NOT EXISTS vessel_activity_log (
     INDEX idx_vessel_activity_session (session_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Rift Vessel Diary: the compacted autobiographical entry produced by chunked
+-- LLM summarisation of a session's lived experience at end-of-session. This is
+-- SEPARATE from the real ai_diary — the vessel no longer writes to ai_diary
+-- (that polluted the Fast Lane prompt). Whether/how to import these entries into
+-- ai_diary is a later, unimplemented decision. Never a bare `timestamp` column.
+CREATE TABLE IF NOT EXISTS vessel_diary (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    session_id VARCHAR(128),
+    interface_path VARCHAR(512),
+    environment VARCHAR(64) NOT NULL,
+    summary LONGTEXT NOT NULL,
+    moments_count INT DEFAULT 0,
+    reason VARCHAR(32),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_vessel_diary_created_at (created_at DESC),
+    INDEX idx_vessel_diary_environment (environment),
+    INDEX idx_vessel_diary_session (session_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Rift Vessel Bases: places Synth chose in a world to build, store resources,
+-- shelter, sleep, or set its respawn. A world can have several bases, so this
+-- is a list per scope tuple. Owned by the Rift Vessel CORE base store
+-- (plugins/rift_vessel/vessel_bases.py) — having a home is common to most game
+-- worlds. Coordinates are structural (never text): `anchor` is the base's
+-- {x,y,z} point used by the night-retreat reflex; `box` is the optional built
+-- structure bounding box {x1..z2}. There is NO catalogue of predefined bases.
+-- Scope-aware like `goals`; Minecraft bases pin scope='vessel'/game='minecraft'.
+-- Never a bare `timestamp` column.
+CREATE TABLE IF NOT EXISTS vessel_bases (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    session_id VARCHAR(128),
+    scope VARCHAR(64) DEFAULT 'none',
+    game VARCHAR(64) DEFAULT 'none',
+    world VARCHAR(64) DEFAULT 'none',
+    name VARCHAR(120) NOT NULL,
+    kind VARCHAR(32) DEFAULT 'home',
+    anchor TEXT,
+    box TEXT,
+    note TEXT,
+    status VARCHAR(32) DEFAULT 'active',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_vessel_bases_status (status),
+    INDEX idx_vessel_bases_scope (scope, game, world)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Rift Vessel Quests: ordered, directed milestones Synth works toward in a
+-- world — one step of a questline (e.g. build first base -> craft a bed -> ...
+-- -> defeat the Ender Dragon). The quest STORE + MECHANISM are owned by the
+-- Rift Vessel CORE (plugins/rift_vessel/vessel_quests.py) — having a sense of
+-- direction is common to most game worlds — while the questline CONTENT (the
+-- ordered Minecraft milestones and their structural objectives) lives in the
+-- adapter. A quest is surfaced to cognition ONLY as reference; Synth still
+-- authors its own goal freely (spontaneity rule). Exactly one row is `active`
+-- per scope tuple; `objectives`/`progress` are JSON TEXT. Objectives are
+-- matched STRUCTURALLY (inventory ids, dimension id, base/bed flags, per-mob
+-- kill counter), never against free text. Scope-aware like `goals`/`vessel_bases`;
+-- Minecraft quests pin scope='vessel'/game='minecraft'. Never a bare `timestamp`.
+CREATE TABLE IF NOT EXISTS vessel_quests (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    scope VARCHAR(64) DEFAULT 'none',
+    game VARCHAR(64) DEFAULT 'none',
+    world VARCHAR(64) DEFAULT 'none',
+    quest_id VARCHAR(64) NOT NULL,
+    title VARCHAR(200) NOT NULL,
+    description TEXT,
+    order_index INT DEFAULT 0,
+    status VARCHAR(32) DEFAULT 'locked',
+    objectives TEXT,
+    progress TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_vessel_quests_identity (scope, game, world, quest_id),
+    INDEX idx_vessel_quests_scope (scope, game, world),
+    INDEX idx_vessel_quests_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Minecraft Goals: Synth's self-authored, free-text in-world objectives for the
+-- Minecraft Vessel (world-specific; owned by the Minecraft goal store,
+-- plugins/rift_vessel/minecraft/goals.py). There is NO catalogue of predefined
+-- objectives: `description` is whatever Synth decided to do, in its own words,
+-- and `note` is its own progress reflection. One active goal at a time; Synth
+-- judges its own progress. Never a bare `timestamp` column.
+-- Goals: Synth's self-directed goal store (extracted from the Minecraft
+-- adapter into the generic `goals` plugin). Scope-aware: a goal is filed under
+-- a three-level scope tuple (`scope`/`game`/`world`, all default 'none').
+-- 'none'/'none'/'none' is a personal life goal; a Minecraft embodiment goal is
+-- filed under 'vessel'/'minecraft'/'none'. At most one row is `active` per
+-- scope tuple. The legacy `minecraft_goals` table is renamed + backfilled by
+-- core/migrations.py::_migrate_goals_table on upgrade.
+CREATE TABLE IF NOT EXISTS goals (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    session_id VARCHAR(128),
+    scope VARCHAR(64) DEFAULT 'none',
+    game VARCHAR(64) DEFAULT 'none',
+    world VARCHAR(64) DEFAULT 'none',
+    description TEXT NOT NULL,
+    note TEXT,
+    destination TEXT,
+    steps TEXT,
+    current_step INT DEFAULT 0,
+    target_kind VARCHAR(16),
+    target_name VARCHAR(64),
+    status VARCHAR(32) DEFAULT 'active',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_goals_status (status),
+    INDEX idx_goals_session (session_id),
+    INDEX idx_goals_scope (scope, game, world)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- Web Search Tasks: decoupled background web-search jobs triggered by the
 -- recon web-search plugin. Recon fires a search and returns immediately; the
 -- orchestrator runs the searches off the message pipeline, synthesises an

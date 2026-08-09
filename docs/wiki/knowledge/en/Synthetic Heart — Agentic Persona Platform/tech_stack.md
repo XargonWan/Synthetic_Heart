@@ -1,0 +1,1 @@
+Python 3.11+ with FastAPI + Uvicorn for HTTP/WebSocket, asyncpg/aiomysql/aiosqlite for databases, Pydantic for validation, MCP SDK for tool exposure, Vue 3 + Three.js for the avatar frontend, Sphinx for docs, pytest + pytest-asyncio for testing, uv for dependency management, and Docker/s6-services for container orchestration.

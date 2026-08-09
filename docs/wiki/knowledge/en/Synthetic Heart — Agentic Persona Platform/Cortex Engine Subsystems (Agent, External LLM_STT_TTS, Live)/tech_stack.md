@@ -1,0 +1,1 @@
+Pure Python with `importlib` + `pkgutil.iter_modules` for runtime plugin discovery; asyncio queues for live audio/vision buffers; optional `google-genai` SDK pulled in lazily inside `gemini_live.py` only when needed.

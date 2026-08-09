@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence
 
 from core.config_manager import config_registry
+from core.interface_path_utils import is_vessel_history_entry, is_vessel_interface_path
 from core.logging_utils import log_debug
 from core.variables_engine import register_exposed_var
 
@@ -76,6 +78,42 @@ register_exposed_var(
     value_type=int,
     ui_type="bool",
     description="If enabled, merges all chat streams into the current conversation history (shared brain).",
+    scope="core",
+    component="history_engine",
+    advanced=True,
+)
+
+register_exposed_var(
+    "VESSEL_PERCEPTION_CONTEXT_CAP",
+    label="Vessel Perception Context Cap",
+    default=3,
+    value_type=int,
+    description=(
+        "During Rift Vessel embodiment, the max number of Synth's own recent "
+        "autonomous perceptions (sightings/movement/will beats) kept in the "
+        "current-chat context. Conversational lines (player chats + Synth's "
+        "replies) are always kept. Prevents the perception stream from drowning "
+        "a reactive player turn."
+    ),
+    scope="core",
+    component="history_engine",
+    advanced=True,
+)
+
+register_exposed_var(
+    "VESSEL_PERCEPTION_COMPACT_MAX",
+    label="Vessel Perception Compact Max (items)",
+    default=20,
+    value_type=int,
+    description=(
+        "During Rift Vessel embodiment, near-identical autonomous perceptions "
+        "(e.g. repeated 'took damage' / 'collected 1 sand') are collapsed into a "
+        "single line with an occurrence count and summed quantity — e.g. "
+        "'took damage (×5)', 'collected sand (×5, total 23)'. This is the max "
+        "number of such compacted lines kept in the current-chat context. "
+        "Structural digit-masking only, never keyword matching (multi-language "
+        "safe)."
+    ),
     scope="core",
     component="history_engine",
     advanced=True,
@@ -297,6 +335,129 @@ def _dedup_key(text: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+# Matches a run of digits (optionally with a decimal part). Used only to derive
+# a language-agnostic *shape* for a history line by masking the variable numeric
+# parts (coordinates, quantities); it never inspects any word.
+_NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
+
+
+def _compact_similar_lines(lines: Sequence[str], max_items: int) -> List[str]:
+    """Collapse near-identical history lines, with counts and summed quantities.
+
+    A game world emits highly repetitive perceptions ("took damage",
+    "collected 1 sand", "collected 1 sand", …). Kept verbatim they waste prompt
+    budget and drown the useful signal. This helper groups lines by their
+    *structural shape* — the line with every numeric run masked out — so lines
+    that differ only in coordinates/quantities merge into one. Detection is
+    purely structural (digit masking), never keyword/language matching, so it is
+    multi-language safe.
+
+    For each group we append a ``(×N)`` occurrence count when it repeated, and
+    when every member carries exactly one number we also sum those numbers and
+    surface the total (e.g. ``collected sand (×5, total 23)``). First-appearance
+    order is preserved and the result is capped at ``max_items`` (keeping the
+    most recent groups when the cap bites).
+
+    Args:
+        lines: History lines in chronological (insertion) order.
+        max_items: Maximum number of compacted lines to return (<=0 → no cap).
+
+    Returns:
+        The compacted, order-preserving list of lines.
+    """
+    order: List[str] = []
+    samples: Dict[str, str] = {}
+    counts: Dict[str, int] = {}
+    single_number: Dict[str, bool] = {}
+    totals: Dict[str, float] = {}
+    for raw in lines:
+        line = (raw or "").strip()
+        if not line:
+            continue
+        nums = _NUMBER_RE.findall(line)
+        shape = _NUMBER_RE.sub("#", line)
+        key = " ".join(shape.split()).lower()
+        if key not in counts:
+            samples[key] = line
+            counts[key] = 0
+            single_number[key] = len(nums) == 1
+            totals[key] = 0.0
+            order.append(key)
+        counts[key] += 1
+        # Only maintain a running sum while every seen member has exactly one
+        # number; a single non-conforming member disables the total for safety.
+        if len(nums) == 1 and single_number[key]:
+            try:
+                totals[key] += float(nums[0])
+            except (TypeError, ValueError):
+                single_number[key] = False
+        elif len(nums) != 1:
+            single_number[key] = False
+
+    if max_items > 0 and len(order) > max_items:
+        order = order[-max_items:]
+
+    compacted: List[str] = []
+    for key in order:
+        text = samples[key]
+        count = counts[key]
+        if count <= 1:
+            compacted.append(text)
+            continue
+        if single_number[key]:
+            total = float(totals[key])
+            total_str = str(int(total)) if total.is_integer() else f"{total:g}"
+            compacted.append(f"{text} (×{count}, total {total_str})")
+        else:
+            compacted.append(f"{text} (×{count})")
+    return compacted
+
+
+def _is_vessel_autonomous_perception(entry: HistoryEntry) -> bool:
+    """Return True for one of Synth's *own* synthetic vessel perceptions.
+
+    A game world streams autonomous perceptions (sightings, movement, will
+    beats, …) far faster than a slow LLM consumes them, so an unbounded stream
+    of them floods the current-chat history and frames every reactive turn as
+    solitary wandering — burying a player's actual question. Those perceptions
+    are tagged at persistence time (``interface/vessel_interface.py``) with
+    ``metadata.vessel_perception``. A real in-world player chat is deliberately
+    left untagged. Detection is purely structural (a persisted flag), never
+    keyword matching (project rule: multi-language safe).
+    """
+    if not isinstance(entry, dict):
+        return False
+    metadata = entry.get("metadata")
+    return bool(isinstance(metadata, dict) and metadata.get("vessel_perception"))
+
+
+def _is_vessel_beat_perception(entry: HistoryEntry) -> bool:
+    """Return True for one of Synth's *own* autonomous vessel **beat** turns.
+
+    Will beats and action beats are enqueued as perceptions (so they never
+    evict player chat from the conversational deque), but their persisted text
+    is the *first-person self-instruction prompt* — e.g. "this is a private
+    moment, no one is addressing you, do NOT speak, return no ``say`` action".
+    That framing is meant only for the beat's own solitary cognition turn; if it
+    leaks into a **reactive** player-chat turn's context it directly suppresses
+    the reply (the model obeys "do NOT speak" instead of answering the player).
+
+    Unlike genuine world-grounding perceptions (sightings, movement, damage,
+    status) — which are legitimate ambient context — beat perceptions must never
+    be merged back into a reactive turn. Detection is purely structural: the
+    persisted ``metadata.vessel_event_type`` ends with ``_beat``
+    (``will_beat`` / ``action_beat`` / any future ``*_beat``). Never keyword
+    matching on the text (project rule: multi-language safe).
+    """
+    if not isinstance(entry, dict):
+        return False
+    metadata = entry.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    event_type = metadata.get("vessel_event_type")
+    return bool(isinstance(event_type, str) and event_type.endswith("_beat"))
+
+
 def _is_ignored_prompt_history_entry(entry: HistoryEntry) -> bool:
     if not isinstance(entry, dict):
         return False
@@ -420,6 +581,34 @@ class HistoryEngine:
             except Exception:
                 interface_path = None
 
+        # === RIFT VESSEL FOCUS: scope context to the world during embodiment ===
+        # When the current turn originates from a Vessel embodiment (SyntH is
+        # "in the world"), it concentrates there like a real person: it must NOT
+        # pull in the whole cross-interface history / global diary / global
+        # memory. We detect vessel focus purely from routing metadata — the
+        # source interface_path (``vessel/...``), the message's chat type
+        # (``vessel``) or an explicit ``vessel_focus`` context flag — never from
+        # message text (project rule: no keyword logic). On focus we force
+        # ``unified_mode = False`` so only the local vessel history is kept, and
+        # we suppress the global diary/memory blocks below. Fully guarded: any
+        # failure leaves the normal context path untouched.
+        from core.vessel_focus import is_vessel_turn
+
+        vessel_focus = is_vessel_turn(message, context_memory, interface_path)
+        if vessel_focus:
+            unified_mode = False
+            enable_diary = False
+            enable_memories = False
+            # The rolling cross-interface "recent chats" block is global noise
+            # during embodiment: SyntH concentrates on the world, so we also
+            # suppress it here (Bug B — it otherwise polluted the vessel prompt
+            # via the enable_recent path below).
+            enable_recent = False
+            log_debug(
+                "[history_engine] Vessel focus active — scoping context to the "
+                "world (unified history + global diary/memory/recent suppressed)"
+            )
+
         # `context_memory` can be either:
         # - the centralized chat map: { interface_path: deque([...]) }
         # - an interface/user context dict (e.g. Telegram user_data)
@@ -487,7 +676,13 @@ class HistoryEngine:
                             load_chat_history as cache_load,
                         )
 
-                        cached = await cache_load(interface_path, match_chat_level=True)
+                        cached = await cache_load(
+                            interface_path,
+                            match_chat_level=(
+                                not vessel_focus
+                                and not is_vessel_interface_path(interface_path)
+                            ),
+                        )
                         combined = list(msgs) + list(cached)
                         msgs = combined[-verbosity:]
                     except Exception as e:
@@ -513,6 +708,14 @@ class HistoryEngine:
                             global_hist = await load_global_chat_history(
                                 limit=verbosity * 5 if verbosity > 0 else 100
                             )
+                            if vessel_focus:
+                                global_hist = []
+                            else:
+                                global_hist = [
+                                    m
+                                    for m in global_hist
+                                    if not is_vessel_history_entry(m)
+                                ]
                             # merge and sort by timestamp so chronology is preserved
                             combined = list(msgs) + list(global_hist)
 
@@ -524,7 +727,100 @@ class HistoryEngine:
                     except Exception as _e:
                         log_debug(f"[history_engine] live merge skipped: {_e}")
 
-                for m in msgs[-verbosity:] if verbosity > 0 else []:
+                window = msgs[-verbosity:] if verbosity > 0 else []
+
+                # Vessel focus: merge conversation with a *bounded* number of
+                # Synth's own autonomous perceptions. Perceptions live in a
+                # SEPARATE in-memory ring buffer (see chat_context_manager) so a
+                # burst of world perceptions (e.g. repeated environmental damage
+                # while drowning) can never evict a player's chat from the
+                # bounded conversational deque. A world emits
+                # sightings/movement/will-beats far faster than a slow LLM
+                # consumes them; left unbounded they dominate the current-chat
+                # context and frame every turn as solitary wandering, so the
+                # model ignores the player's actual question and re-emits a stock
+                # reflective line. We keep ALL conversational lines (player chats
+                # + Synth's own replies) and only the most recent
+                # ``VESSEL_PERCEPTION_CONTEXT_CAP`` perceptions for ambient
+                # grounding. Structural (persisted metadata flag), never keyword.
+                compacted_perception_lines: List[str] = []
+                if vessel_focus:
+                    # Drop any stray perceptions still in the conversational
+                    # window (older messages persisted before the split) so they
+                    # do not double-count against the conversational budget.
+                    window = [
+                        m for m in window if not _is_vessel_autonomous_perception(m)
+                    ]
+                    # Compact-then-cap. A world emits highly repetitive
+                    # perceptions ("took damage", "collected 1 sand", …). Rather
+                    # than keeping only a tiny raw tail (the old
+                    # ``VESSEL_PERCEPTION_CONTEXT_CAP`` = 3 grounding lines), we
+                    # read the *whole* recent ring, collapse near-identical lines
+                    # into counted/summed rollups (e.g. "took damage (×5)",
+                    # "collected sand (×5, total 23)"), then cap the number of
+                    # distinct rollups at ``VESSEL_PERCEPTION_COMPACT_MAX``
+                    # (default 20). This keeps far richer ambient grounding in a
+                    # much smaller prompt budget. Compaction is structural
+                    # (digit-masking), never keyword matching (multi-language
+                    # safe).
+                    compact_max = max(0, _get_int("VESSEL_PERCEPTION_COMPACT_MAX", 20))
+                    if compact_max > 0:
+                        try:
+                            from core.chat_context_manager import (
+                                get_perception_memory as _get_perception_memory,
+                            )
+
+                            pmap = _get_perception_memory()
+                            pbuf = (
+                                pmap.get(interface_path)
+                                if isinstance(pmap, dict)
+                                else None
+                            )
+                            if pbuf:
+                                # Keep only genuine world-grounding perceptions
+                                # (sightings/movement/damage/status). Exclude
+                                # will/action **beat** turns: their persisted
+                                # text is a solitary self-instruction ("do NOT
+                                # speak, return no say action") that suppresses
+                                # the reply when re-injected into a reactive
+                                # player-chat turn. Structural filter on the
+                                # persisted event type, never keyword matching.
+                                grounding = [
+                                    m for m in pbuf if not _is_vessel_beat_perception(m)
+                                ]
+                                perception_texts = [
+                                    _entry_to_text_with_source(
+                                        m, current_interface_path=interface_path
+                                    )
+                                    for m in grounding
+                                ]
+                                compacted_perception_lines = _compact_similar_lines(
+                                    perception_texts, compact_max
+                                )
+                        except Exception as _pe:
+                            log_debug(
+                                f"[history_engine] Could not read vessel perceptions: {_pe}"
+                            )
+                    # Order: ambient grounding perceptions FIRST, then the
+                    # conversation. Perceptions are background scene-setting, not
+                    # part of the conversational thread, so they must never be
+                    # the *last* line the model reads: on a reactive player-chat
+                    # turn the player's question is the last conversational entry
+                    # and MUST stay last, or a weak embodiment model continues
+                    # its own autonomous pattern (mining/observe) instead of
+                    # answering. The compacted perception lines are emitted ahead
+                    # of the conversation ``window`` below.
+
+                # Emit the compacted ambient perceptions first (already plain
+                # text), then the conversational window.
+                for pline in compacted_perception_lines:
+                    k = _dedup_key(pline)
+                    if k in seen_history:
+                        continue
+                    history_current_chat.append(pline)
+                    seen_history.add(k)
+
+                for m in window:
                     if _is_ignored_prompt_history_entry(m):
                         continue
                     line = _entry_to_text_with_source(
@@ -565,6 +861,18 @@ class HistoryEngine:
                         f"[history_engine] Failed to load global chat history: {db_e}"
                     )
 
+                # Vessel conversations are a private embodiment context, not
+                # ordinary cross-interface memory.  They remain available on a
+                # Vessel turn through the local path, but must not enter a
+                # non-Vessel unified prompt merely because their rows are
+                # recent in the durable cache.
+                if not vessel_focus:
+                    unified_candidates = [
+                        m
+                        for m in unified_candidates
+                        if not is_vessel_history_entry(m)
+                    ]
+
                 if isinstance(chat_map, dict):
                     for k, q in chat_map.items():
                         # Skip metadata keys
@@ -594,10 +902,17 @@ class HistoryEngine:
                                     and not m.get("interface_path")
                                     and not m.get("source_path")
                                 ):
+                                    if not vessel_focus and is_vessel_interface_path(k):
+                                        continue
                                     unified_candidates.append(
                                         {**m, "interface_path": k}
                                     )
                                 else:
+                                    if not vessel_focus and (
+                                        is_vessel_interface_path(k)
+                                        or is_vessel_history_entry(m)
+                                    ):
+                                        continue
                                     unified_candidates.append(m)
 
                 def _uni_sort_key(m: Any) -> float:
@@ -751,6 +1066,11 @@ class HistoryEngine:
                             continue
                         for m in list(q or []):
                             if isinstance(m, dict):
+                                if not vessel_focus and (
+                                    is_vessel_interface_path(ip)
+                                    or is_vessel_history_entry(m)
+                                ):
+                                    continue
                                 candidates.append(m)
                     except Exception:
                         continue
@@ -837,6 +1157,8 @@ class HistoryEngine:
                 for raw in list(c.entries)[
                     : max_items or (verbosity if verbosity > 0 else None)
                 ]:
+                    if not vessel_focus and is_vessel_history_entry(raw):
+                        continue
                     if _is_ignored_prompt_history_entry(raw):
                         continue
                     line = _entry_to_text_with_source(

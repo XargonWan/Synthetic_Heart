@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: core_runtime/config_management
+title: Configuration Registry & Model Management
+scope:
+    - core/config.py
+    - core/config_manager.py
+    - core/model_config.json
+    - core/model_manager.py
+source_files: []
+depends_on: []
+related_to: []

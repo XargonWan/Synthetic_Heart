@@ -2,9 +2,9 @@ import logging
 import os
 import sys
 import traceback
-import glob
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -29,6 +29,10 @@ _logger: Optional[logging.Logger] = None
 _DEFAULT_LOG_DIR = os.path.join(os.getcwd(), "logs")
 _LOG_DIR = os.getenv("LOG_DIR", _DEFAULT_LOG_DIR)
 _LOG_FILE = os.path.join(_LOG_DIR, "synth.log")
+# Additional ERROR-only log: a short, low-rotation companion to synth.log so a
+# quick "what broke?" scan doesn't require wading through the full runtime log.
+# This is ADDITIVE — the main synth.log still records everything.
+_ERROR_LOG_FILE = os.path.join(_LOG_DIR, "synth_errors.log")
 _LEVELS = {
     "DEBUG": logging.DEBUG,
     "INFO": logging.INFO,
@@ -58,9 +62,15 @@ class TimeZoneFormatter(logging.Formatter):
     def formatTime(self, record, datefmt=None):
         dt = datetime.fromtimestamp(record.created, timezone.utc)
         dt_local = dt.astimezone(self.tz)
+        # Always include the UTC offset (e.g. "+0900") so every log line is
+        # self-describing and directly comparable with UTC sources such as
+        # Docker's `inspect .State.StartedAt`. If the caller-provided datefmt
+        # already carries the offset (%z), respect it and don't double it.
         if datefmt:
-            return dt_local.strftime(datefmt)
-        return dt_local.strftime("%Y-%m-%d %H:%M:%S")
+            if "%z" in datefmt:
+                return dt_local.strftime(datefmt)
+            return dt_local.strftime(datefmt) + dt_local.strftime(" %z")
+        return dt_local.strftime("%Y-%m-%d %H:%M:%S %z")
 
 
 def _register_logging_config():
@@ -130,12 +140,21 @@ def _register_logging_config():
 
 class TimestampedRotatingFileHandler(RotatingFileHandler):
     """
-    A file handler that rotates based on size, but renames the existing log
-    with a timestamp instead of shifting indices (log.1 -> log.2).
-    This avoids the O(N) renaming cost of standard RotatingFileHandler,
-    which usually causes "chugging" with high backup counts.
+    A file handler that rotates **daily** (at the first record of a new day),
+    with a size / line count safety cap that produces intra-day shards.
 
-    It also includes the 'Safe' logic for Windows permission errors.
+    On rollover the active ``<stem>.log`` is renamed to a dated file following
+    the shared archive naming scheme (see :mod:`core.log_archive`):
+
+    * Daily rollover     -> ``<stem>.<YYYY-MM-DD>.log``
+    * Intra-day size cap -> ``<stem>.<YYYY-MM-DD>.<N>.log``
+
+    After every rollover it runs :func:`core.log_archive.enforce_retention` so
+    older days are gzip-compressed and anything beyond the retention window is
+    deleted. Retention also runs once at :func:`setup_logging`.
+
+    Includes the 'Safe' logic for Windows permission errors (a locked file just
+    keeps being written to rather than crashing).
     """
 
     def __init__(
@@ -146,9 +165,18 @@ class TimestampedRotatingFileHandler(RotatingFileHandler):
         encoding=None,
         delay=False,
         maxLines=0,
+        retentionDays=None,
     ):
         self.maxLines = maxLines
         self._line_count = None  # None indicates NOT INITIALIZED
+        # The calendar day the current active file belongs to; used to trigger
+        # the daily rollover lazily on the first record of a new day.
+        self._current_day = self._file_day(filename)
+        self.retentionDays = (
+            retentionDays
+            if retentionDays is not None
+            else int(os.getenv("LOG_RETENTION_DAYS", "7"))
+        )
         super().__init__(
             filename,
             mode="a",
@@ -157,6 +185,17 @@ class TimestampedRotatingFileHandler(RotatingFileHandler):
             encoding=encoding,
             delay=delay,
         )
+
+    @staticmethod
+    def _file_day(filename):
+        """Return the calendar day the existing active file was last written."""
+        try:
+            if os.path.exists(filename):
+                mtime = os.path.getmtime(filename)
+                return datetime.fromtimestamp(mtime).date()
+        except Exception:
+            pass
+        return datetime.now().date()
 
     def _count_lines(self):
         """Count actual lines in baseFilename using buffered reading."""
@@ -175,22 +214,30 @@ class TimestampedRotatingFileHandler(RotatingFileHandler):
             return 0
 
     def shouldRollover(self, record):
-        """Determine if rollover should occur based on size or line count."""
+        """Rollover on a new calendar day, or when the size/line cap is hit."""
         if self.stream is None:
             self.stream = self._open()
+
+        # Primary trigger: a new day has started.
+        try:
+            record_day = datetime.fromtimestamp(record.created).date()
+        except Exception:
+            record_day = datetime.now().date()
+        if self._current_day is not None and record_day != self._current_day:
+            return 1
 
         # Initialize line count lazily
         if self.maxLines > 0 and self._line_count is None:
             self._line_count = self._count_lines()
 
-        # Check bytes (safety fallback)
+        # Safety cap: bytes
         if self.maxBytes > 0:
             msg = "%s\n" % self.format(record)
             self.stream.seek(0, 2)  # strict append
             if self.stream.tell() + len(msg) >= self.maxBytes:
                 return 1
 
-        # Check lines
+        # Safety cap: lines
         if self.maxLines > 0:
             msg = self.format(record)
             # Standard logging adds one newline per record
@@ -210,8 +257,31 @@ class TimestampedRotatingFileHandler(RotatingFileHandler):
             except Exception:
                 pass
 
+    def _rotated_target(self, day):
+        """Build a collision-free dated target name for *day*.
+
+        Uses the shared naming scheme ``<stem>.<day>[.<N>].log``. The shard
+        index increments only when a same-day file already exists (i.e. the
+        size/line cap fired within the same calendar day).
+        """
+        from core import log_archive
+
+        directory = os.path.dirname(self.baseFilename)
+        stem = os.path.basename(self.baseFilename)
+        if stem.endswith(".log"):
+            stem = stem[: -len(".log")]
+
+        shard = 0
+        while True:
+            candidate = os.path.join(
+                directory, log_archive.dated_name(stem, day, shard)
+            )
+            if not os.path.exists(candidate):
+                return candidate
+            shard += 1
+
     def doRollover(self):
-        """Perform the rollover."""
+        """Perform the rollover (daily / size cap) and enforce retention."""
         if self.stream:
             try:
                 self.stream.close()
@@ -219,52 +289,33 @@ class TimestampedRotatingFileHandler(RotatingFileHandler):
             except Exception:
                 pass
 
-        # Construct new filename with timestamp
-        # Format: filename.YYYY-MM-DD_HH-MM-SS.log
-        t = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        base, ext = os.path.splitext(self.baseFilename)
-        new_name = f"{base}.{t}{ext}"
-
-        # Avoid collision (highly unlikely with second precision)
-        if os.path.exists(new_name):
-            i = 1
-            while os.path.exists(f"{base}.{t}_{i}{ext}"):
-                i += 1
-            new_name = f"{base}.{t}_{i}{ext}"
+        # The dated file inherits the day the closed content belongs to.
+        rollover_day = self._current_day or datetime.now().date()
+        new_name = self._rotated_target(rollover_day)
 
         try:
-            os.rename(self.baseFilename, new_name)
+            if os.path.exists(self.baseFilename):
+                os.rename(self.baseFilename, new_name)
         except (PermissionError, OSError):
-            # On Windows, renaming might fail if file is locked (e.g. by 'tail').
-            # In this case, we just reopen the original file and keep writing.
-            # It will exceed maxBytes, but better than crashing.
+            # On Windows the file may be locked (e.g. by 'tail'); keep writing
+            # to the original rather than crashing.
             pass
 
-        # Cleanup: remove old timestamped backups beyond `backupCount` to
-        # avoid unbounded accumulation of rotated files. Sort by mtime and
-        # delete the oldest files while keeping the most recent `backupCount`.
-        try:
-            if getattr(self, "backupCount", 0) > 0:
-                pattern = f"{base}.*{ext}"
-                rotated = [
-                    p
-                    for p in glob.glob(pattern)
-                    if os.path.abspath(p) != os.path.abspath(self.baseFilename)
-                ]
-                # Sort newest first by modification time
-                rotated.sort(key=os.path.getmtime, reverse=True)
-                # Remove files older than the requested backupCount
-                for old in rotated[self.backupCount :]:
-                    try:
-                        os.remove(old)
-                    except Exception:
-                        pass
-        except Exception:
-            # Never raise from rollover cleanup
-            pass
-
+        # Advance the active day to now and reset the line counter.
+        self._current_day = datetime.now().date()
         if self.maxLines > 0:
-            self._line_count = 0  # Reset line count after successful rotation
+            self._line_count = 0
+
+        # Compress old days + delete beyond the retention window. Best-effort.
+        try:
+            from core import log_archive
+
+            log_archive.enforce_retention(
+                Path(os.path.dirname(self.baseFilename)),
+                retention_days=self.retentionDays,
+            )
+        except Exception:
+            pass
 
         if not self.delay:
             self.stream = self._open()
@@ -295,15 +346,15 @@ def _write_to_separate_log(level: str, message: str, log_file: str) -> None:
                 "%Y-%m-%d %H:%M:%S",
             )
 
-            # Rotate at 5MB, keep 100 backups
-            # Use TimestampedRotatingFileHandler for smooth rotation
-            # Rotate at 5MB or 2000 lines, keep 100 backups
-            # Use TimestampedRotatingFileHandler for smooth rotation
+            # Daily rotation with a size safety cap (see log_archive naming).
+            # Old days are gzip-compressed and pruned by enforce_retention.
+            from core import log_archive
+
             fh = TimestampedRotatingFileHandler(
                 separate_log_path,
-                maxBytes=5_000_000,
-                maxLines=2000,
-                backupCount=100,
+                maxBytes=log_archive.DEFAULT_MAX_BYTES,
+                maxLines=log_archive.DEFAULT_MAX_LINES,
+                backupCount=0,
                 encoding="utf-8",
             )
             fh.setFormatter(formatter)
@@ -352,14 +403,15 @@ def setup_logging() -> logging.Logger:
         # Try to add a file handler. If the file handler can't be created
         # due to permission errors or other IO problems, fallback to stream
         # logging so the application can still start and emit useful logs.
-        # NOTE: backupCount=9999 means files rotate (timestamp) check but never auto-delete
+        # Daily rotation; retention/compression handled by log_archive.
         try:
-            # Added 2000 line limit as requested
+            from core import log_archive
+
             fh = TimestampedRotatingFileHandler(
                 _LOG_FILE,
-                maxBytes=5_000_000,
-                maxLines=2000,
-                backupCount=10,  # keep a reasonable default number of backups
+                maxBytes=log_archive.DEFAULT_MAX_BYTES,
+                maxLines=log_archive.DEFAULT_MAX_LINES,
+                backupCount=0,
                 encoding="utf-8",
             )
             fh.setFormatter(formatter)
@@ -376,6 +428,41 @@ def setup_logging() -> logging.Logger:
                     f"[logging_utils] Could not open log file '{_LOG_FILE}': {e}. Falling back to stdout",
                     file=sys.stderr,
                 )
+
+        # Additional ERROR-only log file: short, low rotation, easy to scan.
+        # Additive to synth.log (which keeps everything). Best-effort — a
+        # failure here must never block startup or the main log handlers.
+        try:
+            error_fh = TimestampedRotatingFileHandler(
+                _ERROR_LOG_FILE,
+                maxBytes=log_archive.DEFAULT_MAX_BYTES,
+                maxLines=log_archive.DEFAULT_MAX_LINES,
+                backupCount=0,
+                encoding="utf-8",
+            )
+            error_fh.setLevel(logging.ERROR)
+            error_fh.setFormatter(formatter)
+            logger.addHandler(error_fh)
+        except Exception as e:  # pragma: no cover - environment dependent
+            try:
+                ch.stream.write(
+                    f"[logging_utils] Could not open error log file '{_ERROR_LOG_FILE}': {e}\n"
+                )
+            except Exception:
+                pass
+
+    # Compress old days + prune beyond the retention window at startup, so a
+    # freshly-started process immediately reflects the retention policy even if
+    # it never rolls over during its lifetime. Best-effort.
+    try:
+        from core import log_archive
+
+        log_archive.enforce_retention(
+            Path(_LOG_DIR),
+            retention_days=int(os.getenv("LOG_RETENTION_DAYS", "7")),
+        )
+    except Exception:
+        pass
 
     _logger = logger
 
@@ -405,7 +492,8 @@ def setup_logging() -> logging.Logger:
     try:
         logger.log(
             _LEVELS.get(_LOGGING_LEVEL, logging.INFO),
-            f"[logging_utils] Started synth logger with level={_LOGGING_LEVEL}, log_file={_LOG_FILE}",
+            f"[logging_utils] Started synth logger with level={_LOGGING_LEVEL}, "
+            f"log_file={_LOG_FILE}, error_log_file={_ERROR_LOG_FILE}",
         )
     except Exception:
         pass
@@ -481,6 +569,12 @@ def _log(
                             message_data = {
                                 "text": notification_message,
                                 "target": log_chat_id,
+                                # LogChat notifications are diagnostic output, not
+                                # Synth utterances: they must NEVER be stored in
+                                # chat history, or every ERROR/WARNING pollutes the
+                                # LLM context of that interface_path and degrades
+                                # (dumbs down) every subsequent turn there.
+                                "skip_history": True,
                             }
                             thread_id = get_log_chat_thread_id_sync()
                             if thread_id:

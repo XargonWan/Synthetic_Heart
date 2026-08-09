@@ -170,10 +170,11 @@ Matrix Interface
 - **Generation**: ``build_interface_path('matrix', room_identifier, thread_event_id)``
 - **Thread Support**: Uses Matrix thread events
 
-Ollama Server
-~~~~~~~~~~~~~
+OpenAI-Compatible Server
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-- **Path Format**: ``ollama_serve/conversation_id``
+- **Path Format**: ``ollama_serve/conversation_id`` (the ``ollama_serve``
+  identifier is retained for backward compatibility)
 - **Generation**: ``build_interface_path('ollama_serve', chat_id)``
 - **Thread Support**: Single-level conversations
 

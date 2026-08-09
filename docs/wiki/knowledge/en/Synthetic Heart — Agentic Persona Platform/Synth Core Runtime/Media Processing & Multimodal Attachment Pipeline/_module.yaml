@@ -1,0 +1,12 @@
+schema_version: 1
+module_path: core_runtime/media_processing
+title: Media Processing & Multimodal Attachment Pipeline
+scope:
+    - core/media_dispatcher.py
+    - core/media_extract.py
+    - core/media_url_utils.py
+    - core/image_processor.py
+    - core/multimodal_attachment.py
+source_files: []
+depends_on: []
+related_to: []

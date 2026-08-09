@@ -1,0 +1,1 @@
+No build or install steps required beyond importing `create_karada_router(animation_handler)` and including the returned `(rest_router, ws_router)` pairs into the FastAPI app. The touch-event system auto-creates its database schema on first use via `ensure_table()`. Optional auth is configured through the `SYNTH_WEBUI_API_TOKEN` environment variable.

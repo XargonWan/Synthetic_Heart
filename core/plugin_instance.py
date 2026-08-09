@@ -638,15 +638,10 @@ async def handle_incoming_message(
                 # receive a neutral plain-text instruction so the vision engine
                 # returns a description rather than formatted/structured output.
                 # The user's actual question is answered by the main LLM after the
-                # Iris description is injected into the context.
-                _IRIS_PLAIN_TEXT_PROMPT = (
-                    "IMPORTANT: Respond in plain conversational text only. "
-                    "Do NOT use JSON, XML or any structured format. "
-                    "Simply describe what you see in the image."
-                )
-                iris_result = await _describe_attachment_images_with_iris(
-                    attachments, prompt=_IRIS_PLAIN_TEXT_PROMPT
-                )
+                # Iris description is injected into the context.  The instruction
+                # is user-editable via IRIS_DEFAULT_PROMPT (Engines tab); no
+                # prompt is passed here so describe_media falls back to it.
+                iris_result = await _describe_attachment_images_with_iris(attachments)
                 if iris_result is not None:
                     try:
                         original_text = getattr(message, "text", "") or ""

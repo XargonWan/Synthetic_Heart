@@ -6,6 +6,27 @@ from core.config_manager import config_registry
 
 
 @pytest.mark.asyncio
+async def test_structured_plugin_failure_enters_selective_failure_path(monkeypatch):
+    """A status/message error is not counted as a successful action."""
+    import core.action_parser as ap
+
+    action = {"type": "vessel_minecraft_craft", "payload": {"item": "sticks"}}
+    monkeypatch.setattr(ap, "validate_action", lambda *args, **kwargs: (True, []))
+
+    async def _failed_run_action(*args, **kwargs):
+        return {"status": "error", "message": "unknown item 'sticks'"}
+
+    monkeypatch.setattr(ap, "run_action", _failed_run_action)
+    result = await run_actions(
+        [action], context={}, bot=None, original_message=SimpleNamespace()
+    )
+
+    assert result["processed"] == []
+    assert result["failed_actions"][0]["action"] == action
+    assert result["failed_actions"][0]["errors"] == ["unknown item 'sticks'"]
+
+
+@pytest.mark.asyncio
 async def test_llm_action_safe_false_blocked_by_default(monkeypatch):
     # Setup: ensure synth mode is 'suggest' and global override false
     await config_registry.set_value("SYNTH_AUTONOMY_MODE", "suggest")

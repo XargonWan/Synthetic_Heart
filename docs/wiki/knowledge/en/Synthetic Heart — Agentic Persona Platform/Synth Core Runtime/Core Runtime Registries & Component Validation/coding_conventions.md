@@ -1,0 +1,5 @@
+- Each registry exposes a module-level singleton instance and a `get_*_registry()` accessor rather than requiring direct instantiation.
+- All public functions log with `log_debug`/`log_info`/`log_warning` using a bracketed prefix like `[module_name]` for consistent log parsing.
+- Component/action configuration is accepted as flexible dicts supporting multiple shapes (dict with `required_fields`, plain lists/tuples, or legacy `required`) and normalized before rule creation.
+- Legacy or deprecated functionality is preserved as thin aliases (e.g. `/llm` → `/cortex`, `llm_alias`) that delegate to the canonical implementation while emitting deprecation hints.
+- External or optional dependencies are imported lazily inside functions (e.g. `from core.external_endpoints.registry import ...`) to avoid circular imports and keep startup lightweight.

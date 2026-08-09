@@ -544,6 +544,17 @@
         .config-input input[type="checkbox"] {
             display: none; /* Hide default checkbox */
         }
+        /* Also hide any native checkbox that drives a .toggle-switch outside of
+           .config-input (the slider is the visible control). The checkbox stays
+           in the DOM as the adjacent sibling the :checked + label rules need. */
+        input[type="checkbox"]:has(+ .toggle-switch) {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            opacity: 0;
+            margin: 0;
+            pointer-events: none;
+        }
         .toggle-switch {
             position: relative;
             display: inline-block;

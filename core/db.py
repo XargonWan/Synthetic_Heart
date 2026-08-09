@@ -1557,9 +1557,29 @@ _VESSEL_ACTIVITY_LOG_DDL = """
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     """
 
+# The compacted "vessel diary": one autobiographical entry per ended session,
+# produced by chunked LLM summarisation of the session's lived experience. This
+# is deliberately SEPARATE from the real ``ai_diary`` — the vessel no longer
+# writes to ``ai_diary`` (that polluted the Fast Lane prompt). Whether/how to
+# import these entries into ``ai_diary`` is a later, unimplemented decision.
+_VESSEL_DIARY_DDL = """
+    CREATE TABLE IF NOT EXISTS vessel_diary (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        session_id VARCHAR(128),
+        interface_path VARCHAR(512),
+        environment VARCHAR(64) NOT NULL,
+        summary LONGTEXT NOT NULL,
+        moments_count INT DEFAULT 0,
+        reason VARCHAR(32),
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_vessel_diary_created_at (created_at),
+        INDEX idx_vessel_diary_environment (environment),
+        INDEX idx_vessel_diary_session (session_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    """
+
 _VESSEL_PG_INDEX_DDL: tuple[str, ...] = (
-    "CREATE INDEX IF NOT EXISTS idx_vessel_sessions_status"
-    " ON vessel_sessions (status)",
+    "CREATE INDEX IF NOT EXISTS idx_vessel_sessions_status ON vessel_sessions (status)",
     "CREATE INDEX IF NOT EXISTS idx_vessel_sessions_environment"
     " ON vessel_sessions (environment)",
     "CREATE INDEX IF NOT EXISTS idx_vessel_sessions_last_event"
@@ -1570,6 +1590,11 @@ _VESSEL_PG_INDEX_DDL: tuple[str, ...] = (
     " ON vessel_activity_log (environment)",
     "CREATE INDEX IF NOT EXISTS idx_vessel_activity_session"
     " ON vessel_activity_log (session_id)",
+    "CREATE INDEX IF NOT EXISTS idx_vessel_diary_created_at"
+    " ON vessel_diary (created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_vessel_diary_environment"
+    " ON vessel_diary (environment)",
+    "CREATE INDEX IF NOT EXISTS idx_vessel_diary_session ON vessel_diary (session_id)",
 )
 
 
@@ -1577,13 +1602,16 @@ async def init_vessel_tables() -> None:
     """Create the Rift Vessel tables (idempotent, MariaDB and Postgres).
 
     vessel_sessions tracks each embodiment session and its buffered lived
-    experience (flushed to a single diary entry at end-of-session);
-    vessel_activity_log is the audit trail shown in WebUI History > Vessel.
+    experience (compacted to a single ``vessel_diary`` entry at end-of-session);
+    vessel_activity_log is the audit trail shown in WebUI History > Vessel;
+    vessel_diary holds the chunk-compacted autobiographical entry per session
+    (separate from the real ai_diary, which the vessel no longer writes to).
     """
     async with get_conn_ctx() as conn:
         async with conn.cursor() as cur:
             await cur.execute(_VESSEL_SESSIONS_DDL)
             await cur.execute(_VESSEL_ACTIVITY_LOG_DDL)
+            await cur.execute(_VESSEL_DIARY_DDL)
             if _get_db_type() == "postgres":
                 for index_sql in _VESSEL_PG_INDEX_DDL:
                     await cur.execute(index_sql)
@@ -1789,9 +1817,11 @@ async def ensure_plugin_tables() -> None:
                 await cur.execute(_GRILLO_ACTIVITY_LOG_DDL)
                 await cur.execute(_GRILLO_ACTION_EXECS_DDL)
 
-                # Rift Vessel tables (embodiment sessions + activity audit).
+                # Rift Vessel tables (embodiment sessions + activity audit +
+                # compacted per-session vessel diary).
                 await cur.execute(_VESSEL_SESSIONS_DDL)
                 await cur.execute(_VESSEL_ACTIVITY_LOG_DDL)
+                await cur.execute(_VESSEL_DIARY_DDL)
 
                 # agent task table (init-db.sql) — Agentic Runtime 2.0
                 await cur.execute(

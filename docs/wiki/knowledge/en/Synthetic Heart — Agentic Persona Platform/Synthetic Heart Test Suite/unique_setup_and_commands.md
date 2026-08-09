@@ -1,0 +1,1 @@
+Run all tests with `python run_tests.py` or `python -m pytest tests/ -v`; generate coverage via `python -m pytest --cov=core --cov-report=html`. CI uses `./run_tests.sh` to produce JUnit XML in `test-results/junit.xml`. Dependencies are installed via `uv sync`. Tests require env vars `BOTFATHER_TOKEN`, `OPENAI_API_KEY`, `TRAINER_IDS` (set automatically in most files).

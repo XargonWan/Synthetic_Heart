@@ -4,6 +4,29 @@ import core.db as db
 import plugins.ai_diary as ai_diary
 
 
+def test_emotions_to_state_map_from_canonical_list():
+    state = ai_diary._emotions_to_state_map(
+        [{"type": "joy", "intensity": 7}, {"type": "love", "intensity": 6.5}]
+    )
+    assert state == {"joy": 7.0, "love": 6.5}
+
+
+def test_emotions_to_state_map_from_dict_and_names():
+    state = ai_diary._emotions_to_state_map({"joy": 7, "love": 6})
+    assert state == {"joy": 7.0, "love": 6.0}
+
+    state = ai_diary._emotions_to_state_map(["happy"])
+    assert state == {}
+
+
+def test_emotions_to_state_map_skips_garbage():
+    assert ai_diary._emotions_to_state_map(None) == {}
+    assert ai_diary._emotions_to_state_map([]) == {}
+    assert ai_diary._emotions_to_state_map([{"type": "joy"}]) == {}
+    assert ai_diary._emotions_to_state_map([{"intensity": 5}]) == {}
+    assert ai_diary._emotions_to_state_map("not emotions") == {}
+
+
 def test_sync_add_diary_does_not_create_many_pools(monkeypatch):
     monkeypatch.setenv("SYNTH_TESTING", "1")
     monkeypatch.setenv("DB_MAX_POOLS", "1")

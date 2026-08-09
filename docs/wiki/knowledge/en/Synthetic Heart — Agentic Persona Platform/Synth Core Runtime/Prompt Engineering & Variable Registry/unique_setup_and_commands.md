@@ -1,0 +1,1 @@
+The `variables_engine` module auto-registers all exposed variables at import time by calling `register_all()`, so importing the module alone populates the registry and wires variables into `config_registry`. No build step is required beyond normal Python imports.

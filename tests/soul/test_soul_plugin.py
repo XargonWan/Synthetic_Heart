@@ -363,6 +363,50 @@ def test_repository_backend_postgres_selected(monkeypatch: pytest.MonkeyPatch) -
     assert isinstance(plugin._repo, PostgresSoulRepository)
 
 
+@pytest.mark.asyncio
+async def test_compile_interface_skips_roleplay_only_buffer() -> None:
+    plugin = SoulPlugin()
+    iface = "telegram_bot/99"
+    compiler = SimpleNamespace(
+        post_session_compile=AsyncMock(return_value=["cell-1"]),
+        async_consolidate=AsyncMock(return_value=["scene-1"]),
+    )
+    plugin._compiler = compiler
+
+    plugin._buffers[iface] = [
+        "I'm fucking cumming in your tight little ass bitch CUM WITH ME YOU SLUT"
+    ]
+    created = await plugin._compile_interface(iface)
+
+    assert created == 0
+    assert plugin._buffers[iface] == []
+    compiler.post_session_compile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_compile_interface_keeps_non_roleplay_lines() -> None:
+    plugin = SoulPlugin()
+    iface = "telegram_bot/100"
+    compiler = SimpleNamespace(
+        post_session_compile=AsyncMock(return_value=["cell-1"]),
+        async_consolidate=AsyncMock(return_value=["scene-1"]),
+    )
+    plugin._compiler = compiler
+
+    plugin._buffers[iface] = [
+        "I work on SynthHeart for real",
+        "I'm fucking cumming in your tight little ass bitch",
+        "I live in Berlin",
+    ]
+    created = await plugin._compile_interface(iface)
+
+    assert created == 1
+    compiled_transcript = compiler.post_session_compile.await_args.kwargs["transcript"]
+    assert "work on SynthHeart" in compiled_transcript
+    assert "live in Berlin" in compiled_transcript
+    assert "fucking cumming" not in compiled_transcript
+
+
 def test_build_embedder_uses_runtime_repository_backend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

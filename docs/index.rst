@@ -31,6 +31,7 @@ getting started.
    interfaces
    peer_synths
    plugins
+   plugins/generated_index
    self_growth
    external_endpoints
    auris_vox
@@ -55,6 +56,7 @@ getting started.
    COMPONENT_DEVELOPMENT_GUIDE
    dev_components
    api_endpoints
+   logging
    agent_integration
    agentic_tools
    component_pattern

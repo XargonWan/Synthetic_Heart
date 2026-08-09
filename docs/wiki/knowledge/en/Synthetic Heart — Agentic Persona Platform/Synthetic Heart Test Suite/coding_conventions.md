@@ -1,0 +1,5 @@
+- Each test module targets a single subsystem and follows the `test_<feature>.py` naming convention, with one assertion-heavy function per behavior path.
+- Autouse fixtures in `conftest.py` enforce isolation: resetting the KaradaStateServer singleton, pointing backups to a tmp_path, and raising on unmocked `ai_diary.get_db()` calls.
+- Optional third-party modules are stubbed into `sys.modules` via the `_ensure_module` helper in `__init__.py` so tests import cleanly without those packages installed.
+- Environment variables are set with `os.environ.setdefault(...)` at the top of test files rather than hard-coded constants, allowing overrides from the caller.
+- Async tests use the `@pytest.mark.asyncio` decorator and call async functions directly rather than wrapping them in `asyncio.run`.

@@ -1,0 +1,1 @@
+Pure Python with `typing` annotations and dataclasses (`dataclass`, `field`). Uses `inspect.signature` for dynamic handler invocation in the command dispatcher and `getattr`-based fallback conversion in the generic interface adapter.

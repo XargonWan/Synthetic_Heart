@@ -1,0 +1,1 @@
+Sphinx-based documentation site for Synthetic Heart, covering user guides, developer internals, Gemini integrations, and auto-generated plugin guides built from Markdown sources.

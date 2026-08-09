@@ -71,6 +71,7 @@ async def test_log_chat_persistence_uses_config_registry(monkeypatch):
     import core.config_manager as cm
 
     conf._log_chat_path = None
+    conf._log_chat_path_loaded = False
     mock = AsyncMock()
     monkeypatch.setattr(cm.config_registry, "set_value", mock)
 
@@ -89,6 +90,7 @@ async def test_log_chat_persistence_omits_empty_thread(monkeypatch):
     import core.config_manager as cm
 
     conf._log_chat_path = None
+    conf._log_chat_path_loaded = False
     mock = AsyncMock()
     monkeypatch.setattr(cm.config_registry, "set_value", mock)
 
@@ -103,6 +105,7 @@ def test_get_log_chat_reads_from_config_registry(monkeypatch):
     import core.config_manager as cm
 
     conf._log_chat_path = None
+    conf._log_chat_path_loaded = False
     monkeypatch.setattr(
         cm.config_registry,
         "get_value",
@@ -133,6 +136,7 @@ def test_log_chat_listener_invalidates_cache(monkeypatch):
 
     # Seed the cache with an initial value.
     conf._log_chat_path = "telegram_bot/111"
+    conf._log_chat_path_loaded = True
     assert conf.get_log_chat_id_sync() == 111
 
     # Simulate the config_registry listener firing on a new value.
@@ -144,6 +148,35 @@ def test_log_chat_listener_invalidates_cache(monkeypatch):
     # An empty value clears the cache.
     conf._on_log_chat_id_changed("")
     assert conf.get_log_chat_id_sync() is None
+
+
+def test_log_chat_loader_is_reentrant_safe(monkeypatch):
+    """Config/logging bootstrap must not recurse while loading LOG_CHAT_ID."""
+    from core import config as conf
+    import core.config_manager as cm
+
+    conf._log_chat_path = None
+    conf._log_chat_path_loaded = False
+    conf._loading_log_chat_path = False
+    monkeypatch.setattr(conf, "log_debug", lambda _message: None)
+    monkeypatch.setattr(conf, "log_error", lambda _message: None)
+
+    calls = 0
+
+    def reentrant_get_value(key, default=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            assert conf._load_log_chat_path() is None
+        return default
+
+    monkeypatch.setattr(cm.config_registry, "get_value", reentrant_get_value)
+
+    assert conf._load_log_chat_path() is None
+    assert calls == 1
+    assert conf._load_log_chat_path() is None
+    assert calls == 1
+    assert conf._loading_log_chat_path is False
 
 
 @pytest.mark.asyncio
@@ -232,8 +265,16 @@ async def test_get_active_cortex_engine_keeps_pending_external_endpoint(monkeypa
             return "anthropic"
 
     class FakeEndpoint:
+        # The provider probe may be conservative, but the explicit effective
+        # subsystem map is what caused the registry to expose this endpoint as
+        # a Cortex engine.
+        capabilities = {"cortex": False}
+
         def engine_name(self):
             return "Venice2"
+
+        def effective_subsystem_map(self):
+            return {"cortex": True}
 
     class FakeExternalEndpointRegistry:
         async def list_endpoints(self, enabled_only=False):
@@ -263,6 +304,69 @@ async def test_get_active_cortex_engine_keeps_pending_external_endpoint(monkeypa
 
     assert engine == "Venice2"
     set_value.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_active_cortex_engine_override_to_noncortex_endpoint_falls_back_to_base(
+    monkeypatch,
+):
+    """General rule: a scope override pointing at a configured external
+    endpoint that does NOT advertise the cortex capability must degrade
+    transparently to the non-override Base Cortex, and the override key must
+    be reset to 'Default'. This is the AGENT_CORTEX=logfare-mykey (cortex:false)
+    401 case -- keeping a non-cortex endpoint would starve the scope."""
+    from core import config as conf
+    import core.config_manager as cm
+
+    class FakeRegistry:
+        def get_available_engines(self):
+            return ["selenium-llm-engine"]
+
+        def get_default_engine(self):
+            return "selenium-llm-engine"
+
+    class FakeEndpoint:
+        # Auto-probe found no cortex capability (the honest signal the resolver
+        # keys off), even though this endpoint may still be reachable.
+        capabilities = {"cortex": False}
+
+        def engine_name(self):
+            return "logfare-mykey"
+
+        def effective_subsystem_map(self):
+            return {"cortex": False}
+
+    class FakeExternalEndpointRegistry:
+        async def list_endpoints(self, enabled_only=False):
+            return [FakeEndpoint()]
+
+    values = {
+        "BASE_CORTEX": "selenium-llm-engine",
+        "AGENT_CORTEX": "logfare-mykey",
+    }
+    set_value = AsyncMock()
+
+    monkeypatch.setattr(
+        cm.config_registry,
+        "get_value",
+        lambda key, default=None: values.get(key, default),
+    )
+    monkeypatch.setattr(cm.config_registry, "set_value", set_value)
+    monkeypatch.setattr(
+        "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
+    )
+    monkeypatch.setattr(
+        "core.external_endpoints.registry.get_external_endpoint_registry",
+        lambda: FakeExternalEndpointRegistry(),
+    )
+    # Silence LogChat delivery in the unit test.
+    monkeypatch.setattr("core.notifier.notifier", lambda *a, **k: None)
+    conf._CORTEX_OVERRIDE_FALLBACK_WARNED.clear()
+
+    engine = await conf.get_active_cortex_engine("agent")
+
+    assert engine == "selenium-llm-engine"
+    set_value.assert_any_await("AGENT_CORTEX", "Default")
 
 
 @pytest.mark.asyncio
@@ -348,3 +452,62 @@ async def test_get_active_cortex_engine_allows_anthropic_when_key_configured(
 
     assert engine == "anthropic"
     set_value.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_active_cortex_engine_registered_noncortex_endpoint_falls_back(
+    monkeypatch,
+):
+    """A registered endpoint with effective Cortex disabled falls back to Base."""
+    from core import config as conf
+    import core.config_manager as cm
+
+    class FakeRegistry:
+        def get_available_engines(self):
+            # logfare-mykey IS registered here -- the primary-path gap.
+            return ["selenium-llm-engine", "logfare-mykey"]
+
+        def get_default_engine(self):
+            return "selenium-llm-engine"
+
+    class FakeEndpoint:
+        # The endpoint is explicitly not configured for Cortex, so it must not
+        # be kept merely because a stale registry entry still contains it.
+        capabilities = {"cortex": False}
+
+        def engine_name(self):
+            return "logfare-mykey"
+
+        def effective_subsystem_map(self):
+            return {"cortex": False}
+
+    class FakeExternalEndpointRegistry:
+        async def list_endpoints(self, enabled_only=False):
+            return [FakeEndpoint()]
+
+    values = {
+        "BASE_CORTEX": "selenium-llm-engine",
+        "AGENT_CORTEX": "logfare-mykey",
+    }
+    set_value = AsyncMock()
+
+    monkeypatch.setattr(
+        cm.config_registry,
+        "get_value",
+        lambda key, default=None: values.get(key, default),
+    )
+    monkeypatch.setattr(cm.config_registry, "set_value", set_value)
+    monkeypatch.setattr(
+        "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
+    )
+    monkeypatch.setattr(
+        "core.external_endpoints.registry.get_external_endpoint_registry",
+        lambda: FakeExternalEndpointRegistry(),
+    )
+    monkeypatch.setattr("core.notifier.notifier", lambda *a, **k: None)
+    conf._CORTEX_OVERRIDE_FALLBACK_WARNED.clear()
+
+    engine = await conf.get_active_cortex_engine("agent")
+
+    assert engine == "selenium-llm-engine"
+    set_value.assert_any_await("AGENT_CORTEX", "Default")

@@ -1,0 +1,15 @@
+schema_version: 1
+module_path: core_runtime/chat_management
+title: Chat History, Context & Archive Management
+scope:
+    - core/chat_context_manager.py
+    - core/chat_history_cache.py
+    - core/chat_archives.py
+    - core/chat_archives_db.py
+    - core/recent_chats.py
+    - core/history_engine.py
+    - core/history_types.py
+source_files: []
+depends_on: []
+related_to:
+    - path: core_runtime/core_runtime_engine

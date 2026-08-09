@@ -1,0 +1,7 @@
+Two parallel server implementations coexist:
+- Python FastMCP servers (`synth_cortex.py`, `synth_db.py`, `synth_logs.py`, `synth_langfuse.py`, `synth_llm_failures.py`) each define a single `FastMCP` instance and register tools via the `@mcp.tool()` decorator, running as standalone stdio processes.
+- A TypeScript server under `grok-api-mcp/` uses `@modelcontextprotocol/sdk` with a `McpServer` and Zod-schemas for tool parameter validation; it is built via `tsc` and shipped from `dist/index.js`.
+
+Dependency direction is one-way: `synth_llm_failures.py` imports shared DB plumbing (`_connect`, `_resolve_target`, `_rows_to_dicts`, `_target_summary`) from `synth_db.py`, while all other Python servers are self-contained. `synth_logs.py` delegates log discovery and gzip-aware reading to the project's `core.log_archive` module by injecting the repo root into `sys.path`. Configuration is read from a workspace `.env` file (with real environment variables overriding), and `synth_db.py` additionally supports Docker host remapping so the same binary works both inside containers and on the host.
+
+Each server exposes a small, focused set of tools (4–5 per script) that return formatted text strings rather than structured JSON, keeping agent interaction simple.

@@ -1,0 +1,7 @@
+Single-page app bootstrapped from `src/main.ts`, which mounts a Pinia-enabled Vue 3 app rooted at `src/App.vue`. Layering follows a clear separation:
+- `src/components/` holds presentational Vue SFCs grouped by concern (`chat/`, `scenes/Stage.vue`, `settings/`, `system/`).
+- `src/stores/` are Pinia stores (`audio`, `avatar`, `chat`, `connection`, `mic`, `settings`) that own reactive state and orchestrate side effects.
+- `src/services/` encapsulate external contracts: `protocol.ts` defines the single typed WS message schema mirrored from the legacy `res/synth_webui/js/chat-window.mjs`; `karada-rest.ts` handles REST calls; `synth-ws.ts`, `audio-stream.ts`, `audio-upload.ts`, `voice-config.ts` wrap transport logic.
+- `src/composables/vrm/` implements the 3D avatar pipeline: `avatar-driver.ts` binds a loaded VRM to the Karada animation protocol, delegating clip caching (`animation-cache.ts`), descriptor resolution (`animation.ts`), retargeting (`retarget/`), eye saccades (`eye-saccade.ts`), and face blending (`face.ts`).
+- `src/lib/` groups lower-level utilities (`audio/`, `lipsync/`, `pipelines-audio/`, `api-token.ts`).
+Dependency direction is one-way: components → stores → services → lib/composables; nothing in `lib` or `composables` imports Vue components. The `scripts/` directory contains Playwright-based verification scripts that drive the running stage via the `window.__stage` debug hook exposed in `main.ts`.

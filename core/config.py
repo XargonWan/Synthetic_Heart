@@ -175,6 +175,33 @@ AGENT_CORTEX = config_registry.get_var(
     allow_env_override=False,
 )
 
+VESSEL_CORTEX = config_registry.get_var(
+    "VESSEL_CORTEX",
+    "Default",
+    label="Rift Vessel (Will) Cortex",
+    description="Cortex engine used for Rift Vessel will beats — the slow volition turn where Synth authors its in-world goals (Default means Base Cortex).",
+    group="core",
+    component="cortex",
+    hidden=True,  # Managed via the Cortex Engines scope selectors
+    allow_env_override=False,
+)
+
+# Named engine-configuration presets (extra_config + optional model bundles)
+# edited from the Engines tab.  Stored as a JSON list; hidden from the generic
+# settings grid because it is managed by the dedicated preset UI in
+# core/engine_config_presets.py.
+ENGINE_CONFIG_PRESETS = config_registry.get_var(
+    "ENGINE_CONFIG_PRESETS",
+    [],
+    label="Engine Config Presets",
+    description="Named provider/model engine-config presets (JSON list).",
+    group="core",
+    component="cortex",
+    hidden=True,
+    value_type=list,
+    allow_env_override=False,
+)
+
 # LLM generation request timeout. Caps how long the synth waits for a single
 # cortex generation before aborting. On slow hardware a long reply can exceed a
 # short timeout, which aborts the HTTP request and makes llama.cpp cancel the
@@ -423,7 +450,7 @@ _register_exposed_var(
 # Cortex scope value (engine + optional model) storage helpers
 # ---------------------------------------------------------------------------
 # Each scope config key (BASE_CORTEX, AGENT_CORTEX, GRILLO_CORTEX,
-# TRAINER_CORTEX, LIVE_CORTEX) stores either:
+# TRAINER_CORTEX, LIVE_CORTEX, VESSEL_CORTEX) stores either:
 #   - a bare engine name string (legacy): the endpoint's default_model is used;
 #   - a JSON object {"engine": "...", "model": "..."}: the model overrides the
 #     endpoint default for that scope only.
@@ -468,6 +495,47 @@ def serialize_cortex_scope_value(engine: str, model: str | None = None) -> str:
     return json.dumps({"engine": engine, "model": model})
 
 
+# General rule (see AGENTS.md / user request "regola generale per tutti gli
+# override"): whenever a cortex *scope override* (AGENT_CORTEX, GRILLO_CORTEX,
+# TRAINER_CORTEX, LIVE_CORTEX, VESSEL_CORTEX, ...) points at an engine that is
+# not currently usable, the resolver degrades transparently to the non-override
+# Base Cortex. Every such degradation is announced in the logs *and* on LogChat
+# so the operator can see the misconfiguration -- but only once per override key
+# per process, to avoid flooding LogChat on every prompt build.
+_CORTEX_OVERRIDE_FALLBACK_WARNED: set[str] = set()
+
+
+def _warn_cortex_override_fallback(
+    override_key: str, chosen: str, fallback: str
+) -> None:
+    """Announce an override→Base cortex degradation to logs and LogChat.
+
+    Emitted every time in the logs (cheap, always useful when debugging) but
+    pushed to LogChat only once per ``override_key`` per process so a broken
+    override does not spam the operator's chat on every resolution.
+    """
+    log_warning(
+        f"[config] ⚠️ Cortex override {override_key}='{chosen}' is unavailable; "
+        f"falling back to Base Cortex '{fallback}'. Fix {override_key} to silence this."
+    )
+    if override_key in _CORTEX_OVERRIDE_FALLBACK_WARNED:
+        return
+    _CORTEX_OVERRIDE_FALLBACK_WARNED.add(override_key)
+    try:
+        from core.notifier import notifier
+
+        notifier(
+            f"⚠️ Cortex override {override_key} ('{chosen}') is unavailable "
+            f"(unregistered or missing cortex capability). Falling back to Base "
+            f"Cortex '{fallback}'. Please fix {override_key}."
+        )
+    except Exception as notify_exc:  # pragma: no cover - defensive
+        log_debug(
+            f"[config] Could not notify LogChat about the cortex override "
+            f"fallback for {override_key}: {notify_exc}"
+        )
+
+
 async def get_active_cortex_engine(scope: str | None = None) -> str:
     """Return the effective cortex engine for a given scope.
 
@@ -485,6 +553,8 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
             override_key = "LIVE_CORTEX"
         elif scope == "agent":
             override_key = "AGENT_CORTEX"
+        elif scope == "vessel":
+            override_key = "VESSEL_CORTEX"
         else:
             override_key = None
 
@@ -530,6 +600,42 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
         ):
             available.discard("anthropic")
 
+        # The external-endpoint registry uses the effective subsystem map as
+        # the source of truth for whether a configured endpoint is a Cortex
+        # engine. The resolver must use the same structural decision.
+        # Endpoints whose effective map disables Cortex are excluded from
+        # ``available`` so ``chosen`` (or ``base``/``sibling``) falls
+        # into the override→Base degradation below.
+        #
+        # A provider probe may be conservative (Venice is one example), while
+        # an explicit effective subsystem map enables Cortex. Do not reject an
+        # endpoint that the registry deliberately registered as a Cortex
+        # engine just because its raw probe capability is false.
+        #
+        # The effective map remains structural and never depends on keyword
+        # or phrase matching.
+        #
+        try:
+            from core.external_endpoints.registry import (
+                get_external_endpoint_registry,
+            )
+
+            _all_endpoints = await get_external_endpoint_registry().list_endpoints(
+                enabled_only=True
+            )
+            _non_cortex = {
+                ep.engine_name()
+                for ep in _all_endpoints
+                if not ep.effective_subsystem_map().get("cortex")
+            }
+            if _non_cortex:
+                available.difference_update(_non_cortex)
+        except Exception as cap_exc:  # pragma: no cover - defensive
+            log_debug(
+                f"[config] Could not verify cortex capability of external "
+                f"endpoints: {cap_exc}"
+            )
+
         if chosen not in available:
             # Before treating this as a genuinely stale/removed engine, check
             # whether it's a still-configured external endpoint (e.g. Venice2)
@@ -549,7 +655,20 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
                 endpoints = await get_external_endpoint_registry().list_endpoints(
                     enabled_only=True
                 )
-                if chosen in {ep.engine_name() for ep in endpoints}:
+                # Only keep ``chosen`` if the configured endpoint's effective
+                # subsystem map exposes Cortex. This is the same structural
+                # decision used by the external-endpoint registry when it
+                # registers engines. A conservative provider probe may report
+                # ``capabilities.cortex=False`` even when the explicit map
+                # enables Cortex, so the effective map is authoritative here.
+                # override→Base degradation below the *general rule* for every
+                # scope, not just a one-off transient-registration escape hatch.
+                cortex_endpoints = {
+                    ep.engine_name()
+                    for ep in endpoints
+                    if ep.effective_subsystem_map().get("cortex")
+                }
+                if chosen in cortex_endpoints:
                     log_warning(
                         f"[config] ⚠️ Cortex engine '{chosen}' is a configured "
                         "external endpoint not yet registered in the CortexRegistry "
@@ -600,12 +719,17 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
                 if base != fallback:
                     updates.append(("BASE_CORTEX", fallback))
 
-            stale_key = override_key if use_override and override_key else "BASE_CORTEX"
-            log_warning(
-                f"[config] ⚠️ Cortex engine '{chosen}' is no longer registered. "
-                f"Falling back to '{fallback}'. "
-                f"Update {stale_key} to silence this warning."
-            )
+            if use_override and override_key is not None:
+                # Override→Base degradation is the general rule: announce it in
+                # the logs *and* on LogChat (once per override key) so the
+                # operator sees the misconfiguration.
+                _warn_cortex_override_fallback(override_key, chosen, fallback)
+            else:
+                log_warning(
+                    f"[config] ⚠️ Cortex engine '{chosen}' is no longer registered. "
+                    f"Falling back to '{fallback}'. "
+                    f"Update BASE_CORTEX to silence this warning."
+                )
             try:
                 seen_keys: set[str] = set()
                 for key, value in updates:
@@ -652,6 +776,8 @@ async def get_active_cortex_scope(scope: str | None = None) -> tuple[str, str | 
         override_key = "LIVE_CORTEX"
     elif scope == "agent":
         override_key = "AGENT_CORTEX"
+    elif scope == "vessel":
+        override_key = "VESSEL_CORTEX"
 
     if override_key is not None:
         ov_engine, ov_model = parse_cortex_scope_value(
@@ -700,7 +826,7 @@ def derive_cortex_scope(context: dict | None) -> str | None:
     keys to scope strings.
 
     Scope values mirror those accepted by :func:`get_active_cortex_engine`:
-    ``"trainer"``, ``"grillo"``, or ``None`` (base engine).
+    ``"trainer"``, ``"grillo"``, ``"vessel"``, or ``None`` (base engine).
     """
     if not isinstance(context, dict):
         return None
@@ -714,6 +840,17 @@ def derive_cortex_scope(context: dict | None) -> str | None:
     # failure for end users.
     if context.get("grillo_beat") or context.get("diary_merge_beat"):
         return "grillo"
+    # Rift Vessel embodiment turns (the slow will beat where Synth authors its
+    # in-world goals) route to VESSEL_CORTEX. Detection is purely structural
+    # routing metadata (never message text), reusing the single canonical
+    # detector shared with history_engine/agent_router.
+    try:
+        from core.interface_path_utils import is_vessel_embodiment_context
+
+        if is_vessel_embodiment_context(context):
+            return "vessel"
+    except Exception:
+        pass
     return None
 
 
@@ -736,6 +873,8 @@ async def set_scope_cortex(scope: str, name: str, model: str | None = None) -> N
         key = "LIVE_CORTEX"
     elif scope == "agent":
         key = "AGENT_CORTEX"
+    elif scope == "vessel":
+        key = "VESSEL_CORTEX"
     else:
         key = "TRAINER_CORTEX"
     value = serialize_cortex_scope_value(name, model)
@@ -1000,6 +1139,10 @@ async def switch_active_cortex_engine(name: str, use_hot_swap: bool = True):
 # `LOG_CHAT_ID` config key (e.g. "telegram_bot/-28475648/6"). The cache holds
 # that raw path; the interface name, chat id and thread id are derived from it.
 _log_chat_path: str | None = None  # cached log chat interface_path
+_log_chat_path_loaded: bool = False  # distinguishes loaded empty value from cache miss
+_loading_log_chat_path: bool = (
+    False  # prevents logging/config re-entry during bootstrap
+)
 
 
 def _parse_log_chat_path(path: str | None) -> tuple[str | None, int | None, int | None]:
@@ -1029,16 +1172,28 @@ def _parse_log_chat_path(path: str | None) -> tuple[str | None, int | None, int 
 
 def _load_log_chat_path() -> str | None:
     """Load and cache the raw LogChat interface_path from config_registry."""
-    global _log_chat_path
+    global _log_chat_path, _log_chat_path_loaded, _loading_log_chat_path
+    if _log_chat_path_loaded:
+        return _log_chat_path
     if _log_chat_path is None:
+        # Loading LOG_CHAT_ID can itself emit a log record. LogChat handling
+        # then calls this function again, so return the safe empty value for
+        # that nested call instead of recursing forever.
+        if _loading_log_chat_path:
+            return None
+        _loading_log_chat_path = True
         try:
             raw = config_registry.get_value("LOG_CHAT_ID", "")
             _log_chat_path = raw if raw else None
+            _log_chat_path_loaded = True
             log_debug(
                 f"[config] 📥 Loaded LOG_CHAT_ID (path) via config_registry: {_log_chat_path}"
             )
         except Exception as e:
+            _log_chat_path_loaded = True
             log_error(f"[config] ❌ Error in _load_log_chat_path(): {repr(e)}")
+        finally:
+            _loading_log_chat_path = False
     return _log_chat_path
 
 
@@ -1049,8 +1204,9 @@ def _on_log_chat_id_changed(new_value: object) -> None:
     generic exposed-var endpoint), bypassing set_log_chat_id_and_thread, so the
     module-level cache must be refreshed on every change.
     """
-    global _log_chat_path
+    global _log_chat_path, _log_chat_path_loaded
     _log_chat_path = str(new_value) if new_value else None
+    _log_chat_path_loaded = True
 
 
 try:
@@ -1090,12 +1246,13 @@ async def set_log_chat_id_and_thread(
     The interface, chat id and optional thread id are joined into one canonical
     interface_path (e.g. "telegram_bot/-28475648/6") stored in `LOG_CHAT_ID`.
     """
-    global _log_chat_path
+    global _log_chat_path, _log_chat_path_loaded
 
     from core.interface_path_utils import build_interface_path_from_legacy
 
     path = build_interface_path_from_legacy(interface, chat_id, thread_id)
     _log_chat_path = path
+    _log_chat_path_loaded = True
 
     try:
         await config_registry.set_value("LOG_CHAT_ID", path)

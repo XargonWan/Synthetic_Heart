@@ -122,6 +122,35 @@ def _cfg_bool(key: str, default: bool) -> bool:
         return default
 
 
+def _is_self_initiated(context_memory: dict[str, Any] | None) -> bool:
+    """Structurally decide whether the search had no human requester.
+
+    Reads ONLY the routing origin carried on the originating turn's
+    ``context_memory`` — never any message text (project rule: no keyword
+    logic). A Grillo beat, any autonomous beat, or a Vessel embodiment turn is
+    self-initiated (nobody asked); a direct user turn is not. Fail-safe: on any
+    doubt it returns ``False`` so the delivery keeps the ordinary
+    user-addressed register rather than wrongly dropping it.
+    """
+    if not isinstance(context_memory, dict):
+        return False
+    try:
+        if context_memory.get("grillo_beat"):
+            return True
+        if context_memory.get("beat_type"):
+            return True
+        if context_memory.get("vessel_focus"):
+            return True
+        path = context_memory.get("interface_path")
+        from core.interface_path_utils import is_vessel_interface_path
+
+        if is_vessel_interface_path(path):
+            return True
+    except Exception:
+        return False
+    return False
+
+
 async def _init_table() -> None:
     """Create the ``web_search_tasks`` table if it does not exist (backend-aware)."""
     from core.db import get_conn_ctx
@@ -599,29 +628,64 @@ class SearchOrchestrator:
             from core import message_queue
 
             links_line = f"Direct links: {', '.join(urls)}\n" if urls else ""
+            # Who initiated this search? Decided STRUCTURALLY from the routing
+            # origin carried on the originating turn's context_memory — never
+            # from message text (project rule: no keyword logic). A Grillo beat,
+            # a Vessel embodiment turn, or any autonomous beat has NO human
+            # requester; a direct user turn does. This drives the *attribution*
+            # of the report only — not where it is delivered.
+            self_initiated = _is_self_initiated(context_memory)
             # Default delivery target is the originating interface_path. We tell
             # Synth explicitly where the search came from and that she should
             # reply there by default. She MAY override the destination, but we
-            # strongly discourage it: the user asked in that chat and expects the
-            # answer there. This is a soft, freedom-preserving instruction — not
-            # a hard constraint — so a deliberate cross-chat reply is still
-            # possible if she has a good reason.
-            origin_note = (
-                f"ORIGIN: this search was requested on interface_path "
-                f"'{interface_path}'. Reply on that same interface_path by default. "
-                f"You MAY redirect the reply elsewhere if you have a clear reason, "
-                f"but doing so is strongly discouraged — the user expects the "
-                f"answer in the chat where they asked.\n"
-                if interface_path
-                else ""
-            )
+            # strongly discourage it. This is a soft, freedom-preserving
+            # instruction — not a hard constraint — so a deliberate cross-chat
+            # reply is still possible if she has a good reason.
+            if not interface_path:
+                origin_note = ""
+            elif self_initiated:
+                origin_note = (
+                    f"ORIGIN: you started this search yourself, and it is tied to "
+                    f"the conversation on interface_path '{interface_path}'. If you "
+                    f"choose to say anything about what you found, that is the "
+                    f"natural place for it. You are under no obligation to report "
+                    f"back — share only if you genuinely want to.\n"
+                )
+            else:
+                origin_note = (
+                    f"ORIGIN: this search was prompted by the conversation on "
+                    f"interface_path '{interface_path}'. Reply on that same "
+                    f"interface_path by default. You MAY redirect the reply "
+                    f"elsewhere if you have a clear reason, but doing so is "
+                    f"strongly discouraged — the person expects the answer in "
+                    f"the chat where the topic came up.\n"
+                )
+
+            if self_initiated:
+                framing = (
+                    "A background web search you started on your own initiative "
+                    "has completed — nobody asked you for this; it came from your "
+                    "own curiosity or your own plan. If you decide to share what "
+                    "you found, do it naturally, in your own voice, in the "
+                    "relevant language, as YOU bringing something up — NOT as an "
+                    "assistant delivering a requested report. Never say 'here are "
+                    "the results you asked for' or address a requester; there is "
+                    "no requester. "
+                )
+            else:
+                framing = (
+                    "A background web search you announced earlier has completed. "
+                    "Report the findings naturally, in your own voice, in the "
+                    "relevant language, phrasing it however feels natural — do "
+                    "not fall back on a scripted 'here are the results you "
+                    "requested' register. "
+                )
             prompt = (
                 "=== WEB SEARCH RESULTS ===\n"
-                "A background web search you announced earlier has completed. "
-                "Report the findings to the user naturally, in your own voice, in "
-                "their language. The following is an aseptic factual summary with "
+                f"{framing}"
+                "The following is an aseptic factual summary with "
                 "sources — do not read it verbatim, integrate it. If any links "
-                "could not be visited, tell the user which specific ones failed "
+                "could not be visited, tell which specific ones failed "
                 "(and why) while still reporting everything that succeeded.\n\n"
                 f"{origin_note}"
                 f"Search intent: {search_context}\n"

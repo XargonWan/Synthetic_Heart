@@ -1,15 +1,63 @@
 <section class="tab-panel" id="tab-plugins" data-tab="plugins" role="tabpanel">
     <div class="settings-grid" style="flex-direction: column;">
-        <article class="card">
-            <h2>Interfaces</h2>
-            <div class="components-list" id="components-interfaces-list">
-                <div class="meta">Loading…</div>
-            </div>
-        </article>
+        <nav class="plugins-subnav" role="tablist" aria-label="Plugins views">
+            <button class="plugins-subnav-btn active" type="button" data-plugins-subtab="installed" aria-selected="true">Installed</button>
+            <button class="plugins-subnav-btn" type="button" data-plugins-subtab="store" aria-selected="false">Store</button>
+        </nav>
+
+        <div class="plugins-subpanel active" id="plugins-panel-installed" data-plugins-subtab="installed">
         <article class="card">
             <h2>Plugins</h2>
-            <div class="components-list" id="components-plugins-list">
-                <div class="meta">Loading…</div>
+            <div class="plugins-search-row">
+                <input type="search" id="plugins-search" class="plugins-search-input"
+                    placeholder="Search plugins by name or variable…"
+                    autocomplete="off" spellcheck="false" aria-label="Search plugins by name or variable" />
+            </div>
+            <div class="plugins-filter-row" id="plugins-filter-row">
+                <select id="plugins-filter-enabled" class="plugins-filter-select"
+                    aria-label="Filter by enabled state">
+                    <option value="">All states</option>
+                    <option value="enabled">Enabled only</option>
+                    <option value="disabled">Disabled only</option>
+                </select>
+                <select id="plugins-filter-status" class="plugins-filter-select"
+                    aria-label="Filter by status">
+                    <option value="">Any status</option>
+                    <option value="green">🟢 OK</option>
+                    <option value="orange">🟠 Warning</option>
+                    <option value="red">🔴 Error</option>
+                    <option value="grey">⚪ Inactive</option>
+                </select>
+                <select id="plugins-filter-category" class="plugins-filter-select"
+                    aria-label="Filter by category">
+                    <option value="">All categories</option>
+                </select>
+                <label class="plugins-filter-check" title="Only plugins that contribute to Recon">
+                    <input type="checkbox" id="plugins-filter-recon" />
+                    <span>Recon</span>
+                </label>
+                <label class="plugins-filter-check" title="Only plugins that contribute to Debrief">
+                    <input type="checkbox" id="plugins-filter-debrief" />
+                    <span>Debrief</span>
+                </label>
+                <label class="plugins-filter-check" title="Only plugins that can be run manually">
+                    <input type="checkbox" id="plugins-filter-runnable" />
+                    <span>Runnable</span>
+                </label>
+                <button type="button" id="plugins-filter-reset" class="plugins-filter-reset"
+                    title="Clear all filters">Reset</button>
+            </div>
+            <div class="plugins-two-col" id="plugins-two-col">
+                <div class="plugins-col-left" id="plugins-banner-list" role="listbox" aria-label="Plugins">
+                    <div class="meta">Loading…</div>
+                </div>
+                <div class="plugins-col-resizer" id="plugins-col-resizer" role="separator" aria-orientation="vertical" title="Drag to resize"></div>
+                <div class="plugins-col-right" id="plugin-detail-pane">
+                    <div class="plugin-detail-empty meta" id="plugin-detail-empty">
+                        Select a plugin on the left to see its description, guide and settings.
+                    </div>
+                    <div class="plugin-detail-content" id="plugin-detail-content" hidden></div>
+                </div>
             </div>
         </article>
 
@@ -25,5 +73,138 @@
                 ⚠️ <strong>Warning:</strong> This setting is not persistent and will reset to OFF when SyntH restarts. SyntH will restart automatically after toggling.
             </div>
         </article>
+        </div>
+
+        <div class="plugins-subpanel" id="plugins-panel-store" data-plugins-subtab="store">
+            <article class="card">
+                <h2>Store</h2>
+                <div class="plugins-store-coming-soon">Coming soon</div>
+            </article>
+        </div>
     </div>
 </section>
+
+<style>
+    .plugins-subnav {
+        display: flex;
+        gap: 0.75rem;
+        margin-bottom: 1rem;
+        padding: 0.5rem;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 10px;
+        background: rgba(12, 12, 20, 0.35);
+    }
+
+    .plugins-subnav-btn {
+        border: 0;
+        border-radius: 8px;
+        padding: 0.55rem 0.95rem;
+        background: transparent;
+        color: var(--text-soft);
+        cursor: pointer;
+        transition: background 0.2s ease, color 0.2s ease;
+    }
+
+    .plugins-subnav-btn:hover {
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--text);
+    }
+
+    .plugins-subnav-btn.active {
+        background: var(--accent);
+        color: var(--accent-contrast, #fff);
+    }
+
+    .plugins-subpanel {
+        display: none;
+    }
+
+    .plugins-subpanel.active {
+        display: block;
+    }
+
+    .plugins-store-coming-soon {
+        padding: 3rem 1rem;
+        text-align: center;
+        color: var(--text-soft);
+        font-size: 1.1rem;
+    }
+
+    .plugins-search-row {
+        display: flex;
+        gap: 0.6rem;
+        align-items: center;
+        margin: 0.2rem 0 0.9rem;
+    }
+
+    .plugins-search-row .plugins-search-input {
+        flex: 1 1 auto;
+        min-width: 200px;
+        padding: 0.55rem 0.75rem;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        background: var(--background);
+        color: var(--text);
+    }
+
+    .plugins-search-row .plugins-search-input::placeholder {
+        color: var(--text-soft);
+    }
+
+    .plugins-filter-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        align-items: center;
+        margin: 0 0 0.9rem;
+    }
+
+    .plugins-filter-row .plugins-filter-select {
+        padding: 0.4rem 0.6rem;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: var(--background);
+        color: var(--text);
+        font-size: 0.85rem;
+        cursor: pointer;
+    }
+
+    .plugins-filter-row .plugins-filter-select:focus {
+        outline: none;
+        border-color: var(--accent);
+    }
+
+    .plugins-filter-row .plugins-filter-check {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        padding: 0.4rem 0.6rem;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: var(--background);
+        color: var(--text);
+        font-size: 0.85rem;
+        cursor: pointer;
+        user-select: none;
+    }
+
+    .plugins-filter-row .plugins-filter-check input {
+        cursor: pointer;
+        margin: 0;
+    }
+
+    .plugins-filter-row .plugins-filter-reset {
+        padding: 0.4rem 0.7rem;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--text-soft);
+        font-size: 0.85rem;
+        cursor: pointer;
+    }
+
+    .plugins-filter-row .plugins-filter-reset:hover {
+        border-color: var(--accent);
+        color: var(--text);
+    }
+</style>

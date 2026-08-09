@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: core_runtime/action_system
+title: Action Parsing, Safety & State Management
+scope:
+    - core/action_parser.py
+    - core/action_safety.py
+    - core/action_schema_converter.py
+    - core/action_state_manager.py
+source_files: []
+depends_on: []
+related_to: []

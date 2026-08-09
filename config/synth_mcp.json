@@ -8,7 +8,16 @@
             "args": ["run", "python", "mcp_servers/synth_logs.py"],
             "env": {"LOG_DIR": "/app/logs"},
             "security_level": "low",
-            "description": "Runtime log analysis MCP server shipped with Synth.",
+            "description": "Runtime log analysis MCP server shipped with Synth."
+        },
+        "synth_llm_failures": {
+            "enabled": true,
+            "transport": "stdio",
+            "command": "uv",
+            "args": ["run", "python", "mcp_servers/synth_llm_failures.py"],
+            "env": {},
+            "security_level": "low",
+            "description": "Structured access to the persisted llm_failure_log table (same data as the WebUI Logs page). Pair with synth_logs to cross-reference structured failures against raw runtime logs."
         },
         "filesystem": {
             "enabled": false,
@@ -18,11 +27,11 @@
                 "-y",
                 "@modelcontextprotocol/server-filesystem",
                 "/videodrome/videodrome-deployment/Synthetic_Heart",
-                "/videodrome/videodrome-deployment/Synthetic_Heart/logs",
+                "/videodrome/videodrome-deployment/Synthetic_Heart/logs"
             ],
             "env": {},
             "security_level": "medium",
-            "description": "Local filesystem access for Synth (repo + logs roots). DISABLED: the runtime image (python:3.12-slim) has NO node/npx (node exists only in the Dockerfile 'stage_builder' build stage), so 'npx @modelcontextprotocol/server-filesystem' cannot start in-container. Also the paths above are HOST paths, not container paths (/app, /app/logs). For sandboxed file writing, Synth uses the native 'agent_write_file' action in plugins/agent_plugin.py instead (no node dependency). Re-enable only after adding a node runtime to the image AND fixing these paths to container-internal roots.",
-        },
-    },
+            "description": "Local filesystem access for Synth (repo + logs roots). DISABLED: the runtime image (python:3.12-slim) has NO node/npx (node exists only in the Dockerfile 'stage_builder' build stage), so 'npx @modelcontextprotocol/server-filesystem' cannot start in-container. Also the paths above are HOST paths, not container paths (/app, /app/logs). For sandboxed file writing, Synth uses the native 'agent_write_file' action in plugins/agent_plugin.py instead (no node dependency). Re-enable only after adding a node runtime to the image AND fixing these paths to container-internal roots."
+        }
+    }
 }

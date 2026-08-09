@@ -34,6 +34,27 @@ System & Configuration
 
 - **POST** `/api/system/restart` – restart the synth process (with confirmation).
 - **POST** `/api/database/backup` – create an immediate runtime database backup and return the generated filename/path.
+- **POST** `/api/database/backup/table` – create a backup of a specific list of
+  tables. JSON payload: ``{"tables": ["table_a", "table_b", ...]}``. Table names
+  are sanitised (identifier characters only); any invalid name rejects the whole
+  request. Returns the generated filename/path.
+- **GET** `/api/database/backup/download?filename=<name>` – download a previously
+  created backup file. The ``filename`` is confined to the backups directory
+  (path traversal is rejected with ``403``); a missing file returns ``404``.
+- **POST** `/api/database/query` – run a **read-only** ``SELECT``/``WITH`` query
+  against the runtime database. JSON payload: ``{"query": "SELECT ...", "limit": 200}``.
+  Any statement that is not read-only (INSERT/UPDATE/DELETE/DDL/multiple
+  statements) is rejected with ``400``. ``limit`` is clamped to ``1..1000``
+  (default ``200``). Returns ``{"success", "row_count", "truncated", "rows"}``.
+- **GET** `/api/logs/query` – search log files across rotations and gzip archives.
+  Query params: ``q`` (text/regex), ``regex`` (bool), ``stems`` (comma-separated
+  log stems, e.g. ``synth,webui``), ``level`` (``DEBUG``/``INFO``/``WARNING``/``ERROR``),
+  ``since`` (ISO 8601 timestamp), ``limit`` (clamped ``1..5000``, default ``500``).
+  Returns ``{"success", "count", "truncated", "hits": [{"stem", "file", "level",
+  "timestamp", "line"}]}``.
+- **GET** `/api/logs/download` – download a ``.zip`` archive of **all** current log
+  files (active, daily, and gzip-compressed shards). Returns ``404`` when no logs
+  exist.
 - **GET** `/api/config` – dump current configuration values.
 - **POST** `/api/config` – update a configuration entry.
 - **POST** `/api/config/{key}/upload` – upload a file for an exposed config variable.
@@ -193,11 +214,12 @@ Config & Miscellaneous
   populate dropdowns and support skin uploads).
 - **POST** `/api/vrm` – upload a new VRM file for the active persona (WebUI only).
 
-Ollama‑Compatibility Server
----------------------------
+OpenAI-Compatible Server
+------------------------
 
-When the ``openai_api_server`` interface is enabled, SyntH speaks the same
-HTTP protocol as an Ollama daemon.  The following endpoints are implemented
+When the ``openai_api_server`` interface is enabled, SyntH exposes an
+OpenAI-compatible HTTP surface (and, for backward compatibility, the legacy
+Ollama REST protocol).  The following endpoints are implemented
 (usually on port ``11435`` by default):
 
 - **GET** `/api/tags` – list available models (returns `models` array).
@@ -208,8 +230,9 @@ HTTP protocol as an Ollama daemon.  The following endpoints are implemented
 - **GET** `/v1/models` – OpenAI‑style model list (returns ``object=list``).
 - **GET** `/api/models/{name}` – retrieve a single model descriptor by name or ID.
 
-Clients familiar with the Ollama/StableLM ecosystem can point to the compat
-server and immediately begin issuing requests without any code changes.
+Clients familiar with the OpenAI API (or the legacy Ollama ecosystem) can point
+to the compat server and immediately begin issuing requests without any code
+changes.
 
 Further Reading
 ---------------

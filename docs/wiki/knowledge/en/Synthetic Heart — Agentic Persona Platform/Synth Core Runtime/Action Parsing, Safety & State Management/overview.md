@@ -1,0 +1,1 @@
+Parses, validates, normalizes and dispatches LLM-generated actions through safety checks, schema conversion, and global animation-state tracking across all interfaces.

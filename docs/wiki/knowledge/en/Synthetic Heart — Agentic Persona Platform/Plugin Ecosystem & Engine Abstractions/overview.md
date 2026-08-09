@@ -1,0 +1,1 @@
+Collects all SyntH plugins and engine base classes (Auris STT, Iris vision, Vox TTS, Live streaming) plus feature plugins for agent tasks, Grillo beats, Rift Vessel embodiment, radio hosting, web search, and auxiliary utilities.

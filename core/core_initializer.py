@@ -43,6 +43,59 @@ class ComponentInfo:
     actions: List[str] = field(default_factory=list)
     error: str = ""
     details: str = ""
+    # WebUI plugin-section metadata (Phase A-cat / B)
+    module_name: str = ""  # dotted module path, e.g. "plugins.grillo.grillo_dream"
+    dir_path: str = ""  # on-disk directory of the component (for icon/guide lookup)
+    category: str = (
+        ""  # macro-category: Core/Interfaces/Grillo/Vessels/Agent/Recon/Various
+    )
+
+
+# Curated set of plugins that must never be disabled at runtime (message chain
+# critical). Kept intentionally minimal; everything else is disable-able.
+CORE_PLUGIN_SHORT_NAMES: frozenset[str] = frozenset({"message_plugin"})
+
+# Curated set of interfaces that must never be disabled at runtime. Every I/O
+# adapter (Telegram, Discord, Matrix, OpenAI API) is safely toggle-able. The
+# WebUI is protected because it is the very surface used to manage toggles —
+# disabling it would lock the operator out (self-lockout) until the next manual
+# config edit + restart.
+CORE_INTERFACE_NAMES: frozenset[str] = frozenset({"synth_webui"})
+
+
+def derive_plugin_category(
+    module_name: str, dir_path: str, declared: str | None = None
+) -> str:
+    """Return the macro-category for a plugin.
+
+    Order of precedence: an explicit ``declared`` category (from
+    ``get_metadata``) always wins; otherwise the category is auto-derived from
+    the module path / on-disk location. This is deterministic and language
+    independent (no keyword matching on user content).
+    """
+    if declared and isinstance(declared, str) and declared.strip():
+        return declared.strip()
+
+    parts = (module_name or "").split(".")
+    lowered = [p.lower() for p in parts]
+
+    # Location-based rules.
+    if "interface" in lowered or "interface_dev" in lowered:
+        return "Interfaces"
+    if "grillo" in lowered:
+        return "Grillo"
+    if "vessels" in lowered or "rift_vessel" in lowered:
+        return "Vessels"
+
+    short_name = parts[-1] if parts else ""
+    if short_name in CORE_PLUGIN_SHORT_NAMES:
+        return "Core"
+
+    # Recon plugins follow the structural `recon_*` module-name convention.
+    if short_name.startswith("recon_"):
+        return "Recon"
+
+    return "Various"
 
 
 class CoreInitializer:
@@ -488,6 +541,7 @@ class CoreInitializer:
             try:
                 from core.config_manager import config_registry as _cfg_reg
 
+                # Global Rift Vessel keys (owned by the vessel_plugin core).
                 _cfg_reg.get_var(
                     "ACTIVE_VESSEL",
                     "disabled",
@@ -497,8 +551,9 @@ class CoreInitializer:
                         "Name of the active Rift Vessel world connector "
                         "(e.g. 'minecraft'), or 'disabled'."
                     ),
-                    group="vessel",
-                    component="vessel",
+                    group="plugins",
+                    component="vessel_plugin",
+                    hidden=True,
                 )
                 _cfg_reg.get_var(
                     "VESSEL_SETTINGS",
@@ -506,9 +561,9 @@ class CoreInitializer:
                     value_type=str,
                     label="Vessel Settings (JSON)",
                     description="JSON settings passed to the active Vessel connector.",
-                    group="vessel",
-                    component="vessel",
-                    advanced=True,
+                    group="plugins",
+                    component="vessel_plugin",
+                    hidden=True,
                 )
                 _cfg_reg.get_var(
                     "VESSEL_SESSION_COOLDOWN_SEC",
@@ -519,71 +574,84 @@ class CoreInitializer:
                         "Inactivity window before a Vessel session is closed and "
                         "its buffered experience is flushed to a single diary entry."
                     ),
-                    group="vessel",
-                    component="vessel",
+                    group="plugins",
+                    component="vessel_plugin",
                     advanced=True,
                 )
-                # Minecraft PoC bridge/provisioner keys.
+                # Minecraft-specific keys (owned by the attachable minecraft_vessel
+                # sub-plugin). Registered under its own component so the WebUI shows
+                # them as a distinct entity from the global Rift Vessel.
                 _cfg_reg.get_var(
-                    "MINECRAFT_BRIDGE_ENABLED",
-                    False,
-                    value_type=bool,
-                    label="Minecraft Bridge Enabled",
-                    description=(
-                        "Opt-in: allow provisioning/starting the in-container "
-                        "Mineflayer bridge for the Minecraft Vessel connector."
-                    ),
-                    group="vessel",
-                    component="vessel",
-                )
-                _cfg_reg.get_var(
-                    "MINECRAFT_BRIDGE_RUN_AT_START",
+                    "MINECRAFT_BRIDGE_RUN_AT_START",  # opt-in boot override
                     False,
                     value_type=bool,
                     label="Minecraft Bridge Autostart",
-                    description="Start the Minecraft bridge automatically at boot.",
-                    group="vessel",
-                    component="vessel",
+                    description=(
+                        "Optional: start the Minecraft bridge at boot. By "
+                        "default the bridge is started on demand, only when "
+                        "Synth actually enters the world."
+                    ),
+                    group="plugins",
+                    component="minecraft_vessel",
                     advanced=True,
                 )
                 _cfg_reg.get_var(
                     "MINECRAFT_BRIDGE_HOST",
                     "127.0.0.1",
                     value_type=str,
-                    group="vessel",
-                    component="vessel",
+                    label="Minecraft Bridge Host",
+                    description=(
+                        "Host the local Mineflayer bridge listens on for HTTP commands."
+                    ),
+                    group="plugins",
+                    component="minecraft_vessel",
                     advanced=True,
                 )
                 _cfg_reg.get_var(
                     "MINECRAFT_BRIDGE_PORT",
                     8137,
                     value_type=int,
-                    group="vessel",
-                    component="vessel",
+                    label="Minecraft Bridge Port",
+                    description=(
+                        "TCP port the local Mineflayer bridge listens on for "
+                        "HTTP commands."
+                    ),
+                    group="plugins",
+                    component="minecraft_vessel",
                     advanced=True,
                 )
                 _cfg_reg.get_var(
                     "MINECRAFT_SERVER_HOST",
                     "127.0.0.1",
                     value_type=str,
-                    group="vessel",
-                    component="vessel",
-                    advanced=True,
+                    label="Minecraft Server Host",
+                    description=(
+                        "Hostname or IP of the Minecraft server the bot connects to."
+                    ),
+                    group="plugins",
+                    component="minecraft_vessel",
                 )
                 _cfg_reg.get_var(
                     "MINECRAFT_SERVER_PORT",
-                    25565,
+                    44383,
                     value_type=int,
-                    group="vessel",
-                    component="vessel",
-                    advanced=True,
+                    label="Minecraft Server Port",
+                    description="TCP port of the Minecraft server the bot connects to.",
+                    group="plugins",
+                    component="minecraft_vessel",
                 )
                 _cfg_reg.get_var(
-                    "MINECRAFT_BOT_USERNAME",
-                    "Synth",
+                    "MINECRAFT_BOT_USERNAME_OVERRIDE",
+                    "",
                     value_type=str,
-                    group="vessel",
-                    component="vessel",
+                    label="Minecraft Bot Username Override",
+                    description=(
+                        "Optional in-world username for the Minecraft bot. "
+                        "Leave empty to use Synth's configured name "
+                        "(SYNTH_NAME)."
+                    ),
+                    group="plugins",
+                    component="minecraft_vessel",
                     advanced=True,
                 )
                 log_debug(
@@ -798,6 +866,23 @@ class CoreInitializer:
         started_count = 0
 
         for interface_name, interface_instance in INTERFACE_REGISTRY.items():
+            # Honour a persistent WebUI disable toggle: skip starting (and drop
+            # the actions of) interfaces the operator turned off.
+            if not self._is_interface_enabled(interface_name):
+                log_info(
+                    f"[core_initializer] 🔌 Interface '{interface_name}' disabled by config; not starting"
+                )
+                self._unregister_plugin_actions(interface_instance)
+                if interface_name in self.active_interfaces:
+                    self.active_interfaces.remove(interface_name)
+                self.track_component(
+                    interface_name,
+                    "interface",
+                    ComponentStatus.SKIPPED,
+                    details="Disabled from WebUI",
+                )
+                continue
+
             has_start = hasattr(interface_instance, "start")
             is_callable = callable(getattr(interface_instance, "start", None))
             log_debug(
@@ -854,7 +939,13 @@ class CoreInitializer:
         )
 
     def mark_component_success(
-        self, name: str, actions: Optional[List[str]] = None, details: str = ""
+        self,
+        name: str,
+        actions: Optional[List[str]] = None,
+        details: str = "",
+        module_name: str = "",
+        dir_path: str = "",
+        category: str = "",
     ):
         """Mark a component as successfully loaded."""
         if name in self.components:
@@ -863,11 +954,20 @@ class CoreInitializer:
                 self.components[name].actions = actions
             if details:
                 self.components[name].details = details
+            if module_name:
+                self.components[name].module_name = module_name
+            if dir_path:
+                self.components[name].dir_path = dir_path
+            if category:
+                self.components[name].category = category
         else:
             # Create new component entry
             self.track_component(
                 name, "unknown", ComponentStatus.SUCCESS, actions, details=details
             )
+            self.components[name].module_name = module_name
+            self.components[name].dir_path = dir_path
+            self.components[name].category = category
 
     def mark_component_failed(self, name: str, error: str, details: str = ""):
         """Mark a component as failed to load."""
@@ -1053,6 +1153,14 @@ class CoreInitializer:
         # Include cortex locations; legacy paths are removed
         search_dirs = ["plugins", "cortex", "interface"]
 
+        # Minimal, fail-safe plugin dependency bookkeeping. A plugin may declare
+        # ``depends_on: [<short_name>, ...]`` in its metadata; after all plugins
+        # are loaded we emit a warning for any dependency that did not load. This
+        # is advisory only — plugins resolve their dependencies lazily at
+        # runtime via PLUGIN_REGISTRY.get(), so a missing dependency never blocks
+        # the load (Golden rule: removing any component must not break the rest).
+        declared_dependencies: dict[str, list[str]] = {}
+
         # If dev components are enabled, also scan dev directories
         if self._enable_dev_components:
             search_dirs.extend(["plugins_dev", "interface_dev"])
@@ -1079,6 +1187,30 @@ class CoreInitializer:
                 module_name = ".".join(
                     py_file.relative_to(root_dir).with_suffix("").parts
                 )
+
+                # Persistent runtime enable/disable: if this plugin was disabled
+                # from the WebUI, skip loading it entirely (TRUE unload — behaves
+                # as if the file did not exist) but keep a "ghost" component
+                # record so the UI still lists it as a disabled (grey) plugin.
+                plugin_short_name = module_name.split(".")[-1]
+                if not self._is_plugin_enabled(plugin_short_name):
+                    dir_path = str(py_file.parent)
+                    category = derive_plugin_category(module_name, dir_path)
+                    self.track_component(
+                        plugin_short_name,
+                        "plugin",
+                        ComponentStatus.SKIPPED,
+                        details="Disabled from WebUI",
+                    )
+                    info = self.components.get(plugin_short_name)
+                    if info is not None:
+                        info.module_name = module_name
+                        info.dir_path = dir_path
+                        info.category = category
+                    log_info(
+                        f"[core_initializer] ⏭️ Plugin '{plugin_short_name}' is disabled; skipping load"
+                    )
+                    continue
 
                 # Enforce policy: plugin files must not write directly to queue internals
                 try:
@@ -1147,7 +1279,6 @@ class CoreInitializer:
                     instance = plugin_class()
 
                     # Register the plugin immediately after instantiation so it's available for action discovery
-                    plugin_short_name = module_name.split(".")[-1]
                     PLUGIN_REGISTRY[plugin_short_name] = instance
                     log_debug(
                         f"[core_initializer] Plugin {module_name} registered in PLUGIN_REGISTRY as '{plugin_short_name}'"
@@ -1182,10 +1313,46 @@ class CoreInitializer:
                             f"[core_initializer] Plugin {module_name} has no start method"
                         )
 
+                    # Resolve declared category (if the plugin overrides
+                    # get_metadata) so it takes precedence over the location
+                    # based fallback.
+                    declared_category = None
+                    try:
+                        meta = instance.get_metadata()
+                        if isinstance(meta, dict):
+                            declared_category = meta.get("category")
+                            deps = meta.get("depends_on")
+                            if isinstance(deps, (list, tuple)):
+                                clean_deps = [
+                                    str(d).strip() for d in deps if str(d or "").strip()
+                                ]
+                                if clean_deps:
+                                    declared_dependencies[plugin_short_name] = (
+                                        clean_deps
+                                    )
+                    except Exception:
+                        declared_category = None
+
+                    dir_path = str(py_file.parent)
+                    category = derive_plugin_category(
+                        module_name, dir_path, declared_category
+                    )
+                    # Full plugin path from the project root, e.g.
+                    # "plugins/grillo/grillo_chat_observer.py".
+                    rel_path = py_file.relative_to(root_dir).as_posix()
+
                     # Track success for WebUI diagnostics
+                    self.track_component(
+                        plugin_short_name,
+                        "plugin",
+                        ComponentStatus.LOADING,
+                    )
                     self.mark_component_success(
                         plugin_short_name,
-                        details=f"Loaded from {module_name}",
+                        details=f"Loaded from: {rel_path}",
+                        module_name=module_name,
+                        dir_path=dir_path,
+                        category=category,
                     )
 
                 except Exception as e:
@@ -1193,6 +1360,19 @@ class CoreInitializer:
                         f"[core_initializer] Failed to start plugin {module_name}: {repr(e)}"
                     )
                     self.startup_errors.append(f"Plugin {module_name}: {e}")
+
+        # Advisory dependency check (fail-safe): warn about any declared
+        # ``depends_on`` target that is not present in PLUGIN_REGISTRY. Never
+        # blocks or unloads anything — plugins degrade gracefully when a
+        # dependency is absent (they resolve it lazily at runtime).
+        for dependent, deps in declared_dependencies.items():
+            for dep in deps:
+                if dep not in PLUGIN_REGISTRY:
+                    log_warning(
+                        f"[core_initializer] Plugin '{dependent}' declares a "
+                        f"dependency on '{dep}', which is not loaded; "
+                        f"'{dependent}' features that rely on it may be inactive."
+                    )
 
     async def _initialize_persona_manager(self):
         """Initialize the core persona manager and await async init."""
@@ -1284,15 +1464,21 @@ class CoreInitializer:
                     f"[core_initializer] Scanning {dir_name} directory: {module_path}"
                 )
 
-                # Auto-discover all modules in package
+                # Auto-discover all modules AND packages in the directory.
+                # Flat single-file interfaces (``interface/foo.py``) and
+                # sub-folder interfaces (``interface/foo/`` with an
+                # ``__init__.py`` package shim, mirroring the multi-file
+                # plugin layout so an interface can ship its own ``icon.png``
+                # and ``guide.md``) are both imported.
                 for importer, module_name, is_pkg in pkgutil.iter_modules(
                     [module_path]
                 ):
-                    if not is_pkg and not module_name.startswith("_"):
+                    if not module_name.startswith("_"):
                         full_module_path = f"{dir_name}.{module_name}"
                         try:
+                            kind = "package" if is_pkg else "module"
                             log_debug(
-                                f"[core_initializer] Importing interface module: {module_name} from {dir_name}"
+                                f"[core_initializer] Importing interface {kind}: {module_name} from {dir_name}"
                             )
                             importlib.import_module(full_module_path)
                             log_debug(
@@ -1333,14 +1519,27 @@ class CoreInitializer:
         """
         import sys
 
-        # Get all loaded interface modules
-        interface_modules = [
-            name
-            for name in sys.modules.keys()
-            if name.startswith("interface.")
-            or name.startswith("interface_dev.")
-            or name == "core.webui"
-        ]
+        # Get all loaded interface modules. Sub-folder interfaces ship a
+        # package shim that rebinds ``sys.modules[<pkg>]`` to the inner
+        # submodule, so both ``interface.foo`` and ``interface.foo.foo`` map
+        # to the *same* module object. Deduplicate by module identity so
+        # ``initialize_interface()`` is not called twice for one interface.
+        _seen_ids: set[int] = set()
+        interface_modules = []
+        for name in list(sys.modules.keys()):
+            if not (
+                name.startswith("interface.")
+                or name.startswith("interface_dev.")
+                or name == "core.webui"
+            ):
+                continue
+            mod = sys.modules.get(name)
+            if mod is None:
+                continue
+            if id(mod) in _seen_ids:
+                continue
+            _seen_ids.add(id(mod))
+            interface_modules.append(name)
 
         import sys as _sys
 
@@ -1487,6 +1686,104 @@ class CoreInitializer:
                 f"[core_initializer] Failed to register Cortex reload handlers: {e}"
             )
 
+    def _missing_required_config_vars(self, interface_instance: Any) -> List[str]:
+        """Return the list of declared-required config keys that are absent.
+
+        An interface declares its "must-have" configuration by exposing a
+        ``required_config_vars`` attribute — an iterable of config-registry keys
+        (e.g. Telegram: ``["BOTFATHER_TOKEN"]``, Discord: ``["DISCORD_BOT_TOKEN"]``).
+        Each entry may be either:
+
+        * a plain string — that key must be present (AND semantics), or
+        * a tuple/list of strings — at least ONE of them must be present
+          (OR semantics), e.g. Matrix accepts either a password or an access
+          token: ``[("MATRIX_PASSWORD", "MATRIX_ACCESS_TOKEN")]``.
+
+        The loader resolves each key through ``config_registry`` and treats a
+        value that is ``None`` or an empty/whitespace string as missing. The
+        interface itself performs no gating — it only declares intent.
+        """
+        if interface_instance is None:
+            return []
+
+        required = getattr(interface_instance, "required_config_vars", None)
+        if not required:
+            return []
+
+        try:
+            from core.config_manager import config_registry
+        except Exception as e:  # pragma: no cover - defensive
+            log_debug(
+                f"[core_initializer] Unable to access config_registry for required "
+                f"var check: {e}"
+            )
+            return []
+
+        def _read_persisted_from_db(key: str) -> Any:
+            """Read the DB-persisted value even inside a running event loop.
+
+            ``config_registry.get_value`` (and its ``_load_from_db_sync``) skip
+            the DB read when an event loop is already running — which is exactly
+            the case during interface registration at startup. That makes a
+            value saved through the WebUI look "missing" (false negative). To get
+            the truth we run the async DB read in a dedicated thread that owns
+            its own event loop, blocking only this loader gate.
+            """
+            import asyncio
+            import concurrent.futures
+
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                # No running loop — the plain sync path already reads the DB.
+                return None
+
+            def _runner() -> Any:
+                return asyncio.run(config_registry.get_persisted_value(str(key), None))
+
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    return pool.submit(_runner).result(timeout=10)
+            except Exception as e:  # pragma: no cover - defensive
+                log_debug(
+                    f"[core_initializer] DB read fallback failed for '{key}': {e}"
+                )
+                return None
+
+        def _is_empty(value: Any) -> bool:
+            if value is None:
+                return True
+            if isinstance(value, str) and not value.strip():
+                return True
+            return False
+
+        def _present(key: str) -> bool:
+            try:
+                value = config_registry.get_value(str(key), None)
+            except Exception as e:  # pragma: no cover - defensive
+                log_debug(
+                    f"[core_initializer] Error reading required config var '{key}': {e}"
+                )
+                value = None
+            if _is_empty(value):
+                # Fall back to a direct DB read: get_value skips the DB while an
+                # event loop is running, so a WebUI-saved value would otherwise
+                # be reported as missing (false negative).
+                value = _read_persisted_from_db(str(key))
+            return not _is_empty(value)
+
+        missing: List[str] = []
+        for entry in required:
+            if isinstance(entry, (list, tuple, set)):
+                # OR group: satisfied if any member is present.
+                group = [str(k) for k in entry]
+                if not any(_present(k) for k in group):
+                    missing.append(" or ".join(group))
+            else:
+                if not _present(str(entry)):
+                    missing.append(str(entry))
+        return missing
+
     def register_interface(self, interface_name: str):
         """Register an active interface."""
         log_info(
@@ -1510,11 +1807,40 @@ class CoreInitializer:
             )
             return
 
+        # Declarative "must-have" configuration gate. An interface may declare a
+        # ``required_config_vars`` attribute (list of config keys). The LOADER —
+        # not the interface — verifies they are present. If any is missing/empty,
+        # the interface is NOT loaded: it registers no actions (so its schemas do
+        # not flood the LLM prompt) and is marked FAILED (red LED) in the WebUI.
+        missing_vars = self._missing_required_config_vars(interface_instance)
+        if missing_vars:
+            reason = "Missing required configuration: " + ", ".join(missing_vars)
+            self.track_component(interface_name, "interface", ComponentStatus.LOADING)
+            # Pass the reason ONLY as the error (red line in the WebUI). Do NOT
+            # also set it as ``details`` — the WebUI renders both ``details`` and
+            # ``error``, so duplicating the text there shows the same message
+            # twice (once black, once red). Leaving details empty lets the black
+            # line fall back to the interface's own description.
+            self.mark_component_failed(
+                interface_name,
+                reason,
+            )
+            # Keep the component typed as an interface for the WebUI.
+            comp = self.components.get(interface_name)
+            if comp is not None:
+                comp.type = "interface"
+                comp.category = "Interfaces"
+            log_warning(
+                f"🔌 Interface not loaded: {interface_name} ({reason}) — "
+                "actions withheld from prompt"
+            )
+            return
+
         if interface_name not in self.active_interfaces:
             self.active_interfaces.append(interface_name)
 
             # Check if the interface exposes action schemas and log them
-            actions = []
+            actions: List[str] = []
 
             if interface_instance and hasattr(
                 interface_instance, "get_supported_actions"
@@ -1522,7 +1848,7 @@ class CoreInitializer:
                 try:
                     supported_actions = interface_instance.get_supported_actions()
                     if isinstance(supported_actions, dict):
-                        actions = list(supported_actions.keys())
+                        actions = [str(a) for a in supported_actions.keys()]
                 except Exception as e:
                     log_debug(
                         f"[core_initializer] Error getting actions for interface {interface_name}: {e}"
@@ -1536,6 +1862,50 @@ class CoreInitializer:
                 log_info(
                     f"🔌 Interface loaded: {interface_name} - No actions registered"
                 )
+
+            # Track the interface as a successfully loaded component so the WebUI
+            # reports it as active (green LED) rather than "inactive" (grey). An
+            # enabled interface that reaches this point is running; without this
+            # its ComponentInfo stayed absent/LOADING and the components summary
+            # fell back to an "unknown"/grey status.
+            self.track_component(
+                interface_name,
+                "interface",
+                ComponentStatus.LOADING,
+                actions=actions,
+            )
+            # Resolve the interface module's on-disk directory so the WebUI can
+            # locate its ``icon.png`` and ``guide.md``. Sub-folder interfaces
+            # (``interface/<module>/<module>.py`` with a package shim) own their
+            # assets in that folder — the instance's ``__module__`` points at the
+            # inner submodule, so ``.parent`` resolves to the interface folder.
+            # Legacy single-file interfaces resolve to ``interface/`` and fall
+            # back to a bundled ``component_icons/<name>.png`` / sibling
+            # ``<name>.guide.md``.
+            interface_dir_path = ""
+            try:
+                import sys
+
+                module_name = (
+                    getattr(interface_instance, "__module__", None)
+                    if interface_instance
+                    else None
+                )
+                module = sys.modules.get(module_name) if module_name else None
+                module_file = getattr(module, "__file__", None) if module else None
+                if module_file:
+                    interface_dir_path = str(Path(module_file).parent)
+            except Exception as exc:  # pragma: no cover - defensive
+                log_debug(
+                    f"[core_initializer] Could not resolve dir_path for interface "
+                    f"{interface_name}: {exc}"
+                )
+            self.mark_component_success(
+                interface_name,
+                actions=actions,
+                category="Interfaces",
+                dir_path=interface_dir_path,
+            )
 
             # After registering, rebuild actions to expose interface capabilities
             # BUT NOT during initial initialization (to avoid triggering rebuild while already building)
@@ -1568,6 +1938,457 @@ class CoreInitializer:
         else:
             log_info("📡 Active Interfaces: None")
 
+    # ------------------------------------------------------------------
+    # Runtime plugin enable/disable (WebUI plugins section — Phase C)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _plugin_enabled_config_key(plugin_short_name: str) -> str:
+        """Config-registry key holding a plugin's persistent enabled flag."""
+        return f"PLUGIN_ENABLED__{plugin_short_name}"
+
+    @staticmethod
+    def is_core_plugin(plugin_short_name: str) -> bool:
+        """Return True for curated core plugins that cannot be disabled."""
+        return plugin_short_name in CORE_PLUGIN_SHORT_NAMES
+
+    def _is_plugin_enabled(self, plugin_short_name: str) -> bool:
+        """Return the persistent enabled state for a plugin (default: True).
+
+        Core plugins are always enabled. The value is read from the config
+        registry so a WebUI toggle survives restarts.
+        """
+        if self.is_core_plugin(plugin_short_name):
+            return True
+        try:
+            from core.config_manager import config_registry
+
+            value = config_registry.get_value(
+                self._plugin_enabled_config_key(plugin_short_name),
+                True,
+                value_type=bool,
+                component=plugin_short_name,
+                group="plugins",
+                hidden=True,
+                label=f"{plugin_short_name} enabled",
+                description="Runtime enable/disable flag for this plugin.",
+            )
+            return bool(value)
+        except Exception as exc:  # pragma: no cover - defensive
+            log_warning(
+                f"[core_initializer] Failed to read enabled flag for {plugin_short_name}: {exc}"
+            )
+            return True
+
+    def _unregister_plugin_actions(self, instance: Any) -> None:
+        """Remove every action handler owned by ``instance`` from the registry."""
+        to_delete: List[str] = []
+        for action_type, handler in list(ACTION_REGISTRY.items()):
+            if isinstance(handler, list):
+                remaining = [h for h in handler if h is not instance]
+                if not remaining:
+                    to_delete.append(action_type)
+                elif len(remaining) == 1:
+                    ACTION_REGISTRY[action_type] = remaining[0]
+                else:
+                    ACTION_REGISTRY[action_type] = remaining
+            elif handler is instance:
+                to_delete.append(action_type)
+        for action_type in to_delete:
+            ACTION_REGISTRY.pop(action_type, None)
+
+    def _invalidate_action_caches(self) -> None:
+        """Drop the action_parser caches so the change is seen immediately."""
+        try:
+            from core import action_parser
+
+            action_parser._ACTION_PLUGINS = None
+            action_parser._ACTION_HANDLERS = None  # type: ignore[attr-defined]
+            action_parser._INTERFACE_ACTIONS = None
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+    async def disable_plugin(self, plugin_short_name: str) -> Dict[str, Any]:
+        """Disable a plugin at runtime with a TRUE unload (no restart).
+
+        The plugin instance is stopped, its actions are removed from the
+        registry, and it is dropped from ``PLUGIN_REGISTRY`` — as if the file
+        did not exist. A disabled "ghost" component record is kept so the WebUI
+        still lists it (grey). The state is persisted via the config registry.
+        """
+        if self.is_core_plugin(plugin_short_name):
+            return {
+                "ok": False,
+                "error": "core_plugin_cannot_be_disabled",
+                "name": plugin_short_name,
+            }
+
+        instance = PLUGIN_REGISTRY.get(plugin_short_name)
+        if instance is not None:
+            # Best-effort teardown.
+            for hook in ("stop", "teardown", "shutdown"):
+                fn = getattr(instance, hook, None)
+                if callable(fn):
+                    try:
+                        result = fn()
+                        if asyncio.iscoroutine(result):
+                            await result
+                    except Exception as exc:  # pragma: no cover - defensive
+                        log_warning(
+                            f"[core_initializer] {hook}() failed for {plugin_short_name}: {exc}"
+                        )
+                    break
+
+            self._unregister_plugin_actions(instance)
+            PLUGIN_REGISTRY.pop(plugin_short_name, None)
+            if plugin_short_name in self.loaded_plugins:
+                self.loaded_plugins.remove(plugin_short_name)
+
+        # Keep a ghost record so the UI lists it as disabled.
+        info = self.components.get(plugin_short_name)
+        if info is not None:
+            info.status = ComponentStatus.SKIPPED
+            info.actions = []
+            info.details = "Disabled from WebUI"
+        else:
+            self.track_component(
+                plugin_short_name,
+                "plugin",
+                ComponentStatus.SKIPPED,
+                details="Disabled from WebUI",
+            )
+
+        self._invalidate_action_caches()
+        await self._build_actions_block()
+
+        # Persist the state. Read the flag first so its config-registry
+        # definition is (lazily) registered before set_value writes to it.
+        try:
+            from core.config_manager import config_registry
+
+            self._is_plugin_enabled(plugin_short_name)
+            await config_registry.set_value(
+                self._plugin_enabled_config_key(plugin_short_name), False
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log_warning(
+                f"[core_initializer] Failed to persist disabled state for {plugin_short_name}: {exc}"
+            )
+
+        log_info(
+            f"[core_initializer] 🔻 Plugin '{plugin_short_name}' disabled (unloaded)"
+        )
+        return {"ok": True, "name": plugin_short_name, "enabled": False}
+
+    async def enable_plugin(self, plugin_short_name: str) -> Dict[str, Any]:
+        """Re-enable a previously disabled plugin at runtime (no restart).
+
+        The plugin module is (re)imported, instantiated and registered exactly
+        as during startup. The persistent flag is updated so the change sticks.
+        """
+        info = self.components.get(plugin_short_name)
+        module_name = getattr(info, "module_name", "") if info else ""
+
+        # Persist enabled first so any re-load path honours it.
+        try:
+            from core.config_manager import config_registry
+
+            self._is_plugin_enabled(plugin_short_name)
+            await config_registry.set_value(
+                self._plugin_enabled_config_key(plugin_short_name), True
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log_warning(
+                f"[core_initializer] Failed to persist enabled state for {plugin_short_name}: {exc}"
+            )
+
+        if plugin_short_name in PLUGIN_REGISTRY:
+            log_debug(
+                f"[core_initializer] Plugin '{plugin_short_name}' already loaded; nothing to do"
+            )
+            return {"ok": True, "name": plugin_short_name, "enabled": True}
+
+        if not module_name:
+            return {
+                "ok": False,
+                "error": "unknown_plugin_module",
+                "name": plugin_short_name,
+            }
+
+        ok = await self._instantiate_and_register(module_name, plugin_short_name)
+        if not ok:
+            return {
+                "ok": False,
+                "error": "instantiation_failed",
+                "name": plugin_short_name,
+            }
+
+        self._invalidate_action_caches()
+        await self._build_actions_block()
+        log_info(f"[core_initializer] 🔺 Plugin '{plugin_short_name}' enabled (loaded)")
+        return {"ok": True, "name": plugin_short_name, "enabled": True}
+
+    # ------------------------------------------------------------------
+    # Runtime interface enable/disable (WebUI plugins/interfaces grid)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _interface_enabled_config_key(interface_name: str) -> str:
+        """Config-registry key holding an interface's persistent enabled flag."""
+        return f"INTERFACE_ENABLED__{interface_name}"
+
+    @staticmethod
+    def is_core_interface(interface_name: str) -> bool:
+        """Return True for interfaces that cannot be disabled from the WebUI."""
+        return interface_name in CORE_INTERFACE_NAMES
+
+    def _is_interface_enabled(self, interface_name: str) -> bool:
+        """Return the persistent enabled state for an interface (default: True).
+
+        Core interfaces are always enabled. The value is read from the config
+        registry so a WebUI toggle survives restarts.
+        """
+        if self.is_core_interface(interface_name):
+            return True
+        try:
+            from core.config_manager import config_registry
+
+            value = config_registry.get_value(
+                self._interface_enabled_config_key(interface_name),
+                True,
+                value_type=bool,
+                component=interface_name,
+                group="interfaces",
+                hidden=True,
+                label=f"{interface_name} enabled",
+                description="Runtime enable/disable flag for this interface.",
+            )
+            return bool(value)
+        except Exception as exc:  # pragma: no cover - defensive
+            log_warning(
+                f"[core_initializer] Failed to read enabled flag for interface {interface_name}: {exc}"
+            )
+            return True
+
+    async def _teardown_interface_instance(self, interface_instance: Any) -> None:
+        """Best-effort stop/teardown of a running interface instance."""
+        for hook in ("stop", "teardown", "shutdown", "close"):
+            fn = getattr(interface_instance, hook, None)
+            if callable(fn):
+                try:
+                    result = fn()
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception as exc:  # pragma: no cover - defensive
+                    log_warning(
+                        f"[core_initializer] {hook}() failed for interface: {exc}"
+                    )
+                break
+
+    async def disable_interface(self, interface_name: str) -> Dict[str, Any]:
+        """Disable an interface at runtime (stop it, drop its actions).
+
+        The instance is kept in ``INTERFACE_REGISTRY`` (so it can be re-enabled
+        without a re-import) but stopped, its actions removed from the registry
+        and it is dropped from ``active_interfaces``. A grey ghost component
+        record is kept so the WebUI still lists it. State is persisted.
+        """
+        if self.is_core_interface(interface_name):
+            return {
+                "ok": False,
+                "error": "core_interface_cannot_be_disabled",
+                "name": interface_name,
+            }
+
+        instance = INTERFACE_REGISTRY.get(interface_name)
+        if instance is not None:
+            await self._teardown_interface_instance(instance)
+            self._unregister_plugin_actions(instance)
+
+        if interface_name in self.active_interfaces:
+            self.active_interfaces.remove(interface_name)
+
+        info = self.components.get(interface_name)
+        if info is not None:
+            info.status = ComponentStatus.SKIPPED
+            info.actions = []
+            info.details = "Disabled from WebUI"
+        else:
+            self.track_component(
+                interface_name,
+                "interface",
+                ComponentStatus.SKIPPED,
+                details="Disabled from WebUI",
+            )
+
+        self._invalidate_action_caches()
+        await self._build_actions_block()
+
+        try:
+            from core.config_manager import config_registry
+
+            self._is_interface_enabled(interface_name)
+            await config_registry.set_value(
+                self._interface_enabled_config_key(interface_name), False
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log_warning(
+                f"[core_initializer] Failed to persist disabled state for interface {interface_name}: {exc}"
+            )
+
+        log_info(
+            f"[core_initializer] 🔻 Interface '{interface_name}' disabled (stopped)"
+        )
+        return {"ok": True, "name": interface_name, "enabled": False}
+
+    async def enable_interface(self, interface_name: str) -> Dict[str, Any]:
+        """Re-enable a previously disabled interface at runtime (no restart).
+
+        The existing instance in ``INTERFACE_REGISTRY`` is re-registered
+        (actions + active list) and started again. State is persisted.
+        """
+        try:
+            from core.config_manager import config_registry
+
+            self._is_interface_enabled(interface_name)
+            await config_registry.set_value(
+                self._interface_enabled_config_key(interface_name), True
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log_warning(
+                f"[core_initializer] Failed to persist enabled state for interface {interface_name}: {exc}"
+            )
+
+        instance = INTERFACE_REGISTRY.get(interface_name)
+        if instance is None:
+            return {
+                "ok": False,
+                "error": "unknown_interface",
+                "name": interface_name,
+            }
+
+        # Re-register supported actions.
+        if hasattr(instance, "get_supported_actions"):
+            try:
+                for act in instance.get_supported_actions().keys():
+                    register_action(act, instance)
+            except Exception as exc:  # pragma: no cover - defensive
+                log_error(
+                    f"[core_initializer] Failed to register actions for interface {interface_name} on enable: {exc}"
+                )
+
+        if interface_name not in self.active_interfaces:
+            self.active_interfaces.append(interface_name)
+
+        info = self.components.get(interface_name)
+        if info is not None:
+            info.status = ComponentStatus.SUCCESS
+            info.details = ""
+
+        # Restart the interface's async loop as a background task.
+        start_fn = getattr(instance, "start", None)
+        if callable(start_fn):
+            try:
+                task = asyncio.create_task(instance.start())
+                task.set_name(f"interface_{interface_name}")
+            except Exception as exc:  # pragma: no cover - defensive
+                log_warning(
+                    f"[core_initializer] start() failed for interface {interface_name} on enable: {exc}"
+                )
+
+        self._invalidate_action_caches()
+        await self._build_actions_block()
+        log_info(
+            f"[core_initializer] 🔺 Interface '{interface_name}' enabled (started)"
+        )
+        return {"ok": True, "name": interface_name, "enabled": True}
+
+    async def _instantiate_and_register(
+        self, module_name: str, plugin_short_name: str
+    ) -> bool:
+        """(Re)import a plugin module, instantiate it and register it.
+
+        Mirrors the startup load path (``_load_plugins``) for a single plugin.
+        Returns True on success. Used by :meth:`enable_plugin`.
+        """
+        try:
+            module = importlib.import_module(module_name)
+            importlib.reload(module)
+        except Exception as exc:
+            log_error(
+                f"[core_initializer] Failed to import {module_name} on enable: {exc}"
+            )
+            return False
+
+        plugin_class = getattr(module, "PLUGIN_CLASS", None)
+        if plugin_class is None:
+            log_error(f"[core_initializer] {module_name} has no PLUGIN_CLASS on enable")
+            return False
+
+        try:
+            instance = plugin_class()
+        except Exception as exc:
+            log_error(
+                f"[core_initializer] Failed to instantiate {module_name} on enable: {exc}"
+            )
+            return False
+
+        PLUGIN_REGISTRY[plugin_short_name] = instance
+
+        if hasattr(instance, "get_supported_actions"):
+            try:
+                supported = instance.get_supported_actions()
+                if isinstance(supported, dict):
+                    for act in supported.keys():
+                        register_action(act, instance)
+            except Exception as exc:
+                log_error(
+                    f"[core_initializer] Failed to register actions for {module_name} on enable: {exc}"
+                )
+
+        if hasattr(instance, "start"):
+            try:
+                if asyncio.iscoroutinefunction(instance.start):
+                    await instance.start()
+                else:
+                    instance.start()
+            except Exception as exc:
+                log_warning(
+                    f"[core_initializer] start() failed for {plugin_short_name} on enable: {exc}"
+                )
+
+        module_file = getattr(module, "__file__", "") or ""
+        dir_path = str(Path(module_file).parent) if module_file else ""
+        declared_category = None
+        try:
+            meta = instance.get_metadata()
+            if isinstance(meta, dict):
+                declared_category = meta.get("category")
+        except Exception:
+            declared_category = None
+        category = derive_plugin_category(module_name, dir_path, declared_category)
+
+        # Full plugin path from the project root, e.g.
+        # "plugins/grillo/grillo_chat_observer.py". Fall back to the module
+        # name if the file lies outside the project root for any reason.
+        root_dir = Path(__file__).parent.parent
+        rel_path = module_name
+        if module_file:
+            try:
+                rel_path = Path(module_file).resolve().relative_to(root_dir).as_posix()
+            except ValueError:
+                rel_path = module_name
+
+        self.track_component(plugin_short_name, "plugin", ComponentStatus.LOADING)
+        self.mark_component_success(
+            plugin_short_name,
+            details=f"Loaded from: {rel_path}",
+            module_name=module_name,
+            dir_path=dir_path,
+            category=category,
+        )
+        if plugin_short_name not in self.loaded_plugins:
+            self.loaded_plugins.append(plugin_short_name)
+        return True
+
     async def refresh_actions_block(self) -> None:
         """Public helper to rebuild the actions block.
 
@@ -1575,6 +2396,62 @@ class CoreInitializer:
         actions immediately to the rest of the system.
         """
         await self._build_actions_block()
+
+    def schedule_actions_block_refresh(self, reason: str = "") -> None:
+        """Fail-safe, loop-aware trigger to rebuild the cached actions block.
+
+        The actions block (``self.actions_block``) is a cache read on every
+        prompt build. Anything that changes which actions are exposed — a
+        config variable, a plugin being enabled/disabled, or the Rift Vessel
+        entering/leaving a world (which changes ``get_supported_actions``) —
+        must call this so the newly exposed/hidden actions are picked up
+        without a restart.
+
+        This wrapper hides all the event-loop / re-entrancy handling so any
+        caller (sync or async context) can invoke it safely. It never raises.
+
+        Args:
+            reason: Short human-readable label for logging (e.g. the caller).
+        """
+        tag = f" ({reason})" if reason else ""
+        try:
+            # During the very first initialization the block is (re)built at
+            # the end of startup; an early refresh would be wasted work.
+            if getattr(self, "_initial_initialization", False):
+                log_debug(
+                    f"[core_initializer] Skipping actions block refresh{tag}: "
+                    "initial initialization in progress"
+                )
+                return
+
+            import asyncio
+
+            async def _do_refresh() -> None:
+                # If a build is already running, wait briefly and retry so we
+                # don't clobber the in-flight build or drop this request.
+                if self._building_actions_block:
+                    await asyncio.sleep(0.1)
+                try:
+                    await self.refresh_actions_block()
+                    log_debug(f"[core_initializer] Actions block refreshed{tag}")
+                except Exception as exc:  # pragma: no cover - defensive
+                    log_warning(
+                        f"[core_initializer] Actions block refresh failed{tag}: {exc}"
+                    )
+
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop is not None and loop.is_running():
+                loop.create_task(_do_refresh())
+            else:
+                asyncio.run(_do_refresh())
+        except Exception as exc:  # pragma: no cover - defensive
+            log_warning(
+                f"[core_initializer] schedule_actions_block_refresh failed{tag}: {exc}"
+            )
 
     async def start_pending_async_plugins(self):
         """Start async plugins that were pending due to no event loop."""

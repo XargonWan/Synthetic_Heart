@@ -39,3 +39,20 @@ def test_trainer_takes_precedence_over_diary_merge():
     assert (
         derive_cortex_scope({"is_trainer": True, "diary_merge_beat": True}) == "trainer"
     )
+
+
+def test_vessel_focus_flag_routes_to_vessel():
+    assert derive_cortex_scope({"vessel_focus": True}) == "vessel"
+
+
+def test_vessel_interface_routes_to_vessel():
+    assert derive_cortex_scope({"interface": "vessel"}) == "vessel"
+
+
+def test_vessel_interface_path_routes_to_vessel():
+    # Mirrors the will-beat enqueue: interface_path "vessel/<world>".
+    assert derive_cortex_scope({"interface_path": "vessel/minecraft"}) == "vessel"
+
+
+def test_trainer_takes_precedence_over_vessel():
+    assert derive_cortex_scope({"is_trainer": True, "vessel_focus": True}) == "trainer"

@@ -70,8 +70,10 @@ db_check.txt
 git_*.txt
 .ruff_cache
 _[Bb]uild
+docs/plugins/generated/
 .gitnexus
 .gitnexus-home
+.tools/
 opencode.json
 .claude
 .clinerules
@@ -92,6 +94,14 @@ installer/vendor/*.msi
 frontend/node_modules/
 frontend/dist/
 frontend/.pnpm-store
+
+# Minecraft Vessel bridge — the ``mineflayer/`` package folder is committed
+# source (its package.json ships with the plugin), but the installed Node
+# modules and runtime artefacts (state, logs) are not. node_modules/ is already
+# covered globally above; ignore the per-run state/log artefacts here.
+plugins/rift_vessel/minecraft/mineflayer/bridge.json
+plugins/rift_vessel/minecraft/mineflayer/bridge.log
+plugins/rift_vessel/minecraft/mineflayer/package-lock.json
 memories/session
 
 # Kilo agent config (per-workspace, not shared)

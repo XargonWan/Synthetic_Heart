@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: plugins_dev
+title: Experimental & Development Action Plugins
+scope:
+    - plugins_dev/
+source_files: []
+depends_on: []
+related_to: []

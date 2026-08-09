@@ -77,11 +77,12 @@ whisper   = ["faster-whisper>=0.8.1"]   # optional language-detection helper
 dev = [
     "pytest>=8.0.0",
     "ruff>=0.1.0",
-    "ty>=0.0.14", 
+    "ty>=0.0.14",
     "unittest-xml-reporting>=3.2.0",
     "sphinx>=7.0.0",
     "sphinx-rtd-theme>=2.0.0",
     "pytest-asyncio>=0.23.0",
+    "myst-parser>=2.0.0",
 ]
 
 [tool.ruff]

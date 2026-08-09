@@ -75,3 +75,12 @@ def test_try_catch_balance_in_main_js():
     assert tries <= catches, (
         f"Unbalanced try/catch/finally in main.js (try: {tries}, catch|finally: {catches})"
     )
+
+
+def test_engine_config_save_does_not_replace_active_endpoint_cards() -> None:
+    """Engine config saves must leave the active editor DOM intact."""
+    text = (Path("res/synth_webui/js/main.js")).read_text(encoding="utf-8")
+    start = text.index("function initEngineConfigEditor()")
+    end = text.index("async function loadComponentsSummary()", start)
+    editor = text[start:end]
+    assert "refreshEndpoints" not in editor

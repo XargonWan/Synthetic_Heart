@@ -29,16 +29,90 @@ if TYPE_CHECKING:
 # unless they set max_tokens explicitly.
 _LOCAL_MAX_TOKENS_DEFAULT = 4096
 
-# --- NATIVE TOOLS ACCANTONATI GLOBALMENTE (2026-07-04) ---
-# I tool nativi (function-calling OpenAI/Gemini/Anthropic) sono disattivati
-# finché non implementeremo la funzionalità agentica (PR futura già pianificata).
-# Con questo flag a True, TUTTI gli endpoint usano il protocollo in-prompt: il
-# catalogo azioni viene iniettato come testo nel system prompt, così anche gli
-# engine senza tool-calling nativo (es. selenium-llm-engine, automazione browser)
-# vedono tutte le actions (incluso tts_speak).
-# Per riattivare i tool nativi quando arriverà la parte agentica: riportare
-# questo flag a False. La logica originale del ramo tools resta intatta sotto.
+# Hard downstream character budget for the fully assembled OpenAI-style messages
+# sent to an endpoint, enforced by ``_clamp_messages_to_char_budget``. Kept
+# safely below the ``selenium-llm-engine`` 32000-char chunking threshold so the
+# chunking path — and its "reply only OK" protocol contamination / empty-actions
+# garbling — is never triggered, regardless of how large the injected action
+# catalog is.
+#
+# IMPORTANT — serialization headroom: the clamp measures the *content* length of
+# each message (``_message_content_len``), but the payload the endpoint actually
+# receives is the role-separated serialization of those messages, which is
+# meaningfully larger (role labels, JSON framing/escaping, chat-template glue).
+# Measured LIVE (2026-07-28) on the selenium-llm-engine: a content-sum clamped to
+# exactly 27000 chars produced a real selenium prompt of 32232 chars — i.e.
+# ~5200 chars of serialization/template overhead — which STILL exceeded the
+# 32000 limit and triggered 2-part chunking (garbled request → empty
+# ``{"actions": []}`` → corrector loop → "😵" fallback). The overhead is far
+# larger than the ~2600 originally assumed. The budget is therefore set to 24000
+# (32000 − ~5200 measured overhead − ~2800 safety margin) so the final serialized
+# payload stays comfortably under 32000 even on the heaviest turns. Applies to
+# every openai-protocol endpoint; harmless for endpoints that accept larger
+# prompts (their payloads are already below this) unless overridden via
+# ``extra_config["downstream_char_budget"]`` (a non-positive value disables the
+# clamp entirely). Unlike the up-front ``max_chars`` reducer, this clamp only
+# trims the *user* body and never the system message (instructions + action
+# catalog), so protected content is never lost even when it alone exceeds the
+# budget.
+_DEFAULT_DOWNSTREAM_CHAR_BUDGET = 24000
+
+# Native tools remain off by default for compatibility with endpoints/models
+# that do not support function calling. Individual endpoints may opt in with
+# ``extra_config.enable_tools: true``.
 _NATIVE_TOOLS_ENABLED = False
+
+# Venice currently rejects requests containing more than 20 function
+# definitions for the affected Gemma endpoint.  Keep this as a provider
+# default rather than making every OpenAI-compatible endpoint pay the same
+# restriction; arbitrary endpoints can opt into their own limit with the
+# ``max_tools`` extra-config key.
+_VENICE_MAX_NATIVE_TOOLS = 20
+
+# When a connected Vessel catalog exceeds a provider's native-tool limit, keep
+# the actions needed for the embodiment loop available. These are action-name
+# suffixes, not intent words: the connected world's prefix remains dynamic.
+_VESSEL_CORE_TOOL_SUFFIXES: tuple[str, ...] = (
+    "say",
+    "move",
+    "look",
+    "use",
+    "attack",
+    "follow",
+    "unfollow",
+    "respawn",
+    "status",
+    "observe",
+)
+_VESSEL_CONNECTED_PRIORITY_SUFFIXES: tuple[str, ...] = (
+    "craft",
+    "inventory",
+    "place",
+    "drop",
+    "mine",
+    "collect_block",
+    "goto",
+    "equip",
+    "climb_staircase",
+)
+
+# This marker is appended to the system instruction only when the endpoint is
+# actually sending native function declarations.  The normal prompt still
+# contains the legacy JSON-action format for endpoints that do not support
+# tools; without an explicit transport instruction, tool-capable small models
+# tend to obey that older format and emit a large ``{"actions": [...]}``
+# content response instead of making a function call.
+_NATIVE_TOOL_MODE_MARKER = "=== SYNTH NATIVE TOOL MODE ==="
+
+# Appended to the current user message on JSON-protocol turns so the format
+# requirement is adjacent to the content being answered (the huge system prompt
+# buries it, and a capable chat model replies with plain prose instead of JSON,
+# forcing a correction round-trip every turn).
+_JSON_FORMAT_REMINDER = (
+    "\n\nRespond with ONLY valid JSON — your ENTIRE reply must be the JSON "
+    "actions object. No prose, no markdown, no text before or after the JSON. "
+    'Format: {"actions": [{"type": "action_name", "payload": { ... }}]}'
+)
 
 
 # ---------------------------------------------------------------------------
@@ -334,11 +408,12 @@ class ExternalCortexEngine(AIPluginBase):
 
         Supported keys (set inside the endpoint's *Extra Config* JSON field):
 
-        * ``disable_thinking`` (bool) — pass ``enable_thinking=False`` to the
-          API.  Supported by Qwen3 / LM Studio: prevents the model from spending
-          the entire context window on chain-of-thought tokens before generating
-          a response.  Drastically reduces latency on models that default to
-          extended thinking mode.
+        * ``enable_thinking`` (bool) — opt into thinking. The bridge keeps this
+          as an internal setting; the OpenAI-compatible adapter translates it
+          to Venice's nested provider-facing ``disable_thinking`` key. Thinking
+          is off by default.
+        * ``disable_thinking`` (bool) — legacy compatibility alias for the
+          provider-facing setting.
         * ``force_json_object`` (bool) — request ``response_format={"type":
           "json_object"}`` so the server constrains decoding to syntactically
           valid JSON.  Recommended for small local quants (llama.cpp / LM Studio)
@@ -367,8 +442,16 @@ class ExternalCortexEngine(AIPluginBase):
         """
         extra = self._endpoint.extra_config or {}
         kwargs: dict[str, Any] = {}
-        if extra.get("disable_thinking"):
-            kwargs["enable_thinking"] = False
+        if self._endpoint.protocol is EndpointProtocol.OPENAI:
+            # Thinking is opt-in. Keep the readable alias as the internal
+            # setting and translate it at the adapter boundary; old configs
+            # using disable_thinking are inverted here for compatibility.
+            if "enable_thinking" in extra:
+                kwargs["enable_thinking"] = extra.get("enable_thinking") is True
+            elif "disable_thinking" in extra:
+                kwargs["enable_thinking"] = not bool(extra.get("disable_thinking"))
+            else:
+                kwargs["enable_thinking"] = False
 
         # Cap completion length. An explicit value always wins; otherwise apply a
         # safe default ONLY for local-model endpoints (disable_tools /
@@ -405,6 +488,20 @@ class ExternalCortexEngine(AIPluginBase):
         extra = self._endpoint.extra_config or {}
         return bool(extra.get("retry_on_timeout", False))
 
+    def _retry_on_empty(self) -> bool:
+        """True when an empty-content LLM response should be re-requested.
+
+        Providers (notably Venice's OpenAI-compat endpoint with thinking
+        models) occasionally return HTTP 200 with non-zero completion tokens
+        but an empty ``message.content``. The turn then fails with no reply
+        and no error. Retrying the *same request* inside the bridge is safe:
+        the user message was already persisted upstream by the interface, and
+        the empty response is never logged or sent — so a retry neither
+        duplicates the input in the DB nor writes a spurious empty reply.
+        """
+        extra = self._endpoint.extra_config or {}
+        return bool(extra.get("retry_on_empty", True))
+
     def _disable_tools(self) -> bool:
         """True when this endpoint opts out of native tool-calling.
 
@@ -419,6 +516,300 @@ class ExternalCortexEngine(AIPluginBase):
         """
         extra = self._endpoint.extra_config or {}
         return bool(extra.get("disable_tools") or extra.get("force_action_grammar"))
+
+    def _native_tools_enabled(self) -> bool:
+        """Return whether this endpoint opts into native tool declarations."""
+        if self._disable_tools():
+            return False
+        extra = self._endpoint.extra_config or {}
+        return bool(_NATIVE_TOOLS_ENABLED or extra.get("enable_tools") is True)
+
+    def _parallel_tools_enabled(self) -> bool:
+        """Return whether this endpoint opts into PARALLEL native tool-calling.
+
+        Most LLMs cannot emit more than one tool call per turn, so this is
+        strictly opt-in via the endpoint's Extra Config JSON (WebUI). Both
+        ``enable_tools_parallel`` (canonical) and ``parallel_tool_calls``
+        (wire-level alias some configs use) are accepted. A model that natively
+        supports parallel calls (e.g. deepseek-4-flash) can emit the outward
+        reply plus bookkeeping actions (emotion state, diary) as parallel tool
+        calls in a single turn — the exact "message + reasoning + context at
+        once" shape the single-native-tool contract (vessel-only) could never
+        express. When enabled it also applies native tools to ordinary
+        (non-vessel) chat turns; Vessel turns keep the reliable single-call
+        contract.
+        """
+        extra = self._endpoint.extra_config or {}
+        return bool(
+            extra.get("enable_tools_parallel")
+            or extra.get("parallel_tool_calls") is True
+        )
+
+    def _max_native_tools(self) -> int | None:
+        """Return the native tool cap for this endpoint, if one is known.
+
+        ``max_tools`` (endpoint Extra Config JSON) is the escape hatch: a
+        positive value caps the tool count for any provider (Venice included —
+        the operator knows their model's real limit); ``0`` disables the cap
+        entirely so the full scoped tool set is sent.
+
+        Without an explicit value, the conservative Venice-20 default (a hard
+        limit of the old Gemma endpoint) applies ONLY to Venice endpoints that
+        have NOT opted into parallel native tool-calling.  A parallel-capable
+        model (``enable_tools_parallel``/``parallel_tool_calls``) sends the
+        full scoped set so structurally important actions are never crowded out
+        by alphabetical ordering — e.g. ``vessel_connect`` sits at "v" and was
+        silently dropped from Telegram turns, leaving the model unable to
+        honour a "connect to the vessel" request.
+        """
+        extra = self._endpoint.extra_config or {}
+        explicit = extra.get("max_tools")
+        if explicit is not None and not isinstance(explicit, bool):
+            try:
+                parsed = int(explicit)
+                if parsed > 0:
+                    return parsed
+                if parsed == 0:
+                    log_warning(
+                        f"[cortex_bridge:{self._endpoint.name}] max_tools=0: "
+                        "native tool cap disabled (full scoped tool set sent)"
+                    )
+                    return None
+                log_warning(
+                    f"[cortex_bridge:{self._endpoint.name}] max_tools={parsed} "
+                    "is invalid (must be >0 or 0); ignoring it"
+                )
+            except (TypeError, ValueError):
+                log_warning(
+                    f"[cortex_bridge:{self._endpoint.name}] invalid max_tools="
+                    f"{explicit!r}; ignoring it"
+                )
+        if self._parallel_tools_enabled():
+            return None
+        is_venice = False
+        detector = getattr(self._adapter, "_is_venice_endpoint", None)
+        if callable(detector):
+            try:
+                is_venice = bool(detector())
+            except Exception:
+                is_venice = False
+        if not is_venice:
+            is_venice = str(self._endpoint.name or "").lower().startswith("venice")
+        return _VENICE_MAX_NATIVE_TOOLS if is_venice else None
+
+    @staticmethod
+    def _is_vessel_prompt_request(prompt_request: Any) -> bool:
+        """Detect an embodied turn from routing metadata only."""
+        runtime_ctx = getattr(prompt_request, "runtime_ctx", None)
+        interface_name = str(getattr(runtime_ctx, "interface_name", "") or "").strip()
+        interface_path = str(getattr(runtime_ctx, "interface_path", "") or "").strip()
+        return (
+            interface_name == "vessel"
+            or interface_path == "vessel"
+            or interface_path.startswith("vessel/")
+        )
+
+    @staticmethod
+    def _vessel_tool_suffix_matches(name: str, suffix: str) -> bool:
+        """Match a namespaced Vessel action by its structural verb suffix."""
+
+        return name == f"vessel_{suffix}" or name.endswith(f"_{suffix}")
+
+    @classmethod
+    def _connected_vessel_tool_sort_key(
+        cls, item: tuple[int, Any]
+    ) -> tuple[int, int, int]:
+        """Sort connected Vessel tools by embodiment usefulness, stably."""
+
+        index, manifest = item
+        name = str(getattr(manifest, "name", "") or "").strip()
+        if name == "vessel_disconnect":
+            return (0, 0, index)
+        for rank, suffix in enumerate(_VESSEL_CORE_TOOL_SUFFIXES):
+            if cls._vessel_tool_suffix_matches(name, suffix):
+                return (1, rank, index)
+        for rank, suffix in enumerate(_VESSEL_CONNECTED_PRIORITY_SUFFIXES):
+            if cls._vessel_tool_suffix_matches(name, suffix):
+                return (2, rank, index)
+        # Keep the remaining world-specific actions in their registry order.
+        return (3, 0, index)
+
+    @staticmethod
+    def _is_other_interface_delivery_action(name: str, interface_name: str) -> bool:
+        """True when ``name`` is a message-delivery action for a different channel.
+
+        The prompt engine's scope may expose several delivery families
+        (``message_*``, ``send_file_*``, ``audio_*``, ``send_<iface>_message``)
+        alongside the current chat's reply action.  Offering the other
+        interfaces' delivery actions in a normal chat turn makes a capable
+        parallel-calling model pick e.g. ``send_mate_message`` to "reply",
+        silently routing the reply to the wrong channel.  Only the current
+        interface's delivery action is kept (``message_<interface>``,
+        ``send_file_<interface>``, ``audio_<interface>``,
+        ``send_<interface>_message``).  Structural name matching only.
+        """
+        if not interface_name:
+            return False
+        lower = name.lower()
+        expected_by_prefix = {
+            "message_": f"message_{interface_name}",
+            "send_file_": f"send_file_{interface_name}",
+            "audio_": f"audio_{interface_name}",
+            "send_": f"send_{interface_name}_message",
+        }
+        for prefix, expected in expected_by_prefix.items():
+            if lower.startswith(prefix):
+                return name != expected
+        return False
+
+    def _select_native_tool_manifests(self, prompt_request: Any) -> list[Any]:
+        """Scope and cap manifests before rendering provider tool schemas.
+
+        The prompt engine's action whitelist protects textual prompt size, but
+        provider tool arrays have a separate limit.  Keep this final boundary
+        check here because it also covers stale/live action catalogs and any
+        caller that constructs a ``PromptRequest`` directly.
+
+        Vessel turns are intentionally vessel-only when native tools are on:
+        ``say`` is the in-world reply path, so unrelated chat, scheduling, and
+        developer actions only compete with the embodiment verbs.  For ordinary
+        interfaces, message actions for other interfaces are removed while the
+        rest of the scoped action set is preserved.
+        """
+        manifests = list(getattr(prompt_request, "tool_declarations", None) or [])
+        if not manifests:
+            return []
+
+        runtime_ctx = getattr(prompt_request, "runtime_ctx", None)
+        interface_name = str(getattr(runtime_ctx, "interface_name", "") or "").strip()
+        is_vessel = self._is_vessel_prompt_request(prompt_request)
+        filtered: list[tuple[int, Any]] = []
+        for index, manifest in enumerate(manifests):
+            name = str(getattr(manifest, "name", "") or "").strip()
+            if not name:
+                continue
+            if is_vessel and not name.startswith("vessel_"):
+                continue
+            if self._is_other_interface_delivery_action(name, interface_name):
+                continue
+            filtered.append((index, manifest))
+
+        # Only a live/connected Vessel needs gameplay prioritisation. The
+        # connection-driven catalog exposes ``vessel_disconnect`` alongside the
+        # connected world's verbs; a disconnected catalog should remain a
+        # simple ``vessel_connect`` entry and must not be treated as embodied.
+        connected_vessel = is_vessel and any(
+            getattr(manifest, "name", "") == "vessel_disconnect"
+            for _, manifest in filtered
+        )
+        if connected_vessel:
+            filtered.sort(key=self._connected_vessel_tool_sort_key)
+
+        selected = [manifest for _, manifest in filtered]
+        limit = self._max_native_tools()
+        if limit is not None and len(selected) > limit:
+            original_count = len(manifests)
+            log_warning(
+                f"[cortex_bridge:{self._endpoint.name}] native tool set reduced "
+                f"from {original_count} submitted/{len(selected)} scoped to "
+                f"{limit}; provider/model tool limit"
+            )
+            selected = selected[:limit]
+        elif len(selected) != len(manifests):
+            log_debug(
+                f"[cortex_bridge:{self._endpoint.name}] native tool set scoped "
+                f"from {len(manifests)} to {len(selected)} for "
+                f"interface={interface_name or 'unknown'}"
+            )
+        return selected
+
+    @staticmethod
+    def _add_native_tool_instruction(
+        prompt_request: Any, parallel: bool = False
+    ) -> None:
+        """Tell the model which response transport is active for this turn.
+
+        ``PromptRequest.system_instruction`` is also used by the OpenAI
+        renderer, so this keeps the transport contract adjacent to the tool
+        declarations.  It is deliberately structural: it does not try to
+        infer intent from the user's words or maintain a keyword list.
+
+        ``parallel`` (from ``enable_tools_parallel``) lets a tool-capable model
+        emit the outward reply plus bookkeeping actions in one turn; the
+        default single-call wording is kept otherwise because most models
+        cannot make several parallel calls.
+        """
+        instruction = str(getattr(prompt_request, "system_instruction", "") or "")
+        if _NATIVE_TOOL_MODE_MARKER in instruction:
+            return
+        if parallel:
+            instruction_text = (
+                "The API tools supplied with this turn are the only action "
+                "interface. In a human chat turn you MUST include the outward "
+                "reply (a message_* action for the current chat, or the vessel "
+                "say action when embodied) among your tool calls — never respond "
+                "with bookkeeping actions alone. You may call several functions "
+                "in one turn: the reply plus update_emotion_state (with at least "
+                "one emotion) and create_personal_diary_entry. Do not emit an "
+                "actions JSON object, action list, tool name, or tool arguments "
+                "as message text. Do not invent a function name."
+            )
+        else:
+            instruction_text = (
+                "The API tools supplied with this turn are the only action interface. "
+                "Call exactly one supplied function for the single most important "
+                "action in this turn. Do not emit an actions JSON object, action list, "
+                "tool name, or tool arguments as message text. Do not invent a function "
+                "name. The next turn will provide the result and any follow-up action."
+            )
+        prompt_request.system_instruction = instruction + (
+            f"\n\n{_NATIVE_TOOL_MODE_MARKER}\n{instruction_text}"
+        )
+
+    def _guard_plain_native_action_response(
+        self,
+        content: Any,
+        selected_manifests: list[Any] | None,
+    ) -> str:
+        """Contain a model that ignored native tools and emitted action JSON.
+
+        A few tool-capable model/provider combinations return HTTP 200 with a
+        plain ``{"actions": [...]}`` completion instead of ``tool_calls``.
+        Passing that list through lets one response enqueue dozens of repeated
+        world actions.  Keep the first action that was actually offered to the
+        model and discard the rest; native tool responses are already normalized
+        by the adapter and do not need this fallback.
+        """
+        text = str(content or "").strip()
+        if not text or not selected_manifests:
+            return text
+        try:
+            parsed = json.loads(text)
+        except (TypeError, ValueError):
+            return text
+        if not isinstance(parsed, dict):
+            return text
+        actions = parsed.get("actions")
+        if not isinstance(actions, list) or len(actions) <= 1:
+            return text
+
+        offered = {
+            str(getattr(manifest, "name", "") or "").strip()
+            for manifest in selected_manifests
+        }
+        valid_actions = [
+            action
+            for action in actions
+            if isinstance(action, dict)
+            and str(action.get("type", "") or "").strip() in offered
+        ]
+        parsed["actions"] = valid_actions[:1]
+        log_warning(
+            f"[cortex_bridge:{self._endpoint.name}] native tool endpoint returned "
+            f"plain action JSON ({len(actions)} actions); keeping "
+            f"{len(parsed['actions'])} offered action and discarding the rest"
+        )
+        return json.dumps(parsed, ensure_ascii=False)
 
     def _build_action_grammar(self, prompt_request: Any) -> str | None:
         """Build a GBNF grammar for the action JSON, or ``None``.
@@ -530,7 +921,26 @@ class ExternalCortexEngine(AIPluginBase):
             if not scoped:
                 return
 
-            is_lite: bool = bool(config_registry.get_value("PROMPT_LITE_MODE", False))
+            # ``build_prompt_request`` forces every Vessel turn into lite mode
+            # because the embodiment catalog is unusually large.  That state
+            # is per-turn, while PROMPT_LITE_MODE is a global setting; relying
+            # on the latter here silently re-expanded Vessel actions after the
+            # prompt engine had already compacted them.  Detect the Vessel
+            # route structurally from the typed request so the bridge uses the
+            # same compact representation for both paths.
+            runtime_ctx = getattr(prompt_request, "runtime_ctx", None)
+            runtime_interface = str(
+                getattr(runtime_ctx, "interface_path", "") or ""
+            ).strip()
+            runtime_name = str(getattr(runtime_ctx, "interface_name", "") or "").strip()
+            is_vessel_turn = (
+                runtime_interface == "vessel"
+                or runtime_interface.startswith("vessel/")
+                or runtime_name == "vessel"
+            )
+            is_lite: bool = is_vessel_turn or bool(
+                config_registry.get_value("PROMPT_LITE_MODE", False)
+            )
             catalog = minify_actions_block(scoped, lite=is_lite)
             # Render as a flat, unambiguous list — NOT a nested JSON dict. The
             # nested ``{name: {brief, schema}}`` shape made small models emit
@@ -545,13 +955,16 @@ class ExternalCortexEngine(AIPluginBase):
                 props = (
                     list((schema.get("properties") or {}).keys())
                     if isinstance(schema, dict)
-                    else []
+                    else list(spec.get("payload_keys") or [])
                 )
+                required = list(spec.get("required_payload_keys") or [])
                 line = f"- {name}"
                 if brief:
                     line += f": {brief}"
                 if props:
                     line += f" (payload keys: {', '.join(str(p) for p in props)})"
+                if required:
+                    line += f" (required: {', '.join(str(p) for p in required)})"
                 lines.append(line)
 
             block = (
@@ -561,9 +974,8 @@ class ExternalCortexEngine(AIPluginBase):
                 "invent, combine, or abbreviate names, and never use a payload key as "
                 "a type:\n" + "\n".join(lines)
             )
-            prompt_request.system_instruction = (
-                getattr(prompt_request, "system_instruction", "") or ""
-            ) + block
+            _base = getattr(prompt_request, "system_instruction", "") or ""
+            prompt_request.system_instruction = _base + block
         except Exception as exc:
             log_warning(
                 f"[cortex_bridge:{self._endpoint.name}] action-catalog injection failed: {exc}"
@@ -672,7 +1084,31 @@ class ExternalCortexEngine(AIPluginBase):
             # action catalog into the system prompt, and leave
             # supports_tool_calling False so the renderer expects a
             # JSON-in-content reply rather than tool_calls.
-            if not _NATIVE_TOOLS_ENABLED or self._disable_tools():
+            #
+            # The single-native-tool contract (tool_choice required + one call)
+            # is only suitable for a single-action embodiment loop (the Vessel).
+            # Ordinary user-facing chat must return BOTH an outward reply and
+            # bookkeeping (emotion/diary) in one turn, which that contract can
+            # never express — with "call exactly one function" a small model
+            # picks the bookkeeping action, never emits a reply, and every
+            # manual turn trips the missing-reply corrector (which re-runs with
+            # no chat history, losing all context).  So even when an endpoint
+            # opts into native tools, they are applied only to Vessel turns;
+            # ordinary chat keeps the in-prompt JSON-action protocol.
+            #
+            # The PARALLEL native-tool opt-in (``enable_tools_parallel`` in Extra
+            # Config) remains supported for Vessel turns' tool-call transport,
+            # but it does NOT enable native tools for ordinary chat: in practice
+            # the current Venice model returns a single tool call per response,
+            # so a chat first attempt degenerates to a lone bookkeeping call
+            # (``update_emotion_state {}``) and every turn needs a correction —
+            # while the in-prompt JSON protocol with the concrete response
+            # example reliably produces the full reply + emotion + diary triple
+            # in one shot. Vessel turns keep the single-call contract.
+            use_native = self._native_tools_enabled() and (
+                _NATIVE_TOOLS_ENABLED or self._is_vessel_prompt_request(prompt_request)
+            )
+            if not use_native:
                 prompt_request.supports_tool_calling = False
                 self._inject_actions_into_prompt(prompt_request)
                 grammar = self._build_action_grammar(prompt_request)
@@ -681,18 +1117,45 @@ class ExternalCortexEngine(AIPluginBase):
                 return {}
 
             prompt_request.supports_tool_calling = True
+            selected_manifests = self._select_native_tool_manifests(prompt_request)
+            if not selected_manifests:
+                prompt_request.supports_tool_calling = False
+                return {}
+
+            self._add_native_tool_instruction(prompt_request, parallel=False)
+
+            # Render a shallow request copy so the caller retains its complete
+            # action registry for dispatch/validation.  Only the provider-facing
+            # tool declaration list is scoped/capped.
+            render_request = copy.copy(prompt_request)
+            render_request.tool_declarations = selected_manifests
+            render_request.supports_tool_calling = True
 
             if self._endpoint.protocol is EndpointProtocol.GEMINI:
-                rendered = GeminiRenderer(prompt_request).render()
+                rendered = GeminiRenderer(render_request).render()
                 tools = rendered.get("tools") or []
                 return {"tools": tools} if tools else {}
 
             if self._endpoint.protocol is EndpointProtocol.OPENAI:
-                tools = OpenAIRenderer(prompt_request).tool_schemas()
-                return {"tools": tools, "tool_choice": "auto"} if tools else {}
+                tools = OpenAIRenderer(render_request).tool_schemas()
+                if not tools:
+                    return {}
+                # SyntH's LLM-to-interface contract requires an action.  This
+                # branch only runs for Vessel turns (ordinary chat uses the
+                # in-prompt JSON protocol), which keep the single-call contract
+                # — parallel_tool_calls stays off so a model cannot turn one
+                # embodiment turn into an unbounded action batch.  Both fields
+                # are standard Chat Completions options; the adapter still owns
+                # provider-specific translation (and degrades the controls
+                # gracefully when a proxy rejects them).
+                return {
+                    "tools": tools,
+                    "tool_choice": "required",
+                    "parallel_tool_calls": False,
+                }
 
             if self._endpoint.protocol is EndpointProtocol.ANTHROPIC:
-                rendered = AnthropicRenderer(prompt_request).render()
+                rendered = AnthropicRenderer(render_request).render()
                 tools = rendered.get("tools") or []
                 if not tools:
                     return {}
@@ -752,6 +1215,7 @@ class ExternalCortexEngine(AIPluginBase):
         else:
             prompt_extra_kwargs = self._tool_api_kwargs(messages)
             msg_list = self._build_messages(messages)
+            msg_list = self._clamp_messages_to_char_budget(msg_list)
 
         model = self._scope_model_override or self._endpoint.default_model
         if not model and self._endpoint.available_models:
@@ -760,6 +1224,7 @@ class ExternalCortexEngine(AIPluginBase):
         max_retries, backoff = self._get_retry_settings()
         request_timeout = self._get_request_timeout()
         retry_on_timeout = self._retry_on_timeout()
+        retry_on_empty = self._retry_on_empty()
         attempt = 0
         while True:
             attempt += 1
@@ -788,24 +1253,68 @@ class ExternalCortexEngine(AIPluginBase):
                     ),
                     timeout=request_timeout,
                 )
-                response_metadata: dict[str, Any] = {
-                    "model": getattr(chat_resp, "model", None) or model,
-                    "finish_reason": getattr(chat_resp, "finish_reason", None)
-                    or "stop",
-                    "empty_response": not bool(getattr(chat_resp, "content", "")),
-                }
+                response_content = chat_resp.content
                 adapter_response_metadata = getattr(
                     self._adapter,
                     "_last_completion_metadata",
                     None,
                 )
+                native_tool_calls = (
+                    adapter_response_metadata.get("native_tool_calls")
+                    if isinstance(adapter_response_metadata, dict)
+                    else None
+                )
+                if "tools" in extra_kwargs and native_tool_calls is not True:
+                    # The provider returned content instead of a structured
+                    # tool call.  Re-derive the exact provider-facing set so
+                    # unsupported plain-content actions cannot leak into the
+                    # normal action parser either.
+                    from core.prompt_request import PromptRequest
+
+                    prompt_request = (
+                        messages if isinstance(messages, PromptRequest) else None
+                    )
+                    if prompt_request is None and isinstance(messages, dict):
+                        candidate = messages.get("__prompt_request")
+                        if isinstance(candidate, PromptRequest):
+                            prompt_request = candidate
+                    selected_manifests = (
+                        self._select_native_tool_manifests(prompt_request)
+                        if prompt_request is not None
+                        else None
+                    )
+                    response_content = self._guard_plain_native_action_response(
+                        response_content,
+                        selected_manifests,
+                    )
+                # Empty-content fallback: some providers return 200 with
+                # non-zero completion tokens but an empty message.content.
+                # Retry the identical request in-bridge — the user message was
+                # already persisted upstream by the interface, and this empty
+                # result is discarded (never logged to the DB nor sent), so a
+                # retry neither duplicates the input nor writes an empty reply.
+                if not response_content and retry_on_empty and attempt < max_retries:
+                    delay = backoff * (2 ** (attempt - 1))
+                    log_warning(
+                        f"[cortex_bridge:{self._endpoint.name}] empty response from "
+                        f"{model} (attempt {attempt}/{max_retries}); re-requesting "
+                        f"in {delay:.1f}s"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                response_metadata: dict[str, Any] = {
+                    "model": getattr(chat_resp, "model", None) or model,
+                    "finish_reason": getattr(chat_resp, "finish_reason", None)
+                    or "stop",
+                    "empty_response": not bool(response_content),
+                }
                 if isinstance(adapter_response_metadata, dict):
                     for key, value in adapter_response_metadata.items():
                         if value is None or value == "":
                             continue
                         response_metadata[key] = value
                 self._last_response_metadata = response_metadata
-                return chat_resp.content
+                return response_content
             except asyncio.TimeoutError:
                 log_warning(
                     f"[cortex_bridge:{self._endpoint.name}] generate_response timed out "
@@ -840,8 +1349,158 @@ class ExternalCortexEngine(AIPluginBase):
                 )
                 raise
 
+    def _downstream_char_budget(self) -> int:
+        """Resolve the hard downstream char budget for assembled messages.
+
+        Endpoints may override the default via
+        ``extra_config["downstream_char_budget"]``; a non-positive value
+        disables the clamp entirely.
+        """
+        extra = self._endpoint.extra_config or {}
+        try:
+            return int(
+                extra.get("downstream_char_budget", _DEFAULT_DOWNSTREAM_CHAR_BUDGET)
+            )
+        except (TypeError, ValueError):
+            return _DEFAULT_DOWNSTREAM_CHAR_BUDGET
+
+    @staticmethod
+    def _message_content_len(content: Any) -> int:
+        """Character length of a message's content (string or multipart list)."""
+        if isinstance(content, str):
+            return len(content)
+        if isinstance(content, list):
+            total = 0
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    total += len(str(part.get("text", "")))
+            return total
+        return len(str(content))
+
+    @staticmethod
+    def _truncate_message_content(content: Any, remove_chars: int) -> Any:
+        """Trim ``remove_chars`` from the tail of a message's text content.
+
+        Only text is trimmed; multimodal (image) parts are left intact so the
+        clamp never corrupts an attachment. A short marker is appended so the
+        model knows the body was shortened.
+        """
+        if remove_chars <= 0:
+            return content
+        marker = "\n\n[...context trimmed to fit the model's input budget...]"
+        if isinstance(content, str):
+            keep = max(0, len(content) - remove_chars - len(marker))
+            if keep <= 0:
+                return content[: max(0, len(content) - remove_chars)]
+            return content[:keep] + marker
+        if isinstance(content, list):
+            remaining = remove_chars
+            out: list[Any] = []
+            for part in content:
+                if (
+                    remaining > 0
+                    and isinstance(part, dict)
+                    and part.get("type") == "text"
+                ):
+                    text = str(part.get("text", ""))
+                    if len(text) <= remaining:
+                        remaining -= len(text)
+                        continue  # drop this text part entirely
+                    new_text = text[: len(text) - remaining] + marker
+                    remaining = 0
+                    out.append({**part, "text": new_text})
+                else:
+                    out.append(part)
+            return out
+        return content
+
+    def _clamp_messages_to_char_budget(
+        self, messages: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Hard-cap the assembled messages below the downstream char budget.
+
+        The up-front ``max_chars`` reducer in ``plugin_instance`` runs BEFORE the
+        action catalog is folded into the system message and before the messages
+        are serialised into role-separated JSON, so the real payload can be much
+        larger than the reduced context (dominated, for vessel turns, by the
+        injected ``vessel_minecraft_*`` catalog). This clamp operates on the
+        fully assembled messages and trims older non-system content first. The
+        latest user turn is protected so the current command cannot disappear;
+        system instructions and image parts are also preserved. If the system
+        message alone exceeds the budget, the method logs the overflow and
+        sends the preserved current turn rather than silently replacing it with
+        an empty message.
+        """
+        budget = self._downstream_char_budget()
+        if budget <= 0 or not isinstance(messages, list) or not messages:
+            return messages
+
+        total = sum(self._message_content_len(m.get("content")) for m in messages)
+        if total <= budget:
+            return messages
+
+        overflow = total - budget
+        # The final user message is the current turn for the typed OpenAI
+        # renderers. Keep it intact and trim preceding history/result messages
+        # first. If there is no user message, protect the last non-system
+        # message as the safest equivalent fallback.
+        protected_index: int | None = None
+        for index in range(len(messages) - 1, -1, -1):
+            if messages[index].get("role") == "user":
+                protected_index = index
+                break
+        if protected_index is None:
+            for index in range(len(messages) - 1, -1, -1):
+                if messages[index].get("role") != "system":
+                    protected_index = index
+                    break
+
+        trimmable = sum(
+            self._message_content_len(message.get("content"))
+            for index, message in enumerate(messages)
+            if message.get("role") != "system" and index != protected_index
+        )
+        if trimmable <= 0:
+            log_warning(
+                f"[cortex_bridge:{self._endpoint.name}] downstream payload "
+                f"{total} chars exceeds budget {budget}; preserving the latest "
+                f"user turn because trimming it would erase the current request. "
+                f"Sending as-is."
+            )
+            return messages
+
+        remaining_to_remove = overflow
+        for index, msg in enumerate(messages):
+            if remaining_to_remove <= 0:
+                break
+            if msg.get("role") == "system" or index == protected_index:
+                continue
+            content = msg.get("content")
+            content_len = self._message_content_len(content)
+            if content_len <= 0:
+                continue
+            take = min(content_len, remaining_to_remove)
+            msg["content"] = self._truncate_message_content(content, take)
+            remaining_to_remove -= take
+
+        if remaining_to_remove > 0:
+            log_warning(
+                f"[cortex_bridge:{self._endpoint.name}] downstream payload {total} "
+                f"chars exceeded budget {budget}; trimmed "
+                f"~{overflow - remaining_to_remove} chars from older context but "
+                f"kept the latest user turn intact. Remaining overflow: "
+                f"{remaining_to_remove} chars."
+            )
+        else:
+            log_warning(
+                f"[cortex_bridge:{self._endpoint.name}] downstream payload {total} "
+                f"chars exceeded budget {budget}; trimmed ~{overflow} chars from "
+                f"older context while preserving the latest user turn."
+            )
+        return messages
+
     def _build_messages(self, prompt: Any) -> list[dict[str, Any]]:
-        """Convert a SyntH prompt into an OpenAI-style messages list.
+        """Convert a SyntH prompt into role-separated provider messages.
 
         Extracts ``instructions_verbose`` (or ``instructions``) from a SyntH prompt
         dict and places it as a ``system`` role message so the LLM receives explicit
@@ -856,11 +1515,14 @@ class ExternalCortexEngine(AIPluginBase):
                 mm_parts = self._build_mm_parts_from_prompt_request(prompt)
                 if mm_parts:
                     supports_vision = self._supports_vision_for_mm_parts(mm_parts)
-                    return renderer.render_with_multimodal(
+                    messages = renderer.render_with_multimodal(
                         mm_parts,
                         supports_vision=supports_vision,
                     )
-                return renderer.render()
+                else:
+                    messages = renderer.render()
+                self._append_json_format_reminder(messages, prompt)
+                return messages
         except Exception as exc:
             log_debug(
                 f"[cortex_bridge] direct PromptRequest rendering fallback to text: {exc}"
@@ -893,11 +1555,14 @@ class ExternalCortexEngine(AIPluginBase):
                     mm_parts = self._build_mm_parts_from_prompt_request(prompt_request)
                     if mm_parts:
                         supports_vision = self._supports_vision_for_mm_parts(mm_parts)
-                        return renderer.render_with_multimodal(
+                        messages = renderer.render_with_multimodal(
                             mm_parts,
                             supports_vision=supports_vision,
                         )
-                    return renderer.render()
+                    else:
+                        messages = renderer.render()
+                    self._append_json_format_reminder(messages, prompt_request)
+                    return messages
             except Exception as exc:
                 log_debug(
                     f"[cortex_bridge] PromptRequest rendering fallback to dict path: {exc}"
@@ -941,6 +1606,35 @@ class ExternalCortexEngine(AIPluginBase):
             ]
         return [{"role": "user", "content": user_msg_content}]
 
+    @staticmethod
+    def _append_json_format_reminder(
+        messages: list[dict[str, Any]], prompt: Any
+    ) -> None:
+        """Append a salient JSON-format reminder to the current user message.
+
+        The JSON-action protocol is enforced only via the (huge) system prompt,
+        so a capable chat model routinely replies with plain in-character prose
+        instead of the required JSON on the FIRST attempt — then the corrector
+        repairs it, costing an extra round-trip every turn. The corrector works
+        because its format requirements sit in the last user message; mirror
+        that salience for ordinary JSON-protocol turns. Native-tool turns
+        declare the contract via tools (``supports_tool_calling`` True) and are
+        skipped.
+        """
+        try:
+            if getattr(prompt, "supports_tool_calling", True):
+                return
+            if not messages:
+                return
+            last = messages[-1]
+            if not isinstance(last, dict) or last.get("role") != "user":
+                return
+            content = last.get("content")
+            if isinstance(content, str):
+                last["content"] = content + _JSON_FORMAT_REMINDER
+        except Exception as exc:
+            log_debug(f"[cortex_bridge] format reminder skip: {exc}")
+
     def _build_correction_messages(
         self, payload: dict[str, Any]
     ) -> list[dict[str, Any]]:
@@ -960,7 +1654,17 @@ class ExternalCortexEngine(AIPluginBase):
 
         user_parts: list[str] = []
         if original_user_message:
-            user_parts.append(f"Original user message:\n{original_user_message}")
+            # Include WHO sent the message — the corrector is stripped of the
+            # routing prefix and history, so a multi-person persona otherwise
+            # makes the model guess the sender (Papa's message answered as
+            # "mama"). Structural field from the original message, never text.
+            sender = str(sm.get("sender") or "").strip()
+            if sender:
+                user_parts.append(
+                    f"Original user message (from {sender}):\n{original_user_message}"
+                )
+            else:
+                user_parts.append(f"Original user message:\n{original_user_message}")
         if required_format:
             user_parts.append(
                 f"Required format:\n{json.dumps(required_format, ensure_ascii=False)}"
@@ -1000,7 +1704,7 @@ class ExternalCortexEngine(AIPluginBase):
 
     # NOTE: generate_response already uses _extra_api_kwargs(), so all call
     # paths (Recon via generate_response, main LLM via handle_incoming_message)
-    # benefit from extra_config settings such as ``disable_thinking``.
+    # benefit from extra_config settings such as ``enable_thinking``.
 
     # ------------------------------------------------------------------
     # Model / capability info

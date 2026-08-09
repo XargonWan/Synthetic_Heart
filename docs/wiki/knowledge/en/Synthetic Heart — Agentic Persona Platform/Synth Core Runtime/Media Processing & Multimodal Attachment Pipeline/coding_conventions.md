@@ -1,0 +1,6 @@
+- External tools (ffmpeg, ffprobe, yt-dlp) are invoked via `subprocess.run` or `asyncio.create_subprocess_exec` with explicit argument lists (never shell=True), and failures are logged via `log_debug`/`log_warning` rather than raised.
+- All temporary files are created under the shared `_MEDIA_TMP_DIR = os.path.join('tmp', 'recon_media')` directory and callers own cleanup responsibility, exposed through helper functions like `_safe_remove` and `YouTubeFetchResult.cleanup()`.
+- Lazy imports are used throughout to avoid circular dependencies — module-level imports of `PLUGIN_REGISTRY`, `LIVE_REGISTRY`, `config_registry`, and third-party packages (`yt_dlp`, `subprocess`) happen inside functions at first use.
+- MIME type handling follows a three-tier pattern: try `mimetypes.guess_type` on the path/name, fall back to an explicit extension-to-MIME mapping dict, and finally default to `application/octet-stream`.
+- Error paths return `None` (or a tuple `(False, reason)` for access checks) and emit structured log messages prefixed with the module name in brackets (e.g. `[media_dispatcher]`, `[multimodal]`, `[image_processor]`).
+- Configuration is read through `config_registry.get_value(...)` with sensible defaults and wrapped in try/except blocks so missing config never crashes the runtime.

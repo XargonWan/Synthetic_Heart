@@ -1,0 +1,1 @@
+A collection of experimental, broken, or untested action plugins (Reddit posting, ElevenLabs TTS via Selenium, terminal shell execution, Gasmask LLM protection) loaded only when the dev_components feature is enabled.

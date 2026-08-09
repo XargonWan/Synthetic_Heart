@@ -11,14 +11,15 @@ search_logs       -- regex / text search with level + time filters
 tail_log          -- last N lines from a named log (stitches across rotations)
 get_recent_errors -- shortcut: recent ERROR / WARNING entries across all logs
 
-Rotation behaviour
-------------------
-Logs rotate at 2000 lines (fast in debug mode).  Every tool that reads log
-content transparently spans the active file PLUS the N most-recent rotated
-backups (controlled by the `lookback_files` parameter, default 3).  This
-means an agent asking for the last 50 lines or searching for an error will
-see content across multiple rotations, not just whatever landed in the tiny
-current file.
+Archive behaviour
+-----------------
+Logs roll over daily and by size.  Today's / yesterday's files stay plain
+text; older days are gzip-compressed (``synth.<YYYY-MM-DD>.log.gz``) with a
+7-day retention.  Every tool that reads log content transparently spans the
+active file PLUS the N most-recent archived files (controlled by the
+`lookback_files` parameter, default 3), decompressing gzip archives on the
+fly.  Discovery and reading are delegated to ``core.log_archive`` so the MCP
+server always understands the same layout as the runtime app.
 
 Usage (stdio transport, registered in .mcp.json)
 ------
@@ -29,6 +30,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -40,7 +42,14 @@ from mcp.server.fastmcp import FastMCP
 # ---------------------------------------------------------------------------
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
-_LOG_DIR = Path(os.getenv("LOG_DIR", str(_SCRIPT_DIR.parent / "logs")))
+_REPO_ROOT = _SCRIPT_DIR.parent
+_LOG_DIR = Path(os.getenv("LOG_DIR", str(_REPO_ROOT / "logs")))
+
+# Share the log discovery / gzip-aware reading logic with the runtime app so
+# the MCP server understands the daily-dated + compressed archive layout.
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from core import log_archive  # noqa: E402
 
 _LEVEL_ORDER: dict[str, int] = {
     "DEBUG": 10,
@@ -58,67 +67,43 @@ _STD_LINE_RE = re.compile(
 
 # cortex_api.log and live_api.log use a section/banner format with large LLM
 # payloads.  Lines from these files are truncated to avoid flooding context.
-_LARGE_PAYLOAD_FILES: frozenset[str] = frozenset({"cortex_api", "live_api"})
+_LARGE_PAYLOAD_FILES: frozenset[str] = log_archive.LARGE_PAYLOAD_STEMS
 _PAYLOAD_TRUNCATE = 400  # characters per line
 
 mcp = FastMCP("synth-logs")
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
+# Internal helpers (delegate discovery/reading to core.log_archive so the
+# daily-dated + gzip-compressed archive layout is handled transparently)
 # ---------------------------------------------------------------------------
 
 
 def _active_stems() -> list[str]:
     """Return the logical names of all active (non-rotated) log files."""
-    if not _LOG_DIR.exists():
-        return []
-    stems: list[str] = []
-    for p in sorted(_LOG_DIR.iterdir()):
-        if not p.is_file() or p.suffix != ".log":
-            continue
-        if re.search(r"\.\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}", p.name):
-            continue
-        if re.search(r"\.log\.\d+$", p.name):
-            continue
-        stems.append(p.stem)
-    return stems
-
-
-def _rotated_files(stem: str) -> list[Path]:
-    """Return rotated backups for *stem*, sorted newest-first by mtime."""
-    if not _LOG_DIR.exists():
-        return []
-    candidates: list[Path] = []
-    for p in _LOG_DIR.iterdir():
-        if not p.is_file():
-            continue
-        name = p.name
-        # Timestamped rotation: synth.2026-04-12_22-45-18.log
-        if re.match(
-            rf"^{re.escape(stem)}\.\d{{4}}-\d{{2}}-\d{{2}}_\d{{2}}-\d{{2}}-\d{{2}}.*\.log$",
-            name,
-        ):
-            candidates.append(p)
-        # Numbered rotation: cortex_api.log.1, cortex_api.log.2
-        elif re.match(rf"^{re.escape(stem)}\.log\.\d+$", name):
-            candidates.append(p)
-    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return candidates
+    return log_archive.active_stems(_LOG_DIR)
 
 
 def _files_for_log(stem: str, lookback: int) -> list[Path]:
-    """Files to read for *stem*, newest-first: active file + up to *lookback* rotated.
+    """Files to read for *stem*, newest-first: active file + up to *lookback* archived.
 
-    Newest-first so search results surface the most recent activity first.
+    Newest-first (active first) so results surface the most recent activity.
+    Includes gzip-compressed daily archives transparently.
     """
-    result: list[Path] = []
-    active = _LOG_DIR / f"{stem}.log"
-    if active.exists():
-        result.append(active)
-    if lookback > 0:
-        result.extend(_rotated_files(stem)[:lookback])
-    return result
+    files = [lf.path for lf in log_archive.files_for_stem(stem, log_dir=_LOG_DIR)]
+    if not files:
+        return []
+    # First entry is the active file (log_archive orders active-first, newest-first).
+    active = files[:1]
+    archived = files[1:]
+    if lookback <= 0:
+        return active
+    return active + archived[:lookback]
+
+
+def _read_all_lines(path: Path) -> list[str]:
+    """Read every line from *path*, transparently decompressing .gz archives."""
+    return log_archive.read_lines(path)
 
 
 def _parse_std_ts(ts_str: str) -> datetime | None:
@@ -131,28 +116,14 @@ def _parse_std_ts(ts_str: str) -> datetime | None:
 
 
 def _tail_file(path: Path, n_lines: int) -> list[str]:
-    """Efficiently read the last *n_lines* from *path* without loading it all."""
-    chunk = 8 * 1024
-    try:
-        with path.open("rb") as fh:
-            fh.seek(0, 2)
-            pos = fh.tell()
-            buf = b""
-            while pos > 0:
-                read = min(chunk, pos)
-                pos -= read
-                fh.seek(pos)
-                buf = fh.read(read) + buf
-                lines = buf.decode("utf-8", errors="replace").splitlines()
-                if len(lines) > n_lines:
-                    return lines[-n_lines:]
-            return buf.decode("utf-8", errors="replace").splitlines()[-n_lines:]
-    except OSError:
-        return []
+    """Read the last *n_lines* from *path* (gzip-aware)."""
+    return log_archive.tail_lines(path, n_lines)
 
 
 def _count_rotated(stem: str) -> int:
-    return len(_rotated_files(stem))
+    """Count archived (non-active) files for *stem*."""
+    files = log_archive.files_for_stem(stem, log_dir=_LOG_DIR)
+    return max(0, len(files) - 1)
 
 
 # ---------------------------------------------------------------------------
@@ -256,12 +227,10 @@ def search_logs(
         for path in files:
             if total >= max_results:
                 break
-            label = path.name  # e.g. "synth.log" or "synth.2026-04-12_22-45-18.log"
+            label = path.name  # e.g. "synth.log" or "synth.2026-04-12.log.gz"
 
             try:
-                all_lines = path.read_text(
-                    encoding="utf-8", errors="replace"
-                ).splitlines()
+                all_lines = _read_all_lines(path)
             except OSError as exc:
                 results.append(f"[{label}] read error: {exc}")
                 continue
