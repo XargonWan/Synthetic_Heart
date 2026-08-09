@@ -723,6 +723,46 @@ class MinecraftConnector(VesselConnectorBase):
         except Exception as exc:  # pragma: no cover - defensive
             log_warning(f"{LOG_PREFIX} bridge auto-start error: {exc}")
 
+    @staticmethod
+    async def _probe_server(host: str, port: int) -> bool:
+        """Cheap TCP reachability probe for the Minecraft server (fail-safe).
+
+        Never spawns a bridge or opens a session: used to decide whether a
+        connect attempt is even worth starting (the world server must accept
+        TCP before the bridge bot can log in). Any error — refused, timeout,
+        DNS — reads as unreachable. 2 s cap keeps it off the hot path.
+        """
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port), timeout=2.0
+            )
+            del reader
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            return True
+        except Exception:
+            return False
+
+    async def server_reachable(self) -> bool:
+        """Return True when the world server accepts TCP connections.
+
+        Resolves the connect target from the current settings (or the plugin
+        defaults) and probes it. Fail-safe: a resolution error returns True so
+        the connect proceeds and reports the real failure.
+        """
+        try:
+            target = self._resolve_server_target(self._connect_settings or {})
+            host = str(target.get("host") or "").strip()
+            port = int(target.get("port") or 0)
+            if not host or port <= 0:
+                return True
+            return await self._probe_server(host, port)
+        except Exception:  # pragma: no cover - defensive
+            return True
+
     async def connect(
         self,
         settings: Dict[str, Any],
@@ -742,6 +782,17 @@ class MinecraftConnector(VesselConnectorBase):
         self._on_event = on_event
         self._connect_settings = dict(settings or {})
         self._base_url = self._resolve_base_url(settings or {})
+
+        # Fail fast when the world server itself is unreachable — spawning a
+        # bridge whose bot cannot log in wastes a subprocess and makes the
+        # reattach retry look like a flapping connect (observed live:
+        # ECONNREFUSED at the Minecraft server while sessions churned).
+        if not await self.server_reachable():
+            self.last_error = f"minecraft server unreachable at {self._resolve_server_target(settings or {})}"
+            log_warning(f"{LOG_PREFIX} {self.last_error}")
+            await self._close_session()
+            return False
+
         timeout = aiohttp.ClientTimeout(total=_HTTP_TIMEOUT_SEC)
         self._session = aiohttp.ClientSession(timeout=timeout)
 
@@ -1641,6 +1692,13 @@ class MinecraftConnector(VesselConnectorBase):
                 target_name=set_name,
             )
             ok = result.get("status") == "ok"
+            if ok:
+                # A goal now exists: any still-pending autonomous will/goal-beat
+                # turn for this world was built against a GOAL-LESS world (its
+                # prompt says "you have no active goal") and would overwrite the
+                # fresh goal when it lands — the observed live race where the
+                # correct initial goal was replaced 6 s later. Drop them.
+                self._purge_stale_goal_beats()
             return VesselActionResult(
                 ok=ok,
                 detail=result.get("message") or "goal adopted",
@@ -1898,6 +1956,13 @@ class MinecraftConnector(VesselConnectorBase):
         self._last_dimension = str(data.get("dimension") or "")
         affordances = self._build_affordances(entities, blocks)
         current_goal, recent_goals = await self._resolve_goals()
+        # Deterministic step-pointer self-advance: while the CURRENT step's
+        # named products are already in inventory, move the pointer forward
+        # (see _advance_satisfied_steps) so the prompt always shows the real
+        # next step even when the model never calls update_goal(advance).
+        current_goal = await self._advance_satisfied_steps(
+            current_goal, inventory_counts
+        )
         bases = await self._resolve_bases()
         quest = await self._resolve_quest(inventory_counts, bases)
         knowledge = await self._resolve_knowledge(
@@ -2264,6 +2329,30 @@ class MinecraftConnector(VesselConnectorBase):
         except Exception:  # pragma: no cover - defensive
             return None
 
+    def _purge_stale_goal_beats(self) -> None:
+        """Drop pending autonomous vessel beats once a goal is committed.
+
+        A goal-beat/will-beat turn enqueued while there was NO active goal
+        (e.g. right after a clear-all) can land AFTER a fresh ``set_goal`` and
+        overwrite it with its own "no goal" authoring — observed live: the
+        correct initial goal was replaced 6 s later by a racing goal-beat turn.
+        Once a goal exists, any still-pending autonomous beat for this world is
+        stale (its prompt was built against a goal-less world) and must not
+        run. Purely structural (world chat scope — the same chat id the beats
+        are enqueued under); player chat and other traffic are untouched.
+        Fail-safe.
+        """
+        try:
+            from core.interface_path_utils import build_interface_path
+            from core.message_queue import _supersede_pending_vessel_beats
+            from interface.vessel_interface import _slugify_world_token
+
+            token = _slugify_world_token(self.get_world_identity())
+            chat_id = build_interface_path("vessel", ENVIRONMENT, token)
+            _supersede_pending_vessel_beats(chat_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} stale goal-beat purge failed: {exc}")
+
     async def _resolve_goals(
         self,
     ) -> tuple[Dict[str, Any] | None, list[Dict[str, Any]]]:
@@ -2279,6 +2368,56 @@ class MinecraftConnector(VesselConnectorBase):
         except Exception as exc:  # pragma: no cover - defensive
             log_debug(f"{LOG_PREFIX} goal resolution failed: {exc}")
             return None, []
+
+    async def _advance_satisfied_steps(
+        self,
+        goal: Dict[str, Any] | None,
+        inventory_counts: Dict[str, int],
+    ) -> Dict[str, Any] | None:
+        """Deterministically advance a stepped goal past steps already done.
+
+        The action beat is limited to ONE tool call per turn, so Synth
+        consistently prioritizes acting over the ``update_goal(advance)`` step
+        bookkeeping — observed live: the pointer stayed at step 1/9 while she
+        finished steps 1-5 (planks, crafting table, wooden pickaxe), so every
+        prompt showed the stale step and she re-crafted a second crafting
+        table. This closes that gap structurally: the same id-based product
+        parser used for the goal deficit is applied to the CURRENT step; while
+        every named product is already in inventory (``have >= need``) the
+        pointer advances. Steps whose text names no countable product are
+        never auto-advanced (a conditional / "as needed" step stays put), and
+        advancing past the last step completes the goal (the store's own
+        rule). Pure inventory math — no keyword logic; fully fail-safe
+        (returns the goal unchanged on any error).
+        """
+        if not isinstance(goal, dict) or goal.get("status") != "active":
+            return goal
+        steps = goal.get("steps")
+        if not isinstance(steps, list) or not steps:
+            return goal
+        try:
+            current = int(goal.get("current_step") or 0)
+            advanced = False
+            for idx in range(current, len(steps)):
+                step_text = str(steps[idx] or "")
+                products = mc_target_names.derive_product_quantities(step_text)
+                if not products:
+                    break  # no countable requirement — cannot judge this step
+                for item, need in products.items():
+                    if int(inventory_counts.get(item) or 0) < int(need or 1):
+                        return goal  # not satisfied — stop at this step
+                result = await mc_goals.update_active_goal(advance=True)
+                if not (result or {}).get("ok", False):
+                    return goal
+                advanced = True
+                if (result or {}).get("completed"):
+                    return None  # advanced past the last step → goal done
+            if advanced:
+                return await mc_goals.get_active_goal()
+            return goal
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} step auto-advance failed: {exc}")
+            return goal
 
     async def _resolve_bases(self) -> list[Dict[str, Any]]:
         """Recall the bases (homes) Synth registered in this world.

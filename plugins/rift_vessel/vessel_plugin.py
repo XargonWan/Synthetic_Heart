@@ -1479,6 +1479,33 @@ class VesselPlugin(AIPluginBase):
         iface = self._get_vessel_interface()
         session_id: str | None = None
 
+        # Probe the world server BEFORE opening a session or spawning a bridge:
+        # when the server is down/restarting, opening a session would flap
+        # (session -> 30s grace-close -> new session ... every ~60s, clearing
+        # chat history per attempt) while every retry spawns a pointless bridge
+        # subprocess whose bot cannot log in (observed live: a steady
+        # ECONNREFUSED loop at the Minecraft server). A cheap TCP probe fails
+        # fast with a clean reason, and the reattach retry simply waits until
+        # the server accepts connections again. Fail-safe: a probe error lets
+        # the connect proceed (it will report the real failure).
+        probe = getattr(connector, "server_reachable", None)
+        if callable(probe):
+            try:
+                if not await probe():
+                    log_warning(
+                        f"[vessel_plugin] connect_world: '{name}' server not "
+                        "reachable — aborting before session/bridge start"
+                    )
+                    return VesselActionResult(
+                        ok=False,
+                        detail=(
+                            f"server_unreachable: the {name} server is not "
+                            "accepting connections (is it running?)"
+                        ),
+                    )
+            except Exception as exc:  # pragma: no cover - defensive
+                log_debug(f"[vessel_plugin] server probe failed for '{name}': {exc}")
+
         async def _on_event(event: Any) -> None:
             """Forward a connector PerceptionEvent into the message chain."""
             if iface is None:
@@ -1919,7 +1946,12 @@ class VesselPlugin(AIPluginBase):
                 "do not invent or override a host or port. Once connected, "
                 "the world's own actions (say/move/look/use/attack/follow/…) "
                 "become available and this action disappears until you "
-                "disconnect."
+                "disconnect. IMPORTANT — when someone asks you to enter, "
+                "connect to, rejoin or come back into a world, you MUST call "
+                "this action in the SAME turn as your reply: telling them you "
+                "are connecting does not connect you, and until you actually "
+                "call this action you remain outside the world (setting a "
+                "goal about connecting does not connect you either)."
             )
             connect_schema["required_fields"] = ["game"]
             # Host/port overrides remain accepted by the backend for explicit

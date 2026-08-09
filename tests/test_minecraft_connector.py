@@ -566,6 +566,11 @@ async def test_connect_records_last_error_on_bridge_connect_failure(
 ) -> None:
     conn = MinecraftConnector()
 
+    async def _fake_reachable() -> bool:
+        return True
+
+    monkeypatch.setattr(conn, "server_reachable", _fake_reachable)
+
     async def _fake_ensure() -> None:
         return None
 
@@ -596,6 +601,11 @@ async def test_connect_records_last_error_on_health_failure(
 ) -> None:
     conn = MinecraftConnector()
 
+    async def _fake_reachable() -> bool:
+        return True
+
+    monkeypatch.setattr(conn, "server_reachable", _fake_reachable)
+
     async def _fake_ensure() -> None:
         return None
 
@@ -624,6 +634,11 @@ async def test_connect_records_last_error_on_missing_mineflayer(
     async def _fake_get(path: str) -> Dict[str, Any]:
         return {"ok": True, "mineflayer": False}
 
+    async def _fake_reachable() -> bool:
+        return True
+
+    monkeypatch.setattr(conn, "server_reachable", _fake_reachable)
+
     monkeypatch.setattr(conn, "_ensure_bridge_running", _fake_ensure)
     monkeypatch.setattr(conn, "_get", _fake_get)
 
@@ -635,6 +650,53 @@ async def test_connect_records_last_error_on_missing_mineflayer(
 
 async def _no_sleep(*_args: Any, **_kwargs: Any) -> None:
     return None
+
+
+@pytest.mark.asyncio
+async def test_server_reachable_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """server_reachable() reports the world server's TCP reachability and the
+    connect path aborts BEFORE spawning a bridge when it is down (the observed
+    live ECONNREFUSED flap: sessions churned and chat history cleared every
+    ~60s while the Minecraft server refused connections)."""
+
+    conn = MinecraftConnector()
+
+    async def _fake_probe(host: str, port: int) -> bool:
+        return host == "192.168.1.69" and port == 16269
+
+    monkeypatch.setattr(conn, "_probe_server", _fake_probe)
+
+    # Reachable server: connect proceeds past the probe (bridge mocked away).
+    async def _fake_ensure() -> None:
+        return None
+
+    async def _fake_get(path: str) -> Dict[str, Any]:
+        return {"ok": True, "mineflayer": True}
+
+    async def _fake_post(
+        path: str,
+        payload: Dict[str, Any],
+        timeout: float | None = None,
+    ) -> Dict[str, Any]:
+        return {"ok": True, "detail": "connected", "data": {"username": "2D"}}
+
+    monkeypatch.setattr(conn, "_ensure_bridge_running", _fake_ensure)
+    monkeypatch.setattr(conn, "_get", _fake_get)
+    monkeypatch.setattr(conn, "_post", _fake_post)
+    ok = await conn.connect({"host": "192.168.1.69", "port": 16269}, lambda e: None)
+    assert ok is True
+
+    # Unreachable server: connect fails fast with a clean reason and NO bridge
+    # spawn (the mocked _ensure_bridge_running would raise if called).
+    async def _boom_ensure() -> None:
+        raise AssertionError("bridge must not spawn when the server is down")
+
+    conn2 = MinecraftConnector()
+    monkeypatch.setattr(conn2, "_probe_server", _fake_probe)
+    monkeypatch.setattr(conn2, "_ensure_bridge_running", _boom_ensure)
+    ok2 = await conn2.connect({"host": "192.168.1.69", "port": 9999}, lambda e: None)
+    assert ok2 is False
+    assert "server unreachable" in (conn2.last_error or "")
 
 
 # ---------------------------------------------------------------------------
@@ -795,3 +857,68 @@ def test_goal_deficit_excludes_entity_targets() -> None:
         {"oak_log": 0},
     )
     assert block_deficit == {"items": [{"item": "oak_log", "have": 0, "need": 1}]}
+
+
+_GOAL_STEPS: List[str] = [
+    "Craft spruce planks from the 15 spruce logs I hold (4 planks per log) until I have a good stockpile",
+    "Craft a crafting table from spruce planks if I don't already have enough (I already hold crafting_table x3)",
+    "Place a crafting table at my current spot so I can use it as a workbench",
+    "Craft a wooden pickaxe using 3 spruce planks and 2 sticks",
+    "Pick up the crafted wooden pickaxe into my inventory",
+    "Repeat plank/table placement as needed so I still hold spare planks for future tools",
+    "Craft a wooden axe from 3 spruce planks and 2 sticks (axe shape)",
+]
+
+
+@pytest.mark.asyncio
+async def test_advance_satisfied_steps(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Steps whose named products are in inventory auto-advance the pointer.
+
+    Regression test for the observed live gap: the action beat is limited to
+    one tool call per turn, so Synth never called update_goal(advance) and the
+    pointer stayed at step 1/9 while she finished steps 1-5 (re-crafting a
+    second crafting table because the stale step kept showing). The connector
+    now advances deterministically from the inventory, stopping at the first
+    step whose products are missing or not countable."""
+    import plugins.rift_vessel.minecraft.goals as mc_goals_mod
+
+    advances: List[int] = []
+
+    async def fake_update_active_goal(**kwargs: Any) -> Dict[str, Any]:
+        advances.append(len(advances))
+        return {"status": "ok", "ok": True, "completed": False, "message": "advanced"}
+
+    async def fake_get_active_goal() -> Dict[str, Any]:
+        return {
+            "status": "active",
+            "steps": _GOAL_STEPS,
+            "current_step": 6,
+        }
+
+    monkeypatch.setattr(mc_goals_mod, "update_active_goal", fake_update_active_goal)
+    monkeypatch.setattr(mc_goals_mod, "get_active_goal", fake_get_active_goal)
+
+    conn = MinecraftConnector()
+    goal: Dict[str, Any] = {
+        "status": "active",
+        "steps": _GOAL_STEPS,
+        "current_step": 0,
+    }
+    inventory = {
+        "spruce_planks": 50,
+        "crafting_table": 3,
+        "wooden_pickaxe": 2,
+        "stick": 12,
+    }
+    out = await conn._advance_satisfied_steps(goal, inventory)
+    # Steps 1-5 (indices 0-4) are satisfied and advance; the "Repeat as
+    # needed" step (index 5) names no countable product and stops the walk.
+    assert advances == [0, 1, 2, 3, 4]
+    assert out is not None
+    assert out["current_step"] == 6
+
+    # A goal with no steps / non-active is untouched.
+    assert await conn._advance_satisfied_steps(None, inventory) is None
+    assert await conn._advance_satisfied_steps(
+        {"status": "done", "steps": _GOAL_STEPS, "current_step": 0}, inventory
+    ) == {"status": "done", "steps": _GOAL_STEPS, "current_step": 0}

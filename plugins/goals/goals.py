@@ -138,7 +138,24 @@ def _coerce_steps(steps: Any) -> List[str]:
     if steps is None:
         return []
     if isinstance(steps, str):
-        raw_list: List[Any] = [steps]
+        # A JSON-encoded array (e.g. the goal-expansion Drone serialising the
+        # plan) must be decoded, not wrapped — wrapping produced the observed
+        # double-encoded steps column (a list containing one JSON string:
+        # ["[\"Gather logs…\", \"Craft…\"]"]), which broke step rendering and
+        # advancement. Anything that does not parse as an array is a single
+        # free-text step.
+        stripped = steps.strip()
+        if stripped.startswith("["):
+            try:
+                parsed = json.loads(stripped)
+            except (TypeError, ValueError):
+                parsed = None
+            if isinstance(parsed, list):
+                raw_list: List[Any] = list(parsed)
+            else:
+                raw_list = [steps]
+        else:
+            raw_list = [steps]
     elif isinstance(steps, (list, tuple)):
         raw_list = list(steps)
     else:

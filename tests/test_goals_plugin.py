@@ -680,3 +680,21 @@ async def test_clear_all_goals_unfiltered_wipes_everything(
     assert res["status"] == "ok"
     assert res["deleted_count"] == 2
     assert fake_db.rows == []
+
+
+def test_coerce_steps_decodes_json_encoded_array() -> None:
+    """A JSON-encoded steps array (Drone serialising the plan) is decoded, not
+    wrapped — wrapping produced the observed double-encoded steps column
+    (a list containing one JSON string) that broke step rendering/advance."""
+    encoded = '["Gather logs by punching trees", "Craft a crafting table", "Craft wooden tools"]'
+    assert goals._coerce_steps(encoded) == [
+        "Gather logs by punching trees",
+        "Craft a crafting table",
+        "Craft wooden tools",
+    ]
+    # A plain free-text string remains a single step.
+    assert goals._coerce_steps("Do the thing") == ["Do the thing"]
+    # A genuine list passes through unchanged (trimmed, capped).
+    assert goals._coerce_steps(["a", "b"]) == ["a", "b"]
+    # A JSON string that is not an array stays a single step.
+    assert goals._coerce_steps('"just one"') == ['"just one"']

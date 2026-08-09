@@ -1375,6 +1375,37 @@ function hasEntityNamed(target) {
   return null;
 }
 
+// Dig the nearest diggable block that is actually IN THE WAY first: breaking a
+// target block THROUGH an obstruction (e.g. a log behind leaves) is legal in
+// vanilla but reads as "hitting blocks through blocks", can collapse
+// unsupported blocks (sand/gravel) onto the bot, and leaves the body swinging
+// at the wrong block. Raycast bot-eye -> target; when the first solid block
+// hit is not the target itself and can be dug, that is the real thing to
+// break. Structural raycast — never keyword logic. Fail-safe (null on any
+// error so the caller digs the original target as before).
+function diggableObstructionTowards(origin, targetBlock) {
+  try {
+    if (!bot || !bot.world || typeof bot.world.raycast !== 'function') return null;
+    if (!targetBlock || !targetBlock.position) return null;
+    const originVec = origin || bot.entity.position;
+    const targetCenter = targetBlock.position.offset(0.5, 0.5, 0.5);
+    const delta = targetCenter.minus(originVec);
+    const range = delta.length ? delta.length() : originVec.distanceTo(targetCenter);
+    if (!(range > 0.5)) return null;
+    const hit = bot.world.raycast(originVec, delta.scaled(1 / range), range + 1);
+    if (!hit || !hit.block) return null;
+    const b = hit.block;
+    if (b.position.equals(targetBlock.position)) return null;
+    // Air-like blocks (boundingBox 'empty') are not obstacles; some
+    // data-packs mark thin foliage empty too — skip those as well.
+    if (b.boundingBox === 'empty') return null;
+    if (typeof bot.canDigBlock === 'function' && !bot.canDigBlock(b)) return null;
+    return b;
+  } catch (e) {
+    return null;
+  }
+}
+
 // Resolve the nearest block matching a canonical 'target' name (the block name
 // reported by nearbyBlocks/scan). Returns the block object or null. Purely
 // structural: the caller supplies a game id and only that exact block id is
@@ -2751,6 +2782,13 @@ async function runAction(action, payload) {
         return { ok: false, detail: 'no matching block to mine nearby', data: {} };
       }
       try {
+        // Break the nearest diggable block that is actually IN THE WAY first
+        // instead of digging the target through it (see
+        // diggableObstructionTowards): a log behind leaves digs through the
+        // leaves visually, can collapse sand/gravel onto the body and reads
+        // as "hitting blocks through blocks".
+        const obstruction = diggableObstructionTowards(bot.entity.position, block);
+        if (obstruction) block = obstruction;
         const blockName = block.name;
         // Anticipate the drop id so we can measure the right inventory delta.
         // We snapshot the whole inventory before and diff after.
@@ -2895,6 +2933,10 @@ async function runAction(action, payload) {
           lastDetail = rounds === 0 ? `no ${name} block nearby` : `no more ${name} nearby`;
           break;
         }
+        // Break the nearest diggable block in the way FIRST (see the 'mine'
+        // verb) instead of digging the target through it.
+        const obstruction = diggableObstructionTowards(bot.entity.position, block);
+        if (obstruction) block = obstruction;
         const before = inventoryTotals();
         try {
           // OOM-safe path (see the 'mine' verb for the full root-cause note):
