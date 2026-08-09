@@ -482,6 +482,50 @@ async def clear_abandoned_goals() -> Dict[str, Any]:
         return {"status": "error", "message": str(exc)}
 
 
+async def clear_all_goals(
+    scope: Any = None,
+    game: Any = None,
+    world: Any = None,
+) -> Dict[str, Any]:
+    """Delete EVERY goal matching the scope tuple (fail-safe, structural).
+
+    The WebUI "clear all" — wipes active, done and abandoned goals alike so
+    Synth starts a completely clean attempt (unlike :func:`delete_goal`, which
+    protects the active goal, and :func:`clear_abandoned_goals`, which keeps
+    active/done rows). Scope params are optional: an omitted column matches any
+    value, so the Minecraft shim can pin ``scope``/``game`` while clearing all
+    concrete servers. Filtering is column equality on the structural scope
+    tuple — never text parsing. Returns a status dict with the rows deleted.
+    """
+    await init_goal_table()
+    clauses: list[str] = []
+    params: list[Any] = []
+    for col, val in (("scope", scope), ("game", game), ("world", world)):
+        if val is not None and str(val).strip():
+            clauses.append(f"{col} = %s")
+            params.append(str(val).strip())
+    try:
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                if clauses:
+                    await cur.execute(
+                        f"DELETE FROM goals WHERE {' AND '.join(clauses)}",
+                        params,
+                    )
+                else:
+                    await cur.execute("DELETE FROM goals")
+                deleted = getattr(cur, "rowcount", 0) or 0
+                await conn.commit()
+        log_info(
+            f"{LOG_PREFIX} cleared {deleted} goal(s) "
+            f"(scope={scope!r} game={game!r} world={world!r})"
+        )
+        return {"status": "ok", "deleted_count": deleted}
+    except Exception as exc:
+        log_error(f"{LOG_PREFIX} clear_all_goals failed: {exc}")
+        return {"status": "error", "message": str(exc)}
+
+
 async def set_goal(
     description: str,
     session_id: str | None = None,

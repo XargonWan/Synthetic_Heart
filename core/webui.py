@@ -911,10 +911,12 @@ class SynthWebUIInterface:
         self.app.post("/api/history/vessel/goals/{world}/clear-abandoned")(
             self.clear_vessel_abandoned_goals
         )
+        self.app.delete("/api/history/vessel/goals/{world}")(self.clear_vessel_goals)
         # Generic, scope-aware goals API (Goals plugin — vessel + personal/other).
         self.app.get("/api/goals")(self.list_goals)
         self.app.delete("/api/goals/{goal_id}")(self.delete_goal)
         self.app.post("/api/goals/clear-abandoned")(self.clear_abandoned_goals)
+        self.app.delete("/api/goals")(self.clear_all_goals)
         self.app.post("/api/growth/current")(self.update_growth_current)
         self.app.post("/api/growth/revert")(self.revert_growth_state)
         # Per-item delete for History sub-tabs
@@ -8611,6 +8613,24 @@ class SynthWebUIInterface:
                 return None
         return None
 
+    @staticmethod
+    def _resolve_world_goal_clearer_all(world: str):
+        """Return an ``async () -> dict`` full goal clearer for ``world``.
+
+        The "clear all" counterpart of :meth:`_resolve_world_goal_clearer`:
+        deletes active, done and abandoned goals alike so Synth gets a
+        completely clean attempt. Returns ``None`` for worlds with no goal
+        store. Structural dispatch — no keyword/trigger logic.
+        """
+        if world == "minecraft":
+            try:
+                from plugins.rift_vessel.minecraft import goals as mc_goals
+
+                return mc_goals.clear_all_goals
+            except Exception:
+                return None
+        return None
+
     async def delete_vessel_goal(self, request: Request):
         """Delete a single non-active goal for a world (Goals sub-tab)."""
         world = str(request.path_params.get("world") or "").strip()
@@ -8656,6 +8676,34 @@ class SynthWebUIInterface:
             result = await clearer()
         except Exception as exc:
             log_error(f"{LOG_PREFIX} clear_vessel_abandoned_goals failed: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+        if (result or {}).get("status") != "ok":
+            return JSONResponse(
+                {"success": False, "error": (result or {}).get("message", "failed")},
+                status_code=500,
+            )
+        return JSONResponse(
+            {"success": True, "deleted_count": result.get("deleted_count", 0)}
+        )
+
+    async def clear_vessel_goals(self, request: Request):
+        """Delete EVERY goal for a world — clean-attempt reset (Goals sub-tab).
+
+        Unlike :meth:`clear_vessel_abandoned_goals`, this wipes active, done
+        and abandoned goals alike so Synth starts a completely fresh attempt.
+        """
+        world = str(request.path_params.get("world") or "").strip()
+        clearer = self._resolve_world_goal_clearer_all(world)
+        if clearer is None:
+            return JSONResponse(
+                {"success": False, "error": "No goal store for this world"},
+                status_code=404,
+            )
+        try:
+            result = await clearer()
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} clear_vessel_goals failed: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
         if (result or {}).get("status") != "ok":
@@ -8801,6 +8849,35 @@ class SynthWebUIInterface:
             result = await store.clear_abandoned_goals()
         except Exception as exc:
             log_error(f"{LOG_PREFIX} clear_abandoned_goals failed: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+        if (result or {}).get("status") != "ok":
+            return JSONResponse(
+                {"success": False, "error": (result or {}).get("message", "failed")},
+                status_code=500,
+            )
+        return JSONResponse(
+            {"success": True, "deleted_count": result.get("deleted_count", 0)}
+        )
+
+    async def clear_all_goals(self, request: Request):
+        """Delete EVERY goal across all scopes — clean-attempt reset.
+
+        Wipes active, done and abandoned goals alike (the per-goal delete
+        protects the active goal; this is the explicit "clear all" for a fresh
+        start). Fail-safe; the Goals plugin is lazily imported.
+        """
+        del request
+        store = self._goals_store()
+        if store is None:
+            return JSONResponse(
+                {"success": False, "error": "Goals plugin unavailable"},
+                status_code=404,
+            )
+        try:
+            result = await store.clear_all_goals()
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} clear_all_goals failed: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
         if (result or {}).get("status") != "ok":

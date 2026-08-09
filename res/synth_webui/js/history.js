@@ -116,6 +116,7 @@ function initializeHistoryTab() {
     document.getElementById('history-goals-status')?.addEventListener('change', () => { goalsFilterState.status = document.getElementById('history-goals-status').value; renderGoalsFiltered(); });
     document.getElementById('history-goals-scope')?.addEventListener('change', () => { goalsFilterState.scope = document.getElementById('history-goals-scope').value; renderGoalsFiltered(); });
     document.getElementById('history-goals-refresh')?.addEventListener('click', () => { loadHistoryGoals(); });
+    document.getElementById('history-goals-clear-all')?.addEventListener('click', clearAllGoals);
 
     // Queue controls (read-only snapshot, live auto-refreshing — see repo memory
     // webui-agent-tab-polling: diff-aware, selection-safe render, no blind innerHTML).
@@ -1785,6 +1786,24 @@ async function clearAbandonedGoals() {
     } catch (error) {
         console.error('Failed to clear abandoned goals:', error);
         alert('Failed to clear abandoned goals.');
+    }
+    loadHistoryGoals();
+}
+
+// Delete EVERY goal (all scopes, all statuses) — a clean-attempt reset, then
+// refresh the sub-tab. Uses the generic Goals API so vessel AND personal goals
+// are wiped alike; confirm() guards the destructive call.
+async function clearAllGoals() {
+    if (!confirm('Delete ALL goals (active, done and abandoned — every scope)? This gives Synth a completely clean attempt and cannot be undone.')) return;
+    try {
+        const response = await fetch('/api/goals', { method: 'DELETE' });
+        const data = await response.json();
+        if (!data || !data.success) {
+            alert('Failed to clear all goals: ' + ((data && data.error) || 'unknown error'));
+        }
+    } catch (error) {
+        console.error('Failed to clear all goals:', error);
+        alert('Failed to clear all goals.');
     }
     loadHistoryGoals();
 }

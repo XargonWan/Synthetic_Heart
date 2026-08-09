@@ -40,6 +40,7 @@ try:  # pragma: no cover - import guarded for fail-safe degradation
         TARGET_KIND_ENTITY,
     )
     from plugins.goals.goals import clear_abandoned_goals as _g_clear_abandoned_goals
+    from plugins.goals.goals import clear_all_goals as _g_clear_all_goals
     from plugins.goals.goals import delete_goal as _g_delete_goal
     from plugins.goals.goals import get_active_goal as _g_get_active_goal
     from plugins.goals.goals import init_goal_table as _g_init_goal_table
@@ -111,6 +112,7 @@ __all__ = [
     "list_all_goals",
     "delete_goal",
     "clear_abandoned_goals",
+    "clear_all_goals",
     "set_goal",
     "update_active_goal",
     "set_active_world",
@@ -171,6 +173,19 @@ async def clear_abandoned_goals() -> Dict[str, Any]:
     if not _GOALS_AVAILABLE:
         return {"status": "error", "message": "goals_unavailable"}
     return await _g_clear_abandoned_goals()
+
+
+async def clear_all_goals() -> Dict[str, Any]:
+    """Delete EVERY Minecraft goal — all statuses and all concrete servers.
+
+    The WebUI Goals "clear all" (clean-attempt reset). Matches what
+    :func:`list_all_goals` displays: every row with ``scope='vessel'`` and
+    ``game='minecraft'``, regardless of the per-server ``world`` identity.
+    Fail-safe.
+    """
+    if not _GOALS_AVAILABLE:
+        return {"status": "error", "message": "goals_unavailable"}
+    return await _g_clear_all_goals(scope=_SCOPE, game=_GAME)
 
 
 async def set_goal(

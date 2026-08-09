@@ -203,6 +203,19 @@ class _FakeStore:
             before = len(self.rows)
             self.rows = [r for r in self.rows if r["status"] != status]
             return before - len(self.rows)
+        # clear_all_goals: DELETE FROM goals [WHERE scope = %s [AND game = %s ...]]
+        if s == "DELETE FROM goals" or s.startswith("DELETE FROM goals WHERE "):
+            conds: list[tuple[str, Any]] = []
+            if s.startswith("DELETE FROM goals WHERE "):
+                parts = s[len("DELETE FROM goals WHERE ") :].split(" AND ")
+                for i, cond in enumerate(parts):
+                    col = cond.split(" = ")[0].strip()
+                    conds.append((col, params[i]))
+            before = len(self.rows)
+            self.rows = [
+                r for r in self.rows if not all(r.get(col) == val for col, val in conds)
+            ]
+            return before - len(self.rows)
         if s.startswith("SELECT status FROM goals WHERE id = %s"):
             gid = params[0]
             matches = [r for r in self.rows if r["id"] == gid]
@@ -635,3 +648,35 @@ async def test_clear_abandoned_goals(fake_db: _FakeStore) -> None:
     assert res["deleted_count"] == 2
     remaining = [r["status"] for r in fake_db.rows]
     assert goals.STATUS_ABANDONED not in remaining
+
+
+@pytest.mark.asyncio
+async def test_clear_all_goals_wipes_every_status(fake_db: _FakeStore) -> None:
+    """Clear-all removes active, done AND abandoned goals for a clean attempt."""
+    await goals.set_goal("first", scope="vessel", game="minecraft")
+    await goals.set_goal("second", scope="vessel", game="minecraft")
+    await goals.update_active_goal(
+        status=goals.STATUS_DONE, scope="vessel", game="minecraft"
+    )
+    await goals.set_goal("third", scope="vessel", game="minecraft")  # abandons 2nd
+    await goals.set_goal("personal", scope="none")  # outside the pinned scope
+
+    res = await goals.clear_all_goals(scope="vessel", game="minecraft")
+    assert res["status"] == "ok"
+    assert res["deleted_count"] == 3
+    remaining = [r["description"] for r in fake_db.rows]
+    assert remaining == ["personal"]
+    assert res["deleted_count"] > 0
+
+
+@pytest.mark.asyncio
+async def test_clear_all_goals_unfiltered_wipes_everything(
+    fake_db: _FakeStore,
+) -> None:
+    """Without scope filters, clear-all removes every goal in the store."""
+    await goals.set_goal("vessel one", scope="vessel", game="minecraft")
+    await goals.set_goal("personal one", scope="none")
+    res = await goals.clear_all_goals()
+    assert res["status"] == "ok"
+    assert res["deleted_count"] == 2
+    assert fake_db.rows == []
