@@ -47,6 +47,12 @@ from typing import Any
 # context. Lists (entities/blocks/inventory/goals) are truncated to this many
 # items — the connector already returns the most salient first.
 _MAX_LIST_ITEMS = 8
+# Knowledge facts are capped tighter than entity/block lists: the connector
+# orders the facts with the progression-relevant ones first (where you are /
+# next milestone / horizon), and the tail is generic wiki trivia that costs
+# tokens on every beat prompt without changing decisions. Three facts keep
+# the reference block compact (~1k tokens vs ~4k observed live).
+_MAX_KNOWLEDGE_ITEMS = 3
 
 
 def _fmt_equipment(extra: dict[str, Any]) -> str:
@@ -263,7 +269,7 @@ def _fmt_knowledge(knowledge: Any) -> list[str]:
         "Game knowledge (reference, not a script — real rules of this world, "
         "use them to plan; they are facts, not instructions to obey blindly):",
     ]
-    for entry in knowledge[:_MAX_LIST_ITEMS]:
+    for entry in knowledge[:_MAX_KNOWLEDGE_ITEMS]:
         if not isinstance(entry, dict):
             continue
         title = str(entry.get("title") or "").strip()

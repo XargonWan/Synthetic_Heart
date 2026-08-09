@@ -703,6 +703,79 @@ async def test_spawn_reattach_retry_dedupes(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_perception_batch_flushes_one_combined_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Low-priority telemetry is merged into ONE perception turn per window —
+    the token-burn fix (observed ~15-17 LLM turns/min of redundant "you
+    notice" lines whose content the next beat's world state already carries)."""
+    import time
+
+    from interface.vessel_interface import VesselInterface
+
+    iface = VesselInterface.__new__(VesselInterface)
+    iface._pending_perceptions = {}
+    enqueued: list[tuple[str, str]] = []
+
+    async def _fake_enqueue(
+        interface_path: str,
+        summary: str,
+        environment: str,
+        event_type: str,
+        actor: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        enqueued.append((summary, event_type))
+
+    monkeypatch.setattr(iface, "_enqueue_perception", _fake_enqueue)
+    path = "vessel/minecraft/w"
+
+    # A fresh buffer (2s old < 15s window) is NOT flushed yet.
+    now_t = time.time()
+    iface._pending_perceptions[path] = [
+        ("oak_log (4m)", now_t - 2, "minecraft"),
+        ("sheep (9m)", now_t - 1, "minecraft"),
+    ]
+    await iface._flush_perception_batch(path, force=False)
+    assert enqueued == []
+
+    # A stale buffer (20s old) flushes as ONE merged turn and clears.
+    iface._pending_perceptions[path] = [
+        ("oak_log (4m)", now_t - 20, "minecraft"),
+        ("sheep (9m)", now_t - 19, "minecraft"),
+    ]
+    await iface._flush_perception_batch(path, force=False)
+    assert len(enqueued) == 1
+    assert enqueued[0][1] == "perception_batch"
+    assert "oak_log (4m)" in enqueued[0][0]
+    assert "sheep (9m)" in enqueued[0][0]
+    assert path not in iface._pending_perceptions
+
+    # force=True flushes regardless of the window.
+    iface._pending_perceptions[path] = [("x (1m)", now_t - 1, "minecraft")]
+    await iface._flush_perception_batch(path, force=True)
+    assert len(enqueued) == 2
+
+    # A full buffer (>= _PERCEPTION_BATCH_MAX) flushes even when fresh.
+    iface._pending_perceptions[path] = [
+        (f"item {i} (1m)", now_t - 1, "minecraft") for i in range(10)
+    ]
+    await iface._flush_perception_batch(path, force=False)
+    assert len(enqueued) == 3
+    assert "item 0 (1m)" in enqueued[2][0]
+    assert "item 9 (1m)" in enqueued[2][0]
+
+    # _flush_pending_perception_batches sweeps every world with an open batch.
+    iface._pending_perceptions[path] = [("a (1m)", now_t - 30, "minecraft")]
+    iface._pending_perceptions["vessel/minecraft/w2"] = [
+        ("b (2m)", now_t - 30, "minecraft")
+    ]
+    await iface._flush_pending_perception_batches()
+    assert len(enqueued) == 5
+    assert iface._pending_perceptions == {}
+
+
+@pytest.mark.asyncio
 async def test_spawn_reconnect_dedupes_per_world(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

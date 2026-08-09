@@ -45,7 +45,21 @@ INTERFACE_NAME = "vessel"
 
 # Salience filter tuning (simple, language-agnostic — never keyword based).
 _DEDUP_WINDOW_SEC = 30.0
-_RATE_LIMIT_SEC = 2.0
+# Per-event-type rate-limit. Generous because low-priority telemetry is now
+# BATCHED (see _PERCEPTION_BATCH_SEC) — the batch, not this clock, bounds the
+# LLM-turn rate; this clock only dampens burst memory growth.
+_RATE_LIMIT_SEC = 5.0
+
+# Perception batching: low-priority pure-log telemetry (sightings/gather/
+# proximity/movement/status — see is_ephemeral_event) is buffered and flushed
+# as ONE combined perception turn per window instead of one full LLM turn per
+# event. The observed live token burn came from ~15-17 full turns per minute,
+# mostly redundant "you notice" lines whose content is already carried by the
+# next will/action beat's world state. The window bounds latency; the cap
+# bounds a burst. High-value events (player chat, damage, death, spawn, kill)
+# bypass the batch and enqueue immediately.
+_PERCEPTION_BATCH_SEC = 15.0
+_PERCEPTION_BATCH_MAX = 10
 
 # Max length of a slugified world-identity token in the interface path.
 _MAX_WORLD_TOKEN_CHARS = 48
@@ -228,6 +242,10 @@ class VesselInterface:
         # server that is still coming up after a restart cycle does not end
         # the session (see ``_retry_reattach``).
         self._reattach_retry_tasks: dict[str, asyncio.Task[Any]] = {}
+        # Pending low-priority perception batch per world chat id:
+        # ``[(summary, monotonic_ts, environment), ...]`` flushed as ONE turn
+        # (see _PERCEPTION_BATCH_*).
+        self._pending_perceptions: dict[str, list[tuple[str, float, str]]] = {}
         # Out-of-band drone planner bookkeeping. When the will beat has run but
         # the active goal still carries neither a structural target nor a
         # numeric destination — so the motor tick can only fall back to the
@@ -1016,6 +1034,31 @@ class VesselInterface:
         except Exception as exc:
             log_error(f"[vessel_interface] Failed to persist perception to chat: {exc}")
 
+        # Low-priority pure-log telemetry (sightings/gather/proximity/movement/
+        # status) is buffered and flushed as ONE combined perception turn (see
+        # _PERCEPTION_BATCH_*): each event's content is already carried by the
+        # next will/action beat's world state, so one LLM turn per event is
+        # pure token burn (the observed ~15-17 turns/min flood). High-value
+        # events (player chat, damage, death, spawn, kill) bypass the buffer.
+        # Structural (event-kind classification via is_ephemeral_event), never
+        # keyword logic; fully guarded.
+        try:
+            from plugins.rift_vessel.vessel_base import is_ephemeral_event
+
+            if is_ephemeral_event(event_type) and event_type != "chat":
+                buf = self._pending_perceptions.setdefault(interface_path, [])
+                buf.append((summary, time.time(), environment))
+                if len(buf) >= _PERCEPTION_BATCH_MAX:
+                    await self._flush_perception_batch(interface_path, force=True)
+                return True
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[vessel_interface] perception batch routing failed: {exc}")
+
+        # An important event is about to enqueue its own turn: flush any
+        # pending batch first so the merged perception is processed BEFORE the
+        # important turn (chronological order in the chain).
+        await self._flush_perception_batch(interface_path, force=True)
+
         await self._enqueue_perception(
             interface_path=interface_path,
             summary=summary,
@@ -1145,6 +1188,64 @@ class VesselInterface:
         self._last_enqueue_by_type[event_type] = now
         self._last_enqueue_at = now
         return True
+
+    # ------------------------------------------------------------------
+    # Perception batching (token-burn fix: one combined turn per window)
+    # ------------------------------------------------------------------
+
+    async def _flush_perception_batch(
+        self, interface_path: str, force: bool = False
+    ) -> None:
+        """Flush pending low-priority perceptions as ONE combined turn.
+
+        Merges the buffered telemetry lines into a single perception message
+        (``event_type="perception_batch"``) so a burst of sightings costs one
+        LLM turn, not one per event. Waits for the window (or the size cap)
+        unless ``force`` (an important event or a full buffer). The audit log
+        still records each event individually upstream — only the cognition
+        turn is batched. Fail-safe.
+        """
+        buf = self._pending_perceptions.get(interface_path)
+        if not buf:
+            return
+        now = time.time()
+        first_ts = buf[0][1]
+        if (
+            not force
+            and len(buf) < _PERCEPTION_BATCH_MAX
+            and (now - first_ts) < _PERCEPTION_BATCH_SEC
+        ):
+            return
+        items = list(buf)
+        self._pending_perceptions.pop(interface_path, None)
+        merged = "; ".join(s for s, _t, _e in items if s)
+        if not merged:
+            return
+        _env = items[-1][2]
+        log_debug(
+            f"[vessel_interface] flushing perception batch "
+            f"({len(items)} event(s), forced={force})"
+        )
+        try:
+            await self._enqueue_perception(
+                interface_path=interface_path,
+                summary=merged,
+                environment=_env or "minecraft",
+                event_type="perception_batch",
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[vessel_interface] perception batch enqueue failed: {exc}")
+
+    async def _flush_pending_perception_batches(self) -> None:
+        """Flush every world's perception batch whose window has elapsed."""
+        for interface_path in list(self._pending_perceptions.keys()):
+            try:
+                await self._flush_perception_batch(interface_path, force=False)
+            except Exception as exc:  # pragma: no cover - defensive
+                log_debug(
+                    f"[vessel_interface] batch flush failed for "
+                    f"'{interface_path}': {exc}"
+                )
 
     # ------------------------------------------------------------------
     # Message-chain enqueue
@@ -1532,6 +1633,9 @@ class VesselInterface:
                 # whose connector has dropped, so a hung client can't keep
                 # ``has_active_session()`` true and pile up autonomous beats.
                 await self._close_disconnected_sessions()
+                # Flush any perception batch whose window has elapsed (low
+                # priority — one combined turn per world).
+                await self._flush_pending_perception_batches()
                 # Autonomous play: only while a session is active and enabled.
                 # Reflection pause first: if Synth is playing without a real
                 # objective, stop and dedicate one elevated turn to sorting out
