@@ -46,6 +46,82 @@ def test_build_json_prompt_reply_without_text(monkeypatch):
     assert "MASTER INSTRUCTION" in pr.system_instruction
 
 
+def test_soul_dsp_profile_suppressed_on_vessel_turns(monkeypatch):
+    """The standing "About the person you're talking to" profile must not leak
+    into Rift Vessel turns — it is compiled from non-world chats and made
+    Synth greet the wrong parent in-world / cite "Mama" in self-authored goals
+    (observed live). The gate is structural (routing interface_path), never
+    message text."""
+
+    async def dummy_gather(message, ctx):
+        return {}
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+
+    class _FakeRegistry:
+        def get_value(self, key, default=None, **kwargs):
+            if key == "SOUL_DSP_INJECT_ENABLED":
+                return 1
+            return default
+
+    monkeypatch.setattr("core.prompt_engine.config_registry", _FakeRegistry())
+    monkeypatch.setattr(
+        "core.prompt_engine._build_soul_user_profile_prefix",
+        lambda context_section: (
+            "[About the person you're talking to]\n"
+            "<user_profile>MARKER_PROFILE</user_profile>"
+        ),
+    )
+
+    base = dict(
+        chat_id=1,
+        text="hello",
+        message_id=1,
+        from_user=SimpleNamespace(full_name="user", username="user"),
+        date=datetime.now(timezone.utc),
+    )
+
+    # A vessel turn: the profile marker must NOT appear anywhere.
+    vessel_msg = SimpleNamespace(
+        **base,
+        interface_path="vessel/minecraft/192_168_1_69_16269",
+        chat=SimpleNamespace(
+            id="vessel/minecraft/192_168_1_69_16269",
+            type="vessel",
+            title="t",
+            username=None,
+            first_name=None,
+            human_count=0,
+        ),
+    )
+    vessel_result = asyncio.run(
+        build_json_prompt(vessel_msg, {}, interface_name="vessel")
+    )
+    # The DSP prefix is prepended to the PromptRequest's current_text (the
+    # engine-facing user turn) — not the raw ``input.payload.text``.
+    vessel_pr = vessel_result.get("__prompt_request")
+    assert "MARKER_PROFILE" not in getattr(vessel_pr, "current_text", "")
+
+    # A non-vessel turn (plain Telegram chat): the profile IS injected.
+    chat_msg = SimpleNamespace(
+        **base,
+        interface_path="telegram/chat/12345",
+        chat=SimpleNamespace(
+            id="telegram/chat/12345",
+            type="telegram",
+            title="t",
+            username=None,
+            first_name=None,
+            human_count=1,
+        ),
+    )
+    chat_result = asyncio.run(
+        build_json_prompt(chat_msg, {}, interface_name="telegram_bot")
+    )
+    chat_pr = chat_result.get("__prompt_request")
+    assert "MARKER_PROFILE" in getattr(chat_pr, "current_text", "")
+
+
 def test_build_json_prompt_inherits_image_data_from_context_memory(monkeypatch):
     async def dummy_gather(message, ctx):
         return {}

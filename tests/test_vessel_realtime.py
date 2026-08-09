@@ -657,6 +657,52 @@ def test_damage_no_attacker_returns_summary_unchanged() -> None:
 
 
 @pytest.mark.asyncio
+async def test_goal_authoring_allowlist() -> None:
+    """An active goal blocks set_goal on autonomous beats (anti-churn)."""
+    from interface.vessel_interface import VesselInterface
+
+    # With a live goal the beat can only update — it cannot replace mid-task.
+    assert VesselInterface._goal_authoring_allowlist("minecraft", has_goal=True) == {
+        "vessel_minecraft_update_goal"
+    }
+    # With no goal the beat may set one.
+    assert VesselInterface._goal_authoring_allowlist("minecraft", has_goal=False) == {
+        "vessel_minecraft_set_goal",
+        "vessel_minecraft_update_goal",
+    }
+    # Namespace is world-scoped.
+    assert VesselInterface._goal_authoring_allowlist("skyrim", has_goal=True) == {
+        "vessel_skyrim_update_goal"
+    }
+
+
+@pytest.mark.asyncio
+async def test_spawn_reattach_retry_dedupes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed reattach is retried once in the background per world, and the
+    task registry is cleaned up when the retry finishes."""
+    from interface.vessel_interface import VesselInterface
+
+    iface = VesselInterface.__new__(VesselInterface)
+    iface._reattach_retry_tasks = {}
+    spawns: list[str] = []
+
+    async def _fake_retry(environment: str) -> None:
+        spawns.append(environment)
+        await asyncio.sleep(0.05)
+
+    monkeypatch.setattr(iface, "_retry_reattach", _fake_retry)
+
+    iface._spawn_reattach_retry("minecraft")
+    iface._spawn_reattach_retry("minecraft")  # deduped while running
+    await asyncio.sleep(0.01)
+    iface._spawn_reattach_retry("other")
+    await asyncio.sleep(0.1)  # let both finish and their callbacks fire
+
+    assert spawns == ["minecraft", "other"]
+    assert iface._reattach_retry_tasks == {}
+
+
+@pytest.mark.asyncio
 async def test_spawn_reconnect_dedupes_per_world(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

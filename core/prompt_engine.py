@@ -1594,7 +1594,20 @@ def _assemble_prompt_request(  # noqa: PLR0913
     _soul_dsp_prefix = ""
     if config_registry.get_value("SOUL_DSP_INJECT_ENABLED", 0, value_type=int):
         try:
-            _soul_dsp_prefix = _build_soul_user_profile_prefix(context_section)
+            # On Rift Vessel turns the standing "About the person you're talking
+            # to" profile is compiled from non-world chats and never reflects
+            # who is actually in the world — injecting it made Synth greet the
+            # wrong parent in-world and cite "Mama" in self-authored goals
+            # (observed live: "Build a cozy little shelter with mama and papa"
+            # and "Mama Remuraine" while the only in-world player is Papa).
+            # Suppress it structurally via is_vessel_turn (routing metadata,
+            # never message text); the vessel world-state block already renders
+            # real identities ("Remuraine (Scar - your papa)").
+            from core.vessel_focus import is_vessel_turn
+
+            vessel_focus = is_vessel_turn(message, None, interface_path)
+            if not vessel_focus:
+                _soul_dsp_prefix = _build_soul_user_profile_prefix(context_section)
         except Exception:
             _soul_dsp_prefix = ""
 

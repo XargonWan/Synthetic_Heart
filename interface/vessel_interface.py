@@ -223,6 +223,11 @@ class VesselInterface:
         # successful reconnect flips ``is_connected`` and the next sweep clears
         # the grace timer. One reconnect per world at a time.
         self._reconnect_tasks: dict[str, asyncio.Task[Any]] = {}
+        # Out-of-band reattach retries (bounded window), deduped per world:
+        # a failed startup reattach is retried in the background so a world
+        # server that is still coming up after a restart cycle does not end
+        # the session (see ``_retry_reattach``).
+        self._reattach_retry_tasks: dict[str, asyncio.Task[Any]] = {}
         # Out-of-band drone planner bookkeeping. When the will beat has run but
         # the active goal still carries neither a structural target nor a
         # numeric destination — so the motor tick can only fall back to the
@@ -508,22 +513,83 @@ class VesselInterface:
                         f"'{environment}' after restart"
                     )
                 else:
-                    # The bot could not be brought back in-world (bridge dead,
-                    # world server unreachable, or the connector is not really
-                    # connected). Close the stale active row so it does not
-                    # linger as a ghost that keeps gameplay verbs hidden while
-                    # looking connected in the DB.
+                    # The bot could not be brought back in-world yet. The world
+                    # may still be coming up (e.g. the Minecraft server was
+                    # restarted together with SyntH and is not accepting logins
+                    # yet). A single failed connect must not destroy the
+                    # session: retry in the background within a bounded window
+                    # before closing the stale row — otherwise the vessel comes
+                    # back logged out with no active row to reattach.
                     detail = getattr(result, "detail", "unknown")
                     log_info(
-                        f"[vessel_interface] Reattach failed for '{environment}' "
-                        f"({detail}); closing stale session"
+                        f"[vessel_interface] Reattach of '{environment}' failed "
+                        f"({detail}); retrying in background for up to "
+                        f"{self._REATTACH_RETRY_WINDOW_SEC:.0f}s"
                     )
-                    await self._close_stale_sessions(environment)
+                    self._spawn_reattach_retry(environment)
             except Exception as exc:
                 log_warning(
                     f"[vessel_interface] reattach failed for '{environment}': {exc}"
                 )
-                await self._close_stale_sessions(environment)
+                # Same bounded background retry for a raised connect.
+                self._spawn_reattach_retry(environment)
+
+    def _spawn_reattach_retry(self, environment: str) -> None:
+        """Retry a failed reattach in the background (deduped, bounded)."""
+        try:
+            existing = self._reattach_retry_tasks.get(environment)
+            if existing is not None and not existing.done():
+                return
+            task = asyncio.create_task(self._retry_reattach(environment))
+            self._reattach_retry_tasks[environment] = task
+
+            def _done(_t: asyncio.Task[Any], env: str = environment) -> None:
+                if self._reattach_retry_tasks.get(env) is _t:
+                    self._reattach_retry_tasks.pop(env, None)
+
+            task.add_done_callback(_done)
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[vessel_interface] reattach retry spawn failed: {exc}")
+
+    async def _retry_reattach(self, environment: str) -> None:
+        """Repeatedly try to bring a failed reattach back, then give up.
+
+        Runs off the startup path so a slow world server never blocks boot.
+        Sleeps first (the initial attempt already failed); on success the
+        session is live again; when the window expires the stale active row is
+        closed so it never becomes a ghost. Fully guarded.
+        """
+        try:
+            from core.core_initializer import PLUGIN_REGISTRY
+
+            plugin = PLUGIN_REGISTRY.get("vessel_plugin")
+        except Exception:
+            plugin = None
+        if plugin is None or not hasattr(plugin, "connect_world"):
+            return
+        deadline = asyncio.get_event_loop().time() + self._REATTACH_RETRY_WINDOW_SEC
+        while True:
+            try:
+                if asyncio.get_event_loop().time() >= deadline:
+                    log_info(
+                        f"[vessel_interface] Reattach of '{environment}' still "
+                        f"failing after {self._REATTACH_RETRY_WINDOW_SEC:.0f}s; "
+                        "closing stale session"
+                    )
+                    await self._close_stale_sessions(environment)
+                    return
+                await asyncio.sleep(self._REATTACH_RETRY_DELAY_SEC)
+                result = await plugin.connect_world(connector_name=environment)
+                if getattr(result, "ok", False) and self._connector_live(environment):
+                    log_info(
+                        f"[vessel_interface] Reattached active session in "
+                        f"'{environment}' after background retry"
+                    )
+                    return
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:  # pragma: no cover - defensive
+                log_debug(f"[vessel_interface] reattach retry error: {exc}")
 
     def _connector_live(self, environment: str) -> bool:
         """Return True only if ``environment``'s connector is really connected.
@@ -1415,6 +1481,18 @@ class VesselInterface:
     # Never spin faster than this, to keep the idle loop cheap.
     _MIN_TICK_SEC = 1.0
 
+    # Bounded reattach-retry window: when a restart cycle restarts the world
+    # server together with SyntH, the server may still be coming up while the
+    # interface boots. A single failed connect must not destroy the session —
+    # the vessel would come back logged out with no active row to reattach
+    # (observed live: MC server restart → connect ECONNREFUSED → session ended
+    # → no reconnect on the next boot). On reattach failure the interface
+    # retries ``connect_world`` in the background for this window before
+    # closing the stale session. A failed connect never registers the session
+    # in ``_sessions``, so the disconnect-grace sweep leaves it alone meanwhile.
+    _REATTACH_RETRY_WINDOW_SEC = 180.0
+    _REATTACH_RETRY_DELAY_SEC = 20.0
+
     async def _scheduler_loop(self) -> None:
         """Drive the cooldown sweep and the two autonomy layers.
 
@@ -1614,11 +1692,21 @@ class VesselInterface:
             f"(duration={duration:.0f}s, "
             f"goal={'missing' if goal is None else 'step-less'})"
         )
+        # A reflection pause may only REPLACE the goal when there is none. When
+        # a goal exists (even stepless — the window before the Drone-expanded
+        # plan lands), restrict the turn to ``update_goal`` so it refines the
+        # goal instead of re-authoring it; the observed live churn came from
+        # reflections firing in that stepless window with the full catalog and
+        # abandoning the fresh goal. Structural (live goal state), never text.
+        allowed_actions = self._goal_authoring_allowlist(
+            world, has_goal=goal is not None
+        )
         await self._enqueue_perception(
             interface_path=interface_path,
             summary=prompt,
             environment=world,
             event_type="reflection",
+            allowed_actions=allowed_actions,
         )
 
     async def _maybe_run_goal_beat(self) -> None:
@@ -1722,6 +1810,21 @@ class VesselInterface:
             allowed_actions=allowed_actions,
         )
 
+    @staticmethod
+    def _goal_authoring_allowlist(world: str, has_goal: bool) -> set[str]:
+        """Return the per-turn goal-verb allowlist for an autonomous beat.
+
+        With an active goal the beat may only ``update_goal`` — the model
+        cannot casually replace the objective mid-task (the observed live
+        churn: a fresh wood/pick goal was re-authored and abandoned every
+        ~45-60 s, each ``set_goal`` discarding the previous one's plan). With
+        no goal the beat may also ``set_goal`` to commit one. Structural
+        (live goal state + verb namespace), never keyword text.
+        """
+        if has_goal:
+            return {f"vessel_{world}_update_goal"}
+        return {f"vessel_{world}_set_goal", f"vessel_{world}_update_goal"}
+
     async def _maybe_run_will_beat(self) -> None:
         """Enqueue a **volition** cognition turn when it is due (slow layer).
 
@@ -1810,15 +1913,27 @@ class VesselInterface:
 
         prompt = vessel_beat.build_will_prompt(world_state, world)
         self._last_will_beat_at = now
+        # Volition may only SET a goal when there genuinely is none. When a goal
+        # already exists, restrict this turn's catalog to ``update_goal`` alone
+        # so the model cannot casually replace the active objective mid-task —
+        # the observed live churn (a fresh wood/pick goal was re-authored and
+        # abandoned every ~45-60 s, each set_goal discarding the previous one's
+        # plan). Structural (live goal state), never keyword text; mirrors the
+        # goal-beat allowlist mechanism.
+        goal = self._goal_from_world_state(world_state)
+        allowed_actions = self._goal_authoring_allowlist(
+            world, has_goal=goal is not None
+        )
         log_debug(
             f"[vessel_interface] Autonomous will beat for '{world}' "
-            f"(interval={interval}s)"
+            f"(interval={interval}s, allowed={sorted(allowed_actions)})"
         )
         await self._enqueue_perception(
             interface_path=interface_path,
             summary=prompt,
             environment=world,
             event_type="will_beat",
+            allowed_actions=allowed_actions,
         )
 
     async def _maybe_run_action_beat(self) -> None:
