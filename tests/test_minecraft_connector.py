@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any, Dict, List
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -247,7 +248,11 @@ async def test_act_posts_cmd_when_connected(monkeypatch: pytest.MonkeyPatch) -> 
     conn._connected = True
     captured: Dict[str, Any] = {}
 
-    async def _fake_post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _fake_post(
+        path: str,
+        payload: Dict[str, Any],
+        timeout: float | None = None,
+    ) -> Dict[str, Any]:
         captured["path"] = path
         captured["payload"] = payload
         return {"ok": True, "detail": "done", "data": {"x": 1}}
@@ -259,6 +264,101 @@ async def test_act_posts_cmd_when_connected(monkeypatch: pytest.MonkeyPatch) -> 
     assert res.ok is True
     assert res.detail == "done"
     assert res.data == {"x": 1}
+
+
+def test_cmd_http_timeout_explicit_budget() -> None:
+    """An explicit ``timeout_ms`` outlives the bridge's own work budget."""
+    conn = MinecraftConnector()
+    # collect_block with a 60 s bridge budget -> 70 s HTTP read.
+    assert conn._cmd_http_timeout("collect_block", {"timeout_ms": 60000}) == 70.0
+    # Max collect_block budget (300 s) stays under the HTTP cap.
+    assert conn._cmd_http_timeout("collect_block", {"timeout_ms": 300000}) == 310.0
+    # Absurd budgets are capped so a hung bridge cannot pin the Fast Lane.
+    assert conn._cmd_http_timeout("collect_block", {"timeout_ms": 999999999}) == 315.0
+    # Non-numeric payload is treated as absent.
+    assert conn._cmd_http_timeout("collect_block", {"timeout_ms": "abc"}) == 130.0
+
+
+def test_cmd_http_timeout_long_verbs_fallback() -> None:
+    """Long-running verbs without an explicit budget still get headroom."""
+    conn = MinecraftConnector()
+    assert conn._cmd_http_timeout("collect_block", {}) == 130.0
+    assert conn._cmd_http_timeout("goto", {}) == 130.0
+    assert conn._cmd_http_timeout("build_base", {}) == 130.0
+
+
+def test_cmd_http_timeout_quick_verb_uses_default() -> None:
+    """Quick verbs return None so the session default (10 s) applies."""
+    conn = MinecraftConnector()
+    assert conn._cmd_http_timeout("say", {"text": "hi"}) is None
+    assert conn._cmd_http_timeout("status", {}) is None
+
+
+@pytest.mark.asyncio
+async def test_act_passes_long_timeout_for_collect_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deliberate long-running verb must not report a spurious timeout."""
+    conn = MinecraftConnector()
+    conn._connected = True
+    captured: Dict[str, Any] = {}
+
+    async def _fake_post(
+        path: str,
+        payload: Dict[str, Any],
+        timeout: float | None = None,
+    ) -> Dict[str, Any]:
+        captured["path"] = path
+        captured["payload"] = payload
+        captured["timeout"] = timeout
+        return {"ok": True, "detail": "collected", "data": {"collected": 4}}
+
+    monkeypatch.setattr(conn, "_post", _fake_post)
+    res = await conn.act("collect_block", {"name": "oak_log", "count": 4})
+    assert captured["timeout"] == 130.0
+    assert res.ok is True
+
+
+@pytest.mark.asyncio
+async def test_poll_loop_detects_dead_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dead bridge must flip ``is_connected`` False.
+
+    Regression test: ``_get`` swallows connection errors into
+    ``{"ok": False, ...}`` (it never raises) and the bridge's success response
+    has no ``ok`` key — so the poll loop must treat a response without the
+    ``events`` key as a FAILED poll. Before the fix the failure counter was
+    reset every tick, a dead bridge was never detected, and the vessel silently
+    froze against a dead world (``is_connected`` stuck True, no reconnect).
+    """
+    import plugins.rift_vessel.minecraft.minecraft as mc_mod
+
+    conn = MinecraftConnector()
+    conn._connected = True
+    monkeypatch.setattr(mc_mod, "_POLL_INTERVAL_SEC", 0.01)
+
+    async def _fake_get(path: str) -> Dict[str, Any]:
+        if path == "/events":
+            return {"ok": False, "detail": "connection refused"}
+        return {"ok": True, "connected": True}
+
+    monkeypatch.setattr(conn, "_get", _fake_get)
+    monkeypatch.setattr(conn, "_dispatch_event", AsyncMock())
+
+    task = asyncio.create_task(conn._poll_loop())
+    try:
+        for _ in range(500):
+            if not conn._connected:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        # The loop catches CancelledError internally and exits cleanly.
+        task.cancel()
+        await task
+
+    assert conn._connected is False
+    assert "lost contact" in (conn.last_error or "")
 
 
 def _mock_skin_config(monkeypatch: pytest.MonkeyPatch, values: Dict[str, Any]) -> None:
@@ -278,7 +378,11 @@ async def test_apply_skin_url_builds_command_with_legacy_template(
     conn = MinecraftConnector()
     captured: Dict[str, Any] = {}
 
-    async def _fake_post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _fake_post(
+        path: str,
+        payload: Dict[str, Any],
+        timeout: float | None = None,
+    ) -> Dict[str, Any]:
         captured["path"] = path
         captured["payload"] = payload
         return {"ok": True, "detail": "skin command sent", "data": {}}
@@ -310,7 +414,11 @@ async def test_apply_skin_url_default_tries_all_providers(
     conn = MinecraftConnector()
     commands: list[str] = []
 
-    async def _fake_post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _fake_post(
+        path: str,
+        payload: Dict[str, Any],
+        timeout: float | None = None,
+    ) -> Dict[str, Any]:
         commands.append(payload["payload"]["command"])
         return {"ok": True, "detail": "skin command sent", "data": {}}
 
@@ -339,7 +447,11 @@ async def test_apply_skin_templates_list_overrides_default(
     conn = MinecraftConnector()
     commands: list[str] = []
 
-    async def _fake_post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _fake_post(
+        path: str,
+        payload: Dict[str, Any],
+        timeout: float | None = None,
+    ) -> Dict[str, Any]:
         commands.append(payload["payload"]["command"])
         return {"ok": True, "detail": "skin command sent", "data": {}}
 
@@ -371,7 +483,11 @@ async def test_apply_skin_legacy_single_template_still_works(
     conn = MinecraftConnector()
     commands: list[str] = []
 
-    async def _fake_post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _fake_post(
+        path: str,
+        payload: Dict[str, Any],
+        timeout: float | None = None,
+    ) -> Dict[str, Any]:
         commands.append(payload["payload"]["command"])
         return {"ok": True, "detail": "skin command sent", "data": {}}
 
@@ -394,7 +510,11 @@ async def test_apply_skin_no_url_is_noop(
     conn = MinecraftConnector()
     called = False
 
-    async def _fake_post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _fake_post(
+        path: str,
+        payload: Dict[str, Any],
+        timeout: float | None = None,
+    ) -> Dict[str, Any]:
         nonlocal called
         called = True
         return {"ok": True}
@@ -410,7 +530,11 @@ async def test_get_world_state_when_connected(monkeypatch: pytest.MonkeyPatch) -
     conn = MinecraftConnector()
     conn._connected = True
 
-    async def _fake_post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _fake_post(
+        path: str,
+        payload: Dict[str, Any],
+        timeout: float | None = None,
+    ) -> Dict[str, Any]:
         return {
             "ok": True,
             "data": {
@@ -448,7 +572,11 @@ async def test_connect_records_last_error_on_bridge_connect_failure(
     async def _fake_get(path: str) -> Dict[str, Any]:
         return {"ok": True, "mineflayer": True}
 
-    async def _fake_post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _fake_post(
+        path: str,
+        payload: Dict[str, Any],
+        timeout: float | None = None,
+    ) -> Dict[str, Any]:
         return {"ok": False, "detail": "No data available for version 26.2"}
 
     monkeypatch.setattr(conn, "_ensure_bridge_running", _fake_ensure)
@@ -620,3 +748,23 @@ async def test_skin_config_change_noop_when_no_connector(
     # Must not raise.
     MinecraftVesselPlugin._on_skin_config_changed("https://example.com/skin.png")
     await asyncio.sleep(0)
+
+
+def test_annotate_known_players_labels_only_known_players() -> None:
+    """Only a player whose exact username is in the map gets an identity label."""
+    entities: List[Dict[str, Any]] = [
+        {"name": "Remuraine", "kind": "player", "distance": 9},
+        {"name": "Steve", "kind": "player", "distance": 20},
+        {"name": "sheep", "kind": "mob", "distance": 2},
+    ]
+    out = MinecraftConnector._annotate_known_players(
+        entities, {"remuraine": "Scar — your papa"}
+    )
+    labeled = [e for e in out if e.get("known_as")]
+    assert [e["name"] for e in labeled] == ["Remuraine"]
+    assert labeled[0]["known_as"] == "Scar — your papa"
+    # Unknown player and non-player entities pass through untouched, and the
+    # source list is never mutated.
+    assert "known_as" not in out[1]
+    assert "known_as" not in out[2]
+    assert "known_as" not in entities[0]

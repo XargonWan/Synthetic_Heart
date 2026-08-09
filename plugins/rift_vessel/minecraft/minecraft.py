@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import math
 import os
 import random
@@ -75,6 +76,28 @@ _HTTP_TIMEOUT_SEC = 10.0
 # the bot spawns a moment later, leaving an orphaned bridge. 100s leaves
 # headroom over the bridge's 90s budget.
 _CONNECT_HTTP_TIMEOUT_SEC = 100.0
+_CMD_LONG_VERB_TIMEOUT_SEC = 130.0  # bridge navigation cap (120 s) + margin
+_CMD_HTTP_TIMEOUT_MAX_SEC = 315.0  # collect_block max budget (300 s) + margin
+# Verbs whose bridge handler can await bounded navigation or a multi-round work
+# loop instead of answering immediately (goto/mine/collect_block/build_base/…).
+# The Python-side HTTP read for these must outlive the bridge's own budget or
+# the connector reports a spurious "timeout" while the bridge keeps working —
+# and the fast motor reflex then resumes and stomps the still-running bridge
+# action. Structural (verb ids), never payload text.
+_CMD_LONG_RUNNING_VERBS = frozenset(
+    {
+        "goto",
+        "mine",
+        "collect_block",
+        "use",
+        "craft",
+        "follow",
+        "build_base",
+        "shelter",
+        "climb_staircase",
+        "surface",
+    }
+)
 # Consecutive failed ``/events`` polls after which the connector considers the
 # bridge/world client gone and flips ``is_connected`` to False. Without this the
 # poll loop would spin forever on a dead bridge, leaving ``is_connected`` stuck
@@ -1089,6 +1112,19 @@ class MinecraftConnector(VesselConnectorBase):
         while self._connected:
             try:
                 res = await self._get("/events")
+                # ``_get`` NEVER raises: it swallows connection errors into
+                # ``{"ok": False, "detail": ...}`` (and the bridge's success
+                # response has no ``ok`` key — it is ``{"events": [...]}``). A
+                # failed poll must therefore be detected by the missing
+                # ``events`` key; without this the failure counter below is
+                # reset on every tick and a dead bridge is never noticed —
+                # ``is_connected()`` stays True forever, the disconnect-grace
+                # sweep never fires and the vessel silently freezes against a
+                # dead world (observed live after a bridge subprocess died).
+                if not (isinstance(res, dict) and "events" in res):
+                    raise RuntimeError(
+                        str((res or {}).get("detail") or "bridge /events poll failed")
+                    )
                 # A successful poll clears the failure streak.
                 consecutive_failures = 0
                 # Probe embodiment liveness via /health (structural boolean, no
@@ -1215,6 +1251,29 @@ class MinecraftConnector(VesselConnectorBase):
     _GOAL_VERBS = frozenset({"set_goal", "goals", "update_goal"})
     _BASE_VERBS = frozenset({"set_base", "list_bases"})
 
+    @staticmethod
+    def _cmd_http_timeout(action: str, payload: Dict[str, Any]) -> float | None:
+        """Return the HTTP read budget (seconds) for a ``/cmd`` dispatch.
+
+        Long-running bridge verbs work server-side for up to their own budget
+        (``payload.timeout_ms`` when given, else the verb's built-in cap — see
+        the ``_CMD_*`` constants). A too-short HTTP read makes the connector
+        report a spurious timeout while the bridge keeps working, and the fast
+        motor reflex then resumes and stomps the still-running bridge action
+        (observed live: ``collect_block`` aborted mid-navigation). Quick verbs
+        return ``None`` so the session default applies. Structural only —
+        keyed on the verb id and a numeric budget, never payload text.
+        """
+        try:
+            budget_ms = int((payload or {}).get("timeout_ms") or 0)
+        except (TypeError, ValueError):
+            budget_ms = 0
+        if budget_ms > 0:
+            return min(budget_ms / 1000.0 + 10.0, _CMD_HTTP_TIMEOUT_MAX_SEC)
+        if action in _CMD_LONG_RUNNING_VERBS:
+            return _CMD_LONG_VERB_TIMEOUT_SEC
+        return None
+
     async def act(
         self,
         action: str,
@@ -1232,7 +1291,11 @@ class MinecraftConnector(VesselConnectorBase):
             return await self._act_base(action, payload or {})
         if action == "say":
             return await self._act_say(payload or {})
-        res = await self._post("/cmd", {"action": action, "payload": payload or {}})
+        res = await self._post(
+            "/cmd",
+            {"action": action, "payload": payload or {}},
+            timeout=self._cmd_http_timeout(action, payload),
+        )
         if action == "craft":
             self._update_craft_deficit(bool(res.get("ok")), res.get("data") or {})
         return VesselActionResult(
@@ -1734,7 +1797,9 @@ class MinecraftConnector(VesselConnectorBase):
                 if layout.get(key):
                     bridge_payload[key] = layout[key]
             res = await self._post(
-                "/cmd", {"action": "build_base", "payload": bridge_payload}
+                "/cmd",
+                {"action": "build_base", "payload": bridge_payload},
+                timeout=self._cmd_http_timeout("build_base", bridge_payload),
             )
             built = bool(res.get("ok"))
             data = res.get("data") or {}
@@ -1812,6 +1877,13 @@ class MinecraftConnector(VesselConnectorBase):
             return None
         data = res.get("data") or {}
         entities = data.get("entities") or []
+        # Attach the config-driven identity label to known player entities so
+        # the world-state prompt and sightings show WHO a nearby player is
+        # (e.g. "Remuraine (Scar — your papa)") instead of leaving the vessel
+        # to guess — the fix for the vessel greeting the wrong parent when it
+        # only saw a username. Structural: exact username match against
+        # MINECRAFT_KNOWN_PLAYERS; fail-safe (any error keeps the bare list).
+        entities = self._annotate_known_players(entities, self._known_players())
         blocks = data.get("blocks") or []
         inventory = data.get("inventory") or []
         inventory_counts = self._inventory_counts(inventory)
@@ -2343,6 +2415,57 @@ class MinecraftConnector(VesselConnectorBase):
             counts[str(name)] = counts.get(str(name), 0) + count
         return counts
 
+    def _known_players(self) -> dict[str, str]:
+        """Read the ``MINECRAFT_KNOWN_PLAYERS`` identity map (fail-safe).
+
+        JSON map of lowercase in-world player usernames to a short identity
+        label (e.g. ``{"remuraine": "Scar — your papa"}``) that gets shown next
+        to the username in every world-state prompt and sighting, so the vessel
+        never guesses who a nearby player is. Declarative identity config — no
+        text parsing. Any read/parse error degrades to ``{}``.
+        """
+        try:
+            raw = config_registry.get_value(
+                "MINECRAFT_KNOWN_PLAYERS",
+                "{}",
+                value_type=str,
+                group="plugins",
+                component="minecraft_vessel",
+            )
+            value = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(value, dict):
+                return {
+                    str(k).strip().lower(): str(v).strip()
+                    for k, v in value.items()
+                    if str(v).strip()
+                }
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} known-players map unreadable: {exc}")
+        return {}
+
+    @staticmethod
+    def _annotate_known_players(
+        entities: list[dict[str, Any]],
+        known_players: dict[str, str],
+    ) -> list[dict[str, Any]]:
+        """Attach the identity label to known player entities (structural).
+
+        Copies each entity dict (never mutates the caller's bridge payload) and
+        adds ``known_as`` for players whose username is in the map, so the
+        world-state prompt and sightings can show who the player is. Purely
+        structural: exact lowercase username match, never keyword logic.
+        """
+        out: list[dict[str, Any]] = []
+        for ent in entities:
+            if not isinstance(ent, dict):
+                continue
+            clone = dict(ent)
+            name = str(clone.get("name") or "").strip().lower()
+            if clone.get("kind") == "player" and name in known_players:
+                clone["known_as"] = known_players[name]
+            out.append(clone)
+        return out
+
     @staticmethod
     def _build_affordances(
         entities: list[dict[str, Any]],
@@ -2379,6 +2502,9 @@ class MinecraftConnector(VesselConnectorBase):
                     # core can derive a cardinal bearing (N/E/S/W) for the
                     # sighting view. Purely geometric — never inspected here.
                     "position": ent.get("position"),
+                    # Identity label for a known player (see _known_players):
+                    # lets the core render "Remuraine (Scar — your papa)".
+                    "known_as": ent.get("known_as"),
                 }
             )
         for blk in blocks:
@@ -4113,6 +4239,18 @@ class MinecraftConnector(VesselConnectorBase):
             if survival is not None:
                 return survival
 
+            # Yield to a deliberate (cognition-driven) action in flight: a
+            # long-running verb such as ``collect_block`` awaits its own
+            # navigation inside the bridge, and a reflex ``goto``/``mine``
+            # here would replace that pathfinder goal mid-walk — aborting the
+            # deliberate action with "The goal was changed before it could be
+            # completed!" (observed live). The survival guard above still runs
+            # every tick: danger pre-empts deliberation, ordinary movement
+            # reflexes must not. The staticity ward below also stays frozen —
+            # a body deliberately working in one spot is not "parked".
+            if self.deliberate_action_in_flight:
+                return {"acted": False, "reason": "deliberate_action_in_flight"}
+
             # Staticity ward — runs BEFORE the ``no goal`` early-return and every
             # other movement branch, so it covers the cases the tick-to-tick
             # ``_stuck_position_ticks`` watchdog cannot: the body parked in one
@@ -5565,6 +5703,21 @@ class MinecraftVesselPlugin(PluginBase):
             group="plugins",
             component="minecraft_vessel",
             advanced=True,
+        )
+        config_registry.get_value(
+            "MINECRAFT_KNOWN_PLAYERS",
+            "{}",
+            value_type=str,
+            label="Minecraft Known Players",
+            description=(
+                "JSON map of in-world player usernames (lowercase) to a short "
+                "identity label Synth should use to address them — shown next "
+                "to the username in every world-state prompt and sighting, so "
+                "the vessel never guesses who a nearby player is. Example: "
+                '{"remuraine": "Scar — your papa"}.'
+            ),
+            group="plugins",
+            component="minecraft_vessel",
         )
 
     def get_metadata(self) -> dict:

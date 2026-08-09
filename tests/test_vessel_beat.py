@@ -970,3 +970,16 @@ def test_resolve_goal_beat_interval_failsafe_on_error() -> None:
         raise RuntimeError("boom")
 
     assert resolve_goal_beat_interval(_boom, default=45) == 45
+
+
+def test_fmt_items_renders_known_player_identity() -> None:
+    """A connector-supplied identity label is appended next to the entity id."""
+    from core.vessel_beat import _fmt_items
+
+    items: list[dict[str, Any]] = [
+        {"name": "remuraine", "kind": "player", "known_as": "Scar - your papa"},
+        {"name": "sheep", "kind": "mob"},
+    ]
+    rendered = _fmt_items(items)
+    assert "remuraine (Scar - your papa)" in rendered
+    assert "sheep" in rendered

@@ -91,8 +91,14 @@ def _fmt_items(items: list[Any], key: str | None = None) -> str:
                 )
                 if label in (None, ""):
                     continue
+                # A connector-supplied identity label (e.g. a known in-world
+                # player: username -> "Scar — your papa") is appended in
+                # parentheses so the prompt shows WHO the entity is, not just
+                # its raw id. Purely structural — never parsed for keywords.
+                known_as = entry.get("known_as")
+                text = f"{label} ({known_as})" if known_as else str(label)
                 count = entry.get("count")
-                rendered.append(f"{label} x{count}" if count else str(label))
+                rendered.append(f"{text} x{count}" if count else text)
         else:
             if entry in (None, ""):
                 continue

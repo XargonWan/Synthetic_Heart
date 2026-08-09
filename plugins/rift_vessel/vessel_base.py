@@ -229,6 +229,51 @@ class VesselConnectorBase(ABC):
             in-world failure — return ``ok=False`` with a ``detail`` instead.
         """
 
+    # ------------------------------------------------------------------
+    # Deliberate-action busy tracking
+    # ------------------------------------------------------------------
+
+    # Count of cognition-driven (deliberate) actions currently in flight on
+    # this connector. Class-level default — the first in-flight mark shadows
+    # it with an instance attribute. See :meth:`act_deliberate`.
+    _deliberate_in_flight: int = 0
+
+    @property
+    def deliberate_action_in_flight(self) -> bool:
+        """``True`` while a cognition-driven action is executing on the body.
+
+        A fast motor/reflex layer (``motor_step``) must yield while this is
+        set: re-issuing its own movement commands mid-action would pre-empt
+        the deliberate verb (observed live in Minecraft: the 3 s motor tick's
+        ``goto`` replaced the pathfinder goal of an in-flight
+        ``collect_block``, which aborted with "The goal was changed before it
+        could be completed!"). A survival guard must be evaluated *before*
+        this check so danger still pre-empts deliberation.
+        """
+        return self._deliberate_in_flight > 0
+
+    async def act_deliberate(
+        self,
+        action: str,
+        payload: Dict[str, Any],
+    ) -> VesselActionResult:
+        """Run a **cognition-driven** action, marking the body busy meanwhile.
+
+        This is the entry point the core Vessel plugin uses for LLM-chosen
+        actions. It behaves exactly like :meth:`act` but keeps
+        :attr:`deliberate_action_in_flight` set for the whole dispatch —
+        including long-running verbs (``collect_block`` can run for the full
+        bridge budget) — so the fast motor reflex defers instead of fighting
+        the deliberate act for control of the body. Reflex-internal dispatches
+        (``motor_step`` movement, a survival guard) call :meth:`act` directly
+        and never mark themselves deliberate.
+        """
+        self._deliberate_in_flight += 1
+        try:
+            return await self.act(action, payload)
+        finally:
+            self._deliberate_in_flight -= 1
+
     async def get_world_state(self) -> WorldState | None:
         """Return the current :class:`WorldState`, or ``None`` if unavailable.
 

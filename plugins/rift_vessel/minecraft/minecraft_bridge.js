@@ -2693,6 +2693,19 @@ async function runAction(action, payload) {
       // can "succeed" while collecting nothing).
       const block = resolveTargetBlock(payload.target, payload.search_radius);
       if (!block) {
+        // Same structural entity hint as collect_block: a 'mine sheep' request
+        // means the model mistook a living entity for a block — say so
+        // precisely instead of "no matching block to mine nearby".
+        const entity = resolveTargetEntity(payload.target);
+        if (entity) {
+          return {
+            ok: false,
+            detail:
+              `'${payload.target}' is a living entity, not a block — ` +
+              "interact with it via 'use' or 'attack'",
+            data: {},
+          };
+        }
         return { ok: false, detail: 'no matching block to mine nearby', data: {} };
       }
       try {
@@ -2822,6 +2835,18 @@ async function runAction(action, payload) {
         if (collectedSoFar >= wantCount) break;
         const block = resolveTargetBlock(name, searchRadius);
         if (!block) {
+          // The requested name may be a living entity rather than a block
+          // (e.g. the model asks to 'collect sheep' for wool). Resolve it
+          // structurally (exact entity id) and surface a precise reason so
+          // cognition picks the right verb instead of looping on a failed
+          // gather. Keyword-free: the id is the game's own entity id.
+          const entity = resolveTargetEntity(name);
+          if (entity) {
+            lastDetail =
+              `'${name}' is a living entity, not a block — ` +
+              "interact with it via 'use' or 'attack'";
+            break;
+          }
           lastDetail = rounds === 0 ? `no ${name} block nearby` : `no more ${name} nearby`;
           break;
         }
@@ -3715,7 +3740,7 @@ async function runAction(action, payload) {
       // Minecraft item name; the bridge never interprets what a name means.
       // Recipes needing a 3x3 grid require a crafting table — we auto-locate
       // the nearest one and walk to it when out of reach.
-      const itemName = String(payload.item || '').trim().toLowerCase();
+      let itemName = String(payload.item || '').trim().toLowerCase();
       if (!itemName) return { ok: false, detail: 'item name required', data: {} };
       const count = Math.min(Math.max(parseInt(payload.count || '1', 10) || 1, 1), 64);
       const version = bot.version;
@@ -3723,7 +3748,22 @@ async function runAction(action, payload) {
       if (!mcData || !mcData.itemsByName) {
         return { ok: false, detail: 'crafting unavailable (minecraft-data not loaded)', data: {} };
       }
-      const itemDef = mcData.itemsByName[itemName];
+      let itemDef = mcData.itemsByName[itemName];
+      if (!itemDef && itemName === 'bed') {
+        // Modern Minecraft has no bare "bed" item — beds are dyed
+        // (white_bed, red_bed, …) and all variants share one recipe (3 wool +
+        // 3 planks). Accept the generic "bed" name and resolve the first bed
+        // item structurally (``*_bed`` ids — the same idiom as the
+        // night-shelter bed search), so the model learns the exact id from the
+        // result instead of looping on "unknown item 'bed'".
+        const bedItem = Object.keys(mcData.itemsByName).find(
+          (id) => typeof id === 'string' && id.endsWith('_bed')
+        );
+        if (bedItem) {
+          itemDef = mcData.itemsByName[bedItem];
+          itemName = bedItem;
+        }
+      }
       if (!itemDef) {
         return { ok: false, detail: `unknown item '${itemName}'`, data: {} };
       }

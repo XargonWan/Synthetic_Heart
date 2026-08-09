@@ -1054,7 +1054,16 @@ class VesselPlugin(AIPluginBase):
         # the connector call — it never changes behaviour.
         _act_started = time.monotonic()
         try:
-            result = connector.act(action, payload)
+            # Route cognition-driven actions through the connector's deliberate
+            # entry point when it provides one
+            # (VesselConnectorBase.act_deliberate): the body stays marked busy
+            # for the whole dispatch so the fast motor reflex yields instead of
+            # pre-empting a long-running deliberate verb (e.g. collect_block).
+            # Duck-typed connectors without it degrade to a plain act() call.
+            _act_entry = getattr(connector, "act_deliberate", None)
+            if not callable(_act_entry):
+                _act_entry = connector.act
+            result = _act_entry(action, payload)
             if asyncio.iscoroutine(result):
                 result = await result
             _act_elapsed_ms = (time.monotonic() - _act_started) * 1000.0

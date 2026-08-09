@@ -214,6 +214,15 @@ class VesselInterface:
         # session was still active. Once the grace window elapses the session is
         # force-closed so autonomous beats stop and the message flow unblocks.
         self._disconnected_since: dict[str, float] = {}
+        # Out-of-band reconnect tasks, deduped per world. A reconnect runs
+        # ``connect_world`` which can take a long time (cold bridge spawn +
+        # login, up to the 100 s connect budget) or hang on the connector's
+        # connect lock — awaiting it inline in the scheduler tick would freeze
+        # the whole autonomy loop (sweeps, beats, motor) for that long. These
+        # run in the background so the tick keeps ticking and retrying; a
+        # successful reconnect flips ``is_connected`` and the next sweep clears
+        # the grace timer. One reconnect per world at a time.
+        self._reconnect_tasks: dict[str, asyncio.Task[Any]] = {}
         # Out-of-band drone planner bookkeeping. When the will beat has run but
         # the active goal still carries neither a structural target nor a
         # numeric destination — so the motor tick can only fall back to the
@@ -2877,14 +2886,19 @@ class VesselInterface:
             return None
         distance = element.get("distance")
         bearing = VesselInterface._cardinal_bearing(origin, element.get("position"))
+        # Connector-supplied identity label for a known player (username ->
+        # "Scar — your papa"): append it so a sighting says WHO is there, not
+        # just a raw username the vessel might misattribute. Structural.
+        known_as = element.get("known_as")
+        target_txt = f"{target} ({known_as})" if known_as else str(target)
         if isinstance(distance, (int, float)):
             dist_txt = f"~{round(float(distance))} blocks"
             if bearing:
-                return f"{target} ({dist_txt} {bearing})"
-            return f"{target} ({dist_txt})"
+                return f"{target_txt} ({dist_txt} {bearing})"
+            return f"{target_txt} ({dist_txt})"
         if bearing:
-            return f"{target} ({bearing})"
-        return str(target)
+            return f"{target_txt} ({bearing})"
+        return target_txt
 
     async def _collect_en_route_sightings(
         self,
@@ -3147,13 +3161,15 @@ class VesselInterface:
                 # RECONNECTING state: the session is frozen (has_active_session()
                 # now reads false via the liveness probe, so beats/perceptions
                 # stop and priorities are untouched) while we try to bring the
-                # connector back before the grace elapses.
-                await self._attempt_reconnect(environment)
+                # connector back before the grace elapses. Reconnect runs out of
+                # band — awaiting it here would block the whole scheduler tick
+                # for the (potentially long / hung) bridge spawn + connect.
+                self._spawn_reconnect(environment)
                 continue
 
             if now - first_seen < grace:
                 # Still within the reconnection window — keep retrying.
-                await self._attempt_reconnect(environment)
+                self._spawn_reconnect(environment)
                 continue
 
             # Grace elapsed and still disconnected: close the stale session(s).
@@ -3171,6 +3187,32 @@ class VesselInterface:
                     f"'{environment}': {exc}"
                 )
             self._disconnected_since.pop(environment, None)
+
+    def _spawn_reconnect(self, environment: str) -> None:
+        """Dispatch a background reconnect for a dropped world (deduped).
+
+        ``connect_world`` can take a long time (a cold bridge spawn + login can
+        approach the 100 s connect budget) or hang on the connector's connect
+        lock. Awaiting it inline would freeze the scheduler tick for that long,
+        stalling every sweep, beat and motor tick (observed live: a 3-minute
+        vessel freeze after the bridge subprocess died). Running it as a
+        deduped background task keeps the tick alive — the sweep keeps retrying
+        within the grace window and the rest of the world keeps ticking.
+        """
+        try:
+            existing = self._reconnect_tasks.get(environment)
+            if existing is not None and not existing.done():
+                return
+            task = asyncio.create_task(self._attempt_reconnect(environment))
+            self._reconnect_tasks[environment] = task
+
+            def _done(_t: asyncio.Task[Any], env: str = environment) -> None:
+                if self._reconnect_tasks.get(env) is _t:
+                    self._reconnect_tasks.pop(env, None)
+
+            task.add_done_callback(_done)
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[vessel_interface] reconnect spawn failed: {exc}")
 
     async def _attempt_reconnect(self, environment: str) -> None:
         """Try to bring a dropped connector back during the RECONNECTING window.

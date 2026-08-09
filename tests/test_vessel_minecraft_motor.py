@@ -14,6 +14,7 @@ three things ``motor_step`` touches (``_connected``, ``get_world_state`` and
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -1363,3 +1364,94 @@ async def test_motor_step_staticity_ward_fires_without_goal() -> None:
 
     # At least one tick fired the ward (relocated) instead of returning no_goal.
     assert any(r.get("reason") == "staticity_ward" for r in results)
+
+
+# ----------------------------------------------------------------------
+# Deliberate-action busy guard (reflex must yield to an in-flight LLM action)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_motor_step_defers_while_deliberate_action_in_flight() -> None:
+    """A cognition-driven action in flight must not be stomped by the reflex.
+
+    Regression test for the live-observed bug where the 3 s motor tick's
+    ``goto`` replaced the pathfinder goal of an in-flight ``collect_block``,
+    aborting it with "The goal was changed before it could be completed!".
+    """
+    conn = _FakeConnector(
+        affordances=[
+            {"kind": "block", "target": "oak_log", "verb": "mine", "distance": 1.0}
+        ]
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+    dispatched: list[tuple[str, dict[str, Any]]] = []
+
+    async def slow_act(action: str, payload: dict[str, Any]) -> VesselActionResult:
+        dispatched.append((action, payload or {}))
+        started.set()
+        await release.wait()
+        return VesselActionResult(ok=True)
+
+    conn.act = slow_act  # type: ignore[method-assign]
+
+    task = asyncio.create_task(
+        conn.act_deliberate("collect_block", {"name": "oak_log", "count": 4})
+    )
+    await started.wait()
+    assert conn.deliberate_action_in_flight is True
+
+    result = await conn.motor_step(_GOAL_TARGET_OAK)
+    assert result == {"acted": False, "reason": "deliberate_action_in_flight"}
+    # The reflex dispatched nothing: the in-reach ``mine`` affordance was NOT
+    # acted on while the deliberate collect was running.
+    assert dispatched == [("collect_block", {"name": "oak_log", "count": 4})]
+
+    release.set()
+    deliberate_result = await task
+    assert deliberate_result.ok is True
+    # The busy mark is always released once the deliberate action returns.
+    assert conn.deliberate_action_in_flight is False
+
+
+@pytest.mark.asyncio
+async def test_survival_guard_preempts_deliberate_action_in_flight() -> None:
+    """Danger still pre-empts deliberation: the survival guard runs BEFORE the
+    busy check, so a drowning body surfaces even while a deliberate action is
+    in flight."""
+    conn = _FakeConnector()
+    conn._sp_enabled = True
+    conn._sp_low_oxygen = float(MinecraftConnector._LOW_OXYGEN)
+    conn._sp_low_health = float(MinecraftConnector._LOW_HEALTH_FLEE)
+    conn._sp_hostile_dist = float(MinecraftConnector._HOSTILE_NEAR_DIST)
+    conn._sp_fight_back = True
+    conn._sp_fight_max_fails = int(MinecraftConnector._FIGHT_MAX_FAILS)
+    conn._sp_use_ranged = True
+    conn._sp_ranged_min_dist = float(MinecraftConnector._RANGED_MIN_DIST)
+    conn._sp_appraisal_enabled = True
+    conn._sp_engage_ratio = float(MinecraftConnector._ENGAGE_RATIO)
+    conn._sp_weak_mob_power = float(MinecraftConnector._WEAK_MOB_POWER)
+    conn._world_state = WorldState(
+        environment="minecraft",
+        health=20.0,
+        position={"x": 0.0, "y": 64.0, "z": 0.0},
+        possible_actions=[],
+        flags={"connected": True},
+        extra={
+            "is_alive": True,
+            "oxygen": 2,
+            "health": 20.0,
+            "block_head": "water",
+            "block_feet": "water",
+            "is_in_water": True,
+            "entities": [],
+            "affordances": [],
+        },
+    )
+    # A deliberate action is in flight — the reflex must NOT defer to it now.
+    conn._deliberate_in_flight = 1
+
+    result = await conn.motor_step(_ACTIVE_GOAL)
+    assert result.get("reason") == "survival:drowning"
+    assert ("surface", {}) in conn.calls

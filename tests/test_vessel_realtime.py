@@ -26,6 +26,7 @@ interface_path) — never from message text.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 
@@ -648,3 +649,63 @@ def test_damage_no_attacker_returns_summary_unchanged() -> None:
         == "Took damage"
     )
     assert iface._attack_counts == {}
+
+
+# ---------------------------------------------------------------------------
+# Reconnect dispatch (background, deduped per world)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_spawn_reconnect_dedupes_per_world(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dropped world gets ONE background reconnect while one is in flight,
+    and the task registry is cleaned up once each reconnect finishes."""
+    from interface.vessel_interface import VesselInterface
+
+    iface = VesselInterface.__new__(VesselInterface)
+    iface._reconnect_tasks = {}
+    spawns: list[str] = []
+
+    async def _fake_reconnect(environment: str) -> None:
+        spawns.append(environment)
+        await asyncio.sleep(0.05)
+
+    monkeypatch.setattr(iface, "_attempt_reconnect", _fake_reconnect)
+
+    iface._spawn_reconnect("minecraft")
+    iface._spawn_reconnect("minecraft")  # deduped: first still running
+    await asyncio.sleep(0.01)
+    iface._spawn_reconnect("other")  # a different world spawns its own
+    await asyncio.sleep(0.1)  # let both finish and their callbacks fire
+
+    assert spawns == ["minecraft", "other"]
+    assert iface._reconnect_tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_describe_sighting_shows_known_player_identity() -> None:
+    """A known player sighting shows WHO is there, not just the raw username."""
+    from interface.vessel_interface import VesselInterface
+
+    origin: dict[str, Any] = {"x": 0.0, "y": 64.0, "z": 0.0}
+    line = VesselInterface._describe_sighting(
+        {
+            "target": "remuraine",
+            "distance": 9,
+            "position": {"x": 0.0, "y": 64.0, "z": -9.0},
+            "known_as": "Scar - your papa",
+        },
+        origin,
+    )
+    assert line is not None
+    assert "remuraine (Scar - your papa)" in line
+    assert "blocks" in line
+    # Without an identity label the rendering is unchanged.
+    plain = VesselInterface._describe_sighting(
+        {"target": "sheep", "distance": 3, "position": {"x": 3.0, "y": 64.0, "z": 0.0}},
+        origin,
+    )
+    assert plain is not None
+    assert plain == "sheep (~3 blocks E)"

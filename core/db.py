@@ -1502,6 +1502,27 @@ _GRILLO_PG_INDEX_DDL: tuple[str, ...] = (
     " ON grillo_action_execs (activity_log_id)",
 )
 
+# Agentic Runtime 2.0 task table (init-db.sql). Same MariaDB dialect /
+# Postgres-translation caveat as the grillo and vessel tables above. Only the
+# Postgres preflight path (ensure_plugin_tables) creates it on Postgres — the
+# inline MariaDB block below is unreachable there, and without this table the
+# agentic task recorder and the goal-expansion Drone fail with
+# 'relation "agent_tasks" does not exist'.
+_AGENT_TASKS_DDL = """
+    CREATE TABLE IF NOT EXISTS agent_tasks (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        engine VARCHAR(64),
+        status ENUM('pending','running','waiting_for_approval','paused','completed','failed','cancelled') NOT NULL DEFAULT 'pending',
+        input JSON,
+        iterations_meta JSON,
+        output JSON,
+        trainer_id VARCHAR(64),
+        metadata JSON,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    """
+
 
 async def init_grillo_tables() -> None:
     """Create the grillo audit tables (idempotent, MariaDB and Postgres).
@@ -1517,6 +1538,22 @@ async def init_grillo_tables() -> None:
             if _get_db_type() == "postgres":
                 for index_sql in _GRILLO_PG_INDEX_DDL:
                     await cur.execute(index_sql)
+            await conn.commit()
+
+
+async def init_agent_tables() -> None:
+    """Create the Agentic Runtime 2.0 task table (idempotent, MariaDB+Postgres).
+
+    ``agent_tasks`` records agentic turns and Drone sub-agent tasks
+    (``metadata.source`` / ``metadata.drone.parent_task_id``). On Postgres it is
+    only created by this preflight — the MariaDB-only DDL block in
+    ``ensure_plugin_tables`` is unreachable there, so without this call every
+    Drone spawn (including the Rift Vessel goal-expansion Drone) fails with
+    'relation "agent_tasks" does not exist'.
+    """
+    async with get_conn_ctx() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(_AGENT_TASKS_DDL)
             await conn.commit()
 
 
@@ -1660,6 +1697,16 @@ async def ensure_plugin_tables() -> None:
             except Exception as init_err:
                 log_warning(
                     f"[db] Postgres preflight init skipped for vessel tables: {init_err}"
+                )
+            # Agentic Runtime 2.0 task table (init-db.sql + the MariaDB-only
+            # block below, which the Postgres branch never reaches). Without it
+            # every Drone spawn fails with 'relation "agent_tasks" does not
+            # exist' — including the Rift Vessel goal-expansion Drone.
+            try:
+                await init_agent_tables()
+            except Exception as init_err:
+                log_warning(
+                    f"[db] Postgres preflight init skipped for agent_tasks: {init_err}"
                 )
             # Idempotent one-shot schema migrations (backup+verify+drop of
             # legacy tables, etc.) — applied automatically on every deploy.
@@ -1824,22 +1871,7 @@ async def ensure_plugin_tables() -> None:
                 await cur.execute(_VESSEL_DIARY_DDL)
 
                 # agent task table (init-db.sql) — Agentic Runtime 2.0
-                await cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS agent_tasks (
-                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                        engine VARCHAR(64),
-                        status ENUM('pending','running','waiting_for_approval','paused','completed','failed','cancelled') NOT NULL DEFAULT 'pending',
-                        input JSON,
-                        iterations_meta JSON,
-                        output JSON,
-                        trainer_id VARCHAR(64),
-                        metadata JSON,
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-                    """
-                )
+                await cur.execute(_AGENT_TASKS_DDL)
 
                 # external_endpoints (core/external_endpoints)
                 await cur.execute(
