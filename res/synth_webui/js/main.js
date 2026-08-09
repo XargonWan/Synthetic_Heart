@@ -2818,6 +2818,41 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
             if (keep) sel.value = keep;
         }
 
+        function syncAppliedEnginePreset(data) {
+            // The apply endpoint is authoritative.  The immediately-following
+            // /api/components response may still expose the registry's previous
+            // current_model, which left the visible model textbox stale until a
+            // full page refresh even though the preset was already active.
+            const endpoint = (data && data.endpoint && typeof data.endpoint === 'object')
+                ? data.endpoint : {};
+            const preset = (data && data.preset && typeof data.preset === 'object')
+                ? data.preset : {};
+            const appliedModel = String(
+                preset.model || endpoint.default_model || endpoint.current_model || ''
+            ).trim();
+
+            if (_engineCfgActive) {
+                const activeId = Number(_engineCfgActive.id);
+                const endpointId = Number(endpoint.id);
+                if (!Number.isFinite(activeId) || !Number.isFinite(endpointId) || activeId === endpointId) {
+                    if (endpoint.extra_config && typeof endpoint.extra_config === 'object') {
+                        _engineCfgActive.extra_config = { ...endpoint.extra_config };
+                    } else if (preset.extra_config && typeof preset.extra_config === 'object') {
+                        _engineCfgActive.extra_config = { ...preset.extra_config };
+                    }
+                    if (appliedModel) _engineCfgActive.current_model = appliedModel;
+                    renderEngineConfigForm(_engineCfgActive);
+                }
+            }
+
+            if (appliedModel) {
+                const modelSearch = document.getElementById('cortex-model-search');
+                const modelLabel = document.getElementById('cortex-engine-model');
+                if (modelSearch) modelSearch.value = appliedModel;
+                if (modelLabel) modelLabel.textContent = `model: ${appliedModel}`;
+            }
+        }
+
         function initEngineConfigEditor() {
             const cfgStatus = document.getElementById('cortex-engine-config-status');
             const setCfgStatus = (msg, ok) => {
@@ -2882,6 +2917,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         setCfgStatus(`Applied "${name}".`, true);
                         if (window.showToast) window.showToast(`Engine preset "${name}" applied`, false);
                         await loadComponentsSummary();
+                        syncAppliedEnginePreset(data);
                     } catch (err) {
                         setCfgStatus('Apply failed: ' + err.message, false);
                     }

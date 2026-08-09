@@ -1536,11 +1536,19 @@
            adjacent sibling that the `:checked + label` rules rely on) but is
            visually removed so it doesn't appear next to the toggle. */
         input[type="checkbox"]:has(+ .toggle-switch) {
-            position: absolute;
+            /* Keep the focus target in the same flex row as its visible label.
+               With position:absolute and no positioned parent Chromium placed
+               the 1px checkbox far below the slider; clicking the label then
+               scrolled the whole WebUI past the active panel. */
+            position: static;
+            flex: 0 0 1px;
             width: 1px;
             height: 1px;
             opacity: 0;
             margin: 0;
+            padding: 0;
+            overflow: hidden;
+            clip-path: inset(50%);
             pointer-events: none;
         }
         .toggle-switch {
