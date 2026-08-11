@@ -1373,6 +1373,22 @@ class TestHistoryToTurns:
         assert turns[0].content == "[3 hours earlier] nighty night bubu"
         assert turns[1].content == "[3 hours earlier] Goodnight, Daddy!"
 
+    def test_empty_content_lines_produce_no_turns(self) -> None:
+        """A blank '[ts] Sender: ""' line must not become an empty-content
+        user/assistant turn in the provider messages array (blank blocks in
+        Langfuse traces). Defense-in-depth on top of the history_engine guard."""
+        lines = [
+            '[09/08/26:0218] Scar: ""',
+            '[09/08/26:0219] self: ""',
+            '[09/08/26:0220] Scar: "real line"',
+        ]
+
+        turns = self._call(lines, {"dee"})
+
+        assert len(turns) == 1
+        assert turns[0].role == "user"
+        assert turns[0].content == "real line"
+
     def test_peer_lookup_failure_falls_back_to_plain_user(self, monkeypatch) -> None:
         def _raise():
             raise RuntimeError("config unavailable")

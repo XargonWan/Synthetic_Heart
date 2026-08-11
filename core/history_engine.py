@@ -533,6 +533,18 @@ def _is_ignored_prompt_history_entry(entry: HistoryEntry) -> bool:
     text = str(
         entry.get("text") or entry.get("message_text") or entry.get("content") or ""
     )
+    # Chat-like entries with NO text (media without a caption, empty placeholder
+    # rows) carry zero signal for the model and would render as a blank
+    # '[ts] Sender: ""' line, which `_history_to_turns` converts into an
+    # empty-content user/assistant turn in the provider messages array
+    # (observed as blank blocks in Langfuse traces). Skip them so the prompt
+    # only ever contains lines that say something. Diary-like dicts
+    # (interaction_summary/personal_thought) are exempt — they are rendered by
+    # the diary branch of `_entry_to_text`, never as chat lines.
+    if not text.strip() and not (
+        entry.get("interaction_summary") or entry.get("personal_thought")
+    ):
+        return True
     if sender != "self":
         return False
 
@@ -931,9 +943,7 @@ class HistoryEngine:
                 # recent in the durable cache.
                 if not vessel_focus:
                     unified_candidates = [
-                        m
-                        for m in unified_candidates
-                        if not is_vessel_history_entry(m)
+                        m for m in unified_candidates if not is_vessel_history_entry(m)
                     ]
                 if isinstance(chat_map, dict):
                     for k, q in chat_map.items():

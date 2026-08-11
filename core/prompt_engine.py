@@ -985,6 +985,13 @@ def _history_to_turns(
             continue
         sender = m.group(1).strip()
         content = m.group(2)
+        # Skip turns whose quoted content is empty/whitespace. A blank
+        # '[ts] Sender: ""' line (e.g. media without a caption) would otherwise
+        # become an empty-content user/assistant message in the provider
+        # payload — observed as blank blocks in Langfuse traces. Belt-and-braces
+        # on top of the history_engine guard; never keyword logic.
+        if not content.strip():
+            continue
         sender_lower = sender.lower()
         is_peer = False
         if sender_lower in all_synth_names:

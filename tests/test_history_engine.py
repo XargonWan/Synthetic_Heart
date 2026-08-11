@@ -268,3 +268,69 @@ async def test_history_engine_excludes_vessel_rows_from_non_vessel_context(
     joined = "\n".join(context["history_current_chat"] + context["history_recent"])
     assert "ordinary chat line" in joined
     assert "stale vessel line" not in joined
+
+
+async def test_empty_text_entries_do_not_render_blank_lines(monkeypatch) -> None:
+    """Chat-like entries with no text (e.g. media without a caption) must not
+    become blank '[ts] Sender: ""' lines in history_current_chat. They carry
+    zero signal and previously surfaced as empty-content user/assistant turns
+    in the provider messages array (blank blocks in Langfuse traces).
+    Diary-like dicts (interaction_summary) must still render."""
+    from core.history_engine import HistoryEngine, _is_ignored_prompt_history_entry
+
+    current_path = "telegram_bot/123"
+    now_ts = "2026-08-11T05:00:00+00:00"
+
+    # Unit-level: the guard itself.
+    assert _is_ignored_prompt_history_entry(
+        {"sender_name": "Scar", "text": "", "timestamp": now_ts}
+    )
+    assert _is_ignored_prompt_history_entry(
+        {"sender_name": "self", "text": "  ", "timestamp": now_ts}
+    )
+    # Diary-like dicts are exempt (no text field but a summary).
+    assert not _is_ignored_prompt_history_entry(
+        {"sender_name": "Scar", "interaction_summary": "We talked", "timestamp": now_ts}
+    )
+    # Real chat lines are never ignored by this rule.
+    assert not _is_ignored_prompt_history_entry(
+        {"sender_name": "Scar", "text": "hello", "timestamp": now_ts}
+    )
+
+    monkeypatch.setattr(
+        "core.chat_history_cache.load_chat_history",
+        AsyncMock(return_value=deque()),
+    )
+    monkeypatch.setattr(
+        "core.chat_history_cache.load_global_chat_history",
+        AsyncMock(return_value=deque()),
+    )
+    monkeypatch.setattr("core.core_initializer.PLUGIN_REGISTRY", {})
+
+    context = await HistoryEngine().build_context(
+        message=SimpleNamespace(interface_path=current_path),
+        context_memory={
+            current_path: deque(
+                [
+                    {
+                        "sender_name": "Scar",
+                        "text": "",
+                        "timestamp": now_ts,
+                        "interface_path": current_path,
+                    },
+                    {
+                        "sender_name": "Scar",
+                        "text": "real question",
+                        "timestamp": now_ts,
+                        "interface_path": current_path,
+                    },
+                ]
+            )
+        },
+        interface_name="telegram_bot",
+        text="current input",
+    )
+
+    joined = "\n".join(context["history_current_chat"])
+    assert "real question" in joined
+    assert 'Scar: ""' not in joined
