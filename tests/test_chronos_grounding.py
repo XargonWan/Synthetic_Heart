@@ -195,3 +195,63 @@ async def test_web_search_execute_action_triggers_delivery(
         assert kwargs["action_type"] == "search_current_knowledge"
         assert kwargs["action_outputs"][0]["type"] == "web_search_result"
         assert kwargs["action_outputs"][0]["result"]["title"] == "Search Result"
+
+
+@pytest.mark.asyncio
+async def test_web_search_direct_fallback_when_delivery_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When LLM delivery fails, results (or a no-results note) reach the user.
+
+    Reproduces the "websearch does nothing" incident: the action context lacks
+    interface_name, so request_llm_response bailed out silently; the plugin
+    then treated non-exception as success and never sent anything, leaving the
+    user with no reply after Synth promised to look something up.
+    """
+    plugin = WebSearchPlugin()
+
+    action = {
+        "type": "search_current_knowledge",
+        "payload": {"query": "current event query"},
+    }
+    # Realistic action context: interface_path/chat_id are present, but
+    # interface_name is NOT (that is what the old code relied on).
+    context = {
+        "prompt_request_mode": "chat",
+        "interface_path": "telegram_bot/123",
+        "chat_id": 123,
+    }
+
+    async def mock_search(query: str, max_results: int = 5) -> list[dict[str, str]]:
+        return []
+
+    monkeypatch.setattr("plugins.web_search_plugin.run_search", mock_search)
+
+    # Delivery fails (returns False after the auto_response fix).
+    mock_delivery = AsyncMock(return_value=False)
+
+    sent: list[dict] = []
+
+    async def _fake_universal_send(iface, **kwargs):
+        sent.append(kwargs)
+
+    monkeypatch.setattr("core.auto_response.request_llm_delivery", mock_delivery)
+    monkeypatch.setattr(
+        "core.core_initializer.INTERFACE_REGISTRY", {"telegram_bot": object()}
+    )
+    monkeypatch.setattr("core.transport_layer.universal_send", _fake_universal_send)
+
+    res = await plugin.execute_action(action, context, None, None)
+    assert res == {"status": "ok", "results_count": 0}
+
+    # The delivery context must carry a usable interface_name (derived from the
+    # interface_path prefix) so the real auto-response path can route.
+    args, kwargs = mock_delivery.call_args
+    assert kwargs["original_context"]["interface_name"] == "telegram_bot"
+    assert kwargs["original_context"]["interface_path"] == "telegram_bot/123"
+    assert kwargs["original_context"]["chat_id"] == 123
+
+    # Direct fallback fired because delivery failed, even with zero results.
+    assert len(sent) == 1
+    assert "No web search results found" in sent[0]["text"]
+    assert sent[0]["interface_path"] == "telegram_bot/123"

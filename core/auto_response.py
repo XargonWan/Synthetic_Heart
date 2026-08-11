@@ -53,7 +53,7 @@ class AutoResponseSystem:
 
             if not interface_name:
                 log_error("No interface_name specified in auto_response context")
-                return
+                return False
 
             # Create a mock message object for the LLM request
             from types import SimpleNamespace
@@ -148,7 +148,7 @@ class AutoResponseSystem:
             interface = INTERFACE_REGISTRY.get(interface_name)
             if not interface:
                 log_error(f"[auto_response] No interface '{interface_name}' available")
-                return
+                return False
 
             # Enqueue the LLM request
             await enqueue(
@@ -157,12 +157,14 @@ class AutoResponseSystem:
                 json.dumps(system_payload, ensure_ascii=False),
                 priority=True,
             )
+            return True
 
         except Exception as e:
             log_error(f"[auto_response] Failed to request LLM response: {e}")
             import traceback
 
             traceback.print_exc()
+            return False
 
 
 # Global instance

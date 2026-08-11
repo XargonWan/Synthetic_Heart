@@ -188,22 +188,51 @@ class WebSearchPlugin:
             try:
                 from core.auto_response import request_llm_delivery
 
+                # Build a delivery context the auto-response system can act on.
+                # The raw action context only carries interface_path/chat_id (no
+                # interface_name), and request_llm_response bails out silently
+                # without it — the legacy memory_search plugin solves this the
+                # same way. interface_name is derived structurally from the
+                # interface_path prefix ("telegram_bot/123" -> "telegram_bot").
+                raw_interface_name = context.get("interface_name") or context.get(
+                    "interface"
+                )
+                interface_path = context.get("interface_path") or getattr(
+                    original_message, "interface_path", None
+                )
+                if (
+                    not raw_interface_name
+                    and interface_path
+                    and "/" in str(interface_path)
+                ):
+                    raw_interface_name = str(interface_path).split("/", 1)[0]
+                original_context = {
+                    "interface_name": raw_interface_name,
+                    "interface_path": interface_path,
+                    "chat_id": context.get("chat_id")
+                    or getattr(original_message, "chat_id", None),
+                    "message_id": context.get("message_id")
+                    or getattr(original_message, "message_id", None),
+                }
+
                 delivered = await request_llm_delivery(
                     action_outputs=action_outputs,
-                    original_context=context,
+                    original_context=original_context,
                     action_type="search_current_knowledge",
                 )
-                # delivered is None in the legacy path, so treat non-exception as success
-                delivery_ok = True
+                # The legacy path returns True once the delivery turn has been
+                # enqueued; treat a falsy return as a failed delivery.
+                delivery_ok = bool(delivered)
                 log_info(
                     f"[web_search] Requested LLM delivery; success={bool(delivered)}"
                 )
             except Exception as e:
                 log_warning(f"[web_search] Failed to request LLM delivery: {e}")
 
-            # Fallback: if LLM delivery was not attempted or failed, send results
-            # directly to the user so they get useful information instead of "😵"
-            if not delivery_ok and results:
+            # Fallback: if LLM delivery was not attempted or failed, send the
+            # outcome directly to the user so they get useful information (or a
+            # clear "no results" note) instead of silence.
+            if not delivery_ok:
                 await self._send_results_directly(
                     results, query, context, original_message
                 )
@@ -221,7 +250,11 @@ class WebSearchPlugin:
         try:
             from core.core_initializer import INTERFACE_REGISTRY
 
-            interface_name = context.get("interface_name") if context else None
+            interface_name = (
+                context.get("interface_name")
+                if context
+                else getattr(original_message, "interface_name", None)
+            )
             interface_path = (
                 context.get("interface_path")
                 if context
@@ -237,6 +270,11 @@ class WebSearchPlugin:
                 if context
                 else getattr(original_message, "thread_id", None)
             )
+
+            # The action context never carries interface_name; derive it
+            # structurally from the interface_path prefix.
+            if not interface_name and interface_path and "/" in str(interface_path):
+                interface_name = str(interface_path).split("/", 1)[0]
 
             if not interface_name or not interface_path or not chat_id:
                 log_debug(
@@ -255,6 +293,11 @@ class WebSearchPlugin:
 
             # Build a concise text summary of results
             lines = [f"🔍 Search results for: {query}"]
+            if not results:
+                lines.append(
+                    "\nNo web search results found for this query (search backend "
+                    "unavailable or returned nothing)."
+                )
             for i, r in enumerate(results[:5], 1):
                 title = r.get("title", "")
                 snippet = r.get("snippet", "")

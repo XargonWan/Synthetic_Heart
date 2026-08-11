@@ -1,9 +1,10 @@
 """Web search engines and page fetching with a per-task shared fetch cache.
 
 This module owns the single implementation of the search backends (SearXNG as the
-primary self-hosted engine, with an optional Tavily API backend) and the
-page-content fetcher. ``web_search_plugin`` imports these helpers so there is
-exactly one implementation of each.
+primary self-hosted engine, with an optional Tavily API backend, plus keyless
+Wikipedia and Hacker News JSON APIs as a last-resort fallback tier for
+deployments without either) and the page-content fetcher. ``web_search_plugin``
+imports these helpers so there is exactly one implementation of each.
 
 Note: the keyless DuckDuckGo backend was removed because DuckDuckGo serves bots a
 CAPTCHA and blocks automated queries, so it returned no results in practice.
@@ -23,12 +24,17 @@ import requests
 from bs4 import BeautifulSoup
 
 from core.config_manager import config_registry
-from core.logging_utils import log_debug, log_error, log_info, log_warning
+from core.logging_utils import log_debug, log_info, log_warning
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
+
+# Wikipedia and Hacker News both require a descriptive User-Agent on API
+# requests; the browser UA above is fine for their JSON endpoints as well, but
+# a self-describing UA is friendlier to their rate-limit policies.
+_WIKI_USER_AGENT = "SyntH-WebSearch/1.0 (self-hosted persona system)"
 
 
 def _tavily_api_key() -> str:
@@ -130,13 +136,107 @@ async def search_searxng(
         return []
 
 
+async def search_wikipedia(query: str, max_results: int = 5) -> list[dict[str, str]]:
+    """Search via the keyless Wikipedia opensearch JSON API.
+
+    This is a last-resort fallback tier for deployments that have neither a
+    reachable SearXNG instance nor a Tavily API key (e.g. a native, non-Docker
+    runtime). Wikipedia covers encyclopedic facts only — a query with no
+    matching article yields an empty list, which is honest. Returns an empty
+    list on any failure so ``run_search`` can move on to the next backend.
+    """
+
+    def _do_get() -> list:
+        headers = {"User-Agent": _WIKI_USER_AGENT}
+        params = {
+            "action": "opensearch",
+            "search": query,
+            "limit": max_results,
+            "format": "json",
+        }
+        response = requests.get(
+            "https://en.wikipedia.org/w/api.php",
+            headers=headers,
+            params=params,
+            timeout=10,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    try:
+        data = await asyncio.to_thread(_do_get)
+        titles = data[1] if len(data) > 1 else []
+        descriptions = data[2] if len(data) > 2 else []
+        urls = data[3] if len(data) > 3 else []
+        mapped: list[dict[str, str]] = []
+        for i, url in enumerate(urls):
+            title = str(titles[i]).strip() if i < len(titles) else ""
+            snippet = str(descriptions[i]).strip() if i < len(descriptions) else ""
+            if title and url:
+                mapped.append({"title": title, "snippet": snippet, "url": url})
+        log_info(f"[web_search] Wikipedia returned {len(mapped)} results")
+        return mapped
+    except Exception as e:
+        log_warning(f"[web_search] Wikipedia search failed: {e}")
+        return []
+
+
+async def search_hackernews(query: str, max_results: int = 5) -> list[dict[str, str]]:
+    """Search via the keyless Hacker News Algolia JSON API.
+
+    Last-resort fallback tier alongside :func:`search_wikipedia` for deployments
+    without SearXNG/Tavily. HN covers technology and current events; comment
+    hits carry the story title in ``story_title`` and the story URL in
+    ``story_url``, both of which are mapped here. Returns an empty list on any
+    failure.
+    """
+
+    def _do_get() -> dict:
+        headers = {"User-Agent": _WIKI_USER_AGENT}
+        params = {"query": query, "hitsPerPage": max_results}
+        response = requests.get(
+            "https://hn.algolia.com/api/v1/search",
+            headers=headers,
+            params=params,
+            timeout=10,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    try:
+        data = await asyncio.to_thread(_do_get)
+        mapped: list[dict[str, str]] = []
+        for hit in data.get("hits", [])[:max_results]:
+            title = str(hit.get("title") or hit.get("story_title") or "").strip()
+            url = str(hit.get("url") or hit.get("story_url") or "").strip()
+            if not url and hit.get("objectID"):
+                url = f"https://news.ycombinator.com/item?id={hit.get('objectID')}"
+            snippet = str(
+                hit.get("comment_text")
+                or hit.get("story_text")
+                or hit.get("_highlightResult", {}).get("title", {}).get("value", "")
+                or ""
+            ).strip()
+            if title and url:
+                mapped.append({"title": title, "snippet": snippet, "url": url})
+        log_info(f"[web_search] Hacker News returned {len(mapped)} results")
+        return mapped
+    except Exception as e:
+        log_warning(f"[web_search] Hacker News search failed: {e}")
+        return []
+
+
 async def run_search(query: str, max_results: int = 5) -> list[dict[str, str]]:
     """Run a single query on the active engine.
 
     Backend priority: SearXNG (self-hosted, if configured) -> Tavily (if keyed).
-    SearXNG that yields no results falls through to Tavily. If neither backend is
-    configured or both yield nothing, an empty list is returned. The DuckDuckGo
-    backend was removed because it blocks bots with a CAPTCHA.
+    SearXNG that yields no results falls through to Tavily. If neither backend
+    is configured or both yield nothing, the keyless Wikipedia and Hacker News
+    JSON APIs are tried as a last resort so a deployment without SearXNG/Tavily
+    (e.g. a native non-Docker runtime) still returns real results for
+    encyclopedic/technology queries. If every tier fails, an empty list is
+    returned. The DuckDuckGo backend was removed because it blocks bots with a
+    CAPTCHA.
     """
     searxng_url = _searxng_url()
     if searxng_url:
@@ -146,9 +246,19 @@ async def run_search(query: str, max_results: int = 5) -> list[dict[str, str]]:
 
     api_key = _tavily_api_key()
     if api_key:
-        return await search_tavily(api_key, query, max_results=max_results)
+        results = await search_tavily(api_key, query, max_results=max_results)
+        if results:
+            return results
 
-    # Neither backend produced results. Distinguish "configured but empty" from
+    results = await search_wikipedia(query, max_results=max_results)
+    if results:
+        return results
+
+    results = await search_hackernews(query, max_results=max_results)
+    if results:
+        return results
+
+    # Every tier produced nothing. Distinguish "configured but empty" from
     # "nothing configured at all" so the caller (and the logs) can tell whether
     # the search genuinely failed or was never wired up. A silent ``[]`` here
     # is the most common cause of "the search ran but Synth got nothing".
@@ -156,14 +266,15 @@ async def run_search(query: str, max_results: int = 5) -> list[dict[str, str]]:
         log_warning(
             f"[web_search] No results for '{query}' from the configured "
             f"backend(s) (SearXNG={'yes' if searxng_url else 'no'}, "
-            f"Tavily={'yes' if api_key else 'no'})."
+            f"Tavily={'yes' if api_key else 'no'}), and the keyless "
+            f"Wikipedia/Hacker News fallback tiers returned nothing."
         )
     else:
-        log_error(
-            f"[web_search] No web-search backend available for '{query}': "
-            f"SearXNG is not configured/reachable AND no Tavily API key is set. "
-            f"Set SEARXNG_URL or TAVILY_API_KEY, otherwise every search "
-            f"returns empty."
+        log_warning(
+            f"[web_search] No results for '{query}': SearXNG is not "
+            f"configured/reachable, no Tavily API key is set, and the keyless "
+            f"Wikipedia/Hacker News fallback tiers returned nothing. "
+            f"Set SEARXNG_URL or TAVILY_API_KEY for a full web-search backend."
         )
     return []
 

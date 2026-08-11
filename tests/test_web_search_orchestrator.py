@@ -403,10 +403,186 @@ async def test_run_search_returns_empty_when_no_backend(
     """With neither SearXNG nor a Tavily key configured, run_search returns []."""
     monkeypatch.setattr(search_engine, "_searxng_url", lambda: "")
     monkeypatch.setattr(search_engine, "_tavily_api_key", lambda: "")
+    monkeypatch.setattr(search_engine, "search_wikipedia", _empty_results)
+    monkeypatch.setattr(search_engine, "search_hackernews", _empty_results)
 
     results = await search_engine.run_search("hello", max_results=3)
 
     assert results == []
+
+
+async def _empty_results(query: str, max_results: int = 5) -> list[dict[str, str]]:
+    return []
+
+
+@pytest.mark.asyncio
+async def test_run_search_falls_back_to_wikipedia_when_no_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No SearXNG/Tavily -> the keyless Wikipedia tier serves the query."""
+    monkeypatch.setattr(search_engine, "_searxng_url", lambda: "")
+    monkeypatch.setattr(search_engine, "_tavily_api_key", lambda: "")
+
+    called: dict[str, Any] = {}
+
+    async def _fake_wiki(query: str, max_results: int = 5) -> list[dict[str, str]]:
+        called["query"] = query
+        called["max_results"] = max_results
+        return [
+            {
+                "title": "Qwen",
+                "snippet": "AI model",
+                "url": "https://en.wikipedia.org/wiki/Qwen",
+            }
+        ]
+
+    monkeypatch.setattr(search_engine, "search_wikipedia", _fake_wiki)
+
+    results = await search_engine.run_search("Qwen release date", max_results=3)
+
+    assert called == {"query": "Qwen release date", "max_results": 3}
+    assert results == [
+        {
+            "title": "Qwen",
+            "snippet": "AI model",
+            "url": "https://en.wikipedia.org/wiki/Qwen",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_search_falls_back_to_hackernews_when_wikipedia_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wikipedia returning nothing falls through to the Hacker News tier."""
+    monkeypatch.setattr(search_engine, "_searxng_url", lambda: "")
+    monkeypatch.setattr(search_engine, "_tavily_api_key", lambda: "")
+
+    async def _empty_wiki(query: str, max_results: int = 5) -> list[dict[str, str]]:
+        return []
+
+    called: dict[str, Any] = {}
+
+    async def _fake_hn(query: str, max_results: int = 5) -> list[dict[str, str]]:
+        called["query"] = query
+        return [
+            {
+                "title": "Qwen 3.8",
+                "snippet": "discussion",
+                "url": "https://news.ycombinator.com/item?id=1",
+            }
+        ]
+
+    monkeypatch.setattr(search_engine, "search_wikipedia", _empty_wiki)
+    monkeypatch.setattr(search_engine, "search_hackernews", _fake_hn)
+
+    results = await search_engine.run_search("Qwen release date", max_results=3)
+
+    assert called == {"query": "Qwen release date"}
+    assert results == [
+        {
+            "title": "Qwen 3.8",
+            "snippet": "discussion",
+            "url": "https://news.ycombinator.com/item?id=1",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_search_wikipedia_maps_opensearch_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The opensearch [query, titles, descriptions, urls] shape maps correctly."""
+
+    class _FakeResp:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> list:
+            return [
+                "Qwen",
+                ["Qwen", "Qwen2"],
+                ["AI model", ""],
+                [
+                    "https://en.wikipedia.org/wiki/Qwen",
+                    "https://en.wikipedia.org/wiki/Qwen2",
+                ],
+            ]
+
+    calls: list[Any] = []
+
+    def _fake_get(url: str, headers: Any, params: Any, timeout: float) -> _FakeResp:
+        calls.append({"url": url, "params": params})
+        return _FakeResp()
+
+    monkeypatch.setattr(search_engine.requests, "get", _fake_get)
+
+    out = await search_engine.search_wikipedia("Qwen", max_results=2)
+
+    assert calls[0]["url"] == "https://en.wikipedia.org/w/api.php"
+    assert calls[0]["params"]["action"] == "opensearch"
+    assert out == [
+        {
+            "title": "Qwen",
+            "snippet": "AI model",
+            "url": "https://en.wikipedia.org/wiki/Qwen",
+        },
+        {"title": "Qwen2", "snippet": "", "url": "https://en.wikipedia.org/wiki/Qwen2"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_search_hackernews_maps_comment_hit_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Algolia comment hits (story_title/story_url) map to title/snippet/url."""
+
+    class _FakeResp:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "hits": [
+                    {
+                        "title": "Qwen 3.8",
+                        "url": "https://twitter.com/Alibaba_Qwen/status/1",
+                        "story_text": "announcement",
+                    },
+                    {
+                        "title": None,
+                        "story_title": "Qwen 3.8",
+                        "story_url": None,
+                        "objectID": "42",
+                        "comment_text": "discussion",
+                    },
+                ]
+            }
+
+    calls: list[Any] = []
+
+    def _fake_get(url: str, headers: Any, params: Any, timeout: float) -> _FakeResp:
+        calls.append({"url": url, "params": params})
+        return _FakeResp()
+
+    monkeypatch.setattr(search_engine.requests, "get", _fake_get)
+
+    out = await search_engine.search_hackernews("Qwen", max_results=2)
+
+    assert calls[0]["url"] == "https://hn.algolia.com/api/v1/search"
+    assert calls[0]["params"]["hitsPerPage"] == 2
+    assert out == [
+        {
+            "title": "Qwen 3.8",
+            "snippet": "announcement",
+            "url": "https://twitter.com/Alibaba_Qwen/status/1",
+        },
+        {
+            "title": "Qwen 3.8",
+            "snippet": "discussion",
+            "url": "https://news.ycombinator.com/item?id=42",
+        },
+    ]
 
 
 @pytest.mark.asyncio
@@ -423,12 +599,16 @@ async def test_collect_valid_results_skips_blocked(
     monkeypatch.setattr(search_engine, "_tavily_api_key", lambda: "")
 
     # Page 1: 4 blocked (no snippet/page) + 1 valid. Page 2: 5 valid.
-    valid = lambda i: {"title": f"v{i}", "snippet": "ok", "url": f"https://v{i}.x"}
-    blocked = lambda i: {"title": f"b{i}", "snippet": "", "url": f"https://b{i}.x"}
+
+    def _valid(i: int) -> dict[str, str]:
+        return {"title": f"v{i}", "snippet": "ok", "url": f"https://v{i}.x"}
+
+    def _blocked(i: int) -> dict[str, str]:
+        return {"title": f"b{i}", "snippet": "", "url": f"https://b{i}.x"}
 
     pages = [
-        [blocked(0), blocked(1), blocked(2), blocked(3), valid(0)],
-        [valid(1), valid(2), valid(3), valid(4), valid(5)],
+        [_blocked(0), _blocked(1), _blocked(2), _blocked(3), _valid(0)],
+        [_valid(1), _valid(2), _valid(3), _valid(4), _valid(5)],
     ]
 
     async def _fake_searxng(base_url, query, max_results=5, page=1):
