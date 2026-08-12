@@ -107,6 +107,34 @@ class AutoResponseSystem:
             # {"response": ...} instead of a message_* action, which then trips
             # the corrector (observed live 2026-08-12).
             if action_outputs is not None:
+                # The delivery turn is a standalone prompt with no chat history,
+                # so the persona must be injected here or the LLM answers as a
+                # generic assistant (observed live 2026-08-12). Mirrors the
+                # persona gathering in prompt_engine.build_delivery_request and
+                # is fail-safe: any error degrades to the plain delivery task.
+                persona_block = ""
+                try:
+                    from core.action_parser import gather_static_injections
+                    from types import SimpleNamespace
+
+                    _mock_msg = SimpleNamespace(
+                        chat_id=chat_id,
+                        text="",
+                        message_id=message_id or 0,
+                        from_user=None,
+                        date=datetime.now(),
+                        reply_to_message=None,
+                        interface_path=interface_path,
+                    )
+                    _inj = await gather_static_injections(_mock_msg, {})
+                    _persona = str(_inj.get("persona") or "").strip()
+                    if _persona:
+                        persona_block = (
+                            f"=== CRITICAL SYSTEM IDENTITY ===\n{_persona}\n\n"
+                        )
+                except Exception as _pe:
+                    log_debug(f"[auto_response] delivery persona gather skipped: {_pe}")
+
                 example_payload = '{"text": "<your reply>"'
                 if interface_path:
                     example_payload += f', "interface_path": "{interface_path}"'
@@ -120,6 +148,7 @@ class AutoResponseSystem:
                     f'"payload": {example_payload}}}]}}\n'
                     f"Respond with ONLY valid JSON. No text before or after."
                 )
+                message_block = f"{persona_block}{delivery_note}\n\n=== RESULTS ===\n{message_block}"
                 message_block = f"{delivery_note}\n\n=== RESULTS ===\n{message_block}"
 
             # Build explicit instruction to prevent action loops

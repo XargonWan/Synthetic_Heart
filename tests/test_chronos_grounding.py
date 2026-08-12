@@ -312,7 +312,9 @@ async def test_auto_response_legacy_delivery_propagates_result_and_builds_prompt
         assert delivered is False
 
     # Now exercise the real request_llm_response with a captured enqueue to
-    # verify the delivery prompt is a complete, serializable instruction.
+    # verify the delivery prompt is a complete, serializable instruction that
+    # carries the persona (the delivery turn has no chat history, so without it
+    # the answer is out of character - observed live 2026-08-12).
     enqueue_mock = AsyncMock()
     import core.message_queue as mq
 
@@ -321,6 +323,15 @@ async def test_auto_response_legacy_delivery_propagates_result_and_builds_prompt
         "core.core_initializer.INTERFACE_REGISTRY", {"telegram_bot": object()}
     )
     monkeypatch.setattr(ar, "load_json_instructions", lambda: "JSON RULES")
+
+    async def _fake_gather_static_injections(message, context: dict) -> dict:
+        return {
+            "persona": "You are 2D, also called Dee. You are the daughter of 2B and Scarlet."
+        }
+
+    monkeypatch.setattr(
+        "core.action_parser.gather_static_injections", _fake_gather_static_injections
+    )
 
     result = await ar._auto_response_system.request_llm_response(
         original_context=original_context,
@@ -331,7 +342,9 @@ async def test_auto_response_legacy_delivery_propagates_result_and_builds_prompt
     enqueue_mock.assert_called_once()
     payload = json.loads(enqueue_mock.call_args.args[2])
     sm = payload["system_message"]
+    assert "=== CRITICAL SYSTEM IDENTITY ===" in sm["message"]
+    assert "You are 2D, also called Dee." in sm["message"]
     assert "DELIVERY TASK" in sm["message"]
-    assert 'message_telegram_bot' in sm["message"]
+    assert "message_telegram_bot" in sm["message"]
     assert 'interface_path": "telegram_bot/123' in sm["message"]
     assert "=== RESULTS ===" in sm["message"]
