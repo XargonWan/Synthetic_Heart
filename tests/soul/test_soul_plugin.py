@@ -295,6 +295,82 @@ async def test_static_injection_excludes_diary_merge_housekeeping_memories() -> 
 
 
 @pytest.mark.asyncio
+async def test_recall_excludes_roleplay_memories() -> None:
+    """Explicit/roleplay mem-cells must not be recalled into prompts (Grillo
+    reflection beats included). An explicit cell recalled into a
+    tag_elaboration beat was elaborated into an ever-more-explicit diary entry
+    (langfuse 36cb0aca). Structural detector from core.soul.roleplay."""
+    plugin = SoulPlugin()
+    now = datetime.now(timezone.utc)
+    emotional_tag = EmotionalTag(
+        state_snapshot={"joy": 0.2, "fear": 0.0, "sad": 0.0, "anger": 0.0},
+        dominant_emotion="joy",
+        intensity=0.2,
+        valence=0.2,
+    )
+    roleplay_cell = MemCell(
+        id="rp",
+        episodic_trace=(
+            "slide my hand under your big shirt, grabbing your breast, you moan softly"
+        ),
+        atomic_facts=["you|moan|softly"],
+        emotional_tag=emotional_tag,
+        foresight_signals=[],
+        event_timestamp=now,
+        session_id="telegram_bot_5208932647",
+    )
+    normal_cell = MemCell(
+        id="normal",
+        episodic_trace="Alice loves jasmine tea on rainy evenings.",
+        atomic_facts=["Alice|likes|jasmine tea"],
+        emotional_tag=emotional_tag,
+        foresight_signals=[],
+        event_timestamp=now,
+        session_id="telegram_bot_5208932647",
+    )
+
+    plugin._compiler = SimpleNamespace(
+        embedder=SimpleNamespace(embed=AsyncMock(return_value=[0.25, 0.75]))
+    )
+    plugin._repo = SimpleNamespace(
+        get_active_dsp=AsyncMock(return_value=None),
+        list_active_foresight_signals=AsyncMock(return_value=[]),
+        recall_memories=AsyncMock(
+            return_value=[
+                MemCellRecall(
+                    cell=roleplay_cell,
+                    similarity=0.99,
+                    lexical_score=0.9,
+                    score=0.99,
+                ),
+                MemCellRecall(
+                    cell=normal_cell,
+                    similarity=0.9,
+                    lexical_score=0.8,
+                    score=0.9,
+                ),
+            ]
+        ),
+        upsert_memcell=AsyncMock(return_value=None),
+    )
+
+    # Grillo beat path (the leak scenario).
+    payload = await plugin.get_static_injection(
+        SimpleNamespace(
+            interface_path="grillo/-1",
+            text="[G.R.I.L.L.O. Tag Elaboration] Reflect on your recent conversations",
+            caption=None,
+        ),
+        {"interface_path": "grillo/-1", "grillo_beat": True},
+    )
+
+    recalled = [str(e) for e in payload.get("soul_recalled_memories", [])]
+    assert len(recalled) == 1
+    assert "jasmine tea" in recalled[0].lower()
+    assert all("breast" not in e.lower() and "moan" not in e.lower() for e in recalled)
+
+
+@pytest.mark.asyncio
 async def test_scheduler_tick_compiles_idle_sessions() -> None:
     plugin = SoulPlugin()
 

@@ -1590,9 +1590,10 @@ def _assemble_prompt_request(  # noqa: PLR0913
     # ── Attachments ─────────────────────────────────────────────────────────
     pr_attachments = _build_pr_attachments(image_data, attachments)
 
-    # SOUL user-role context, prepended to the current user turn. The standing
-    # DSP (who you're talking to) plus the per-turn mood delta, each gated so a
-    # quiet / unprofiled session contributes ~0 tokens.
+    # ── SOUL user-role context ──────────────────────────────────────────────
+    # The standing DSP ("About the person you're talking to") plus the per-turn
+    # mood delta, prepended to the current user turn. Each gated so a quiet /
+    # unprofiled session contributes ~0 tokens.
     #
     # DSP injection is OFF by default (SOUL_DSP_INJECT_ENABLED): the rule-based
     # DSP extractor turns roleplay/status speech into a "user profile", which
@@ -1601,20 +1602,37 @@ def _assemble_prompt_request(  # noqa: PLR0913
     _soul_dsp_prefix = ""
     if config_registry.get_value("SOUL_DSP_INJECT_ENABLED", 0, value_type=int):
         try:
-            # On Rift Vessel turns the standing "About the person you're talking
-            # to" profile is compiled from non-world chats and never reflects
-            # who is actually in the world — injecting it made Synth greet the
-            # wrong parent in-world and cite "Mama" in self-authored goals
-            # (observed live: "Build a cozy little shelter with mama and papa"
-            # and "Mama Remuraine" while the only in-world player is Papa).
-            # Suppress it structurally via is_vessel_turn (routing metadata,
-            # never message text); the vessel world-state block already renders
-            # real identities ("Remuraine (Scar - your papa)").
-            from core.vessel_focus import is_vessel_turn
+            # A Grillo beat — internal OR outbound (observer/reminder) — is an
+            # autonomous turn, not a human addressing Synth. There is no "person
+            # you're talking to" in that moment, so injecting the standing DSP
+            # makes the model treat a stale profile line as the current user's
+            # ask (observed live: an observer beat answered "User wants to try
+            # setting a minecraft goal from here" — a 3-day-old profile fact —
+            # as if the trainer had just requested it, sending an unsolicited
+            # outreach + goal_set). Suppress it structurally via routing metadata
+            # (beat_type, grillo_beat flag, grillo* interface_path), never
+            # message text.
+            _is_grillo_beat_turn = (
+                is_outbound_beat(beat_type)
+                or bool(getattr(message, "grillo_beat", False))
+                or (interface_path and str(interface_path).startswith("grillo"))
+            )
+            if not _is_grillo_beat_turn:
+                # On Rift Vessel turns the standing "About the person you're
+                # talking to" profile is compiled from non-world chats and never
+                # reflects who is actually in the world — injecting it made
+                # Synth greet the wrong parent in-world and cite "Mama" in
+                # self-authored goals (observed live: "Build a cozy little
+                # shelter with mama and papa" and "Mama Remuraine" while the
+                # only in-world player is Papa). Suppress it structurally via
+                # is_vessel_turn (routing metadata, never message text); the
+                # vessel world-state block already renders real identities
+                # ("Remuraine (Scar - your papa)").
+                from core.vessel_focus import is_vessel_turn
 
-            vessel_focus = is_vessel_turn(message, None, interface_path)
-            if not vessel_focus:
-                _soul_dsp_prefix = _build_soul_user_profile_prefix(context_section)
+                vessel_focus = is_vessel_turn(message, None, interface_path)
+                if not vessel_focus:
+                    _soul_dsp_prefix = _build_soul_user_profile_prefix(context_section)
         except Exception:
             _soul_dsp_prefix = ""
 

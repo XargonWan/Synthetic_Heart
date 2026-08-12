@@ -577,3 +577,42 @@ async def test_dsp_builder_caps_profile_words() -> None:
     # The cap limits the rendered profile body well below the raw fact length.
     body = profile.replace("<user_profile>", "").replace("</user_profile>", "")
     assert len(body.split()) <= builder.MAX_PROFILE_WORDS + 1
+
+
+@pytest.mark.asyncio
+async def test_dsp_builder_sanitizes_stale_profile() -> None:
+    """build_update must not preserve a stale/contaminated DSP forever: when no
+    new stable fact arrives, conversation-shaped facts in the existing profile
+    ("User says/wants…" sentences, person-addressed speech, emote filler) are
+    dropped so they cannot leak into later turns (observed: an old "User wants
+    to try setting a minecraft goal from here" reached an observer beat's
+    outreach). Stable biographical facts and preferences survive."""
+    builder = RuleBasedDspBuilder()
+    contaminated = (
+        "<user_profile>User works on SynthHeart; User wants to try setting a "
+        "minecraft goal from here; User says they are already there; User "
+        "lives in Berlin</user_profile>"
+    )
+    # No new stable facts in the fresh extractions — the contaminated profile
+    # must still be cleaned.
+    quiet = _dsp_extraction(facts=["User says they are fixing it now"])
+
+    result = await builder.build_update(current_dsp=contaminated, extractions=[quiet])
+
+    assert "User works on SynthHeart" in result
+    assert "User lives in Berlin" in result
+    assert "minecraft goal" not in result
+    assert "already there" not in result
+
+
+@pytest.mark.asyncio
+async def test_dsp_builder_keeps_clean_profile_when_quiet() -> None:
+    """A clean profile (only stable facts) is preserved untouched on a quiet
+    day — sanitisation must not degrade a good profile."""
+    builder = RuleBasedDspBuilder()
+    clean = "<user_profile>User works on SynthHeart</user_profile>"
+    quiet = _dsp_extraction(facts=["User says they are fixing it now"])
+
+    result = await builder.build_update(current_dsp=clean, extractions=[quiet])
+
+    assert result == clean

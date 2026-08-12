@@ -425,6 +425,37 @@ class RuleBasedDspExtractor:
             return False
         return True
 
+    # Conversational/status sentence shapes that are never stable user
+    # attributes: "User says they are X", "User wants to Y", "User is going to
+    # Z" — one-off status telemetry or in-chat speech, not a durable profile
+    # fact. The profile must read like a cheat-sheet about the person, never a
+    # dump of what they recently said. Structural prefix matching on the
+    # extracted fact; used both by the extractor's guards and by the DSP
+    # builder's staleness sanitisation (data-cleaning only, never routing).
+    _UNSTABLE_SENTENCE_PREFIX_RE = re.compile(
+        r"^User\s+(?:says|said|wants|wanted|is going|was going|told|asked|"
+        r"thinks|thought|feels|felt|tried|trying|will|would|can|could|"
+        r"needs|needed|hopes|hoped|is trying|has been)\b",
+        flags=re.IGNORECASE,
+    )
+
+    @classmethod
+    def is_stable_user_fact(cls, fact: str) -> bool:
+        """Return True when ``fact`` is a plausible stable user-profile fact.
+
+        Used by ``RuleBasedDspBuilder`` to sanitise an existing (possibly stale)
+        DSP: a fact that fails these structural guards — person-addressed
+        speech, filler/emote-laden fragments, or a one-off "User says/wants…"
+        sentence — is conversation, not a standing attribute, and is dropped
+        from the profile on the next update.
+        """
+        fact = (fact or "").strip()
+        if not fact:
+            return False
+        if cls._UNSTABLE_SENTENCE_PREFIX_RE.match(fact):
+            return False
+        return cls._is_bound_fact(fact)
+
     @staticmethod
     def _clean_fact_value(value: str) -> str:
         cleaned = (value or "").strip().strip("\"'")

@@ -538,6 +538,10 @@ class SoulPlugin(PluginBase):
                         SELECT sender_name, sender_id, message_text, created_at
                         FROM chat_history_cache
                         WHERE created_at >= %s
+                          AND (interface_path IS NULL OR NOT (
+                                interface_path LIKE 'vessel/%'
+                             OR interface_path LIKE 'grillo/%'
+                          ))
                         ORDER BY created_at ASC
                         LIMIT 500
                         """,
@@ -607,6 +611,20 @@ class SoulPlugin(PluginBase):
                 continue
             if self._should_exclude_recalled_memory(cell):
                 continue
+            # Roleplay/explicit exchanges are in-character fiction, not a stable
+            # record of the user or an event (the compile path already strips
+            # them via strip_roleplay_lines — this keeps recall consistent).
+            # Feeding them back into a Grillo reflection beat made the beat
+            # elaborate the explicit content into ever-more-explicit diary
+            # entries (observed in tag_elaboration langfuse 36cb0aca). Structural
+            # detector from core.soul.roleplay; data-cleaning only, never routing.
+            try:
+                from core.soul.roleplay import is_roleplay_turn
+
+                if is_roleplay_turn(cell.episodic_trace):
+                    continue
+            except Exception:
+                pass
             memory_emotion = self._normalize_memory_emotion(
                 cell.emotional_tag.dominant_emotion
             )

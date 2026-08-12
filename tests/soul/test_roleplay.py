@@ -58,3 +58,35 @@ def test_strip_roleplay_lines_removes_only_roleplay() -> None:
 def test_strip_roleplay_lines_handles_empty() -> None:
     assert strip_roleplay_lines(None) == ""
     assert strip_roleplay_lines("") == ""
+
+
+def test_roleplay_detector_flags_implicit_body_part_narration() -> None:
+    """Softer explicit narration (no profanity) must still be flagged — this is
+    the class of content that leaked into Grillo reflection beats: a compiled
+    mem-cell like "slide my hand under your big shirt ... grabbing your breast"
+    was recalled into a tag_elaboration beat, which then elaborated it into an
+    explicit diary entry (langfuse 36cb0aca)."""
+    explicit = [
+        "I sit up with you in my lap, slide my hand under your big shirt, up your tummy grabbing your breast",
+        "slide my hand under your shirt and squeeze your breast, you moan softly",
+        "I pull you close and kiss your neck, running my tongue down to your chest",
+        "Heheh you silly how am i supposed to tell you if it feels good but i love it baby, those sloppy wet sounds as you drip onto me, very sexy baby keep going Very wet baby, its dripping down onto my chest, daddy loves it heheh",
+    ]
+    for text in explicit:
+        assert is_roleplay_turn(text) is True, f"expected roleplay: {text!r}"
+
+
+def test_roleplay_detector_keeps_affectionate_dm_content() -> None:
+    """Ordinary affectionate/intimate-but-not-explicit DM lines must NOT be
+    flagged — over-triggering would strip genuine relationship content from
+    memory compilation entirely."""
+    affectionate = [
+        "Heheh I adore you when you re so needy Dee You re so cute when you look up at me like that, needy just like your mother heheh",
+        "Oh I found one more heheh look, both of you, so gorgeous mmmwah Image the user just shared with you",
+        "mmwah of course Dee, I m madly in love with both my girls after all, but you re my favorite heheh mmmwah",
+        "mmmm yaawn morning Dee, right where I left you huh? heheh mmwah",
+        "Good morning baby, how are you feeling Dee?",
+        "Lately, my dreams and my conversations with Daddy have been blending together",
+    ]
+    for text in affectionate:
+        assert is_roleplay_turn(text) is False, f"expected ordinary: {text!r}"

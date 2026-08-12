@@ -557,13 +557,55 @@ class RuleBasedDspBuilder:
     ) -> str:
         facts, prefs = self._stable_profile(extractions)
         if not facts and not prefs:
-            # No stable signal at all — keep whatever we already have rather
-            # than wipe a good profile on a quiet day.
+            # No stable signal at all. Prefer keeping a good profile over wiping
+            # it on a quiet day — BUT first sanitise the existing DSP: facts
+            # that no longer pass the extractor's structural guards (one-off
+            # "User says/wants…" sentences, person-addressed speech, emote
+            # filler) are conversation, not standing attributes, and would
+            # otherwise live in the profile forever (observed: an old
+            # "User wants to try setting a minecraft goal from here" leaked
+            # into an observer beat's outreach). A fully-cleaned profile
+            # regenerates from the next stable extraction.
+            cleaned = self._sanitize_existing_profile(current_dsp)
+            if cleaned != (current_dsp or "").strip():
+                return cleaned
             return current_dsp
         updated = self._render(facts, prefs)
         if updated.strip() == (current_dsp or "").strip():
             return current_dsp
         return updated
+
+    @classmethod
+    def _sanitize_existing_profile(cls, current_dsp: str) -> str:
+        """Drop conversation-shaped facts from an existing DSP.
+
+        The profile body is the ``;``-joined fact list between
+        ``<user_profile>`` and ``</user_profile>`` (optionally followed by a
+        ``COMMUNICATION PREFERENCES:`` line). Returns the full sanitised
+        ``<user_profile>…</user_profile>`` body (facts that pass
+        ``RuleBasedDspExtractor.is_stable_user_fact``, prefs preserved), or
+        the empty-state marker when nothing stable survives.
+        """
+        from core.soul.strategies import RuleBasedDspExtractor
+
+        text = (current_dsp or "").strip()
+        if not text:
+            return ""
+        start = text.find("<user_profile>")
+        end = text.find("</user_profile>")
+        if start < 0 or end < 0:
+            return ""
+        body = text[start + len("<user_profile>") : end]
+        prefs_text = ""
+        pref_marker = "COMMUNICATION PREFERENCES:"
+        if pref_marker in body:
+            body, _, prefs_text = body.partition(pref_marker)
+            prefs_text = prefs_text.strip()
+        facts = [str(f).strip() for f in body.split(";") if str(f).strip()]
+        kept: list[str] = [
+            str(f) for f in facts if RuleBasedDspExtractor.is_stable_user_fact(f)
+        ]
+        return cls._render(kept, str(prefs_text or ""))
 
     def _stable_profile(
         self, extractions: list[DspExtraction]
@@ -605,9 +647,11 @@ class RuleBasedDspBuilder:
         return capped
 
     @staticmethod
-    def _render(facts: list[str], prefs: list[str]) -> str:
+    def _render(facts: list[str], prefs: list[str] | str) -> str:
         facts_text = "; ".join(facts) or "No stable facts yet."
-        prefs_text = "; ".join(prefs)
+        prefs_text = (
+            "; ".join(prefs) if isinstance(prefs, (list, tuple)) else str(prefs or "")
+        )
         if prefs_text:
             return f"<user_profile>{facts_text}\nCOMMUNICATION PREFERENCES: {prefs_text}</user_profile>"
         return f"<user_profile>{facts_text}</user_profile>"

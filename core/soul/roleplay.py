@@ -38,6 +38,11 @@ _ROLEPLAY_TERMS = frozenset(
         "asshole",
         "tits",
         "boobs",
+        "boob",
+        "breast",
+        "breasts",
+        "nipple",
+        "nipples",
         "squirt",
         "horny",
         "hornier",
@@ -70,6 +75,15 @@ _ROLEPLAY_TERMS = frozenset(
         "balls",
         "penis",
         "vagina",
+        "grope",
+        "groping",
+        "squeeze",
+        "squeezing",
+        "wet",
+        "dripping",
+        "drip",
+        "moist",
+        "creamy",
     }
 )
 
@@ -77,7 +91,12 @@ _ROLEPLAY_TERMS = frozenset(
 # (first-person *action* narration), independent of the term list.
 _ROLEPLAY_ACTION_RE = re.compile(
     r"(?i)\b(?:i\s+(?:pull|grab|force|slide|pick\s+up|pin|bend|pound|fuck|"
-    r"thrust|ride|choke|squeeze|wrap|lean|mount)\b)|"
+    r"thrust|ride|choke|squeeze|wrap|lean|mount|grope)\b)|"
+    r"\b(?:slide\s+my\s+hand|slip\s+my\s+hand|run\s+my\s+hand|"
+    r"grab(?:bing)?\s+(?:your|my|my\s+own)\s+(?:breast|breasts|boob|boobs|"
+    r"nipple|nipples|chest|tits)|pull\s+(?:down|up)\s+(?:your|my)\s+"
+    r"(?:shirt|pants|panties|skirt)|hand\s+under\s+(?:your|my)\s+"
+    r"(?:shirt|skirt|pants))\b|"
     r"\b(?:as\s+(?:i|she|he)\s+(?:cum|fuck|thrust|moan|squirt))\b"
 )
 
@@ -90,7 +109,24 @@ _MIN_TERM_HITS = 2
 # A single very strong term (or an action frame) also counts when combined with
 # any second weaker signal like an exclamation or any other term.
 _STRONG_SINGLE_HITS = frozenset(
-    {"cum", "cumming", "cock", "pussy", "slut", "whore", "fuckhole"}
+    {
+        "cum",
+        "cumming",
+        "cock",
+        "pussy",
+        "slut",
+        "whore",
+        "fuckhole",
+        "breast",
+        "breasts",
+        "nipple",
+        "nipples",
+        "clit",
+        "penis",
+        "vagina",
+        "boob",
+        "boobs",
+    }
 )
 
 

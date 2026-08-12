@@ -122,6 +122,104 @@ def test_soul_dsp_profile_suppressed_on_vessel_turns(monkeypatch):
     assert "MARKER_PROFILE" in getattr(chat_pr, "current_text", "")
 
 
+def test_soul_dsp_profile_suppressed_on_grillo_beats(monkeypatch):
+    """The standing "About the person you're talking to" profile must not leak
+    into ANY Grillo beat — internal or outbound (observer/reminder). An
+    autonomous beat is not a human addressing Synth, so a stale profile line
+    must not be treated as the current user's ask (observed live: an observer
+    beat answered "User wants to try setting a minecraft goal from here" — a
+    3-day-old profile fact — as if the trainer had just requested it, sending
+    an unsolicited outreach + goal_set). The gate is structural (beat_type /
+    interface_path), never message text."""
+
+    async def dummy_gather(message, ctx):
+        return {}
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+
+    class _FakeRegistry:
+        def get_value(self, key, default=None, **kwargs):
+            if key == "SOUL_DSP_INJECT_ENABLED":
+                return 1
+            return default
+
+    monkeypatch.setattr("core.prompt_engine.config_registry", _FakeRegistry())
+    monkeypatch.setattr(
+        "core.prompt_engine._build_soul_user_profile_prefix",
+        lambda context_section: (
+            "[About the person you're talking to]\n"
+            "<user_profile>MARKER_PROFILE</user_profile>"
+        ),
+    )
+
+    base = dict(
+        chat_id=-1,
+        text="[G.R.I.L.L.O. CHAT OBSERVER] snippets...",
+        message_id=0,
+        from_user=SimpleNamespace(id=-1, username="grillo", full_name="G.R.I.L.L.O."),
+        date=datetime.now(timezone.utc),
+    )
+
+    # An outbound observer beat (the trace scenario): profile must NOT appear.
+    observer_msg = SimpleNamespace(
+        **base,
+        interface_path="grillo/-1",
+        chat=SimpleNamespace(id=-1, type="internal", title="t"),
+        grillo_beat=True,
+        beat_type="observer",
+    )
+    observer_result = asyncio.run(
+        build_json_prompt(
+            observer_msg,
+            {"grillo_beat": True, "beat_type": "observer"},
+            interface_name="grillo",
+        )
+    )
+    observer_pr = observer_result.get("__prompt_request")
+    assert "MARKER_PROFILE" not in getattr(observer_pr, "current_text", "")
+
+    # An internal Grillo beat (diary reflection): profile must NOT appear either.
+    internal_msg = SimpleNamespace(
+        **base,
+        interface_path="grillo/-1",
+        chat=SimpleNamespace(id=-1, type="internal", title="t"),
+        grillo_beat=True,
+        beat_type="diary_consolidation",
+    )
+    internal_result = asyncio.run(
+        build_json_prompt(
+            internal_msg,
+            {"grillo_beat": True, "beat_type": "diary_consolidation"},
+            interface_name="grillo",
+        )
+    )
+    internal_pr = internal_result.get("__prompt_request")
+    assert "MARKER_PROFILE" not in getattr(internal_pr, "current_text", "")
+
+    # A normal human chat turn: the profile IS injected.
+    chat_msg = SimpleNamespace(
+        chat_id=1,
+        text="hello",
+        message_id=1,
+        from_user=SimpleNamespace(full_name="user", username="user"),
+        date=datetime.now(timezone.utc),
+        interface_path="telegram/chat/12345",
+        chat=SimpleNamespace(
+            id="telegram/chat/12345",
+            type="telegram",
+            title="t",
+            username=None,
+            first_name=None,
+            human_count=1,
+        ),
+    )
+    chat_result = asyncio.run(
+        build_json_prompt(chat_msg, {}, interface_name="telegram_bot")
+    )
+    chat_pr = chat_result.get("__prompt_request")
+    assert "MARKER_PROFILE" in getattr(chat_pr, "current_text", "")
+
+
 def test_build_json_prompt_inherits_image_data_from_context_memory(monkeypatch):
     async def dummy_gather(message, ctx):
         return {}
