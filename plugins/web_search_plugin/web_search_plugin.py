@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 from core.config_manager import config_registry
@@ -260,11 +261,6 @@ class WebSearchPlugin:
                 if context
                 else getattr(original_message, "interface_path", None)
             )
-            chat_id = (
-                context.get("chat_id")
-                if context
-                else getattr(original_message, "chat_id", None)
-            )
             thread_id = (
                 context.get("thread_id")
                 if context
@@ -276,10 +272,12 @@ class WebSearchPlugin:
             if not interface_name and interface_path and "/" in str(interface_path):
                 interface_name = str(interface_path).split("/", 1)[0]
 
-            if not interface_name or not interface_path or not chat_id:
+            # interface_path is what the interface needs to resolve the target
+            # chat; chat_id alone is not required by every interface.
+            if not interface_name or not interface_path:
                 log_debug(
                     "[web_search] Cannot send direct fallback — missing "
-                    "interface_name/interface_path/chat_id in context"
+                    "interface_name/interface_path in context"
                 )
                 return
 
@@ -313,42 +311,35 @@ class WebSearchPlugin:
 
             fallback_text = "\n".join(lines)
 
-            # Try universal_send first (handles thread_id, etc.)
+            # Send through the interface's canonical payload-dict path — the same
+            # call shape the message_* actions use (see action_parser message
+            # dispatch and message_plugin). universal_send is for LLM-response
+            # flows, and hand-rolled chat_id/text kwargs break payload-style
+            # interfaces (Telegram's send_message takes a single payload dict).
             try:
-                from core.transport_layer import universal_send
-
-                await universal_send(
-                    iface,
-                    chat_id=chat_id,
-                    text=fallback_text,
-                    interface_path=interface_path,
-                    thread_id=thread_id,
-                    is_llm_response=True,
-                    skip_history=True,
+                send_payload: dict[str, Any] = {
+                    "text": fallback_text,
+                    "interface_path": interface_path,
+                }
+                if thread_id is not None:
+                    send_payload["thread_id"] = thread_id
+                result = iface.send_message(
+                    send_payload, original_message=original_message
                 )
+                if inspect.iscoroutine(result):
+                    result = await result
+                if result is False:
+                    log_warning(
+                        "[web_search] Direct fallback reported delivery failure "
+                        f"({len(results)} results, {len(fallback_text)} chars)"
+                    )
+                    return
                 log_info(
-                    "[web_search] Direct fallback sent via universal_send "
+                    "[web_search] Direct fallback sent via interface.send_message "
                     f"({len(results)} results, {len(fallback_text)} chars)"
                 )
-                return
-            except Exception as ue:
-                log_debug(
-                    f"[web_search] universal_send fallback failed, "
-                    f"trying direct send: {ue}"
-                )
-
-            # Fallback to send_message on the interface
-            if hasattr(iface, "send_message"):
-                try:
-                    kwargs = {"chat_id": chat_id, "text": fallback_text}
-                    if thread_id is not None:
-                        kwargs["message_thread_id"] = thread_id
-                    await iface.send_message(**kwargs)
-                    log_info(
-                        "[web_search] Direct fallback sent via interface.send_message"
-                    )
-                except Exception as se:
-                    log_warning(f"[web_search] Failed to send direct fallback: {se}")
+            except Exception as se:
+                log_warning(f"[web_search] Failed to send direct fallback: {se}")
         except Exception as e:
             log_warning(f"[web_search] Direct fallback error: {e}")
 

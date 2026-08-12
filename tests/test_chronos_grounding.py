@@ -232,14 +232,15 @@ async def test_web_search_direct_fallback_when_delivery_fails(
 
     sent: list[dict] = []
 
-    async def _fake_universal_send(iface, **kwargs):
-        sent.append(kwargs)
+    class _FakeInterface:
+        async def send_message(self, payload: dict, original_message=None) -> bool:
+            sent.append(payload)
+            return True
 
     monkeypatch.setattr("core.auto_response.request_llm_delivery", mock_delivery)
     monkeypatch.setattr(
-        "core.core_initializer.INTERFACE_REGISTRY", {"telegram_bot": object()}
+        "core.core_initializer.INTERFACE_REGISTRY", {"telegram_bot": _FakeInterface()}
     )
-    monkeypatch.setattr("core.transport_layer.universal_send", _fake_universal_send)
 
     res = await plugin.execute_action(action, context, None, None)
     assert res == {"status": "ok", "results_count": 0}
@@ -251,7 +252,9 @@ async def test_web_search_direct_fallback_when_delivery_fails(
     assert kwargs["original_context"]["interface_path"] == "telegram_bot/123"
     assert kwargs["original_context"]["chat_id"] == 123
 
-    # Direct fallback fired because delivery failed, even with zero results.
+    # Direct fallback fired because delivery failed, even with zero results. It
+    # must use the canonical payload-dict send shape (interface.send_message
+    # takes a single payload dict, not chat_id/text kwargs).
     assert len(sent) == 1
     assert "No web search results found" in sent[0]["text"]
     assert sent[0]["interface_path"] == "telegram_bot/123"
