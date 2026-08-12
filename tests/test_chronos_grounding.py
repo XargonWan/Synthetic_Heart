@@ -258,3 +258,80 @@ async def test_web_search_direct_fallback_when_delivery_fails(
     assert len(sent) == 1
     assert "No web search results found" in sent[0]["text"]
     assert sent[0]["interface_path"] == "telegram_bot/123"
+
+
+@pytest.mark.asyncio
+async def test_auto_response_legacy_delivery_propagates_result_and_builds_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The legacy delivery branch must propagate True/False AND enqueue a
+    self-contained delivery prompt.
+
+    Reproduces the live 2026-08-12 trace: request_llm_delivery's legacy branch
+    returned None (so the web_search plugin treated a successful enqueue as a
+    failure and dumped raw results), and the delivery system message rendered
+    as a bare ``{'action_outputs': [...]}`` dict, so the LLM replied with
+    ``{"response": ...}`` instead of a ``message_*`` action.
+    """
+    import json
+    from unittest.mock import patch as mock_patch
+
+    import core.auto_response as ar
+
+    original_context = {
+        "interface_name": "telegram_bot",
+        "interface_path": "telegram_bot/123",
+        "chat_id": 123,
+        "message_id": 42,
+    }
+    action_outputs = [
+        {
+            "type": "web_search_result",
+            "result": {"title": "T", "snippet": "S", "url": "https://e.x"},
+        }
+    ]
+
+    # The wrapper's legacy branch must propagate the inner result (True/False)
+    # instead of returning None, so callers can trust delivery_ok.
+    with mock_patch.object(
+        ar._auto_response_system, "request_llm_response", new_callable=AsyncMock
+    ) as fake_response:
+        fake_response.return_value = True
+        delivered = await ar.request_llm_delivery(
+            action_outputs=action_outputs,
+            original_context=original_context,
+            action_type="search_current_knowledge",
+        )
+        assert delivered is True
+        fake_response.return_value = False
+        delivered = await ar.request_llm_delivery(
+            action_outputs=action_outputs,
+            original_context=original_context,
+            action_type="search_current_knowledge",
+        )
+        assert delivered is False
+
+    # Now exercise the real request_llm_response with a captured enqueue to
+    # verify the delivery prompt is a complete, serializable instruction.
+    enqueue_mock = AsyncMock()
+    import core.message_queue as mq
+
+    monkeypatch.setattr(mq, "enqueue", enqueue_mock)
+    monkeypatch.setattr(
+        "core.core_initializer.INTERFACE_REGISTRY", {"telegram_bot": object()}
+    )
+    monkeypatch.setattr(ar, "load_json_instructions", lambda: "JSON RULES")
+
+    result = await ar._auto_response_system.request_llm_response(
+        original_context=original_context,
+        action_type="search_current_knowledge",
+        action_outputs=action_outputs,
+    )
+    assert result is True
+    enqueue_mock.assert_called_once()
+    payload = json.loads(enqueue_mock.call_args.args[2])
+    sm = payload["system_message"]
+    assert "DELIVERY TASK" in sm["message"]
+    assert 'message_telegram_bot' in sm["message"]
+    assert 'interface_path": "telegram_bot/123' in sm["message"]
+    assert "=== RESULTS ===" in sm["message"]

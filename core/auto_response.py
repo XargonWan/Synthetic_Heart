@@ -93,9 +93,34 @@ class AutoResponseSystem:
 
             json_rules = load_json_instructions()
             if action_outputs is not None:
-                message_block = {"action_outputs": action_outputs}
+                message_block = json.dumps(
+                    {"action_outputs": action_outputs}, ensure_ascii=False
+                )
             else:
                 message_block = output
+
+            # The delivery system message is rendered verbatim as the LLM's
+            # system content (the bridge routes any system_message dict through
+            # its role-splitter, which reads only 'message'), so 'message' must
+            # be a complete, self-contained instruction: delivery task + reply
+            # format + the results. Without an explicit format the LLM returns
+            # {"response": ...} instead of a message_* action, which then trips
+            # the corrector (observed live 2026-08-12).
+            if action_outputs is not None:
+                example_payload = '{"text": "<your reply>"'
+                if interface_path:
+                    example_payload += f', "interface_path": "{interface_path}"'
+                example_payload += "}"
+                delivery_note = (
+                    f"DELIVERY TASK: These are the results from your "
+                    f"'{action_type}' action. DO NOT call '{action_type}' again.\n"
+                    f"Compose a natural message to the user summarising these "
+                    f"results. Reply with exactly ONE action:\n"
+                    f'{{"actions": [{{"type": "message_{interface_name}", '
+                    f'"payload": {example_payload}}}]}}\n'
+                    f"Respond with ONLY valid JSON. No text before or after."
+                )
+                message_block = f"{delivery_note}\n\n=== RESULTS ===\n{message_block}"
 
             # Build explicit instruction to prevent action loops
             # Tell LLM to respond to user with results, NOT call the same action again
@@ -172,21 +197,19 @@ async def request_llm_delivery(
     """
     # Handle legacy calling pattern (terminal plugin style)
     if (action_outputs is not None) and original_context is not None:
-        await _auto_response_system.request_llm_response(
+        return await _auto_response_system.request_llm_response(
             original_context=original_context,
             action_type=action_type or "unknown",
             action_outputs=action_outputs,
         )
-        return
 
     if output is not None and original_context is not None:
-        await _auto_response_system.request_llm_response(
+        return await _auto_response_system.request_llm_response(
             output,
             original_context,
             action_type or "unknown",
             command,
         )
-        return
 
     # Handle new calling pattern (interface style)
     if message is not None or interface is not None:

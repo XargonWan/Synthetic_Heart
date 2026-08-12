@@ -2475,6 +2475,14 @@ async def run_corrector_middleware(
                 successful_count = _normalize_count(raw_successful, len(successful))
                 failed_count = _normalize_count(raw_failed, len(failed))
 
+                # Normalize once so it is safe to reference below even when
+                # ``successful`` is a non-empty list (previously only assigned in
+                # the empty-list branch, causing a NameError on every selective
+                # correction with dict successful actions).
+                successful_types = correction_context.get("successful_types") or []
+                if not isinstance(successful_types, (list, tuple, set)):
+                    successful_types = []
+
                 if successful_count > 0:
                     # At least some actions ran — tell LLM exactly what to re-emit
                     correction_message_text = (
@@ -2489,8 +2497,7 @@ async def run_corrector_middleware(
                             action_type = action.get("type", "unknown")
                             correction_message_text += f"  - {action_type}\n"
                     else:
-                        successful_types = correction_context.get("successful_types")
-                        if isinstance(successful_types, (list, tuple, set)):
+                        if successful_types:
                             for action_type in successful_types:
                                 correction_message_text += f"  - {action_type}\n"
 
