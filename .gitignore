@@ -107,6 +107,12 @@ plugins/rift_vessel/minecraft/mineflayer/package-lock.json
 # (source clone, venv, logs, pid). The settings live in the committed
 # container/searxng/settings.yml, so only the runtime artefacts are ignored.
 plugins/web_search/searxng-runtime/
+
+# Rift Vessel Minecraft knowledge-base cache — LLM-summarised wiki pages the
+# vessel fetches while playing (plugins/rift_vessel/knowledge_client.py writes
+# one JSON per fact slug). Generated at runtime and rebuilt on demand; the
+# client creates the directory itself, so fresh clones start empty.
+plugins/rift_vessel/minecraft/wiki/cache/
 memories/session
 
 # Kilo agent config (per-workspace, not shared)
