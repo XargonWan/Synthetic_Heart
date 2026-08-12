@@ -348,3 +348,13 @@ async def test_auto_response_legacy_delivery_propagates_result_and_builds_prompt
     assert "message_telegram_bot" in sm["message"]
     assert 'interface_path": "telegram_bot/123' in sm["message"]
     assert "=== RESULTS ===" in sm["message"]
+    # No duplicated blocks, and the persona must come before the delivery task
+    # which must come before the results (a double-wrap regressed this live:
+    # the delivery turn prompt repeated DELIVERY TASK / === RESULTS === around
+    # the persona block).
+    assert sm["message"].count("DELIVERY TASK") == 1
+    assert (
+        sm["message"].index("=== CRITICAL SYSTEM IDENTITY ===")
+        < sm["message"].index("DELIVERY TASK")
+        < sm["message"].index("=== RESULTS ===")
+    )

@@ -149,7 +149,6 @@ class AutoResponseSystem:
                     f"Respond with ONLY valid JSON. No text before or after."
                 )
                 message_block = f"{persona_block}{delivery_note}\n\n=== RESULTS ===\n{message_block}"
-                message_block = f"{delivery_note}\n\n=== RESULTS ===\n{message_block}"
 
             # Build explicit instruction to prevent action loops
             # Tell LLM to respond to user with results, NOT call the same action again
