@@ -2422,27 +2422,6 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         const presets = (window.__SYNTH_CONFIG && window.__SYNTH_CONFIG.WEBUI_ACCENT_PRESETS) || ['#6bfefe','#ff6bd6','#18c98c','#ffd166','#ff9ecb'];
                         const presetsWrap = document.createElement('div');
                         presetsWrap.className = 'accent-presets';
-                        const setActivePreset = (val) => {
-                            const needle = String(val || '').toLowerCase();
-                            presetsWrap.querySelectorAll('button[data-color]').forEach((btn) => {
-                                const btnColor = String(btn.getAttribute('data-color') || '').toLowerCase();
-                                btn.classList.toggle('is-active', !!needle && btnColor === needle);
-                            });
-                        };
-                        presets.forEach((c) => {
-                            const b = document.createElement('button');
-                            b.type = 'button';
-                            b.style.background = c;
-                            b.title = c;
-                            b.setAttribute('data-color', c);
-                            b.addEventListener('click', () => {
-                                previewVal = c;
-                                try { document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch (e) {}
-                                updateColorDot(c);
-                                setActivePreset(c);
-                            });
-                            presetsWrap.appendChild(b);
-                        });
 
                         const colorInput = document.createElement('input');
                         colorInput.type = 'color';
@@ -2452,29 +2431,55 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         colorInput.addEventListener('input', (ev) => {
                             previewVal = ev.target.value;
                             try { const c = previewVal; document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch (e) {}
-                            updateColorDot(previewVal);
+                            setActivePreset(previewVal);
                         });
 
-                        const colorDot = document.createElement('button');
-                        colorDot.type = 'button';
-                        colorDot.className = 'accent-color-dot';
-                        colorDot.disabled = !isEditable;
-                        const updateColorDot = (val) => {
-                            if (isValidHex(val)) {
-                                colorDot.style.background = val;
-                                colorDot.textContent = '';
-                                colorDot.setAttribute('aria-label', `Color ${val}`);
-                            } else {
-                                colorDot.style.background = 'transparent';
-                                colorDot.textContent = '🎨';
-                                colorDot.setAttribute('aria-label', 'Pick accent color');
-                            }
+                        // Custom blob: last swatch of the row. Shows the current custom
+                        // color when one is set, otherwise a rainbow badge; clicking it
+                        // opens the native hex color wheel.
+                        const customBtn = document.createElement('button');
+                        customBtn.type = 'button';
+                        customBtn.className = 'accent-preset-custom';
+                        customBtn.title = 'Custom color';
+                        customBtn.disabled = !isEditable;
+                        const paintCustom = (val) => {
+                            const valid = isValidHex(val);
+                            const needle = String(val || '').toLowerCase();
+                            const isCustom = valid && !presets.some((p) => String(p || '').toLowerCase() === needle);
+                            customBtn.classList.toggle('is-active', isCustom);
+                            customBtn.style.background = isCustom ? val : '';
+                            customBtn.textContent = isCustom ? '' : '+';
+                            customBtn.setAttribute('aria-label', isCustom ? `Custom color ${val}` : 'Pick a custom accent color');
                         };
-                        updateColorDot(current);
-                        setActivePreset(current);
-                        colorDot.addEventListener('click', () => {
+                        customBtn.addEventListener('click', () => {
                             if (!colorInput.disabled) colorInput.click();
                         });
+
+                        const setActivePreset = (val) => {
+                            const needle = String(val || '').toLowerCase();
+                            presetsWrap.querySelectorAll('button[data-color]').forEach((btn) => {
+                                const btnColor = String(btn.getAttribute('data-color') || '').toLowerCase();
+                                btn.classList.toggle('is-active', !!needle && btnColor === needle);
+                            });
+                            paintCustom(val);
+                        };
+
+                        presets.forEach((c) => {
+                            const b = document.createElement('button');
+                            b.type = 'button';
+                            b.style.background = c;
+                            b.title = c;
+                            b.setAttribute('data-color', c);
+                            b.addEventListener('click', () => {
+                                previewVal = c;
+                                try { document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch (e) {}
+                                setActivePreset(c);
+                            });
+                            presetsWrap.appendChild(b);
+                        });
+                        presetsWrap.appendChild(customBtn);
+
+                        setActivePreset(current);
 
                         const applyBtn = document.createElement('button');
                         applyBtn.type = 'button';
@@ -2507,7 +2512,6 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             previewVal = null;
                             colorInput.value = current;
                             try { const c = current; document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch (e) {}
-                            updateColorDot(current);
                             setActivePreset(current);
                         });
 
@@ -2519,7 +2523,6 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             const def = accentItem.default || '#6bfefe';
                             previewVal = def;
                             colorInput.value = def;
-                            updateColorDot(def);
                             setActivePreset(def);
                             try { const payload = { key: accentItem.key, value: def }; const res = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); if (res.ok) await refreshConfig(); } catch (e) { window.showToast && window.showToast('Save failed', true); }
                         });
@@ -2531,7 +2534,6 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         actions.appendChild(resetBtn);
 
                         container.appendChild(presetsWrap);
-                        container.appendChild(colorDot);
                         container.appendChild(colorInput);
                         container.appendChild(actions);
                     };
