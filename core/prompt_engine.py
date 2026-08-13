@@ -16,6 +16,7 @@ from core.user_utils import get_user_display_name, get_user_usertag
 from datetime import datetime, timezone
 import os
 import asyncio
+import inspect
 from typing import Any, cast
 
 # Lazily imported to avoid circular deps at module load time
@@ -1485,6 +1486,13 @@ def _assemble_prompt_request(  # noqa: PLR0913
 
         history_lines: list[Any] = context_section.get("history_current_chat") or []
         conversation_history = _history_to_turns(history_lines, synth_names)
+        # Final safety net: never let an empty-content turn reach the provider
+        # payload, whatever the source (a stale module binding or a malformed
+        # history line could otherwise inject blank user/assistant messages,
+        # observed in langfuse 3f11e804 / 7f92da0e / 9f50c1a2).
+        conversation_history = [
+            t for t in conversation_history if (t.content or "").strip()
+        ]
 
     # ── Runtime context ─────────────────────────────────────────────────────
     try:
@@ -1971,7 +1979,21 @@ async def build_prompt_request(
         from core.action_parser import gather_static_injections
 
         log_info("[json_prompt] 🔄 About to call gather_static_injections()")
-        injections = await gather_static_injections(message, context_memory)
+        # Defensive: gather_static_injections is an async function, but a
+        # concurrent plugin reload (importlib.reload in core_initializer) can
+        # transiently leave the module attribute pointing at an old binding.
+        # Awaiting a non-awaitable raises "object dict can't be used in 'await'
+        # expression" and the whole context gather is silently dropped (blank
+        # memories/diary/profile + empty conversation_history, observed in
+        # langfuse 3f11e804 / 7f92da0e / 9f50c1a2). Guard it so one bad bind
+        # degrades to a clean empty gather instead of nuking the whole prompt.
+        _gather_result = gather_static_injections(message, context_memory)
+        if inspect.isawaitable(_gather_result):
+            injections = await _gather_result
+        elif isinstance(_gather_result, dict):
+            injections = _gather_result
+        else:
+            injections = {}
         log_info(
             f"[json_prompt] 📥 gather_static_injections() returned: {list(injections.keys()) if injections else 'empty'}"
         )
@@ -3081,7 +3103,13 @@ async def build_delivery_request(
             reply_to_message=None,
             interface_path=interface_path,
         )
-        _injections = await gather_static_injections(_mock_msg, {})
+        _gather = gather_static_injections(_mock_msg, {})
+        if inspect.isawaitable(_gather):
+            _injections = await _gather
+        elif isinstance(_gather, dict):
+            _injections = _gather
+        else:
+            _injections = {}
         if isinstance(_injections, dict):
             persona = str(_injections.get("persona") or "")
             persona_preferences = str(_injections.get("persona_preferences") or "")
@@ -3569,7 +3597,13 @@ async def build_live_prompt_request(
     try:
         from core.action_parser import gather_static_injections
 
-        injections = await gather_static_injections(message, context_memory)
+        _gather = gather_static_injections(message, context_memory)
+        if inspect.isawaitable(_gather):
+            injections = await _gather
+        elif isinstance(_gather, dict):
+            injections = _gather
+        else:
+            injections = {}
         if not isinstance(injections, dict):
             injections = {}
     except Exception as e:
