@@ -907,7 +907,12 @@ class VoxPlugin(AIPluginBase):
         return await self.speak(
             text=payload.get("text", ""),
             emotion=payload.get("emo"),
-            interface_path=context.get("interface_path"),
+            # Prefer an explicit interface_path carried in the payload (set by
+            # message_chain's TTS auto-inject for turns that address a chat other
+            # than the current context, e.g. outbound Grillo beats); fall back to
+            # the message-chain context.
+            interface_path=payload.get("interface_path")
+            or context.get("interface_path"),
             context=context,
             original_message=original_message,
             merged_text=payload.get("__merged_text"),

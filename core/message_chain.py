@@ -2583,15 +2583,26 @@ async def handle_incoming_message(
                         # earlier ``is_reactive_vessel_chat`` note); autonomous vessel
                         # perceptions leave the structural flag False and stay excluded.
                         is_reactive_vessel_chat = bool(ctx.get("vessel_player_chat"))
-                        is_user_facing = bool(
-                            interface_path
-                            and (
-                                any(
-                                    interface_path.startswith(f"{iface}/")
-                                    for iface in user_facing_interfaces
+                        # Outbound Grillo beats (observer, scheduled_reminder,
+                        # web_search_result) target a real interface and are
+                        # user-facing: their ``message_*`` actions must ride the same
+                        # TTS auto-inject path as ordinary replies. Internal beats
+                        # (self_reflection, curiosity, ...) stay excluded.
+                        is_grillo_outbound = bool(
+                            ctx.get("grillo_beat", False)
+                        ) and is_outbound_beat(ctx.get("beat_type"))
+                        is_user_facing = (
+                            bool(
+                                interface_path
+                                and (
+                                    any(
+                                        interface_path.startswith(f"{iface}/")
+                                        for iface in user_facing_interfaces
+                                    )
+                                    or is_reactive_vessel_chat
                                 )
-                                or is_reactive_vessel_chat
                             )
+                            or is_grillo_outbound
                         )
 
                         # Check if this is an internal/system message
@@ -2694,10 +2705,12 @@ async def handle_incoming_message(
 
                         # Skip for: internal grillo beats, internal chats, system messages, autonomous messages, already-executed TTS,
                         # an explicit send_as_voice request (handled in action_parser),
-                        # or if the request_tts flag/feature is off
+                        # or if the request_tts flag/feature is off.
+                        # Outbound Grillo beats are exempt from the internal-chat
+                        # skip so their user-facing messages get TTS.
                         should_skip_tts = (
                             is_grillo_internal
-                            or is_internal_chat
+                            or (is_internal_chat and not is_grillo_outbound)
                             or is_system_message
                             or is_autonomous
                             or tts_already_executed
@@ -2847,6 +2860,15 @@ async def handle_incoming_message(
                                     or bool(context and context.get("request_tts"))
                                 ) and _iface_tts_prefix != "synth_webui"
 
+                                # Carry the target interface_path into the injected
+                                # tts_speak so audio dispatch works even when the
+                                # current chat context has none (e.g. outbound Grillo
+                                # beats that address another chat via the message
+                                # action's payload).
+                                _tts_target_path = payload.get(
+                                    "interface_path"
+                                ) or payload.get("chat_name")
+
                                 if is_voice_response:
                                     # Voice response strategy:
                                     #   • Remove the standalone message_* action so text
@@ -2901,6 +2923,10 @@ async def handle_incoming_message(
                                             "__auto_injected": True,
                                         },
                                     }
+                                if _tts_target_path:
+                                    tts_action["payload"]["interface_path"] = (
+                                        _tts_target_path
+                                    )
                                 actions.append(tts_action)
                                 # Update has_tts flag since we just added it
                                 has_tts = True

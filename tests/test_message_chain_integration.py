@@ -213,6 +213,135 @@ class TestMessageChainIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIn("tts_speak", types)
         get_var_patcher.stop()
 
+    @patch("core.config_manager.config_registry.get_value")
+    @patch("core.transport_layer.run_corrector_middleware")
+    @patch("core.action_parser.run_actions")
+    async def test_tts_auto_injected_for_grillo_observer_beat(
+        self, mock_run_actions, mock_corrector, mock_get_value
+    ):
+        """Outbound Grillo observer beats get TTS on their message_* actions.
+
+        The observer beat runs as an internal chat (chat_id=-1) but addresses a
+        real conversation via the message action's interface_path. It must ride
+        the same TTS auto-inject path as ordinary replies, with the target
+        interface_path carried into the injected tts_speak payload so audio
+        dispatch can find the destination.
+        """
+        from core import message_chain
+
+        def fake_get_value(key, default=None, **kwargs):
+            if key == "CORRECTOR_RETRIES":
+                return 4
+            if key == "ACTIVE_VOX_ENGINE":
+                return "http"
+            if key == "VOX_SPEAK_TEXT_REPLIES":
+                return True
+            return default
+
+        mock_get_value.side_effect = fake_get_value
+        mock_run_actions.return_value = {
+            "processed": [],
+            "failed_actions": [],
+            "errors": [],
+        }
+
+        class FakeVar:
+            def __init__(self, value):
+                self.value = value
+
+        def fake_get_var(name, default=None, **kwargs):
+            if name == "MESSAGE_ACTION_TYPES":
+                return FakeVar(["message_telegram_bot"])
+            return default
+
+        get_var_patcher = patch(
+            "core.config_manager.config_registry.get_var", new=fake_get_var
+        )
+        get_var_patcher.start()
+
+        json_text = '{"actions": [{"type": "message_telegram_bot", "payload": {"interface_path": "telegram_bot/5208932647", "text": "It was... better,"}}]}'
+        msg = SimpleNamespace(chat_id=-1, text=json_text, from_cortex=True)
+
+        result = await message_chain.handle_incoming_message(
+            bot=MagicMock(),
+            message=msg,
+            text=json_text,
+            source="llm",
+            context={"grillo_beat": True, "beat_type": "observer"},
+        )
+
+        get_var_patcher.stop()
+
+        self.assertEqual(result, message_chain.ACTIONS_EXECUTED)
+        mock_run_actions.assert_called_once()
+        called_actions = mock_run_actions.call_args[0][0]
+        types = [a.get("type") for a in called_actions if isinstance(a, dict)]
+        self.assertIn("tts_speak", types)
+        self.assertNotIn("message_telegram_bot", types)
+        tts_payload = next(
+            a["payload"] for a in called_actions if a.get("type") == "tts_speak"
+        )
+        self.assertEqual(tts_payload.get("interface_path"), "telegram_bot/5208932647")
+        self.assertEqual(tts_payload.get("__merged_text"), "It was... better,")
+
+    @patch("core.config_manager.config_registry.get_value")
+    @patch("core.transport_layer.run_corrector_middleware")
+    @patch("core.action_parser.run_actions")
+    async def test_tts_not_injected_for_grillo_internal_beat(
+        self, mock_run_actions, mock_corrector, mock_get_value
+    ):
+        """Internal Grillo beats (self_reflection, curiosity) still skip TTS."""
+        from core import message_chain
+
+        def fake_get_value(key, default=None, **kwargs):
+            if key == "CORRECTOR_RETRIES":
+                return 4
+            if key == "ACTIVE_VOX_ENGINE":
+                return "http"
+            if key == "VOX_SPEAK_TEXT_REPLIES":
+                return True
+            return default
+
+        mock_get_value.side_effect = fake_get_value
+        mock_run_actions.return_value = {
+            "processed": [],
+            "failed_actions": [],
+            "errors": [],
+        }
+
+        class FakeVar:
+            def __init__(self, value):
+                self.value = value
+
+        def fake_get_var(name, default=None, **kwargs):
+            if name == "MESSAGE_ACTION_TYPES":
+                return FakeVar(["message_telegram_bot"])
+            return default
+
+        get_var_patcher = patch(
+            "core.config_manager.config_registry.get_var", new=fake_get_var
+        )
+        get_var_patcher.start()
+
+        json_text = '{"actions": [{"type": "message_telegram_bot", "payload": {"interface_path": "telegram_bot/5208932647", "text": "note to self"}}]}'
+        msg = SimpleNamespace(chat_id=-1, text=json_text, from_cortex=True)
+
+        result = await message_chain.handle_incoming_message(
+            bot=MagicMock(),
+            message=msg,
+            text=json_text,
+            source="llm",
+            context={"grillo_beat": True, "beat_type": "self_reflection"},
+        )
+
+        get_var_patcher.stop()
+
+        self.assertEqual(result, message_chain.ACTIONS_EXECUTED)
+        mock_run_actions.assert_called_once()
+        called_actions = mock_run_actions.call_args[0][0]
+        types = [a.get("type") for a in called_actions if isinstance(a, dict)]
+        self.assertNotIn("tts_speak", types)
+
     @patch("core.transport_layer.run_corrector_middleware")
     @patch("core.action_parser.run_actions")
     async def test_system_message_blocked(self, mock_run_actions, mock_corrector):
