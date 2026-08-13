@@ -629,6 +629,21 @@ when invoking the interpreter directly, use `.venv/Scripts/python.exe` on Window
 because the system Python may not have the test dependencies installed and can produce
 a misleading "pytest is not available" result.
 
+### Process cleanup and `uv run` network fallbacks
+
+- **Kill the main process when you are done with it.** Any Synth instance you start
+  (`main.py`, smoke runs, `--help` probes) must be stopped before you finish, or it
+  will keep consuming the DB pool, message queue, and LLM endpoints indefinitely.
+  On Windows: `Get-CimInstance Win32_Process -Filter "Name = 'python.exe'"` to find
+  it by command line (match `main.py`), then `Stop-Process -Id <pid> -Force`.
+  Do not kill unrelated long-lived infra (the `mcp_servers/*.py` processes, the
+  `tencentdb_knowledge_mcp.py` launcher) unless asked.
+- **`uv run main.py` may fail on a transient network error fetching the
+  `kittentts` GitHub wheel** (e.g. `http2 error ... refused stream`). The venv is
+  already synced — the failure is only `uv` re-resolving metadata. Use
+  `uv run --offline main.py` or `uv run --no-sync main.py` (or run
+  `.venv/Scripts/python.exe main.py` directly) instead of retrying the fetch.
+
 ### Before editing
 
 1. Read the relevant wiki/docs and nearby tests.
