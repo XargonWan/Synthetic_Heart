@@ -237,7 +237,10 @@ def _translate_create_table(sql: str) -> str:
     translated = re.sub(r"\bDATETIME\b", "TIMESTAMPTZ", translated)
     translated = re.sub(r"\bTIMESTAMP\b", "TIMESTAMPTZ", translated)
     translated = re.sub(
-        r"\bDOUBLE\b", "DOUBLE PRECISION", translated, flags=re.IGNORECASE
+        r"\bDOUBLE\b(?!\s+PRECISION)",
+        "DOUBLE PRECISION",
+        translated,
+        flags=re.IGNORECASE,
     )
     translated = re.sub(r"\bJSON\b", "JSONB", translated, flags=re.IGNORECASE)
     translated = re.sub(r"\bENUM\s*\([^\)]*\)", "TEXT", translated, flags=re.IGNORECASE)

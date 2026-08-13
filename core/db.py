@@ -1389,10 +1389,29 @@ async def init_db() -> None:
             # Ensure we have a cursor to run schema creation for core tables
             async with conn.cursor() as cur:
                 if _get_db_type() == "postgres":
+                    failed_statements = 0
                     for statement in _load_sql_statements(
                         _runtime_postgres_schema_path()
                     ):
-                        await cur.execute(statement)
+                        try:
+                            await cur.execute(statement)
+                        except Exception as statement_error:
+                            # One invalid statement must not abort the whole
+                            # schema: log it and keep going so tables declared
+                            # after the failure still get created. A single
+                            # bad statement used to stop the loop, strand every
+                            # later table, and re-fail on every boot (crash ->
+                            # restart -> bootloop), masking all other errors.
+                            failed_statements += 1
+                            log_warning(
+                                f"[init_db] PostgreSQL schema statement failed "
+                                f"({statement_error}): {statement[:120]}"
+                            )
+                    if failed_statements:
+                        log_warning(
+                            f"[init_db] {failed_statements} PostgreSQL schema "
+                            "statement(s) failed to apply"
+                        )
                 else:
                     await cur.execute(
                         """

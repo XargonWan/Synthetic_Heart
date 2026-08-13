@@ -184,7 +184,7 @@ CREATE TABLE IF NOT EXISTS message_map (
     trainer_message_id INTEGER PRIMARY KEY,
     chat_id BIGINT NOT NULL,
     message_id INTEGER NOT NULL,
-    timestamp DOUBLE PRECISION
+    created_at DOUBLE PRECISION
 );
 
 CREATE TABLE IF NOT EXISTS grillo_beats (
