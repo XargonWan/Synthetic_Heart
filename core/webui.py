@@ -2461,12 +2461,12 @@ class SynthWebUIInterface:
             return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
     async def stats(self):
-        uptime = int((datetime.utcnow() - self.start_time).total_seconds())
+        uptime = int((datetime.now(timezone.utc) - self.start_time).total_seconds())
         return JSONResponse({"uptime": uptime, "sessions": len(self.connections)})
 
     async def about_summary(self) -> JSONResponse:
         """Return lightweight About tab metadata (uptime, system, and component counts)."""
-        uptime = int((datetime.utcnow() - self.start_time).total_seconds())
+        uptime = int((datetime.now(timezone.utc) - self.start_time).total_seconds())
         sessions = len(self.connections)
         python_version = platform.python_version()
         platform_label = os.getenv("SYNTH_HOST_OS") or platform.platform()
