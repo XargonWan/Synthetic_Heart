@@ -2599,9 +2599,35 @@ async def run_corrector_middleware(
             # Extract the originating interface so the LLM engine can route
             # the corrected response back to the correct interface instead of
             # falling back to synth_webui.
+            #
+            # Prefer the authoritative interface_path prefix (e.g. "telegram_bot"
+            # from "telegram_bot/5208932647") over the raw context["interface"]
+            # value, which is a legacy display name ("telegram") that does not
+            # match the registered interface id ("telegram_bot"). Using the
+            # legacy name made the required_format example teach
+            # "message_telegram" + "telegram/5208932647" — an unregistered
+            # action the model then copied verbatim, so the correction failed
+            # again (langfuse 48282d7a-42fe-49a1-9d3a-4db1e1123a21).
             originating_interface: str | None = (
                 context.get("interface") if context else None
             )
+            _path_interface: str | None = None
+            try:
+                _raw_path = (
+                    context.get("interface_path")
+                    if context
+                    else getattr(context, "interface_path", None)
+                )
+                if _raw_path:
+                    from core.interface_path_utils import (
+                        get_interface_from_path,
+                    )
+
+                    _path_interface = get_interface_from_path(str(_raw_path))
+            except Exception:
+                _path_interface = None
+            if _path_interface:
+                originating_interface = _path_interface
 
             # Carry the active persona (identity + likes/dislikes) into the
             # correction prompt. The corrector sends a fresh single-message
@@ -2687,7 +2713,21 @@ async def run_corrector_middleware(
             # a correction response was silently dropped even after the game
             # actions themselves had succeeded.
             iface_label = originating_interface or "<interface>"
-            correction_action_type = f"message_{iface_label}"
+            # Map the interface id to its registered message action type via the
+            # canonical table (telegram_bot -> message_telegram_bot, ...). Blind
+            # ``message_{iface_label}`` taught the model unregistered types (e.g.
+            # ``message_telegram``) when the label was a legacy display name
+            # rather than the interface id, so the correction re-emitted the same
+            # invalid action (langfuse 48282d7a-42fe-49a1-9d3a-4db1e1123a21).
+            try:
+                from core.message_chain import _INTERFACE_TO_MESSAGE_ACTION
+
+                correction_action_type = (
+                    _INTERFACE_TO_MESSAGE_ACTION.get(iface_label)
+                    or f"message_{iface_label}"
+                )
+            except Exception:
+                correction_action_type = f"message_{iface_label}"
             # Build the example interface_path WITHOUT a trailing slash. The old
             # unconditional ``.../{thread or ''}`` produced e.g.
             # ``telegram_bot/5208932647/`` when ``thread_id`` was None, which the

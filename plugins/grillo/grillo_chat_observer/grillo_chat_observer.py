@@ -731,10 +731,6 @@ class GrilloChatObserverPlugin:
                         # snippet with how long ago it was said lets the model
                         # judge staleness itself — no hard age gate, so outreach
                         # always has context behind it.
-                        msg_ts = self._parse_ts(timestamp)
-                        age_seconds: Optional[float] = None
-                        if msg_ts is not None:
-                            age_seconds = (now - msg_ts).total_seconds()
                         if text:
                             snippet = text.strip()
                             if len(snippet) > 300:
@@ -870,10 +866,29 @@ class GrilloChatObserverPlugin:
                         has_recent_human = True
                         break
 
+                # Awaiting-reply guard: when the synth spoke last, the human has
+                # simply not replied yet — the person is not "gone". Mirror the
+                # snippet rule (self_skip_window): a chat whose last message is
+                # the synth's own, sent within the skip window, is NOT an
+                # outreach target. Without this, the 45-min self-cooldown
+                # expired while the human still had not answered, so the same DM
+                # was re-offered as "cooldown=ok" every hourly run and the beat
+                # nagged ("still coming tonight?" -> "hurry home!" -> "did you
+                # get home okay?") into a thread the synth already dominates
+                # (5 consecutive hourly observer beats, langfuse 404f8b76 /
+                # 1331d0ee / b4d0490c / c8b5a672 / 416e8e23). Structural sender
+                # metadata only, never keyword logic.
+                awaiting_reply = bool(
+                    last_from_self
+                    and last_ts is not None
+                    and (now - last_ts).total_seconds() < self.self_skip_window
+                )
+
                 eligible = (
                     has_recent_human
                     and not cooldown_active
                     and not in_active_conversation
+                    and not awaiting_reply
                 )
 
                 targets.append(
@@ -884,6 +899,7 @@ class GrilloChatObserverPlugin:
                         "age_seconds": age_seconds,
                         "cooldown_active": cooldown_active,
                         "in_active_conversation": in_active_conversation,
+                        "awaiting_reply": awaiting_reply,
                         "has_recent_human": has_recent_human,
                         "eligible": eligible,
                     }
@@ -1009,6 +1025,15 @@ class GrilloChatObserverPlugin:
                     cd = "ON-COOLDOWN(OFF-LIMITS)"
                 elif t.get("in_active_conversation"):
                     cd = "LIVE-CONVERSATION(OFF-LIMITS)"
+                elif t.get("last_from_self"):
+                    # Synth spoke last and the human has not replied yet. The
+                    # person is simply away from the chat — reaching out again
+                    # to ask if they are coming back is nagging, not initiative
+                    # (observed live: "hurry home!" / "did you get home okay?"
+                    # sent into a DM where the last message was the synth's own
+                    # and the human was present). Structural sender metadata,
+                    # never keyword logic.
+                    cd = "AWAITING-REPLY(OFF-LIMITS — you spoke last; the human has not replied yet)"
                 else:
                     cd = "ok"
                 last = t.get("last_sender") or "?"

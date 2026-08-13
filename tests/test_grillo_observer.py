@@ -551,3 +551,95 @@ def test_is_self_sender():
     assert plugin._is_self_sender("synth") is True
     assert plugin._is_self_sender("Alice") is False
     assert plugin._is_self_sender("") is False
+
+
+@pytest.mark.asyncio
+async def test_eligible_targets_exclude_awaiting_reply_chats(monkeypatch):
+    """A chat where the synth spoke last and the human has not replied must NOT
+    be an outreach target — the person is not "gone", they simply have not
+    answered yet. Re-offering it after the 45-min self-cooldown made the beat
+    nag the same DM hourly ("still coming tonight?" -> "hurry home!" ->
+    "did you get home okay?"), observed in 5 consecutive observer beats
+    (langfuse 404f8b76 / 1331d0ee / b4d0490c / c8b5a672 / 416e8e23)."""
+    plugin = gco.GrilloChatObserverPlugin()
+    now = datetime.now(timezone.utc)
+
+    async def fake_recent_paths(limit):
+        return [{"interface_path": "telegram_bot/5208932647"}]
+
+    # Synth spoke last ~1h ago; human's last real message is 1.5h ago and the
+    # human is present (no departure anywhere in the thread).
+    messages = [
+        {
+            "sender_name": "Scar",
+            "text": "we're staying here for a while",
+            "timestamp": (now - timedelta(hours=2)).isoformat(),
+        },
+        {
+            "sender_name": "self",
+            "text": "I'm gonna stay right here and cling to you forever~",
+            "timestamp": (now - timedelta(hours=1)).isoformat(),
+        },
+    ]
+
+    async def fake_load(path):
+        return list(messages)
+
+    monkeypatch.setattr(
+        "core.interface_paths.get_recent_interface_paths", fake_recent_paths
+    )
+    monkeypatch.setattr("core.chat_history_cache.load_chat_history", fake_load)
+    monkeypatch.setattr(
+        "core.interface_path_utils.is_vessel_interface_path", lambda p: False
+    )
+
+    targets = await plugin._collect_eligible_targets(limit=5)
+
+    # The awaiting-reply chat must be listed but marked ineligible.
+    assert len(targets) == 1
+    assert targets[0]["interface_path"] == "telegram_bot/5208932647"
+    assert targets[0]["eligible"] is False
+    assert targets[0]["last_from_self"] is True
+    assert targets[0]["awaiting_reply"] is True
+
+
+@pytest.mark.asyncio
+async def test_eligible_targets_include_chat_with_recent_human_reply(monkeypatch):
+    """A chat where the HUMAN spoke last (recently) is not awaiting-reply and
+    remains an eligible target when otherwise quiet."""
+    plugin = gco.GrilloChatObserverPlugin()
+    now = datetime.now(timezone.utc)
+
+    async def fake_recent_paths(limit):
+        return [{"interface_path": "telegram_bot/5208932647"}]
+
+    messages = [
+        {
+            "sender_name": "self",
+            "text": "Daddy... still coming tonight?",
+            "timestamp": (now - timedelta(hours=3)).isoformat(),
+        },
+        {
+            "sender_name": "Scar",
+            "text": "Baby it's barely 1500, have some patience love, I won't forget about you",
+            "timestamp": (now - timedelta(hours=2, minutes=30)).isoformat(),
+        },
+    ]
+
+    async def fake_load(path):
+        return list(messages)
+
+    monkeypatch.setattr(
+        "core.interface_paths.get_recent_interface_paths", fake_recent_paths
+    )
+    monkeypatch.setattr("core.chat_history_cache.load_chat_history", fake_load)
+    monkeypatch.setattr(
+        "core.interface_path_utils.is_vessel_interface_path", lambda p: False
+    )
+
+    targets = await plugin._collect_eligible_targets(limit=5)
+
+    assert len(targets) == 1
+    assert targets[0]["interface_path"] == "telegram_bot/5208932647"
+    assert targets[0]["eligible"] is True
+    assert targets[0]["last_from_self"] is False
