@@ -28,6 +28,24 @@ PRESETS_CONFIG_KEY = "ENGINE_CONFIG_PRESETS"
 # originating provider preset id) is never clobbered by a preset swap.
 _PRESERVED_KEYS: tuple[str, ...] = ("provider_id",)
 
+# Cortex scope names accepted by the "Apply to scopes" toggle. ``"base"`` maps
+# to BASE_CORTEX; everything else maps to its ``<SCOPE>_CORTEX`` override key
+# via ``set_scope_cortex`` (the same helpers the Engines-tab scope selectors
+# use), so the scope selectors reflect the change immediately.
+_VALID_SCOPES: frozenset[str] = frozenset(
+    {"base", "agent", "grillo", "trainer", "vessel", "dsp", "live"}
+)
+
+
+def normalize_scopes(scopes: list[str] | None) -> list[str]:
+    """Validate/dedupe a scope list against the known scope names."""
+    out: list[str] = []
+    for scope in scopes or []:
+        scope = str(scope or "").strip().lower()
+        if scope in _VALID_SCOPES and scope not in out:
+            out.append(scope)
+    return out
+
 
 def load_presets() -> list[dict[str, Any]]:
     """Return all saved presets as a list of dicts (never raises)."""
@@ -65,6 +83,7 @@ async def save_preset(
     model: str | None = None,
     description: str = "",
     extra_config: dict[str, Any] | None = None,
+    scopes: list[str] | None = None,
 ) -> dict[str, Any]:
     """Create or replace a named preset.
 
@@ -73,6 +92,9 @@ async def save_preset(
         model: Optional model id applied together with the config.
         description: Optional free-text note shown in the UI.
         extra_config: The ``extra_config`` bundle the preset carries.
+        scopes: Optional Cortex scope names (``"agent"``, ``"grillo"``, ...)
+            the preset was saved to target. Stored on the preset so the
+            "Apply to scopes" checkboxes can be prefilled later.
 
     Returns the stored preset dict.  Raises ``ValueError`` for an empty name.
     """
@@ -85,6 +107,7 @@ async def save_preset(
         "model": str(model).strip() if model else "",
         "description": str(description or "").strip(),
         "extra_config": dict(extra_config or {}),
+        "scopes": normalize_scopes(scopes),
     }
 
     presets = load_presets()
@@ -162,3 +185,39 @@ async def apply_preset(
     except Exception as exc:
         log_warning(f"[engine_config_presets] apply failed: {exc}")
         raise
+
+
+async def apply_preset_to_scopes(
+    engine_name: str,
+    model: str | None,
+    scopes: list[str] | None,
+) -> list[str]:
+    """Point each selected Cortex scope at ``engine_name`` (plus ``model``).
+
+    Uses the same scope-resolution helpers as the Engines-tab scope selectors
+    (``set_scope_cortex`` / ``set_base_cortex``), so the scope selectors reflect
+    the change immediately and every scope resolver honors it on the next call.
+    Unknown scope names are ignored; a failing scope never aborts the others.
+    Returns the scope names actually applied.
+    """
+    applied: list[str] = []
+    for scope in normalize_scopes(scopes):
+        try:
+            if scope == "base":
+                from core.config import set_base_cortex
+
+                await set_base_cortex(engine_name, model)
+            else:
+                from core.config import set_scope_cortex
+
+                await set_scope_cortex(scope, engine_name, model)
+            applied.append(scope)
+        except Exception as exc:
+            log_warning(f"[engine_config_presets] scope '{scope}' apply failed: {exc}")
+    if applied:
+        log_info(
+            f"[engine_config_presets] Applied engine '{engine_name}' "
+            f"(model={model or 'endpoint default'}) to scopes: "
+            f"{', '.join(applied)}"
+        )
+    return applied

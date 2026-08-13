@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Dict, List, Optional
 
-from core.logging_utils import log_debug, log_error, log_info
+from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.config_manager import config_registry
 
 # Lane constants
@@ -456,6 +456,24 @@ def _derive_goal(actions: List[Any], context: Dict[str, Any] | None) -> str:
         return "Execute the requested agentic actions."
 
 
+def _agent_actions_executed(result: Dict[str, Any]) -> int:
+    """Count executed tool actions from the loop's observations.
+
+    Mirrors the persistence path in ``agent_core.py``: every ``tool_results``
+    observation carries the executed tool results in its ``content`` list, so
+    ``0`` means the model produced no usable tool work this turn.
+    """
+    count = 0
+    for obs in result.get("observations") or []:
+        if not isinstance(obs, dict):
+            continue
+        if obs.get("role") == "tool_results":
+            content = obs.get("content")
+            if isinstance(content, list):
+                count += len(content)
+    return count
+
+
 async def _deliver_agent_reply(
     result: Dict[str, Any],
     context: Dict[str, Any],
@@ -482,6 +500,23 @@ async def _deliver_agent_reply(
     # reference. We deliver ``final_text`` exactly like any other reply.
     final_text = result.get("final_text")
     if not isinstance(final_text, str) or not final_text.strip():
+        return
+
+    # Garbage-output guard. When the turn times out with ZERO tool actions
+    # executed, the loop's ``final_text`` is raw model text that may be a
+    # degenerate artifact (e.g. ``"thought\nthought"`` after an empty-body burst
+    # from the endpoint). Retrying is the loop's job (primary re-call +
+    # Base-Cortex safety net, plus the bridge's ``retry_on_empty``) — this only
+    # stops the artifact from being shipped to the user as a reply. Purely
+    # structural (stop_reason + executed-action count), never keyword logic; the
+    # pause path (``paused_max_iterations``) composes its own message and is
+    # untouched.
+    stop_reason = str(result.get("stop_reason") or "").strip()
+    if stop_reason == "timeout" and _agent_actions_executed(result) == 0:
+        log_warning(
+            "[agent_router] Suppressing agent reply delivery: turn timed out "
+            f"with 0 actions executed (final_text={final_text!r})"
+        )
         return
 
     interface_path = context.get("interface_path") if context else None

@@ -511,3 +511,95 @@ async def test_get_active_cortex_engine_registered_noncortex_endpoint_falls_back
 
     assert engine == "selenium-llm-engine"
     set_value.assert_any_await("AGENT_CORTEX", "Default")
+
+
+@pytest.mark.asyncio
+async def test_get_active_cortex_engine_dsp_scope_uses_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A valid DSP_CORTEX override is honoured for scope='dsp'."""
+    from core import config as conf
+    import core.config_manager as cm
+
+    class FakeRegistry:
+        def get_available_engines(self):
+            return ["anthropic", "gemini_api"]
+
+        def get_default_engine(self):
+            return "anthropic"
+
+    class FakeExternalEndpointRegistry:
+        async def list_endpoints(self, enabled_only=False):
+            return []
+
+    values = {
+        "BASE_CORTEX": "anthropic",
+        "DSP_CORTEX": "gemini_api",
+    }
+    set_value = AsyncMock()
+
+    monkeypatch.setattr(
+        cm.config_registry,
+        "get_value",
+        lambda key, default=None: values.get(key, default),
+    )
+    monkeypatch.setattr(cm.config_registry, "set_value", set_value)
+    monkeypatch.setattr(
+        "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
+    )
+    monkeypatch.setattr(
+        "core.external_endpoints.registry.get_external_endpoint_registry",
+        lambda: FakeExternalEndpointRegistry(),
+    )
+
+    engine = await conf.get_active_cortex_engine("dsp")
+
+    assert engine == "gemini_api"
+    set_value.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_active_cortex_engine_dsp_scope_falls_back_to_base_when_bad(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale DSP_CORTEX override degrades to Base Cortex and resets to 'Default'."""
+    from core import config as conf
+    import core.config_manager as cm
+
+    class FakeRegistry:
+        def get_available_engines(self):
+            return ["anthropic", "gemini_api"]
+
+        def get_default_engine(self):
+            return "anthropic"
+
+    class FakeExternalEndpointRegistry:
+        async def list_endpoints(self, enabled_only=False):
+            return []
+
+    values = {
+        "BASE_CORTEX": "gemini_api",
+        "DSP_CORTEX": "removed_engine",
+    }
+    set_value = AsyncMock()
+
+    monkeypatch.setattr(
+        cm.config_registry,
+        "get_value",
+        lambda key, default=None: values.get(key, default),
+    )
+    monkeypatch.setattr(cm.config_registry, "set_value", set_value)
+    monkeypatch.setattr(
+        "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
+    )
+    monkeypatch.setattr(
+        "core.external_endpoints.registry.get_external_endpoint_registry",
+        lambda: FakeExternalEndpointRegistry(),
+    )
+    monkeypatch.setattr("core.notifier.notifier", lambda *a, **k: None)
+    conf._CORTEX_OVERRIDE_FALLBACK_WARNED.clear()
+
+    engine = await conf.get_active_cortex_engine("dsp")
+
+    assert engine == "gemini_api"
+    set_value.assert_awaited_once_with("DSP_CORTEX", "Default")

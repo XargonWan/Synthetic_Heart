@@ -186,6 +186,17 @@ VESSEL_CORTEX = config_registry.get_var(
     allow_env_override=False,
 )
 
+DSP_CORTEX = config_registry.get_var(
+    "DSP_CORTEX",
+    "Default",
+    label="SOUL / DSP Cortex",
+    description="Cortex engine used for SOUL DSP profile compilation (Default means Base Cortex).",
+    group="core",
+    component="cortex",
+    hidden=True,  # Managed via the Cortex Engines scope selectors
+    allow_env_override=False,
+)
+
 # Named engine-configuration presets (extra_config + optional model bundles)
 # edited from the Engines tab.  Stored as a JSON list; hidden from the generic
 # settings grid because it is managed by the dedicated preset UI in
@@ -450,7 +461,7 @@ _register_exposed_var(
 # Cortex scope value (engine + optional model) storage helpers
 # ---------------------------------------------------------------------------
 # Each scope config key (BASE_CORTEX, AGENT_CORTEX, GRILLO_CORTEX,
-# TRAINER_CORTEX, LIVE_CORTEX, VESSEL_CORTEX) stores either:
+# TRAINER_CORTEX, LIVE_CORTEX, VESSEL_CORTEX, DSP_CORTEX) stores either:
 #   - a bare engine name string (legacy): the endpoint's default_model is used;
 #   - a JSON object {"engine": "...", "model": "..."}: the model overrides the
 #     endpoint default for that scope only.
@@ -555,6 +566,8 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
             override_key = "AGENT_CORTEX"
         elif scope == "vessel":
             override_key = "VESSEL_CORTEX"
+        elif scope == "dsp":
+            override_key = "DSP_CORTEX"
         else:
             override_key = None
 
@@ -778,6 +791,8 @@ async def get_active_cortex_scope(scope: str | None = None) -> tuple[str, str | 
         override_key = "AGENT_CORTEX"
     elif scope == "vessel":
         override_key = "VESSEL_CORTEX"
+    elif scope == "dsp":
+        override_key = "DSP_CORTEX"
 
     if override_key is not None:
         ov_engine, ov_model = parse_cortex_scope_value(
@@ -875,6 +890,8 @@ async def set_scope_cortex(scope: str, name: str, model: str | None = None) -> N
         key = "AGENT_CORTEX"
     elif scope == "vessel":
         key = "VESSEL_CORTEX"
+    elif scope == "dsp":
+        key = "DSP_CORTEX"
     else:
         key = "TRAINER_CORTEX"
     value = serialize_cortex_scope_value(name, model)

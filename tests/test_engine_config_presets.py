@@ -1,5 +1,7 @@
 """Unit tests for core/engine_config_presets.py."""
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 from core import engine_config_presets as ecp
@@ -217,3 +219,73 @@ async def test_apply_preset_persists_model_before_resync(
     assert updated is ep
     assert ep_registry.models.get(3) == "my-custom-model"
     assert ep_registry.call_order == ["set_default_model", "update_endpoint"]
+
+
+# ---------------------------------------------------------------------------
+# Preset scopes ("Apply to scopes" toggle)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_save_preset_stores_validated_scopes(
+    cfg_registry: FakeConfigRegistry,
+) -> None:
+    saved = await ecp.save_preset(
+        "deep",
+        model="m",
+        extra_config={},
+        scopes=["Agent", "agent", "dsp", "bogus", "agent"],
+    )
+    assert saved["scopes"] == ["agent", "dsp"]
+
+
+@pytest.mark.asyncio
+async def test_save_preset_without_scopes_stores_empty(
+    cfg_registry: FakeConfigRegistry,
+) -> None:
+    saved = await ecp.save_preset("plain", extra_config={})
+    assert saved["scopes"] == []
+
+
+@pytest.mark.asyncio
+async def test_apply_preset_to_scopes_calls_scope_setters(
+    cfg_registry: FakeConfigRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    set_scope = AsyncMock()
+    set_base = AsyncMock()
+    monkeypatch.setattr("core.config.set_scope_cortex", set_scope)
+    monkeypatch.setattr("core.config.set_base_cortex", set_base)
+
+    applied = await ecp.apply_preset_to_scopes(
+        "venice", "deepseek-v4-flash", ["agent", "base", "dsp", "bogus"]
+    )
+
+    assert applied == ["agent", "base", "dsp"]
+    set_scope.assert_any_await("agent", "venice", "deepseek-v4-flash")
+    set_scope.assert_any_await("dsp", "venice", "deepseek-v4-flash")
+    set_base.assert_awaited_once_with("venice", "deepseek-v4-flash")
+
+
+@pytest.mark.asyncio
+async def test_apply_preset_to_scopes_ignores_failing_scope(
+    cfg_registry: FakeConfigRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("core.config.set_scope_cortex", boom)
+    monkeypatch.setattr("core.config.set_base_cortex", AsyncMock())
+
+    applied = await ecp.apply_preset_to_scopes("venice", None, ["agent", "grillo"])
+
+    assert applied == []
+
+
+@pytest.mark.asyncio
+async def test_apply_preset_to_scopes_empty_input(
+    cfg_registry: FakeConfigRegistry,
+) -> None:
+    assert await ecp.apply_preset_to_scopes("venice", None, None) == []
+    assert await ecp.apply_preset_to_scopes("venice", None, []) == []

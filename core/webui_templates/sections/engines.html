@@ -84,6 +84,19 @@
                         <button id="engine-config-preset-save-btn" class="pill secondary" type="button" title="Save the current settings (and selected model) as a named preset">＋ Save current as preset</button>
                     </div>
 
+                    <!-- Apply-to-scopes toggle: point Cortex scopes at this engine + the preset model -->
+                    <div id="engine-config-scopes-row" style="display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:12px; padding:8px 10px; border:1px solid var(--border,#444); border-radius:8px; background:var(--background,#1a1a22);">
+                        <span style="font-size:0.82rem; font-weight:600; color:var(--muted);">Apply to scopes</span>
+                        <label style="display:flex; align-items:center; gap:4px; font-size:0.82rem; cursor:pointer;"><input type="checkbox" id="engine-config-scope-base" value="base"> Base</label>
+                        <label style="display:flex; align-items:center; gap:4px; font-size:0.82rem; cursor:pointer;"><input type="checkbox" id="engine-config-scope-agent" value="agent"> Agent</label>
+                        <label style="display:flex; align-items:center; gap:4px; font-size:0.82rem; cursor:pointer;"><input type="checkbox" id="engine-config-scope-grillo" value="grillo"> Grillo</label>
+                        <label style="display:flex; align-items:center; gap:4px; font-size:0.82rem; cursor:pointer;"><input type="checkbox" id="engine-config-scope-trainer" value="trainer"> Trainer</label>
+                        <label style="display:flex; align-items:center; gap:4px; font-size:0.82rem; cursor:pointer;"><input type="checkbox" id="engine-config-scope-vessel" value="vessel"> Rift Vessel</label>
+                        <label style="display:flex; align-items:center; gap:4px; font-size:0.82rem; cursor:pointer;"><input type="checkbox" id="engine-config-scope-dsp" value="dsp"> SOUL / DSP</label>
+                        <label style="display:flex; align-items:center; gap:4px; font-size:0.82rem; cursor:pointer;"><input type="checkbox" id="engine-config-scope-live" value="live"> Live</label>
+                        <span style="font-size:0.78rem; color:var(--muted);">Apply / ＋ Save will point the checked scopes at this engine's model (scope overrides).</span>
+                    </div>
+
                     <!-- Structured editor: toggles + value boxes rendered from the current extra_config -->
                     <div id="engine-config-fields" style="display:flex; flex-direction:column; gap:10px;"></div>
 

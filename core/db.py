@@ -1345,7 +1345,7 @@ async def _heal_cortex_config(cur: Any) -> None:
 
     await cur.execute(
         "SELECT config_key, value FROM config "
-        "WHERE config_key IN ('BASE_CORTEX', 'GRILLO_CORTEX', 'TRAINER_CORTEX', 'LIVE_CORTEX')"
+        "WHERE config_key IN ('BASE_CORTEX', 'GRILLO_CORTEX', 'TRAINER_CORTEX', 'LIVE_CORTEX', 'DSP_CORTEX')"
     )
     current: dict[str, str] = {}
     for row in await cur.fetchall():
@@ -1355,7 +1355,7 @@ async def _heal_cortex_config(cur: Any) -> None:
             current[str(key)] = "" if value is None else str(value)
 
     updates: list[tuple[str, str]] = []
-    for key in ("TRAINER_CORTEX", "GRILLO_CORTEX", "LIVE_CORTEX"):
+    for key in ("TRAINER_CORTEX", "GRILLO_CORTEX", "LIVE_CORTEX", "DSP_CORTEX"):
         value = current.get(key, "")
         if value and value not in ("Default", "None") and value not in valid_names:
             updates.append((key, "Default"))
@@ -1438,6 +1438,11 @@ async def init_db() -> None:
                 await cur.execute(
                     """
                     INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('TRAINER_CORTEX', 'Default')
+                    """
+                )
+                await cur.execute(
+                    """
+                    INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('DSP_CORTEX', 'Default')
                     """
                 )
 

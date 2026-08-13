@@ -2818,6 +2818,33 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
             if (keep) sel.value = keep;
         }
 
+        const ENGINE_CONFIG_SCOPE_IDS = {
+            base: 'engine-config-scope-base',
+            agent: 'engine-config-scope-agent',
+            grillo: 'engine-config-scope-grillo',
+            trainer: 'engine-config-scope-trainer',
+            vessel: 'engine-config-scope-vessel',
+            dsp: 'engine-config-scope-dsp',
+            live: 'engine-config-scope-live',
+        };
+
+        function collectEngineConfigScopes() {
+            const out = [];
+            for (const [scope, id] of Object.entries(ENGINE_CONFIG_SCOPE_IDS)) {
+                const el = document.getElementById(id);
+                if (el && el.checked) out.push(scope);
+            }
+            return out;
+        }
+
+        function setEngineConfigScopes(scopes) {
+            const wanted = new Set(Array.isArray(scopes) ? scopes : []);
+            for (const [scope, id] of Object.entries(ENGINE_CONFIG_SCOPE_IDS)) {
+                const el = document.getElementById(id);
+                if (el) el.checked = wanted.has(scope);
+            }
+        }
+
         function syncAppliedEnginePreset(data) {
             // The apply endpoint is authoritative.  The immediately-following
             // /api/components response may still expose the registry's previous
@@ -2899,6 +2926,14 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
             const savePresetBtn = document.getElementById('engine-config-preset-save-btn');
             const nameInput = document.getElementById('engine-config-preset-name');
 
+            if (sel && !sel.dataset.scopeBound) {
+                sel.dataset.scopeBound = '1';
+                sel.addEventListener('change', () => {
+                    const preset = _engineCfgPresets.find((p) => p.name === sel.value);
+                    setEngineConfigScopes(preset && Array.isArray(preset.scopes) ? preset.scopes : []);
+                });
+            }
+
             if (applyBtn && !applyBtn.dataset.bound) {
                 applyBtn.dataset.bound = '1';
                 applyBtn.addEventListener('click', async () => {
@@ -2910,7 +2945,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         const res = await fetch('/api/engine-config-presets/apply', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ ep_id: epId, name }),
+                            body: JSON.stringify({ ep_id: epId, name, scopes: collectEngineConfigScopes() }),
                         });
                         const data = await res.json().catch(() => ({}));
                         if (!res.ok) throw new Error((data && data.detail) || ('HTTP ' + res.status));
@@ -2964,7 +2999,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         const res = await fetch('/api/engine-config-presets', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ name: presetName, model, extra_config: cfg }),
+                            body: JSON.stringify({ name: presetName, model, extra_config: cfg, scopes: collectEngineConfigScopes() }),
                         });
                         const data = await res.json().catch(() => ({}));
                         if (!res.ok) throw new Error((data && data.detail) || ('HTTP ' + res.status));

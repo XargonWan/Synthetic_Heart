@@ -6190,6 +6190,7 @@ class SynthWebUIInterface:
                 "LIVE_CORTEX",
                 "AGENT_CORTEX",
                 "VESSEL_CORTEX",
+                "DSP_CORTEX",
             ):
                 ui_type = "select"
                 if entry.get("key") == "LIVE_CORTEX":
@@ -6208,6 +6209,7 @@ class SynthWebUIInterface:
                     "TRAINER_CORTEX",
                     "AGENT_CORTEX",
                     "VESSEL_CORTEX",
+                    "DSP_CORTEX",
                 ):
                     options = ["Default"] + available_cortex_engines
                 else:
@@ -7251,7 +7253,7 @@ class SynthWebUIInterface:
         """POST /api/engine-config-presets — create or replace a named preset.
 
         Body: ``{"name": ..., "model"?: ..., "description"?: ...,
-        "extra_config"?: {...}}``
+        "extra_config"?: {...}, "scopes"?: [...]}``
         """
         try:
             data = await request.json()
@@ -7269,6 +7271,9 @@ class SynthWebUIInterface:
             raise HTTPException(
                 status_code=400, detail="'extra_config' must be an object"
             )
+        scopes = data.get("scopes")
+        if scopes is not None and not isinstance(scopes, list):
+            raise HTTPException(status_code=400, detail="'scopes' must be an array")
         try:
             from core.engine_config_presets import save_preset
 
@@ -7277,6 +7282,7 @@ class SynthWebUIInterface:
                 model=model,
                 description=description,
                 extra_config=extra_config,
+                scopes=scopes,
             )
             return JSONResponse({"preset": preset})
         except Exception as exc:
@@ -7306,9 +7312,11 @@ class SynthWebUIInterface:
     async def apply_engine_config_preset(self, request: Request) -> JSONResponse:
         """POST /api/engine-config-presets/apply — apply a preset to an endpoint.
 
-        Body: ``{"ep_id": ..., "name": ...}``.  Replaces the endpoint's
-        ``extra_config`` with the preset's bundle (and sets its default model
-        when the preset carries one), then re-probes the endpoint.
+        Body: ``{"ep_id": ..., "name": ..., "scopes"?: [...]}``.  Replaces the
+        endpoint's ``extra_config`` with the preset's bundle (and sets its
+        default model when the preset carries one), then re-probes the endpoint.
+        When ``scopes`` is present, the preset's engine + model are also applied
+        to those Cortex scopes (``"base"``/``"agent"``/``"grillo"``/...).
         """
         try:
             data = await request.json()
@@ -7322,6 +7330,9 @@ class SynthWebUIInterface:
         name = str(data.get("name") or "").strip()
         if not name:
             raise HTTPException(status_code=400, detail="Missing 'name'")
+        scopes = data.get("scopes")
+        if scopes is not None and not isinstance(scopes, list):
+            raise HTTPException(status_code=400, detail="'scopes' must be an array")
 
         try:
             from core.engine_config_presets import apply_preset
@@ -7362,12 +7373,25 @@ class SynthWebUIInterface:
             api_key = decrypt_api_key(ep.api_key_enc or "")
             probe_data = await self._run_auto_probe(ep.id, api_key, reg)
 
+            # Optionally point the selected Cortex scopes at this engine + model.
+            scopes_applied: list[str] = []
+            if scopes:
+                try:
+                    from core.engine_config_presets import apply_preset_to_scopes
+
+                    scopes_applied = await apply_preset_to_scopes(
+                        ep.engine_name(), preset_model, scopes
+                    )
+                except Exception as exc:
+                    log_warning(f"{LOG_PREFIX} preset scope apply failed: {exc}")
+
             ep_updated = await reg.get_endpoint(ep.id) or ep
             return JSONResponse(
                 {
                     "endpoint": ep_updated.to_dict(),
                     "preset": preset,
                     "probe": probe_data,
+                    "scopes_applied": scopes_applied,
                 }
             )
         except HTTPException:
@@ -10386,6 +10410,7 @@ class SynthWebUIInterface:
             "AGENT_CORTEX",
             "LIVE_CORTEX",
             "VESSEL_CORTEX",
+            "DSP_CORTEX",
         }
         if key in _CORTEX_SCOPE_KEYS and isinstance(value, dict):
             try:
@@ -12488,6 +12513,9 @@ class SynthWebUIInterface:
                 ),
                 _build_scope_entry(
                     "VESSEL_CORTEX", "Rift Vessel", ["Default"] + llm_engines_sorted
+                ),
+                _build_scope_entry(
+                    "DSP_CORTEX", "SOUL / DSP", ["Default"] + llm_engines_sorted
                 ),
             ]
         except Exception as exc:

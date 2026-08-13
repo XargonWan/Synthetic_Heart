@@ -798,12 +798,12 @@ def _recover_tool_call_dialect(text: str) -> Optional[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
     try:
         # Case A: a name key ("tool"/"name"/"action") paired with a params blob
-        # ("params"/"arguments"/"parameters"/"input"). The params blob may be a
-        # normal object {...} or the illegal pseudo-list [...]; both are grabbed
-        # non-greedily up to the first closing bracket/brace.
+        # ("params"/"arguments"/"parameters"/"input"/"payload"). The params blob
+        # may be a normal object {...} or the illegal pseudo-list [...]; both
+        # are grabbed non-greedily up to the first closing bracket/brace.
         name_re = re.compile(
             r'"(?:tool|name|action)"\s*:\s*"([^"]+)"'
-            r'(?:\s*,\s*"(?:params|arguments|parameters|input)"\s*:\s*'
+            r'(?:\s*,\s*"(?:params|arguments|parameters|input|payload)"\s*:\s*'
             r"(\{[^{}]*\}|\[[^\[\]]*\]))?"
         )
         for m in name_re.finditer(text):
@@ -829,10 +829,16 @@ def _recover_tool_call_dialect(text: str) -> Optional[dict[str, Any]]:
             # real arguments live one level down. Structural, key-shape only.
             if len(payload) == 1:
                 only_key = next(iter(payload))
-                if only_key in ("params", "arguments", "parameters", "input"):
+                if only_key in (
+                    "params",
+                    "arguments",
+                    "parameters",
+                    "input",
+                    "payload",
+                ):
                     inner = m.group(2) or ""
                     inner_match = re.search(
-                        r'"(?:params|arguments|parameters|input)"\s*:\s*'
+                        r'"(?:params|arguments|parameters|input|payload)"\s*:\s*'
                         r"(\{[^{}]*\}|\[[^\[\]]*\])",
                         inner,
                     )
