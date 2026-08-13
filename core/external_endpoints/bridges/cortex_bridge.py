@@ -1426,10 +1426,13 @@ class ExternalCortexEngine(AIPluginBase):
         injected ``vessel_minecraft_*`` catalog). This clamp operates on the
         fully assembled messages and trims older non-system content first. The
         latest user turn is protected so the current command cannot disappear;
-        system instructions and image parts are also preserved. If the system
-        message alone exceeds the budget, the method logs the overflow and
-        sends the preserved current turn rather than silently replacing it with
-        an empty message.
+        system instructions and image parts are also preserved. When the
+        protected content alone (system + current turn) already exceeds the
+        budget — i.e. the budget is unreachable even by dropping every
+        trimmable message — the method logs the overflow and sends the
+        assembled messages as-is rather than destroying the conversation
+        history for no gain (serialization headroom keeps such payloads below
+        the downstream engine's hard limit anyway).
         """
         budget = self._downstream_char_budget()
         if budget <= 0 or not isinstance(messages, list) or not messages:
@@ -1460,28 +1463,59 @@ class ExternalCortexEngine(AIPluginBase):
             for index, message in enumerate(messages)
             if message.get("role") != "system" and index != protected_index
         )
-        if trimmable <= 0:
+        # Budget unreachable: even dropping EVERY trimmable message cannot get
+        # under the budget (the protected system + current-turn baseline alone
+        # already exceeds it). Trimming anyway would only destroy the
+        # conversation history with zero budget benefit — observed live as
+        # system+current-only prompts with all history dropped (Langfuse
+        # 04247e00 / 3e3bd8eb, where a ~24.4k baseline vs a 24000 budget left
+        # "Remaining overflow: 164" after wiping every history turn) and as
+        # mid-sentence history stubs (39112b42). Keep the assembled messages
+        # and warn instead. Serialization headroom keeps such payloads safely
+        # below the downstream engine limit even when the conservative budget
+        # is missed (measured overhead ~5.2k chars; a 24.7k payload serializes
+        # to ~29.9k, well under the 32000 chunking threshold).
+        if overflow >= trimmable:
             log_warning(
                 f"[cortex_bridge:{self._endpoint.name}] downstream payload "
-                f"{total} chars exceeds budget {budget}; preserving the latest "
-                f"user turn because trimming it would erase the current request. "
-                f"Sending as-is."
+                f"{total} chars exceeds budget {budget} and the budget is "
+                f"unreachable (protected system + current turn alone: "
+                f"{total - trimmable} chars); sending the assembled messages "
+                f"as-is to preserve conversation context."
             )
             return messages
 
         remaining_to_remove = overflow
+        # Fully-consumed messages are DROPPED, never left behind as empty
+        # ``"content": ""`` turns. The upstream empty-turn filters (prompt
+        # assembly) run BEFORE this clamp, so a blank user/assistant message
+        # here would be a brand-new empty-content message in the provider
+        # payload (observed as blank blocks in Langfuse — e.g. d3e58a80,
+        # where the 8 short history turns were each trimmed to ""). Dropping
+        # keeps the provider history well-formed.
+        kept_messages: list[dict[str, Any]] = []
         for index, msg in enumerate(messages):
             if remaining_to_remove <= 0:
+                kept_messages.extend(messages[index:])
                 break
             if msg.get("role") == "system" or index == protected_index:
+                kept_messages.append(msg)
                 continue
             content = msg.get("content")
             content_len = self._message_content_len(content)
             if content_len <= 0:
+                kept_messages.append(msg)
+                continue
+            if remaining_to_remove >= content_len:
+                # The entire message would be consumed by the trim: drop it
+                # instead of emitting an empty-content turn.
+                remaining_to_remove -= content_len
                 continue
             take = min(content_len, remaining_to_remove)
             msg["content"] = self._truncate_message_content(content, take)
             remaining_to_remove -= take
+            kept_messages.append(msg)
+        messages = kept_messages
 
         if remaining_to_remove > 0:
             log_warning(

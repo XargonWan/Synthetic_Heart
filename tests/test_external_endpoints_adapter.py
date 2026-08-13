@@ -1213,7 +1213,7 @@ def test_downstream_clamp_preserves_latest_user_turn():
 
     engine = ExternalCortexEngine(
         _openai_endpoint({"downstream_char_budget": 120}),
-        cast(Any, object()),
+        SimpleNamespace(),
     )
     messages = [
         {"role": "system", "content": "instructions"},
@@ -1227,6 +1227,79 @@ def test_downstream_clamp_preserves_latest_user_turn():
 
     assert clamped[-1]["content"] == "Go hit a tree and get some wood."
     assert len(clamped[1]["content"]) < old_history_length
+
+
+def test_downstream_clamp_never_emits_blank_turns():
+    """Fully-consumed history turns are DROPPED, not left as empty-content
+    messages. Langfuse d3e58a80: a 25703-char payload vs a 24000 budget fully
+    consumed 8 short history turns, which ``_truncate_message_content`` turned
+    into ``{"content": ""}`` blanks in the provider payload (the upstream
+    empty-turn filters run before this clamp, so nothing caught them)."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+
+    engine = ExternalCortexEngine(
+        _openai_endpoint({"downstream_char_budget": 24000}),
+        SimpleNamespace(),
+    )
+    messages = [
+        {"role": "system", "content": "S" * 23556},
+        {"role": "user", "content": "H" * 200},
+        {"role": "assistant", "content": "H" * 200},
+        {"role": "user", "content": "H" * 200},
+        {"role": "assistant", "content": "H" * 200},
+        {"role": "user", "content": "H" * 200},
+        {"role": "assistant", "content": "H" * 200},
+        {"role": "user", "content": "H" * 200},
+        {"role": "assistant", "content": "H" * 200},
+        {"role": "user", "content": "Heheh yeah go ahead darling"},
+    ]
+
+    clamped = engine._clamp_messages_to_char_budget(messages)
+
+    # System and current user turn survive intact.
+    assert clamped[0]["content"] == "S" * 23556
+    assert clamped[-1]["content"] == "Heheh yeah go ahead darling"
+    # No blank turns may reach the provider; whatever survived has content.
+    assert all(
+        isinstance(m.get("content"), str) and m["content"].strip() for m in clamped
+    )
+    # The history turns (all below the consumed threshold) are gone, not blank.
+    assert not any(m.get("content") == "" for m in clamped)
+
+
+def test_downstream_clamp_unreachable_baseline_preserves_everything():
+    """System + current turn alone > budget: history must survive untouched.
+
+    Langfuse 04247e00 / 3e3bd8eb: a ~23.9k system + ~0.5k current turn
+    (baseline ~24.4k) vs the 24000 budget produced system+current-only
+    prompts with ALL history turns dropped (the clamp consumed them and
+    still logged "Remaining overflow: 164"). When the protected baseline
+    already exceeds the budget, dropping history cannot reach it — keep the
+    assembled messages as-is."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+
+    engine = ExternalCortexEngine(
+        _openai_endpoint({"downstream_char_budget": 24000}),
+        SimpleNamespace(),
+    )
+    messages = [
+        {"role": "system", "content": "S" * 23907},
+        {"role": "user", "content": "H" * 200},
+        {"role": "assistant", "content": "H" * 200},
+        {"role": "user", "content": "H" * 200},
+        {"role": "assistant", "content": "H" * 200},
+        {"role": "user", "content": "C" * 300},
+    ]
+    original = [m["content"] for m in messages]
+
+    clamped = engine._clamp_messages_to_char_budget(messages)
+
+    # Baseline 23907 + 300 = 24207 > 24000 -> unreachable -> as-is, history kept.
+    assert [m["content"] for m in clamped] == original
+    assert len(clamped) == len(messages)
+    assert all(
+        isinstance(m.get("content"), str) and m["content"].strip() for m in clamped
+    )
 
 
 @pytest.mark.asyncio
