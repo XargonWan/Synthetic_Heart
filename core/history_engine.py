@@ -305,7 +305,7 @@ def _entry_to_text(entry: HistoryEntry) -> str:
         or entry.get("sender_id")
         or "Unknown"
     )
-    ts = entry.get("timestamp") or entry.get("date") or ""
+    ts = entry.get("timestamp") or entry.get("date") or entry.get("created_at") or ""
 
     # Diary-like dicts: inject only the interaction summary, never the raw
     # personal thought.

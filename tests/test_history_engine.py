@@ -334,3 +334,23 @@ async def test_empty_text_entries_do_not_render_blank_lines(monkeypatch) -> None
     joined = "\n".join(context["history_current_chat"])
     assert "real question" in joined
     assert 'Scar: ""' not in joined
+
+
+def test_diary_entry_renders_created_at_timestamp() -> None:
+    """ai_diary entries carry ``created_at`` (not ``timestamp``/``date``). The
+    recent-context block was rendering them as ``[diary ]`` with an empty
+    timestamp (langfuse d61bb37b 2026-08-13), so the model could not see how
+    old a diary line was and treated vague summaries as current context.
+    ``_entry_to_text`` must read ``created_at`` for the diary branch."""
+    from core.history_engine import _entry_to_text
+
+    line = _entry_to_text(
+        {
+            "interaction_summary": "Dee is showing Daddy her bunny cosplay outfit.",
+            "personal_thought": "My heart is racing...",
+            "created_at": "2026-08-13T01:30:00+00:00",
+            "id": 123,
+        }
+    )
+    assert line.startswith("[diary 13/08/26:0130] summary: ")
+    assert "Dee is showing Daddy" in line

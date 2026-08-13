@@ -22,7 +22,7 @@ import os
 import time
 from typing import Any
 
-from core.logging_utils import log_debug, log_error, log_info
+from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.mcp_bridge.config import (
     SynthMcpServerConfig,
     load_enabled_synth_mcp_servers,
@@ -46,6 +46,31 @@ class McpConnection:
         if self._stack is not None:
             try:
                 await self._stack.aclose()
+            except BaseExceptionGroup as exc:  # pragma: no cover - SDK teardown
+                # anyio/MCP SDK: "Attempted to exit cancel scope in a different
+                # task than it was entered in" fires when the stdio client's
+                # task group was cancelled (e.g. loop teardown / task GC) and
+                # the AsyncExitStack is then closed from the caller's task.
+                # The connection is already unusable; swallow it so a teardown
+                # of an optional MCP client can never crash the event loop or
+                # cancel unrelated tasks (observed: shutdown cancelled the DB
+                # query in _recover_interrupted_agent_tasks and every
+                # background loop). Best-effort cleanup only.
+                log_debug(
+                    f"[mcp_client] Suppressed anyio teardown error closing "
+                    f"'{self.server_name}': {exc}"
+                )
+            except RuntimeError as exc:  # pragma: no cover - same SDK issue
+                if "cancel scope" in str(exc):
+                    log_debug(
+                        f"[mcp_client] Suppressed cancel-scope teardown error "
+                        f"closing '{self.server_name}': {exc}"
+                    )
+                else:
+                    log_debug(
+                        f"[mcp_client] Error closing session for "
+                        f"'{self.server_name}': {exc}"
+                    )
             except Exception as exc:  # pragma: no cover - best effort cleanup
                 log_debug(
                     f"[mcp_client] Error closing session for "
@@ -142,7 +167,22 @@ class McpClientBridge:
 
         conn = McpConnection(cfg.name)
         async with conn._lock:
-            stack, session = await self._open_session(cfg)
+            # Bound the connect: a hung stdio spawn (server not reading) would
+            # otherwise leave the anyio task group half-open, and a later
+            # cancellation during shutdown then corrupts the loop with
+            # "Attempted to exit cancel scope in a different task than it was
+            # entered in" (observed live: MCP teardown cancelled the DB query
+            # in _recover_interrupted_agent_tasks and every background loop).
+            try:
+                stack, session = await asyncio.wait_for(
+                    self._open_session(cfg), timeout=15
+                )
+            except asyncio.TimeoutError:
+                log_warning(
+                    f"[mcp_client] Timed out connecting to MCP server "
+                    f"'{cfg.name}' (transport {cfg.transport}); skipping."
+                )
+                return conn
             conn._stack = stack
             conn.session = session
             self._connections[cfg.name] = conn
@@ -161,49 +201,71 @@ class McpClientBridge:
         url = cfg.url
         command = cfg.command
 
-        if cfg.transport == "stdio":
-            if not isinstance(command, str) or not command:
-                raise ValueError(
-                    f"MCP server '{cfg.name}' transport 'stdio' requires a "
-                    "non-empty command"
-                )
-            from mcp.client.stdio import StdioServerParameters, stdio_client
+        try:
+            if cfg.transport == "stdio":
+                if not isinstance(command, str) or not command:
+                    raise ValueError(
+                        f"MCP server '{cfg.name}' transport 'stdio' requires a "
+                        "non-empty command"
+                    )
+                from mcp.client.stdio import StdioServerParameters, stdio_client
 
-            server_params = StdioServerParameters(
-                command=command,
-                args=list(cfg.args),
-                env={**os.environ, **cfg.env} if cfg.env else None,
-            )
-            read, write = await stack.enter_async_context(stdio_client(server_params))
-            session = await stack.enter_async_context(ClientSession(read, write))
-        elif cfg.transport in ("sse", "http", "streamable_http"):
-            if not isinstance(url, str) or not url:
-                raise ValueError(
-                    f"MCP server '{cfg.name}' transport '{cfg.transport}' "
-                    "requires a non-empty url"
+                server_params = StdioServerParameters(
+                    command=command,
+                    args=list(cfg.args),
+                    env={**os.environ, **cfg.env} if cfg.env else None,
                 )
-            if cfg.transport == "sse":
-                from mcp.client.sse import sse_client
-                from mcp.client.session import (
-                    SseServerParameters,  # type: ignore[attr-defined]
+                read, write = await stack.enter_async_context(
+                    stdio_client(server_params)
                 )
+                session = await stack.enter_async_context(ClientSession(read, write))
+            elif cfg.transport in ("sse", "http", "streamable_http"):
+                if not isinstance(url, str) or not url:
+                    raise ValueError(
+                        f"MCP server '{cfg.name}' transport '{cfg.transport}' "
+                        "requires a non-empty url"
+                    )
+                if cfg.transport == "sse":
+                    from mcp.client.sse import sse_client
+                    from mcp.client.session import (
+                        SseServerParameters,  # type: ignore[attr-defined]
+                    )
 
-                params = SseServerParameters(url=url)
-                read, write = await stack.enter_async_context(sse_client(params))
-            else:
-                from mcp.client.streamable_http import (
-                    streamablehttp_client,
-                )
+                    params = SseServerParameters(url=url)
+                    read, write = await stack.enter_async_context(sse_client(params))
+                else:
+                    from mcp.client.streamable_http import (
+                        streamablehttp_client,
+                    )
 
-                read, write, _ = await stack.enter_async_context(
-                    streamablehttp_client(url)
-                )
-            session = await stack.enter_async_context(ClientSession(read, write))
-        else:  # pragma: no cover - guarded earlier in config loader
-            raise ValueError(f"Unsupported transport: {cfg.transport}")
+                    read, write, _ = await stack.enter_async_context(
+                        streamablehttp_client(url)
+                    )
+                session = await stack.enter_async_context(ClientSession(read, write))
+            else:  # pragma: no cover - guarded earlier in config loader
+                raise ValueError(f"Unsupported transport: {cfg.transport}")
 
-        await session.initialize()
-        return stack, session
+            await session.initialize()
+            return stack, session
+        except Exception:
+            # A failed spawn/connect (e.g. the stdio server exits immediately ->
+            # McpError: Connection closed) leaves the AsyncExitStack with
+            # partially-entered anyio contexts. Abandoning it lets the async
+            # generator be garbage-collected in a DIFFERENT task than the one
+            # that entered it, which anyio reports as "Attempted to exit cancel
+            # scope in a different task than it was entered in" and corrupts
+            # the whole event loop (observed live: MCP teardown cancelled the
+            # DB query in _recover_interrupted_agent_tasks and every background
+            # loop). Close the partial stack HERE, in the task that entered it,
+            # before re-raising so the caller sees the real connect error.
+            try:
+                await stack.aclose()
+            except Exception as close_exc:  # pragma: no cover - best effort
+                log_debug(
+                    f"[mcp_client] Best-effort close of failed session for "
+                    f"'{cfg.name}' also failed: {close_exc}"
+                )
+            raise
 
     async def _list_and_register(
         self, cfg: SynthMcpServerConfig, session: Any
@@ -295,8 +357,20 @@ class McpClientBridge:
 
     async def disconnect_all(self) -> None:
         """Close all open server connections and clear MCP tools."""
-        for conn in self._connections.values():
-            await conn.close()
+        for conn in list(self._connections.values()):
+            # Closing a cancelled/failed stdio session can raise the anyio
+            # cancel-scope error; never let MCP teardown crash app shutdown.
+            try:
+                await asyncio.wait_for(conn.close(), timeout=5)
+            except asyncio.TimeoutError:
+                log_debug(
+                    f"[mcp_client] Timed out closing session for '{conn.server_name}'"
+                )
+            except Exception as exc:
+                log_debug(
+                    f"[mcp_client] Suppressed error closing session for "
+                    f"'{conn.server_name}': {exc}"
+                )
         self._connections.clear()
         self.registry.clear_mcp_tools()
         self._connected = False
