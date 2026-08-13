@@ -28,6 +28,7 @@
     var _configError = null;
     var _writeTimers = {};       // per-key debounce timers
     var _searchTimer = null;
+    var _lastInteraction = 0;    // ms timestamp of last user interaction inside the dashboard
     var _dashIds = [
         'dash-readouts', 'dash-search', 'dash-advanced', 'dash-refresh',
         'dash-sidebar-count', 'dash-group-index', 'dash-rack', 'dash-toasts'
@@ -586,7 +587,7 @@
         picker.className = 'dash-color';
         picker.disabled = locked;
         var cur = String(item.value || '').trim();
-        if (!/^#[0-9a-fA-F]{3,8}$/.test(cur)) { cur = '#ff2bd6'; }
+        if (!/^#[0-9a-fA-F]{3,8}$/.test(cur)) { cur = '#6bfefe'; }
         picker.value = cur;
         var valEl = document.createElement('span');
         valEl.className = 'dash-color-value';
@@ -643,13 +644,23 @@
     function renderNumWidget(item, body, locked) {
         var isInt = String(item.value_type || '').toLowerCase() === 'int';
         var base = Number(item.default) || 0;
-        var nom = Math.max(1, 2 * Math.abs(base), 100);
-        var min = base >= 0 ? 0 : -nom;
-        var max = base >= 0 ? nom : 0;
+        // An empty/null stored value (e.g. never persisted in the DB) must fall
+        // back to the default instead of Number('') -> a misleading 0.
+        var cur;
+        if (item.value === null || item.value === undefined || item.value === '') {
+            cur = base;
+        } else {
+            cur = Number(item.value);
+            if (!Number.isFinite(cur)) { cur = base; }
+        }
+        // Scale the dial to the value's own magnitude so small values do not
+        // sit visually at zero on a huge fixed 0..100 scale.
+        var anchor = base !== 0 ? base : (cur !== 0 ? cur : 0);
+        var nom = Math.max(10, 2 * Math.abs(anchor));
+        var min = anchor >= 0 ? 0 : -nom;
+        var max = anchor >= 0 ? nom : 0;
         var sens = nom / 200;
         var step = isInt ? 1 : 0.5;
-        var cur = Number(item.value);
-        if (!Number.isFinite(cur)) { cur = base; }
 
         var wrap = document.createElement('div');
         wrap.className = 'dash-num-body';
@@ -991,9 +1002,32 @@
             refresh.addEventListener('click', loadAll);
         }
 
-        // Poll readouts only while the dashboard tab is the active one.
+        // Track user interaction so background config refreshes never clobber
+        // an in-flight edit (typing in a field, dragging a knob, pending write).
+        var dashRoot = section.querySelector('.dash-root');
+        if (dashRoot) {
+            ['pointerdown', 'keydown', 'change'].forEach(function (evtName) {
+                dashRoot.addEventListener(evtName, function () { _lastInteraction = Date.now(); }, true);
+            });
+        }
+
+        // Poll readouts + refresh config values only while the dashboard tab is
+        // the active one. Externally changed settings (Settings tab, other
+        // clients, DB) then appear here automatically, but never mid-edit.
         setInterval(function () {
-            if (isDashboardActive()) { loadReadouts(); }
+            if (!isDashboardActive()) { return; }
+            loadReadouts();
+            if (Object.keys(_writeTimers).length === 0 &&
+                !document.querySelector('.dash-knob.dragging') &&
+                (Date.now() - _lastInteraction) > 2000) {
+                loadConfig().then(function () {
+                    renderGroupIndex();
+                    renderRack();
+                    renderReadouts();
+                }).catch(function () {
+                    // transient poll failure — keep the currently shown data
+                });
+            }
         }, 15000);
 
         loadAll();
