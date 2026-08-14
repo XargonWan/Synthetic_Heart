@@ -279,6 +279,69 @@ async def _call_interface_send(interface_send_func, *args, **kwargs):
         raise
 
 
+def _resolve_delivery_target(
+    interface_send_func: Any, args: tuple, kwargs: dict, interface_path: Any
+) -> tuple[str, str] | None:
+    """Best-effort resolve the ``(interface, chat_id)`` delivery target.
+
+    Used by the delivery circuit breaker to key per-target state. Returns
+    ``None`` when the target cannot be resolved (e.g. a system message with no
+    chat id), in which case the breaker simply does not apply.
+    """
+    chat_id = kwargs.get("chat_id")
+    if chat_id is None and args:
+        first_arg = args[0]
+        if not hasattr(first_arg, "send_message"):
+            chat_id = first_arg
+    if chat_id is None:
+        return None
+
+    interface_name: str | None = None
+    if interface_path:
+        try:
+            from core.interface_path_utils import get_interface_from_path
+
+            interface_name = get_interface_from_path(str(interface_path)) or None
+        except Exception:
+            interface_name = str(interface_path)
+
+    if not interface_name:
+        sender = getattr(interface_send_func, "__self__", None)
+        if sender is not None:
+            getter = getattr(sender, "get_interface_id", None)
+            if callable(getter):
+                try:
+                    resolved = getter()
+                    if resolved:
+                        interface_name = str(resolved)
+                except Exception:
+                    pass
+        if not interface_name:
+            interface_name = (
+                sender.__class__.__name__ if sender is not None else "unknown"
+            )
+
+    return (str(interface_name), str(chat_id))
+
+
+def _result_is_delivery_failure(result: Any) -> bool:
+    """Return True when an interface send result explicitly reports failure.
+
+    Several interfaces swallow delivery exceptions and return ``False`` (or a
+    ``{"status": "failed"}`` dict) instead of raising. Those must not be treated
+    as a successful delivery by the breaker, otherwise a tripped target would be
+    immediately re-armed by the wrapper's falsy return.
+    """
+    if result is False:
+        return True
+    if isinstance(result, dict):
+        if result.get("status") == "failed":
+            return True
+        if result.get("success") is False or result.get("ok") is False:
+            return True
+    return False
+
+
 def _get_system_reply_timeout():
     """Get the system reply timeout from config, default to 10 minutes."""
     try:
@@ -1591,13 +1654,58 @@ async def universal_send(interface_send_func, *args, text: str | None = None, **
             log_debug(f"[transport] Failed to persist delivery failure: {failure_exc}")
 
     async def _send_text(message_text: str):
+        target = _resolve_delivery_target(
+            interface_send_func, args, kwargs, interface_path
+        )
+
+        # Delivery circuit breaker: skip a target whose breaker has tripped.
+        # Fail-open — if the guard itself errors, deliver anyway.
+        if target is not None:
+            try:
+                from core.delivery_guard import delivery_guard as _guard
+
+                if await _guard.should_skip(target[0], target[1]):
+                    log_warning(
+                        f"[transport] ⚡ Skipping delivery to dead target "
+                        f"{target[0]}/{target[1]} (circuit breaker open)"
+                    )
+                    return None
+            except Exception as guard_exc:
+                log_debug(
+                    f"[transport] Delivery guard check failed (failing open): {guard_exc}"
+                )
+
         try:
-            return await _call_interface_send(
+            result = await _call_interface_send(
                 interface_send_func, *args, text=message_text, **kwargs
             )
         except Exception as exc:
             await _record_delivery_failure(exc, message_text)
+            if target is not None:
+                try:
+                    from core.delivery_guard import (
+                        classify_delivery_failure,
+                        delivery_guard as _guard,
+                    )
+
+                    if classify_delivery_failure(exc) == "dead_target":
+                        await _guard.record_failure(target[0], target[1], exc)
+                except Exception as guard_exc:
+                    log_debug(
+                        f"[transport] Delivery guard record_failure failed: {guard_exc}"
+                    )
             raise
+        else:
+            if target is not None and not _result_is_delivery_failure(result):
+                try:
+                    from core.delivery_guard import delivery_guard as _guard
+
+                    await _guard.record_success(target[0], target[1])
+                except Exception as guard_exc:
+                    log_debug(
+                        f"[transport] Delivery guard record_success failed: {guard_exc}"
+                    )
+            return result
 
     # Log LLM response for debugging
     if text:

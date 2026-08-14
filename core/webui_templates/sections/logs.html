@@ -5,6 +5,7 @@
             <nav class="logs-subnav" role="tablist" aria-label="Logs views">
                 <button class="logs-subnav-btn active" type="button" data-logs-subtab="live" aria-selected="true">Live Log Stream</button>
                 <button class="logs-subnav-btn" type="button" data-logs-subtab="failures" aria-selected="false">LLM Failures</button>
+                <button class="logs-subnav-btn" type="button" data-logs-subtab="dead-targets" aria-selected="false">Dead Targets</button>
                 <button class="logs-subnav-btn" type="button" data-logs-subtab="archive" aria-selected="false">Archive &amp; Query</button>
             </nav>
         </div>
@@ -87,6 +88,16 @@
                 </div>
 
                 <div id="logs-failures-pagination" class="logs-failures-pagination"></div>
+            </section>
+
+            <section class="logs-subpanel" id="logs-panel-dead-targets" data-logs-subtab="dead-targets">
+                <div class="log-controls logs-failure-controls">
+                    <button id="logs-dead-targets-refresh" type="button">Refresh</button>
+                    <span class="logs-archive-status">Targets the delivery circuit breaker has stopped sending to (dead channels / users).</span>
+                </div>
+                <div id="logs-dead-targets-output" class="logs-failures-output">
+                    <div class="logs-empty-state">No dead delivery targets.</div>
+                </div>
             </section>
 
             <section class="logs-subpanel" id="logs-panel-archive" data-logs-subtab="archive">

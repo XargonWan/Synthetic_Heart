@@ -6953,6 +6953,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 const logsFailuresCode = document.getElementById('logs-failures-code');
                 const logsFailuresStage = document.getElementById('logs-failures-stage');
                 const logsFailuresSort = document.getElementById('logs-failures-sort');
+                const logsDeadTargetsOutput = document.getElementById('logs-dead-targets-output');
+                const logsDeadTargetsRefreshBtn = document.getElementById('logs-dead-targets-refresh');
                 const logsState = window.__synth_logs_state || {
                     currentSubtab: 'live',
                     failurePage: 1,
@@ -6963,6 +6965,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     failureSort: 'desc',
                     failureTotalPages: 1,
                     loadingFailures: false,
+                    loadingDeadTargets: false,
                 };
                 window.__synth_logs_state = logsState;
 
@@ -7035,6 +7038,10 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     });
                     if (nextSubtab === 'failures') {
                         loadFailureLog();
+                        return;
+                    }
+                    if (nextSubtab === 'dead-targets') {
+                        loadDeadTargets();
                         return;
                     }
                     applyFilters();
@@ -7169,6 +7176,78 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     }
                 }
 
+                function renderDeadTargets(payload) {
+                    if (!logsDeadTargetsOutput) return;
+                    const entries = Array.isArray(payload.entries) ? payload.entries : [];
+                    if (!entries.length) {
+                        logsDeadTargetsOutput.innerHTML = '<div class="logs-empty-state">No dead delivery targets. The circuit breaker is closed everywhere.</div>';
+                        return;
+                    }
+                    logsDeadTargetsOutput.innerHTML = entries.map((entry) => {
+                        const reason = safeEscapeHtml(entry.reason || 'Unknown channel or user');
+                        const meta = [
+                            `Interface: ${entry.interface || 'unknown'}`,
+                            `Target: ${entry.chat_id}`,
+                            `Failures: ${entry.consecutive_failures}`,
+                            `Marked dead: ${formatFailureDate(entry.marked_dead_at)}`,
+                        ].map((value) => `<span>${safeEscapeHtml(value)}</span>`).join('');
+                        return `
+                            <article class="logs-failure-entry" data-dead-target-id="${safeEscapeHtml(String(entry.id))}">
+                                <div class="logs-failure-entry-header">
+                                    <div>
+                                        <div class="logs-failure-title">
+                                            <span class="logs-failure-pill code">dead_target</span>
+                                            <span class="logs-failure-pill stage">${safeEscapeHtml(entry.interface || 'unknown')}</span>
+                                        </div>
+                                        <div class="logs-failure-meta">${meta}</div>
+                                    </div>
+                                    <button class="logs-failure-delete" type="button" data-revive-dead-target="${safeEscapeHtml(String(entry.id))}">Revive</button>
+                                </div>
+                                <div class="logs-failure-reason">${reason}</div>
+                            </article>
+                        `;
+                    }).join('');
+
+                    logsDeadTargetsOutput.querySelectorAll('[data-revive-dead-target]').forEach((button) => {
+                        button.addEventListener('click', async () => {
+                            const targetId = button.dataset.reviveDeadTarget;
+                            if (!targetId) return;
+                            if (!window.confirm('Revive this delivery target? The circuit breaker will re-arm and delivery will resume.')) return;
+                            try {
+                                const response = await fetch(`/api/dead-targets/${encodeURIComponent(targetId)}`, { method: 'DELETE' });
+                                if (!response.ok) {
+                                    const payloadText = await response.text();
+                                    throw new Error(payloadText || `HTTP ${response.status}`);
+                                }
+                                if (window.showToast) window.showToast('Delivery target revived', false);
+                                loadDeadTargets();
+                            } catch (error) {
+                                console.error('[logs] failed to revive dead target', error);
+                                if (window.showToast) window.showToast('Failed to revive delivery target', true);
+                            }
+                        });
+                    });
+                }
+
+                async function loadDeadTargets() {
+                    if (!logsDeadTargetsOutput || logsState.loadingDeadTargets) return;
+                    logsState.loadingDeadTargets = true;
+                    logsDeadTargetsOutput.innerHTML = '<div class="logs-empty-state">Loading dead targets...</div>';
+                    try {
+                        const response = await fetch('/api/dead-targets');
+                        const payload = await response.json();
+                        if (!response.ok || !payload.success) {
+                            throw new Error((payload && payload.error) || `HTTP ${response.status}`);
+                        }
+                        renderDeadTargets(payload);
+                    } catch (error) {
+                        console.error('[logs] failed to load dead targets', error);
+                        logsDeadTargetsOutput.innerHTML = '<div class="logs-empty-state">Failed to load dead delivery targets.</div>';
+                    } finally {
+                        logsState.loadingDeadTargets = false;
+                    }
+                }
+
                 function connectLogs() {
                     if (window.__synth_logs_socket && (window.__synth_logs_socket.readyState === WebSocket.OPEN || window.__synth_logs_socket.readyState === WebSocket.CONNECTING)) {
                         return;
@@ -7210,6 +7289,11 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 if (logsFailuresRefreshBtn) {
                     logsFailuresRefreshBtn.addEventListener('click', () => {
                         loadFailureLog();
+                    });
+                }
+                if (logsDeadTargetsRefreshBtn) {
+                    logsDeadTargetsRefreshBtn.addEventListener('click', () => {
+                        loadDeadTargets();
                     });
                 }
                 if (logsFailuresSearch) {

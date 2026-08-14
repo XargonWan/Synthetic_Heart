@@ -929,6 +929,8 @@ class SynthWebUIInterface:
         self.app.get("/api/history/chat")(self.history_chat)
         self.app.get("/api/log-failures")(self.list_log_failures)
         self.app.delete("/api/log-failures/{failure_id}")(self.delete_log_failure)
+        self.app.get("/api/dead-targets")(self.list_dead_targets)
+        self.app.delete("/api/dead-targets/{target_id}")(self.delete_dead_target)
 
         # Agent tasks endpoints (Agentic Runtime persistence)
         self.app.get("/api/agent/tasks")(self.list_agent_tasks)
@@ -9993,6 +9995,45 @@ class SynthWebUIInterface:
             raise
         except Exception as exc:
             log_error(f"{LOG_PREFIX} Failed to delete log failure {failure_id}: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def list_dead_targets(self, request: Request):
+        """Return the dead-delivery-target registry (Logs > Dead Targets)."""
+        try:
+            from core.delivery_guard import delivery_guard
+
+            entries = await delivery_guard.list_dead_targets()
+            normalized = []
+            for entry in entries:
+                item = dict(entry)
+                item["last_failure_at"] = self._dt_to_utc_iso(
+                    entry.get("last_failure_at")
+                )
+                item["marked_dead_at"] = self._dt_to_utc_iso(
+                    entry.get("marked_dead_at")
+                )
+                normalized.append(item)
+            return JSONResponse(
+                {"success": True, "entries": normalized, "total_count": len(normalized)}
+            )
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to fetch dead delivery targets: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def delete_dead_target(self, target_id: int):
+        """Revive a dead delivery target (removes the registry entry so the
+        circuit breaker re-arms and delivery resumes)."""
+        try:
+            from core.delivery_guard import delivery_guard
+
+            revived = await delivery_guard.revive_target(target_id)
+            if not revived:
+                raise HTTPException(status_code=404, detail="Dead target not found")
+            return JSONResponse({"success": True, "revived": True, "id": target_id})
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to revive dead target {target_id}: {exc}")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     # ------------------------------------------------------------------
