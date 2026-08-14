@@ -147,7 +147,16 @@ async def init_bio_table():
 
 
 def _run(coro):
-    """Run a coroutine safely even if an event loop is already running."""
+    """Run a coroutine safely even if an event loop is already running.
+
+    IMPORTANT: never call this from the event-loop thread itself. When the loop
+    is running AND the caller is the loop thread, ``run_coroutine_threadsafe(
+    ...).result()`` schedules the coroutine on the very loop that is blocked
+    waiting for it, deadlocking until the 30s timeout (see
+    docs/database_connection_management.rst). Prefer the async helpers
+    (``_get_bio_light_async``, ``_get_bio_full_async``, ``_update_bio_fields_async``)
+    from async code instead.
+    """
     try:
         # Log the coroutine name for debugging timeouts
         coro_name = coro.__name__ if hasattr(coro, "__name__") else str(coro)
@@ -155,7 +164,24 @@ def _run(coro):
 
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            # We're in async context, use run_coroutine_threadsafe to avoid creating new loop
+            try:
+                # If the caller IS the loop thread, run_coroutine_threadsafe
+                # would deadlock (the loop is blocked in .result() and can never
+                # execute the scheduled coroutine). Run it in a fresh loop on a
+                # worker thread instead, mirroring the no-loop fallback below.
+                if asyncio.get_running_loop() is loop:
+                    log_debug(
+                        f"[bio_manager] _run on loop thread; delegating to worker thread for: {coro_name}"
+                    )
+                    import concurrent.futures
+
+                    with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=1, thread_name_prefix="bio_manager_run"
+                    ) as ex:
+                        return ex.submit(asyncio.run, coro).result(timeout=30.0)
+            except RuntimeError:
+                pass
+            # We're in async context on another thread, use run_coroutine_threadsafe
             log_debug(f"[bio_manager] Using run_coroutine_threadsafe for: {coro_name}")
             result = asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=30.0)
             log_debug(f"[bio_manager] _run completed successfully for: {coro_name}")
@@ -169,7 +195,10 @@ def _run(coro):
     except Exception as e:
         import traceback
 
-        log_error(f"[bio_manager] Error in _run: {e}")
+        log_error(
+            f"[bio_manager] Error in _run: {type(e).__name__}: {e} "
+            f"(coroutine={getattr(coro, '__name__', str(coro))})"
+        )
         log_debug(f"[bio_manager] Traceback: {traceback.format_exc()}")
         return None
 
@@ -204,6 +233,100 @@ def _ensure_table() -> None:
         _run(init_bio_table())
         _table_initialized = True
         log_debug("[bio_manager] Table initialization completed and cached")
+
+
+async def _ensure_table_async() -> None:
+    """Create the bio table if it doesn't exist (async, loop-safe).
+
+    Mirrors ``_ensure_table`` but never goes through the ``_run`` bridge, so it
+    is safe to call from the event-loop thread (``_run``'s
+    ``run_coroutine_threadsafe().result()`` deadlocks when the loop is already
+    running, see docs/database_connection_management.rst).
+    """
+    global _table_initialized
+
+    # Fast path: if already initialized, skip DB call
+    if _table_initialized:
+        return
+
+    # Slow path: check and initialize with lock
+    with _table_lock:
+        # Double-check after acquiring lock
+        if _table_initialized:
+            return
+
+        await init_bio_table()
+        _table_initialized = True
+        log_debug("[bio_manager] Table initialization completed and cached (async)")
+
+
+async def _ensure_user_exists_async(user_id: str) -> None:
+    """Create an empty bio entry if the user is missing (async, loop-safe)."""
+    await _ensure_table_async()
+    row = await _fetchone("SELECT 1 FROM bio WHERE id=%s", (user_id,))
+    if not row:
+        now = datetime.utcnow().isoformat()
+
+        # Try with all columns first, fallback to basic columns if some are missing
+        try:
+            await _execute(
+                """
+                INSERT INTO bio (
+                    id, known_as, likes, not_likes, information,
+                    past_events, feelings, contacts, social_accounts,
+                    privacy, created_at, last_accessed, last_update, update_count
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    user_id,
+                    json.dumps([]),
+                    json.dumps([]),
+                    json.dumps([]),
+                    "",
+                    json.dumps([]),
+                    json.dumps([]),
+                    json.dumps({}),
+                    json.dumps([]),  # social_accounts should be list
+                    "default",
+                    now,
+                    now,
+                    now,  # last_update
+                    0,  # update_count
+                ),
+            )
+        except Exception as e:
+            # Fallback to basic columns only
+            log_warning(f"[bio_manager] Full insert failed ({e}), trying basic columns")
+            try:
+                await _execute(
+                    """
+                    INSERT INTO bio (
+                        id, known_as, likes, not_likes, information,
+                        past_events, feelings, contacts, social_accounts,
+                        privacy, created_at, last_accessed
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        user_id,
+                        json.dumps([]),
+                        json.dumps([]),
+                        json.dumps([]),
+                        "",
+                        json.dumps([]),
+                        json.dumps([]),
+                        json.dumps({}),
+                        json.dumps([]),
+                        "default",
+                        now,
+                        now,
+                    ),
+                )
+                log_info(f"[bio_manager] Created basic bio entry for {user_id}")
+            except Exception as e2:
+                log_error(
+                    f"[bio_manager] Failed to create bio entry for {user_id}: {e2}"
+                )
+                raise
 
 
 def _ensure_user_exists(user_id: str) -> None:
@@ -463,6 +586,29 @@ def get_bio_full(user_id: str) -> dict:
     return result
 
 
+async def _get_bio_full_async(user_id: str) -> dict:
+    """Async version of get_bio_full - returns the full bio for the user.
+
+    Loop-safe: never uses the ``_run`` bridge (see docs/database_connection_management.rst).
+    """
+    try:
+        row = await _fetchone("SELECT * FROM bio WHERE id=%s", (user_id,))
+        if not row:
+            return {}
+        result = {"id": row.get("id"), "information": row.get("information") or ""}
+        for key in JSON_LIST_FIELDS | JSON_DICT_FIELDS:
+            result[key] = _load_json_field(row.get(key), key, DEFAULTS[key])
+        result["privacy"] = row.get("privacy") or "default"
+        result["created_at"] = row.get("created_at") or ""
+        result["last_accessed"] = row.get("last_accessed") or ""
+        result["last_update"] = row.get("last_update") or ""
+        result["update_count"] = row.get("update_count") or 0
+        return result
+    except Exception as e:
+        log_error(f"[bio_manager] Error in _get_bio_full_async for user {user_id}: {e}")
+        return {}
+
+
 def _validate_bio_consistency(existing_bio: dict, updates: dict) -> tuple[bool, str]:
     """Validate bio updates for consistency with existing data."""
     # Check age consistency
@@ -524,6 +670,54 @@ def _check_update_limits(user_id: str, updates: dict) -> tuple[bool, str]:
     try:
         # Get current bio data including update tracking
         current = get_bio_full(user_id)
+        last_update_str = current.get("last_update", "")
+        update_count = current.get("update_count", 0)
+
+        # Parse last update time
+        if last_update_str:
+            try:
+                last_update = datetime.fromisoformat(
+                    last_update_str.replace("Z", "+00:00")
+                )
+            except Exception:
+                last_update = datetime.utcnow() - timedelta(
+                    hours=2
+                )  # Default to 2 hours ago
+        else:
+            last_update = datetime.utcnow() - timedelta(hours=2)
+
+        now = datetime.utcnow()
+
+        # Frequency check: minimum 1 hour between updates
+        if (now - last_update) < timedelta(hours=1):
+            return (
+                False,
+                "Updates too frequent. Please wait at least 1 hour between updates.",
+            )
+
+        # Amplitude check: maximum 3 fields per update
+        if len(updates) > 3:
+            return (
+                False,
+                f"Too many fields updated at once ({len(updates)}). Maximum 3 fields per update.",
+            )
+
+        # Daily limit: maximum 50 updates per day
+        if update_count >= 50 and (now - last_update) < timedelta(days=1):
+            return False, "Daily update limit reached (50 updates per day)."
+
+        return True, ""
+
+    except Exception as e:
+        log_warning(f"[bio] Error checking update limits: {e}")
+        return True, ""  # Allow update on error to avoid blocking legitimate updates
+
+
+async def _check_update_limits_async(user_id: str, updates: dict) -> tuple[bool, str]:
+    """Async, loop-safe version of _check_update_limits."""
+    try:
+        # Get current bio data including update tracking
+        current = await _get_bio_full_async(user_id)
         last_update_str = current.get("last_update", "")
         update_count = current.get("update_count", 0)
 
@@ -742,6 +936,172 @@ async def _update_last_accessed_async(user_id: str, timestamp: str) -> None:
     except Exception as e:
         log_warning(
             f"[bio_manager] Failed to update last_accessed for user {user_id}: {e}"
+        )
+
+
+async def _update_bio_fields_async(user_id: str, updates: dict) -> None:
+    """Safely update multiple fields in the user's bio (async, loop-safe).
+
+    Mirrors ``update_bio_fields`` but never uses the ``_run`` bridge, so it is
+    safe to call from the event-loop thread (e.g. the Agent Lane action path).
+    """
+
+    if not updates:
+        return
+
+    # Validate update limits
+    limits_ok, limit_msg = await _check_update_limits_async(user_id, updates)
+    if not limits_ok:
+        log_warning(f"[bio] Update rejected for user {user_id}: {limit_msg}")
+        raise ValueError(f"Bio update rejected: {limit_msg}")
+
+    await _ensure_user_exists_async(user_id)
+    current = await _get_bio_full_async(user_id)
+
+    # Validate consistency
+    consistency_ok, consistency_msg = _validate_bio_consistency(current, updates)
+    if not consistency_ok:
+        log_warning(f"[bio] Inconsistent update for user {user_id}: {consistency_msg}")
+        raise ValueError(f"Bio update rejected: {consistency_msg}")
+
+    merged: dict[str, Any] = {}
+
+    for field in VALID_BIO_FIELDS:
+        old_val = current.get(field)
+        new_val = updates.get(field)
+
+        if isinstance(old_val, str) and field not in [
+            "information",
+            "privacy",
+            "user_name",
+        ]:
+            try:
+                old_val = json.loads(old_val)
+            except Exception:
+                old_val = []
+
+        if new_val is None:
+            merged[field] = old_val
+            continue
+
+        log_debug(f"[bio] Merging field '{field}': old={old_val}, new={new_val}")
+
+        if isinstance(old_val, list) and isinstance(new_val, list):
+            unique = {json.dumps(x) for x in old_val + new_val}
+            merged[field] = [json.loads(x) for x in unique]
+            log_debug(f"[bio] Merged list for '{field}': {merged[field]}")
+        elif isinstance(old_val, dict) and isinstance(new_val, dict):
+            merged[field] = _merge_nested_dicts(old_val, new_val)
+        else:
+            merged[field] = new_val
+            log_debug(f"[bio] Direct assignment for '{field}': {merged[field]}")
+
+    # Update tracking fields
+    now = datetime.utcnow().isoformat()
+    merged["last_update"] = now
+    merged["update_count"] = (
+        current.get("update_count", 0) + 1
+    ) % 6  # Reset after 5 updates
+
+    # Try to update with all fields, fallback to basic fields if some columns are missing
+    is_postgres = _get_db_type() == "postgres"
+    try:
+        if is_postgres:
+            query = """
+                INSERT INTO bio (
+                    id, known_as, likes, not_likes, information,
+                    past_events, feelings, contacts, social_accounts,
+                    privacy, created_at, last_accessed, last_update, update_count
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    known_as = EXCLUDED.known_as,
+                    likes = EXCLUDED.likes,
+                    not_likes = EXCLUDED.not_likes,
+                    information = EXCLUDED.information,
+                    past_events = EXCLUDED.past_events,
+                    feelings = EXCLUDED.feelings,
+                    contacts = EXCLUDED.contacts,
+                    social_accounts = EXCLUDED.social_accounts,
+                    privacy = EXCLUDED.privacy,
+                    created_at = EXCLUDED.created_at,
+                    last_accessed = EXCLUDED.last_accessed,
+                    last_update = EXCLUDED.last_update,
+                    update_count = EXCLUDED.update_count
+            """
+        else:
+            query = """
+                REPLACE INTO bio (
+                    id, known_as, likes, not_likes, information,
+                    past_events, feelings, contacts, social_accounts,
+                    privacy, created_at, last_accessed, last_update, update_count
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+        await _execute(
+            query,
+            (
+                user_id,
+                json.dumps(merged.get("known_as") or []),
+                json.dumps(merged.get("likes") or []),
+                json.dumps(merged.get("not_likes") or []),
+                str(merged.get("information") or ""),
+                json.dumps(merged.get("past_events") or []),
+                json.dumps(merged.get("feelings") or []),
+                json.dumps(merged.get("contacts") or {}),
+                json.dumps(merged.get("social_accounts") or []),
+                merged.get("privacy") or "default",
+                str(merged.get("created_at") or datetime.utcnow().isoformat()),
+                str(merged.get("last_accessed") or datetime.utcnow().isoformat()),
+                merged.get("last_update"),
+                merged.get("update_count"),
+            ),
+        )
+    except Exception as e:
+        # Fallback to basic columns only
+        log_warning(f"[bio_manager] Full replace failed ({e}), trying basic columns")
+        if is_postgres:
+            fallback_query = """
+                INSERT INTO bio (
+                    id, known_as, likes, not_likes, information,
+                    past_events, feelings, contacts, social_accounts,
+                    privacy, created_at, last_accessed
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    known_as = EXCLUDED.known_as,
+                    likes = EXCLUDED.likes,
+                    not_likes = EXCLUDED.not_likes,
+                    information = EXCLUDED.information,
+                    past_events = EXCLUDED.past_events,
+                    feelings = EXCLUDED.feelings,
+                    contacts = EXCLUDED.contacts,
+                    social_accounts = EXCLUDED.social_accounts,
+                    privacy = EXCLUDED.privacy,
+                    created_at = EXCLUDED.created_at,
+                    last_accessed = EXCLUDED.last_accessed
+            """
+        else:
+            fallback_query = """
+                REPLACE INTO bio (
+                    id, known_as, likes, not_likes, information,
+                    past_events, feelings, contacts, social_accounts,
+                    privacy, created_at, last_accessed
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+        await _execute(
+            fallback_query,
+            (
+                user_id,
+                json.dumps(merged.get("known_as") or []),
+                json.dumps(merged.get("likes") or []),
+                json.dumps(merged.get("not_likes") or []),
+                str(merged.get("information") or ""),
+                json.dumps(merged.get("past_events") or []),
+                json.dumps(merged.get("feelings") or []),
+                json.dumps(merged.get("contacts") or {}),
+                json.dumps(merged.get("social_accounts") or []),
+                merged.get("privacy") or "default",
+                str(merged.get("created_at") or datetime.utcnow().isoformat()),
+                str(merged.get("last_accessed") or datetime.utcnow().isoformat()),
+            ),
         )
 
 
@@ -1198,7 +1558,23 @@ class BioPlugin:
                 return p["id"]
         return None
 
-    def execute_action(self, action: dict, context: dict, bot, original_message):
+    async def _resolve_target_async(self, target: Any) -> str | None:
+        """Async, loop-safe version of _resolve_target."""
+        if target is None:
+            return None
+        target = str(target)
+        if target.isdigit():
+            return target
+        for p in self._participants:
+            if target in {p.get("usertag"), p.get("username")}:
+                return p["id"]
+            bio = await _get_bio_light_async(p["id"])
+            # Ensure bio is a dict before calling .get()
+            if isinstance(bio, dict) and target in bio.get("known_as", []):
+                return p["id"]
+        return None
+
+    async def execute_action(self, action: dict, context: dict, bot, original_message):
         action_type = action.get("type")
         payload = action.get("payload", {}) or {}
         if action_type == "bio_full_request":
@@ -1207,11 +1583,15 @@ class BioPlugin:
             if not targets:
                 targets = action.get("targets", [])
 
+            # LLMs may emit a comma-separated string instead of a list
+            if isinstance(targets, str):
+                targets = [t.strip() for t in targets.split(",") if t.strip()]
+
             bios = []
             for t in targets:
-                uid = self._resolve_target(t)
+                uid = await self._resolve_target_async(t)
                 if uid:
-                    bios.append(get_bio_full(uid))
+                    bios.append(await _get_bio_full_async(uid))
             if bios:
                 # Return the bios data instead of trying to send directly
                 return {
@@ -1236,20 +1616,20 @@ class BioPlugin:
             if not fields:
                 fields = action.get("fields", {})
 
-            uid = self._resolve_target(target)
+            uid = await self._resolve_target_async(target)
             if uid and isinstance(fields, dict):
                 try:
                     # Special handling for user_name field - check if it's a "call me" request
                     if "user_name" in fields:
-                        self.update_user_name(uid, fields["user_name"])
+                        await self._update_user_name_async(uid, fields["user_name"])
                         # Remove user_name from fields since it's been handled specially
                         remaining_fields = {
                             k: v for k, v in fields.items() if k != "user_name"
                         }
                         if remaining_fields:
-                            update_bio_fields(uid, remaining_fields)
+                            await _update_bio_fields_async(uid, remaining_fields)
                     else:
-                        update_bio_fields(uid, fields)
+                        await _update_bio_fields_async(uid, fields)
 
                     return {
                         "success": True,
@@ -1271,6 +1651,40 @@ class BioPlugin:
                 }
 
         return {"success": False, "message": f"Unsupported action type: {action_type}"}
+
+    @staticmethod
+    async def _update_user_name_async(user_id: str, new_name: str) -> None:
+        """Async, loop-safe version of update_user_name."""
+        await _ensure_user_exists_async(user_id)
+        current = await _get_bio_full_async(user_id)
+
+        # Get current user_name and known_as
+        current_name = current.get("user_name")
+        known_as = current.get("known_as", [])
+
+        # Parse known_as if it's a JSON string
+        if isinstance(known_as, str):
+            try:
+                known_as = json.loads(known_as)
+            except Exception:
+                known_as = []
+
+        # If there's an existing name, move it to known_as
+        if current_name and current_name != new_name:
+            if current_name not in known_as:
+                known_as.append(current_name)
+
+        # Remove new name from known_as if it's there
+        if new_name in known_as:
+            known_as.remove(new_name)
+
+        # Update both fields
+        updates = {"user_name": new_name, "known_as": known_as}
+
+        await _update_bio_fields_async(user_id, updates)
+        log_info(
+            f"[bio_manager] Updated user_name for {user_id}: '{new_name}' (moved '{current_name}' to known_as)"
+        )
 
     @staticmethod
     def update_user_name(user_id: str, new_name: str) -> None:
@@ -1318,7 +1732,7 @@ class BioPlugin:
         """
         try:
             # First check if it's a direct user ID match
-            bio = get_bio_full(user_identifier)
+            bio = await _get_bio_full_async(user_identifier)
             if bio and bio.get("id"):
                 user_name = bio.get("user_name") or user_identifier
                 return (user_identifier, user_name)

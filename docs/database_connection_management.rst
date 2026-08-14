@@ -312,3 +312,27 @@ The bio_manager plugin was experiencing ``TimeoutError`` when retrieving user pr
 - ``plugins/bio_manager.py``: Added ``_get_bio_light_async()``, ``_update_last_accessed_async()``
 - ``plugins/bio_manager.py``: Converted ``get_static_injection()`` to ``async def``
 - **MariaDB Connection Pooling**: https://mariadb.com/kb/en/
+
+**Agent Lane action deadlock (August 2026)**:
+
+The same ``run_coroutine_threadsafe()`` deadlock resurfaced on the *action* path: the Agent Lane
+(``core/agent_tool_executor.py`` → ``core/action_parser.run_action``) calls ``BioPlugin.execute_action``
+directly on the event-loop thread. The old sync ``execute_action`` went through ``_run()``, which
+scheduled its coroutine on the very loop it was blocking, deadlocking until the 30s ``TimeoutError``
+("Error in _run: " with an empty message, repeated every 30s — e.g. the ``bio_full_request`` tool
+with ``targets: "grillo,karada,scarlett,scarlet"``).
+
+- **Root cause**: ``_run()`` used ``run_coroutine_threadsafe(coro, loop).result(timeout=30)`` when the
+  loop is running. From the loop thread itself, the scheduled coroutine can never run while the loop
+  thread blocks in ``.result()``.
+- **Fix**: ``execute_action`` is now ``async def`` and uses loop-safe async helpers
+  (``_get_bio_light_async``, ``_get_bio_full_async``, ``_update_bio_fields_async``,
+  ``_ensure_user_exists_async``, ``_resolve_target_async``); ``action_parser`` already awaited coroutine
+  results from ``execute_action``, so no caller change was needed. ``_run()`` additionally gained a
+  defensive branch: when invoked from the loop thread it delegates to a worker thread instead of
+  deadlocking, and its error log now includes the exception type (a bare ``TimeoutError`` has an empty
+  ``str()``).
+- **Bonus fix**: ``bio_full_request`` now normalizes a comma-separated string ``targets`` into a list
+  (LLMs often emit a string, which previously iterated character-by-character).
+- **Tests**: ``tests/test_bio_manager_async.py`` proves the action path never touches the ``_run``
+  bridge and runs inside a live event loop without deadlocking.
