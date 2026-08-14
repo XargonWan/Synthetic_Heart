@@ -663,7 +663,16 @@ async def gather_recon_contributions(
     recon_specs = []
     for plugin in recon_plugins:
         key = str(plugin.get_recon_key())
-        instruction = str(plugin.get_recon_instruction())
+        try:
+            # Pass the message/context so plugins can tailor their instruction
+            # (e.g. whether the user attached files). Older plugins take none.
+            instruction = str(
+                plugin.get_recon_instruction(
+                    message=message, context_memory=context_memory
+                )
+            )
+        except TypeError:
+            instruction = str(plugin.get_recon_instruction())
         recon_specs.append((plugin, key, instruction))
 
     # Build combined system prompt

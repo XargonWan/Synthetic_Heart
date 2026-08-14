@@ -1254,6 +1254,22 @@ class AgentLoopManager:
         # observation records "already delivered" so the model sees it went out.
         delivered_texts: set[str] = set()
 
+        # Cross-iteration tool-call dedup: a weak loop engine re-issues the SAME
+        # tool call on later iterations (observed live: the same
+        # ``agent_read_file`` call repeated 7x because the engine thought the
+        # file content was truncated). An identical (name, args) call in the
+        # same turn is never re-executed — the first result is returned with a
+        # structural note so the model sees it already has the answer.
+        executed_calls: dict[tuple[str, str], Dict[str, Any]] = {}
+
+        # Two consecutive message-only iterations (no tool calls in either) mean
+        # the loop engine has no further tool intent: the second delivered
+        # message is treated as the final answer instead of nagging the model
+        # into inventing tool calls it will not make (observed live: the agent
+        # answered, then re-issued the same read_file 6 more times and sent a
+        # second duplicate reply).
+        prev_iteration_message_only = False
+
         # LogChat is warned at most once per turn when the agent-scope engine
         # produces an empty response and the loop falls back to the Base Cortex
         # (see the base-cortex safety net inside the iteration loop below), so a
@@ -1748,6 +1764,28 @@ class AgentLoopManager:
                 # Only synth message actions this iteration (no real tools left).
                 if message_calls and (final_text.strip() or delivered_message_texts):
                     if require_explicit_completion and i < max_iterations:
+                        if prev_iteration_message_only:
+                            # Two consecutive message-only iterations: the loop
+                            # engine has no further tool intent. Treat the
+                            # delivered message as the final answer instead of
+                            # nagging it into inventing tool calls (observed
+                            # live: the agent answered, then re-issued the same
+                            # read_file 6 more times and sent a second reply).
+                            log_info(
+                                "[agent_core] Two consecutive message-only "
+                                "iterations — ending the turn with the "
+                                "delivered reply"
+                            )
+                            observations.append(
+                                {
+                                    "iteration": i,
+                                    "role": "assistant",
+                                    "content": final_text or "(message delivered)",
+                                }
+                            )
+                            stop_reason = "model_done"
+                            break
+                        prev_iteration_message_only = True
                         # Deliver the message as an intermediate reply but keep
                         # working: the model must still call attempt_completion
                         # (or run out of iterations) to genuinely end the turn.
@@ -1802,6 +1840,10 @@ class AgentLoopManager:
                     )
                     stop_reason = "model_done"
                     break
+
+                # A non-message-only iteration resets the consecutive-message
+                # detector: the loop engine still has tool intent.
+                prev_iteration_message_only = False
 
                 if not raw_text.strip():
                     observations.append(
@@ -1869,6 +1911,7 @@ class AgentLoopManager:
             # Diary entries are allowed only on the first (start) and last (end)
             # iteration; suppress them on the intermediate working iterations so
             # a single task produces at most one opening and one closing entry.
+            prev_iteration_message_only = False
             diary_allowed_this_iteration = i == 1 or i == max_iterations
             iteration_results: list[Dict[str, Any]] = []
             for call in tool_calls:
@@ -1890,6 +1933,35 @@ class AgentLoopManager:
                                 "diary_suppressed_mid_task: write a diary entry "
                                 "only at the start or the end of the task, not on "
                                 "intermediate iterations"
+                            ),
+                        }
+                    )
+                    continue
+
+                # Cross-iteration identical-call dedup: never re-execute the
+                # same (name, args) tool call within one turn. Weak engines
+                # re-issue the identical call when they think a result was
+                # truncated (observed live: the same agent_read_file call
+                # repeated 7x). Return the first result with a structural note.
+                # Diary tools are exempt: their start/end slots are enforced
+                # deterministically above, and the closing entry is expected to
+                # run even when its content resembles the opening one.
+                _call_key = (name, json.dumps(args, sort_keys=True, default=str))
+                cached = (
+                    executed_calls.get(_call_key) if name not in _DIARY_TOOLS else None
+                )
+                if cached is not None:
+                    log_info(
+                        f"[agent_core] Iteration {i}: identical tool call "
+                        f"'{name}' already executed this turn — returning "
+                        "cached result"
+                    )
+                    iteration_results.append(
+                        {
+                            **cached,
+                            "note": (
+                                "identical call already executed earlier this "
+                                "turn; result unchanged — do not repeat it"
                             ),
                         }
                     )
@@ -1963,6 +2035,14 @@ class AgentLoopManager:
                         "error": exec_result.get("error"),
                     }
                 )
+                # Cache the final result (after any programmatic retry) for the
+                # cross-iteration identical-call dedup above.
+                executed_calls[_call_key] = {
+                    "tool": name,
+                    "ok": exec_result.get("ok", False),
+                    "result": exec_result.get("result", ""),
+                    "error": exec_result.get("error"),
+                }
                 log_info(
                     f"[agent_core] Iteration {i}: tool '{name}' "
                     f"ok={exec_result.get('ok')}"

@@ -1362,3 +1362,147 @@ async def test_agent_engine_call_skips_kwargs_when_native_tools_disabled(monkeyp
 
     assert out == "prose reply"
     assert captured == {}
+
+
+@pytest.mark.asyncio
+async def test_run_agentic_turn_dedupes_identical_tool_calls(monkeypatch):
+    """An identical (name, args) tool call on a later iteration must NOT re-execute.
+
+    Regression for the observed live loop where the same ``agent_read_file``
+    call was re-issued 7 times (the engine thought the file content was
+    truncated). The first result is cached and returned with a structural note.
+    """
+
+    calls = []
+
+    async def fake_handle(bot, message, context_memory_or_prompt):
+        calls.append(context_memory_or_prompt)
+        if len(calls) == 1:
+            return json.dumps(
+                {"actions": [{"type": "mcp_fs_read", "payload": {"path": "/x"}}]}
+            )
+        if len(calls) == 2:
+            # Same call again — must be deduped, not re-executed.
+            return json.dumps(
+                {"actions": [{"type": "mcp_fs_read", "payload": {"path": "/x"}}]}
+            )
+        return json.dumps(
+            {
+                "actions": [
+                    {
+                        "type": "attempt_completion",
+                        "payload": {"summary": "Read it."},
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr("core.plugin_instance.handle_incoming_message", fake_handle)
+
+    executed: list = []
+
+    async def fake_execute(name, arguments, context=None, original_message=None):
+        executed.append((name, arguments))
+        return {
+            "ok": True,
+            "tool": name,
+            "source": "mcp:fs",
+            "result": "file contents",
+            "error": None,
+        }
+
+    monkeypatch.setattr(agent_tool_executor, "execute", fake_execute)
+
+    manager = AgentLoopManager()
+    out = await manager.run_agentic_turn(
+        goal="read the file", max_iterations=5, timeout_seconds=30
+    )
+    assert out["stop_reason"] == "completed"
+    # Only one real execution of the identical call.
+    assert executed == [("mcp_fs_read", {"path": "/x"})]
+    # The deduped repeat surfaces a structural note to the model.
+    notes = [
+        r.get("note")
+        for o in out["observations"]
+        if o.get("role") == "tool_results"
+        for r in (o.get("content") or [])
+        if isinstance(r, dict)
+    ]
+    assert any("already executed" in str(n) for n in notes)
+
+
+@pytest.mark.asyncio
+async def test_run_agentic_turn_ends_after_two_message_only_iterations(monkeypatch):
+    """Two consecutive message-only iterations end the turn with the reply.
+
+    Regression for the observed live run where the agent delivered an answer,
+    was nudged to keep working, then re-issued the same file read 6 more times
+    and sent a second duplicate reply. A second consecutive message-only
+    iteration means the loop engine has no further tool intent.
+    """
+
+    calls = []
+
+    async def fake_handle(bot, message, context_memory_or_prompt):
+        calls.append(1)
+        # Iteration 1 does real tool work (keeps the loop past the iteration-1
+        # conversational-reply short-circuit), then the model switches to
+        # message-only iterations — the observed live failure shape.
+        if len(calls) == 1:
+            return json.dumps(
+                {"actions": [{"type": "mcp_fs_read", "payload": {"path": "/x"}}]}
+            )
+        if len(calls) == 2:
+            return json.dumps(
+                {
+                    "actions": [
+                        {
+                            "type": "message_telegram_bot",
+                            "payload": {
+                                "interface_path": "telegram_bot/31321637",
+                                "text": "I read the file, here are my thoughts.",
+                            },
+                        }
+                    ]
+                }
+            )
+        return json.dumps(
+            {
+                "actions": [
+                    {
+                        "type": "message_telegram_bot",
+                        "payload": {
+                            "interface_path": "telegram_bot/31321637",
+                            "text": "And one more thought on top of that.",
+                        },
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr("core.plugin_instance.handle_incoming_message", fake_handle)
+
+    async def fake_execute(name, arguments, context=None, original_message=None):
+        return {
+            "ok": True,
+            "tool": name,
+            "source": "internal",
+            "result": "delivered" if name.startswith("message_") else "file contents",
+            "error": None,
+        }
+
+    monkeypatch.setattr(agent_tool_executor, "execute", fake_execute)
+
+    manager = AgentLoopManager()
+    out = await manager.run_agentic_turn(
+        goal="give thoughts", max_iterations=10, timeout_seconds=30
+    )
+    # Turn ended at the second consecutive message-only iteration, never
+    # nagging for more tools.
+    assert out["stop_reason"] == "model_done"
+    assert len(calls) == 3
+    # The messages were delivered through the executor, so final_text stays
+    # empty — a delivered message must never be re-sent as final_text.
+    assert out["final_text"] == ""
+    # The end-of-turn observation is the assistant's delivered reply marker.
+    assert out["observations"][-1].get("role") == "assistant"

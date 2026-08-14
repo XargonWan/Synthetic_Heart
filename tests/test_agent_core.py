@@ -162,9 +162,11 @@ async def test_diary_only_executed_at_start_and_end(monkeypatch):
     assert len(diary_execs) == 2, (
         f"expected diary to run only at start/end, got {len(diary_execs)}: {executed}"
     )
-    # The working tool ran on every iteration (never suppressed).
+    # The identical working call is executed once, then deduped on later
+    # iterations (cross-iteration identical-call dedup — re-running the same
+    # call is a loop artifact, not real work).
     work_execs = [n for n in executed if n == "agent_read_file"]
-    assert len(work_execs) == max_iterations
+    assert len(work_execs) == 1, executed
     assert result is not None
 
 

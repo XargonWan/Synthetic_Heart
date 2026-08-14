@@ -36,6 +36,11 @@ plugin = None
 if TYPE_CHECKING:
     from plugins.iris_base import IrisResult
 
+# Max characters of inbound text-attachment content injected into the current
+# turn, so the full-context Fast Lane model can read attached documents
+# directly (no agent/tool needed just to read what the user attached).
+_TEXT_ATTACHMENT_MAX_CHARS = 16000
+
 
 def _get_grillo_engine_label(plugin_obj: Any) -> str | None:
     """Return a short engine label for Grillo activity diagnostics."""
@@ -774,6 +779,12 @@ async def handle_incoming_message(
                         or ""
                     ).startswith(("image/", "video/"))
                 ]
+
+                # Inline bounded content of inbound TEXT attachments into the
+                # current turn (see _inject_text_attachment_content) so the
+                # full-context model can read what the user attached without
+                # needing the Agent Lane's filesystem tools.
+                _inject_text_attachment_content(message, attachments)
 
         if isinstance(context_memory_or_prompt, str):
             try:
@@ -1738,6 +1749,57 @@ async def _describe_attachment_images_with_iris(
             first_media_mime_type, reason="error"
         )
     )
+
+
+def _inject_text_attachment_content(message: Any, attachments: list) -> bool:
+    """Append bounded content of inbound ``text/*`` attachments to ``message.text``.
+
+    The multimodal extractor keeps document bytes as base64 in memory and only
+    the Agent Lane can read them from disk — the full-context Fast Lane model
+    never saw attached documents, so "read this md and tell me what you think"
+    was escalated to the Agent Lane (Langfuse 2a09c706-era: recon judged the
+    request agentic because the main model had no way to read the file).
+    Inlining the content (bounded) into the current turn lets the main model
+    answer directly. Images/videos are handled by Iris, audio by Auris; only
+    ``text/*`` is inlined here. Language-neutral framing, no keyword logic.
+    Fail-safe: any decode error skips that attachment; never raises.
+
+    Returns True when content was injected.
+    """
+    try:
+        blocks: list[str] = []
+        for att in attachments or []:
+            if not isinstance(att, dict):
+                continue
+            mime = str(att.get("mime_type") or att.get("content_type") or "")
+            if not mime.startswith("text/"):
+                continue
+            data_b64 = att.get("data")
+            if not isinstance(data_b64, str) or not data_b64.strip():
+                continue
+            try:
+                text_content = base64.b64decode(data_b64).decode(
+                    "utf-8", errors="replace"
+                )
+            except Exception:
+                continue
+            if not text_content.strip():
+                continue
+            name = str(att.get("filename") or "attachment").strip()
+            blocks.append(f"[Attachment: {name}]\n{text_content}")
+        if not blocks:
+            return False
+        joined = "\n\n".join(blocks)[:_TEXT_ATTACHMENT_MAX_CHARS]
+        original = getattr(message, "text", "") or ""
+        setattr(message, "text", f"{original}\n\n{joined}" if original else joined)
+        log_info(
+            f"[plugin_instance] Injected {len(joined)} chars of text "
+            "attachment content into the current turn"
+        )
+        return True
+    except Exception as exc:
+        log_warning(f"[plugin_instance] Text attachment injection failed: {exc}")
+        return False
 
 
 def _persist_attachments_to_sandbox(attachments: list[dict]) -> list[str]:

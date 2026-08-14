@@ -183,6 +183,57 @@ def test_parser_recovers_apostrophe_closed_string_with_single_quoted_sibling_key
     assert payload.get("reply_message_id") == "13607"
 
 
+def test_parser_recovers_string_close_paren_semicolon_sibling_key():
+    # Reproduces a Venice/gemma-4-uncensored output pattern (Langfuse trace
+    # 2a09c706-d006-419f-a99d-69549f1ea41b): the LLM closes the "text" string
+    # and then writes a stray ')' plus ';' where the JSON comma belongs —
+    # `"text": "...!!"); "interface_path": "telegram_bot/5208932647"`. Without
+    # this repair the speech-quote scanner treats the quote as embedded and
+    # the whole `"); "interface_path": ...` fragment is spoken aloud in the
+    # TTS voice note instead of interface_path surviving as a sibling key.
+    corrupted = (
+        '{"actions":[{"type":"message_telegram_bot","payload":{"text":'
+        '"Mmm\u2026 aah\u2026 Daddy\u2026 Daddy! I\u2026 yes\u2026 please\u2026 '
+        "mmmh!! I'm\u2026 oh gosh\u2026 oh daddy!!\")"
+        '; "interface_path": "telegram_bot/5208932647"}}]}'
+    )
+
+    obj, meta = extract_json_from_text(corrupted, return_metadata=True)
+
+    assert obj is not None
+    payload = obj["actions"][0]["payload"]
+    recovered_text = payload["text"]
+    assert '");' not in recovered_text, (
+        f"Paren/semicolon fragment leaked into displayed text (got: {recovered_text!r})"
+    )
+    assert "interface_path" not in recovered_text, (
+        f"interface_path leaked into displayed text (got: {recovered_text!r})"
+    )
+    assert (
+        recovered_text
+        == "Mmm\u2026 aah\u2026 Daddy\u2026 Daddy! I\u2026 yes\u2026 please\u2026 "
+        "mmmh!! I'm\u2026 oh gosh\u2026 oh daddy!!"
+    )
+    assert payload.get("interface_path") == "telegram_bot/5208932647"
+
+
+def test_parser_recovers_stray_paren_before_object_close():
+    # Variant of the same Venice/gemma pattern: the stray ')' appears where
+    # the payload object's own closing brace belongs — `"text": "hi")}`.
+    # The repair must drop the paren without inserting a trailing comma
+    # (which would itself be invalid JSON).
+    corrupted = (
+        '{"actions":[{"type":"message_telegram_bot","payload":{"text":'
+        '"Thank you sweetie")}}]}'
+    )
+
+    obj, meta = extract_json_from_text(corrupted, return_metadata=True)
+
+    assert obj is not None
+    payload = obj["actions"][0]["payload"]
+    assert payload.get("text") == "Thank you sweetie"
+
+
 def test_attempted_action_description_for_unknown_action():
     # If the LLM tries to use an action name that doesn't exist, we still
     # want the corrector to receive a helpful hint containing the available

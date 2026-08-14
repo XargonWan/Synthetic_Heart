@@ -246,6 +246,14 @@ def _repair_json_string_speech_quotes(raw: str) -> str:
     embedded dialogue (e.g. ``"spoken line," she said, "more dialogue"``) and
     the quote is treated as embedded.
 
+    A ``")`` (quote directly followed by a stray ``)`` plus optional ``;``) is
+    a *corrupted* closer: the LLM closed the string and then wrote a paren
+    where the JSON comma (or the object's closing brace) belongs, e.g.
+    ``"text": "...!!"); "interface_path": "..."``. When what follows the paren
+    is a sibling ``"key":`` pattern, the quote is the true closer and the
+    paren/semicolon become the missing comma; when it is a closing bracket or
+    end-of-text, the parens are simply dropped.
+
     ``\"`` (backslash-quote) where the character following the pair is structural,
     or immediately precedes a ``"key":`` pattern, is treated as a mistakenly-escaped
     closer (the ``\\`` is stripped).
@@ -406,6 +414,36 @@ def _repair_json_string_speech_quotes(raw: str) -> str:
                     pos += 1
                     found_close = True
                     break
+
+                elif s[j] == ")":
+                    # Stray closing paren after the quote: the LLM closed the
+                    # string and then wrote a ')' (plus optional ';') where the
+                    # JSON comma (or the object's closing brace) belongs, e.g.
+                    # `"text": "...!!"); "interface_path": "..."`. ')' is never
+                    # valid JSON, so when what follows looks like a sibling key
+                    # or a closing bracket, this quote is the true closer and
+                    # the paren/semicolon garbage is consumed.
+                    k = j + 1
+                    while k < n and s[k] in " \t;":
+                        k += 1
+                    if k >= n or s[k] in "}]":
+                        # Stray paren before a closing bracket / end-of-text →
+                        # true closer; drop the parens, no comma needed.
+                        out.append('"')
+                        pos = k
+                        found_close = True
+                        break
+                    elif _looks_like_next_key(s, k):
+                        # Paren where a comma should separate the string from
+                        # the next sibling key → true closer + missing comma.
+                        out.append('", ')
+                        pos = k
+                        found_close = True
+                        break
+                    else:
+                        # Followed by prose → embedded speech quote.
+                        out.append('\\"')
+                        pos += 1
 
                 elif s[j] == "{":
                     # Stray opening brace where a comma should separate the

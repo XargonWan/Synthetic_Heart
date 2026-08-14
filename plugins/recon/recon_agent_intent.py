@@ -73,8 +73,8 @@ class ReconAgentIntentPlugin:
     def get_recon_key(self) -> str:
         return "agent_intent"
 
-    def get_recon_instruction(self) -> str:
-        return (
+    def get_recon_instruction(self, *, message=None, context_memory=None) -> str:
+        instruction = (
             "Judge whether fulfilling the user's request requires acting as an "
             "agent that uses tools and performs work, as opposed to simply "
             "replying with knowledge or conversation. DEFAULT TO "
@@ -106,6 +106,16 @@ class ReconAgentIntentPlugin:
             'Return as an object: {"agent_needed": true|false, "reason": '
             '"short justification", "task_title": "short task name"}.'
         )
+        if isinstance(context_memory, dict) and context_memory.get("attachment_paths"):
+            instruction += (
+                " The user attached file(s) to this message; the attached "
+                "content is already provided to the main model in this turn. "
+                "Reading, quoting, or summarising an attached file is ordinary "
+                "conversation and does NOT require tools. Only escalate when "
+                "the request needs tool work beyond the attached file itself "
+                "(modifying files, running commands, searching the codebase)."
+            )
+        return instruction
 
     def _enabled(self) -> bool:
         try:
