@@ -132,6 +132,48 @@ def _resolve_message_action_for_path(interface_path: Optional[str]) -> Optional[
     return _INTERFACE_TO_MESSAGE_ACTION.get(prefix)
 
 
+def _collect_message_texts(actions: list) -> list:
+    """Collect the ordered, non-empty text bodies of every ``message_*`` action.
+
+    A single LLM turn may emit several message actions (e.g. a multi-part
+    reply).  When those messages are folded into one TTS voice note, every
+    text must be preserved — historically only the first one survived the
+    merge, silently dropping the rest.
+
+    Args:
+        actions: List of action dicts to scan.
+
+    Returns:
+        List of stripped message texts, in emission order.
+    """
+    if not actions:
+        return []
+    texts: list = []
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        action_type = action.get("type") or action.get("action")
+        if not (isinstance(action_type, str) and action_type.startswith("message_")):
+            continue
+        payload = action.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        text = payload.get("text") or payload.get("content") or payload.get("message")
+        if isinstance(text, str) and text.strip():
+            texts.append(text.strip())
+    return texts
+
+
+def _join_message_texts(texts: list) -> str:
+    """Join several message bodies into a single voice-note text.
+
+    Paragraph breaks (``\\n\\n``) give TTS engines a natural pause between the
+    messages that were originally separate bubbles, and the same joined text
+    becomes the audio caption.
+    """
+    return "\n\n".join(t for t in texts if isinstance(t, str) and t.strip())
+
+
 def _normalize_message_payload_text(actions: list) -> list:
     """Promote legacy message payload text aliases to payload.text.
 
@@ -2569,20 +2611,11 @@ async def handle_incoming_message(
                                     _tts_payload.get("text") or ""
                                 ).strip()
                                 # Prefer the spoken text as caption; fall back to the
-                                # text-only message body if tts_speak carried no text.
-                                _msg_payload = (
-                                    user_message_action.get("payload")
-                                    if isinstance(user_message_action, dict)
-                                    else {}
-                                )
-                                if not isinstance(_msg_payload, dict):
-                                    _msg_payload = {}
-                                _msg_text = str(
-                                    _msg_payload.get("text")
-                                    or _msg_payload.get("content")
-                                    or _msg_payload.get("message")
-                                    or ""
-                                ).strip()
+                                # text-only message bodies if tts_speak carried no
+                                # text. When the LLM emitted several message actions,
+                                # join ALL of their texts so no message is dropped.
+                                _msg_texts = _collect_message_texts(actions)
+                                _msg_text = _join_message_texts(_msg_texts)
                                 _caption = _spoken_text or _msg_text
                                 if _caption:
                                     if not _tts_payload.get("text"):
@@ -2934,7 +2967,7 @@ async def handle_incoming_message(
 
                                 if is_voice_response:
                                     # Voice response strategy:
-                                    #   • Remove the standalone message_* action so text
+                                    #   • Remove the standalone message_* actions so text
                                     #     is NOT sent as a separate message.
                                     #   • Inject tts_speak with __merged_text so the text
                                     #     becomes the audio caption (Telegram) or is sent
@@ -2942,6 +2975,20 @@ async def handle_incoming_message(
                                     #   • Do NOT set __auto_injected — if TTS fails the
                                     #     fallback will send text so the user is not left
                                     #     with zero response.
+                                    # When the LLM emitted several message actions, join
+                                    # ALL of their texts so no message is dropped: the
+                                    # voice note speaks (and captions) the full reply.
+                                    _voice_msg_texts = _collect_message_texts(actions)
+                                    if len(_voice_msg_texts) > 1:
+                                        _joined_voice_text = _join_message_texts(
+                                            _voice_msg_texts
+                                        )
+                                        log_info(
+                                            "[message_chain] 🎤 Voice response with "
+                                            f"{len(_voice_msg_texts)} message actions — "
+                                            "joining all texts into the voice note"
+                                        )
+                                        text_to_speak = _joined_voice_text
                                     log_info(
                                         f"[message_chain] 🎤 Voice response: replacing text-only message with audio+caption for: {text_to_speak[:30]}..."
                                     )
@@ -3096,22 +3143,35 @@ async def handle_incoming_message(
                                     f"[message_chain] 🔗 Merging {len(message_actions_to_remove)} message action(s) into TTS to send text+audio together"
                                 )
 
+                                # Join ALL message texts (not just the first) so a
+                                # multi-message reply survives the merge verbatim —
+                                # the voice note speaks and captions the full reply.
+                                _all_msg_texts = [
+                                    msg_text
+                                    for (_, msg_text, _) in message_actions_to_remove
+                                ]
+                                _joined_msg_text = _join_message_texts(_all_msg_texts)
+
                                 for tts_action in tts_actions:
                                     tts_payload = tts_action.get("payload", {})
                                     if not isinstance(tts_payload, dict):
                                         continue
 
-                                    for (
-                                        idx,
-                                        msg_text,
-                                        msg_ipath,
-                                    ) in message_actions_to_remove:
-                                        if "__merged_text" not in tts_payload:
-                                            tts_payload["__merged_text"] = msg_text
-                                            log_info(
-                                                f"[message_chain] ✅ Merged text into tts_speak: '{msg_text[:50]}...'"
-                                            )
-                                            break
+                                    tts_payload["__merged_text"] = _joined_msg_text
+
+                                    # When the spoken text was derived from the first
+                                    # message action (auto-injected TTS), speak the full
+                                    # merged reply instead of only the first message. An
+                                    # LLM-chosen tts_speak carries its own deliberate
+                                    # spoken text and is left untouched.
+                                    _cur_text = str(
+                                        tts_payload.get("text") or ""
+                                    ).strip()
+                                    if _cur_text and _cur_text in _all_msg_texts:
+                                        tts_payload["text"] = _joined_msg_text
+                                    log_info(
+                                        f"[message_chain] ✅ Merged {len(_all_msg_texts)} message text(s) into tts_speak: '{_joined_msg_text[:50]}...'"
+                                    )
 
                                 # Remove the standalone message actions
                                 for idx, _, _ in sorted(
