@@ -62,6 +62,22 @@ CORE_PLUGIN_SHORT_NAMES: frozenset[str] = frozenset({"message_plugin"})
 # config edit + restart.
 CORE_INTERFACE_NAMES: frozenset[str] = frozenset({"synth_webui"})
 
+# Directory segments whose contents are vendored third-party runtimes, never
+# SyntH plugins. The recursive plugin scan must not import (or fail on) their
+# ``.py`` files — e.g. the Minecraft bridge's npm ``node_modules`` tree and the
+# vendored SearXNG source under ``plugins/web_search/searxng-runtime/``. Files
+# beneath these segments are skipped before the import attempt, so missing
+# third-party dependencies no longer spam warnings or pollute startup_errors.
+VENDORED_RUNTIME_DIR_SEGMENTS: frozenset[str] = frozenset(
+    {
+        "node_modules",
+        "searxng-runtime",
+        "site-packages",
+        "dist-packages",
+        ".venv",
+    }
+)
+
 
 def derive_plugin_category(
     module_name: str, dir_path: str, declared: str | None = None
@@ -1175,6 +1191,14 @@ class CoreInitializer:
 
             for py_file in base_path.rglob("*.py"):
                 if py_file.name == "__init__.py" or py_file.name.startswith("_"):
+                    continue
+
+                # Skip vendored third-party runtime trees (npm node_modules,
+                # the SearXNG vendored source, etc.). These are not SyntH
+                # plugins and must not be imported or tracked as components.
+                if isinstance(py_file, Path) and any(
+                    part in VENDORED_RUNTIME_DIR_SEGMENTS for part in py_file.parts
+                ):
                     continue
 
                 if (

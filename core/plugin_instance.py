@@ -623,6 +623,38 @@ async def handle_incoming_message(
             log_info(
                 f"[plugin_instance] Message contains {len(attachments)} attachments from user {user_id}"
             )
+            # Materialize inbound document/audio attachments onto a sandbox path
+            # the agent tools (agent_read_file) and Auris (stt_transcribe) can
+            # actually resolve. The multimodal extractor only keeps base64 bytes
+            # in memory — a downstream tool call then receives a bare filename
+            # that does not exist ("File not found: Untitled document.pdf",
+            # Langfuse 11feca6f). Images/videos stay in-memory for Iris/inline
+            # vision; only non-visual media is persisted. Fail-safe: any error
+            # skips persistence, the turn proceeds unchanged.
+            _sandbox_paths: list[str] = []
+            try:
+                _sandbox_paths = _persist_attachments_to_sandbox(attachments)
+                if _sandbox_paths:
+                    log_info(
+                        f"[plugin_instance] Persisted {len(_sandbox_paths)} "
+                        f"attachment(s) for agent/auris access: {_sandbox_paths}"
+                    )
+            except Exception as _persist_exc:
+                log_warning(
+                    f"[plugin_instance] Attachment persistence skipped: {_persist_exc}"
+                )
+            # Surface the persisted paths on the shared context so the Agent
+            # Lane prompt can point the model at the actual file instead of a
+            # nonexistent bare filename (the recon/agent-intent path inherits
+            # context_memory into the router ctx).
+            if _sandbox_paths and isinstance(context_memory_or_prompt, dict):
+                _existing = context_memory_or_prompt.get("attachment_paths") or []
+                if isinstance(_existing, list):
+                    context_memory_or_prompt["attachment_paths"] = (
+                        _existing + _sandbox_paths
+                    )
+                else:
+                    context_memory_or_prompt["attachment_paths"] = _sandbox_paths
             # 'inline' is a hardcoded Iris pseudo-engine: skip the description
             # step entirely and let image/video bytes flow through to the Cortex
             # engine so a vision-capable multimodal model can see them directly.
@@ -1706,6 +1738,79 @@ async def _describe_attachment_images_with_iris(
             first_media_mime_type, reason="error"
         )
     )
+
+
+def _persist_attachments_to_sandbox(attachments: list[dict]) -> list[str]:
+    """Persist non-visual attachment bytes onto an agent-sandbox-readable path.
+
+    The multimodal extractor keeps document/audio bytes base64-in-memory only,
+    so a downstream tool call (``agent_read_file``, ``stt_transcribe``) receives
+    a bare filename that does not exist on disk — observed live as "File not
+    found: Untitled document.pdf" (Langfuse 11feca6f). This helper writes those
+    bytes under the first configured agent filesystem root (``AGENT_FS_ROOTS`` /
+    ``AGENT_FS_ROOT``, falling back to ``/app``) so the Agent Lane and Auris can
+    resolve the real path. Images/videos are intentionally skipped: they flow
+    through Iris/inline vision instead. Fail-safe: any error skips that
+    attachment and never raises.
+
+    Args:
+        attachments: Extracted attachment dicts (``mime_type``, ``data`` base64,
+            optional ``filename``).
+
+    Returns:
+        List of persisted absolute paths (possibly empty).
+    """
+    import base64 as _b64
+    import re as _re
+    import time as _time
+
+    roots_raw = os.getenv("AGENT_FS_ROOTS") or ""
+    if roots_raw.strip():
+        roots = [p.strip() for p in roots_raw.split(":") if p.strip()]
+    else:
+        roots = [os.getenv("AGENT_FS_ROOT", "/app")]
+    if not roots:
+        return []
+
+    root = roots[0]
+    try:
+        sandbox_root = Path(root).resolve()
+    except Exception:
+        return []
+
+    persisted: list[str] = []
+    for att in attachments or []:
+        try:
+            if not isinstance(att, dict):
+                continue
+            mime = str(att.get("mime_type") or att.get("content_type") or "")
+            # Only non-visual media benefits from a sandbox path.
+            if mime.startswith(("image/", "video/")):
+                continue
+            data_b64 = att.get("data")
+            if not isinstance(data_b64, str) or not data_b64.strip():
+                continue
+            raw_bytes = _b64.b64decode(data_b64)
+            if not raw_bytes:
+                continue
+
+            filename = str(att.get("filename") or "").strip() or "attachment"
+            # Sanitize: keep only safe filename characters (never a path).
+            safe_name = _re.sub(r"[^A-Za-z0-9._-]+", "_", filename).strip("._")
+            if not safe_name:
+                safe_name = "attachment"
+            target_dir = sandbox_root / "attachments"
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target = target_dir / f"{int(_time.time() * 1000)}_{safe_name}"
+            target.write_bytes(raw_bytes)
+            att["path"] = str(target)
+            persisted.append(str(target))
+        except Exception as exc:
+            log_warning(
+                f"[plugin_instance] Failed to persist attachment to sandbox: {exc}"
+            )
+            continue
+    return persisted
 
 
 async def _extract_multimodal_attachments(

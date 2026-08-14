@@ -2673,7 +2673,13 @@ async def handle_incoming_message(
                         tts_already_executed = False
                         correction_ctx = getattr(message, "correction_context", None)
                         if correction_ctx:
-                            # Check if successful_actions (list) or successful_types (list) contains tts_speak
+                            # Only treat TTS as already-executed when the SAME text
+                            # was already spoken. A correction often returns a NEW
+                            # message (e.g. after a failed action); suppressing TTS
+                            # then leaves the corrected reply as silent text
+                            # (Langfuse 11feca6f: the corrector's new reply was
+                            # sent as plain text with no voice note).
+                            spoken_texts: set[str] = set()
                             successful_actions = correction_ctx.get(
                                 "successful_actions", []
                             )
@@ -2683,15 +2689,28 @@ async def handle_incoming_message(
                                         isinstance(action, dict)
                                         and action.get("type") == "tts_speak"
                                     ):
-                                        tts_already_executed = True
-                                        break
-                            # Also check successful_types which is populated by action_parser
-                            successful_types = correction_ctx.get(
-                                "successful_types", []
-                            )
-                            if (
-                                isinstance(successful_types, list)
-                                and "tts_speak" in successful_types
+                                        spoken_payload = action.get("payload", {})
+                                        if isinstance(spoken_payload, dict):
+                                            spoken_text = spoken_payload.get("text")
+                                            if (
+                                                isinstance(spoken_text, str)
+                                                and spoken_text.strip()
+                                            ):
+                                                spoken_texts.add(spoken_text.strip())
+                            if not spoken_texts:
+                                # Fallback: keep the legacy type-only check when
+                                # no spoken text is recorded.
+                                successful_types = correction_ctx.get(
+                                    "successful_types", []
+                                )
+                                if (
+                                    isinstance(successful_types, list)
+                                    and "tts_speak" in successful_types
+                                ):
+                                    tts_already_executed = True
+                            elif (
+                                isinstance(text_to_speak, str)
+                                and text_to_speak.strip() in spoken_texts
                             ):
                                 tts_already_executed = True
 

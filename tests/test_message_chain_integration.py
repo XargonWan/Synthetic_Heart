@@ -816,6 +816,186 @@ class TestMessageChainIntegration(unittest.IsolatedAsyncioTestCase):
             "Non-voice input must not trigger a tts_speak action",
         )
 
+    @patch("core.config_manager.config_registry.get_value")
+    @patch("core.transport_layer.run_corrector_middleware")
+    @patch("core.action_parser.run_actions")
+    async def test_corrected_text_still_gets_tts_when_text_differs(
+        self, mock_run_actions, mock_corrector, mock_get_value
+    ):
+        """A corrected reply with NEW text must still get a tts_speak auto-inject.
+
+        Langfuse 11feca6f: the first pass spoke text A ("Oh! I can try..."),
+        then the corrector returned a different text B ("I'll do my best!...")
+        which was sent as plain text with NO voice note — the old
+        ``tts_already_executed`` guard suppressed TTS merely because a
+        ``tts_speak`` had succeeded in a previous attempt, even though the
+        corrected text was never spoken. The guard must compare the text: only
+        suppress TTS when the SAME text was already spoken.
+        """
+        from core import message_chain
+
+        def fake_get_value(key, default=None, **kwargs):
+            if key == "CORRECTOR_RETRIES":
+                return 4
+            if key == "ACTIVE_VOX_ENGINE":
+                return "http"
+            if key == "VOX_SPEAK_TEXT_REPLIES":
+                return True
+            return default
+
+        mock_get_value.side_effect = fake_get_value
+        mock_run_actions.return_value = {
+            "processed": [],
+            "failed_actions": [],
+            "errors": [],
+        }
+
+        class FakeVar:
+            def __init__(self, value):
+                self.value = value
+
+        def fake_get_var(name, default=None, **kwargs):
+            if name == "MESSAGE_ACTION_TYPES":
+                return FakeVar(["message_telegram_bot"])
+            return default
+
+        get_var_patcher = patch(
+            "core.config_manager.config_registry.get_var", new=fake_get_var
+        )
+        get_var_patcher.start()
+
+        json_text = '{"actions": [{"type": "message_telegram_bot", "payload": {"text": "I\'ll do my best, Daddy!","interface_path": "telegram_bot/123"}}]}'
+        msg = SimpleNamespace(
+            chat_id=123,
+            text=json_text,
+            from_cortex=True,
+            interface_path="telegram_bot/123",
+        )
+        # Correction retry: the previous pass successfully SPOKE a DIFFERENT
+        # text ("Oh! I can try, Daddy..."). The corrected text below was never
+        # spoken, so TTS must still be auto-injected.
+        msg.correction_context = {
+            "successful_actions": [
+                {
+                    "type": "tts_speak",
+                    "payload": {
+                        "text": "Oh! I can try, Daddy...",
+                        "__auto_injected": True,
+                    },
+                },
+                {"type": "update_emotion_state", "payload": {}},
+            ],
+            "successful_types": ["tts_speak", "update_emotion_state"],
+            "failed_actions": [],
+            "errors": [],
+        }
+
+        result = await message_chain.handle_incoming_message(
+            bot=MagicMock(),
+            message=msg,
+            text=json_text,
+            source="llm",
+            interface_path="telegram_bot/123",
+            context={},
+        )
+
+        self.assertEqual(result, message_chain.ACTIONS_EXECUTED)
+        mock_run_actions.assert_called_once()
+        get_var_patcher.stop()
+
+        called_actions = mock_run_actions.call_args[0][0]
+        types = [a.get("type") for a in called_actions if isinstance(a, dict)]
+        self.assertIn(
+            "tts_speak",
+            types,
+            "Corrected text differs from the already-spoken text, so it "
+            "must still be spoken (Langfuse 11feca6f)",
+        )
+
+    @patch("core.config_manager.config_registry.get_value")
+    @patch("core.transport_layer.run_corrector_middleware")
+    @patch("core.action_parser.run_actions")
+    async def test_tts_suppressed_when_same_text_already_spoken(
+        self, mock_run_actions, mock_corrector, mock_get_value
+    ):
+        """Re-emitting the SAME text on a correction retry must NOT double-TTS."""
+        from core import message_chain
+
+        def fake_get_value(key, default=None, **kwargs):
+            if key == "CORRECTOR_RETRIES":
+                return 4
+            if key == "ACTIVE_VOX_ENGINE":
+                return "http"
+            if key == "VOX_SPEAK_TEXT_REPLIES":
+                return True
+            return default
+
+        mock_get_value.side_effect = fake_get_value
+        mock_run_actions.return_value = {
+            "processed": [],
+            "failed_actions": [],
+            "errors": [],
+        }
+
+        class FakeVar:
+            def __init__(self, value):
+                self.value = value
+
+        def fake_get_var(name, default=None, **kwargs):
+            if name == "MESSAGE_ACTION_TYPES":
+                return FakeVar(["message_telegram_bot"])
+            return default
+
+        get_var_patcher = patch(
+            "core.config_manager.config_registry.get_var", new=fake_get_var
+        )
+        get_var_patcher.start()
+
+        spoken_text = "I'll do my best, Daddy!"
+        json_text = (
+            '{"actions": [{"type": "message_telegram_bot", "payload": {"text": "'
+            + spoken_text
+            + '","interface_path": "telegram_bot/123"}}]}'
+        )
+        msg = SimpleNamespace(
+            chat_id=123,
+            text=json_text,
+            from_cortex=True,
+            interface_path="telegram_bot/123",
+        )
+        msg.correction_context = {
+            "successful_actions": [
+                {
+                    "type": "tts_speak",
+                    "payload": {"text": spoken_text, "__auto_injected": True},
+                }
+            ],
+            "successful_types": ["tts_speak"],
+            "failed_actions": [],
+            "errors": [],
+        }
+
+        result = await message_chain.handle_incoming_message(
+            bot=MagicMock(),
+            message=msg,
+            text=json_text,
+            source="llm",
+            interface_path="telegram_bot/123",
+            context={},
+        )
+
+        self.assertEqual(result, message_chain.ACTIONS_EXECUTED)
+        mock_run_actions.assert_called_once()
+        get_var_patcher.stop()
+
+        called_actions = mock_run_actions.call_args[0][0]
+        types = [a.get("type") for a in called_actions if isinstance(a, dict)]
+        self.assertNotIn(
+            "tts_speak",
+            types,
+            "Same text already spoken on a previous attempt: no double-TTS",
+        )
+
     # merge tests: ensure duplicate text actions are consolidated into tts_speak replies
     # Note: subsequent decorators rely on indentation
     @patch("core.transport_layer.run_corrector_middleware")

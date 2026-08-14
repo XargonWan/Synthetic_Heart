@@ -1068,7 +1068,11 @@ def _plugins_for(action_type: str) -> List[Any]:
     # Special handling for tts_speak: explicitly check for master TTS plugin if not found
     if action_type == "tts_speak" and not plugins:
         for plugin in loaded_plugins:
-            if plugin.__class__.__name__ in {"TTSMasterPlugin", "TTSPlugin"}:
+            if plugin.__class__.__name__ in {
+                "TTSMasterPlugin",
+                "TTSPlugin",
+                "VoxPlugin",
+            }:
                 plugins.append(plugin)
                 log_info(
                     "[action_parser] ✅ Explicitly added TTS master plugin for tts_speak"
