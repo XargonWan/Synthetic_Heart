@@ -2240,7 +2240,11 @@ class SynthWebUIInterface:
 
             # Accent color config + presets (exposed to client as runtime config)
             try:
-                accent = str(config_registry.get_value("WEBUI_ACCENT_COLOR", "#6bfefe"))
+                accent = str(
+                    config_registry.get_value("WEBUI_ACCENT_COLOR", "#6bfefe") or ""
+                ).strip()
+                if not re.fullmatch(r"#[0-9a-fA-F]{3}|#[0-9a-fA-F]{6}", accent):
+                    accent = "#6bfefe"
             except Exception:
                 accent = "#6bfefe"
             presets = ["#6bfefe", "#ff6bd6", "#18c98c", "#ffd166", "#ff9ecb"]

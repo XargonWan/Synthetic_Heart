@@ -211,7 +211,7 @@ try {
     // Apply accent color from server-rendered runtime config (if provided)
     try {
       const accent = window.__SYNTH_CONFIG.WEBUI_ACCENT_COLOR;
-      if (accent) {
+      if (accent && /^#([0-9a-f]{3}){1,2}$/i.test(accent)) {
         document.documentElement.style.setProperty('--accent', accent);
         // set a soft variant at ~16% alpha and compute readable contrast color
         const hexToRgb = (h) => { const c = h.replace('#',''); const bigint = parseInt(c.length===3?c.split('').map(x=>x+x).join(''):c,16); return [(bigint>>16)&255, (bigint>>8)&255, bigint&255]; };
@@ -2455,6 +2455,16 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             if (!colorInput.disabled) colorInput.click();
                         });
 
+                        // Tether the hidden color input to the blob: the wrapper is
+                        // position:relative and the input covers the blob exactly, so
+                        // the native hex picker opens anchored at the blob instead of
+                        // the bottom of the screen.
+                        const customWrap = document.createElement('span');
+                        customWrap.className = 'accent-preset-custom-wrap';
+                        colorInput.title = 'Custom color';
+                        customWrap.appendChild(customBtn);
+                        customWrap.appendChild(colorInput);
+
                         const setActivePreset = (val) => {
                             const needle = String(val || '').toLowerCase();
                             presetsWrap.querySelectorAll('button[data-color]').forEach((btn) => {
@@ -2477,7 +2487,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             });
                             presetsWrap.appendChild(b);
                         });
-                        presetsWrap.appendChild(customBtn);
+                        presetsWrap.appendChild(customWrap);
 
                         setActivePreset(current);
 
@@ -2534,7 +2544,6 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         actions.appendChild(resetBtn);
 
                         container.appendChild(presetsWrap);
-                        container.appendChild(colorInput);
                         container.appendChild(actions);
                     };
 

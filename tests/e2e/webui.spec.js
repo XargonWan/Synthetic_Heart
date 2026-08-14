@@ -135,6 +135,15 @@ test('accent color picker in settings updates --accent CSS variable and supports
   expect(customBlob).not.toBeNull();
   expect(await customBlob.evaluate(el => el.textContent)).toBe('+');
 
+  // the hex picker input is tethered inside the blob wrapper, covering the blob
+  const customWrap = await page.$('#config-theme-input-container .accent-preset-custom-wrap');
+  expect(customWrap).not.toBeNull();
+  const pickerInWrap = await page.$('#config-theme-input-container .accent-preset-custom-wrap input[type=color]');
+  expect(pickerInWrap).not.toBeNull();
+  const pickerBox = await pickerInWrap.evaluate(el => { const r = el.getBoundingClientRect(); return { w: r.width, h: r.height }; });
+  expect(pickerBox.w).toBeGreaterThanOrEqual(30);
+  expect(pickerBox.h).toBeGreaterThanOrEqual(30);
+
   // remember current accent so Cancel can be validated
   const originalAccent = (await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--accent').trim())).toLowerCase();
 

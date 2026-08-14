@@ -64,6 +64,27 @@ def test_webui_accent_default():
     assert val.lower() == "#6bfefe"
 
 
+def test_serialize_value_preserves_hex_colors():
+    """A value whose '#' starts the string (e.g. a hex color) must not be
+    treated as an inline comment and truncated to '' -- that bug made every
+    WEBUI accent-color save persist an empty string."""
+    from core.config_manager import config_registry
+
+    key = "TEST_SERIALIZE_COLOR"
+    if key in config_registry._definitions:
+        del config_registry._definitions[key]
+    config_registry.get_var(key, "#6bfefe", label="Test color", value_type=str)
+    defn = config_registry._definitions[key]
+
+    assert config_registry._serialize_value(defn, "#6bfefe") == "#6bfefe"
+    assert config_registry._serialize_value(defn, "#ffd166") == "#ffd166"
+    assert config_registry._serialize_value(defn, "#6bfefe # my accent") == "#6bfefe"
+    assert (
+        config_registry._serialize_value(defn, "Asia/Tokyo # Timezone") == "Asia/Tokyo"
+    )
+    assert config_registry._serialize_value(defn, "plain-value") == "plain-value"
+
+
 @pytest.mark.asyncio
 async def test_log_chat_persistence_uses_config_registry(monkeypatch):
     """set_log_chat_id_and_thread writes a single interface_path to LOG_CHAT_ID."""
