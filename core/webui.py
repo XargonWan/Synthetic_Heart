@@ -931,6 +931,8 @@ class SynthWebUIInterface:
         self.app.delete("/api/log-failures/{failure_id}")(self.delete_log_failure)
         self.app.get("/api/dead-targets")(self.list_dead_targets)
         self.app.delete("/api/dead-targets/{target_id}")(self.delete_dead_target)
+        self.app.get("/api/reason-trail")(self.list_reason_trail)
+        self.app.delete("/api/reason-trail/{reason_id}")(self.delete_reason_trail)
 
         # Agent tasks endpoints (Agentic Runtime persistence)
         self.app.get("/api/agent/tasks")(self.list_agent_tasks)
@@ -10019,6 +10021,57 @@ class SynthWebUIInterface:
         except Exception as exc:
             log_error(f"{LOG_PREFIX} Failed to fetch dead delivery targets: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def list_reason_trail(self, request: Request):
+        """Return the per-turn reason trail (Logs > Reason Trail)."""
+        params = request.query_params
+
+        def _bounded_int(value: Any, default: int | None, maximum: int) -> int | None:
+            if value is None:
+                return default
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return default
+            return max(1, min(maximum, parsed))
+
+        limit = _bounded_int(params.get("limit"), default=None, maximum=5000)
+        search = params.get("search", "").strip() or None
+
+        try:
+            from core.turn_reason import list_reasons
+
+            entries = await list_reasons(limit=limit, search=search)
+            normalized = []
+            for entry in entries:
+                item = dict(entry)
+                item["created_at"] = self._dt_to_utc_iso(entry.get("created_at"))
+                normalized.append(item)
+            return JSONResponse(
+                {"success": True, "entries": normalized, "total_count": len(normalized)}
+            )
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to fetch reason trail: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def delete_reason_trail(self, reason_id: int):
+        """Delete one reason-trail entry."""
+        try:
+            from core.turn_reason import delete_reason
+
+            deleted = await delete_reason(reason_id)
+            if not deleted:
+                raise HTTPException(
+                    status_code=404, detail="Reason trail entry not found"
+                )
+            return JSONResponse({"success": True, "deleted": True, "id": reason_id})
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(
+                f"{LOG_PREFIX} Failed to delete reason trail entry {reason_id}: {exc}"
+            )
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     async def delete_dead_target(self, target_id: int):
         """Revive a dead delivery target (removes the registry entry so the

@@ -6,6 +6,7 @@
                 <button class="logs-subnav-btn active" type="button" data-logs-subtab="live" aria-selected="true">Live Log Stream</button>
                 <button class="logs-subnav-btn" type="button" data-logs-subtab="failures" aria-selected="false">LLM Failures</button>
                 <button class="logs-subnav-btn" type="button" data-logs-subtab="dead-targets" aria-selected="false">Dead Targets</button>
+                <button class="logs-subnav-btn" type="button" data-logs-subtab="reason-trail" aria-selected="false">Reason Trail</button>
                 <button class="logs-subnav-btn" type="button" data-logs-subtab="archive" aria-selected="false">Archive &amp; Query</button>
             </nav>
         </div>
@@ -97,6 +98,17 @@
                 </div>
                 <div id="logs-dead-targets-output" class="logs-failures-output">
                     <div class="logs-empty-state">No dead delivery targets.</div>
+                </div>
+            </section>
+
+            <section class="logs-subpanel" id="logs-panel-reason-trail" data-logs-subtab="reason-trail">
+                <div class="log-controls logs-failure-controls">
+                    <button id="logs-reason-trail-refresh" type="button">Refresh</button>
+                    <input type="text" id="logs-reason-trail-search" placeholder="Search interface, emotion, beat, goal..." style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border); background: rgba(12, 12, 20, 0.58); color: inherit; min-width: 260px;" />
+                    <span class="logs-archive-status">Per-turn record of which memories, diary entries, emotion, goal, and beat drove each reply.</span>
+                </div>
+                <div id="logs-reason-trail-output" class="logs-failures-output">
+                    <div class="logs-empty-state">No reason trail entries yet.</div>
                 </div>
             </section>
 

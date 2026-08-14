@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="PDF Voice">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#e64a4a"/>
+      <stop offset="1" stop-color="#5b8def"/>
+    </linearGradient>
+  </defs>
+  <path d="M64 32 h84 l44 44 v148 a8 8 0 0 1 -8 8 H64 a8 8 0 0 1 -8 -8 V40 a8 8 0 0 1 8 -8 Z" fill="#f4f4f6"/>
+  <path d="M148 32 l44 44 h-44 Z" fill="#d9d9e3"/>
+  <path d="M84 104 h64 M84 124 h64 M84 144 h40" stroke="#9aa0a6" stroke-width="8" stroke-linecap="round"/>
+  <path d="M160 176 v-24 a12 12 0 0 1 24 0 v24" fill="none" stroke="url(#g)" stroke-width="12" stroke-linecap="round"/>
+  <path d="M172 200 a12 12 0 0 0 12 12 M196 200 a12 12 0 0 1 -12 12" fill="none" stroke="url(#g)" stroke-width="12" stroke-linecap="round"/>
+  <path d="M208 164 a36 36 0 0 1 0 48" fill="none" stroke="url(#g)" stroke-width="10" stroke-linecap="round" opacity="0.7"/>
+</svg>

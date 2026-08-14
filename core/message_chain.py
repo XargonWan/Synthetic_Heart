@@ -1206,6 +1206,33 @@ async def handle_incoming_message(
         except Exception:
             ctx["llm_response_text"] = ""
 
+        # Per-turn reason trail ("why did I say that"): the structural reason
+        # summary built in ``build_prompt_request`` rides the context dict
+        # (``plugin_instance`` stashes it under ``_reason_trail`` before the
+        # engine call). Record it here once per LLM turn, now that the reply
+        # text is known. Fail-open: any error must never affect the reply.
+        try:
+            _reason_trail = ctx.get("_reason_trail")
+            if isinstance(_reason_trail, dict):
+                from core.turn_reason import record_reason
+
+                await record_reason(
+                    interface_path=ctx.get("interface_path") or _entry_interface_path,
+                    reply_preview=str(text or "")[:200],
+                    memories=_reason_trail.get("memories"),
+                    diary_sources=_reason_trail.get("diary_sources"),
+                    emotion=_reason_trail.get("emotion"),
+                    goal=_reason_trail.get("goal"),
+                    beat_type=_reason_trail.get("beat_type"),
+                    history_scope=_reason_trail.get("history_scope"),
+                )
+                # Never leave the internal key on a context dict that could be
+                # reused by a later turn (a stale reason must not pair with a
+                # newer reply).
+                ctx.pop("_reason_trail", None)
+        except Exception as _reason_exc:
+            log_debug(f"[message_chain] Reason trail record skipped: {_reason_exc}")
+
     # Also set on message object if possible (for corrector_orchestrator and action_parser detection)
     try:
         if hasattr(message, "__dict__") or isinstance(message, type({})):

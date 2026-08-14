@@ -81,6 +81,27 @@ def _build_empty_grillo_response_text(
     return "[EMPTY LLM RESPONSE]"
 
 
+def _compute_prompt_signature(prompt_for_engine: Any) -> str | None:
+    """Return a short, bounded fingerprint of a prompt for the cached-safe-response store.
+
+    Best-effort: any failure returns ``None`` (which disables caching for the
+    turn). Only a bounded prefix of the serialized prompt is hashed so large
+    prompts never cost a full re-serialization on the hot path.
+    """
+    try:
+        import hashlib
+
+        if isinstance(prompt_for_engine, bytes):
+            blob = prompt_for_engine
+        elif isinstance(prompt_for_engine, str):
+            blob = prompt_for_engine.encode("utf-8", "replace")
+        else:
+            blob = json_dumps(prompt_for_engine).encode("utf-8", "replace")
+        return hashlib.sha256(blob[:8192]).hexdigest()[:16]
+    except Exception:
+        return None
+
+
 def _restore_plugin_instance(instance: object) -> None:
     """Directly restore the module-level plugin reference from a saved instance."""
     global plugin  # noqa: PLW0603
@@ -917,8 +938,43 @@ async def handle_incoming_message(
     # Only PromptRequest-aware engines receive this object directly; legacy
     # engines keep the sanitized transport dict until they opt in.
     prompt_request_obj: object | None = None
+    _reason_trail_dict: dict | None = None
     if isinstance(prompt, dict):
         prompt_request_obj = prompt.pop("__prompt_request", None)
+        # Per-turn reason trail ("why did I say that") is a diagnostics payload
+        # only. It must never reach the engine, so pop it here exactly like
+        # ``__prompt_request`` before sanitization (see core/turn_reason.py).
+        _reason_trail_dict = prompt.pop("__reason_trail", None)
+        if not isinstance(_reason_trail_dict, dict):
+            _reason_trail_dict = None
+        if _reason_trail_dict is not None and isinstance(
+            context_memory_or_prompt, dict
+        ):
+            # Thread the reason to the send path: the llm_context built below
+            # inherits from context_memory_or_prompt, so message_chain records
+            # exactly one row per turn once the reply text is known (and fills
+            # reply_preview). The key is internal and never part of a prompt.
+            context_memory_or_prompt["_reason_trail"] = _reason_trail_dict
+        elif _reason_trail_dict is not None:
+            # Non-dict context: there is no ctx thread to message_chain, so
+            # record directly here (the reply preview is not known yet).
+            try:
+                from core.turn_reason import record_reason
+
+                await record_reason(
+                    interface_path=getattr(message, "interface_path", None),
+                    reply_preview=None,
+                    memories=_reason_trail_dict.get("memories"),
+                    diary_sources=_reason_trail_dict.get("diary_sources"),
+                    emotion=_reason_trail_dict.get("emotion"),
+                    goal=_reason_trail_dict.get("goal"),
+                    beat_type=_reason_trail_dict.get("beat_type"),
+                    history_scope=_reason_trail_dict.get("history_scope"),
+                )
+            except Exception as _reason_exc:
+                log_debug(
+                    f"[plugin_instance] Reason trail fallback record skipped: {_reason_exc}"
+                )
 
     prompt = sanitize_for_json(prompt)
     log_debug("🌐 JSON PROMPT built for the plugin:")
@@ -972,6 +1028,8 @@ async def handle_incoming_message(
     # flags (is_trainer, grillo_beat) to scope strings.
     effective_plugin = plugin
     _scope_model: str | None = None
+    _scope: str | None = None
+    _primary_engine_name: str | None = original_plugin_name
     try:
         from core.config import derive_cortex_scope, get_active_cortex_scope
 
@@ -988,6 +1046,7 @@ async def handle_incoming_message(
         )
 
         active_engine_name, _scope_model = await get_active_cortex_scope(scope=_scope)
+        _primary_engine_name = active_engine_name
         reg = get_cortex_registry()
         resolved = reg.get_engine(active_engine_name)
         if resolved is None:
@@ -1015,10 +1074,64 @@ async def handle_incoming_message(
             prompt_for_engine = prompt_request_obj
         from core.config import scope_model_override
 
-        with scope_model_override(effective_plugin, _scope_model):
-            result = await effective_plugin.handle_incoming_message(
-                bot, message, prompt_for_engine
+        # ── Staged cortex fallback (primary → local → cached/safe) ─────
+        # This is the single choke point where every chat turn generates text,
+        # for both built-in engines (which implement handle_incoming_message)
+        # and external engines (which implement generate_response). Route the
+        # generation through core.cortex_fallback so an empty or timed-out
+        # primary engine degrades to a configured fallback engine and then to a
+        # cached safe response. Everything is fail-open: if the module cannot be
+        # imported, or the wrapper raises, the primary outcome is preserved so
+        # the direct call is indistinguishable from the pre-fallback behavior.
+        async def _call_engine(engine_name: str) -> Any:
+            instance = effective_plugin
+            if engine_name != _primary_engine_name:
+                _fallback_reg = get_cortex_registry()
+                instance = _fallback_reg.get_engine(engine_name)
+                if instance is None:
+                    instance = _fallback_reg.load_engine(engine_name)
+                if instance is None:
+                    raise ValueError(f"Cortex engine {engine_name!r} is not registered")
+            with scope_model_override(instance, _scope_model):
+                return await instance.handle_incoming_message(
+                    bot, message, prompt_for_engine
+                )
+
+        _prompt_signature = _compute_prompt_signature(prompt_for_engine)
+
+        try:
+            from core import cortex_fallback
+        except Exception as _import_exc:  # pragma: no cover - defensive
+            log_warning(
+                f"[plugin_instance] core.cortex_fallback import failed: "
+                f"{_import_exc}; using direct call"
             )
+            cortex_fallback = None
+
+        if cortex_fallback is not None:
+            try:
+                result = await cortex_fallback.run_cortex_with_fallback(
+                    engine_name=_primary_engine_name or "default",
+                    scope=_scope,
+                    call_engine=_call_engine,
+                    prompt_signature=_prompt_signature,
+                )
+            except Exception as _fb_exc:
+                # The wrapper is fail-open and only propagates the primary
+                # engine's own outcome (a TimeoutError or the primary's original
+                # exception). Re-running the direct call here would double the
+                # primary call (and double a timeout), so propagate it exactly
+                # as the direct call would have.
+                log_warning(
+                    f"[plugin_instance] Staged cortex fallback raised; "
+                    f"propagating primary outcome: {_fb_exc}"
+                )
+                raise
+        else:
+            with scope_model_override(effective_plugin, _scope_model):
+                result = await effective_plugin.handle_incoming_message(
+                    bot, message, prompt_for_engine
+                )
         try:
             _log_llm_traffic(prompt, result, interface)
         except Exception as e:

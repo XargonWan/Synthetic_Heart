@@ -305,3 +305,18 @@ CREATE INDEX IF NOT EXISTS idx_failure_code ON llm_failure_log (failure_code);
 CREATE INDEX IF NOT EXISTS idx_failure_stage ON llm_failure_log (stage);
 CREATE INDEX IF NOT EXISTS idx_failure_interface_path ON llm_failure_log (interface_path);
 CREATE INDEX IF NOT EXISTS idx_failure_engine ON llm_failure_log (engine);
+
+CREATE TABLE IF NOT EXISTS turn_reason_trail (
+    id BIGSERIAL PRIMARY KEY,
+    interface_path TEXT,
+    reply_preview TEXT,
+    memories TEXT,
+    diary_sources TEXT,
+    emotion TEXT,
+    goal TEXT,
+    beat_type TEXT,
+    history_scope TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_reason_trail_created_at ON turn_reason_trail (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_reason_trail_interface_path ON turn_reason_trail (interface_path);

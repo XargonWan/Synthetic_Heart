@@ -495,6 +495,42 @@ async def _migrate_goals_table() -> None:
                 pass
 
 
+async def _migrate_llm_failure_log_is_test() -> None:
+    """Add the ``is_test`` column to ``llm_failure_log`` for test isolation.
+
+    The failure store now tags test-isolated entries (``interface_path='fake'``
+    or ``reason='test reason'``) so runtime failure summaries can exclude them.
+    This migration adds the column idempotently to existing installs that
+    predate the flag. Backend-aware (``TINYINT`` on MariaDB, ``SMALLINT`` on
+    Postgres) and fail-open: a broken ALTER must never block startup.
+    """
+    from core.db import _get_db_type, get_conn_ctx
+
+    db_type = _get_db_type()
+    async with get_conn_ctx() as conn:
+        async with conn.cursor() as cur:
+            if not await _table_exists(cur, "llm_failure_log", db_type):
+                return
+            if await _column_exists(cur, "llm_failure_log", "is_test", db_type):
+                return
+
+            col_type = "SMALLINT" if db_type == "postgres" else "TINYINT(1)"
+            try:
+                await cur.execute(
+                    f"ALTER TABLE llm_failure_log ADD COLUMN is_test {col_type} "
+                    "NOT NULL DEFAULT 0"
+                )
+                log_info("[migrations] Added llm_failure_log.is_test column")
+            except Exception as exc:
+                log_warning(f"[migrations] llm_failure_log.is_test add skipped: {exc}")
+                return
+
+            try:
+                await conn.commit()
+            except Exception:
+                pass
+
+
 # Registry of startup migrations, applied in order. Each entry is
 # (name, coroutine-callable). Add new one-shot migrations here.
 _STARTUP_MIGRATIONS: list[tuple[str, Any]] = [
@@ -502,6 +538,7 @@ _STARTUP_MIGRATIONS: list[tuple[str, Any]] = [
     ("rename_timestamp_columns", _rename_timestamp_columns),
     ("dedup_diary_segments", _dedup_diary_segments),
     ("migrate_goals_table", _migrate_goals_table),
+    ("migrate_llm_failure_log_is_test", _migrate_llm_failure_log_is_test),
 ]
 
 

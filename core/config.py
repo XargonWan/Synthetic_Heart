@@ -234,6 +234,83 @@ LLM_GENERATION_TIMEOUT_SEC = config_registry.get_var(
     component="cortex",
 )
 
+# Staged cortex fallback chain (primary -> local -> cached/safe), implemented
+# in core/cortex_fallback.py and wired at the single chat-turn generation choke
+# point in core/plugin_instance.py. All keys are fail-open: an unset/empty
+# fallback engine simply disables the fallback, and every read degrades to the
+# registered default. Engine selection is by registry name only.
+CORTEX_FALLBACK_ENABLED = config_registry.get_var(
+    "CORTEX_FALLBACK_ENABLED",
+    True,
+    label="Cortex Fallback Enabled",
+    description=(
+        "When enabled, an empty or timed-out primary cortex generation degrades "
+        "to the configured fallback engine and then to a cached safe response."
+    ),
+    value_type=bool,
+    group="core",
+    component="cortex",
+)
+
+CORTEX_FALLBACK_ENGINE = config_registry.get_var(
+    "CORTEX_FALLBACK_ENGINE",
+    "",
+    label="Cortex Fallback Engine",
+    description=(
+        "Registry name of the engine to retry once when the primary cortex "
+        "returns empty/whitespace or times out. Empty disables the fallback."
+    ),
+    group="core",
+    component="cortex",
+)
+
+CORTEX_LOCAL_ENGINES = config_registry.get_var(
+    "CORTEX_LOCAL_ENGINES",
+    "selenium-llm-engine",
+    label="Cortex Local Engines",
+    description=(
+        "Comma-separated registry names of engines considered local (no network)."
+    ),
+    group="core",
+    component="cortex",
+)
+
+CORTEX_FALLBACK_TIMEOUT_SEC = config_registry.get_var(
+    "CORTEX_FALLBACK_TIMEOUT_SEC",
+    60,
+    label="Cortex Fallback Timeout (s)",
+    description=(
+        "Shorter timeout applied to the fallback engine generation "
+        "(clamped to 5-600 seconds)."
+    ),
+    value_type=int,
+    group="core",
+    component="cortex",
+)
+
+CORTEX_CACHED_RESPONSE_ENABLED = config_registry.get_var(
+    "CORTEX_CACHED_RESPONSE_ENABLED",
+    True,
+    label="Cortex Cached Response Enabled",
+    description=(
+        "When enabled, a previously good response is replayed for the same "
+        "(engine, prompt) signature when all live generation fails."
+    ),
+    value_type=bool,
+    group="core",
+    component="cortex",
+)
+
+CORTEX_CACHE_TTL_SEC = config_registry.get_var(
+    "CORTEX_CACHE_TTL_SEC",
+    3600,
+    label="Cortex Cache TTL (s)",
+    description=("Lifetime of cached safe responses in seconds (clamped to 60-86400)."),
+    value_type=int,
+    group="core",
+    component="cortex",
+)
+
 # ----------------------------------------------------------------------
 # Live session synchronization settings
 # ----------------------------------------------------------------------

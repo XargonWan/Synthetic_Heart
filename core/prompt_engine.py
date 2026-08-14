@@ -2756,6 +2756,59 @@ async def build_prompt_request(
     except Exception as _pr_exc:
         log_debug(f"[json_prompt] PromptRequest assembly skipped: {_pr_exc}")
 
+    # === Per-turn reason trail ("why did I say that") ===
+    # Build a compact, structural summary of the context that shaped this turn
+    # (memories, diary sources, emotion, active vessel goal, beat type, history
+    # scope) and attach it to the transport dict under ``__reason_trail`` — the
+    # same stash-on-dict precedent as ``__prompt_request``/``__pre_reduction_size``.
+    # ``plugin_instance`` pops it before the engine sees the dict (so it never
+    # leaks into the engine payload) and threads it through the context dict to
+    # ``message_chain``, which records exactly one row per turn once the reply
+    # text is known (so ``reply_preview`` is populated). Fail-open: any error
+    # here must never affect the reply.
+    try:
+        from core.turn_reason import build_reason_summary
+
+        _reason_diary_entries: Any = None
+        if isinstance(context_section, dict):
+            _reason_diary_entries = context_section.get("latest_diary_entries")
+        if not _reason_diary_entries:
+            _reason_injections = locals().get("injections")
+            if isinstance(_reason_injections, dict):
+                _reason_diary_entries = _reason_injections.get("latest_diary_entries")
+
+        _reason_emotion: Any = None
+        if isinstance(context_section, dict):
+            _reason_emotion = context_section.get(
+                "current_emotions_nl"
+            ) or context_section.get("emotion_state")
+
+        _reason_hist_scope: str | None = (
+            effective_history_scope
+            if "effective_history_scope" in locals() and effective_history_scope
+            else None
+        )
+
+        _reason_goal: Any = None
+        if isinstance(_vessel_world_state, dict):
+            _reason_extra = _vessel_world_state.get("extra")
+            if isinstance(_reason_extra, dict):
+                _reason_goal = _reason_extra.get("current_goal")
+            if not _reason_goal:
+                _reason_goal = _vessel_world_state.get("current_goal")
+
+        reason = build_reason_summary(
+            memories=memories,
+            diary_entries=_reason_diary_entries,
+            emotion=_reason_emotion,
+            beat_type=_beat_type,
+            history_scope=_reason_hist_scope,
+            goal=_reason_goal,
+        )
+        prompt_with_instructions["__reason_trail"] = reason
+    except Exception as _reason_exc:
+        log_debug(f"[json_prompt] Reason trail capture skipped: {_reason_exc}")
+
     return prompt_with_instructions
 
 

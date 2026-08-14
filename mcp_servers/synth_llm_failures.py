@@ -139,6 +139,7 @@ def list_llm_failures(
     since_minutes: Optional[int] = None,
     sort: str = "desc",
     target: Optional[str] = None,
+    include_test: bool = False,
 ) -> str:
     """List recent persisted LLM failure entries (same data as the WebUI Logs page).
 
@@ -157,6 +158,8 @@ def list_llm_failures(
         since_minutes: Only entries created in the last N minutes.
         sort: "desc" (newest first, default) or "asc".
         target: DB target (default runtime). Usually leave unset.
+        include_test: When True, include test-isolated entries (is_test = 1).
+                      Default False hides them from runtime failure statistics.
 
     Returns:
         A compact, newest-first list. Use get_llm_failure(id) for full detail.
@@ -166,6 +169,9 @@ def list_llm_failures(
 
     where: list[str] = []
     params: list[Any] = []
+
+    if not include_test:
+        where.append("is_test = 0")
 
     if search:
         term = f"%{search}%"
@@ -264,6 +270,7 @@ def get_llm_failure(failure_id: int, target: Optional[str] = None) -> str:
 def llm_failure_summary(
     since_minutes: int = 60,
     target: Optional[str] = None,
+    include_test: bool = False,
 ) -> str:
     """Aggregate view of recent LLM failures: counts by code, stage, and interface.
 
@@ -273,20 +280,24 @@ def llm_failure_summary(
     Args:
         since_minutes: Look-back window in minutes (default 60).
         target: DB target (default runtime). Usually leave unset.
+        include_test: When True, include test-isolated entries (is_test = 1).
+                      Default False hides them from runtime failure statistics.
     """
     window = str(int(max(1, since_minutes)))
     time_clause = "created_at >= NOW() - (%s || ' minutes')::interval"
+    test_clause = "" if include_test else "AND is_test = 0"
 
     def _counts(group_col: str) -> list[dict[str, Any]]:
         sql = (
             f"SELECT {group_col} AS k, COUNT(*) AS c FROM llm_failure_log "
-            f"WHERE {time_clause} GROUP BY {group_col} ORDER BY c DESC"
+            f"WHERE {time_clause} {test_clause} GROUP BY {group_col} ORDER BY c DESC"
         )
         return _query(sql, [window], target)
 
     try:
         total_rows = _query(
-            f"SELECT COUNT(*) AS c FROM llm_failure_log WHERE {time_clause}",
+            f"SELECT COUNT(*) AS c FROM llm_failure_log "
+            f"WHERE {time_clause} {test_clause}",
             [window],
             target,
         )

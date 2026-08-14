@@ -17,6 +17,22 @@ import json
 from core.transport_layer import run_corrector_middleware
 from core.core_initializer import INTERFACE_REGISTRY
 
+# Interface capability introspection — guarded import so a failure in the new
+# module can never break dispatch (fail-open: dispatch proceeds unimpeded).
+try:
+    from core.interface_capabilities import (
+        capability_gate_enabled as _interface_capability_gate_enabled,
+        has_capability as _has_capability,
+    )
+except Exception:  # pragma: no cover - import safety
+
+    def _interface_capability_gate_enabled() -> bool:
+        return True
+
+    def _has_capability(iface: Any, cap: str) -> bool:
+        return True
+
+
 # Global dictionary to track retry attempts per chat/message thread for the corrector
 # Use a ConfigVar so consumers always see the latest value (set via WebUI/API)
 CORRECTOR_RETRIES = config_registry.get_var("CORRECTOR_RETRIES", 2)
@@ -1273,6 +1289,39 @@ async def _handle_plugin_action(
             from core.core_initializer import INTERFACE_REGISTRY
 
             interface = INTERFACE_REGISTRY.get(iface_name) if iface_name else None
+
+            # Interface capability gate (fail-open): before dispatching to an
+            # interface, verify it structurally advertises the capability the
+            # action needs. A missing capability is an explicit, correctable
+            # failure — never a silent fall-through.
+            if interface and action_type.startswith("audio"):
+                if _interface_capability_gate_enabled() and not (
+                    _has_capability(interface, "send_audio")
+                    or _has_capability(interface, "send_voice")
+                ):
+                    log_warning(
+                        f"[action_parser] ⚠️ Interface '{iface_name}' lacks audio "
+                        f"capability; refusing to dispatch '{action_type}'"
+                    )
+                    return {
+                        "ok": False,
+                        "error": f"interface '{iface_name}' lacks audio capability",
+                    }
+
+            if interface and action_type.startswith("message"):
+                if _interface_capability_gate_enabled() and not _has_capability(
+                    interface, "send_message"
+                ):
+                    log_warning(
+                        f"[action_parser] ⚠️ Interface '{iface_name}' lacks "
+                        f"'send_message' capability; refusing to dispatch "
+                        f"'{action_type}'"
+                    )
+                    return {
+                        "ok": False,
+                        "error": f"interface '{iface_name}' lacks send_message capability",
+                    }
+
             if (
                 interface
                 and action_type.startswith("message")

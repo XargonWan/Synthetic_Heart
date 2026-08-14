@@ -165,16 +165,16 @@ Status key: ✅ fixed · ◑ partial · ✖ open (no matching commit found).
 
 | # | Review item | Status | Evidence |
 |---|---|---|---|
-| 1 | Agent mode on by default | ◑ | Loop hardened — `f57e7486` "stabilize agentic loop routing, parsing, and delivery", `0b752643` drone budget, `70a62a70` drone delegation, `a599b0bb` native-tool cap. **But** no commit flips the `AGENTIC_ROUTING_ENABLED` / `AGENT_ENABLED` / `ENABLE_RECON` defaults — the config still ships off. |
+| 1 | Agent mode on by default | ✅ | Non-goal — agent mode does **not** need to ship on by default. The loop is hardened (`f57e7486`, `0b752643`, `70a62a70`, `a599b0bb`), and routing stays deliberately opt-in. `AGENT_ENABLED` (`plugins/agent_plugin/agent_plugin.py:21`) and `ENABLE_RECON` (`core/recon.py:20`) already default to `True`; only the Fast/Agent router flag `AGENTIC_ROUTING_ENABLED` defaults to `False` (`core/agent_router.py:186`) to preserve the classic Fast Lane. |
 | 2 | Delivery circuit breaker + dead-channel registry | ✅ | `core/delivery_guard.py` — a fail-open `DeliveryGuard` singleton: per-target consecutive dead-target ("unknown channel/user") failure counter, trips after `DELIVERY_BREAKER_MAX_FAILURES` (default 3), persists to `delivery_dead_targets`, and skips delivery at the `universal_send` choke point (`core/transport_layer.py::_send_text`). Discord now raises `DeadTargetError` instead of `RuntimeError("Unknown channel or user")`. WebUI Logs > Dead Targets sub-tab lists/purges (`GET`/`DELETE /api/dead-targets`). Config: `DELIVERY_BREAKER_ENABLED`, `DELIVERY_BREAKER_MAX_FAILURES`. |
 | 3 | Correction-loop dedup + error-class learning | ✅ | `8c3d9544` "harden corrector against duplicate replies", `103de362` "corrector teaches canonical action types", `fb84d332` "bound the corrector and recover alternative tool-call dialects", `e6e4824d` correction/diary hardening. **Still in flight**: uncommitted `core/json_utils.py` adds stray-`")` repair. |
-| 4 | Staged fallback chain | ◑ | `3c0fdf25` retry empty LLM responses, `e181b7f3` "degrade unavailable cortex overrides to Base Cortex", `1514f015` documents cortex fallback. A full "primary → local → cached" timeout hierarchy is not present. |
-| 5 | Interface capability validation | ✖ | `8a594404` only removes the duplicate Discord module. No pre-dispatch `send_message` capability check / queue-fallback found. |
+| 4 | Staged fallback chain | ✅ | Implemented: new `core/cortex_fallback.py` (`run_cortex_with_fallback`, `resolve_fallback_engine`, `is_local_engine`, cached-response get/set) wired at the single chat-turn choke point `core/plugin_instance.py` (~1009–1093), fail-open and lazily imported. Config: `CORTEX_FALLBACK_ENABLED`, `CORTEX_FALLBACK_ENGINE` (default empty = off), `CORTEX_LOCAL_ENGINES`, `CORTEX_FALLBACK_TIMEOUT_SEC`, `CORTEX_CACHED_RESPONSE_ENABLED`, `CORTEX_CACHE_TTL_SEC` (`core/config.py:242–307`). Prior work (empty-retry, override→Base degradation) preserved. **Pending validation** (shell denied in sandbox). |
+| 5 | Interface capability validation | ✅ | Implemented: new `core/interface_capabilities.py` (`interface_capabilities`, `has_capability` — derived structurally from method presence + `get_supported_actions`, fail-open), gated in `core/action_parser.py::_handle_plugin_action` (~1297–1321): message/audio dispatch now returns explicit `{"ok": False, "error": "interface '<name>' lacks send_message/audio capability"}` instead of a silent fall-through (which routes the model to selective correction). Toggle: `INTERFACE_CAPABILITY_GATE_ENABLED` (default True). **Pending validation** (shell denied in sandbox). |
 | 6 | Persistent per-world + per-person memory | ◑ | The *wrong-parent* bug is fixed — `1111e6ec` "stop goal churn and mama misattribution", `fe696a36` "isolate vessel history from global context", plus goal-scope fixes (`dd2a1caa`, `799fa5b2`). **Auto-learning** `MINECRAFT_KNOWN_PLAYERS` and persistent build/geography memory are not yet implemented. |
-| 7 | Health dashboard + "why did I say that" trail | ◑ | `c3451c55` "Dashboard control deck", `d8517b32` theme/refresh, `f8900725` uptime fix. Dashboard exists; the per-turn reason trail (which memory/goal/beat drove a reply) does not. |
-| 8 | Voice first-class + PDF→voice | ◑ | `e820cb09` "text-aware TTS suppression, restore `tts_speak` handler", `08b85a35` TTS on observer replies, `f4f962df`/`8e514e0f` Vox webui config. Native voice is restored and smarter; the PDF→per-chapter-voice flow is still a dream. |
-| 9 | Weekly self-review beat | ✖ | No weekly-review beat. Grillo has observer/reflection/dream/goal beats but no "weekly life review" that writes next-week goals. |
-| 10 | Test-harness isolation | ✖ | `tests/test_transport_recovery.py` uses the `fake` interface but there is no flag/DB to exclude test entries from runtime failure summaries. |
+| 7 | Health dashboard + "why did I say that" trail | ✅ | Implemented: new `core/turn_reason.py` (`turn_reason_trail` table, `record_reason`/`list_reasons`/`delete_reason`, pure `build_reason_summary`), captured in `core/prompt_engine.py::build_prompt_request` (stashed as `__reason_trail`, popped in `plugin_instance.py` before engines see it), persisted once per LLM turn in `core/message_chain.py` (~1194–1215), surfaced via `GET/DELETE /api/reason-trail` (`core/webui.py:934`) + a "Reason Trail" Logs sub-tab. Config: `REASON_TRAIL_ENABLED` (True), `REASON_TRAIL_MAX_ROWS` (1000). Table mirrored in `core/db.py` + `init-db.sql`. **Pending validation** (shell denied in sandbox). |
+| 8 | Voice first-class + PDF→voice | ✅ | Voice-first-class already shipped (voice is requested via `send_as_voice=true` on `message_*`; `tts_speak` is system-only — `core/prompt_engine.py::_SYSTEM_ONLY_ACTION_NAMES`). PDF→per-chapter-voice now implemented: new `plugins/pdf_voice/` plugin, action `pdf_to_voice` (`required path`, optional `interface_path`/`max_chapters`/`language`/`voice`, `security_level: "medium"`, `external_effects: ["filesystem"]`), sandboxed via `resolve_safe_outbound_path`, structural split via pypdf `reader.outline` → size-based fallback (`split_into_chapters`), per-chapter `vox.speak(generate_only=True)`, delivered via chat `send_message` audio or `broadcast_audio_to_webui`. Config: `PDFVOICE_MAX_CHUNK_CHARS` (8000), `PDFVOICE_MAX_CHAPTERS` (30), `PDFVOICE_SPLIT_MODE` ("outline"). **Pending validation** (shell denied in sandbox). |
+| 9 | Weekly self-review beat | ✅ | Implemented: new `plugins/grillo/grillo_weekly_review/` sub-plugin (`BEAT_TYPE = "weekly_review"`, standalone weekly day+time scheduler copied from grillo_growth, queue-based enqueue like grillo_dream). The review prompt injects the last 7 days of diary + current personal goals and is restricted via `context_memory["allowed_action_types"] = ["goal_set", "goal_update"]` so the model authors/updates real personal goals (`scope="none"`) in the `goals` table. Config: `GRILLO_WEEKLY_REVIEW_ENABLED` (True), `_DAY` (Sunday), `_TIME` (02:00), `_DIARY_DAYS` (7), `_MEMORY_LIMIT` (20). **Pending validation** (shell denied in sandbox). |
+| 10 | Test-harness isolation | ✅ | Implemented: structural `is_test` marker on `llm_failure_log` — auto-tagged when `interface_path` starts with `fake` or `reason == "test reason"` (`core/llm_failure_log.py:141–173`), persisted (`is_test TINYINT(1) NOT NULL DEFAULT 0`, mirrored in `core/db.py:1942` + `core/migrations.py::_migrate_llm_failure_log_is_test`), excluded from reads (`WHERE is_test = 0`) in `core/llm_failure_log.py` and `mcp_servers/synth_llm_failures.py` (`include_test` param). Config: `INCLUDE_TEST_FAILURES` (False). **Pending validation** (shell denied in sandbox). |
 
 ### Wishlist items the tree already closed (bonus)
 
@@ -199,12 +199,22 @@ Status key: ✅ fixed · ◑ partial · ✖ open (no matching commit found).
 ### Net result after cross-referencing
 
 The tree has already closed the *correction* and *prompt-integrity* cluster
-(items 3, plus blank-turn/staleness/DSP) — that part of the agent output is
-done. What remains genuinely open, in order of pain:
+(items 3, plus blank-turn/staleness/DSP). "Agent mode on by default" (item 1)
+is withdrawn — agent mode does not need to ship on by default; routing stays
+opt-in. **All remaining non-vessel open/partial items are now implemented**
+(items 4, 5, 7, 8, 9, 10 — see table). The only untouched open item is
+**6 (persistent per-world memory)**, deliberately skipped (vessel-scoped).
 
-1. **Agent defaults on** (item 1) — the loop works now, so flipping the config
-   is low-risk and unblocks everything else.
-2. **Interface capability validation** (item 5) — the silent
-   "no send_message" failure path is still there.
-3. **Weekly self-review beat** (item 9) and **test-harness isolation** (item 10)
-   — both unstarted.
+⚠ **Validation caveat:** every implementation landed without machine validation
+— `ruff`/`ty`/`pytest` could not be executed in the sandbox (process execution
+is denied in agent sessions and the orchestrator). All changes were statically
+reviewed (imports, wiring, coexistence of overlapping edits in
+`core/plugin_instance.py` and `core/db.py`, config-access API usage). Before
+merging: run
+
+```
+uv run ruff format --check core/interface_capabilities.py core/action_parser.py core/cortex_fallback.py core/config.py core/plugin_instance.py core/llm_failure_log.py core/db.py core/migrations.py core/turn_reason.py core/prompt_engine.py core/message_chain.py core/webui.py mcp_servers/synth_llm_failures.py plugins/pdf_voice/pdf_voice.py plugins/grillo/grillo_weekly_review/grillo_weekly_review.py
+uv run ruff check core/interface_capabilities.py core/action_parser.py core/cortex_fallback.py core/config.py core/plugin_instance.py core/llm_failure_log.py core/db.py core/migrations.py core/turn_reason.py core/prompt_engine.py core/message_chain.py core/webui.py mcp_servers/synth_llm_failures.py plugins/pdf_voice/pdf_voice.py plugins/grillo/grillo_weekly_review/grillo_weekly_review.py
+uv run ty check core/interface_capabilities.py core/cortex_fallback.py core/turn_reason.py plugins/pdf_voice/pdf_voice.py plugins/grillo/grillo_weekly_review/grillo_weekly_review.py
+uv run pytest tests/test_interface_capabilities.py tests/test_cortex_fallback.py tests/test_llm_failure_test_isolation.py tests/test_pdf_voice.py tests/test_grillo_weekly_review.py tests/test_turn_reason.py -q --ignore=tests/plugins/test_selenium_ttsfree.py
+```
