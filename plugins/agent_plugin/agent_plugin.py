@@ -194,7 +194,10 @@ class AgentPlugin(AIPluginBase):
                 "required_fields": ["path"],
                 "optional_fields": ["start_line", "end_line", "max_chars"],
                 "scope": "agent",
-                "description": "Read a text file within the allowed agent filesystem roots.",
+                "description": (
+                    "Read a text file within the allowed agent filesystem roots. "
+                    "PDF files are handled automatically: their text is extracted and returned."
+                ),
             },
             "agent_write_file": {
                 "required_fields": ["path", "content"],
@@ -735,6 +738,52 @@ class AgentPlugin(AIPluginBase):
             if safe_path.is_dir():
                 return {"status": "error", "reason": "path is a directory"}
 
+            max_chars = _safe_int(
+                payload.get("max_chars"), 40_000, min_value=500, max_value=200_000
+            )
+
+            # Binary PDFs must not be read as UTF-8 text — that returns raw
+            # PDF markup, which made the agent loop re-read the file endlessly
+            # (Langfuse ff1bbae0). Detect via the structural %PDF- magic and
+            # extract real text with pypdf (the same library the prompt engine
+            # uses for attachments).
+            try:
+                with safe_path.open("rb") as fh:
+                    head = fh.read(5)
+                is_pdf = head.startswith(b"%PDF-")
+            except Exception:
+                is_pdf = False
+            if is_pdf:
+                try:
+                    from pypdf import PdfReader
+
+                    page_chunks: list[str] = []
+                    with safe_path.open("rb") as fh:
+                        reader = PdfReader(fh)
+                        for page_num, page in enumerate(reader.pages, start=1):
+                            page_text = str(page.extract_text() or "").strip()
+                            if page_text:
+                                page_chunks.append(f"[Page {page_num}]\n{page_text}")
+                    content = "\n\n".join(page_chunks)
+                    if not content.strip():
+                        return {
+                            "status": "error",
+                            "reason": "pdf contains no extractable text",
+                        }
+                    if len(content) > max_chars:
+                        content = content[:max_chars] + "\n... (truncated)"
+                    return {
+                        "status": "ok",
+                        "path": str(safe_path),
+                        "extracted": "pdf_text",
+                        "content": content,
+                    }
+                except Exception as exc:
+                    return {
+                        "status": "error",
+                        "reason": f"pdf text extraction failed: {exc}",
+                    }
+
             start_line = _safe_int(
                 payload.get("start_line"), 1, min_value=1, max_value=1_000_000
             )
@@ -743,9 +792,6 @@ class AgentPlugin(AIPluginBase):
                 start_line + 199,
                 min_value=start_line,
                 max_value=1_000_000,
-            )
-            max_chars = _safe_int(
-                payload.get("max_chars"), 40_000, min_value=500, max_value=200_000
             )
 
             try:

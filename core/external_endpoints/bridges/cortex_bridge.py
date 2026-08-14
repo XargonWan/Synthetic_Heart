@@ -1200,13 +1200,21 @@ class ExternalCortexEngine(AIPluginBase):
         finally:
             self._scope_model_override = previous
 
-    async def generate_response(self, messages: list[dict[str, Any]] | Any) -> str:
+    async def generate_response(
+        self,
+        messages: list[dict[str, Any]] | Any,
+        **extra_request_kwargs: Any,
+    ) -> str:
         """Forward ``messages`` to the external endpoint and return the response text.
 
-        Accepts either a list of OpenAI-style message dicts (e.g. from recon) or a
-        SyntH JSON-prompt dict/str — same flexible contract as the built-in engines.
+        Accepts either a list of OpenAI-style message dicts (e.g. from recon or
+        the agent loop) or a SyntH JSON-prompt dict/str — same flexible
+        contract as the built-in engines. ``extra_request_kwargs`` are merged
+        into the provider request (e.g. the Agent Lane passes
+        ``enable_thinking`` / ``tools`` / ``tool_choice`` /
+        ``parallel_tool_calls``); ordinary callers pass none.
         """
-        prompt_extra_kwargs: dict[str, Any] = {}
+        prompt_extra_kwargs: dict[str, Any] = dict(extra_request_kwargs)
         if isinstance(messages, list):
             msg_list = messages
             # Ensure sufficient output tokens for structured responses (e.g. Recon JSON).

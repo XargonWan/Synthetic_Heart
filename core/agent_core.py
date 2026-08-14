@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import re
 import sys
 from typing import Any, Coroutine, Dict, Optional
 
@@ -80,6 +81,62 @@ try:
             "attempt_completion tool — plain text with no tool calls does not "
             "stop the loop, preventing premature final answers."
         ),
+        scope="agent",
+        component="agent",
+        needs_component_reload=False,
+    )
+    # Auto-resume freshness window: a parked (``pending``) task is only
+    # auto-resumed when it was parked recently (default 900s = 15 min). A
+    # stale parked task must never hijack a later conversational turn — the
+    # user's "keep going" reply arrives within seconds/minutes of the pause
+    # message, so an old pending row is abandoned work, not a continuation
+    # (Langfuse 00:49 chain: a 3.5h-old task absorbed a plain chat message).
+    register_exposed_var(
+        "AGENT_RESUME_MAX_AGE_SEC",
+        label="Agent auto-resume max age (s)",
+        default=900,
+        value_type=int,
+        ui_type="number",
+        description="Maximum age (seconds) of a parked agent task that may still be auto-resumed by the next message from the same interface. Older pending tasks are left for explicit resume only.",
+        scope="agent",
+        component="agent",
+        needs_component_reload=False,
+    )
+    # Scoped agent-route engine profile: the Agent Lane calls its engine with
+    # thinking ENABLED and NATIVE tool calls so engines that support them
+    # (e.g. Venice deepseek) return structured tool_calls instead of ad-hoc
+    # text protocols (the "format whack-a-mole": Tool Call: JSON, <function>
+    # XML, bare name(args), ...). Ordinary chat keeps the in-prompt JSON
+    # protocol — these keys apply ONLY to the agentic loop route.
+    register_exposed_var(
+        "AGENT_ENABLE_THINKING",
+        label="Agent route: enable thinking",
+        default=True,
+        value_type=bool,
+        ui_type="toggle",
+        description="Enable model thinking on Agent Lane engine calls (Venice disable_thinking: false). Ordinary chat keeps its configured default; only the agentic loop turns thinking on.",
+        scope="agent",
+        component="agent",
+        needs_component_reload=False,
+    )
+    register_exposed_var(
+        "AGENT_NATIVE_TOOLS",
+        label="Agent route: native tool calls",
+        default=True,
+        value_type=bool,
+        ui_type="toggle",
+        description="Pass OpenAI function schemas (tools + tool_choice=auto) on Agent Lane engine calls so capable engines return structured tool_calls instead of text-protocol tool calls.",
+        scope="agent",
+        component="agent",
+        needs_component_reload=False,
+    )
+    register_exposed_var(
+        "AGENT_PARALLEL_TOOL_CALLS",
+        label="Agent route: parallel tool calls",
+        default=True,
+        value_type=bool,
+        ui_type="toggle",
+        description="Allow multiple tool calls per Agent Lane response (parallel_tool_calls).",
         scope="agent",
         component="agent",
         needs_component_reload=False,
@@ -227,6 +284,140 @@ def _looks_like_internal_monologue(text: str) -> list[str]:
         pass
 
     return signals
+
+
+def _match_balanced_json_object(text: str, start: int) -> int | None:
+    """Return the index of the ``}`` closing the JSON object opened at
+    ``text[start]`` (which must be ``{``), or ``None`` when unbalanced.
+
+    Tracks nesting depth and skips string literals (with backslash escapes)
+    so braces inside string values never confuse the matcher.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return None
+
+
+def _match_balanced_call_paren(text: str, open_idx: int) -> int | None:
+    """Return the index of the ``)`` closing the call paren at ``text[open_idx]``
+    (which must be ``(``), or ``None`` when unbalanced.
+
+    Tracks nesting depth and skips string literals (with backslash escapes) so
+    parentheses and quotes inside argument values never confuse the matcher.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(open_idx, len(text)):
+        ch = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return None
+
+
+def _system_only_action_names() -> frozenset[str]:
+    """Action names the main prompt keeps OUT of the model-visible catalog.
+
+    The agent loop mirrors the same exclusion so the model cannot reach for
+    avatar-only speech (``tts_speak`` — voice replies must use
+    ``send_as_voice`` on a ``message_*`` action) or system-internal actions
+    (``static_inject``). Lazy import keeps ``prompt_engine`` detachable.
+    """
+    try:
+        from core.prompt_engine import _SYSTEM_ONLY_ACTION_NAMES
+
+        return _SYSTEM_ONLY_ACTION_NAMES
+    except Exception:
+        return frozenset({"tts_speak"})
+
+
+def _build_openai_tool_manifests() -> list[dict[str, Any]]:
+    """OpenAI function schemas for every registered agent tool.
+
+    Mirrors the loop's AVAILABLE TOOLS enumeration (internal + MCP tools,
+    minus the ``_SYSTEM_ONLY_ACTION_NAMES`` actions) plus the
+    ``attempt_completion`` sentinel, so engines that support native
+    tool-calling (e.g. Venice deepseek) receive the same tool set they see in
+    the prompt and return structured ``tool_calls`` instead of ad-hoc text
+    protocols. The executor's safety gate and the drone/allow-list
+    restrictions still apply at execution time regardless of what the engine
+    sees here.
+    """
+    from core.tool_registry import tool_registry
+
+    excluded = _system_only_action_names()
+    manifests: list[dict[str, Any]] = []
+    for tool in tool_registry.all_tools():
+        if tool.name in excluded:
+            continue
+        action = tool.to_action_dict()
+        schema = action.get("schema") or {}
+        manifests.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": schema,
+                },
+            }
+        )
+    manifests.append(
+        {
+            "type": "function",
+            "function": {
+                "name": _COMPLETION_TOOL,
+                "description": (
+                    "Signal that the goal is genuinely accomplished (or cannot "
+                    "be), ending the agent turn with a short summary."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "summary": {
+                            "type": "string",
+                            "description": ("Short summary of what was accomplished."),
+                        }
+                    },
+                    "required": ["summary"],
+                },
+            },
+        }
+    )
+    return manifests
 
 
 async def _call_with_hard_timeout(
@@ -425,7 +616,8 @@ class AgentLoopManager:
         continue the same task — without any keyword/language detection, purely
         by matching the originating interface.
 
-        Returns a dict ``{"task_id", "goal", "engine", "prior_observations"}``
+        Returns a dict
+        ``{"task_id", "goal", "engine", "prior_observations", "updated_at"}``
         for the most recent pending task on that interface, or ``None`` when
         there is none (or on any DB error — best-effort, never blocks a turn).
         """
@@ -436,7 +628,7 @@ class AgentLoopManager:
             async with conn_ctx as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        "SELECT id, engine, input, iterations_meta "
+                        "SELECT id, engine, input, iterations_meta, updated_at "
                         "FROM agent_tasks "
                         "WHERE status='pending' "
                         "AND metadata::json->>'interface_path' = %s "
@@ -450,6 +642,7 @@ class AgentLoopManager:
             engine = row[1]
             input_raw = row[2]
             iterations_raw = row[3]
+            updated_at = row[4]
 
             input_payload = json.loads(input_raw) if input_raw else {}
             if not isinstance(input_payload, dict):
@@ -476,6 +669,7 @@ class AgentLoopManager:
                 "goal": goal,
                 "engine": engine if engine and engine != "default" else None,
                 "prior_observations": prior_observations,
+                "updated_at": updated_at,
             }
         except Exception as e:
             log_warning(f"[agent_core] find_resumable_task_for_interface failed: {e}")
@@ -670,6 +864,28 @@ class AgentLoopManager:
                 await self._maybe_commit(conn)
         except Exception as e:
             log_warning(f"[agent_core] _mark_task_running failed: {e}")
+
+    async def supersede_pending_task(self, task_id: int) -> None:
+        """Best-effort cancel of a parked task that can never be resumed.
+
+        Used when the auto-resume gate refuses a task whose stored goal is a
+        self-referential LLM artifact (pre-fix data): leaving it ``pending``
+        would let it keep hijacking future turns from the same interface.
+        Best-effort — a failure never blocks the turn.
+        """
+        try:
+            conn_ctx = await self._get_conn_ctx()
+            async with conn_ctx as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "UPDATE agent_tasks SET status='cancelled', "
+                        "updated_at=CURRENT_TIMESTAMP "
+                        "WHERE id=%s AND status='pending'",
+                        (int(task_id),),
+                    )
+                await self._maybe_commit(conn)
+        except Exception as e:
+            log_warning(f"[agent_core] supersede_pending_task failed: {e}")
 
     async def _persist_agentic_turn(
         self,
@@ -885,6 +1101,7 @@ class AgentLoopManager:
         task_id: int | None = None,
         prior_observations: list[Dict[str, Any]] | None = None,
         cortex_scope: str = "agent",
+        preplanned_then_loop: bool = False,
     ) -> Dict[str, Any]:
         """Run a bounded agentic turn that re-injects tool results into the model.
 
@@ -913,6 +1130,11 @@ class AgentLoopManager:
             prior_observations: Optional observation history from a previous
                 (paused) turn, re-injected so the model continues with the
                 context it already built instead of starting from scratch.
+            preplanned_then_loop: when True (used by the Agent Lane
+                under-emission seeding), execute ``preplanned_calls`` first
+                and then CONTINUE into the model loop instead of returning
+                after the plan (default False keeps the current terminal-plan
+                behaviour for WebUI/vessel callers).
 
         Returns:
             A dict with ``iterations``, ``observations``, ``final_text`` and
@@ -972,6 +1194,21 @@ class AgentLoopManager:
                         f"interface_path {src_path!r}: {exc}"
                     )
 
+        # Diagnostic: the agent prompt surfaces materialized attachment paths
+        # (the USER ATTACHMENTS block) so the model can read uploaded files
+        # directly. Log once per turn whether the context carried them, so a
+        # missing block can be attributed without a full trace dump (Langfuse
+        # 600052d5 showed the block absent even though plugin_instance
+        # persisted the file at the same timestamp).
+        _att_paths = (
+            context.get("attachment_paths") if isinstance(context, dict) else None
+        )
+        log_info(
+            f"[agent_core] Agent turn context: attachment_paths present="
+            f"{bool(isinstance(_att_paths, list) and _att_paths)}; "
+            f"context_keys={sorted((context or {}).keys())}"
+        )
+
         # Open a durable ``running`` row BEFORE the loop starts. A detached turn
         # (message-chain Agent Lane) can be interrupted by a container restart
         # mid-flight; persisting up-front means the startup recovery sweep can
@@ -1008,6 +1245,14 @@ class AgentLoopManager:
         # have replied when nothing reached the interface.
         delivered_message_ok = False
         delivery_failures: list[str] = []
+
+        # Cross-iteration delivery dedup: a weak loop engine re-emits the SAME
+        # outbound text (or the same voice note via send_as_voice) on later
+        # iterations instead of calling attempt_completion, which delivered the
+        # reply multiple times (Langfuse 00:48-00:50 chain: the PDF voice note
+        # was sent 3x). Any text already delivered once is not re-sent; the
+        # observation records "already delivered" so the model sees it went out.
+        delivered_texts: set[str] = set()
 
         # LogChat is warned at most once per turn when the agent-scope engine
         # produces an empty response and the loop falls back to the Base Cortex
@@ -1083,24 +1328,31 @@ class AgentLoopManager:
                     }
                 )
 
-            if not stop_reason or stop_reason == "max_iterations":
-                stop_reason = "planned_calls_done"
-            result: Dict[str, Any] = {
-                "iterations": len(observations),
-                "observations": observations,
-                "final_text": "",
-                "stop_reason": stop_reason,
-            }
-            result["task_id"] = await self._persist_agentic_turn(
-                engine=engine,
-                goal=goal,
-                result=result,
-                context=context,
-                original_message=original_message,
-                preplanned_calls=preplanned_calls,
-                task_id=task_id,
-            )
-            return result
+            if not preplanned_then_loop:
+                if not stop_reason or stop_reason == "max_iterations":
+                    stop_reason = "planned_calls_done"
+                result: Dict[str, Any] = {
+                    "iterations": len(observations),
+                    "observations": observations,
+                    "final_text": "",
+                    "stop_reason": stop_reason,
+                }
+                result["task_id"] = await self._persist_agentic_turn(
+                    engine=engine,
+                    goal=goal,
+                    result=result,
+                    context=context,
+                    original_message=original_message,
+                    preplanned_calls=preplanned_calls,
+                    task_id=task_id,
+                )
+                return result
+            # Under-emission seeding: continue into the model loop with the
+            # real goal after the bookkeeping plan executed. Reset the stop
+            # reason so the loop's own end-of-turn logic (budget/pause/etc.)
+            # applies instead of the terminal "planned_calls_done".
+            if stop_reason == "timeout":
+                stop_reason = "max_iterations"
 
         for i in range(1, max_iterations + 1):
             elapsed = time.monotonic() - start
@@ -1240,6 +1492,11 @@ class AgentLoopManager:
 
             parsed, _meta = extract_json_from_text(raw_text, return_metadata=True)
             tool_calls = self._extract_tool_calls(parsed)
+            if not tool_calls:
+                # Text-protocol fallback: engines that ignore the JSON-only
+                # instruction and emit "Tool Call: <name>" + JSON blocks must
+                # still have their tool intent executed (Langfuse 07ba4a27).
+                tool_calls = self._extract_tool_calls_from_text(raw_text)
 
             # Defence in depth: enforce the Drone tool allow-list before ANY
             # execution. A restricted Drone (e.g. the vessel goal-expander,
@@ -1299,6 +1556,17 @@ class AgentLoopManager:
                             summary_parts.append(text)
                 if summary_parts:
                     final_text = "\n\n".join(summary_parts)
+                    # The completion summary becomes BOTH the user-facing final
+                    # message AND the single "final result" the agent harness
+                    # persists to conversation context for the next trainer turn
+                    # (start + final result only — mid-loop deliveries are not
+                    # kept, by design). Prefix it structurally so a later turn
+                    # reads the task as FINISHED instead of misreading the
+                    # past-tense summary as a promise to still do it (Langfuse
+                    # f1684175: after "good job baby" the model replied "I'll
+                    # get that all read for you right away" although the task
+                    # was already done).
+                    final_text = f"Task complete: {final_text}"
                 observations.append(
                     {
                         "iteration": i,
@@ -1331,6 +1599,7 @@ class AgentLoopManager:
             if message_calls:
                 tool_calls = [c for c in tool_calls if c not in message_calls]
                 collected: list[str] = []
+                delivered_message_texts: list[str] = []
                 for mc in message_calls:
                     mc_name = str(mc.get("name") or mc.get("type") or "")
                     args = mc.get("arguments") or mc.get("payload") or {}
@@ -1342,10 +1611,32 @@ class AgentLoopManager:
 
                     # Deliver the message to the interface. Only actual outbound
                     # interface messages (message_* delivery actions) are routed
-                    # through the executor here; synchronous synth-side speech
-                    # actions (radio_speak/tts_speak) are handled elsewhere and
-                    # kept as captured text only.
+                    # through the executor here. Voice replies go through
+                    # ``send_as_voice`` on the message_* action itself (tts_speak
+                    # is deprecated and is excluded from the loop's tool set);
+                    # any stray non-message speech action (radio_speak) stays
+                    # captured as text only.
                     if mc_name.startswith(_DELIVERY_ACTION_PREFIX):
+                        # Cross-iteration dedup: never re-send text already
+                        # delivered earlier in THIS turn (the model re-emitting
+                        # the same reply instead of completing → 3x voice notes).
+                        if text and text in delivered_texts:
+                            delivered_ok = True
+                            observations.append(
+                                {
+                                    "iteration": i,
+                                    "role": "tool_results",
+                                    "content": [
+                                        {
+                                            "tool": mc_name,
+                                            "ok": True,
+                                            "result": "already delivered",
+                                            "error": None,
+                                        }
+                                    ],
+                                }
+                            )
+                            continue
                         exec_result = await agent_tool_executor.execute(
                             mc_name,
                             args,
@@ -1371,6 +1662,12 @@ class AgentLoopManager:
                         delivered_ok = bool(exec_result.get("ok"))
                         if delivered_ok:
                             delivered_message_ok = True
+                            delivered_text = str(
+                                args.get("text") or args.get("content") or ""
+                            ).strip()
+                            if delivered_text:
+                                delivered_message_texts.append(delivered_text)
+                                delivered_texts.add(delivered_text)
                         else:
                             delivery_failures.append(mc_name)
                             log_warning(
@@ -1397,7 +1694,17 @@ class AgentLoopManager:
                             f"'{mc_name}' delivered ok={delivered_ok}"
                         )
                 if collected:
-                    final_text = "\n\n".join(collected)
+                    delivered_set = {
+                        t for t in delivered_message_texts
+                    } | delivered_texts
+                    # Keep only texts that were NOT already delivered through
+                    # the executor (the Agent Lane router re-sends final_text
+                    # as a fresh outbound message — a delivered message must
+                    # never be sent a second time) plus non-delivery speech
+                    # actions that were only captured.
+                    remaining = [t for t in collected if t.strip() not in delivered_set]
+                    if remaining:
+                        final_text = "\n\n".join(remaining)
 
             # Under the explicit-completion contract, the ONLY structural
             # end-of-turn signal is ``attempt_completion`` (handled above) or
@@ -1418,20 +1725,28 @@ class AgentLoopManager:
                 # the turn cleanly instead of nagging the model to invent tool
                 # calls it does not need. Structural only (message vs tool), no
                 # keyword/language logic.
-                if i == 1 and message_calls and final_text.strip():
+                if (
+                    i == 1
+                    and message_calls
+                    and (final_text.strip() or delivered_message_texts)
+                ):
                     log_info(
                         "[agent_core] Iteration 1 produced only a message and no "
                         "tool calls; treating as a conversational reply "
                         "(router over-routing) and ending the turn"
                     )
                     observations.append(
-                        {"iteration": i, "role": "assistant", "content": final_text}
+                        {
+                            "iteration": i,
+                            "role": "assistant",
+                            "content": final_text or "(message delivered)",
+                        }
                     )
                     stop_reason = "no_tools_required"
                     break
 
                 # Only synth message actions this iteration (no real tools left).
-                if message_calls and final_text.strip():
+                if message_calls and (final_text.strip() or delivered_message_texts):
                     if require_explicit_completion and i < max_iterations:
                         # Deliver the message as an intermediate reply but keep
                         # working: the model must still call attempt_completion
@@ -1467,7 +1782,11 @@ class AgentLoopManager:
                     # "Continue". The message is kept as the latest reply.
                     if require_explicit_completion:
                         observations.append(
-                            {"iteration": i, "role": "assistant", "content": final_text}
+                            {
+                                "iteration": i,
+                                "role": "assistant",
+                                "content": final_text or "(message delivered)",
+                            }
                         )
                         stop_reason = "paused_max_iterations"
                         break
@@ -1475,7 +1794,11 @@ class AgentLoopManager:
                     # Explicit-completion disabled: the message is the final
                     # reply; end the turn.
                     observations.append(
-                        {"iteration": i, "role": "assistant", "content": final_text}
+                        {
+                            "iteration": i,
+                            "role": "assistant",
+                            "content": final_text or "(message delivered)",
+                        }
                     )
                     stop_reason = "model_done"
                     break
@@ -1899,6 +2222,8 @@ class AgentLoopManager:
         prompt: Dict[str, Any],
         engine_name: str | None,
         cortex_scope: str = "agent",
+        *,
+        native_tools: bool = True,
     ) -> str:
         """Fallback direct call to the active cortex engine.
 
@@ -1965,8 +2290,34 @@ class AgentLoopManager:
                     {"role": "system", "content": system},
                     {"role": "user", "content": text},
                 ]
+                # Agent-route engine profile: thinking on + native tool calls
+                # (AGENT_ENABLE_THINKING / AGENT_NATIVE_TOOLS /
+                # AGENT_PARALLEL_TOOL_CALLS). Only external endpoint bridges
+                # (identifiable by ``_adapter``) accept these request kwargs;
+                # plugin engines keep the plain positional call. The
+                # pause-composer passes ``native_tools=False`` to write prose
+                # without offering tools/thinking.
+                agent_call_kwargs: dict[str, Any] = {}
+                if native_tools:
+                    if bool(config_registry.get_var("AGENT_ENABLE_THINKING", True)):
+                        agent_call_kwargs["enable_thinking"] = True
+                    if bool(config_registry.get_var("AGENT_NATIVE_TOOLS", True)):
+                        manifests = _build_openai_tool_manifests()
+                        if manifests:
+                            agent_call_kwargs["tools"] = manifests
+                            agent_call_kwargs["tool_choice"] = "auto"
+                            agent_call_kwargs["parallel_tool_calls"] = bool(
+                                config_registry.get_var(
+                                    "AGENT_PARALLEL_TOOL_CALLS", True
+                                )
+                            )
                 with scope_model_override(engine, scope_model):
-                    res = await engine.generate_response(messages)
+                    if agent_call_kwargs and hasattr(engine, "_adapter"):
+                        res = await engine.generate_response(
+                            messages, **agent_call_kwargs
+                        )
+                    else:
+                        res = await engine.generate_response(messages)
                 return res if isinstance(res, str) else (str(res) if res else "")
 
             if hasattr(engine, "handle_incoming_message"):
@@ -2064,11 +2415,26 @@ class AgentLoopManager:
             if context:
                 prompt["context"] = context
             # Bounded (and detachable): a hung engine must not freeze the turn
-            # that is trying to tell the user it needs more turns.
+            # that is trying to tell the user it needs more turns. Write prose
+            # only — the agent profile (thinking/native tools) is disabled so
+            # the engine answers with plain text instead of a JSON action.
             text = await _call_with_hard_timeout(
-                self._call_engine_direct(prompt, engine), timeout=30.0
+                self._call_engine_direct(prompt, engine, native_tools=False),
+                timeout=30.0,
             )
-            return text.strip() if isinstance(text, str) else ""
+            if not isinstance(text, str):
+                return ""
+            text = text.strip()
+            # The model may still return a JSON action / code-fence wrapper
+            # despite the "text ONLY" instruction. Delivering raw JSON to the
+            # user is worse than falling back to the last real reply.
+            if text.startswith("{") or text.startswith("```"):
+                log_debug(
+                    "[agent_core] _compose_pause_message got a non-prose "
+                    "response; falling back to the last reply"
+                )
+                return ""
+            return text
         except Exception as exc:
             log_debug(f"[agent_core] _compose_pause_message failed: {exc}")
             return ""
@@ -2128,6 +2494,25 @@ class AgentLoopManager:
                 )
                 source_block = "\n".join(lines)
 
+        # Inbound attachments materialized to sandbox paths (documents/audio
+        # uploaded by the user in this conversation). The agent tools
+        # (agent_read_file / stt_transcribe) can only read real files, so the
+        # model must be told where the uploaded file actually lives instead of
+        # guessing a bare filename (Langfuse 11feca6f: "File not found:
+        # Untitled document.pdf"). Structural context, never keyword logic.
+        attachment_block = ""
+        if isinstance(context, dict):
+            attachment_paths = context.get("attachment_paths")
+            if isinstance(attachment_paths, list) and attachment_paths:
+                lines = [
+                    "USER ATTACHMENTS (files uploaded in this conversation; "
+                    "read them with agent_read_file if the task needs their "
+                    "contents):"
+                ]
+                for apath in attachment_paths:
+                    lines.append(f"- {apath}")
+                attachment_block = "\n".join(lines)
+
         # Drones cannot spawn Drones: hide the spawn_drone tool from a Drone's
         # available tool list (single-level delegation). The handler enforces the
         # same rule defensively, this just keeps the model from ever proposing it.
@@ -2146,6 +2531,8 @@ class AgentLoopManager:
 
         tool_lines: list[str] = []
         for tool in tool_registry.all_tools():
+            if tool.name in _system_only_action_names():
+                continue
             if is_drone and tool.name == "spawn_drone":
                 continue
             if allowed_tools is not None and tool.name not in allowed_tools:
@@ -2172,6 +2559,14 @@ class AgentLoopManager:
             "the available tools. When you need a tool, respond ONLY with the "
             "tool-call JSON actions. Use only tool names from the AVAILABLE TOOLS "
             "block.\n"
+            "TOOL-CALL FORMAT: when you need a tool, emit EXACTLY this JSON "
+            "shape — no markdown, no XML, no prose, nothing else:\n"
+            '{"tool_calls": [{"function": {"name": "agent_read_file", '
+            '"arguments": {"path": "C:/x.pdf"}}}]}\n'
+            "You may list several entries inside one tool_calls array.\n"
+            "VOICE/AUDIO REPLIES: to answer with your spoken voice, call "
+            "message_telegram_bot (or the matching message_* action) with "
+            "send_as_voice=true and put the full spoken reply in 'text'.\n"
             "Work like a careful engineer: break the goal into steps and keep "
             "calling tools to gather information, verify assumptions and make "
             "progress until the goal is genuinely achieved. Do NOT stop and give "
@@ -2208,17 +2603,20 @@ class AgentLoopManager:
             "another one until the task is complete."
         )
         source_prefix = f"{source_block}\n\n" if source_block else ""
+        attachment_prefix = f"{attachment_block}\n\n" if attachment_block else ""
         prompt = {
             "input": {
                 "payload": {
                     "text": (
                         f"{source_prefix}"
+                        f"{attachment_prefix}"
                         f"GOAL: {goal}\n\n"
                         f"AVAILABLE TOOLS:\n{tools_block}\n\n"
                         f"PRIOR OBSERVATIONS:\n{observation_block}\n"
                         if observation_block
                         else (
                             f"{source_prefix}"
+                            f"{attachment_prefix}"
                             f"GOAL: {goal}\n\nAVAILABLE TOOLS:\n{tools_block}\n"
                         )
                     ),
@@ -2362,6 +2760,214 @@ class AgentLoopManager:
                 }
             ]
         return []
+
+    @staticmethod
+    def _extract_tool_calls_from_text(text: str) -> list[Dict[str, Any]]:
+        """Recover tool calls from a text-protocol response.
+
+        Some engines (e.g. flash-sized models served through openai_compat
+        bridges) ignore the "respond ONLY with JSON" instruction and emit a
+        text protocol instead. Several such protocols are recognized::
+
+            I'll check the file now.
+
+            Tool Call: agent_read_file
+            {"path": "core/main.py"}
+
+            <function>agent_read_file<path>core/main.py</path></function>
+
+            <tool_calls><invoke name="agent_read_file">
+              <parameter name="path">core/main.py</parameter>
+            </invoke></tool_calls>
+
+            agent_read_file(path="core/main.py")
+
+            `attempt_completion({"summary": "done"})`
+
+        ``extract_json_from_text`` then recovers only the inner payload JSON
+        (which carries no tool name), so :meth:`_extract_tool_calls` returns
+        nothing and the loop nags the model with "you responded with text but
+        no tool calls" for the whole budget without executing anything
+        (Langfuse 07ba4a27 / d59c10fc / fdf08aef / 5ea2ff8c / 85519e59). This
+        parser recovers the name + arguments pairs so the loop executes the
+        model's actual intent. A weak model may re-emit the SAME call in
+        several formats within one response; identical (name, arguments) pairs
+        are deduplicated so side effects never repeat. Purely structural (a
+        declared call protocol), never keyword intent detection. Returns an
+        empty list when nothing parseable is present.
+        """
+        if not isinstance(text, str) or not text.strip():
+            return []
+        calls: list[Dict[str, Any]] = []
+        header = re.compile(
+            r"tool[\s_]*call\s*[:：]\s*([A-Za-z_][A-Za-z0-9_]*)",
+            re.IGNORECASE,
+        )
+        for match in header.finditer(text):
+            name = match.group(1).strip()
+            # The header may be wrapped in markdown bold (**Tool Call: x**)
+            # and the JSON may sit inside a ```json code fence — both appear
+            # in real engine output (Langfuse c1e66673). Consume whitespace,
+            # asterisks, then an optional fence opener before the object.
+            cursor = match.end()
+            while cursor < len(text) and text[cursor] in " \t\r\n*":
+                cursor += 1
+            if text.startswith("```", cursor):
+                cursor += 3
+                while cursor < len(text) and text[cursor] in " \t\r\n":
+                    cursor += 1
+                if text[cursor : cursor + 4].lower() == "json":
+                    cursor += 4
+                while cursor < len(text) and text[cursor] in " \t\r\n":
+                    cursor += 1
+            if cursor >= len(text) or text[cursor] != "{":
+                continue
+            end = _match_balanced_json_object(text, cursor)
+            if end is None:
+                continue
+            try:
+                args = json.loads(text[cursor : end + 1])
+            except Exception:
+                continue
+            if not isinstance(args, dict):
+                continue
+            calls.append({"name": name, "arguments": args})
+
+        # DeepSeek-native XML blocks (Langfuse ff1bbae0). Two variants:
+        #   <function> name-line <arg>value</arg> ... </function>
+        #   <function> <function_name>name</function_name>
+        #              <parameters>{...json...}</parameters> </function>
+        for block in re.finditer(
+            r"<function>(.*?)</function>", text, re.DOTALL | re.IGNORECASE
+        ):
+            inner = block.group(1)
+            name_match = re.search(
+                r"<function_name>\s*([A-Za-z_][A-Za-z0-9_]*)\s*</function_name>",
+                inner,
+                re.DOTALL | re.IGNORECASE,
+            )
+            if name_match:
+                name = name_match.group(1)
+            else:
+                stripped_inner = inner.strip()
+                if not stripped_inner:
+                    continue
+                first_line = stripped_inner.splitlines()[0].strip()
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", first_line):
+                    continue
+                name = first_line
+            args: Dict[str, Any] = {}
+            params_match = re.search(
+                r"<parameters>\s*(.*?)\s*</parameters>",
+                inner,
+                re.DOTALL | re.IGNORECASE,
+            )
+            if params_match:
+                try:
+                    parsed_params = json.loads(params_match.group(1).strip())
+                    if isinstance(parsed_params, dict):
+                        args = parsed_params
+                except Exception:
+                    pass
+            if not args:
+                for arg_match in re.finditer(
+                    r"<([A-Za-z_][A-Za-z0-9_]*)>\s*(.*?)\s*</\1>",
+                    inner,
+                    re.DOTALL,
+                ):
+                    key = arg_match.group(1)
+                    if key in ("function_name", "parameters"):
+                        continue
+                    value = arg_match.group(2).strip()
+                    try:
+                        args[key] = json.loads(value)
+                    except Exception:
+                        args[key] = value
+            calls.append({"name": name, "arguments": args})
+
+        # Bare Python-style calls (Langfuse fdf08aef): engines that emit
+        #   agent_read_file(path="D:\\app\\a.pdf", max_chars="5000")
+        # directly, with no wrapper/prefix. Also covers backtick-wrapped
+        # JSON-argument calls like `attempt_completion({"summary": "..."})`.
+        # A call must carry at least one argument so prose is never mistaken.
+        for m in re.finditer(r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)\s*\(", text):
+            name = m.group(1)
+            open_idx = m.end() - 1
+            end = _match_balanced_call_paren(text, open_idx)
+            if end is None:
+                continue
+            args_text = text[m.end() : end].strip()
+            if not args_text:
+                continue
+            args: Dict[str, Any] = {}
+            if args_text.startswith("{"):
+                # JSON-object argument form: name({"path": "x"})
+                try:
+                    parsed_args = json.loads(args_text)
+                    if isinstance(parsed_args, dict):
+                        args = parsed_args
+                except Exception:
+                    pass
+            if not args:
+                # key="value" pairs (double-quoted values, escaped quotes ok)
+                for am in re.finditer(
+                    r'([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"((?:[^"\\]|\\.)*)"',
+                    args_text,
+                ):
+                    key = am.group(1)
+                    value = am.group(2)
+                    value = value.replace('\\"', '"').replace("\\\\", "\\")
+                    try:
+                        args[key] = json.loads(value)
+                    except Exception:
+                        args[key] = value
+            if not args:
+                continue
+            calls.append({"name": name, "arguments": args})
+
+        # Claude-style XML blocks (Langfuse 5ea2ff8c):
+        #   <tool_calls>
+        #   <invoke name="agent_run_shell">
+        #   <parameter name="command">python3 -c "..."</parameter>
+        #   </invoke>
+        #   </tool_calls>
+        for invoke in re.finditer(
+            r"<invoke\s+name\s*=\s*\"([^\"]+)\"\s*>(.*?)</invoke>",
+            text,
+            re.DOTALL | re.IGNORECASE,
+        ):
+            name = invoke.group(1).strip()
+            inner = invoke.group(2)
+            args: Dict[str, Any] = {}
+            for pm in re.finditer(
+                r"<parameter\s+name\s*=\s*\"([^\"]+)\"\s*>(.*?)</parameter>",
+                inner,
+                re.DOTALL | re.IGNORECASE,
+            ):
+                key = pm.group(1)
+                value = pm.group(2).strip()
+                try:
+                    args[key] = json.loads(value)
+                except Exception:
+                    args[key] = value
+            calls.append({"name": name, "arguments": args})
+
+        # A weak model may emit the SAME call in several formats within one
+        # response (e.g. "Tool Call: x" + <function>x</function> + x(args)).
+        # Executing duplicates would repeat side effects — keep the first only
+        # (the "3 duplicate tool calls per step" symptom).
+        seen: set[tuple] = set()
+        deduped: list[Dict[str, Any]] = []
+        for call in calls:
+            key = (
+                str(call.get("name")),
+                json.dumps(call.get("arguments") or {}, sort_keys=True, default=str),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(call)
+        return deduped
 
 
 # Expose a convenient singleton manager

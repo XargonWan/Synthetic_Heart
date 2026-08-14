@@ -24,6 +24,8 @@ router always returns ``FAST`` so existing behaviour is preserved.
 from __future__ import annotations
 
 import asyncio
+import json
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from core.logging_utils import log_debug, log_error, log_info, log_warning
@@ -128,11 +130,14 @@ def _is_pure_message(action_type: str) -> bool:
     return action_type in (
         "message",
         "send_message",
-        "message_telegram_bot",
         "message_discord_bot",
-        "message_synth_webui",
+        "message_fluxer_bot",
+        "message_integration",
+        "message_mate_engine",
         "message_matrix_chat",
         "message_ollama_serve",
+        "message_synth_webui",
+        "message_telegram_bot",
         "radio_speak",
         "tts_speak",
     )
@@ -195,11 +200,33 @@ def classify(actions: List[Any], *, context: Dict[str, Any] | None = None) -> st
         log_info("[agent_router] classify: vessel embodiment turn -> FAST lane")
         return FAST
 
+    # G.R.I.L.L.O. (and other autonomous beat) turns must NEVER enter the Agent
+    # Lane. A Grillo reflection beat is not a user request — its prompt already
+    # drives its own multi-step actions (get_recent_chats / get_emotion_state /
+    # diary), and wrapping it in the agentic loop turns one beat into a
+    # 30-iteration tool-calling turn with the attempt_completion contract
+    # (Langfuse 5fe657db). Structural signal only (the beat's interface, never
+    # message text); the beat's actions stay on the Fast Lane via run_actions.
+    if isinstance(context, dict):
+        _beat_interface = str(
+            context.get("interface") or context.get("interface_path") or ""
+        )
+        if _beat_interface == "grillo" or _beat_interface.startswith("grillo/"):
+            log_info("[agent_router] classify: grillo beat -> FAST lane")
+            return FAST
+
     # Authoritative, pre-LLM decision: the recon plugin evaluated the user's
-    # request and flagged it as agentic work. This is deterministic and does not
-    # depend on how many actions the main model happened to emit — which is what
-    # previously caused a plain greeting (message + diary/emotion) to be
-    # misrouted to the Agent lane via the removed ``len(types) > 1`` heuristic.
+    # request and flagged it as agentic work. It escalates even when the main
+    # model only emitted conversational actions — the under-emission case where
+    # the model promised work instead of doing it (Langfuse 0ee26438: "read
+    # this pdf into a voice note" was answered with "I'll have the voice note
+    # sent over in a moment!" and no tool call). The Agent Lane re-runs from
+    # the user's actual request text, and its loop handles over-routing safely:
+    # a message-only first iteration is delivered once and the turn ends
+    # (``no_tools_required``), tool-call text-protocol output is parsed, and
+    # delivered messages are never re-sent (deduped from final_text). The
+    # earlier misrouted-roleplay regression (Langfuse 86141208) is handled
+    # downstream in goal derivation and the loop, not by this guard.
     if context and context.get("agent_needed"):
         log_info("[agent_router] classify: context agent_needed -> AGENT lane")
         return AGENT
@@ -209,25 +236,16 @@ def classify(actions: List[Any], *, context: Dict[str, Any] | None = None) -> st
 
     types = _action_types(actions)
 
-    # A batch made up entirely of plain outbound message actions is NOT agentic
-    # work — it is just Synth talking (possibly on several interfaces at once).
-    # Those synth actions (e.g. ``message_telegram_bot``) must be recognised and
-    # delivered through the classic Fast Lane so they never get swept into the
-    # agent tool loop, where they would be executed as "tools" and interfere
-    # with the agent.
-    if types and all(_is_pure_message(t) for t in types):
-        log_info("[agent_router] classify: message-only batch -> FAST lane")
-        return FAST
-
     # Safety net: any batch containing a real tool call is agentic work, even if
     # the recon somehow missed it. This keeps tool actions out of the Fast Lane.
     if any(_is_tool_call(t) for t in types):
         log_info("[agent_router] classify: batch contains a tool call -> AGENT lane")
         return AGENT
 
-    # No agent_needed flag and no tool call: the request was not judged agentic,
-    # so it stays on the classic Fast Lane regardless of how many non-tool
-    # actions the model emitted.
+    # No agent_needed flag and no tool call: the request was not judged
+    # agentic, so it stays on the classic Fast Lane regardless of how many
+    # non-tool actions the model emitted (the plain-greeting regression from
+    # the removed ``len(types) > 1`` heuristic does not return).
     log_info("[agent_router] classify: no agentic signal -> FAST lane")
     return FAST
 
@@ -247,6 +265,12 @@ async def route(
     if lane == AGENT:
         log_info("[agent_router] Routing to Agent Lane (detached)")
         goal = _derive_goal(actions, context)
+
+        # Under-emission seeding: when the main model produced no tool call,
+        # execute its bookkeeping actions (emotion/diary/etc.) before the loop
+        # starts so the persona's turn still lands; the loop then works the
+        # real goal (Langfuse 0ee26438).
+        seed_calls = _seed_calls_for_under_emission(actions)
 
         # Mark this interface as having an in-flight agent turn BEFORE spawning
         # the detached task. The message chain returns ``None`` to the interface
@@ -280,7 +304,18 @@ async def route(
         # delivered from inside the task via ``_deliver_agent_reply``.
         task = asyncio.create_task(
             _run_agent_turn_detached(
-                goal, context, bot, message, explicit_resume_id=explicit_resume_id
+                goal,
+                # Snapshot the context for the detached task. ``route`` returns
+                # immediately and the message chain keeps mutating the shared
+                # ctx dict afterwards; the detached loop must see a stable copy
+                # so per-turn routing state (attachment_paths, interface, ...)
+                # can never be mutated out from under it mid-flight.
+                dict(context) if isinstance(context, dict) else context,
+                bot,
+                message,
+                explicit_resume_id=explicit_resume_id,
+                preplanned_calls=seed_calls or None,
+                preplanned_then_loop=bool(seed_calls),
             )
         )
         _AGENT_BACKGROUND_TASKS.add(task)
@@ -345,6 +380,8 @@ async def _run_agent_turn_detached(
     message: Any,
     *,
     explicit_resume_id: int | None = None,
+    preplanned_calls: list[Dict[str, Any]] | None = None,
+    preplanned_then_loop: bool = False,
 ) -> None:
     """Run one agentic turn off the message-chain consumer lock.
 
@@ -392,11 +429,58 @@ async def _run_agent_turn_detached(
                 )
         if resumable is None:
             resumable = await manager.find_resumable_task_for_interface(interface_path)
+            if resumable:
+                allowed, reason = _resume_allowed(
+                    str(resumable.get("goal") or ""), context
+                )
+                if not allowed:
+                    if reason != "poisoned_goal":
+                        log_warning(
+                            f"[agent_router] Refusing auto-resume of task "
+                            f"{resumable['task_id']}: {reason}"
+                        )
+                        resumable = None
+                    # "poisoned_goal" falls through to the unified gate below,
+                    # which cancels the row and clears it for both resume paths.
+                elif not _resume_age_allowed(
+                    resumable.get("updated_at"),
+                    int(config_registry.get_var("AGENT_RESUME_MAX_AGE_SEC", 900)),
+                ):
+                    # Stale parked task: the user's "keep going" reply arrives
+                    # within minutes of the pause — an old pending row is
+                    # abandoned work and must not hijack a later conversational
+                    # turn (Langfuse 00:49 chain). Start fresh instead; the
+                    # stale row stays pending for explicit WebUI resume.
+                    log_warning(
+                        f"[agent_router] Refusing auto-resume of task "
+                        f"{resumable['task_id']}: parked too long ago "
+                        f"(AGENT_RESUME_MAX_AGE_SEC)"
+                    )
+                    resumable = None
+        # Poisoned-goal gate — applies to BOTH resume paths (explicit WebUI
+        # resume / resume_agent_task action AND interface auto-resume). A
+        # parked task whose stored goal is the model's own self-referential
+        # LLM JSON artifact (pre-fix data, Langfuse 7b31c7c8 / task 198) can
+        # never be meaningfully resumed: refuse it and cancel the row
+        # best-effort so it stops being offered in the WebUI and cannot
+        # hijack future turns.
+        if resumable is not None:
+            stored_goal = str(resumable.get("goal") or "")
+            if _looks_like_llm_response_json(stored_goal):
+                log_warning(
+                    f"[agent_router] Refusing resume of task "
+                    f"{resumable['task_id']}: poisoned goal artifact"
+                )
+                await manager.supersede_pending_task(resumable["task_id"])
+                resumable = None
         if resumable:
             resume_task_id = resumable["task_id"]
             resume_goal = resumable["goal"]
             resume_engine = resumable["engine"]
-            prior_observations = resumable["prior_observations"]
+            # Bound the re-injected history: a parked task may have been
+            # resumed repeatedly, accumulating dozens of stale observations
+            # that bloat every iteration prompt. Keep the most recent 20.
+            prior_observations = list((resumable.get("prior_observations") or [])[-20:])
             if goal and goal.strip():
                 prior_observations = list(prior_observations or [])
                 prior_observations.append(
@@ -418,6 +502,8 @@ async def _run_agent_turn_detached(
             original_message=message,
             task_id=resume_task_id,
             prior_observations=prior_observations,
+            preplanned_calls=preplanned_calls,
+            preplanned_then_loop=preplanned_then_loop,
         )
         # The agent loop runs detached from the Fast-Lane reply path, so the
         # user's interface receives nothing while it works and nothing when it
@@ -440,20 +526,165 @@ async def _run_agent_turn_detached(
             _INFLIGHT_AGENT_INTERFACE_PATHS.discard(str(interface_path))
 
 
+def _looks_like_llm_response_json(text: str) -> bool:
+    """True when ``text`` is a JSON object shaped like an LLM action response.
+
+    The message chain stores the model's RAW response text into
+    ``context["goal"]`` / ``context["original_text"]`` on LLM-origin turns
+    (``core/message_chain.py``), so those keys can hold the model's own action
+    batch rather than the user's request. A goal that IS the model's own
+    output is self-referential garbage (Langfuse 86141208: the agent loop was
+    asked to "achieve" the reply Synth had already written). This structural
+    check (never keyword logic) identifies such values so the goal derivation
+    can skip them. Conservative: only values that actually parse as a JSON
+    actions/tool-call object are rejected.
+    """
+    stripped = text.strip()
+    if not (stripped.startswith("{") or stripped.startswith("[")):
+        return False
+    try:
+        parsed = json.loads(stripped)
+    except Exception:
+        return False
+    if isinstance(parsed, dict):
+        if any(k in parsed for k in ("actions", "tool_calls", "calls")):
+            return True
+        if any(k in parsed for k in ("type", "name", "tool")) and any(
+            k in parsed for k in ("payload", "arguments", "params", "args")
+        ):
+            return True
+    return False
+
+
+def _seed_calls_for_under_emission(actions: List[Any]) -> list[Dict[str, Any]]:
+    """Extract the main model's bookkeeping actions for pre-loop seeding.
+
+    When the recon flag escalates a turn whose batch contains NO real tool
+    call (the under-emission case — the model promised work instead of doing
+    it, Langfuse 0ee26438), the loop discards the main model's actions and
+    re-runs from the user's request. Seeding the non-message actions
+    (update_emotion_state, diary, etc.) lets that bookkeeping still land
+    before the loop starts.
+
+    Message actions are NEVER seeded: the loop's model owns conversation, and
+    delivering the promise text twice would duplicate a user-facing message.
+    Tool calls are NEVER seeded: they would execute twice (once here, once by
+    the loop) with duplicated side effects. Returns an empty list when there
+    is nothing safe to seed (or a tool call is present).
+    """
+    types = _action_types(actions)
+    if not actions or not types:
+        return []
+    if any(_is_tool_call(t) for t in types):
+        return []
+    seeds: list[Dict[str, Any]] = []
+    for a in actions:
+        if not isinstance(a, dict):
+            continue
+        name = a.get("type") or a.get("action")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if _is_pure_message(name):
+            continue
+        payload = a.get("payload")
+        seeds.append(
+            {
+                "name": name.strip(),
+                "arguments": payload if isinstance(payload, dict) else {},
+            }
+        )
+    return seeds
+
+
+def _resume_allowed(
+    stored_goal: str, context: Dict[str, Any] | None
+) -> tuple[bool, str]:
+    """Structural gate for interface-scoped auto-resume of a parked task.
+
+    A parked (``pending``) task is resumed when the next message from the same
+    interface is a continuation ("yes, keep going"). Two fresh-request signals
+    must NOT auto-resume (Langfuse 7b31c7c8 chain): the stored goal being the
+    model's own self-referential JSON artifact (pre-fix poisoned rows that can
+    never be meaningfully continued), or the incoming turn carrying new
+    uploaded attachments (fresh material = a new task). Purely structural —
+    never message-text/keyword logic.
+
+    The poisoned-goal refusal is enforced by the caller for BOTH resume paths
+    (explicit WebUI resume / ``resume_agent_task`` action AND interface
+    auto-resume); the helper still reports it so the auto path can distinguish
+    reasons.
+
+    Returns ``(allowed, reason)``; ``reason`` is a short machine label when
+    refused (``"poisoned_goal"`` / ``"fresh_attachments"``), else ``""``.
+    """
+    if _looks_like_llm_response_json(stored_goal):
+        return False, "poisoned_goal"
+    if isinstance(context, dict):
+        attachment_paths = context.get("attachment_paths")
+        if isinstance(attachment_paths, (list, tuple)) and attachment_paths:
+            return False, "fresh_attachments"
+    return True, ""
+
+
+def _resume_age_allowed(
+    updated_at: Any, max_age_sec: int, *, now: datetime | None = None
+) -> bool:
+    """Structural freshness gate for interface-scoped auto-resume.
+
+    A parked (``pending``) task may only be auto-resumed when it was parked
+    recently: the user's "keep going" reply arrives within seconds or minutes
+    of the pause message. An old pending row is abandoned work and must never
+    hijack a later conversational turn (Langfuse 00:49 chain: a 3.5h-old task
+    absorbed a plain chat message). Purely structural (timestamps), never
+    message text. A missing/unparseable timestamp degrades to allowed=True so
+    the pre-existing behavior is preserved.
+    """
+    if updated_at is None:
+        return True
+    try:
+        reference = now or datetime.now(timezone.utc)
+        age_seconds = (reference - updated_at).total_seconds()
+    except Exception:
+        return True
+    return age_seconds <= float(max_age_sec)
+
+
 def _derive_goal(actions: List[Any], context: Dict[str, Any] | None) -> str:
-    """Best-effort goal string for the agent loop from the parsed actions."""
+    """Best-effort goal string for the agent loop from the parsed actions.
+
+    The goal must be the USER's request, never the model's own output: on
+    LLM-origin turns ``context["goal"]`` / ``context["original_text"]`` hold
+    the raw LLM response (message_chain stores it there), so reading those
+    keys first produced self-referential goals — the agent loop was asked to
+    "achieve" the reply Synth had already written (Langfuse 86141208).
+    """
     if context:
-        for key in ("goal", "original_text", "original_user_message", "user_text"):
+        # Preferred: the user's actual request text (set from the inbound
+        # message by plugin_instance / message_chain — never the model reply).
+        for key in ("original_user_message", "user_text"):
             value = context.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
-    # Fall back to a compact JSON description of the requested actions.
-    import json
-
-    try:
-        return f"Execute: {json.dumps(actions, default=str)}"
-    except Exception:
-        return "Execute the requested agentic actions."
+        # Secondary: goal/original_text, but only when they are NOT the
+        # model's own JSON response.
+        for key in ("goal", "original_text"):
+            value = context.get(key)
+            if not (isinstance(value, str) and value.strip()):
+                continue
+            candidate = value.strip()
+            if _looks_like_llm_response_json(candidate):
+                continue
+            return candidate
+    # Fallback: describe the model's own planned actions, but ONLY when they
+    # are genuine tool work — a message-only batch reaching this point means
+    # the caller misrouted a conversational reply and the loop must not re-run
+    # it (the router keeps such batches on the Fast Lane).
+    if actions and any(_is_tool_call(t) for t in _action_types(actions)):
+        try:
+            return f"Execute: {json.dumps(actions, default=str)}"
+        except Exception:
+            pass
+    return "Complete the user's request using the available tools."
 
 
 def _agent_actions_executed(result: Dict[str, Any]) -> int:

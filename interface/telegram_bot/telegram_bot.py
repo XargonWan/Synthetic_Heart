@@ -2432,7 +2432,22 @@ class TelegramInterface:
                 errors.append("payload.text must be a non-empty string")
             send_as_voice = payload.get("send_as_voice")
             if send_as_voice is not None and not isinstance(send_as_voice, bool):
-                errors.append("payload.send_as_voice must be a boolean")
+                # Weak models (and the agent-loop engine) often emit the flag as
+                # a JSON string ("true"/"false") because the tool manifest
+                # renders it as ``string``. Coerce the obvious string forms so a
+                # single voice note is delivered instead of the model retrying
+                # with ever-different spellings (Langfuse 00:49 chain: "must be
+                # a boolean" → 3 duplicate voice notes).
+                if isinstance(send_as_voice, str):
+                    _lower = send_as_voice.strip().lower()
+                    if _lower in ("true", "1", "yes", "on"):
+                        payload["send_as_voice"] = True
+                    elif _lower in ("false", "0", "no", "off", ""):
+                        payload["send_as_voice"] = False
+                    else:
+                        errors.append("payload.send_as_voice must be a boolean")
+                else:
+                    errors.append("payload.send_as_voice must be a boolean")
 
         elif action_type == "audio_telegram_bot":
             audio = payload.get("audio")

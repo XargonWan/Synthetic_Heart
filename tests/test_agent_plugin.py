@@ -313,3 +313,70 @@ async def test_agent_search_files_rejects_escape(monkeypatch, tmp_path):
         None,
     )
     assert res["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_agent_read_file_extracts_pdf_text(monkeypatch, tmp_path):
+    """agent_read_file on a PDF returns extracted text, not raw PDF markup
+    (the garbage that made the agent loop re-read attachments forever)."""
+    from pypdf import PdfWriter
+    from pypdf.generic import (
+        DecodedStreamObject,
+        DictionaryObject,
+        NameObject,
+    )
+
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=612, height=792)
+    content = DecodedStreamObject()
+    content.set_data(b"BT /F1 12 Tf 72 720 Td (Hello rainbow test) Tj ET")
+    page[NameObject("/Contents")] = content
+    page[NameObject("/Resources")] = DictionaryObject(
+        {
+            NameObject("/Font"): DictionaryObject(
+                {
+                    NameObject("/F1"): DictionaryObject(
+                        {
+                            NameObject("/Type"): NameObject("/Font"),
+                            NameObject("/Subtype"): NameObject("/Type1"),
+                            NameObject("/BaseFont"): NameObject("/Helvetica"),
+                        }
+                    )
+                }
+            )
+        }
+    )
+    writer.add_page(page)
+    pdf_path = tmp_path / "test.pdf"
+    with pdf_path.open("wb") as fh:
+        writer.write(fh)
+
+    p = AgentPlugin()
+    monkeypatch.setattr(p, "_allowed_roots", lambda: [tmp_path])
+    res = await p.execute_action(
+        {"type": "agent_read_file", "payload": {"path": str(pdf_path)}},
+        {},
+        None,
+        None,
+    )
+    assert res["status"] == "ok"
+    assert res["extracted"] == "pdf_text"
+    assert "Hello rainbow test" in res["content"]
+
+
+@pytest.mark.asyncio
+async def test_agent_read_file_pdf_failure_returns_error(monkeypatch, tmp_path):
+    """A broken/corrupt PDF yields a clear error, never raw binary garbage."""
+    pdf_path = tmp_path / "broken.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%% this is not a real pdf\n")
+
+    p = AgentPlugin()
+    monkeypatch.setattr(p, "_allowed_roots", lambda: [tmp_path])
+    res = await p.execute_action(
+        {"type": "agent_read_file", "payload": {"path": str(pdf_path)}},
+        {},
+        None,
+        None,
+    )
+    assert res["status"] == "error"
+    assert "pdf" in res["reason"].lower()

@@ -964,6 +964,9 @@ Before finishing a code task, verify:
 | `AUTONOMY_ALLOWED_SECURITY_LEVEL` | Max security level for autonomous actions |
 | `DRONE_MAX_ITERATIONS` | Hard cap on Drone sub-agent loop iterations (default 3) |
 | `DRONE_TURN_TIMEOUT_SEC` | Wall-clock budget per Drone turn in seconds (default 90) |
+| `AGENT_ENABLE_THINKING` | Enable model thinking on Agent Lane engine calls (default `True`; Venice `disable_thinking: false`). The agentic loop is the ONLY route that turns thinking on — ordinary chat keeps its configured default. |
+| `AGENT_NATIVE_TOOLS` | Pass OpenAI function schemas (`tools` + `tool_choice=auto`) on Agent Lane engine calls so capable engines (e.g. Venice deepseek) return structured `tool_calls` instead of ad-hoc text-protocol formats (default `True`). Only applied to external endpoint bridges; plugin engines keep the plain positional call. |
+| `AGENT_PARALLEL_TOOL_CALLS` | Allow multiple native tool calls per Agent Lane response (default `True`). |
 | `AGENT_SHELL_ALLOW_HOST` | Allow `agent_run_shell` to run when NOT in a container (default `False`; a host shell is a real compromise risk) |
 | `VESSEL_AUTONOMY_ENABLED` | Enable autonomous Rift Vessel play — the slow will beat, the middle action beat, and the fast motor tick (default `False`) |
 | `VESSEL_WILL_INTERVAL_SEC` | Seconds between slow volition/will beats — the LLM turn that authors/updates Synth's goal (default 45, clamped `[10, 3600]`, falls back to legacy `VESSEL_BEAT_INTERVAL_SEC`) |

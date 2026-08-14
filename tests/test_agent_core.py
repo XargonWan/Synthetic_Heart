@@ -204,3 +204,155 @@ async def test_call_with_hard_timeout_raises_without_awaiting_cancel() -> None:
     # The helper returned on time; release the orphan so the test loop drains.
     release.set()
     await asyncio.sleep(0)
+
+
+def test_extract_tool_calls_from_text_parses_protocol_blocks():
+    """Recovers name + args pairs from Anthropic-style text protocol output,
+    including nested JSON objects."""
+    text = (
+        "I'll do it now.\n\n"
+        "Tool Call: agent_read_file\n"
+        '{"path": "core/main.py", "meta": {"nested": true}}\n\n'
+        "Tool Call: message_telegram_bot\n"
+        '{"text": "hi", "interface_path": "telegram_bot/123"}'
+    )
+    calls = AgentLoopManager._extract_tool_calls_from_text(text)
+    assert len(calls) == 2
+    assert calls[0]["name"] == "agent_read_file"
+    assert calls[0]["arguments"] == {"path": "core/main.py", "meta": {"nested": True}}
+    assert calls[1]["name"] == "message_telegram_bot"
+    assert calls[1]["arguments"]["interface_path"] == "telegram_bot/123"
+
+
+def test_extract_tool_calls_from_text_ignores_prose():
+    assert (
+        AgentLoopManager._extract_tool_calls_from_text("I'll check the codebase now.")
+        == []
+    )
+    assert AgentLoopManager._extract_tool_calls_from_text("") == []
+
+
+def test_extract_tool_calls_from_text_skips_broken_json():
+    """A tool call whose JSON is truncated/unbalanced is skipped, not misparsed."""
+    text = 'Tool Call: agent_read_file\n{"path": "core/main.py"'
+    assert AgentLoopManager._extract_tool_calls_from_text(text) == []
+
+
+def test_extract_tool_calls_from_text_parses_bold_fenced_blocks():
+    """Handles the markdown-bold header + ```json fence format engines
+    actually emit (Langfuse c1e66673)."""
+    text = (
+        "Let me read the file first.\n\n"
+        "**Tool Call: agent_read_file**\n"
+        "```json\n"
+        '{\n  "path": "D:\\\\app\\\\a.pdf",\n  "max_chars": "5000"\n}\n'
+        "```\n\n"
+        "**Tool Call: message_telegram_bot**\n"
+        "```\n"
+        '{"text": "done", "interface_path": "telegram_bot/123"}\n'
+        "```"
+    )
+    calls = AgentLoopManager._extract_tool_calls_from_text(text)
+    assert len(calls) == 2
+    assert calls[0]["name"] == "agent_read_file"
+    assert calls[0]["arguments"] == {"path": "D:\\app\\a.pdf", "max_chars": "5000"}
+    assert calls[1]["name"] == "message_telegram_bot"
+    assert calls[1]["arguments"]["interface_path"] == "telegram_bot/123"
+
+
+def test_extract_tool_calls_from_text_still_parses_plain_blocks():
+    """The original plain ``Tool Call: name`` + JSON form keeps working."""
+    text = (
+        'Tool Call: agent_read_file\n{"path": "core/main.py", "meta": {"nested": true}}'
+    )
+    calls = AgentLoopManager._extract_tool_calls_from_text(text)
+    assert len(calls) == 1
+    assert calls[0]["name"] == "agent_read_file"
+    assert calls[0]["arguments"]["meta"] == {"nested": True}
+
+
+def test_extract_tool_calls_from_text_parses_xml_function_blocks():
+    """Parses the DeepSeek-native <function> XML format (Langfuse ff1bbae0),
+    both the compact arg-tag and the canonical function_name/parameters forms."""
+    from core.agent_core import AgentLoopManager
+
+    compact = (
+        "<function>\n"
+        "agent_read_file\n"
+        "<path>D:\\app\\attachments\\1786655465343_Untitled_document.pdf</path>\n"
+        "</function>"
+    )
+    calls = AgentLoopManager._extract_tool_calls_from_text(compact)
+    assert len(calls) == 1
+    assert calls[0]["name"] == "agent_read_file"
+    assert calls[0]["arguments"]["path"] == (
+        "D:\\app\\attachments\\1786655465343_Untitled_document.pdf"
+    )
+
+    canonical = (
+        "<function>\n"
+        "<function_name>\nmessage_telegram_bot\n</function_name>\n"
+        "<parameters>\n"
+        '{"text": "done", "interface_path": "telegram_bot/123"}\n'
+        "</parameters>\n"
+        "</function>"
+    )
+    calls = AgentLoopManager._extract_tool_calls_from_text(canonical)
+    assert len(calls) == 1
+    assert calls[0]["name"] == "message_telegram_bot"
+    assert calls[0]["arguments"] == {
+        "text": "done",
+        "interface_path": "telegram_bot/123",
+    }
+
+
+def test_extract_tool_calls_from_text_parses_bare_python_calls():
+    """Parses bare name(key="value") calls (Langfuse fdf08aef)."""
+    text = (
+        "Let me read it.\n\n"
+        'agent_read_file(path="D:\\app\\attachments\\a.pdf", max_chars="5000")'
+    )
+    calls = AgentLoopManager._extract_tool_calls_from_text(text)
+    assert len(calls) == 1
+    assert calls[0]["name"] == "agent_read_file"
+    assert calls[0]["arguments"]["path"] == "D:\\app\\attachments\\a.pdf"
+    assert calls[0]["arguments"]["max_chars"] == 5000
+
+
+def test_extract_tool_calls_from_text_parses_backtick_json_call():
+    """Backtick-wrapped name({...json...}) completion calls are recovered."""
+    calls = AgentLoopManager._extract_tool_calls_from_text(
+        '`attempt_completion({"summary": "done"})`'
+    )
+    assert len(calls) == 1
+    assert calls[0]["name"] == "attempt_completion"
+    assert calls[0]["arguments"] == {"summary": "done"}
+
+
+def test_extract_tool_calls_from_text_parses_claude_invoke_blocks():
+    """Claude-style <tool_calls><invoke> XML is recovered (Langfuse 5ea2ff8c)."""
+    text = (
+        "<tool_calls>\n"
+        '<invoke name="agent_run_shell">\n'
+        '<parameter name="command">echo hi</parameter>\n'
+        '<parameter name="timeout">15</parameter>\n'
+        "</invoke>\n"
+        "</tool_calls>"
+    )
+    calls = AgentLoopManager._extract_tool_calls_from_text(text)
+    assert len(calls) == 1
+    assert calls[0]["name"] == "agent_run_shell"
+    assert calls[0]["arguments"] == {"command": "echo hi", "timeout": 15}
+
+
+def test_extract_tool_calls_from_text_dedupes_duplicate_calls():
+    """The same call emitted in multiple formats executes only once."""
+    text = (
+        'Tool Call: agent_read_file\n{"path": "a.pdf"}\n\n'
+        "<function>\nagent_read_file\n<path>a.pdf</path>\n</function>\n\n"
+        'agent_read_file(path="a.pdf")'
+    )
+    calls = AgentLoopManager._extract_tool_calls_from_text(text)
+    assert len(calls) == 1
+    assert calls[0]["name"] == "agent_read_file"
+    assert calls[0]["arguments"]["path"] == "a.pdf"

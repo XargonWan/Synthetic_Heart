@@ -566,7 +566,16 @@ async def enqueue(
     """
     # Use centralized context manager if context_memory not provided
     if context_memory is None:
-        context_memory = get_context_memory()
+        # The shared context-manager dict is the global chat-history store
+        # (Dict[str, deque]) and must NEVER be used as the per-turn context:
+        # per-turn routing flags written into it by the pipeline (recon
+        # ``agent_needed``, attachment ``attachment_paths``, ...) would persist
+        # across every message and every chat. Observed live: after the first
+        # agentic turn, EVERY later message — including a plain "You back to
+        # normal Dee?" — classified AGENT and spawned a new task (Langfuse
+        # 21:41-21:47 chain). A shallow copy keeps the history deques shared
+        # while making the top-level dict turn-local.
+        context_memory = dict(get_context_memory())
     # Normalise the incoming message's user fields for consistent downstream handling
     try:
         ensure_message_user_fields(message)
@@ -1119,7 +1128,16 @@ async def enqueue_low_priority(
                   ``PRIORITY_*`` constants.
     """
     if context_memory is None:
-        context_memory = get_context_memory()
+        # The shared context-manager dict is the global chat-history store
+        # (Dict[str, deque]) and must NEVER be used as the per-turn context:
+        # per-turn routing flags written into it by the pipeline (recon
+        # ``agent_needed``, attachment ``attachment_paths``, ...) would persist
+        # across every message and every chat. Observed live: after the first
+        # agentic turn, EVERY later message — including a plain "You back to
+        # normal Dee?" — classified AGENT and spawned a new task (Langfuse
+        # 21:41-21:47 chain). A shallow copy keeps the history deques shared
+        # while making the top-level dict turn-local.
+        context_memory = dict(get_context_memory())
 
     # Ensure message fields exist before queueing
     try:
