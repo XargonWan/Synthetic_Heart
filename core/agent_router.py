@@ -17,8 +17,9 @@ touches the network. It only inspects action structure + the unified tool
 registry's safety metadata. This keeps the critical Fast Lane path unchanged
 when no agentic intent is present.
 
-Feature flag: ``AGENTIC_ROUTING_ENABLED`` (default ``False``). When disabled the
-router always returns ``FAST`` so existing behaviour is preserved.
+The router is gated by the single authoritative agent toggle ``AGENT_ENABLED``
+(the user-facing on/off switch). When the agent is disabled the router always
+returns ``FAST`` so existing behaviour is preserved.
 """
 
 from __future__ import annotations
@@ -176,15 +177,12 @@ def classify(actions: List[Any], *, context: Dict[str, Any] | None = None) -> st
     Returns:
         ``FAST`` or ``AGENT``.
     """
-    # Two independent gates must BOTH be on to ever leave the Fast Lane:
-    #  * AGENTIC_ROUTING_ENABLED — the Fast/Agent router feature flag.
-    #  * AGENT_ENABLED — the user-facing agent on/off toggle (WebUI + agent
-    #    plugin). When the user switches the agent OFF, behaviour must fall back
-    #    to the classic Fast Lane exactly like the ``develop`` branch, even if
-    #    the routing flag is still set. Keeping these decoupled caused the agent
-    #    to keep engaging while toggled off.
-    if not config_registry.get_var("AGENTIC_ROUTING_ENABLED", False, value_type=bool):
-        return FAST
+    # Single authoritative gate: the user-facing agent on/off toggle (WebUI +
+    # agent plugin). If the agent is enabled, the router is active; if the user
+    # switches the agent OFF, behaviour falls back to the classic Fast Lane
+    # exactly like the ``develop`` branch. (The old AGENTIC_ROUTING_ENABLED
+    # feature flag was removed — a second layer that silently kept the Agent
+    # Lane off even when the agent was enabled.)
     if not config_registry.get_var("AGENT_ENABLED", True, value_type=bool):
         log_debug("[agent_router] AGENT_ENABLED off -> FAST lane (classic behaviour)")
         return FAST

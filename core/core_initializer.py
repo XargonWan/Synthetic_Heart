@@ -464,28 +464,13 @@ class CoreInitializer:
             # functions on the chat path (core.agent_router.classify, the gate in
             # core.message_chain, plugins.recon_agent_intent), never at module import
             # time. That means they are not in _definitions when load_all_from_db()
-            # runs below, so their DB value (e.g. AGENTIC_ROUTING_ENABLED=true) is
-            # never loaded and they permanently fall back to their code default —
-            # the Fast/Agent router would stay disabled even when enabled in the DB.
-            # Registering them here ensures the DB sweep populates them. Same class
-            # of bug as BOTFATHER_TOKEN (see FIXED_ISSUES.md).
+            # runs below, so their DB value is never loaded and they permanently
+            # fall back to their code default. Registering them here ensures the DB
+            # sweep populates them. Same class of bug as BOTFATHER_TOKEN (see
+            # FIXED_ISSUES.md).
             try:
                 from core.config_manager import config_registry as _cfg_reg
 
-                _cfg_reg.get_var(
-                    "AGENTIC_ROUTING_ENABLED",
-                    False,
-                    value_type=bool,
-                    label="Enable Agentic Routing",
-                    description=(
-                        "Enable the deterministic Fast/Agent router. When on, "
-                        "turns that need tools or multiple steps are escalated "
-                        "to the bounded Agent lane; otherwise every turn uses "
-                        "the Fast lane."
-                    ),
-                    group="agent",
-                    component="agent",
-                )
                 # AGENT_ENABLED (the user-facing on/off toggle) is registered at
                 # module import time by plugins.agent_plugin, but the plugin is
                 # loaded AFTER load_all_from_db() runs — so its DB value would

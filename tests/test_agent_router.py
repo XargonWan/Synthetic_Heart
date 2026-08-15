@@ -152,3 +152,52 @@ async def test_deliver_suppresses_paused_timeout_with_zero_actions_but_keeps_pau
     # The pause path composes its own message and must still be delivered.
     assert len(delivered) == 1
     assert delivered[0]["payload"]["text"] == "I'm not finished, shall I continue?"
+
+
+# --------------------------------------------------------------------------- #
+# Single-gate routing (AGENT_ENABLED is the only authoritative toggle; the old
+# AGENTIC_ROUTING_ENABLED feature flag was removed).
+# --------------------------------------------------------------------------- #
+def _set_agent_enabled(monkeypatch: pytest.MonkeyPatch, enabled: bool) -> None:
+    def fake_get_var(key, default=None, value_type=None):
+        if key == "AGENT_ENABLED":
+            return enabled
+        return default
+
+    monkeypatch.setattr("core.config_manager.config_registry.get_var", fake_get_var)
+
+
+def test_classify_agent_enabled_with_agent_needed_returns_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_agent_enabled(monkeypatch, True)
+    assert (
+        agent_router.classify([], context={"agent_needed": True}) == agent_router.AGENT
+    )
+
+
+def test_classify_agent_disabled_returns_fast_even_with_agent_needed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # With the agent OFF, even a clear agentic signal must stay on the Fast Lane.
+    _set_agent_enabled(monkeypatch, False)
+    assert (
+        agent_router.classify([], context={"agent_needed": True}) == agent_router.FAST
+    )
+
+
+def test_classify_agent_enabled_no_signal_returns_fast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_agent_enabled(monkeypatch, True)
+    assert agent_router.classify([], context={}) == agent_router.FAST
+
+
+def test_classify_agent_enabled_tool_call_returns_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_agent_enabled(monkeypatch, True)
+    # An mcp_* action is always a tool call, so the safety net escalates to the
+    # Agent Lane regardless of the tool registry state.
+    actions = [{"type": "mcp_fs_read", "payload": {"path": "/app/x.txt"}}]
+    assert agent_router.classify(actions, context={}) == agent_router.AGENT

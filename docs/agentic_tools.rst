@@ -189,8 +189,10 @@ Routing (Phase E)
 * A single pure message (``message``/``tts_speak``/…) → **Fast Lane**.
 * Unknown single action → **Fast Lane** (unchanged behaviour).
 
-The router is gated by the ``AGENTIC_ROUTING_ENABLED`` config flag (default
-``False``). When disabled, the message chain executes exactly as before.
+The router is gated by the single authoritative agent toggle ``AGENT_ENABLED``
+(the user-facing on/off switch). When the agent is disabled, the message chain
+executes exactly as before (classic Fast Lane). When enabled, the router is
+active and escalates agentic turns to the Agent Lane.
 
 Exposing Synth actions as MCP (Phase F)
 ---------------------------------------
@@ -336,7 +338,7 @@ Configuration reference
 ================================  ============================================
 Key                               Meaning
 ================================  ============================================
-``AGENTIC_ROUTING_ENABLED``       Enable the Fast/Agent router (default False).
+``AGENT_ENABLED``                 Master agent on/off toggle (also gates the router).
 ``AGENT_MAX_ITERATIONS``          Hard cap on agent-loop iterations (default 30).
 ``AGENT_TURN_TIMEOUT_SEC``        Wall-clock budget per agent turn (default 120).
 ``SYNTH_MCP_CONFIG``              Override path to ``config/synth_mcp.json``.

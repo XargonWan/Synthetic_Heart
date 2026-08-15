@@ -7,15 +7,13 @@ class Msg:
     interface_path = "telegram_bot/12345"
 
 
-def _enable(monkeypatch, *, plugin_enabled=True, routing_on=True, agent_on=True):
+def _enable(monkeypatch, *, plugin_enabled=True, agent_on=True):
     def fake_get_value(key, default=None, value_type=None):
         if key == "RECON_AGENT_INTENT_RECON_ENABLED":
             return plugin_enabled
         return default
 
     def fake_get_var(key, default=None, value_type=None):
-        if key == "AGENTIC_ROUTING_ENABLED":
-            return routing_on
         if key == "AGENT_ENABLED":
             return agent_on
         return default
@@ -127,18 +125,6 @@ async def test_no_instruction_when_agent_toggle_off(monkeypatch):
     )
     assert contribs == []
     assert "agent_needed" not in ctx
-
-
-@pytest.mark.asyncio
-async def test_no_instruction_when_routing_off(monkeypatch):
-    _enable(monkeypatch, routing_on=False)
-    plugin = ReconAgentIntentPlugin()
-    contribs = await plugin.parse_recon_response(
-        {"agent_needed": True, "reason": "inspect the codebase"},
-        message=Msg(),
-        text="check your code",
-    )
-    assert contribs == []
 
 
 @pytest.mark.asyncio
