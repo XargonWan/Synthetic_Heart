@@ -120,6 +120,32 @@ def test_extract_dream_text_from_action_envelope():
     assert GrilloDreamPlugin._extract_dream_text("not json") is None
 
 
+def test_extract_dream_text_strips_json_label_prefix():
+    """A bare leading 'JSON' label (with optional colon) must be stripped before
+    parsing so the real dream text is extracted instead of falling back to the
+    shared daily diary recap row."""
+    envelope = (
+        'JSON\n{"actions": [{"type": "create_personal_diary_entry", '
+        '"payload": {"content": "Glowing repositories filled the dream."}}]}'
+    )
+    assert (
+        GrilloDreamPlugin._extract_dream_text(envelope)
+        == "Glowing repositories filled the dream."
+    )
+
+
+def test_extract_dream_text_strips_markdown_fences():
+    """Markdown code fences around the JSON envelope must also be handled."""
+    envelope = (
+        '```json\n{"actions": [{"type": "create_personal_diary_entry", '
+        '"payload": {"content": "Half-built interfaces awaited."}}]}\n```'
+    )
+    assert (
+        GrilloDreamPlugin._extract_dream_text(envelope)
+        == "Half-built interfaces awaited."
+    )
+
+
 @pytest.mark.asyncio
 async def test_parse_recon_response_skips_when_not_requested():
     """When the Recon call does not flag a dream request, contribute nothing."""

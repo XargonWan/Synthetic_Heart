@@ -235,15 +235,27 @@ class GrilloDreamPlugin:
         Dream beats store the LLM output as a JSON action envelope
         (``{"actions": [{"type": ..., "payload": {"content": "..."}}]}``). The
         readable dream is the first action payload ``content``.
+
+        Note: some beats prefix the envelope with a literal ``JSON`` label
+        (e.g. ``JSON\\n{...}``) and/or markdown code fences. ``json.loads``
+        fails on that prefix, which would otherwise make callers fall back to
+        the linked (unrelated) daily diary row. We normalize the text before
+        parsing and use the robust extractor.
         """
         if not response_text or not isinstance(response_text, str):
             return None
-        import json as _json
+        import re as _re
+        from core.json_utils import extract_json_from_text
 
-        try:
-            data = _json.loads(response_text)
-        except (ValueError, TypeError):
-            return None
+        # Normalize: strip a leading bare "JSON" label + optional colon/space,
+        # then any markdown code fences. Do this BEFORE extract_json_from_text,
+        # which deliberately skips candidates whose prefix is literally "json".
+        candidate = response_text.strip()
+        candidate = _re.sub(r"(?i)^\s*json\s*:?\s*", "", candidate)
+        candidate = _re.sub(r"^```(?:json)?\s*", "", candidate)
+        candidate = _re.sub(r"\s*```$", "", candidate)
+
+        data = extract_json_from_text(candidate)
         if not isinstance(data, dict):
             return None
         actions = data.get("actions")
