@@ -1144,7 +1144,7 @@ class AgentLoopManager:
             max_iterations = int(config_registry.get_var("AGENT_MAX_ITERATIONS", 30))
         if timeout_seconds is None:
             timeout_seconds = float(
-                config_registry.get_var("AGENT_TURN_TIMEOUT_SEC", 120)
+                config_registry.get_var("AGENT_TURN_TIMEOUT_SEC", 3600)
             )
 
         # Resolve the Cortex engine for the agentic loop. When the caller did
@@ -2269,7 +2269,7 @@ class AgentLoopManager:
             max_iterations = int(config_registry.get_var("AGENT_MAX_ITERATIONS", 30))
         if timeout_seconds is None:
             timeout_seconds = float(
-                config_registry.get_var("AGENT_TURN_TIMEOUT_SEC", 120)
+                config_registry.get_var("AGENT_TURN_TIMEOUT_SEC", 3600)
             )
 
         drone_context: Dict[str, Any] = dict(context or {})

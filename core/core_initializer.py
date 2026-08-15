@@ -496,10 +496,19 @@ class CoreInitializer:
                 )
                 _cfg_reg.get_var(
                     "AGENT_TURN_TIMEOUT_SEC",
-                    120,
+                    3600,
                     value_type=int,
                     label="Agent Turn Timeout (s)",
-                    description="Wall-clock budget in seconds for a single Agent turn.",
+                    description=(
+                        "Wall-clock budget in seconds for a single Agent turn. "
+                        "Set well above the Fast-Lane LLM response timeout "
+                        "(AWAIT_RESPONSE_TIMEOUT) because the agent runs many "
+                        "dependent steps (read -> plan -> act) within one turn. "
+                        "A generous bound is safe: the agent turn runs DETACHED "
+                        "off the message-queue consumer (agent_router.route "
+                        "spawns _run_agent_turn_detached and returns immediately), "
+                        "so it never blocks other queued messages while it works."
+                    ),
                     group="agent",
                     component="agent",
                     advanced=True,
