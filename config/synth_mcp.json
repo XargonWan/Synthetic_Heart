@@ -4,8 +4,8 @@
         "synth_logs": {
             "enabled": true,
             "transport": "stdio",
-            "command": "uv",
-            "args": ["run", "python", "mcp_servers/synth_logs.py"],
+            "command": "/app/venv/bin/python",
+            "args": ["mcp_servers/synth_logs.py"],
             "env": {"LOG_DIR": "/app/logs"},
             "security_level": "low",
             "description": "Runtime log analysis MCP server shipped with Synth."
@@ -13,8 +13,8 @@
         "synth_llm_failures": {
             "enabled": true,
             "transport": "stdio",
-            "command": "uv",
-            "args": ["run", "python", "mcp_servers/synth_llm_failures.py"],
+            "command": "/app/venv/bin/python",
+            "args": ["mcp_servers/synth_llm_failures.py"],
             "env": {},
             "security_level": "low",
             "description": "Structured access to the persisted llm_failure_log table (same data as the WebUI Logs page). Pair with synth_logs to cross-reference structured failures against raw runtime logs."

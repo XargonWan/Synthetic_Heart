@@ -213,8 +213,11 @@ def _build_runtime_db_target(
     declared_type = _repo_or_process_value(
         "SYNTH_DB_TYPE", _repo_or_process_value("DB_TYPE")
     )
+    # The runtime DB moved to PostgreSQL (see core/db.py), so when no engine is
+    # declared and no well-known port is present we default to postgres rather
+    # than the legacy mariadb default. Explicit config still wins.
     inferred_default = (
-        _infer_db_type_from_port(_repo_or_process_value("DB_PORT")) or "mariadb"
+        _infer_db_type_from_port(_repo_or_process_value("DB_PORT")) or "postgres"
     )
     db_type = forced_db_type or _normalize_db_type(
         declared_type, default=inferred_default
@@ -232,10 +235,14 @@ def _build_runtime_db_target(
             or None
         )
 
+    # Default the host to the Docker service name used by docker-compose
+    # (``synth-db``). _remap_for_host_access rewrites it to 127.0.0.1:<EXT_DB_PORT>
+    # when running on the host where the service name does not resolve, so the
+    # same default works both inside the container and from the host.
     return DbTarget(
         name="runtime",
         db_type=db_type,
-        host=str(_repo_or_process_value("DB_HOST", "localhost") or "localhost"),
+        host=str(_repo_or_process_value("DB_HOST", "synth-db") or "synth-db"),
         port=_coerce_port(_repo_or_process_value("DB_PORT"), default_port),
         user=str(_repo_or_process_value("DB_USER", "synth") or "synth"),
         password=str(_repo_or_process_value("DB_PASS", "synth") or "synth"),

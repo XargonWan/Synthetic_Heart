@@ -33,6 +33,22 @@ from core.mcp_bridge.config import (
 # environments (e.g. build-time checks, unit tests that never touch MCP).
 
 
+def _connect_timeout_sec() -> float:
+    """Per-server MCP connection timeout (seconds), env-configurable.
+
+    A stdio server launched via ``uv run`` can take longer than a naive 15s
+    to become ready (uv re-resolves the environment and two parallel ``uv run``
+    processes contend on the same lock), which previously made the server time
+    out and — before the ``except BaseException`` fix — crash the whole app.
+    Default 30s; override with ``MCP_CONNECT_TIMEOUT_SEC``. Clamped to a sane
+    floor so a mis-set value can never make the connect hang forever.
+    """
+    try:
+        return max(5.0, float(os.environ.get("MCP_CONNECT_TIMEOUT_SEC", "30")))
+    except (TypeError, ValueError):
+        return 30.0
+
+
 class McpConnection:
     """Holds an open MCP client session for one server."""
 
@@ -175,7 +191,7 @@ class McpClientBridge:
             # in _recover_interrupted_agent_tasks and every background loop).
             try:
                 stack, session = await asyncio.wait_for(
-                    self._open_session(cfg), timeout=15
+                    self._open_session(cfg), timeout=_connect_timeout_sec()
                 )
             except asyncio.TimeoutError:
                 log_warning(
@@ -247,20 +263,27 @@ class McpClientBridge:
 
             await session.initialize()
             return stack, session
-        except Exception:
+        except BaseException:
             # A failed spawn/connect (e.g. the stdio server exits immediately ->
-            # McpError: Connection closed) leaves the AsyncExitStack with
+            # McpError: Connection closed) OR a timeout cancellation (asyncio
+            # wait_for cancelling this task) leaves the AsyncExitStack with
             # partially-entered anyio contexts. Abandoning it lets the async
             # generator be garbage-collected in a DIFFERENT task than the one
             # that entered it, which anyio reports as "Attempted to exit cancel
             # scope in a different task than it was entered in" and corrupts
             # the whole event loop (observed live: MCP teardown cancelled the
-            # DB query in _recover_interrupted_agent_tasks and every background
-            # loop). Close the partial stack HERE, in the task that entered it,
-            # before re-raising so the caller sees the real connect error.
+            # DB query in _recover_interrupted_agent_tasks, every background
+            # loop, and the main application task -> app crash-loop).
+            #
+            # NOTE: this must be `except BaseException`, NOT `except Exception`.
+            # asyncio.CancelledError is a BaseException, so a plain `except
+            # Exception` would NOT catch the wait_for timeout cancellation and
+            # the partial stack would be left to be GC'd in the wrong task.
+            # Close the partial stack HERE, in the task that entered it, before
+            # re-raising so the caller sees the real connect error.
             try:
                 await stack.aclose()
-            except Exception as close_exc:  # pragma: no cover - best effort
+            except BaseException as close_exc:  # pragma: no cover - best effort
                 log_debug(
                     f"[mcp_client] Best-effort close of failed session for "
                     f"'{cfg.name}' also failed: {close_exc}"

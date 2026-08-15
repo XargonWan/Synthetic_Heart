@@ -466,11 +466,45 @@ if __name__ == "__main__":
                 # whichever comes first.
                 restart_wait = asyncio.create_task(_restart_event.wait())
                 shutdown_wait = asyncio.create_task(_shutdown_event.wait())
+                done, pending = set(), set()
                 try:
                     done, pending = await asyncio.wait(
                         {restart_wait, shutdown_wait},
                         return_when=asyncio.FIRST_COMPLETED,
                     )
+                except asyncio.CancelledError:
+                    # A background task (e.g. an MCP stdio client teardown)
+                    # spuriously cancelled the main wait. This is NOT a
+                    # shutdown request. Cancel the waiters and restart the
+                    # loop cleanly instead of crashing the whole process.
+                    # (Previously this raised UnboundLocalError because
+                    # `pending` was never assigned when the wait raised,
+                    # crash-looping the app under s6-overlay.)
+                    if _shutdown_event.is_set():
+                        log_info(
+                            "[main] Shutdown requested during wait - cleaning up..."
+                        )
+                        await stop_interfaces()
+                        await stop_synth_mcp()
+                        cleanup_components()
+                        break
+                    log_warning(
+                        "[main] Main wait spuriously cancelled by a background "
+                        "task; restarting cleanly."
+                    )
+                    for task in (restart_wait, shutdown_wait):
+                        task.cancel()
+                    await stop_synth_mcp()
+                    cleanup_components()
+                    from core.core_initializer import (
+                        INTERFACE_REGISTRY,
+                        PLUGIN_REGISTRY,
+                    )
+                    INTERFACE_REGISTRY.clear()
+                    PLUGIN_REGISTRY.clear()
+                    from core.cortex_registry import get_cortex_registry
+                    get_cortex_registry()._engines.clear()
+                    continue
                 finally:
                     for task in pending:
                         task.cancel()
