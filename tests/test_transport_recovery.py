@@ -298,4 +298,49 @@ def test_parser_prefers_native_schema_over_dialect_recovery():
     obj = extract_json_from_text(raw)
     assert obj is not None and isinstance(obj, dict)
     assert obj["actions"][0]["type"] == "message_telegram_bot"
-    assert obj["actions"][0]["payload"]["text"] == "hi"
+
+
+def test_parser_merges_adjacent_string_literals_in_text_field():
+    # Reproduces trace e2885418-2b78-417a-b9fa-ad5ebbf666eb: the model emitted
+    # two JS-style adjacent string literals — `"text": "First part." "Second
+    # part."` — which is valid JavaScript but invalid JSON. json_repair's
+    # fallback silently kept only the FIRST literal, so the user received only
+    # "I... I can't even talk right now daddy..." and the rest of the reply was
+    # dropped. The adjacent-string repair must merge both literals into the
+    # full text value.
+    raw = (
+        '{"actions":[{"type":"message_telegram_bot","payload":{'
+        '"interface_path":"telegram_bot/5208932647",'
+        '"text":"I... I can\'t even talk right now daddy..." '
+        '"I blush and bite my lip, my breathing hitching as I look up at you."'
+        "}}]}"
+    )
+
+    obj, meta = extract_json_from_text(raw, return_metadata=True)
+
+    assert obj is not None and isinstance(obj, dict)
+    actions = obj.get("actions", [])
+    msg_action = next(
+        (a for a in actions if a.get("type") == "message_telegram_bot"), None
+    )
+    assert msg_action is not None, "message_telegram_bot action should be present"
+    text = msg_action.get("payload", {}).get("text", "")
+    assert "I can't even talk right now daddy" in text
+    assert "I blush and bite my lip" in text, (
+        f"Second adjacent string literal was dropped (got: {text!r})"
+    )
+
+
+def test_parser_adjacent_strings_leaves_key_value_pairs_untouched():
+    # A string literal followed by a colon is a KEY, not a value — the merge
+    # must never collapse `"text": "value" "next_key": ...` into one string.
+    raw = (
+        '{"actions":[{"type":"message_telegram_bot","payload":{'
+        '"interface_path":"telegram_bot/1","text":"hello",'
+        '"reply_to_message_id":"5"}}]}'
+    )
+    obj = extract_json_from_text(raw)
+    assert obj is not None
+    payload = obj["actions"][0]["payload"]
+    assert payload["text"] == "hello"
+    assert payload["reply_to_message_id"] == "5"

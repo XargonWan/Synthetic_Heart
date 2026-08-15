@@ -490,9 +490,14 @@ def extract_json_from_text(
             _repair_apostrophe_closed_escaped_tail as _repair_p2,
             _repair_apostrophe_closed_single_quoted_tail as _repair_p2b,
             _repair_json_string_speech_quotes as _repair_p3,
+            _repair_adjacent_string_literals as _repair_p4,
         )
 
         _pre_repaired = _repair_p0(cleaned_text)
+        # Merge JS-style adjacent string literals ("a" "b") into one string
+        # BEFORE the other repairs so the full text survives — without it,
+        # json_repair's fallback silently keeps only the first literal.
+        _pre_repaired = _repair_p4(_pre_repaired)
         _pre_repaired = _repair_p1(_pre_repaired)
         _pre_repaired = _repair_p2(_pre_repaired)
         _pre_repaired = _repair_p2b(_pre_repaired)
@@ -677,7 +682,24 @@ def extract_json_from_text(
         try:
             from json_repair import repair_json as _json_repair
 
-            _repaired = _json_repair(text, return_objects=True)
+            # Prefer the pre-repaired variant (adjacent-string merge etc.) when
+            # json_repair must run: it recovers the FULL text value, whereas
+            # running json_repair on the raw output alone silently collapses
+            # JS-style adjacent string literals ("a" "b") to just "a".
+            _repair_inputs = []
+            for _candidate in (_pre_repaired, cleaned_text, text.strip()):
+                if _candidate and _candidate not in _repair_inputs:
+                    _repair_inputs.append(_candidate)
+
+            _repaired: Any = None
+            for _candidate in _repair_inputs:
+                try:
+                    _repaired = _json_repair(_candidate, return_objects=True)
+                    if isinstance(_repaired, (dict, list)) and _repaired:
+                        break
+                except Exception:
+                    _repaired = None
+                    continue
 
             _repair_candidate: Any = None
             if isinstance(_repaired, dict) and "actions" in _repaired:
