@@ -10,6 +10,7 @@ import pytest
 
 from plugins.soul_plugin import SoulPlugin
 from plugins.soul_plugin import _SessionState
+from core.plugin_base import PluginBase
 from core.soul.emotion_engine import EmotionalEngine
 from core.soul.models import EmotionalProfile, EmotionalTag, MemCell, MemCellRecall
 from core.soul.repository import InMemorySoulRepository, PostgresSoulRepository
@@ -22,14 +23,13 @@ def _default_soul_plugin_tests_to_memory(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setenv("SYNTH_DB_TYPE", "mariadb")
 
 
-def test_soul_plugin_is_enabled_uses_config_gate() -> None:
-    plugin = SoulPlugin.__new__(SoulPlugin)
-
-    with patch.object(SoulPlugin, "_is_enabled", return_value=False):
-        assert plugin.is_enabled() is False
-
-    with patch.object(SoulPlugin, "_is_enabled", return_value=True):
-        assert plugin.is_enabled() is True
+def test_soul_plugin_has_no_internal_enable_flag() -> None:
+    """soul_plugin activation is gated only by the global plugin toggle
+    (PLUGIN_ENABLED__soul_plugin). It must not expose an internal
+    `_is_enabled` config gate that duplicates the toggle, and it must not
+    override `is_enabled` (the PluginBase default already returns True)."""
+    assert not hasattr(SoulPlugin, "_is_enabled")
+    assert SoulPlugin.is_enabled is PluginBase.is_enabled
 
 
 @pytest.mark.asyncio

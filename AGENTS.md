@@ -273,8 +273,9 @@ level is enforced regardless of how it is invoked.
 **Two lanes, one chain.** `core/agent_router.classify` is a pure deterministic
 function: multiple actions, a tool call (`mcp_*` or an internal action with
 external effects), or a multi-step intent → **Agent Lane**; a single pure
-message → **Fast Lane** (unchanged path). Gated by `AGENTIC_ROUTING_ENABLED`
-(default `False`).
+message → **Fast Lane** (unchanged path). Gated by the single authoritative
+agent toggle `AGENT_ENABLED` (the user-facing on/off switch). When the agent is
+enabled the router is active; when disabled, every turn stays on the Fast Lane.
 
 **Tools are actions.** Internal actions and remote MCP tools are unified in
 `ToolRegistry`. Every tool — internal or external — funnels through
@@ -282,7 +283,7 @@ message → **Fast Lane** (unchanged path). Gated by `AGENTIC_ROUTING_ENABLED`
 via `run_action`; external MCP tools via `mcp_client_bridge.call_tool`. Tool
 names are namespaced `mcp_<server>_<tool>`.
 
-**Config keys:** `AGENTIC_ROUTING_ENABLED`, `AGENT_MAX_ITERATIONS` (30),
+**Config keys:** `AGENT_ENABLED`, `AGENT_MAX_ITERATIONS` (30),
 `AGENT_TURN_TIMEOUT_SEC` (120), `SYNTH_MCP_CONFIG`.
 See `docs/agentic_tools.rst` for the full reference.
 
@@ -951,12 +952,10 @@ Before finishing a code task, verify:
 | `DIARY_HISTORY_DAYS` | How many days of diary to inject into context |
 | `EMOTION_DECAY_TAU` | Emotion decay time constant (seconds) |
 | `EMOTION_MAX_DISPLAY` | Max emotions to display in UI |
-| `SOUL_PLUGIN_ENABLED` | Enable/disable SOUL runtime orchestration plugin |
 | `SOUL_COMPILE_IDLE_SECONDS` | Idle seconds before SOUL compiles buffered transcript |
 | `SOUL_SCHEDULER_INTERVAL_SECONDS` | Scheduler tick interval for SOUL compile/rollup checks |
 | `SOUL_REPOSITORY_BACKEND` | SOUL persistence backend selector (`memory` or `postgres`) |
 | `SOUL_POSTGRES_DSN` | PostgreSQL DSN used when SOUL backend is `postgres` |
-| `ENABLE_MEMORY_SEARCH` | Enable/disable semantic memory retrieval |
 | `MEMORY_SEARCH_MAX_RESULTS` | Max memories returned per query |
 | `GRILLO_ALLOWED_ACTIONS` | Actions Grillo is permitted to execute |
 | `GRILLO_ALLOWED_SECURITY_LEVEL` | Max security level for Grillo actions |

@@ -13,7 +13,7 @@
 - **Runtime DB is PostgreSQL** (`soul@192.168.1.13:5432/soul`), so
   `SoulPlugin._get_repository_backend()` → `postgres` → `PostgresSoulRepository`.
   Persistence is real and live.
-- **SOUL plugin is enabled** (`SOUL_PLUGIN_ENABLED=1`), `SOUL_COMPILE_IDLE_SECONDS=300`,
+- **SOUL plugin is enabled** (global plugin toggle `PLUGIN_ENABLED__soul_plugin`), `SOUL_COMPILE_IDLE_SECONDS=300`,
   `SOUL_SCHEDULER_INTERVAL_SECONDS=60`.
 - **Compiler is producing data** (live store counts):
 
@@ -42,9 +42,7 @@ backend decision.
 | `GRILLO_CORTEX` | `Venice2` |
 | `PROJECT_DEFAULT_LANGUAGE` | `en` |
 | `ENABLE_MEMORIES` | `1` |
-| `ENABLE_MEMORY_SEARCH` | `true` |
 | `ENABLE_RECON` | `false` |
-| `SOUL_PLUGIN_ENABLED` | `1` |
 | `SOUL_COMPILE_IDLE_SECONDS` | `300` |
 | `SOUL_SCHEDULER_INTERVAL_SECONDS` | `60` |
 

@@ -35,17 +35,6 @@ from core.soul.repository import (
 from core.soul.strategies import RuleBasedDspExtractor, RuleBasedMemCellExtractor
 
 register_exposed_var(
-    "SOUL_PLUGIN_ENABLED",
-    label="SOUL Plugin Enabled",
-    default=1,
-    value_type=int,
-    ui_type="bool",
-    description="Enable runtime SOUL memory/emotion orchestration plugin.",
-    scope="plugins",
-    component="soul_plugin",
-)
-
-register_exposed_var(
     "SOUL_COMPILE_IDLE_SECONDS",
     label="SOUL Compile Idle Seconds",
     default=300,
@@ -258,9 +247,6 @@ class SoulPlugin(PluginBase):
         return EmotionalProfile()
 
     async def start(self) -> None:
-        if not self._is_enabled():
-            log_info("[soul_plugin] Disabled by config")
-            return
         if self._scheduler_task and not self._scheduler_task.done():
             return
         self._scheduler_task = asyncio.create_task(self._scheduler_loop())
@@ -292,9 +278,6 @@ class SoulPlugin(PluginBase):
             },
         }
 
-    def is_enabled(self) -> bool:
-        return self._is_enabled()
-
     async def execute_action(
         self,
         action: dict[str, Any],
@@ -311,9 +294,6 @@ class SoulPlugin(PluginBase):
     async def get_static_injection(
         self, message: Any = None, context_memory: dict[str, Any] | None = None
     ) -> dict[str, object]:
-        if not self._is_enabled():
-            return {}
-
         interface_path = self._extract_interface_path(message, context_memory)
         if interface_path.startswith("grillo/"):
             return await self._get_grillo_beat_context(message)
@@ -590,7 +570,7 @@ class SoulPlugin(PluginBase):
     async def _get_status(self) -> dict[str, object]:
         dsp = await self._repo.get_active_dsp()
         return {
-            "enabled": self._is_enabled(),
+            "enabled": True,
             "tracked_sessions": len(self._sessions),
             "buffered_sessions": sum(1 for v in self._buffers.values() if v),
             "active_dsp": bool(dsp),
@@ -916,17 +896,6 @@ class SoulPlugin(PluginBase):
                 "[soul_plugin] Runtime Postgres DSN is empty; falling back to memory"
             )
         return InMemorySoulRepository()
-
-    @staticmethod
-    def _is_enabled() -> bool:
-        try:
-            from core.config_manager import config_registry
-
-            return bool(
-                config_registry.get_value("SOUL_PLUGIN_ENABLED", 1, value_type=int)
-            )
-        except Exception:
-            return True
 
     @staticmethod
     def _get_compile_idle_seconds() -> int:
