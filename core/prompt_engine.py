@@ -366,6 +366,16 @@ def _action_scopes_by_name(action_name: str, action_def: Any) -> set[str]:
     return set(_DEFAULT_ACTION_SCOPES)
 
 
+# Synthetic interface prefixes used by the outbound-beat plumbing (Grillo
+# observer, web-search delivery, etc.). A beat runs *under* one of these
+# synthetic scopes while being *addressed* to a real interface; the real
+# interface is what must be offered. These prefixes never correspond to a real
+# I/O interface, so they are never a valid ``message_*`` target.
+_OUTBOUND_SYNTHETIC_INTERFACES: frozenset[str] = frozenset(
+    {"grillo", "web_search", "vessel", "system", "internal"}
+)
+
+
 def _derive_outbound_beat_target_interfaces(
     context_memory: Any | None,
     beat_type: object,
@@ -378,6 +388,20 @@ def _derive_outbound_beat_target_interfaces(
     actions for those offered interfaces so the model can use the target paths
     it was given.  This deliberately reads only routing metadata; it never
     infers an interface from message text.
+
+    A ``web_search_result`` beat is delivered by the search orchestrator
+    addressed to its real target via the **top-level** ``interface_path`` (e.g.
+    ``telegram_bot/-1003098886330/4297``) even though the beat itself runs under
+    a synthetic interface (``web_search`` / ``grillo``).  The originating
+    snippet/target list may additionally be nested under ``prior_context`` (see
+    ``plugins/web_search/search_orchestrator.py::_deliver``) — in the
+    Grillo-observer shape as ``grillo_snippets``/``grillo_targets``, or in the
+    direct-chat shape as an interface-keyed history map.  We therefore read the
+    top-level ``interface_path`` plus snippet/target lists from both the
+    top-level context and ``prior_context``.  Without this, the second turn sees
+    no real interfaces and message actions for registered interfaces (e.g.
+    ``message_telegram_bot``) are dropped as out-of-scope, silently losing the
+    search answer.
     """
     if not isinstance(context_memory, dict):
         return set()
@@ -386,31 +410,60 @@ def _derive_outbound_beat_target_interfaces(
 
     paths: set[str] = set()
 
-    snippets = context_memory.get("grillo_snippets")
-    if isinstance(snippets, (list, tuple)):
-        for snippet in snippets:
-            if not isinstance(snippet, str):
-                continue
-            marker = "chat:"
-            start = snippet.find(marker)
-            if start == -1:
-                continue
-            start += len(marker)
-            end = start
-            while end < len(snippet) and snippet[end] not in (" ", "|", ")"):
-                end += 1
-            path = snippet[start:end].strip()
-            if path:
-                paths.add(path)
+    # The beat's own top-level target path (structural routing metadata). The
+    # orchestrator already points ``interface_path`` at the conversation the
+    # reply belongs to, so its prefix must be offered — unless it is one of the
+    # synthetic beat scopes (``grillo``/``web_search``/…), which are never a
+    # real ``message_*`` target.
+    own_path = context_memory.get("interface_path")
+    if isinstance(own_path, str) and own_path.strip():
+        head = own_path.split("/", 1)[0].strip()
+        if head and head not in _OUTBOUND_SYNTHETIC_INTERFACES:
+            paths.add(head)
 
-    targets = context_memory.get("grillo_targets")
-    if isinstance(targets, (list, tuple)):
-        for target in targets:
-            if not isinstance(target, dict):
+    candidates: list[dict] = [context_memory]
+    prior = context_memory.get("prior_context")
+    if isinstance(prior, dict):
+        candidates.append(prior)
+
+    for ctx in candidates:
+        snippets = ctx.get("grillo_snippets")
+        if isinstance(snippets, (list, tuple)):
+            for snippet in snippets:
+                if not isinstance(snippet, str):
+                    continue
+                marker = "chat:"
+                start = snippet.find(marker)
+                if start == -1:
+                    continue
+                start += len(marker)
+                end = start
+                while end < len(snippet) and snippet[end] not in (" ", "|", ")"):
+                    end += 1
+                path = snippet[start:end].strip()
+                if path:
+                    paths.add(path)
+
+        targets = ctx.get("grillo_targets")
+        if isinstance(targets, (list, tuple)):
+            for target in targets:
+                if not isinstance(target, dict):
+                    continue
+                path = target.get("interface_path")
+                if isinstance(path, str) and path.strip():
+                    paths.add(path.strip())
+
+    # Direct-chat shape: ``prior_context`` may itself be an interface-keyed
+    # history map (e.g. ``{"telegram_bot/-1003098886330/4297": deque([...])}``).
+    # Treat keys that look like interface paths as additional offered targets —
+    # purely structural (a slash-separated path), never content-based.
+    if isinstance(prior, dict):
+        for key in prior.keys():
+            if not isinstance(key, str) or "/" not in key:
                 continue
-            path = target.get("interface_path")
-            if isinstance(path, str) and path.strip():
-                paths.add(path.strip())
+            head = key.split("/", 1)[0].strip()
+            if head and head not in _OUTBOUND_SYNTHETIC_INTERFACES:
+                paths.add(head)
 
     return {path.split("/", 1)[0].strip() for path in paths if path.strip()}
 
