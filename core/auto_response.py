@@ -158,7 +158,36 @@ class AutoResponseSystem:
                 f"Output a single message_* action with your response text. No additional actions needed."
             )
 
-            system_payload = {
+            # ── Structural loop prevention (search-loop fix, 2026-08-17) ──────
+            # The delivery turn's ONLY job is to summarise the action results and
+            # reply to the user. If the delivery LLM re-emits the producing action
+            # (e.g. search_current_knowledge), the plugin runs the search again and
+            # enqueues ANOTHER delivery turn — the observed "search loop" where one
+            # user message produced many web-search replies. We restrict the delivery
+            # turn to message_* actions only via allowed_action_types, so the LLM
+            # cannot even see the producing action. build_prompt_request reads this
+            # allowlist (parsing the enqueued JSON string) and filters the action
+            # catalog; message_chain's leaked-action filter and corrector honour it
+            # too. Scoped to this single delivery turn — never persisted, never
+            # inherited by other turns. If derivation fails we leave the key unset
+            # (empty allowlist would hide ALL actions and break the delivery), so we
+            # fall back to the previous unrestricted behaviour.
+            delivery_allowed_action_types: list[str] = []
+            try:
+                from core.core_initializer import core_initializer
+
+                _full_actions = dict(
+                    core_initializer.actions_block.get("available_actions", {}) or {}
+                )
+                delivery_allowed_action_types = sorted(
+                    k for k in _full_actions if k.startswith("message_")
+                )
+            except Exception as _aa_exc:
+                log_debug(
+                    f"[auto_response] delivery allowlist derive skipped: {_aa_exc}"
+                )
+
+            system_payload: dict[str, Any] = {
                 "system_message": {
                     "type": "output",
                     "action_type": action_type,  # Track which action produced these results
@@ -171,6 +200,8 @@ class AutoResponseSystem:
                     ),  # Use configurable corrector retries
                 }
             }
+            if delivery_allowed_action_types:
+                system_payload["allowed_action_types"] = delivery_allowed_action_types
 
             log_info(
                 f"[auto_response] Requesting LLM to deliver {action_type} output to chat {chat_id}"

@@ -1097,6 +1097,15 @@ async def handle_incoming_message(
             try:
                 if isinstance(prompt, dict) and isinstance(prompt.get("actions"), dict):
                     llm_context["allowed_action_types"] = list(prompt["actions"].keys())
+                elif isinstance(prompt, dict) and prompt.get("allowed_action_types"):
+                    # Delivery / scoped turns carry an explicit allowlist (e.g.
+                    # message_* only, set by auto_response.py) so the corrector and
+                    # the leaked-action filter in message_chain stay in scope. This
+                    # is the structural search-loop fix (2026-08-17): the delivery
+                    # LLM must never re-emit the producing action.
+                    llm_context["allowed_action_types"] = list(
+                        prompt["allowed_action_types"]
+                    )
                 else:
                     llm_context["allowed_action_types"] = None
             except Exception:

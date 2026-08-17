@@ -781,6 +781,70 @@ def test_build_json_prompt_filters_actions_by_allowlist(monkeypatch):
         core_initializer.actions_block = original_actions_block
 
 
+def test_build_json_prompt_filters_actions_by_allowlist_from_json_string(monkeypatch):
+    """Delivery turns are enqueued as a JSON string (core/auto_response.py). The
+    structural search-loop fix (2026-08-17) restricts the delivery LLM to
+    message_* actions via allowed_action_types, so it can never re-emit the
+    producing action (e.g. search_current_knowledge). build_prompt_request must
+    read that allowlist from the JSON string context_memory and filter the
+    action catalog accordingly."""
+
+    async def dummy_gather(message, ctx):
+        return {}
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+
+    from core.core_initializer import core_initializer
+
+    original_actions_block = core_initializer.actions_block
+    core_initializer.actions_block = {
+        "available_actions": {
+            "search_current_knowledge": {
+                "schema": {"type": "object", "properties": {}, "required": []},
+                "brief": "Search the web.",
+                "source": "web_search_plugin",
+            },
+            "message_telegram_bot": {
+                "schema": {"type": "object", "properties": {}, "required": []},
+                "brief": "Send Telegram message.",
+                "source": "telegram_bot",
+            },
+        }
+    }
+
+    try:
+        message = SimpleNamespace(
+            chat_id=1,
+            text="",
+            message_id=1,
+            from_user=SimpleNamespace(full_name="user", username="user"),
+            date=datetime.now(timezone.utc),
+            interface_path="telegram_bot/1",
+        )
+
+        # Delivery payload serialised as JSON, exactly as auto_response enqueues it.
+        import json
+
+        context_memory = json.dumps(
+            {
+                "system_message": {
+                    "type": "output",
+                    "is_action_result_delivery": True,
+                },
+                "allowed_action_types": ["message_telegram_bot"],
+            }
+        )
+
+        result = asyncio.run(
+            build_json_prompt(message, context_memory, interface_name="telegram_bot")
+        )
+
+        # The delivery LLM must only see message_* actions — search is hidden.
+        assert list(result["actions"].keys()) == ["message_telegram_bot"]
+    finally:
+        core_initializer.actions_block = original_actions_block
+
+
 def test_build_json_prompt_derives_default_interface_action_scope(monkeypatch):
     async def dummy_gather(message, ctx):
         return {}

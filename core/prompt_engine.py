@@ -1792,6 +1792,26 @@ async def build_prompt_request(
         ) or context_memory.get("allowed_actions")
         if isinstance(scoped_actions, (list, set, tuple)):
             allowed_action_types_for_prompt = {str(a) for a in scoped_actions if a}
+    elif isinstance(context_memory, str):
+        # Delivery turns are enqueued as a JSON string (core/auto_response.py).
+        # Parse it so a scoped allowlist (e.g. message_* only) is honoured here
+        # too, keeping the delivery LLM from re-emitting the producing action
+        # (search-loop fix, 2026-08-17). Fail-safe: any parse error leaves the
+        # allowlist unset (no restriction), matching the previous behaviour.
+        try:
+            import json as _json
+
+            _parsed = _json.loads(context_memory)
+            if isinstance(_parsed, dict):
+                scoped_actions = _parsed.get("allowed_action_types") or _parsed.get(
+                    "allowed_actions"
+                )
+                if isinstance(scoped_actions, (list, set, tuple)):
+                    allowed_action_types_for_prompt = {
+                        str(a) for a in scoped_actions if a
+                    }
+        except Exception:
+            pass
 
     # Determine if context_memory is a chat history map or a context dict
     # Context dicts have keys like 'interface_path', 'system_message', etc.
