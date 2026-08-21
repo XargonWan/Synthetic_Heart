@@ -14,6 +14,22 @@ from core.prompt_engine import (
 )
 from core.action_parser import CORRECTOR_RETRIES
 
+# Shared delivery style rule (2026-08-21): when Synth reports completed work —
+# e.g. web-search results — it must NOT introduce itself. The observed failure
+# mode was the model opening a search-result delivery with "Ciao, sono Rekku!"
+# (a self-presentation to a user who has known it for the whole conversation),
+# which reads as identity confusion. The rule is appended to EVERY action-result
+# delivery prompt (Flow A here, Flow B in search_orchestrator, PromptRequest
+# path in prompt_engine.build_delivery_request) and mirrored in the Agent Lane
+# system prompt. Purely prompt guidance — no keyword logic.
+NO_SELF_INTRODUCTION_RULE = (
+    "DELIVERY STYLE: never introduce yourself and never greet with your name "
+    "— the user already knows who you are, so do NOT say 'I am <name>' or "
+    "open with any self-presentation. Start directly with the substance of "
+    "what you found or did (e.g. 'I searched online and ...' / 'Ho cercato "
+    "su internet e ...'), in the conversation's own language."
+)
+
 
 class AutoResponseSystem:
     """Manages automatic responses through LLM for interface actions."""
@@ -142,6 +158,7 @@ class AutoResponseSystem:
                 delivery_note = (
                     f"DELIVERY TASK: These are the results from your "
                     f"'{action_type}' action. DO NOT call '{action_type}' again.\n"
+                    f"{NO_SELF_INTRODUCTION_RULE}\n"
                     f"Compose a natural message to the user summarising these "
                     f"results. Reply with exactly ONE action:\n"
                     f'{{"actions": [{{"type": "message_{interface_name}", '
@@ -169,9 +186,11 @@ class AutoResponseSystem:
             # allowlist (parsing the enqueued JSON string) and filters the action
             # catalog; message_chain's leaked-action filter and corrector honour it
             # too. Scoped to this single delivery turn — never persisted, never
-            # inherited by other turns. If derivation fails we leave the key unset
-            # (empty allowlist would hide ALL actions and break the delivery), so we
-            # fall back to the previous unrestricted behaviour.
+            # inherited by other turns. FAIL-CLOSED (hardening, 2026-08-18): the
+            # allowlist is always set to a non-empty message_* set — derived from
+            # the registered action catalog, with a structural fallback to the
+            # registered interfaces' message actions — so a delivery turn can never
+            # silently fall back to the full (unrestricted) catalog.
             delivery_allowed_action_types: list[str] = []
             try:
                 from core.core_initializer import core_initializer
@@ -186,6 +205,23 @@ class AutoResponseSystem:
                 log_debug(
                     f"[auto_response] delivery allowlist derive skipped: {_aa_exc}"
                 )
+            if not delivery_allowed_action_types:
+                # Fail-closed fallback: derive the message_* set structurally from
+                # the registered interfaces so the delivery turn is ALWAYS scoped.
+                try:
+                    from core.core_initializer import INTERFACE_REGISTRY
+
+                    delivery_allowed_action_types = sorted(
+                        {
+                            f"message_{name}"
+                            for name in INTERFACE_REGISTRY
+                            if name and not str(name).startswith("_")
+                        }
+                    )
+                except Exception as _fb_exc:
+                    log_debug(
+                        f"[auto_response] delivery allowlist fallback skipped: {_fb_exc}"
+                    )
 
             system_payload: dict[str, Any] = {
                 "system_message": {
@@ -198,6 +234,10 @@ class AutoResponseSystem:
                     "max_correction_attempts": int(
                         CORRECTOR_RETRIES
                     ),  # Use configurable corrector retries
+                    # Structural action_outputs so plugin_instance can build a
+                    # message_*-only delivery PromptRequest without re-parsing
+                    # the 'message' block (delivery-turn scoping, 2026-08-17).
+                    "action_outputs": action_outputs,
                 }
             }
             if delivery_allowed_action_types:

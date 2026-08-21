@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -310,6 +311,30 @@ async def test_orchestrator_delivers_second_turn(
 
     monkeypatch.setattr(core, "message_queue", _FakeQueue, raising=False)
 
+    # Provide a minimal action catalog so the delivery allowlist derivation
+    # (message_* only) has something to produce.
+    from core.core_initializer import core_initializer
+
+    monkeypatch.setattr(
+        core_initializer,
+        "actions_block",
+        {
+            "available_actions": {
+                "search_current_knowledge": {
+                    "schema": {"type": "object", "properties": {}, "required": []},
+                    "brief": "Search the web.",
+                    "source": "web_search_plugin",
+                },
+                "message_discord_bot": {
+                    "schema": {"type": "object", "properties": {}, "required": []},
+                    "brief": "Send Discord message.",
+                    "source": "message_plugin, discord_bot",
+                },
+            }
+        },
+        raising=False,
+    )
+
     await orch._run_task(
         task_id="t1",
         interface_path="discord/guild/chan",
@@ -327,6 +352,12 @@ async def test_orchestrator_delivers_second_turn(
     assert ctx["grillo_beat"] is True
     assert ctx["web_search_task_id"] == "t1"
     assert ctx["prior_context"] == {"k": "v"}
+    # Delivery-turn structural scoping (search-loop fix, 2026-08-17): the second
+    # turn must be restricted to message_* so the model cannot re-emit the
+    # producing search action and loop.
+    allowed = ctx.get("allowed_action_types")
+    assert isinstance(allowed, list) and len(allowed) > 0
+    assert all(str(a).startswith("message_") for a in allowed)
 
 
 def test_web_search_result_is_outbound_beat() -> None:
@@ -486,6 +517,295 @@ async def test_run_search_falls_back_to_hackernews_when_wikipedia_empty(
             "url": "https://news.ycombinator.com/item?id=1",
         }
     ]
+
+
+# ── Search-loop hardening tests (2026-08-18) ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_submit_dedups_in_flight_same_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second background search for the same interface_path while one is in
+    flight is rejected (returns the existing task id) so a single request can
+    never stack multiple deliveries — the 'max 2 messages' guarantee."""
+
+    async def _fake_init() -> None:
+        return None
+
+    async def _fake_insert(*_a: Any, **_k: Any) -> None:
+        return None
+
+    monkeypatch.setattr(search_orchestrator, "_init_table", _fake_init)
+    monkeypatch.setattr(search_orchestrator, "_insert_task", _fake_insert)
+
+    created: list[str] = []
+
+    class _DummyTask:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def add_done_callback(self, cb: Any) -> None:
+            pass
+
+    def _fake_create_task(coro: Any) -> _DummyTask:
+        created.append("task")
+        return _DummyTask("dummy")
+
+    monkeypatch.setattr(asyncio, "create_task", _fake_create_task)
+
+    orch = SearchOrchestrator()
+    t1 = await orch.submit(interface_path="tg/1", queries=["q1"], search_context="c")
+    t2 = await orch.submit(interface_path="tg/1", queries=["q2"], search_context="c2")
+
+    # The second submit returned the existing in-flight task id...
+    assert t1 == t2
+    # ...and only ONE background task was created.
+    assert len(created) == 1
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_submit_allows_distinct_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Different conversations are independent: each gets its own task."""
+
+    async def _fake_init() -> None:
+        return None
+
+    async def _fake_insert(*_a: Any, **_k: Any) -> None:
+        return None
+
+    monkeypatch.setattr(search_orchestrator, "_init_table", _fake_init)
+    monkeypatch.setattr(search_orchestrator, "_insert_task", _fake_insert)
+
+    created: list[str] = []
+
+    class _DummyTask:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def add_done_callback(self, cb: Any) -> None:
+            pass
+
+    def _fake_create_task(coro: Any) -> _DummyTask:
+        created.append("task")
+        return _DummyTask("dummy")
+
+    monkeypatch.setattr(asyncio, "create_task", _fake_create_task)
+
+    orch = SearchOrchestrator()
+    t1 = await orch.submit(interface_path="tg/1", queries=["q1"], search_context="c")
+    t2 = await orch.submit(interface_path="tg/2", queries=["q2"], search_context="c2")
+
+    assert t1 != t2
+    assert len(created) == 2
+
+
+@pytest.mark.asyncio
+async def test_recon_skips_when_web_search_task_id_present(
+    enable_recon: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A delivery turn carrying the orchestrator's web_search_task_id marker must
+    not trigger a new search."""
+    called = {"submit": False}
+
+    class _FakeOrchestrator:
+        async def submit(self, **_k: Any) -> str:
+            called["submit"] = True
+            return "x"
+
+    monkeypatch.setattr(
+        search_orchestrator,
+        "get_search_orchestrator",
+        lambda: _FakeOrchestrator(),
+    )
+
+    plugin = ReconWebSearchPlugin()
+    out = await plugin.parse_recon_response(
+        {"web_search": ["some query"]},
+        message=_Msg(),
+        context_memory={"web_search_task_id": "t1"},
+    )
+    assert called["submit"] is False
+    assert out == []
+
+
+@pytest.mark.asyncio
+async def test_recon_skips_when_interface_id_is_web_search(
+    enable_recon: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A turn delivered on the web_search interface must not trigger a search."""
+    called = {"submit": False}
+
+    class _FakeOrchestrator:
+        async def submit(self, **_k: Any) -> str:
+            called["submit"] = True
+            return "x"
+
+    monkeypatch.setattr(
+        search_orchestrator,
+        "get_search_orchestrator",
+        lambda: _FakeOrchestrator(),
+    )
+
+    plugin = ReconWebSearchPlugin()
+    out = await plugin.parse_recon_response(
+        {"web_search": ["some query"]},
+        message=_Msg(),
+        context_memory={"interface_id": "web_search"},
+    )
+    assert called["submit"] is False
+    assert out == []
+
+
+@pytest.mark.asyncio
+async def test_recon_triggered_instruction_carries_structural_marker(
+    enable_recon: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When a background search IS triggered, the returned instruction carries a
+    structural web_search_triggered marker so prompt_engine can drop the inline
+    search action for that turn."""
+
+    class _FakeOrchestrator:
+        async def submit(self, **_k: Any) -> str:
+            return "task-xyz"
+
+    monkeypatch.setattr(
+        search_orchestrator,
+        "get_search_orchestrator",
+        lambda: _FakeOrchestrator(),
+    )
+
+    plugin = ReconWebSearchPlugin()
+    out = await plugin.parse_recon_response(
+        {"web_search": ["weather Rome today"]},
+        message=_Msg(interface_path="tg/42"),
+        context_memory={},
+    )
+    assert len(out) == 1
+    assert out[0]["type"] == "instruction"
+    assert out[0].get("web_search_triggered") is True
+
+
+@pytest.mark.asyncio
+async def test_execute_action_refuses_on_delivery_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WebSearchPlugin.execute_action must NOT run a search on a delivery turn
+    (detected structurally via beat_type / web_search_task_id /
+    system_message.is_action_result_delivery), so the model cannot re-emit the
+    producing action and loop."""
+    from plugins.web_search_plugin.web_search_plugin import WebSearchPlugin
+    import plugins.web_search_plugin as ws_module
+
+    searched: list[str] = []
+
+    async def _fake_run_search(query: str, max_results: int = 5) -> list[dict]:
+        searched.append(query)
+        return [{"title": "T", "snippet": "S", "url": "https://example.com"}]
+
+    monkeypatch.setattr(ws_module, "run_search", _fake_run_search)
+
+    plugin = WebSearchPlugin()
+    action = {"type": "search_current_knowledge", "payload": {"query": "q"}}
+
+    # Delivery turn flagged via beat_type.
+    out = await plugin.execute_action(
+        action,
+        {"beat_type": "web_search_result"},
+        bot=None,
+        original_message=None,
+    )
+    assert out is None
+    assert searched == []
+
+    # Delivery turn flagged via web_search_task_id.
+    out = await plugin.execute_action(
+        action,
+        {"web_search_task_id": "t1"},
+        bot=None,
+        original_message=None,
+    )
+    assert out is None
+    assert searched == []
+
+    # Delivery turn flagged via system_message.is_action_result_delivery.
+    out = await plugin.execute_action(
+        action,
+        {"system_message": {"is_action_result_delivery": True}},
+        bot=None,
+        original_message=None,
+    )
+    assert out is None
+    assert searched == []
+
+    # A normal turn still runs the search.
+    out = await plugin.execute_action(
+        action, {"interface_path": "tg/1"}, bot=None, original_message=None
+    )
+    assert out is not None
+    assert searched == ["q"]
+
+
+@pytest.mark.asyncio
+async def test_execute_action_is_pure_tool_when_agent_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When called as an agent tool (context carries ``agent_tool: True``),
+    WebSearchPlugin.execute_action must be a *pure tool*: it runs the search and
+    returns the results to the bounded loop WITHOUT enqueuing a separate LLM
+    delivery turn. The agent loop delivers its single final reply via
+    agent_router._deliver_agent_reply, so a per-call delivery here is what
+    produced the observed spam (one user request -> many web-search messages)."""
+    import json
+
+    from plugins.web_search_plugin.web_search_plugin import WebSearchPlugin
+    import plugins.web_search_plugin as ws_module
+    import core.auto_response as auto_response
+
+    searched: list[str] = []
+
+    async def _fake_run_search(query: str, max_results: int = 5) -> list[dict]:
+        searched.append(query)
+        return [
+            {"title": "T1", "snippet": "S1", "url": "https://example.com/1"},
+            {"title": "T2", "snippet": "S2", "url": "https://example.com/2"},
+        ]
+
+    monkeypatch.setattr(ws_module, "run_search", _fake_run_search)
+
+    # request_llm_delivery must NEVER be called on the agent-tool path. If it
+    # is, the test fails loudly instead of silently passing.
+    async def _fail_if_delivery(*args, **kwargs):
+        raise AssertionError(
+            "request_llm_delivery must not be called when search runs as an agent tool"
+        )
+
+    monkeypatch.setattr(auto_response, "request_llm_delivery", _fail_if_delivery)
+
+    plugin = WebSearchPlugin()
+    action = {"type": "search_current_knowledge", "payload": {"query": "q"}}
+
+    out = await plugin.execute_action(
+        action,
+        {"agent_tool": True, "interface_path": "tg/1"},
+        bot=None,
+        original_message=None,
+    )
+
+    # The search ran once.
+    assert searched == ["q"]
+    # The tool returned the results to the loop (pure tool), not None.
+    assert out is not None
+    assert out.get("status") == "ok"
+    assert out.get("results_count") == 2
+    # The result string carries the search results so the loop can reason on them.
+    result_text = out.get("result", "")
+    assert isinstance(result_text, str)
+    parsed = json.loads(result_text)
+    assert len(parsed) == 2
+    assert parsed[0]["result"]["title"] == "T1"
 
 
 @pytest.mark.asyncio

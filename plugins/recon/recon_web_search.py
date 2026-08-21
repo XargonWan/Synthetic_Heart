@@ -224,9 +224,14 @@ class ReconWebSearchPlugin:
         # fresh queries and this plugin would spawn a new background task,
         # producing an infinite loop of "searching..." announcements while the
         # real findings (already in the prompt) are never reported. Detect the
-        # beat via structured context, not text — language-agnostic.
+        # beat via structured context, not text — language-agnostic. We also
+        # skip when the turn carries the orchestrator's ``web_search_task_id``
+        # marker or is delivered on the ``web_search`` interface, both of which
+        # identify a delivery turn structurally.
         if isinstance(context_memory, dict) and (
             context_memory.get("beat_type") == "web_search_result"
+            or context_memory.get("web_search_task_id") is not None
+            or context_memory.get("interface_id") == "web_search"
         ):
             log_debug(
                 "[recon_web_search] Skipping: this is a web_search_result "
@@ -357,6 +362,13 @@ class ReconWebSearchPlugin:
                 "content": instruction,
                 "source": "recon_web_search",
                 "priority": int(self.recon_priority),
+                # Structural marker (never text): a background search was started
+                # for THIS turn. prompt_engine reads it to drop
+                # ``search_current_knowledge`` from the exposed catalog so the
+                # model cannot ALSO fire the inline search action in the same
+                # turn — guaranteeing at most one search source per turn (the
+                # "max 2 messages" guarantee).
+                "web_search_triggered": True,
             }
         ]
 

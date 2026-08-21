@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from typing import Any
 
 from core.config_manager import config_registry
@@ -147,13 +148,35 @@ class WebSearchPlugin:
         if not query:
             return {"error": "Empty query"}
 
-        log_info(f"[web_search] Performing web search for: '{query}'")
-
-        # Prevent loop: check if we are already in delivery mode
-        is_action_result_delivery = (
+        # ── Delivery-turn re-entrancy guard (search-loop hardening, 2026-08-18) ──
+        # A delivery turn's ONLY job is to report already-completed results. If the
+        # model re-emits ``search_current_knowledge`` on such a turn we must NOT run
+        # the search again (and must NOT enqueue another delivery) — that is the
+        # observed loop where one user request produced many web-search replies.
+        # Detection is purely structural (never message text): the delivery turn is
+        # flagged by ``prompt_request_mode``/``mode`` == "delivery", by the
+        # orchestrator's ``beat_type``/``web_search_task_id`` markers, or by the
+        # ``system_message.is_action_result_delivery`` flag that the Flow A delivery
+        # payload carries. Any of these means "results are already being delivered —
+        # do nothing here".
+        is_delivery_turn = (
             context.get("prompt_request_mode") == "delivery"
             or context.get("mode") == "delivery"
+            or context.get("beat_type") == "web_search_result"
+            or context.get("web_search_task_id") is not None
+            or (
+                isinstance(context.get("system_message"), dict)
+                and context["system_message"].get("is_action_result_delivery") is True
+            )
         )
+        if is_delivery_turn:
+            log_debug(
+                f"[web_search] Refusing to re-run search on delivery turn "
+                f"(query={query!r})"
+            )
+            return None
+
+        log_info(f"[web_search] Performing web search for: '{query}'")
 
         results: list[dict[str, str]] = []
         try:
@@ -184,59 +207,71 @@ class WebSearchPlugin:
                 }
             ]
 
-        if not is_action_result_delivery:
-            delivery_ok = False
-            try:
-                from core.auto_response import request_llm_delivery
+        # ── Agent-tool purity guard (2026-08-19) ───────────────────────────────
+        # When called as an agent tool (context carries ``agent_tool: True`` from
+        # ``agent_tool_executor``), this action must be a *pure tool*: return the
+        # results to the bounded loop and do NOT enqueue a separate delivery turn.
+        # The agent loop itself delivers its single final reply via
+        # ``agent_router._deliver_agent_reply`` on the originating interface_path,
+        # so a per-call delivery here is what produced the observed spam (one user
+        # request -> many web-search messages).
+        if context.get("agent_tool"):
+            log_info(
+                f"[web_search] Agent tool call: returning {len(results)} result(s) "
+                "to loop (no separate delivery)"
+            )
+            return {
+                "status": "ok",
+                "results_count": len(results),
+                "result": json.dumps(action_outputs, ensure_ascii=False, default=str),
+            }
 
-                # Build a delivery context the auto-response system can act on.
-                # The raw action context only carries interface_path/chat_id (no
-                # interface_name), and request_llm_response bails out silently
-                # without it — the legacy memory_search plugin solves this the
-                # same way. interface_name is derived structurally from the
-                # interface_path prefix ("telegram_bot/123" -> "telegram_bot").
-                raw_interface_name = context.get("interface_name") or context.get(
-                    "interface"
-                )
-                interface_path = context.get("interface_path") or getattr(
-                    original_message, "interface_path", None
-                )
-                if (
-                    not raw_interface_name
-                    and interface_path
-                    and "/" in str(interface_path)
-                ):
-                    raw_interface_name = str(interface_path).split("/", 1)[0]
-                original_context = {
-                    "interface_name": raw_interface_name,
-                    "interface_path": interface_path,
-                    "chat_id": context.get("chat_id")
-                    or getattr(original_message, "chat_id", None),
-                    "message_id": context.get("message_id")
-                    or getattr(original_message, "message_id", None),
-                }
+        # We only reach this point on a NON-delivery, NON-agent-tool turn, so the
+        # search result is always delivered to the user.
+        delivery_ok = False
+        try:
+            from core.auto_response import request_llm_delivery
 
-                delivered = await request_llm_delivery(
-                    action_outputs=action_outputs,
-                    original_context=original_context,
-                    action_type="search_current_knowledge",
-                )
-                # The legacy path returns True once the delivery turn has been
-                # enqueued; treat a falsy return as a failed delivery.
-                delivery_ok = bool(delivered)
-                log_info(
-                    f"[web_search] Requested LLM delivery; success={bool(delivered)}"
-                )
-            except Exception as e:
-                log_warning(f"[web_search] Failed to request LLM delivery: {e}")
+            # Build a delivery context the auto-response system can act on.
+            # The raw action context only carries interface_path/chat_id (no
+            # interface_name), and request_llm_response bails out silently
+            # without it — the legacy memory_search plugin solves this the
+            # same way. interface_name is derived structurally from the
+            # interface_path prefix ("telegram_bot/123" -> "telegram_bot").
+            raw_interface_name = context.get("interface_name") or context.get(
+                "interface"
+            )
+            interface_path = context.get("interface_path") or getattr(
+                original_message, "interface_path", None
+            )
+            if not raw_interface_name and interface_path and "/" in str(interface_path):
+                raw_interface_name = str(interface_path).split("/", 1)[0]
+            original_context = {
+                "interface_name": raw_interface_name,
+                "interface_path": interface_path,
+                "chat_id": context.get("chat_id")
+                or getattr(original_message, "chat_id", None),
+                "message_id": context.get("message_id")
+                or getattr(original_message, "message_id", None),
+            }
 
-            # Fallback: if LLM delivery was not attempted or failed, send the
-            # outcome directly to the user so they get useful information (or a
-            # clear "no results" note) instead of silence.
-            if not delivery_ok:
-                await self._send_results_directly(
-                    results, query, context, original_message
-                )
+            delivered = await request_llm_delivery(
+                action_outputs=action_outputs,
+                original_context=original_context,
+                action_type="search_current_knowledge",
+            )
+            # The legacy path returns True once the delivery turn has been
+            # enqueued; treat a falsy return as a failed delivery.
+            delivery_ok = bool(delivered)
+            log_info(f"[web_search] Requested LLM delivery; success={bool(delivered)}")
+        except Exception as e:
+            log_warning(f"[web_search] Failed to request LLM delivery: {e}")
+
+        # Fallback: if LLM delivery was not attempted or failed, send the
+        # outcome directly to the user so they get useful information (or a
+        # clear "no results" note) instead of silence.
+        if not delivery_ok:
+            await self._send_results_directly(results, query, context, original_message)
 
         return {"status": "ok", "results_count": len(results)}
 

@@ -385,6 +385,23 @@ def _collect_beat_allowed_paths(ctx: Optional[dict]) -> Optional[set[str]]:
     if not isinstance(ctx, dict) or not ctx.get("grillo_beat"):
         return None
 
+    # Web-search delivery turns (search_orchestrator._deliver) are a second turn
+    # whose ONLY job is to report the completed search results. They are
+    # hard-scoped to their originating interface_path: the report belongs in the
+    # chat where the search was prompted, never redirected elsewhere. Without
+    # this, the model can deliver the results to an unrelated conversation —
+    # observed: a Grillo self-initiated search (origin ``grillo/-1``, no human
+    # requester) spammed Discord channels with unsolicited store/link messages
+    # pulled from the observer snippets. Scoping to the origin means a real
+    # human chat delivers only there, while an internal origin (``grillo/-1``)
+    # allows no outward message_* routing at all (there is no grillo message
+    # interface), so the delivery degrades to a no-op instead of spamming.
+    if ctx.get("beat_type") == "web_search_result":
+        origin = ctx.get("interface_path")
+        if isinstance(origin, str) and origin.strip():
+            return {origin.strip()}
+        return None
+
     allowed: set[str] = set()
 
     snippets = ctx.get("grillo_snippets")

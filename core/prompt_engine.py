@@ -1998,6 +1998,24 @@ async def build_prompt_request(
     except Exception as e:
         log_warning(f"[json_prompt] Recon gather failed: {e}")
 
+    # ── Recon-triggered background search (search-loop hardening, 2026-08-18) ──
+    # When recon started a background web-search for THIS turn (structural marker
+    # on the recon_web_search instruction — never text), the model must not ALSO
+    # fire the inline ``search_current_knowledge`` action in the same turn: that
+    # double-fire is the observed "one request -> many replies" spam. We drop the
+    # action from the exposed catalog below so the two search sources are
+    # mutually exclusive per turn, guaranteeing at most one "I'm searching"
+    # announcement + one result delivery.
+    recon_triggered_web_search = any(
+        isinstance(c, dict) and c.get("web_search_triggered") is True
+        for c in recon_contributions
+    )
+    if recon_triggered_web_search:
+        log_debug(
+            "[json_prompt] Recon started a background web search this turn; "
+            "dropping 'search_current_knowledge' from the exposed catalog"
+        )
+
     # === 3. Context base (history + optional plugin contributions) ===
     try:
         from core.history_engine import HistoryEngine
@@ -2636,6 +2654,18 @@ async def build_prompt_request(
                 f"{sorted(allowed_action_types_for_prompt)}"
             )
 
+        # ── Recon-triggered search: drop the inline search action (hardening) ──
+        # If recon already started a background web search for this turn, remove
+        # ``search_current_knowledge`` from the catalog so the model cannot ALSO
+        # fire it — the two search sources are mutually exclusive per turn. This
+        # is applied AFTER the allowlist filter so it holds for every engine path.
+        if recon_triggered_web_search and "search_current_knowledge" in full_actions:
+            full_actions.pop("search_current_knowledge", None)
+            log_debug(
+                "[json_prompt] Removed 'search_current_knowledge' (recon "
+                "background search already running this turn)"
+            )
+
         # Minify to reduce token usage (lite=True also filters + strips to brief-only)
         prompt_with_instructions["actions"] = minify_actions_block(
             full_actions, lite=is_lite
@@ -3213,9 +3243,19 @@ async def build_delivery_request(
 
     # ── System instruction ────────────────────────────────────────────────────
     base_instructions = load_json_instructions()
+    # No-self-introduction rule (2026-08-21): a delivery turn must open with
+    # the substance, never with "Ciao, sono <name>". Lazy import keeps this
+    # module free of an auto_response dependency at load time; fail-safe.
+    try:
+        from core.auto_response import NO_SELF_INTRODUCTION_RULE
+
+        _style_rule = f"{NO_SELF_INTRODUCTION_RULE} "
+    except Exception:
+        _style_rule = ""
     delivery_note = (
         f"DELIVERY MODE: The following are the results from your '{action_type}' action. "
         f"DO NOT call '{action_type}' again. "
+        f"{_style_rule}"
         "Compose a natural message to the user summarising these results. "
         "Use only message_* actions."
     )

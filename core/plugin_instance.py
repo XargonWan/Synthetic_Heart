@@ -12,7 +12,7 @@ import base64
 import os
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.json_utils import (
     dumps as json_dumps,
@@ -833,6 +833,27 @@ async def handle_incoming_message(
                     attachments=attachments,
                     max_chars=max_chars,
                 )
+
+            # ── Delivery-turn structural scoping (search-loop fix, 2026-08-17) ──
+            # A delivery turn is enqueued as a JSON string ({system_message,
+            # allowed_action_types}) and parsed successfully above, so it BYPASSES
+            # build_prompt_request — the prior allowed_action_types allowlist was
+            # therefore never applied to the action catalog the weak selenium model
+            # saw, and it re-emitted the producing action (e.g.
+            # search_current_knowledge) in a loop. Here we rebuild the delivery
+            # turn as a PromptRequest whose tool_declarations are message_* only;
+            # cortex_bridge._inject_actions_into_prompt folds exactly those into the
+            # system prompt, so the model literally cannot see the producing action.
+            # The original dict (system_message + allowed_action_types) is kept intact
+            # so the corrector metadata and allowlist still reach message_chain
+            # unchanged (plugin_instance pops __prompt_request before sanitizing and
+            # routes it to PromptRequest-aware engines below).
+            if isinstance(prompt, dict):
+                _pr = await _scope_delivery_prompt_request(
+                    prompt, interface_name, getattr(message, "interface_path", None)
+                )
+                if _pr is not None:
+                    prompt["__prompt_request"] = _pr
         else:
             # Get model's max chars limit - try plugin, then fallback to DEFAULT
             max_chars = None
@@ -1111,6 +1132,20 @@ async def handle_incoming_message(
             except Exception:
                 llm_context["allowed_action_types"] = None
 
+            # Propagate the delivery system_message (when present) into the
+            # corrector context so message_chain honours its metadata (e.g.
+            # max_correction_attempts / is_action_result_delivery). For a
+            # delivery turn context_memory_or_prompt is the enqueued JSON string,
+            # so the update above (which only inherits from a dict context) never
+            # carried it — copy it here so the delivery corrector stays bounded.
+            try:
+                if isinstance(prompt, dict) and isinstance(
+                    prompt.get("system_message"), dict
+                ):
+                    llm_context.setdefault("system_message", prompt["system_message"])
+            except Exception:
+                pass
+
             # Explicitly tag the action scope for the corrector
             llm_context["action_scope"] = "main"
 
@@ -1244,6 +1279,52 @@ def set_current_model(model: str) -> None:
             plugin.set_current_model(model)
         except Exception:
             pass
+
+
+async def _scope_delivery_prompt_request(
+    prompt: object,
+    interface_name: str | None,
+    interface_path: str | None,
+) -> object | None:
+    """If ``prompt`` is a delivery-turn dict, build a message_*-only PromptRequest.
+
+    Delivery turns are enqueued as a JSON string (``{system_message,
+    allowed_action_types}``) and parsed to a dict that BYPASSES
+    ``build_prompt_request``, so the action catalog was never trimmed for the
+    weak model and it re-emitted the producing action (search-loop fix,
+    2026-08-17). Rebuilding the delivery turn as a ``PromptRequest`` whose
+    ``tool_declarations`` are ``message_*`` only hides the producing action
+    from the model. Returns ``None`` for any non-delivery turn or on any error
+    (fail-closed to the legacy path).
+    """
+    if not isinstance(prompt, dict):
+        return None
+    _prompt_dict = cast(dict[str, Any], prompt)
+    try:
+        _sm = _prompt_dict.get("system_message")
+        if not (
+            isinstance(_sm, dict)
+            and _sm.get("is_action_result_delivery") is True
+            and _sm.get("action_type")
+            and _sm.get("action_outputs") is not None
+        ):
+            return None
+        from core.prompt_engine import build_delivery_request
+
+        _pr = await build_delivery_request(
+            str(_sm.get("action_type")),
+            _sm.get("action_outputs") or [],
+            interface_name,
+            interface_path,
+        )
+        log_info(
+            f"[plugin_instance] Delivery turn '{_sm.get('action_type')}' "
+            f"scoped to message_* via PromptRequest"
+        )
+        return _pr
+    except Exception as _de:
+        log_warning(f"[plugin_instance] Delivery PromptRequest scoping skipped: {_de}")
+        return None
 
 
 def _log_llm_traffic(prompt, response, interface_name):
