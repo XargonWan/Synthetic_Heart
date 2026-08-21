@@ -814,6 +814,59 @@ class FluxerInterface:
         sender_id = str(author_id) if author_id is not None else "unknown"
         message_id = message.get("id")
 
+        # Discord-like reply payload (2026-08-21 reply-context fix): when the
+        # user replies to a message, the gateway event carries
+        # ``referenced_message`` (the full quoted message) and/or
+        # ``message_reference`` (ids only). Extract the quoted TEXT so both
+        # the prompt paths (message.reply_to_message) and the history metadata
+        # can show what the user is replying to. Previously nothing was read
+        # inbound — the quote was silently lost.
+        _ref = message.get("referenced_message")
+        _ref_ref = message.get("message_reference")
+        reply_to_message = None
+        _reply_meta: dict | None = None
+        if isinstance(_ref, dict) and _ref.get("id") is not None:
+            _ref_author = _ref.get("author") or {}
+            _ref_name = (
+                _ref_author.get("username")
+                or _ref_author.get("global_name")
+                or "unknown"
+            )
+            _ref_text = str(_ref.get("content") or "")
+            reply_to_message = SimpleNamespace(
+                message_id=str(_ref.get("id")),
+                text=_ref_text or None,
+                caption=None,
+                date=None,
+                from_user=SimpleNamespace(
+                    id=(
+                        str(_ref_author.get("id"))
+                        if _ref_author.get("id") is not None
+                        else None
+                    ),
+                    username=_ref_name,
+                    full_name=_ref_author.get("global_name") or _ref_name,
+                ),
+            )
+            if _ref_text.strip():
+                _reply_meta = {
+                    "reply_to": {
+                        "sender_name": _ref_name,
+                        "text": _ref_text,
+                        "message_id": str(_ref.get("id")),
+                    }
+                }
+        elif isinstance(_ref_ref, dict) and _ref_ref.get("message_id") is not None:
+            # Ids only: keep the reference for outbound threading, but there is
+            # no local way to resolve the quoted text.
+            reply_to_message = SimpleNamespace(
+                message_id=str(_ref_ref["message_id"]),
+                text=None,
+                caption=None,
+                date=None,
+                from_user=SimpleNamespace(id=None, username=None, full_name=None),
+            )
+
         try:
             from core.chat_context_manager import add_message_to_context
 
@@ -824,6 +877,7 @@ class FluxerInterface:
                 sender_id=sender_id,
                 message_id=None,
                 timestamp=message.get("timestamp"),
+                metadata=_reply_meta,
                 fluxer_message_id=(str(message_id) if message_id is not None else None),
             )
         except Exception as exc:
@@ -850,7 +904,7 @@ class FluxerInterface:
                 first_name=None,
             ),
             entities=None,
-            reply_to_message=None,
+            reply_to_message=reply_to_message,
         )
 
         try:

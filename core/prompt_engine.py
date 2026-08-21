@@ -1648,6 +1648,25 @@ def _assemble_prompt_request(  # noqa: PLR0913
     except Exception:
         pass
 
+    # ── Quoted-reply inline prefix (2026-08-21) ──────────────────────────────
+    # The history renderer truncates the [replied to ...] suffix to a few dozen
+    # chars and the typed-turn parser strips it entirely, so without this block
+    # the model never reliably sees WHICH earlier message the user is replying
+    # to. Rendered as an inline prefix on the current turn (same mechanism as
+    # the SOUL user prefix), structurally from message.reply_to_message — never
+    # from message-text heuristics.
+    _reply_quote_prefix = ""
+    if isinstance(reply_to_dict, dict):
+        _rq_sender = str((reply_to_dict.get("from") or {}).get("username") or "Unknown")
+        _rq_text = str(reply_to_dict.get("text") or "").strip()
+        if _rq_text and _rq_text != "[Non-text content]":
+            if len(_rq_text) > 400:
+                _rq_text = _rq_text[:400] + "\u2026"
+            _rq_safe = _rq_text.replace('"', "'").replace("\n", " ")
+            _reply_quote_prefix = (
+                f'[The user is replying to {_rq_sender}\'s message: "{_rq_safe}"]\n'
+            )
+
     # ── Attachments ─────────────────────────────────────────────────────────
     pr_attachments = _build_pr_attachments(image_data, attachments)
 
@@ -1702,12 +1721,14 @@ def _assemble_prompt_request(  # noqa: PLR0913
 
     _soul_user_prefix = f"{_soul_dsp_prefix}{_soul_delta}"
 
+    _combined_prefix = _soul_user_prefix + _reply_quote_prefix
+
     return PromptRequest(
         system_instruction=system_instruction,
         tool_declarations=tool_declarations,
         context_summary=context_summary,
         conversation_history=conversation_history,
-        current_text=(_soul_user_prefix + text) if _soul_user_prefix else text,
+        current_text=((_combined_prefix + text) if _combined_prefix else text),
         runtime_ctx=runtime_ctx,
         attachments=pr_attachments,
         reply_to=reply_to_dict,

@@ -290,6 +290,10 @@ def _relative_age_marker(ts: Any, now: datetime | None = None) -> str:
         return ""
 
 
+# Max chars of a quoted message rendered in the history reply annotation.
+_REPLY_QUOTE_MAX_CHARS = 200
+
+
 def _entry_to_text(entry: HistoryEntry) -> str:
     if isinstance(entry, str):
         return entry
@@ -314,7 +318,9 @@ def _entry_to_text(entry: HistoryEntry) -> str:
         body = f"summary: {summary}" if summary else (text or "")
         return f"[diary {_format_ts(ts)}] {body}".strip()
 
-    # Reply context annotation (40-char truncation for LLM readability)
+    # Reply context annotation. Truncated for LLM readability, but generous
+    # enough to keep the quote meaningful (40 chars cut mid-sentence and made
+    # the quoted message unrecognisable — 2026-08-21 reply-context fix).
     reply_suffix = ""
     meta = entry.get("metadata")
     if isinstance(meta, dict):
@@ -322,8 +328,8 @@ def _entry_to_text(entry: HistoryEntry) -> str:
         if isinstance(reply_to, dict):
             reply_sender = reply_to.get("sender_name") or "Unknown"
             reply_text = str(reply_to.get("text") or "")
-            if len(reply_text) > 40:
-                reply_text = reply_text[:40] + "\u2026"
+            if len(reply_text) > _REPLY_QUOTE_MAX_CHARS:
+                reply_text = reply_text[:_REPLY_QUOTE_MAX_CHARS] + "\u2026"
             reply_text_safe = reply_text.replace('"', "'")
             reply_suffix = f' [replied to {reply_sender}: "{reply_text_safe}"]'
 

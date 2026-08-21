@@ -148,6 +148,34 @@ def _extract_grillo_activity_log_id(message: object) -> int | None:
         return None
 
 
+def _reply_context_from_message(message: object) -> dict[str, str] | None:
+    """Extract the quoted-reply context from a queued inbound message.
+
+    When the user REPLIES to an earlier message, the interfaces attach the
+    platform reply payload on ``message.reply_to_message`` (Telegram wrapper,
+    Discord SimpleNamespace, Matrix fallback-parse namespace, Fluxer extraction).
+    The Agent Lane never sees that attribute — its prompt is built only from
+    goal + observations + context — so without this the model answers a quote
+    it cannot read. Returns ``{"sender_name", "text"}`` or None. Purely
+    structural (attribute reads), no keyword logic.
+    """
+    reply = getattr(message, "reply_to_message", None)
+    if reply is None:
+        return None
+    text = str(
+        getattr(reply, "text", None) or getattr(reply, "caption", None) or ""
+    ).strip()
+    if not text:
+        return None
+    sender = getattr(reply, "from_user", None)
+    sender_name = (
+        getattr(sender, "full_name", None)
+        or getattr(sender, "username", None)
+        or "Unknown"
+    )
+    return {"sender_name": str(sender_name), "text": text}
+
+
 def _get_queue() -> asyncio.PriorityQueue:
     global _queue, _queue_loop
     try:
@@ -1546,6 +1574,18 @@ async def _consumer_loop() -> None:
                             context["voice_channel_id"] = str(_vc_id)
                         else:
                             context.pop("voice_channel_id", None)
+
+                        # Propagate quoted-reply context (2026-08-21): what earlier
+                        # message the user is replying to. Reaches BOTH the Fast
+                        # Lane (build_prompt_request via this same dict) and the
+                        # Agent Lane (agent_router.route → run_agentic_turn →
+                        # _build_agent_prompt renders a QUOTED MESSAGE block).
+                        # Written/cleared every turn so a stale value never lingers.
+                        _reply_ctx = _reply_context_from_message(_queued_msg)
+                        if _reply_ctx is not None:
+                            context["reply_context"] = _reply_ctx
+                        else:
+                            context.pop("reply_context", None)
 
                         # Propagate the structural in-world player-chat marker so
                         # message_chain can treat a reactive vessel player turn as
