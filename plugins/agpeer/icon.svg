@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="agpeer">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#39c48f"/>
+      <stop offset="1" stop-color="#2f8fd6"/>
+    </linearGradient>
+  </defs>
+  <circle cx="128" cy="128" r="112" fill="none" stroke="url(#g)" stroke-width="16"/>
+  <!-- two peers exchanging a file: opposing arrows around a shared node -->
+  <circle cx="86" cy="98" r="18" fill="url(#g)"/>
+  <circle cx="170" cy="158" r="18" fill="url(#g)"/>
+  <path d="M104 96 L176 96 L176 76 L216 108 L176 140 L176 120 L104 120 Z"
+        fill="url(#g)" opacity="0.85"/>
+  <path d="M152 160 L80 160 L80 140 L40 172 L80 204 L80 184 L152 184 Z"
+        fill="url(#g)" opacity="0.55"/>
+</svg>
