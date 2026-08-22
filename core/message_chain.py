@@ -1185,7 +1185,11 @@ async def handle_incoming_message(
     """
     # Local imports to avoid circular dependencies
     from core.transport_layer import extract_json_from_text, run_corrector_middleware
-    from core.action_parser import run_actions, CORRECTOR_RETRIES
+    from core.action_parser import (
+        run_actions,
+        CORRECTOR_RETRIES,
+        _is_delivered_auto_tts_failure,
+    )
     from types import SimpleNamespace
     from datetime import datetime, timezone
 
@@ -2964,6 +2968,27 @@ async def handle_incoming_message(
                                 _tts_target_path = payload.get(
                                     "interface_path"
                                 ) or payload.get("chat_name")
+                                # A model may hallucinate the interface prefix
+                                # (e.g. 'em_chat_bridge/...'); the message action is
+                                # merged away below, so the voice note would otherwise
+                                # be undeliverable. Route to the chat the turn arrived
+                                # in when the payload path is not a registered
+                                # interface. Structural check, never keyword logic.
+                                if isinstance(_tts_target_path, str) and "/" in (
+                                    _tts_target_path
+                                ):
+                                    from core.interface_path_utils import (
+                                        resolve_registered_interface_path,
+                                    )
+
+                                    _routed_tts_path = (
+                                        resolve_registered_interface_path(
+                                            _tts_target_path,
+                                            context=ctx,
+                                        )
+                                    )
+                                    if _routed_tts_path:
+                                        _tts_target_path = _routed_tts_path
 
                                 if is_voice_response:
                                     # Voice response strategy:
@@ -3309,8 +3334,23 @@ async def handle_incoming_message(
                         # If we had corruption recovery or validation failures, check if correction is needed
                         # But SKIP correction for "unfixable" errors (policy restrictions like whitelist/suggest mode)
                         # These can't be fixed by the LLM - they're system configuration issues
+                        # Also SKIP correction for auto-injected tts_speak failures whose VoxPlugin
+                        # text-only fallback already delivered the reply: the message action was
+                        # merged into the TTS and removed, so the fallback text IS the reply.
+                        # Re-running the LLM would re-emit the message action and deliver a
+                        # duplicate (the double-interface-output bug).
+                        delivered_auto_tts_failures = [
+                            f for f in failed if _is_delivered_auto_tts_failure(f)
+                        ]
+                        if delivered_auto_tts_failures:
+                            log_warning(
+                                f"[message_chain] Excluding {len(delivered_auto_tts_failures)} auto-injected tts_speak failure(s) from correction: text-only fallback already delivered the reply (avoiding duplicate message)"
+                            )
                         fixable_failures = [
-                            f for f in failed if not f.get("unfixable", False)
+                            f
+                            for f in failed
+                            if not f.get("unfixable", False)
+                            and not _is_delivered_auto_tts_failure(f)
                         ]
                         unfixable_failures = [
                             f for f in failed if f.get("unfixable", False)

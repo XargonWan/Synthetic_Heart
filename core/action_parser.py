@@ -1677,9 +1677,20 @@ async def _request_selective_correction(
     """Request LLM to fix only the failed actions, while preserving successful ones."""
 
     fixable_failed_actions = [
-        failed for failed in failed_actions if not failed.get("unfixable")
+        failed
+        for failed in failed_actions
+        if not failed.get("unfixable") and not _is_delivered_auto_tts_failure(failed)
     ]
     unfixable_failed_count = len(failed_actions) - len(fixable_failed_actions)
+    delivered_auto_tts_count = sum(
+        1 for failed in failed_actions if _is_delivered_auto_tts_failure(failed)
+    )
+    if delivered_auto_tts_count:
+        log_warning(
+            f"[action_parser] Excluding {delivered_auto_tts_count} auto-injected "
+            "tts_speak failure(s) from correction: text-only fallback already "
+            "delivered the reply (avoiding duplicate message)"
+        )
     if not fixable_failed_actions:
         log_info(
             "[action_parser] Skipping selective correction because all failed actions are unfixable"
@@ -2074,7 +2085,17 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
             if result_error is not None:
                 collected_errors.append(result_error)
                 failed_actions.append(
-                    {"index": idx, "action": action, "errors": [result_error]}
+                    {
+                        "index": idx,
+                        "action": action,
+                        "errors": [result_error],
+                        "result_reason": (
+                            result.get("reason")
+                            if isinstance(result, dict)
+                            and isinstance(result.get("reason"), str)
+                            else None
+                        ),
+                    }
                 )
             else:
                 processed_actions.append(action)
@@ -2246,6 +2267,33 @@ def _action_result_error(result: Any) -> str | None:
         value = result.get("message") or result.get("detail")
         return str(value or "action failed")
     return None
+
+
+def _is_delivered_auto_tts_failure(failed_item: Any) -> bool:
+    """True when a failed action is an auto-injected ``tts_speak`` whose
+    VoxPlugin text-only fallback already delivered the reply.
+
+    message_chain merges a standalone ``message_*`` action into an auto-injected
+    ``tts_speak`` and drops the message action, so when synthesis fails
+    VoxPlugin's text-only fallback (reason ``tts_failed_fallback_sent``) is the
+    only delivery — and it has already happened. Such failures must NOT trigger
+    LLM correction: re-running the model re-emits the message action and
+    delivers a duplicate (the double-interface-output bug). Structural check
+    only (action type + ``__auto_injected`` payload flag + result reason);
+    never inspects message text.
+    """
+    if not isinstance(failed_item, dict):
+        return False
+    action = failed_item.get("action")
+    if not isinstance(action, dict):
+        return False
+    atype = action.get("type") or action.get("action")
+    if atype != "tts_speak":
+        return False
+    payload = action.get("payload")
+    if not isinstance(payload, dict) or not payload.get("__auto_injected"):
+        return False
+    return failed_item.get("result_reason") == "tts_failed_fallback_sent"
 
 
 def _llm_already_provided_diary_content(processed_actions: list) -> bool:
