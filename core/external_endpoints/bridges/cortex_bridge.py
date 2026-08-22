@@ -1200,6 +1200,52 @@ class ExternalCortexEngine(AIPluginBase):
         finally:
             self._scope_model_override = previous
 
+    def _bind_langfuse_turn_context(self, messages: Any) -> None:
+        """Attach per-turn attribution context for Langfuse tracing.
+
+        Pulls structural turn metadata (interface, user, mode, scope) from a
+        typed ``PromptRequest`` so every cortex trace for this turn — including
+        retries and nested TTS calls — groups under the same Langfuse session
+        and user. The call site is structural: it never reads message text.
+        """
+        try:
+            from core.cortex_api_logger import set_langfuse_turn_context
+            from core.prompt_request import PromptRequest
+
+            prompt_request: PromptRequest | None = None
+            if isinstance(messages, PromptRequest):
+                prompt_request = messages
+            elif isinstance(messages, dict):
+                candidate = messages.get("__prompt_request")
+                if isinstance(candidate, PromptRequest):
+                    prompt_request = candidate
+
+            if prompt_request is None:
+                set_langfuse_turn_context(None)
+                return
+
+            runtime_ctx = prompt_request.runtime_ctx
+            context: dict[str, Any] = {
+                "interface_path": runtime_ctx.interface_path,
+                "interface_name": runtime_ctx.interface_name,
+                "chat_type": runtime_ctx.chat_type,
+                "username": runtime_ctx.username,
+                "usertag": runtime_ctx.usertag,
+                "scope": runtime_ctx.scope,
+                "mode": prompt_request.mode,
+                "input_source": runtime_ctx.input_source,
+            }
+            set_langfuse_turn_context(
+                {k: v for k, v in context.items() if v not in (None, "")}
+            )
+        except Exception:
+            try:
+                from core.cortex_api_logger import set_langfuse_turn_context
+
+                set_langfuse_turn_context(None)
+            except Exception:
+                pass
+
     async def generate_response(
         self,
         messages: list[dict[str, Any]] | Any,
@@ -1224,6 +1270,8 @@ class ExternalCortexEngine(AIPluginBase):
             prompt_extra_kwargs = self._tool_api_kwargs(messages)
             msg_list = self._build_messages(messages)
             msg_list = self._clamp_messages_to_char_budget(msg_list)
+
+        self._bind_langfuse_turn_context(messages)
 
         model = self._scope_model_override or self._endpoint.default_model
         if not model and self._endpoint.available_models:

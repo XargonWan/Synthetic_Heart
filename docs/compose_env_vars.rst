@@ -114,9 +114,18 @@ For users migrating from older Synthetic Heart installations:
 
 Observability:
 
-- ``LANGFUSE_ENABLED``
+- ``LANGFUSE_ENABLED`` / ``CORTEX_LANGFUSE_ENABLED``
 - ``LANGFUSE_HOST`` / ``LANGFUSE_BASE_URL``
 - ``LANGFUSE_PUBLIC_KEY`` / ``LANGFUSE_SECRET_KEY``
+- ``LANGFUSE_FLUSH_EACH_CALL`` (default ``false``; set ``true`` to flush every
+  LLM request/response synchronously so traces are delivered to the Langfuse
+  server before the interface output — recommended for live debugging)
+- ``CORTEX_LANGFUSE_REDACT_PAYLOADS`` (default ``true``; set ``false`` to store
+  full prompt/response text in Langfuse traces)
+- ``CORTEX_LANGFUSE_CAPTURE_GENERATIONS`` (default ``true`` — populates
+  model/token columns and the model-usage graphs)
+- ``CORTEX_LANGFUSE_CAPTURE_HEADERS`` (default ``false``; set ``true`` to store
+  request headers, secrets redacted)
 - ``CORTEX_API_LOG_ENABLED``
 
 Prompt / runtime behavior:
