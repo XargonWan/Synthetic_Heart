@@ -111,11 +111,29 @@ async def search_memories(
     keywords: list[str] | None = None,
     include_chat: bool = True,
     limit: int = 5,
+    exclude_interface_paths: list[str] | None = None,
 ) -> list[dict]:
     """Unified memory search across memories, diary, and chat history.
 
-    Returns normalized hits:
-    {"source", "id", "timestamp", "snippet", "tags"}
+    Args:
+        tags: Recon-derived tags to match against stored tag columns.
+        keywords: Content keywords to match against stored text columns.
+        include_chat: Also search raw ``chat_history_cache`` rows.
+        limit: Maximum hits to return.
+        exclude_interface_paths: Interface paths whose raw chat rows must be
+            excluded from the chat-history tier. The message currently being
+            answered is persisted to ``chat_history_cache`` *before* the prompt
+            is built, so a keyword search extracted from that very message
+            matches it (and its recent neighbours) verbatim and re-injects the
+            current conversation as "memories" — the model then anchors on
+            stale lines (e.g. a "good morning" greeting) instead of the actual
+            question. Callers pass the current chat's path so its own raw
+            lines are never duplicated; durable facts still come from the
+            ``memories``/``ai_diary`` tiers.
+
+    Returns:
+        Normalized hits:
+        {"source", "id", "timestamp", "snippet", "tags"}
     """
 
     tags = [str(t).strip() for t in (tags or []) if str(t).strip()]
@@ -273,6 +291,21 @@ async def search_memories(
                         # Case-insensitive across backends (see _mem_where note).
                         chat_conditions.append("LOWER(message_text) LIKE %s")
                         chat_params.append(f"%{tok.lower()}%")
+                    # Never re-inject the chat we are currently answering from.
+                    # The current message is persisted to the cache before the
+                    # prompt is built, so a keyword search extracted from it
+                    # matches itself (and its recent neighbours) verbatim and
+                    # echoes the live conversation back as "memories" — the
+                    # model then keeps "responding to the good morning message"
+                    # because that greeting is re-injected every turn.
+                    if exclude_interface_paths:
+                        excluded = [str(p) for p in exclude_interface_paths if p]
+                        if excluded:
+                            chat_conditions.append(
+                                "interface_path NOT IN (%s)"
+                                % ",".join(["%s"] * len(excluded))
+                            )
+                            chat_params.extend(excluded)
                     if chat_conditions:
                         chat_where = " OR ".join(chat_conditions)
                         chat_query = (

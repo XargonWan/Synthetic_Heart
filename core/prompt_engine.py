@@ -1860,8 +1860,18 @@ async def build_prompt_request(
         try:
             from core.synth_core_memory import search_memories
 
+            # Exclude the current chat from the raw chat-history tier: the
+            # message being answered is already persisted to
+            # ``chat_history_cache``, so a keyword search extracted from it
+            # would echo the live conversation (including stale greetings)
+            # back as "memories". Durable facts still come from the
+            # memories/ai_diary tiers.
+            _excluded_paths = [str(interface_path)] if interface_path else None
             memories = await search_memories(
-                keywords=expanded_tags, limit=max(1, mem_limit), include_chat=True
+                keywords=expanded_tags,
+                limit=max(1, mem_limit),
+                include_chat=True,
+                exclude_interface_paths=_excluded_paths,
             )
         except Exception as e:
             log_warning(f"[json_prompt] search_memories failed: {e}")

@@ -521,6 +521,109 @@ async def test_synth_core_search_memories_rare_keyword_survives_generic_dilution
 
 
 @pytest.mark.asyncio
+async def test_search_memories_excludes_chat_history_of_current_chat(
+    monkeypatch,
+) -> None:
+    """The chat-history tier must not re-inject the chat being answered.
+
+    The message currently being processed is persisted to chat_history_cache
+    before the prompt is built, so a keyword search extracted from that very
+    message would echo the live conversation (incl. stale greetings) back as
+    "memories". Rows from the excluded interface_path must never appear.
+    """
+    captured_queries: list[tuple[str, list[object] | None]] = []
+
+    class DummyCursor:
+        def __init__(self) -> None:
+            self.queries: list[tuple[str, list[object] | None]] = []
+
+        async def execute(self, sql: str, params=None) -> None:
+            stored = list(params) if params is not None else None
+            self.queries.append((sql, stored))
+            captured_queries.append((sql, stored))
+
+        async def fetchall(self) -> list[list[object]]:
+            last_sql, last_params = self.queries[-1]
+            if "FROM chat_history_cache" in last_sql:
+                # Simulate the DB honouring the NOT IN exclusion: when the
+                # current chat's path is excluded, drop the row belonging to it
+                # (identified here by the id 1) and keep the other-chat row.
+                excluded_path = next(
+                    (str(p) for p in (last_params or []) if "/" in str(p)),
+                    None,
+                )
+                rows = [
+                    [
+                        "chat_history",
+                        1,
+                        "2026-08-15 06:26:34",
+                        "Basically once its elevated i can reset it...",
+                        None,
+                    ],
+                    [
+                        "chat_history",
+                        2,
+                        "2026-08-14 06:00:00",
+                        "older morning greeting from another chat",
+                        None,
+                    ],
+                ]
+                if excluded_path:
+                    return [r for r in rows if r[1] != 1]
+                return rows
+            return []
+
+        async def __aenter__(self) -> "DummyCursor":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    class DummyConn:
+        def __init__(self) -> None:
+            self.cursor_obj = DummyCursor()
+
+        async def __aenter__(self) -> "DummyConn":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def cursor(self) -> DummyCursor:
+            return self.cursor_obj
+
+    conn_instance = DummyConn()
+
+    monkeypatch.setattr(scm, "get_conn_ctx", lambda: conn_instance)
+    monkeypatch.setattr(scm, "_get_db_type", lambda: "postgres")
+
+    results = await scm.search_memories(
+        keywords=["elevated", "reset"],
+        include_chat=True,
+        limit=5,
+        exclude_interface_paths=["telegram_bot/5208932647"],
+    )
+
+    # The chat-history query must carry the NOT IN exclusion for the current chat.
+    chat_queries = [
+        (sql, params)
+        for sql, params in captured_queries
+        if "FROM chat_history_cache" in sql
+    ]
+    assert chat_queries, "chat-history tier query was not issued"
+    chat_sql, chat_params = chat_queries[-1]
+    assert "interface_path NOT IN" in chat_sql
+    assert "telegram_bot/5208932647" in [str(p) for p in (chat_params or [])]
+
+    # The row from the excluded current chat must not be returned; the
+    # other-chat row may surface.
+    snippets = [str(r.get("snippet") or "") for r in results]
+    assert not any("elevated i can reset" in s for s in snippets), (
+        f"current chat's own message was echoed back as a memory: {snippets}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_build_json_prompt_merges_soul_recalled_memories(monkeypatch):
     soul_memory = (
         "[SOUL recalled memory | 2026-04-18 | same chat] Alice loves jasmine tea."
