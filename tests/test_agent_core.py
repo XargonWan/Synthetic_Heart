@@ -358,3 +358,293 @@ def test_extract_tool_calls_from_text_dedupes_duplicate_calls():
     assert len(calls) == 1
     assert calls[0]["name"] == "agent_read_file"
     assert calls[0]["arguments"]["path"] == "a.pdf"
+
+
+# ---------------------------------------------------------------------------
+# Engine-failure classification (offline endpoint / bad key / empty / timeout)
+# ---------------------------------------------------------------------------
+
+from core.agent_core import (
+    _describe_engine_failure,
+    _engine_failure_from_diagnostics,
+    classify_engine_failure,
+)
+
+
+@pytest.mark.parametrize(
+    "error_text,kwargs,expected_kind",
+    [
+        ("APIConnectionError: Connection error.", {}, "connection"),
+        ("Connection refused when connecting to the endpoint", {}, "connection"),
+        ("getaddrinfo failed: Name or service not known", {}, "connection"),
+        ("Error code: 401 - Unauthorized", {}, "auth"),
+        ("Error code: 403 - Forbidden", {}, "auth"),
+        ("invalid API key provided", {}, "auth"),
+        (
+            "Error code: 400 - This model supports at most 20 tool definitions",
+            {},
+            "bad_request",
+        ),
+        ("Error code: 429 - rate limit exceeded", {}, "rate_limited"),
+        ("Error code: 503 - Service Unavailable", {}, "server_error"),
+        ("ReadTimeout: timed out", {}, "timeout"),
+        (None, {"timed_out": True}, "timeout"),
+        (None, {"empty_body": True}, "empty"),
+        ("something utterly strange happened", {}, "unknown"),
+    ],
+)
+def test_classify_engine_failure_kinds(error_text, kwargs, expected_kind):
+    kind, hint = classify_engine_failure(error_text, **kwargs)
+    assert kind == expected_kind
+    assert hint  # every kind carries an operator-facing hint
+
+
+def test_classify_engine_failure_error_beats_timeout_flag():
+    """A recorded connection error classifies as connection even when the loop
+    only saw a hard timeout — the offline-endpoint production case."""
+    kind, _ = classify_engine_failure(
+        "APIConnectionError: Connection error.", timed_out=True
+    )
+    assert kind == "connection"
+
+
+def test_describe_engine_failure_without_diagnostics_is_honest():
+    """No diagnostics → describe the symptom, never guess 'bad API key'."""
+    desc = _describe_engine_failure(None, "some-engine")
+    assert "empty response" in desc
+    assert "API key" not in desc
+
+
+class _FakeBridgeEngine:
+    """Mimics a cortex bridge's diagnostic attributes."""
+
+    def __init__(self, last_error=None, empty_body=False):
+        self._last_attempt_error = last_error
+        self._last_response_metadata = {"empty_response": empty_body}
+
+
+class _FakeCortexRegistry:
+    def __init__(self, engine_obj):
+        self._engine_obj = engine_obj
+
+    def get_engine(self, name):
+        return self._engine_obj
+
+
+def _install_agent_harness(monkeypatch, engine_reply, bridge_engine):
+    """Patch the agent loop for turn-level tests.
+
+    ``engine_reply`` may be a string (returned for every direct engine call) or
+    an async callable ``(prompt, engine_name) -> str``.
+    """
+    from core.agent_core import _agent_loop_manager
+
+    if isinstance(engine_reply, str):
+        text = engine_reply
+
+        async def fake_call_engine_direct(prompt, engine_name, cortex_scope="agent"):
+            return text
+
+    else:
+        fake_call_engine_direct = engine_reply
+
+    monkeypatch.setattr(
+        _agent_loop_manager, "_call_engine_direct", fake_call_engine_direct
+    )
+
+    async def fake_persist(**kwargs):
+        return 1
+
+    monkeypatch.setattr(_agent_loop_manager, "_persist_agentic_turn", fake_persist)
+
+    monkeypatch.setattr(
+        "core.cortex_registry.get_cortex_registry",
+        lambda: _FakeCortexRegistry(bridge_engine),
+    )
+
+    async def fake_base_engine(*args, **kwargs):
+        return "base-engine"
+
+    monkeypatch.setattr("core.config.get_active_cortex_engine", fake_base_engine)
+
+    notified: list[str] = []
+    monkeypatch.setattr("core.notifier.notifier", lambda msg: notified.append(msg))
+
+    return _agent_loop_manager, notified
+
+
+@pytest.mark.asyncio
+async def test_offline_endpoint_fails_fast_with_connection_cause(monkeypatch):
+    """An offline agent endpoint (bridge records a connection error, the loop
+    sees an empty response) must end the turn promptly as engine_error with the
+    TRUE cause — not grind iterations and not blame a bad API key."""
+    bridge = _FakeBridgeEngine(last_error="APIConnectionError: Connection error.")
+    manager, notified = _install_agent_harness(monkeypatch, "", bridge)
+
+    call_log: list[str] = []
+
+    async def fake_call(prompt, engine_name, cortex_scope="agent"):
+        call_log.append(engine_name)
+        return ""
+
+    monkeypatch.setattr(manager, "_call_engine_direct", fake_call)
+
+    result = await manager.run_agentic_turn(
+        goal="do a thing",
+        engine="fake-engine",
+        max_iterations=5,
+        timeout_seconds=30.0,
+    )
+
+    assert result["stop_reason"] == "engine_error"
+    error_contents = [
+        str(o.get("content"))
+        for o in result["observations"]
+        if o.get("role") == "error"
+    ]
+    assert any("connection" in c for c in error_contents), error_contents
+    # Structural failure: no pointless same-engine retry — only the primary
+    # call plus the Base Cortex safety-net call.
+    assert call_log == ["fake-engine", "base-engine"]
+    # The operator message carries the truthful cause, not a guessed bad key.
+    engine_msgs = [m for m in notified if "fake-engine" in m]
+    assert engine_msgs and "unreachable" in engine_msgs[0]
+    assert "Please fix AGENTCORTEX" not in engine_msgs[0].replace("_", "")
+
+
+@pytest.mark.asyncio
+async def test_offline_endpoint_timeout_surfaces_connection_error(monkeypatch):
+    """The exact production shape: each connection attempt hangs until the
+    per-call budget dies, so the loop sees asyncio.TimeoutError while the bridge
+    already recorded 'Connection error.' — the report must say connection."""
+    import asyncio as _asyncio
+
+    bridge = _FakeBridgeEngine(last_error="APIConnectionError: Connection error.")
+
+    async def hanging_primary(prompt, engine_name, cortex_scope="agent"):
+        if engine_name == "fake-engine":
+            await _asyncio.sleep(30)  # wedged offline endpoint
+        return ""
+
+    manager, notified = _install_agent_harness(
+        monkeypatch, hanging_primary, bridge
+    )
+
+    result = await manager.run_agentic_turn(
+        goal="do a thing",
+        engine="fake-engine",
+        max_iterations=5,
+        timeout_seconds=1.0,
+    )
+
+    assert result["stop_reason"] == "engine_error"
+    error_contents = [
+        str(o.get("content"))
+        for o in result["observations"]
+        if o.get("role") == "error"
+    ]
+    assert any("timed out" in c and "Connection error" in c for c in error_contents), (
+        error_contents
+    )
+
+
+@pytest.mark.asyncio
+async def test_empty_response_is_not_structural_and_reports_honestly(monkeypatch):
+    """A 200-with-empty-body failure is NOT structural: the turn keeps the
+    existing retry/empty_response behaviour, and the warning describes an empty
+    body instead of asserting a bad API key."""
+    bridge = _FakeBridgeEngine(last_error=None, empty_body=True)
+    manager, notified = _install_agent_harness(monkeypatch, "", bridge)
+
+    result = await manager.run_agentic_turn(
+        goal="do a thing",
+        engine="fake-engine",
+        max_iterations=2,
+        timeout_seconds=30.0,
+    )
+
+    assert result["stop_reason"] == "empty_response"
+    assert result["stop_reason"] != "engine_error"
+    error_contents = [
+        str(o.get("content"))
+        for o in result["observations"]
+        if o.get("role") == "error"
+    ]
+    assert any(c.startswith("empty_model_response") for c in error_contents)
+    assert any("empty body" in c for c in error_contents), error_contents
+    engine_msgs = [m for m in notified if "fake-engine" in m]
+    assert engine_msgs and "empty" in engine_msgs[0].lower()
+    # One notification per turn, not one per iteration.
+    assert len(engine_msgs) == 1
+
+
+@pytest.mark.asyncio
+async def test_malformed_response_recorded_and_never_shipped(monkeypatch):
+    """A response full of unparseable JSON is recorded as malformed_response,
+    nudged once, and its raw text never becomes the final answer."""
+    bridge = _FakeBridgeEngine()
+    # Truncated JSON with no "actions" key: json_repair recovers an object but
+    # it carries no actions, so nothing executable can be extracted from it.
+    broken = '{"summary": "I will check the codebase now and th'
+    manager, _notified = _install_agent_harness(monkeypatch, broken, bridge)
+
+    result = await manager.run_agentic_turn(
+        goal="do a thing",
+        engine="fake-engine",
+        max_iterations=2,
+        timeout_seconds=30.0,
+    )
+
+    assert result["stop_reason"] == "malformed_response"
+    assert result["final_text"] == ""  # garbage is never shipped as the answer
+    assert result.get("malformed_responses") == 2
+    error_contents = [
+        str(o.get("content"))
+        for o in result["observations"]
+        if o.get("role") == "error"
+    ]
+    assert any(c.startswith("malformed_response") for c in error_contents)
+    # A repair nudge was injected for the non-final iteration.
+    system_contents = [
+        str(o.get("content"))
+        for o in result["observations"]
+        if o.get("role") == "system"
+    ]
+    assert any("malformed" in c for c in system_contents)
+
+
+def test_engine_failure_from_diagnostics_paths():
+    import core.cortex_registry as reg_mod
+
+    class _ErroredObj:
+        _last_attempt_error = "Error code: 401 - Unauthorized"
+        _last_response_metadata = {"empty_response": True}
+
+    class _EmptyObj:
+        _last_attempt_error = None
+        _last_response_metadata = {"empty_response": True}
+
+    class _CleanObj:
+        _last_attempt_error = None
+        _last_response_metadata = {}
+
+    original = reg_mod.get_cortex_registry
+    try:
+        # Error text wins over the empty-body flag.
+        reg_mod.get_cortex_registry = lambda: _FakeCortexRegistry(_ErroredObj())
+        failure = _engine_failure_from_diagnostics("any-engine")
+        assert failure is not None
+        assert failure["kind"] == "auth"
+        assert failure["detail"].startswith("Error code: 401")
+
+        # Empty body with no error classifies as "empty".
+        reg_mod.get_cortex_registry = lambda: _FakeCortexRegistry(_EmptyObj())
+        failure = _engine_failure_from_diagnostics("any-engine")
+        assert failure is not None
+        assert failure["kind"] == "empty"
+
+        # A clean engine carries no failure.
+        reg_mod.get_cortex_registry = lambda: _FakeCortexRegistry(_CleanObj())
+        assert _engine_failure_from_diagnostics("any-engine") is None
+    finally:
+        reg_mod.get_cortex_registry = original

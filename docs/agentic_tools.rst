@@ -123,7 +123,8 @@ turn is recorded in the WebUI Agent panel **no matter which interface or API
 call originated it** (Telegram, Discord, Matrix, the OpenAI-compatible API, or
 the WebUI ``POST /api/agent/run`` route). The row records the resolved engine,
 a status derived from the ``stop_reason`` (``failed`` for ``timeout`` /
-``engine_error`` / ``empty_response``, otherwise ``completed``), the per-turn
+``engine_error`` / ``empty_response`` / ``malformed_response`` /
+``delivery_failed``, otherwise ``completed``), the per-turn
 ``iterations_meta``, the ``final_text`` / ``stop_reason`` output, the
 originating ``trainer_id`` (from the message ``sender_id``), and a
 ``metadata.source`` label taken from the originating interface context. The

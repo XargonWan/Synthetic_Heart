@@ -220,6 +220,11 @@ class ExternalCortexEngine(AIPluginBase):
         self.notify_fn = notify_fn
         self.display_name = endpoint.display_label or endpoint.name
         self._last_response_metadata: dict[str, Any] = {}
+        # Last transport/provider error seen inside generate_response (cleared
+        # at the start of each call, set on every failed attempt). Callers such
+        # as the agent loop read this after a cancelled/failed call to report
+        # the real cause ("endpoint offline") instead of a bare timeout/empty.
+        self._last_attempt_error: str | None = None
         # Transient, per-call model override applied by scope-aware call sites
         # (see ``scope_model_override``). Unlike ``_endpoint.default_model`` this
         # is NOT persisted and is scoped to a single ``generate_response`` call,
@@ -1277,6 +1282,7 @@ class ExternalCortexEngine(AIPluginBase):
         if not model and self._endpoint.available_models:
             model = self._endpoint.available_models[0]
         self._last_response_metadata = {}
+        self._last_attempt_error = None
         max_retries, backoff = self._get_retry_settings()
         request_timeout = self._get_request_timeout()
         retry_on_timeout = self._retry_on_timeout()
@@ -1372,6 +1378,9 @@ class ExternalCortexEngine(AIPluginBase):
                 self._last_response_metadata = response_metadata
                 return response_content
             except asyncio.TimeoutError:
+                self._last_attempt_error = (
+                    f"TimeoutError: LLM request timed out after {request_timeout}s"
+                )
                 log_warning(
                     f"[cortex_bridge:{self._endpoint.name}] generate_response timed out "
                     f"after {request_timeout}s (attempt {attempt}/{max_retries})"
@@ -1389,6 +1398,7 @@ class ExternalCortexEngine(AIPluginBase):
                     f"and {max_retries} retry attempts"
                 )
             except Exception as exc:
+                self._last_attempt_error = f"{type(exc).__name__}: {exc}"
                 should_retry = attempt < max_retries and self._is_retryable_exception(
                     exc
                 )
