@@ -638,3 +638,32 @@ async def test_request_unreachable_core_fails_closed(monkeypatch, fake_aiohttp):
     assert "is it running" in outcome["error"]
     # The bearer token never leaks into error text.
     assert "sekrit" not in outcome["error"]
+
+
+def test_poll_verbs_declare_repeatable():
+    """Read/poll verbs must opt into re-execution so the agent loop's
+    identical-call dedup never serves a cached stale snapshot to a polling
+    model (live incident: a stuck-queued transfer polled ~15x against the
+    first snapshot because every poll hit the dedup cache)."""
+    actions = AgpeerPlugin.get_supported_actions(AgpeerPlugin())
+    poll_verbs = {
+        "agpeer_status",
+        "agpeer_searches",
+        "agpeer_search_results",
+        "agpeer_transfer",
+        "agpeer_transfer_files",
+        "agpeer_postprocess",
+        "agpeer_library",
+        "agpeer_settings",
+    }
+    for verb in poll_verbs:
+        assert actions[verb].get("repeatable") is True, verb
+    # Mutating verbs must NOT be repeatable.
+    for verb in (
+        "agpeer_download",
+        "agpeer_add_magnet",
+        "agpeer_cancel_transfer",
+        "agpeer_delete_transfer",
+        "agpeer_setting_set",
+    ):
+        assert not actions[verb].get("repeatable"), verb

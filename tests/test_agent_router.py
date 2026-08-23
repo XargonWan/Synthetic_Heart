@@ -39,6 +39,7 @@ def test_agent_actions_executed_zero_for_no_tool_results() -> None:
 
 def _delivery_fixture(
     monkeypatch: pytest.MonkeyPatch,
+    voiceover: str = "",
 ) -> tuple[list[dict[str, Any]], Any]:
     delivered: list[dict[str, Any]] = []
 
@@ -49,6 +50,15 @@ def _delivery_fixture(
         return {"ok": True}
 
     monkeypatch.setattr("core.action_parser.run_action", fake_run_action)
+
+    # Keep delivery-guard tests focused: the persona voiceover defaults to a
+    # no-op returning ``voiceover`` (empty → original text ships unchanged).
+    from core.agent_core import AgentLoopManager
+
+    async def fake_voiceover(self, final_text, **kwargs):
+        return voiceover
+
+    monkeypatch.setattr(AgentLoopManager, "persona_voiceover", fake_voiceover)
     return delivered, fake_run_action
 
 
@@ -201,3 +211,92 @@ def test_classify_agent_enabled_tool_call_returns_agent(
     # Agent Lane regardless of the tool registry state.
     actions = [{"type": "mcp_fs_read", "payload": {"path": "/app/x.txt"}}]
     assert agent_router.classify(actions, context={}) == agent_router.AGENT
+
+
+@pytest.mark.asyncio
+async def test_deliver_revoices_final_text_through_persona(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the persona voiceover returns styled text, THAT is what ships to
+    the interface — the agent's raw operational summary never reaches the
+    user directly."""
+    delivered, _ = _delivery_fixture(monkeypatch, voiceover="Voiced by Dee!")
+    result: dict[str, Any] = {
+        "stop_reason": "completed",
+        "final_text": "task complete: file written to /tmp/x",
+        "observations": [],
+    }
+    context = {"interface_path": "telegram_bot/123"}
+
+    await agent_router._deliver_agent_reply(
+        result, context, None, None, goal="write the file"
+    )
+
+    assert len(delivered) == 1
+    assert delivered[0]["payload"]["text"] == "Voiced by Dee!"
+
+
+@pytest.mark.asyncio
+async def test_deliver_persona_disabled_ships_original(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AGENT_PERSONA_DELIVERY=False is a hard bypass: the voiceover is never
+    invoked and the original agent text ships as-is."""
+    from core.config_manager import config_registry
+    from core.agent_core import AgentLoopManager
+
+    original = config_registry.get_value
+
+    def fake_get_value(key, default=None, *a, **kw):
+        if key == "AGENT_PERSONA_DELIVERY":
+            return False
+        return original(key, default, *a, **kw)
+
+    monkeypatch.setattr(config_registry, "get_value", fake_get_value)
+
+    async def must_not_run(self, final_text, **kwargs):
+        raise AssertionError("voiceover must not run when disabled")
+
+    monkeypatch.setattr(AgentLoopManager, "persona_voiceover", must_not_run)
+
+    delivered, _ = _delivery_fixture(monkeypatch)
+    # Re-apply the voiceover stub AFTER the fixture (fixture overrides it).
+    monkeypatch.setattr(AgentLoopManager, "persona_voiceover", must_not_run)
+
+    result: dict[str, Any] = {
+        "stop_reason": "completed",
+        "final_text": "raw agent text",
+        "observations": [],
+    }
+    context = {"interface_path": "telegram_bot/123"}
+
+    await agent_router._deliver_agent_reply(result, context, None, None)
+
+    assert len(delivered) == 1
+    assert delivered[0]["payload"]["text"] == "raw agent text"
+
+
+@pytest.mark.asyncio
+async def test_deliver_voiceover_failure_falls_back_to_original(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A voiceover that fails (returns empty) must never lose the result."""
+    from core.agent_core import AgentLoopManager
+
+    async def failing_voiceover(self, final_text, **kwargs):
+        return ""
+
+    delivered, _ = _delivery_fixture(monkeypatch)
+    monkeypatch.setattr(AgentLoopManager, "persona_voiceover", failing_voiceover)
+
+    result: dict[str, Any] = {
+        "stop_reason": "completed",
+        "final_text": "the important result",
+        "observations": [],
+    }
+    context = {"interface_path": "telegram_bot/123"}
+
+    await agent_router._deliver_agent_reply(result, context, None, None)
+
+    assert len(delivered) == 1
+    assert delivered[0]["payload"]["text"] == "the important result"

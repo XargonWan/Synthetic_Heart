@@ -38,6 +38,50 @@ try:
         component="agent",
         needs_component_reload=False,
     )
+    # Interim (mid-loop) outbound user-facing messages per agentic turn. The
+    # final answer (attempt_completion summary / pause-composer message) is
+    # NOT counted — this caps only status updates sent while the loop keeps
+    # working. Default 1: the user hears one interim update, then the final
+    # answer — never a re-worded status message on every iteration (observed
+    # live: three near-identical Telegram updates from one turn).
+    register_exposed_var(
+        "AGENT_MAX_INTERIM_MESSAGES",
+        label="Agent max interim messages",
+        default=1,
+        value_type=int,
+        ui_type="number",
+        description=(
+            "Maximum number of mid-task status messages a single agent turn "
+            "may send to the user (the final answer is not counted). Raise "
+            "for long-running tasks that benefit from milestone updates."
+        ),
+        scope="agent",
+        component="agent",
+        needs_component_reload=False,
+    )
+    # Persona voiceover at agent delivery: the tool-calling loop deliberately
+    # runs persona-free (a ~32k persona prompt on every iteration would bloat
+    # each call and degrade tool discipline), so the agent's raw final text is
+    # operationally correct but tonally flat. When on, the final message is
+    # re-voiced ONCE by the Base Cortex with the full persona chat context
+    # before delivery; any failure falls back to the original text.
+    register_exposed_var(
+        "AGENT_PERSONA_DELIVERY",
+        label="Agent persona delivery",
+        default=True,
+        value_type=bool,
+        ui_type="bool",
+        description=(
+            "Re-voice the agent's final result through the persona chat "
+            "engine (Base Cortex + full persona context) before it is "
+            "delivered to the interface. Tool-calling iterations stay "
+            "persona-free either way; on any restyle failure the original "
+            "agent text is delivered unchanged."
+        ),
+        scope="agent",
+        component="agent",
+        needs_component_reload=False,
+    )
     # Drones are ephemeral, task-scoped sub-agents spawned by the Agent via the
     # `spawn_drone` tool. They run through the same bounded agent loop but with a
     # tighter budget and cannot spawn further Drones (single-level delegation).
@@ -362,6 +406,29 @@ def _system_only_action_names() -> frozenset[str]:
         return _SYSTEM_ONLY_ACTION_NAMES
     except Exception:
         return frozenset({"tts_speak"})
+
+
+def _repeatable_action_names() -> frozenset[str]:
+    """Action names that legitimately re-run identically within one turn.
+
+    Poll/refresh actions (e.g. ``agpeer_transfer``) declare ``"repeatable":
+    true`` in their schema so the loop's identical-call dedup does not serve
+    them a stale cached first result. Read fresh from the live action catalog
+    (a tiny walk — the catalog is a few hundred entries) so runtime plugin
+    enable/disable is picked up immediately; fail-safe to an empty set (dedup
+    then behaves exactly as before).
+    """
+    try:
+        from core.core_initializer import core_initializer
+
+        actions = (core_initializer.actions_block or {}).get("available_actions", {})
+        return frozenset(
+            name
+            for name, defn in (actions or {}).items()
+            if isinstance(defn, dict) and defn.get("repeatable")
+        )
+    except Exception:
+        return frozenset()
 
 
 def _build_openai_tool_manifests() -> list[dict[str, Any]]:
@@ -1154,11 +1221,12 @@ class AgentLoopManager:
                 "delivery_failed",
             }:
                 status = "failed"
-            elif stop_reason == "paused_max_iterations":
-                # Iteration budget exhausted without an explicit completion: the
-                # goal is not finished. Park the task as ``pending`` so the user
-                # can grant more iterations via "Continue" (WebUI) instead of it
-                # being falsely reported as ``completed``.
+            elif stop_reason in ("paused_max_iterations", "paused_timeout"):
+                # Iteration or TIME budget exhausted without an explicit
+                # completion: the goal is not finished. Park the task as
+                # ``pending`` so the user can grant more iterations via
+                # "Continue" (WebUI) or a chat reply instead of it being
+                # falsely reported as ``completed``.
                 status = "pending"
             else:
                 status = "completed"
@@ -1475,6 +1543,23 @@ class AgentLoopManager:
         # was sent 3x). Any text already delivered once is not re-sent; the
         # observation records "already delivered" so the model sees it went out.
         delivered_texts: set[str] = set()
+
+        # Interim-message damper: even NON-identical re-worded status messages
+        # must not spam the user on every iteration (observed live: one turn
+        # sent three near-identical Telegram updates because each iteration
+        # re-narrated the same status slightly differently — exact-text dedup
+        # can not catch that). At most ``AGENT_MAX_INTERIM_MESSAGES``
+        # successful mid-loop user-facing deliveries per turn; anything beyond
+        # is suppressed with an observation steering the model to finish and
+        # use attempt_completion for the final answer. Failed deliveries do
+        # not count against the cap (a retry must remain possible).
+        interim_messages_delivered = 0
+        try:
+            max_interim_messages = max(
+                0, min(int(config_registry.get_var("AGENT_MAX_INTERIM_MESSAGES", 1)), 10)
+            )
+        except (TypeError, ValueError):
+            max_interim_messages = 1
 
         # Cross-iteration tool-call dedup: a weak loop engine re-issues the SAME
         # tool call on later iterations (observed live: the same
@@ -1990,7 +2075,13 @@ class AgentLoopManager:
                     if not isinstance(args, dict):
                         args = {}
                     text = str(args.get("text") or args.get("content") or "").strip()
-                    if text:
+                    is_delivery = mc_name.startswith(_DELIVERY_ACTION_PREFIX)
+                    # Non-delivery speech actions are only captured; delivery
+                    # actions are collected once they pass the dedup + interim
+                    # cap below (a suppressed message must not be hoisted into
+                    # ``final_text`` — the closing message belongs to
+                    # attempt_completion / the pause composer).
+                    if text and not is_delivery:
                         collected.append(text)
 
                     # Deliver the message to the interface. Only actual outbound
@@ -2021,6 +2112,53 @@ class AgentLoopManager:
                                 }
                             )
                             continue
+                        # Interim-message damper: the cap for THIS turn is
+                        # already spent — suppress the re-worded update and
+                        # steer the model toward completing properly. Only a
+                        # MIXED iteration (message + further tool calls) is an
+                        # interim update; a message-ONLY iteration is the
+                        # model's answer channel (two consecutive message-only
+                        # iterations end the turn as model_done) and must stay
+                        # deliverable. The suppressed text is NOT hoisted into
+                        # final_text (the pause composer or attempt_completion
+                        # own the closing message).
+                        if (
+                            interim_messages_delivered >= max_interim_messages
+                            and tool_calls
+                        ):
+                            log_info(
+                                f"[agent_core] Iteration {i}: suppressing interim "
+                                f"message '{mc_name}' — cap of "
+                                f"{max_interim_messages} mid-task message(s) "
+                                "already delivered this turn"
+                            )
+                            observations.append(
+                                {
+                                    "iteration": i,
+                                    "role": "tool_results",
+                                    "content": [
+                                        {
+                                            "tool": mc_name,
+                                            "ok": True,
+                                            "result": (
+                                                "suppressed: the user was "
+                                                f"already updated {interim_messages_delivered} "
+                                                "time(s) this turn — do not send "
+                                                "more interim status messages. "
+                                                "Keep working silently and "
+                                                "deliver the final answer via "
+                                                f"{_COMPLETION_TOOL} (or tell "
+                                                "the user you need more time "
+                                                "in that final message)."
+                                            ),
+                                            "error": None,
+                                        }
+                                    ],
+                                }
+                            )
+                            continue
+                        if text:
+                            collected.append(text)
                         exec_result = await agent_tool_executor.execute(
                             mc_name,
                             args,
@@ -2046,6 +2184,7 @@ class AgentLoopManager:
                         delivered_ok = bool(exec_result.get("ok"))
                         if delivered_ok:
                             delivered_message_ok = True
+                            interim_messages_delivered += 1
                             delivered_text = str(
                                 args.get("text") or args.get("content") or ""
                             ).strip()
@@ -2370,12 +2509,24 @@ class AgentLoopManager:
                 # re-issue the identical call when they think a result was
                 # truncated (observed live: the same agent_read_file call
                 # repeated 7x). Return the first result with a structural note.
-                # Diary tools are exempt: their start/end slots are enforced
-                # deterministically above, and the closing entry is expected to
-                # run even when its content resembles the opening one.
+                # Two structural exemptions:
+                # * Diary tools: their start/end slots are enforced
+                #   deterministically above, and the closing entry is expected
+                #   to run even when its content resembles the opening one.
+                # * Repeatable (poll/refresh) actions: re-invoking them is the
+                #   POINT — serving a cached first result made every poll of a
+                #   slow external operation see stale state forever, so the
+                #   model could never observe progress and looped until the
+                #   turn budget died (observed live: a Soulseek transfer stuck
+                #   "queued" polled ~15x, each poll returning the cached first
+                #   snapshot). Actions opt in via ``"repeatable": true`` in
+                #   their get_supported_actions() schema.
                 _call_key = (name, json.dumps(args, sort_keys=True, default=str))
                 cached = (
-                    executed_calls.get(_call_key) if name not in _DIARY_TOOLS else None
+                    executed_calls.get(_call_key)
+                    if name not in _DIARY_TOOLS
+                    and name not in _repeatable_action_names()
+                    else None
                 )
                 if cached is not None:
                     log_info(
@@ -2513,6 +2664,45 @@ class AgentLoopManager:
             )
             if composed:
                 final_text = composed
+
+        # Timeout with real work done: the turn ran out of TIME (not
+        # iterations) while still mid-task. Without this, the loop ends with
+        # an empty ``final_text`` and NOTHING is delivered — the user sees
+        # silence even though the agent diagnosed the situation mid-loop
+        # (observed live: a stuck-queued download was analysed in every
+        # iteration's reasoning, yet Telegram never received a word because
+        # the turn died at the budget with no message). Compose the same
+        # model-authored "here's where I am, shall I continue?" pause message
+        # and re-classify the stop reason so the task parks as resumable
+        # ``pending`` (a raw ``timeout`` persists as ``failed``) and the
+        # router's garbage-output guard (which only suppresses ``timeout``
+        # with ZERO actions) lets it through.
+        if (
+            stop_reason == "timeout"
+            and not str(final_text or "").strip()
+        ):
+            actions_executed = 0
+            for obs in observations:
+                if isinstance(obs, dict) and obs.get("role") == "tool_results":
+                    content = obs.get("content")
+                    if isinstance(content, list):
+                        actions_executed += len(content)
+            if actions_executed > 0:
+                composed = await self._compose_pause_message(
+                    goal=goal,
+                    observations=observations,
+                    actions_executed=actions_executed,
+                    engine=engine,
+                    context=context,
+                )
+                if composed:
+                    final_text = composed
+                    stop_reason = "paused_timeout"
+                    log_info(
+                        "[agent_core] Turn hit the time budget mid-task after "
+                        f"{actions_executed} action(s); composed a pause message "
+                        "for delivery (task parks as resumable 'pending')."
+                    )
 
         # Completion-integrity gate. A turn must never report "completed" while
         # an outbound message it claimed to send actually failed to reach the
@@ -2859,6 +3049,135 @@ class AgentLoopManager:
             )
         return ""
 
+    async def persona_voiceover(
+        self,
+        final_text: str,
+        *,
+        goal: str = "",
+        context: Dict[str, Any] | None = None,
+        message: Any = None,
+    ) -> str:
+        """Re-voice an agent turn's final result through the persona.
+
+        The agentic loop deliberately runs persona-free (the ~32k persona
+        prompt on every tool iteration would bloat each call and degrade
+        tool discipline), so its final text is operationally correct but
+        tonally flat. This asks the **Base Cortex** — the engine that speaks
+        as Synth in ordinary chat — with the FULL persona chat context
+        (persona, memories, conversation, language) to deliver the result in
+        Synth's own voice, keeping every fact intact.
+
+        Returns the re-voiced text, or ``""`` on any failure — the caller
+        then delivers the original agent text unchanged. A styling hiccup
+        must never lose the result.
+        """
+        if not str(final_text or "").strip():
+            return ""
+        try:
+            from types import SimpleNamespace
+
+            from core.prompt_engine import build_prompt_request
+
+            # Build the SAME persona prompt an ordinary chat reply on this
+            # interface would get: the synthetic user message carries the
+            # restyle instruction, and the history/persona machinery keys on
+            # the real interface_path from the original message / context.
+            interface_path = None
+            if isinstance(context, dict):
+                interface_path = context.get("interface_path")
+            if not interface_path:
+                interface_path = getattr(message, "interface_path", None)
+            interface_name = None
+            if isinstance(interface_path, str) and "/" in interface_path:
+                interface_name = interface_path.split("/", 1)[0]
+
+            instruction = (
+                "Your tool-using agent side just finished working on a task"
+                + (f" ('{goal.strip()}')" if str(goal or "").strip() else "")
+                + " — it does the mechanical work, you do the talking. It "
+                "produced this result to report to the user:\n\n"
+                f"{final_text.strip()}\n\n"
+                "Deliver this result to the user now, in YOUR own voice — "
+                "same language and tone as this conversation. Keep every "
+                "fact and outcome intact (paths, names, numbers, successes, "
+                "failures); change only the voice, and keep it about as "
+                "short as the original. Reply ONLY with the message text."
+            )
+            synth_message = SimpleNamespace(
+                interface_path=interface_path,
+                text=instruction,
+                sender_id=getattr(message, "sender_id", None),
+                is_from_self=False,
+            )
+            prompt = await build_prompt_request(
+                synth_message,
+                {"interface_path": interface_path} if interface_path else {},
+                interface_name,
+            )
+            payload = (prompt.get("input") or {}).get("payload") or {}
+            persona_system = str(payload.get("system") or "")
+
+            # Route through the Base Cortex (the persona chat engine), prose
+            # only — no thinking, no native tools. Same bounded/detachable
+            # call shape as the pause composer.
+            from core.config import get_active_cortex_engine
+
+            base_engine = await get_active_cortex_engine()
+            if not base_engine:
+                return ""
+            voice_prompt: Dict[str, Any] = {
+                "input": {
+                    "payload": {
+                        "text": instruction,
+                        "system": persona_system,
+                    }
+                },
+                "system_message": {
+                    "type": "agent_turn",
+                    "engine": base_engine,
+                    "goal": goal,
+                },
+                "agent_mode": True,
+                "observation_history": [],
+            }
+            if context:
+                voice_prompt["context"] = context
+            text = await _call_with_hard_timeout(
+                self._call_engine_direct(voice_prompt, base_engine, native_tools=False),
+                timeout=30.0,
+            )
+            if not isinstance(text, str):
+                return ""
+            text = text.strip()
+            if not text:
+                return ""
+            # The chat-shaped persona prompt invites an action JSON reply —
+            # a message action's text IS the styled reply, so unwrap it.
+            if text.startswith("{") or text.startswith("```"):
+                try:
+                    from core.transport_layer import extract_json_from_text
+
+                    parsed = extract_json_from_text(text)
+                    if isinstance(parsed, dict):
+                        actions = parsed.get("actions")
+                        if isinstance(actions, list):
+                            for act in actions:
+                                if not isinstance(act, dict):
+                                    continue
+                                a_text = str(
+                                    (act.get("payload") or {}).get("text") or ""
+                                ).strip()
+                                if a_text:
+                                    return a_text
+                except Exception:
+                    pass
+                # Unparseable JSON wrapper — do not ship raw JSON to the user.
+                return ""
+            return text
+        except Exception as exc:
+            log_debug(f"[agent_core] persona_voiceover failed: {exc}")
+            return ""
+
     async def _compose_pause_message(
         self,
         *,
@@ -3092,8 +3411,15 @@ class AgentLoopManager:
             f"{_COMPLETION_TOOL} tool with a short summary of what you "
             "accomplished, once the goal is genuinely done (or you can clearly "
             "explain, based on tool results, why it cannot be). Send message "
-            "actions to talk to the user while you work, but keep emitting the "
+            "actions to talk to the user while you work, but send at most ONE "
+            "brief interim update per task — repeating status updates on later "
+            "iterations is spam and will be suppressed; the complete answer "
+            f"belongs in the {_COMPLETION_TOOL} summary. Keep emitting the "
             f"next tool call until you call {_COMPLETION_TOOL}.\n"
+            "USER-FACING VOICE: any text you send to the user (interim update "
+            "or completion summary) must already be written in your own voice "
+            "and the conversation's language — natural and personal, never a "
+            "dry technical log. Keep the facts exact; keep the tone yours.\n"
             "Each tool observation is already in PRIOR OBSERVATIONS — build on it "
             "rather than repeating an identical call.\n"
             "INTERNAL NOTES vs USER MESSAGES: keep your private reasoning "

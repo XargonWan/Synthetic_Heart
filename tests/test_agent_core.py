@@ -648,3 +648,422 @@ def test_engine_failure_from_diagnostics_paths():
         assert _engine_failure_from_diagnostics("any-engine") is None
     finally:
         reg_mod.get_cortex_registry = original
+
+
+# ---------------------------------------------------------------------------
+# Repeatable (poll) actions & timeout delivery
+# ---------------------------------------------------------------------------
+
+import json  # noqa: E402  (section-local; earlier tests import inside functions)
+
+
+@pytest.mark.asyncio
+async def test_repeatable_action_bypasses_identical_call_dedup(monkeypatch):
+    """Poll actions (schema ``repeatable: true``) must re-execute on every
+    identical invocation — the dedup serves cached stale state otherwise, so
+    a model polling a slow external operation can never observe progress
+    (live: a stuck-queued transfer polled ~15x against the first snapshot)."""
+    import core.agent_core as agent_core_mod
+    from core.agent_core import _agent_loop_manager
+
+    call_json = json.dumps(
+        {"actions": [{"type": "poll_status", "payload": {"id": "t-1"}}]}
+    )
+
+    async def fake_call_engine_direct(prompt, engine_name, cortex_scope="agent"):
+        return call_json
+
+    monkeypatch.setattr(_agent_loop_manager, "_call_engine_direct", fake_call_engine_direct)
+
+    async def fake_persist(**kwargs):
+        return 1
+
+    monkeypatch.setattr(_agent_loop_manager, "_persist_agentic_turn", fake_persist)
+
+    executed: list[str] = []
+
+    async def fake_execute(name, args, context=None, original_message=None):
+        executed.append(name)
+        return {"ok": True, "result": f"fresh-state-{len(executed)}"}
+
+    monkeypatch.setattr(
+        "core.agent_tool_executor.agent_tool_executor.execute", fake_execute
+    )
+
+    # Opt the fake tool into re-execution via the structural schema flag.
+    monkeypatch.setattr(
+        agent_core_mod,
+        "_repeatable_action_names",
+        lambda: frozenset({"poll_status"}),
+    )
+
+    result = await _agent_loop_manager.run_agentic_turn(
+        goal="watch the thing",
+        engine="fake-engine",
+        max_iterations=3,
+        timeout_seconds=30.0,
+    )
+    # All three iterations executed a FRESH poll, none was served from cache.
+    assert executed == ["poll_status"] * 3, executed
+
+
+@pytest.mark.asyncio
+async def test_non_repeatable_action_still_deduped(monkeypatch):
+    """Without the flag the historical dedup behaviour is unchanged."""
+    import core.agent_core as agent_core_mod
+    from core.agent_core import _agent_loop_manager
+
+    call_json = json.dumps(
+        {"actions": [{"type": "agent_read_file", "payload": {"path": "/tmp/x"}}]}
+    )
+
+    async def fake_call_engine_direct(prompt, engine_name, cortex_scope="agent"):
+        return call_json
+
+    monkeypatch.setattr(_agent_loop_manager, "_call_engine_direct", fake_call_engine_direct)
+
+    async def fake_persist(**kwargs):
+        return 1
+
+    monkeypatch.setattr(_agent_loop_manager, "_persist_agentic_turn", fake_persist)
+
+    executed: list[str] = []
+
+    async def fake_execute(name, args, context=None, original_message=None):
+        executed.append(name)
+        return {"ok": True, "result": "done"}
+
+    monkeypatch.setattr(
+        "core.agent_tool_executor.agent_tool_executor.execute", fake_execute
+    )
+    monkeypatch.setattr(
+        agent_core_mod, "_repeatable_action_names", lambda: frozenset()
+    )
+
+    await _agent_loop_manager.run_agentic_turn(
+        goal="read it",
+        engine="fake-engine",
+        max_iterations=3,
+        timeout_seconds=30.0,
+    )
+    assert executed == ["agent_read_file"], executed
+
+
+@pytest.mark.asyncio
+async def test_timeout_with_actions_composes_pause_message(monkeypatch):
+    """A turn that runs out of TIME mid-task (with real work done) must not
+    end in silence: the loop composes the model-authored pause message and
+    parks the task as resumable 'paused_timeout' so it is delivered (live:
+    the agent diagnosed a stuck download in every iteration's reasoning yet
+    Telegram never received a word)."""
+    import asyncio as _asyncio
+
+    from core.agent_core import _agent_loop_manager
+
+    call_json = json.dumps(
+        {"actions": [{"type": "agent_read_file", "payload": {"path": "/tmp/x"}}]}
+    )
+
+    async def slow_engine(prompt, engine_name, cortex_scope="agent"):
+        await _asyncio.sleep(0.6)  # burn wall-clock budget like a real engine
+        return call_json
+
+    monkeypatch.setattr(_agent_loop_manager, "_call_engine_direct", slow_engine)
+
+    async def fake_persist(**kwargs):
+        return 1
+
+    monkeypatch.setattr(_agent_loop_manager, "_persist_agentic_turn", fake_persist)
+
+    async def fake_execute(name, args, context=None, original_message=None):
+        return {"ok": True, "result": "done"}
+
+    monkeypatch.setattr(
+        "core.agent_tool_executor.agent_tool_executor.execute", fake_execute
+    )
+
+    async def fake_compose_pause_message(**kwargs):
+        return (
+            "I'm still on it — the download is queued, want me to keep waiting?"
+        )
+
+    monkeypatch.setattr(
+        _agent_loop_manager,
+        "_compose_pause_message",
+        fake_compose_pause_message,
+    )
+
+    result = await _agent_loop_manager.run_agentic_turn(
+        goal="pull the song",
+        engine="fake-engine",
+        max_iterations=10,
+        timeout_seconds=1.0,
+    )
+    assert result["stop_reason"] == "paused_timeout"
+    assert result["final_text"] == (
+        "I'm still on it — the download is queued, want me to keep waiting?"
+    )
+
+
+@pytest.mark.asyncio
+async def test_timeout_with_zero_actions_stays_plain_timeout(monkeypatch):
+    """The garbage-output guard stays intact: a timeout with NO executed
+    actions must not fabricate a pause message (nothing to report)."""
+    import asyncio as _asyncio
+
+    from core.agent_core import _agent_loop_manager
+
+    async def empty_slow_engine(prompt, engine_name, cortex_scope="agent"):
+        await _asyncio.sleep(0.05)
+        return ""
+
+    monkeypatch.setattr(_agent_loop_manager, "_call_engine_direct", empty_slow_engine)
+
+    async def fake_persist(**kwargs):
+        return 1
+
+    monkeypatch.setattr(_agent_loop_manager, "_persist_agentic_turn", fake_persist)
+
+    async def fake_compose_pause_message(**kwargs):
+        raise AssertionError("composer must not run for an actionless timeout")
+
+    monkeypatch.setattr(
+        _agent_loop_manager,
+        "_compose_pause_message",
+        fake_compose_pause_message,
+    )
+
+    result = await _agent_loop_manager.run_agentic_turn(
+        goal="do nothing",
+        engine="fake-engine",
+        max_iterations=1000,
+        timeout_seconds=1.0,
+    )
+    assert result["stop_reason"] == "timeout"
+    assert result["final_text"] == ""
+
+
+@pytest.mark.asyncio
+async def test_interim_message_cap_suppresses_reworded_duplicates(monkeypatch):
+    """One interim status message per turn: re-WORDed updates (which defeat
+    the exact-text dedup) are suppressed past AGENT_MAX_INTERIM_MESSAGES
+    (live: a single turn sent three near-identical Telegram updates because
+    every iteration re-narrated the same status slightly differently)."""
+    from core.agent_core import _agent_loop_manager
+
+    iteration = {"n": 0}
+
+    async def fake_call_engine_direct(prompt, engine_name, cortex_scope="agent"):
+        iteration["n"] += 1
+        # Message + poll each iteration, message text re-worded every time —
+        # exactly the live incident shape.
+        return json.dumps(
+            {
+                "actions": [
+                    {
+                        "type": "message_telegram_bot",
+                        "payload": {
+                            "text": f"update number {iteration['n']}",
+                            "interface_path": "telegram_bot/1",
+                        },
+                    },
+                    {
+                        "type": "agent_read_file",
+                        "payload": {"path": "/tmp/x"},
+                    },
+                ]
+            }
+        )
+
+    monkeypatch.setattr(_agent_loop_manager, "_call_engine_direct", fake_call_engine_direct)
+
+    async def fake_persist(**kwargs):
+        return 1
+
+    monkeypatch.setattr(_agent_loop_manager, "_persist_agentic_turn", fake_persist)
+
+    sent: list[tuple[str, str]] = []
+
+    async def fake_execute(name, args, context=None, original_message=None):
+        if name == "message_telegram_bot":
+            sent.append((name, args.get("text")))
+            return {"ok": True, "result": "sent"}
+        return {"ok": True, "result": "done"}
+
+    monkeypatch.setattr(
+        "core.agent_tool_executor.agent_tool_executor.execute", fake_execute
+    )
+
+    result = await _agent_loop_manager.run_agentic_turn(
+        goal="pull the song",
+        engine="fake-engine",
+        max_iterations=3,
+        timeout_seconds=30.0,
+    )
+    # Exactly ONE interim message reached the interface; the re-worded
+    # duplicates on iterations 2 and 3 were suppressed.
+    assert len(sent) == 1, sent
+    assert sent[0][1] == "update number 1"
+    # The work tool kept running on every iteration (suppression must not
+    # stall the loop).
+    obs_dump = json.dumps(result["observations"], default=str)
+    assert obs_dump.count("agent_read_file") >= 3
+    assert "suppressed" in obs_dump
+    # The suppressed texts must NOT be hoisted into the final answer.
+    assert result["final_text"] == ""
+
+
+@pytest.mark.asyncio
+async def test_interim_message_cap_zero_disables_interim_messages(monkeypatch):
+    """AGENT_MAX_INTERIM_MESSAGES=0 silences all mid-loop updates; the final
+    answer channel (attempt_completion) is unaffected."""
+    from core.agent_core import _agent_loop_manager
+    from core.config_manager import config_registry
+
+    original = config_registry.get_value
+
+    def fake_get_value(key, default=None, *a, **kw):
+        if key == "AGENT_MAX_INTERIM_MESSAGES":
+            return 0
+        return original(key, default, *a, **kw)
+
+    monkeypatch.setattr(config_registry, "get_value", fake_get_value)
+
+    async def fake_call_engine_direct(prompt, engine_name, cortex_scope="agent"):
+        return json.dumps(
+            {
+                "actions": [
+                    {
+                        "type": "message_telegram_bot",
+                        "payload": {"text": "status!", "interface_path": "telegram_bot/1"},
+                    },
+                    {"type": "agent_read_file", "payload": {"path": "/tmp/x"}},
+                ]
+            }
+        )
+
+    monkeypatch.setattr(_agent_loop_manager, "_call_engine_direct", fake_call_engine_direct)
+
+    async def fake_persist(**kwargs):
+        return 1
+
+    monkeypatch.setattr(_agent_loop_manager, "_persist_agentic_turn", fake_persist)
+
+    sent: list[str] = []
+
+    async def fake_execute(name, args, context=None, original_message=None):
+        if name == "message_telegram_bot":
+            sent.append(args.get("text"))
+            return {"ok": True, "result": "sent"}
+        return {"ok": True, "result": "done"}
+
+    monkeypatch.setattr(
+        "core.agent_tool_executor.agent_tool_executor.execute", fake_execute
+    )
+
+    await _agent_loop_manager.run_agentic_turn(
+        goal="quiet task",
+        engine="fake-engine",
+        max_iterations=2,
+        timeout_seconds=30.0,
+    )
+    assert sent == []
+
+
+# ---------------------------------------------------------------------------
+# Persona voiceover (final agent result re-voiced through the persona engine)
+# ---------------------------------------------------------------------------
+
+
+def _voiceover_harness(monkeypatch, engine_reply):
+    """Patch persona_voiceover's collaborators; return the engine-call log."""
+    from core.agent_core import _agent_loop_manager
+
+    calls: list[dict] = []
+
+    async def fake_engine(prompt, engine_name, cortex_scope="agent", *, native_tools=True):
+        calls.append(
+            {
+                "engine": engine_name,
+                "native_tools": native_tools,
+                "system": (prompt.get("input") or {}).get("payload", {}).get("system", ""),
+                "text": (prompt.get("input") or {}).get("payload", {}).get("text", ""),
+            }
+        )
+        return engine_reply
+
+    monkeypatch.setattr(_agent_loop_manager, "_call_engine_direct", fake_engine)
+
+    async def fake_base_engine(*args, **kwargs):
+        return "persona-engine"
+
+    monkeypatch.setattr("core.config.get_active_cortex_engine", fake_base_engine)
+
+    async def fake_build_prompt_request(message, context_memory, interface_name=None, **kw):
+        return {
+            "input": {
+                "payload": {
+                    "system": "FULL PERSONA SYSTEM PROMPT",
+                    "text": getattr(message, "text", ""),
+                }
+            }
+        }
+
+    monkeypatch.setattr(
+        "core.prompt_engine.build_prompt_request", fake_build_prompt_request
+    )
+    return _agent_loop_manager, calls
+
+
+@pytest.mark.asyncio
+async def test_persona_voiceover_prose_success(monkeypatch):
+    manager, calls = _voiceover_harness(monkeypatch, "Voiced result in her tone!")
+    voiced = await manager.persona_voiceover(
+        "task complete: downloaded to E:/Media/Music/unsorted",
+        goal="pull the song",
+        context={"interface_path": "telegram_bot/123"},
+        message=None,
+    )
+    assert voiced == "Voiced result in her tone!"
+    assert len(calls) == 1
+    call = calls[0]
+    # Routed to the persona (Base Cortex) engine, prose-only.
+    assert call["engine"] == "persona-engine"
+    assert call["native_tools"] is False
+    # The full persona system prompt was used, and the instruction carries
+    # both the agent result and the goal.
+    assert call["system"] == "FULL PERSONA SYSTEM PROMPT"
+    assert "E:/Media/Music/unsorted" in call["text"]
+    assert "pull the song" in call["text"]
+
+
+@pytest.mark.asyncio
+async def test_persona_voiceover_unwraps_action_json(monkeypatch):
+    """The persona chat prompt invites an action reply — a message action's
+    text IS the styled result."""
+    reply = (
+        '{"actions": [{"type": "message_telegram_bot", "payload": '
+        '{"text": "Unwrapped styled reply", "interface_path": "telegram_bot/1"}}]}'
+    )
+    manager, _calls = _voiceover_harness(monkeypatch, reply)
+    voiced = await manager.persona_voiceover(
+        "raw result", goal="g", context={"interface_path": "telegram_bot/1"}, message=None
+    )
+    assert voiced == "Unwrapped styled reply"
+
+
+@pytest.mark.asyncio
+async def test_persona_voiceover_failure_returns_empty(monkeypatch):
+    manager, _calls = _voiceover_harness(monkeypatch, "")
+    voiced = await manager.persona_voiceover(
+        "raw result", goal="g", context={"interface_path": "telegram_bot/1"}, message=None
+    )
+    assert voiced == ""
+
+
+@pytest.mark.asyncio
+async def test_persona_voiceover_empty_input_short_circuits(monkeypatch):
+    manager, calls = _voiceover_harness(monkeypatch, "should not be called")
+    voiced = await manager.persona_voiceover("   ", goal="g", context={}, message=None)
+    assert voiced == ""
+    assert calls == []

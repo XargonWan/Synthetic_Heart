@@ -359,6 +359,7 @@ class AgpeerPlugin(PluginBase):
     def get_supported_actions(self) -> Dict[str, Any]:
         return {
             "agpeer_status": {
+                "repeatable": True,
                 "description": (
                     "Check the agpeer P2P core: version, uptime, and each "
                     "backend's readiness (search_available / "
@@ -399,6 +400,7 @@ class AgpeerPlugin(PluginBase):
                 "external_effects": ["network"],
             },
             "agpeer_search_results": {
+                "repeatable": True,
                 "description": (
                     "Fetch the results accumulated so far for a search "
                     "(pass the search_id from agpeer_search). Each result "
@@ -406,7 +408,10 @@ class AgpeerPlugin(PluginBase):
                     "bitrate, queue_length and free_upload_slots — prefer "
                     "peers with free_upload_slots=true and a low "
                     "queue_length, then hand the chosen result_id to "
-                    "agpeer_download."
+                    "agpeer_download. Results gather for ~10-15s after "
+                    "the search started: call agent_wait once before the "
+                    "first fetch rather than re-fetching back-to-back, "
+                    "and only fetch again if the count could still grow."
                 ),
                 "required_fields": ["search_id"],
                 "optional_fields": [],
@@ -458,6 +463,7 @@ class AgpeerPlugin(PluginBase):
                 "external_effects": ["network", "filesystem"],
             },
             "agpeer_searches": {
+                "repeatable": True,
                 "description": (
                     "List past and active searches with their ids, states "
                     "and result counts — use it to recover a search_id you "
@@ -481,6 +487,7 @@ class AgpeerPlugin(PluginBase):
                 "external_effects": ["network"],
             },
             "agpeer_transfer_files": {
+                "repeatable": True,
                 "description": (
                     "List the files of a multi-file torrent transfer by "
                     "'id', with per-file selection state and index — use "
@@ -514,6 +521,7 @@ class AgpeerPlugin(PluginBase):
                 "external_effects": ["network"],
             },
             "agpeer_library": {
+                "repeatable": True,
                 "description": (
                     "List the organized media library (files under the "
                     "core's configured library root, directories first). "
@@ -527,6 +535,7 @@ class AgpeerPlugin(PluginBase):
                 "external_effects": ["network"],
             },
             "agpeer_postprocess": {
+                "repeatable": True,
                 "description": (
                     "Inspect post-processing jobs (auto-organize runs the "
                     "core performs on completed transfers when enabled). "
@@ -540,6 +549,7 @@ class AgpeerPlugin(PluginBase):
                 "external_effects": ["network"],
             },
             "agpeer_settings": {
+                "repeatable": True,
                 "description": (
                     "Read the agpeer core's runtime settings (secrets are "
                     "redacted by the core). Without 'key': the full map; "
@@ -576,14 +586,22 @@ class AgpeerPlugin(PluginBase):
                 "external_effects": ["network"],
             },
             "agpeer_transfer": {
+                "repeatable": True,
                 "description": (
                     "Check transfer progress. With 'id': one transfer's "
                     "state (queued|resolving|downloading|paused|completed|"
                     "failed|cancelled), progress (0..1), bytes, "
                     "destination and error. Without 'id': the full "
-                    "transfer list. Poll a download every ~3-4 seconds "
-                    "until its state is terminal; 'resolving' means a "
-                    "magnet is still fetching metadata from the swarm."
+                    "transfer list. Poll a download roughly every 3-5 "
+                    "seconds — call agent_wait between polls instead of "
+                    "re-checking back-to-back — until its state is "
+                    "terminal; 'resolving' means a magnet is still "
+                    "fetching metadata from the swarm. If a transfer "
+                    "stays in the same non-terminal state with no byte "
+                    "progress across several spaced polls (~30s), STOP "
+                    "polling: report the situation to the user and ask "
+                    "how to proceed (wait longer, try another source, or "
+                    "give up) instead of burning the turn on more polls."
                 ),
                 "required_fields": [],
                 "optional_fields": ["id"],

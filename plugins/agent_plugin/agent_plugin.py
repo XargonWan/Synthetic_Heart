@@ -184,6 +184,18 @@ class AgentPlugin(AIPluginBase):
 
     def get_supported_actions(self) -> Dict[str, Any]:
         return {
+            "agent_wait": {
+                "required_fields": [],
+                "optional_fields": ["seconds"],
+                "scope": "agent",
+                "description": (
+                    "Pause briefly (default 5s, max 60s) before your next "
+                    "step — use it to SPACE OUT polls of slow external "
+                    "operations (a download transfer, an asynchronous search "
+                    "gathering results) instead of re-checking back-to-back. "
+                    "Waiting counts toward the turn's time budget."
+                ),
+            },
             "agent_list_files": {
                 "required_fields": [],
                 "optional_fields": ["path", "recursive", "max_depth", "limit"],
@@ -704,6 +716,17 @@ class AgentPlugin(AIPluginBase):
     async def execute_action(self, action: dict, context: dict, bot, original_message):
         action_type = action.get("type")
         payload = action.get("payload", {})
+
+        if action_type == "agent_wait":
+            seconds = _safe_int(
+                payload.get("seconds"), 5, min_value=1, max_value=60
+            )
+            await asyncio.sleep(seconds)
+            return {
+                "status": "ok",
+                "result": f"waited {seconds}s",
+                "seconds": seconds,
+            }
 
         if action_type == "agent_list_files":
             raw_path = str(payload.get("path") or ".")

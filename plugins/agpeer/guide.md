@@ -68,7 +68,7 @@ magnet/`.torrent`, or `agpeer_search {backend:"hook", query:...}` and pick
 the result with the most `attributes.seeders`, taking
 `backend_metadata.magnet`) → `agpeer_add_magnet` → for multi-file torrents
 check `agpeer_transfer_files` and, if only a subset is wanted, cancel with
-data and re-add with `file_selection` → poll `agpeer_transfer` every ~3–4 s
+data and re-add with `file_selection` → poll `agpeer_transfer` every ~3–5 s (pace with `agent_wait`, and stop + report if a transfer shows no progress across several spaced polls)
 (`resolving` while magnet metadata is being fetched; minutes of `resolving`
 usually means a dead swarm) → on completion, check `agpeer_library` /
 `agpeer_postprocess` if auto-organize is enabled.

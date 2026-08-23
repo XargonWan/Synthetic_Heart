@@ -507,7 +507,9 @@ async def _run_agent_turn_detached(
         # user's interface receives nothing while it works and nothing when it
         # finishes. Deliver the loop's final text back to the originating
         # interface so the user actually sees the outcome instead of silence.
-        await _deliver_agent_reply(result, context, bot, message)
+        await _deliver_agent_reply(
+            result, context, bot, message, goal=resume_goal or goal
+        )
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -708,6 +710,7 @@ async def _deliver_agent_reply(
     context: Dict[str, Any],
     bot: Any,
     message: Any,
+    goal: str = "",
 ) -> None:
     """Send the agent loop's final text back to the originating interface.
 
@@ -747,6 +750,33 @@ async def _deliver_agent_reply(
             f"with 0 actions executed (final_text={final_text!r})"
         )
         return
+
+    # Persona voiceover: the agent loop runs persona-free by design (its raw
+    # final text is operationally correct but tonally flat), so before the
+    # result ships to the user, re-voice it once through the persona chat
+    # engine (Base Cortex + full persona context). Fail-safe by contract: on
+    # any restyle failure the original agent text is delivered unchanged —
+    # a styling hiccup must never lose the result.
+    try:
+        from core.config_manager import config_registry
+
+        if bool(config_registry.get_value("AGENT_PERSONA_DELIVERY", True)):
+            from core.agent_core import AgentLoopManager
+
+            voiced = await AgentLoopManager().persona_voiceover(
+                final_text,
+                goal=goal,
+                context=context,
+                message=message,
+            )
+            if voiced.strip():
+                final_text = voiced
+                log_info(
+                    "[agent_router] Agent result re-voiced through the persona "
+                    "engine for delivery"
+                )
+    except Exception as exc:
+        log_debug(f"[agent_router] Persona voiceover skipped: {exc}")
 
     interface_path = context.get("interface_path") if context else None
     if not interface_path:
