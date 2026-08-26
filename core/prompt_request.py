@@ -54,6 +54,11 @@ class RuntimeContext:
     voice_channel_id: str | None = None
     is_grillo_beat: bool = False
     beat_type: str | None = None
+    # Structural identity guard: set when the human's message opens by
+    # addressing Synth with its own name/alias (e.g. "Rekku, ..."). Weak
+    # models mirror that vocative back and address the USER as the synth;
+    # the rendered note re-anchors who is who right at the generation point.
+    addressee_note: str = ""
 
 
 @dataclass
