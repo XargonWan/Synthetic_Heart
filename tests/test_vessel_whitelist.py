@@ -43,7 +43,7 @@ class TestParsePatterns:
 
     def test_default_whitelist_parses(self) -> None:
         assert parse_patterns(DEFAULT_WHITELIST) == [
-            "message_*",
+            "send_message",
             "event",
             "schedule_message",
             "blocklist",
