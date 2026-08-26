@@ -198,7 +198,12 @@ _COMPLETION_TOOL = "attempt_completion"
 # are attempted (text sanitisation, deriving a missing target from the
 # already-present interface_path). The interface_path itself is NEVER modified —
 # doing so could deliver the message to a chat Synth never intended.
-_DELIVERY_ACTION_PREFIX = "message_"
+_DELIVERY_ACTIONS = ("send_message", "message_")
+
+
+def _is_delivery_action(name: str) -> bool:
+    """True for the unified send_message or any legacy message_* action."""
+    return name == "send_message" or name.startswith("message_")
 
 
 def _context_allowed_tools(context: dict[str, Any] | None) -> set[str] | None:
@@ -2099,7 +2104,7 @@ class AgentLoopManager:
                     if not isinstance(args, dict):
                         args = {}
                     text = str(args.get("text") or args.get("content") or "").strip()
-                    is_delivery = mc_name.startswith(_DELIVERY_ACTION_PREFIX)
+                    is_delivery = _is_delivery_action(mc_name)
                     # Non-delivery speech actions are only captured; delivery
                     # actions are collected once they pass the dedup + interim
                     # cap below (a suppressed message must not be hoisted into
@@ -2115,7 +2120,7 @@ class AgentLoopManager:
                     # is deprecated and is excluded from the loop's tool set);
                     # any stray non-message speech action (radio_speak) stays
                     # captured as text only.
-                    if mc_name.startswith(_DELIVERY_ACTION_PREFIX):
+                    if _is_delivery_action(mc_name):
                         # Cross-iteration dedup: never re-send text already
                         # delivered earlier in THIS turn (the model re-emitting
                         # the same reply instead of completing → 3x voice notes).
@@ -2578,9 +2583,7 @@ class AgentLoopManager:
                 # missing target) and re-execute BEFORE bothering the model. The
                 # interface_path is never touched, so the retry can only reach
                 # the exact destination the model already chose.
-                if not exec_result.get("ok") and str(name).startswith(
-                    _DELIVERY_ACTION_PREFIX
-                ):
+                if not exec_result.get("ok") and _is_delivery_action(str(name)):
                     fixed_args, changed = _programmatic_delivery_fix(args)
                     if changed:
                         log_info(
@@ -2613,7 +2616,7 @@ class AgentLoopManager:
                 # monologue structure leaked into a user-facing message. This is
                 # non-blocking — the message is already delivered — but a WARNING
                 # makes the leak visible in logs for later prompt tuning.
-                if str(name).startswith(_DELIVERY_ACTION_PREFIX):
+                if _is_delivery_action(str(name)):
                     delivered_text = args.get("text") or args.get("content")
                     leak_signals = _looks_like_internal_monologue(
                         delivered_text if isinstance(delivered_text, str) else ""

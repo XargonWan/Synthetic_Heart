@@ -397,7 +397,7 @@ async def test_invalid_emotions_corrector_uses_full_run_action_signature(monkeyp
     monkeypatch.setattr(
         action_parser,
         "get_supported_action_types",
-        lambda: {"message_telegram_bot"},
+        lambda: {"send_message"},
     )
     monkeypatch.setattr(
         "core.transport_layer.extract_json_from_text",
@@ -414,12 +414,12 @@ async def test_invalid_emotions_corrector_uses_full_run_action_signature(monkeyp
     result = await message_chain.handle_incoming_message(
         bot=bot,
         message=msg,
-        text='{"actions":[{"type":"message_telegram_bot","payload":{"text":"hello","interface_path":"telegram_bot/123"}}]}',
+        text='{"actions":[{"type":"send_message","payload":{"text":"hello","interface_path":"telegram_bot/123"}}]}',
         source="llm",
         context={
             "chat_id": 123,
             "interface_path": "telegram_bot/123",
-            "allowed_action_types": ["message_telegram_bot"],
+            "allowed_action_types": ["send_message"],
         },
     )
 
@@ -432,7 +432,7 @@ async def test_invalid_emotions_corrector_uses_full_run_action_signature(monkeyp
     assert isinstance(context, dict)
     assert context["chat_id"] == 123
     assert context["interface_path"] == "telegram_bot/123"
-    assert context["allowed_action_types"] == ["message_telegram_bot"]
+    assert context["allowed_action_types"] == ["send_message"]
     assert context["from_cortex"] is True
     assert captured["action"] == {
         "type": "send_corrector_message",
@@ -525,12 +525,12 @@ async def test_normalize_message_unknown_obeys_supported_actions(monkeypatch):
     monkeypatch.setattr(
         action_parser,
         "get_supported_action_types",
-        lambda: set(["message_telegram_bot"]),
+        lambda: set(["send_message"]),
     )
 
     actions = [{"type": "message_unknown", "payload": {"text": "hi"}}]
     normalized = message_chain._normalize_message_unknown(actions, "telegram_bot/123")
-    assert normalized[0]["type"] == "message_telegram_bot"
+    assert normalized[0]["type"] == "send_message"
 
     # If target action is NOT supported, normalization should be skipped
     monkeypatch.setattr(
@@ -576,7 +576,7 @@ async def test_send_message_body_alias_is_normalized_before_validation(monkeypat
     monkeypatch.setattr(
         action_parser,
         "get_supported_action_types",
-        lambda: {"message_telegram_bot"},
+        lambda: {"send_message"},
     )
     monkeypatch.setattr(
         "core.transport_layer.run_corrector_middleware",
@@ -603,7 +603,7 @@ async def test_send_message_body_alias_is_normalized_before_validation(monkeypat
     assert result == message_chain.ACTIONS_EXECUTED
     assert captured["corrector_calls"] == 0
     assert captured["actions"] is not None
-    assert captured["actions"][0]["type"] == "message_telegram_bot"
+    assert captured["actions"][0]["type"] == "send_message"
     assert captured["actions"][0]["payload"]["text"] == "ping pong"
 
 
@@ -647,7 +647,7 @@ async def test_diary_entry_alias_is_normalized_before_validation(monkeypatch):
     monkeypatch.setattr(
         action_parser,
         "get_supported_action_types",
-        lambda: {"message_telegram_bot", "create_personal_diary_entry"},
+        lambda: {"send_message", "create_personal_diary_entry"},
     )
     monkeypatch.setattr(
         "core.transport_layer.run_corrector_middleware",
@@ -675,7 +675,7 @@ async def test_diary_entry_alias_is_normalized_before_validation(monkeypatch):
     assert captured["corrector_calls"] == 0
     assert captured["actions"] is not None
     assert [action["type"] for action in captured["actions"]] == [
-        "message_telegram_bot",
+        "send_message",
         "create_personal_diary_entry",
     ]
     assert captured["actions"][0]["payload"]["text"] == "ping pong"
@@ -725,7 +725,7 @@ async def test_diary_alias_is_normalized_before_validation(monkeypatch):
     monkeypatch.setattr(
         action_parser,
         "get_supported_action_types",
-        lambda: {"message_telegram_bot", "create_personal_diary_entry"},
+        lambda: {"send_message", "create_personal_diary_entry"},
     )
     monkeypatch.setattr(
         "core.transport_layer.run_corrector_middleware",
@@ -753,7 +753,7 @@ async def test_diary_alias_is_normalized_before_validation(monkeypatch):
     assert captured["corrector_calls"] == 0
     assert captured["actions"] is not None
     assert [action["type"] for action in captured["actions"]] == [
-        "message_telegram_bot",
+        "send_message",
         "create_personal_diary_entry",
     ]
     assert captured["actions"][1]["payload"]["interaction_summary"] == (
@@ -806,7 +806,7 @@ async def test_thought_action_is_folded_into_diary_payload(monkeypatch):
     monkeypatch.setattr(
         action_parser,
         "get_supported_action_types",
-        lambda: {"message_telegram_bot", "create_personal_diary_entry"},
+        lambda: {"send_message", "create_personal_diary_entry"},
     )
     monkeypatch.setattr(
         "core.transport_layer.run_corrector_middleware",
@@ -834,7 +834,7 @@ async def test_thought_action_is_folded_into_diary_payload(monkeypatch):
     assert captured["corrector_calls"] == 0
     assert captured["actions"] is not None
     assert [action["type"] for action in captured["actions"]] == [
-        "message_telegram_bot",
+        "send_message",
         "create_personal_diary_entry",
     ]
     assert captured["actions"][1]["payload"]["interaction_summary"] == (
@@ -919,7 +919,7 @@ async def test_corrector_forces_message_to_ollama_serve(monkeypatch):
     assert corrected is not None
     parsed, _ = extract_json_from_text(corrected, return_metadata=True)
     assert parsed is not None
-    assert parsed["actions"][0]["type"] == "message_ollama_serve"
+    assert parsed["actions"][0]["type"] == "send_message"
     assert parsed["actions"][0]["payload"]["interface_path"].startswith("ollama_serve/")
 
 
@@ -1064,7 +1064,7 @@ async def test_recovered_truncated_json_triggers_corrector_for_dropped_actions(
         parsed = {
             "actions": [
                 {
-                    "type": "message_telegram_bot",
+                    "type": "send_message",
                     "payload": {
                         "text": "hello",
                         "interface_path": "telegram_bot/42",
@@ -1102,7 +1102,7 @@ async def test_recovered_truncated_json_triggers_corrector_for_dropped_actions(
     monkeypatch.setattr(
         action_parser,
         "get_supported_action_types",
-        lambda: {"message_telegram_bot"},
+        lambda: {"send_message"},
     )
     monkeypatch.setattr(
         "core.action_parser.run_actions",
@@ -1126,7 +1126,7 @@ async def test_recovered_truncated_json_triggers_corrector_for_dropped_actions(
     )
 
     assert called["actions"] is not None
-    assert called["actions"][0]["type"] == "message_telegram_bot"
+    assert called["actions"][0]["type"] == "send_message"
     assert called["corrector"] >= 1
     assert called["fallback"] == 0
     assert result == message_chain.ACTIONS_EXECUTED

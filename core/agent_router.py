@@ -127,20 +127,15 @@ def _extract_resume_task_id(actions: List[Any]) -> int | None:
 
 
 def _is_pure_message(action_type: str) -> bool:
-    """A plain outbound message action (no tool semantics)."""
-    return action_type in (
-        "message",
-        "send_message",
-        "message_discord_bot",
-        "message_fluxer_bot",
-        "message_integration",
-        "message_mate_engine",
-        "message_matrix_chat",
-        "message_ollama_serve",
-        "message_synth_webui",
-        "message_telegram_bot",
-        "radio_speak",
-        "tts_speak",
+    """A plain outbound message action (no tool semantics).
+
+    Matches the unified ``send_message`` plus any ``message_*`` interface
+    action; special outbound verbs (radio, TTS) are listed explicitly.
+    """
+    return (
+        action_type in ("send_message", "message")
+        or action_type.startswith("message_")
+        or action_type in ("radio_speak", "tts_speak")
     )
 
 
