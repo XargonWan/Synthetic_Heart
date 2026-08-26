@@ -342,7 +342,7 @@ SyntH is a persistent cognitive entity; a **Vessel** is a layer of embodiment in
 **Vessel action whitelist — keep the will/reflection prompt from being erased.** During a vessel turn the full ~60-action global catalog (`base_system≈9.9k` + `catalog_block≈17.6k`) is folded into the **system** prompt, pushing it past the downstream char-budget clamp in `core/external_endpoints/bridges/cortex_bridge.py` (§5). Because that clamp trims only the **user body**, never the system message, the small will/reflection prompt (which lives in the body) gets erased — so SyntH authors goals "blind" and produces trivial material-gathering objectives instead of strategic ones. The fix is a **whitelist** applied *only on vessel turns* that trims the catalog to the actions embodiment actually needs, keeping the system prompt lean enough that the body survives. It is a **3-tier** model implemented in `plugins/rift_vessel/vessel_whitelist.py` (plugin-owned, self-contained — if the Rift Vessel plugin is absent the core falls back to its normal scope-based derive) and wired into `core/prompt_engine.py::build_json_prompt` via `_derive_vessel_whitelist_action_types` (only applied when the derived set is strictly smaller than the full catalog):
    - **Tier 1 — hardcoded, non-editable:** `vessel_*` (the Vessel's own world-agnostic verbs, already namespaced `vessel_<world>_<verb>`). The user can never remove these — they are imperative to embodiment.
    - **Tier 2 — hardcoded, interchangeable per connected world:** `*_<world>_*` (e.g. `*_minecraft_*`), derived **structurally** from the connected world token via `vessel_plugin._action_world()` (never a hardcoded game name), so it swaps automatically when the connected world changes.
-   - **Tier 3 — editable:** the `VESSEL_ACTION_WHITELIST` config var (advanced; default `message_*, event, schedule_message, blocklist, spawn_drone`) holds only the optional *core-extra* actions the user may tune (message/event/schedule/blocklist/drone).
+   - **Tier 3 — editable:** the `VESSEL_ACTION_WHITELIST` config var (advanced; default `send_message, event, schedule_message, blocklist, spawn_drone`) holds only the optional *core-extra* actions the user may tune (message/event/schedule/blocklist/drone).
 
    The final allowlist = `hardcoded_vessel_patterns(world)` ∪ `matches_whitelist(available_action, parse_patterns(VESSEL_ACTION_WHITELIST))`, with `_SYSTEM_ONLY_ACTION_NAMES` and non-user-facing actions dropped. Matching is **structural** (`fnmatch.fnmatchcase` on the action *name*), never keyword/regex intent detection — safe in a multi-language deployment. **Global audio/tts trim (companion change).** As part of the same lean-prompt effort, the standalone audio/tts actions `tts_speak` (vox), `audio_telegram_bot`, and `audio_discord_bot` are removed from the exposed catalog **globally** (commented out with `TODO(vessel-whitelist)` markers referencing this section) — audio delivery still works via the `say audio` flag and the interface-native audio paths; restore them by uncommenting the marked blocks. Unit-tested in `tests/test_vessel_whitelist.py`.
 
@@ -485,36 +485,43 @@ sub-folder layout: `interface/openai_api_server/openai_api_server.py` +
 `res/synth_webui/static/component_icons/<name>.png` and a sibling
 `<name>.guide.md`.
 
-### Outbound file sending
+### Unified outbound messaging (`send_message`)
 
-Telegram, Discord, and Matrix each expose a single generic **send-file** action so
-Synth can push a local file to a user/channel/room. All three share the sandbox
-path-safety and MIME-detection helper `core/outbound_file_utils.py`:
+Every chat interface exposes **one** LLM-facing delivery action: `send_message`
+(schema owned by `core/message_registry.py`, dispatched by
+`core/action_parser.py::_dispatch_send_message`). The per-interface legacy
+`message_*` / `send_file_*` / `audio_*` actions are removed — do not write new
+plugins using them.
 
-- `resolve_safe_outbound_path(raw_path)` confines the source to the same sandbox
-  roots as the Agent tools (`AGENT_FS_ROOTS`, else `[AGENT_FS_ROOT|/app, SYNTH_LOG_DIR|/app/logs]`);
-  relative paths resolve against the first root. Only existing regular files inside a
-  root pass — traversal, missing files, and directories are rejected.
-- `classify_media(path)` returns `image` / `video` / `audio` / `document` (MIME first,
-  extension fallback); `guess_mime_type(path)` backs it with an
-  `application/octet-stream` fallback.
+Payload contract:
 
-| Action | Interface | Required | Optional |
-|--------|-----------|----------|----------|
-| `send_file_telegram_bot` | `interface/telegram_bot.py` | `path`, `interface_path` | `chat_name`, `caption` |
-| `send_file_discord_bot` | `interface/discord_interface.py` | `path` | `interface_path`, `target`, `channel_id`, `caption` |
-| `send_file_fluxer_bot` | `interface/fluxer_interface.py` | `path`, (`channel_id` or `interface_path`) | `caption` |
-| `send_file_matrix_chat` | `interface/matrix_interface.py` | `path`, `target` | `caption`, `thread_event_id` |
+- `text` — message body; also the caption for media. `media` — sandbox file
+  path(s), auto-detected image/video/audio/document via
+  `core/outbound_file_utils.py` (`resolve_safe_outbound_path`,
+  `classify_media`, `guess_mime_type`).
+- At least one of `text`/`media` is required (OR validation via the
+  `one_of_groups` extension on `ValidationRule` in `core/validation_registry.py`;
+  read from action schemas by `core/component_auto_registration.py`).
+- `interface_path` is **conditional**: optional when replying to an incoming
+  message (`original_message.interface_path` is the fallback), required for
+  spontaneous sends.
+- Optional `send_as_voice` (TTS voice note; routed through Vox at dispatch) and
+  `reply_to` (unified reply id mapped to the interface-native field).
 
-All four are `security_level: "medium"`, `external_effects: ["filesystem"]` — so the
-router 2.0 auto-routes them to the Agent Lane, and (like every action) each is
-auto-exposed as an MCP tool (`synth_send_file_*`). Captions longer than the
-interface limit are split into a follow-up text message.
+Capabilities: interfaces declare what they can deliver via a `get_capabilities()`
+hook or method presence (`core/interface_capabilities.py`). The set is stored at
+registration time in `InterfaceRegistry` (`register_interface_capabilities`).
+Requested features an interface does not support are dropped with a log warning,
+stripped from the payload before delivery, and reported back to the model as
+structured `capability_drops` (`{"feature", "reason", "interface"}`,
+`core/capability_drops.py`) so Synth can acknowledge the limitation in its own
+words on the next turn — never a canned message, never an error.
 
-**Audio stays playable.** A file classified as audio is delivered as a *playable*
-message, not an inert attachment: Telegram uses `send_audio`, Matrix uses the
-`m.audio` msgtype. The pre-existing dedicated `audio_*` actions are untouched — use
-`send_file_*` only when a caller explicitly wants a generic file.
+**New interface checklist:** implement `async send_message(payload,
+original_message=None)` accepting the unified payload above; expose
+`send_message` from `get_supported_actions()` via
+`message_registry.get_send_message_schema()`; declare capabilities; never emit
+per-interface action names.
 
 ---
 
@@ -1002,7 +1009,7 @@ Before finishing a code task, verify:
 | `VESSEL_SP_ENGAGE_RATIO` | Minimum `own_power / mob_power` ratio at/above which an **armed** Synth engages a hostile mob instead of fleeing (default 1.0, clamped `[0.2, 5.0]`). Structural, telemetry-only — see §5c "Power-aware fight-vs-flee" |
 | `VESSEL_SP_WEAK_MOB_POWER` | Structural power floor below which a **disarmed** (no melee *and* no ranged weapon) Synth still punches out a mob bare-handed instead of fleeing (default 6.0). `_mob_power(entity) = max_health * (1 + attack_damage/8)`. See §5c "Power-aware fight-vs-flee" |
 | `VESSEL_PERCEPTION_CONTEXT_CAP` | Max autonomous vessel perceptions merged into a vessel-focus prompt (default 3). Perceptions live in a SEPARATE in-memory ring buffer (`_perception_memory`, maxlen 32) so a rapid ambient burst (e.g. drowning damage) can never evict player chat from the bounded conversational deque; the prompt merges conversation + the last N perceptions chronologically |
-| `VESSEL_ACTION_WHITELIST` | Comma/newline-separated fnmatch patterns for the **core-extra** actions kept in the prompt during a vessel turn (advanced; default `message_*, event, schedule_message, blocklist, spawn_drone`). This is the *editable* Tier 3 of the vessel action whitelist — the vessel's own verbs (`vessel_*`) and the connected world's verbs (`*_<world>_*`) are **hardcoded** and always kept. See §5c "Vessel action whitelist" |
+| `VESSEL_ACTION_WHITELIST` | Comma/newline-separated fnmatch patterns for the **core-extra** actions kept in the prompt during a vessel turn (advanced; default `send_message, event, schedule_message, blocklist, spawn_drone`). This is the *editable* Tier 3 of the vessel action whitelist — the vessel's own verbs (`vessel_*`) and the connected world's verbs (`*_<world>_*`) are **hardcoded** and always kept. See §5c "Vessel action whitelist" |
 | `VESSEL_COMPACTOR_ENABLED` | Enable the **Rift Vessel Compactor** plugin (`plugins/rift_vessel/vessel_compactor/`, default `True`) — the dedicated plugin that, on end-of-session, compacts the session's `vessel_activity_log` rows into one factual, third-person **operational recap** in `vessel_diary` (`reason = "activity_recap"`). Uses its own internal off-chain low-priority asyncio worker queue (not the message chain); also manually runnable from the WebUI Plugins tab (`run_action("compact_now")`). Fully fail-safe |
 | `VESSEL_DIARY_COMPACTION_ENABLED` | Gate for the **legacy inline fallback** compaction path only (default `True`). Used when no compaction handler is registered (the Rift Vessel Compactor plugin is absent/disabled): `VesselSessionManager._compact_and_store` writes the old autobiographical entry to `vessel_diary` via `core/vessel_diary_compactor.py::compact_session`. With the plugin enabled this path is not used. Fully fail-safe: any LLM error degrades to a deterministic plain-text join |
 | `VESSEL_DIARY_CHUNK_ITEMS` | Max experience-buffer items per compaction chunk before it is summarised into a partial (default 40, clamped `[4, 400]`). Keeps each chunk LLM call small enough that a long session never produces a single oversized prompt |

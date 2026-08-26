@@ -440,31 +440,42 @@ listed because it ships with a non-empty default and is therefore always
 Interface Actions
 -----------------
 
-Interfaces can provide actions that LLMs can invoke:
+Interfaces can provide actions that LLMs can invoke. All chat interfaces expose
+a single unified **``send_message``** action (schema owned by
+``core/message_registry.py``) — never per-interface ``message_*`` /
+``send_file_*`` / ``audio_*`` names:
 
 **Message Sending:**
 
 .. code-block:: json
 
    {
-     "type": "message_telegram_bot",
+     "type": "send_message",
      "payload": {
        "text": "Hello from synth!",
+       "media": ["/app/data/photo.png"],
        "interface_path": "telegram_bot/123456789/2"
      }
    }
 
-**Media Handling:**
+At least one of ``text``/``media`` is required (OR-validated via the
+``one_of_groups`` extension on ``ValidationRule``). ``interface_path`` is
+optional when replying to an incoming message (the origin conversation is the
+fallback) and required for spontaneous sends. Optional ``send_as_voice``
+(TTS voice note) and ``reply_to`` (unified reply id) are honoured where the
+interface supports them; unsupported features are dropped with a log warning
+and reported back to the model as structured ``capability_drops`` so it can
+acknowledge the limitation in its own words.
 
-.. code-block:: json
+**New interface checklist:**
 
-   {
-     "type": "send_media_discord",
-     "payload": {
-       "file_url": "https://example.com/image.png",
-       "interface_path": "discord_interface/987654321/123"
-     }
-   }
+* implement ``async send_message(payload, original_message=None)`` accepting
+  the unified payload above;
+* expose ``send_message`` from ``get_supported_actions()`` via
+  ``message_registry.get_send_message_schema()``;
+* declare capabilities via ``get_capabilities()`` (or rely on method presence,
+  see ``core/interface_capabilities.py``);
+* never emit per-interface action names.
 
 Security and Validation
 -----------------------
