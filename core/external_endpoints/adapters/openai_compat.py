@@ -415,6 +415,26 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                     **bare_kwargs,
                 )
 
+    @staticmethod
+    def _first_choice_or_raise(response: Any) -> Any:
+        """Return the first completion choice, or raise a descriptive error.
+
+        Some OpenAI-compatible servers answer HTTP 200 with a body that is not
+        a well-formed completion (missing/null/empty ``choices``). Subscripting
+        ``None`` there crashed the whole engine call with the opaque
+        ``TypeError: 'NoneType' object is not subscriptable``; surface the real
+        cause instead. The message deliberately avoids transport/transient
+        wording so the bridge does not mistake it for a retryable API error.
+        """
+        choices = getattr(response, "choices", None) or []
+        if not choices:
+            preview = repr(response)[:400]
+            raise RuntimeError(
+                "endpoint returned no completion choices "
+                f"(malformed or non-standard response body): {preview}"
+            )
+        return choices[0]
+
     async def chat_completion(
         self,
         messages: list[dict[str, Any]],
@@ -461,7 +481,7 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                 extra_body=extra_body,
                 disable_thinking=disable_thinking,
             )
-            choice = response.choices[0]
+            choice = self._first_choice_or_raise(response)
             usage = {}
             if response.usage:
                 usage = {
