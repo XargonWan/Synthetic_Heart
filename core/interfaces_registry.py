@@ -15,18 +15,41 @@ class InterfaceRegistry:
         self._interfaces: Dict[str, Any] = {}
         self._interface_configs: Dict[str, Dict[str, Any]] = {}
         self._trainer_ids: Dict[str, int | str] = {}
+        self._interface_capabilities: Dict[str, frozenset[str]] = {}
 
     def register_interface(
         self,
         name: str,
         interface_instance: Any,
         config: Optional[Dict[str, Any]] = None,
+        capabilities: Optional[frozenset[str]] = None,
     ):
-        """Register a new interface."""
+        """Register a new interface.
+
+        ``capabilities`` is the structural capability token set advertised by
+        the interface (see ``core.interface_capabilities``). When omitted it
+        is derived lazily via :meth:`get_interface_capabilities`.
+        """
         self._interfaces[name] = interface_instance
         if config:
             self._interface_configs[name] = config
+        if capabilities is not None:
+            self._interface_capabilities[name] = frozenset(capabilities)
         log_debug(f"[interfaces_registry] Registered interface: {name}")
+
+    def register_interface_capabilities(
+        self, name: str, capabilities: frozenset[str]
+    ) -> None:
+        """Store (or overwrite) the capability set for a registered interface."""
+        self._interface_capabilities[name] = frozenset(capabilities)
+        log_debug(
+            f"[interfaces_registry] Stored capabilities for {name}: "
+            f"{sorted(self._interface_capabilities[name])}"
+        )
+
+    def get_interface_capabilities(self, name: str) -> frozenset[str]:
+        """Return the capability tokens for ``name``; empty set when unknown."""
+        return self._interface_capabilities.get(name, frozenset())
 
     def unregister_interface(self, name: str):
         """Remove an interface from the registry."""
@@ -36,6 +59,8 @@ class InterfaceRegistry:
             del self._interface_configs[name]
         if name in self._trainer_ids:
             del self._trainer_ids[name]
+        if name in self._interface_capabilities:
+            del self._interface_capabilities[name]
         log_debug(f"[interfaces_registry] Unregistered interface: {name}")
 
     def get_interface(self, name: str) -> Optional[Any]:

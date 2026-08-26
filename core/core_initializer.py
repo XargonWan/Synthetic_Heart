@@ -3221,6 +3221,19 @@ def register_interface(name: str, interface_obj: Any) -> None:
     INTERFACE_REGISTRY[name] = interface_obj
     log_debug(f"[core_initializer] Registered interface: {name}")
 
+    # Persist the structural capability set so the unified send_message
+    # dispatcher (and any future consumer) can query what each interface can
+    # deliver without re-introspecting the instance.
+    try:
+        from core.interface_capabilities import interface_capabilities as _derive_caps
+        from core.interfaces_registry import get_interface_registry
+
+        get_interface_registry().register_interface_capabilities(
+            name, _derive_caps(interface_obj)
+        )
+    except Exception as e:  # pragma: no cover - defensive
+        log_debug(f"[core_initializer] Capability storage for {name} failed: {e}")
+
     # Log detailed information about the interface loading
     log_debug(f"[core_initializer] Loading interface: {name}")
 
