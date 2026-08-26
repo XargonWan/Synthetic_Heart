@@ -1,0 +1,4 @@
+- Documentation pages use reStructuredText (`.rst`) for core project topics and Markdown (`.md`) for plugin-owned guides and Gemini-specific content, with both formats accepted via the `source_suffix` mapping in `conf.py`.
+- Plugin documentation follows a convention where each plugin ships its own `guide.md` (or `<name>.guide.md`) next to its code, and `conf.py` automatically discovers and copies these into `docs/plugins/generated/` during the build.
+- Images and screenshots are stored under `docs/res/` and referenced via relative paths in RST `.. image::` directives, with shared assets like `GRILLO.png` copied alongside generated plugin guides so Markdown can reference them flatly.
+- Top-level navigation is organized through two separate toctrees in `index.rst` — one for the User guide and one for the Developer guide — keeping documentation sections clearly separated by audience.

@@ -1230,3 +1230,119 @@ async def test_no_fallback_on_corrector_exception_with_success(monkeypatch):
 
     assert called["fallback"] == 0
     assert result == message_chain.ACTIONS_EXECUTED
+
+
+@pytest.mark.asyncio
+async def test_reactive_vessel_chat_webui_only_reply_triggers_corrector(monkeypatch):
+    # Regression: a reactive in-world player chat ("Rekku ci sei?") that the LLM
+    # answered with a ``message_synth_webui`` action delivered the reply to the
+    # WebUI, not in-world. A ``message_*`` action satisfies ``has_user_response``
+    # but NOT ``has_inworld_reply``; for a reactive vessel turn the corrector must
+    # gate on the in-world reply and fire so a ``vessel_<world>_say`` is forced.
+    corrector_calls = _corrector_harness(
+        monkeypatch,
+        [
+            {
+                "type": "message_synth_webui",
+                "payload": {"text": "sono qui", "interface_path": "synth_webui/x"},
+            }
+        ],
+        supported_types={"message_synth_webui"},
+    )
+
+    msg = SimpleNamespace(
+        chat_id="vessel/minecraft",
+        interface_path="vessel/minecraft",
+        from_cortex=True,
+    )
+
+    await message_chain.handle_incoming_message(
+        bot=None,
+        message=msg,
+        text='{"actions":[{"type":"message_synth_webui","payload":{"text":"sono qui","interface_path":"synth_webui/x"}}]}',
+        source="llm",
+        context={
+            "interface_path": "vessel/minecraft",
+            "vessel_player_chat": True,
+        },
+    )
+
+    assert corrector_calls, (
+        "reactive vessel chat answered only via message_synth_webui must trigger "
+        "the missing-reply corrector"
+    )
+    # The corrector was primed with a missing-reply hint that names the in-world
+    # speak verb, so the retry is steered toward ``vessel_minecraft_say``.
+    correction_context = getattr(msg, "correction_context", None) or {}
+    hint = " ".join(str(e) for e in correction_context.get("errors", []))
+    assert "vessel_minecraft_say" in hint, (
+        f"corrector hint should force an in-world say, got: {hint!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reactive_vessel_chat_inworld_say_suppresses_corrector(monkeypatch):
+    # The counterpart: a reactive vessel turn that already replied in-world with
+    # ``vessel_minecraft_say`` sets ``has_inworld_reply`` and must NOT trigger the
+    # missing-reply corrector.
+    corrector_calls = _corrector_harness(
+        monkeypatch,
+        [{"type": "vessel_minecraft_say", "payload": {"text": "ciao, sono qui"}}],
+        supported_types={"vessel_minecraft_say"},
+    )
+
+    msg = SimpleNamespace(
+        chat_id="vessel/minecraft",
+        interface_path="vessel/minecraft",
+        from_cortex=True,
+    )
+
+    result = await message_chain.handle_incoming_message(
+        bot=None,
+        message=msg,
+        text='{"actions":[{"type":"vessel_minecraft_say","payload":{"text":"ciao, sono qui"}}]}',
+        source="llm",
+        context={
+            "interface_path": "vessel/minecraft",
+            "vessel_player_chat": True,
+        },
+    )
+
+    assert result == message_chain.ACTIONS_EXECUTED
+    assert not corrector_calls, (
+        "an in-world vessel_*_say reply must suppress the missing-reply corrector"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reactive_vessel_disconnect_suppresses_missing_reply_corrector(monkeypatch):
+    # Disconnect is a successful terminal lifecycle action. It removes the
+    # world-specific say verb immediately, so demanding a spoken reply after it
+    # would manufacture an action that is no longer valid.
+    corrector_calls = _corrector_harness(
+        monkeypatch,
+        [{"type": "vessel_disconnect", "payload": {}}],
+        supported_types={"vessel_disconnect"},
+    )
+
+    msg = SimpleNamespace(
+        chat_id="vessel/minecraft",
+        interface_path="vessel/minecraft",
+        from_cortex=True,
+    )
+
+    result = await message_chain.handle_incoming_message(
+        bot=None,
+        message=msg,
+        text='{"actions":[{"type":"vessel_disconnect","payload":{}}]}',
+        source="llm",
+        context={
+            "interface_path": "vessel/minecraft",
+            "vessel_player_chat": True,
+        },
+    )
+
+    assert result == message_chain.ACTIONS_EXECUTED
+    assert not corrector_calls, (
+        "a successful vessel_disconnect must not trigger a missing-reply correction"
+    )

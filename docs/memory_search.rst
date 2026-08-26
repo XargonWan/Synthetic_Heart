@@ -25,8 +25,10 @@ Example payloads:
 Configuration
 -------------
 
-- `ENABLE_MEMORY_SEARCH` (bool, default: True) — Toggle plugin on/off.
 - `MEMORY_SEARCH_MAX_RESULTS` (int, default: 10) — Default maximum number of results returned.
+
+The plugin is enabled/disabled via its global plugin toggle
+(`PLUGIN_ENABLED__memory_search`), not a separate config flag.
 
 Behavior
 --------

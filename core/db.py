@@ -1345,7 +1345,7 @@ async def _heal_cortex_config(cur: Any) -> None:
 
     await cur.execute(
         "SELECT config_key, value FROM config "
-        "WHERE config_key IN ('BASE_CORTEX', 'GRILLO_CORTEX', 'TRAINER_CORTEX', 'LIVE_CORTEX')"
+        "WHERE config_key IN ('BASE_CORTEX', 'GRILLO_CORTEX', 'TRAINER_CORTEX', 'LIVE_CORTEX', 'DSP_CORTEX')"
     )
     current: dict[str, str] = {}
     for row in await cur.fetchall():
@@ -1355,7 +1355,7 @@ async def _heal_cortex_config(cur: Any) -> None:
             current[str(key)] = "" if value is None else str(value)
 
     updates: list[tuple[str, str]] = []
-    for key in ("TRAINER_CORTEX", "GRILLO_CORTEX", "LIVE_CORTEX"):
+    for key in ("TRAINER_CORTEX", "GRILLO_CORTEX", "LIVE_CORTEX", "DSP_CORTEX"):
         value = current.get(key, "")
         if value and value not in ("Default", "None") and value not in valid_names:
             updates.append((key, "Default"))
@@ -1389,10 +1389,29 @@ async def init_db() -> None:
             # Ensure we have a cursor to run schema creation for core tables
             async with conn.cursor() as cur:
                 if _get_db_type() == "postgres":
+                    failed_statements = 0
                     for statement in _load_sql_statements(
                         _runtime_postgres_schema_path()
                     ):
-                        await cur.execute(statement)
+                        try:
+                            await cur.execute(statement)
+                        except Exception as statement_error:
+                            # One invalid statement must not abort the whole
+                            # schema: log it and keep going so tables declared
+                            # after the failure still get created. A single
+                            # bad statement used to stop the loop, strand every
+                            # later table, and re-fail on every boot (crash ->
+                            # restart -> bootloop), masking all other errors.
+                            failed_statements += 1
+                            log_warning(
+                                f"[init_db] PostgreSQL schema statement failed "
+                                f"({statement_error}): {statement[:120]}"
+                            )
+                    if failed_statements:
+                        log_warning(
+                            f"[init_db] {failed_statements} PostgreSQL schema "
+                            "statement(s) failed to apply"
+                        )
                 else:
                     await cur.execute(
                         """
@@ -1419,6 +1438,11 @@ async def init_db() -> None:
                 await cur.execute(
                     """
                     INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('TRAINER_CORTEX', 'Default')
+                    """
+                )
+                await cur.execute(
+                    """
+                    INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('DSP_CORTEX', 'Default')
                     """
                 )
 
@@ -1502,6 +1526,27 @@ _GRILLO_PG_INDEX_DDL: tuple[str, ...] = (
     " ON grillo_action_execs (activity_log_id)",
 )
 
+# Agentic Runtime 2.0 task table (init-db.sql). Same MariaDB dialect /
+# Postgres-translation caveat as the grillo and vessel tables above. Only the
+# Postgres preflight path (ensure_plugin_tables) creates it on Postgres — the
+# inline MariaDB block below is unreachable there, and without this table the
+# agentic task recorder and the goal-expansion Drone fail with
+# 'relation "agent_tasks" does not exist'.
+_AGENT_TASKS_DDL = """
+    CREATE TABLE IF NOT EXISTS agent_tasks (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        engine VARCHAR(64),
+        status ENUM('pending','running','waiting_for_approval','paused','completed','failed','cancelled') NOT NULL DEFAULT 'pending',
+        input JSON,
+        iterations_meta JSON,
+        output JSON,
+        trainer_id VARCHAR(64),
+        metadata JSON,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    """
+
 
 async def init_grillo_tables() -> None:
     """Create the grillo audit tables (idempotent, MariaDB and Postgres).
@@ -1516,6 +1561,120 @@ async def init_grillo_tables() -> None:
             await cur.execute(_GRILLO_ACTION_EXECS_DDL)
             if _get_db_type() == "postgres":
                 for index_sql in _GRILLO_PG_INDEX_DDL:
+                    await cur.execute(index_sql)
+            await conn.commit()
+
+
+async def init_agent_tables() -> None:
+    """Create the Agentic Runtime 2.0 task table (idempotent, MariaDB+Postgres).
+
+    ``agent_tasks`` records agentic turns and Drone sub-agent tasks
+    (``metadata.source`` / ``metadata.drone.parent_task_id``). On Postgres it is
+    only created by this preflight — the MariaDB-only DDL block in
+    ``ensure_plugin_tables`` is unreachable there, so without this call every
+    Drone spawn (including the Rift Vessel goal-expansion Drone) fails with
+    'relation "agent_tasks" does not exist'.
+    """
+    async with get_conn_ctx() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(_AGENT_TASKS_DDL)
+            await conn.commit()
+
+
+# Rift Vessel tables. Same MariaDB dialect / Postgres-translation caveat as the
+# grillo tables above — indexes are re-declared explicitly for Postgres in
+# _VESSEL_PG_INDEX_DDL. NOTE: never use a bare `timestamp` column (PostgreSQL
+# reserved word — breaks fresh installs); time columns use *_at names.
+_VESSEL_SESSIONS_DDL = """
+    CREATE TABLE IF NOT EXISTS vessel_sessions (
+        session_id VARCHAR(128) PRIMARY KEY,
+        environment VARCHAR(64) NOT NULL,
+        interface_path VARCHAR(512),
+        status ENUM('active','ended') NOT NULL DEFAULT 'active',
+        experience_buffer LONGTEXT,
+        diary_entry_id INT,
+        started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        last_event_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        ended_at DATETIME,
+        INDEX idx_vessel_sessions_status (status),
+        INDEX idx_vessel_sessions_environment (environment),
+        INDEX idx_vessel_sessions_last_event (last_event_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    """
+
+_VESSEL_ACTIVITY_LOG_DDL = """
+    CREATE TABLE IF NOT EXISTS vessel_activity_log (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        session_id VARCHAR(128),
+        interface_path VARCHAR(512),
+        environment VARCHAR(64) NOT NULL,
+        event_type VARCHAR(50) NOT NULL,
+        summary TEXT NOT NULL,
+        metadata JSON,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_vessel_activity_created_at (created_at),
+        INDEX idx_vessel_activity_environment (environment),
+        INDEX idx_vessel_activity_session (session_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    """
+
+# The compacted "vessel diary": one autobiographical entry per ended session,
+# produced by chunked LLM summarisation of the session's lived experience. This
+# is deliberately SEPARATE from the real ``ai_diary`` — the vessel no longer
+# writes to ``ai_diary`` (that polluted the Fast Lane prompt). Whether/how to
+# import these entries into ``ai_diary`` is a later, unimplemented decision.
+_VESSEL_DIARY_DDL = """
+    CREATE TABLE IF NOT EXISTS vessel_diary (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        session_id VARCHAR(128),
+        interface_path VARCHAR(512),
+        environment VARCHAR(64) NOT NULL,
+        summary LONGTEXT NOT NULL,
+        moments_count INT DEFAULT 0,
+        reason VARCHAR(32),
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_vessel_diary_created_at (created_at),
+        INDEX idx_vessel_diary_environment (environment),
+        INDEX idx_vessel_diary_session (session_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    """
+
+_VESSEL_PG_INDEX_DDL: tuple[str, ...] = (
+    "CREATE INDEX IF NOT EXISTS idx_vessel_sessions_status ON vessel_sessions (status)",
+    "CREATE INDEX IF NOT EXISTS idx_vessel_sessions_environment"
+    " ON vessel_sessions (environment)",
+    "CREATE INDEX IF NOT EXISTS idx_vessel_sessions_last_event"
+    " ON vessel_sessions (last_event_at)",
+    "CREATE INDEX IF NOT EXISTS idx_vessel_activity_created_at"
+    " ON vessel_activity_log (created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_vessel_activity_environment"
+    " ON vessel_activity_log (environment)",
+    "CREATE INDEX IF NOT EXISTS idx_vessel_activity_session"
+    " ON vessel_activity_log (session_id)",
+    "CREATE INDEX IF NOT EXISTS idx_vessel_diary_created_at"
+    " ON vessel_diary (created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_vessel_diary_environment"
+    " ON vessel_diary (environment)",
+    "CREATE INDEX IF NOT EXISTS idx_vessel_diary_session ON vessel_diary (session_id)",
+)
+
+
+async def init_vessel_tables() -> None:
+    """Create the Rift Vessel tables (idempotent, MariaDB and Postgres).
+
+    vessel_sessions tracks each embodiment session and its buffered lived
+    experience (compacted to a single ``vessel_diary`` entry at end-of-session);
+    vessel_activity_log is the audit trail shown in WebUI History > Vessel;
+    vessel_diary holds the chunk-compacted autobiographical entry per session
+    (separate from the real ai_diary, which the vessel no longer writes to).
+    """
+    async with get_conn_ctx() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(_VESSEL_SESSIONS_DDL)
+            await cur.execute(_VESSEL_ACTIVITY_LOG_DDL)
+            await cur.execute(_VESSEL_DIARY_DDL)
+            if _get_db_type() == "postgres":
+                for index_sql in _VESSEL_PG_INDEX_DDL:
                     await cur.execute(index_sql)
             await conn.commit()
 
@@ -1556,6 +1715,22 @@ async def ensure_plugin_tables() -> None:
             except Exception as init_err:
                 log_warning(
                     f"[db] Postgres preflight init skipped for grillo tables: {init_err}"
+                )
+            try:
+                await init_vessel_tables()
+            except Exception as init_err:
+                log_warning(
+                    f"[db] Postgres preflight init skipped for vessel tables: {init_err}"
+                )
+            # Agentic Runtime 2.0 task table (init-db.sql + the MariaDB-only
+            # block below, which the Postgres branch never reaches). Without it
+            # every Drone spawn fails with 'relation "agent_tasks" does not
+            # exist' — including the Rift Vessel goal-expansion Drone.
+            try:
+                await init_agent_tables()
+            except Exception as init_err:
+                log_warning(
+                    f"[db] Postgres preflight init skipped for agent_tasks: {init_err}"
                 )
             # Idempotent one-shot schema migrations (backup+verify+drop of
             # legacy tables, etc.) — applied automatically on every deploy.
@@ -1713,23 +1888,14 @@ async def ensure_plugin_tables() -> None:
                 await cur.execute(_GRILLO_ACTIVITY_LOG_DDL)
                 await cur.execute(_GRILLO_ACTION_EXECS_DDL)
 
+                # Rift Vessel tables (embodiment sessions + activity audit +
+                # compacted per-session vessel diary).
+                await cur.execute(_VESSEL_SESSIONS_DDL)
+                await cur.execute(_VESSEL_ACTIVITY_LOG_DDL)
+                await cur.execute(_VESSEL_DIARY_DDL)
+
                 # agent task table (init-db.sql) — Agentic Runtime 2.0
-                await cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS agent_tasks (
-                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                        engine VARCHAR(64),
-                        status ENUM('pending','running','waiting_for_approval','paused','completed','failed','cancelled') NOT NULL DEFAULT 'pending',
-                        input JSON,
-                        iterations_meta JSON,
-                        output JSON,
-                        trainer_id VARCHAR(64),
-                        metadata JSON,
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-                    """
-                )
+                await cur.execute(_AGENT_TASKS_DDL)
 
                 # external_endpoints (core/external_endpoints)
                 await cur.execute(
@@ -1773,12 +1939,34 @@ async def ensure_plugin_tables() -> None:
                         message_id VARCHAR(255),
                         content_preview TEXT,
                         metadata JSON,
+                        is_test TINYINT(1) NOT NULL DEFAULT 0,
                         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                         INDEX idx_failure_created_at (created_at),
                         INDEX idx_failure_code (failure_code),
                         INDEX idx_failure_stage (stage),
                         INDEX idx_failure_interface_path (interface_path),
                         INDEX idx_failure_engine (engine)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+                    """
+                )
+
+                # turn_reason_trail (core/turn_reason.py) — per-turn structural
+                # summary of what drove a reply ("why did I say that").
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS turn_reason_trail (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        interface_path VARCHAR(255),
+                        reply_preview TEXT,
+                        memories JSON,
+                        diary_sources JSON,
+                        emotion VARCHAR(255),
+                        goal JSON,
+                        beat_type VARCHAR(100),
+                        history_scope VARCHAR(50),
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        INDEX idx_reason_trail_created_at (created_at),
+                        INDEX idx_reason_trail_interface_path (interface_path)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
                     """
                 )

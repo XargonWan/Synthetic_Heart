@@ -313,3 +313,106 @@ async def test_agent_search_files_rejects_escape(monkeypatch, tmp_path):
         None,
     )
     assert res["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_agent_read_file_extracts_pdf_text(monkeypatch, tmp_path):
+    """agent_read_file on a PDF returns extracted text, not raw PDF markup
+    (the garbage that made the agent loop re-read attachments forever)."""
+    from pypdf import PdfWriter
+    from pypdf.generic import (
+        DecodedStreamObject,
+        DictionaryObject,
+        NameObject,
+    )
+
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=612, height=792)
+    content = DecodedStreamObject()
+    content.set_data(b"BT /F1 12 Tf 72 720 Td (Hello rainbow test) Tj ET")
+    page[NameObject("/Contents")] = content
+    page[NameObject("/Resources")] = DictionaryObject(
+        {
+            NameObject("/Font"): DictionaryObject(
+                {
+                    NameObject("/F1"): DictionaryObject(
+                        {
+                            NameObject("/Type"): NameObject("/Font"),
+                            NameObject("/Subtype"): NameObject("/Type1"),
+                            NameObject("/BaseFont"): NameObject("/Helvetica"),
+                        }
+                    )
+                }
+            )
+        }
+    )
+    writer.add_page(page)
+    pdf_path = tmp_path / "test.pdf"
+    with pdf_path.open("wb") as fh:
+        writer.write(fh)
+
+    p = AgentPlugin()
+    monkeypatch.setattr(p, "_allowed_roots", lambda: [tmp_path])
+    res = await p.execute_action(
+        {"type": "agent_read_file", "payload": {"path": str(pdf_path)}},
+        {},
+        None,
+        None,
+    )
+    assert res["status"] == "ok"
+    assert res["extracted"] == "pdf_text"
+    assert "Hello rainbow test" in res["content"]
+
+
+@pytest.mark.asyncio
+async def test_agent_read_file_pdf_failure_returns_error(monkeypatch, tmp_path):
+    """A broken/corrupt PDF yields a clear error, never raw binary garbage."""
+    pdf_path = tmp_path / "broken.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%% this is not a real pdf\n")
+
+    p = AgentPlugin()
+    monkeypatch.setattr(p, "_allowed_roots", lambda: [tmp_path])
+    res = await p.execute_action(
+        {"type": "agent_read_file", "payload": {"path": str(pdf_path)}},
+        {},
+        None,
+        None,
+    )
+    assert res["status"] == "error"
+    assert "pdf" in res["reason"].lower()
+
+
+@pytest.mark.asyncio
+async def test_agent_wait_clamps_and_sleeps(monkeypatch):
+    """agent_wait paces polls: seconds clamped to [1, 60], actual sleep is
+    awaited exactly once with the clamped value."""
+    p = AgentPlugin()
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(agent_plugin_mod.asyncio, "sleep", fake_sleep)
+
+    result = await p.execute_action(
+        {"type": "agent_wait", "payload": {"seconds": 99}}, {}, None, None
+    )
+    assert result["status"] == "ok"
+    assert result["seconds"] == 60
+    assert sleeps == [60.0]
+
+    await p.execute_action({"type": "agent_wait", "payload": {"seconds": 0}}, {}, None, None)
+    assert sleeps[-1] == 1.0
+
+    # No seconds given -> default 5.
+    await p.execute_action({"type": "agent_wait", "payload": {}}, {}, None, None)
+    assert sleeps[-1] == 5.0
+
+
+def test_agent_wait_in_supported_actions():
+    p = AgentPlugin()
+    spec = p.get_supported_actions()["agent_wait"]
+    assert spec["optional_fields"] == ["seconds"]
+    # No external effects: waiting is pure pacing, it must not affect routing.
+    assert not spec.get("external_effects")

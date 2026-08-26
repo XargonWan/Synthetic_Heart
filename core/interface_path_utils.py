@@ -143,6 +143,87 @@ def get_interface_from_path(interface_path: str) -> str:
     return interface_name
 
 
+def resolve_registered_interface_path(
+    interface_path: Optional[str],
+    context: Optional[Dict[str, Any]] = None,
+    original_message: Any = None,
+) -> Optional[str]:
+    """Return a routable interface path, falling back to the turn origin.
+
+    Models occasionally hallucinate an ``interface_path`` prefix (e.g.
+    ``em_chat_bridge/...``) that matches no registered interface, which makes
+    the outbound reply (message, audio, or text fallback) undeliverable.
+    When the given path is unregistered, fall back to the chat the turn
+    actually arrived in — the same structural guarantee ``message_plugin``
+    applies to message actions.
+
+    Args:
+        interface_path: Path to validate (payload/context value).
+        context: Turn context dict; ``context['interface_path']`` is the origin.
+        original_message: Incoming message; ``.interface_path`` is the origin.
+
+    Returns:
+        The original path when its interface is registered, else the
+        originating chat path, else ``None`` when no routable path exists.
+    """
+    if not interface_path:
+        return None
+    path_str = str(interface_path)
+    iface_name, _ = parse_interface_path(path_str)
+    if iface_name:
+        try:
+            from core.core_initializer import INTERFACE_REGISTRY
+
+            if not INTERFACE_REGISTRY:
+                # Registry not populated yet (early startup / offline tests):
+                # cannot validate — keep the given path unchanged.
+                return path_str
+            if INTERFACE_REGISTRY.get(iface_name):
+                return path_str
+        except Exception:
+            # Registry unavailable: cannot validate, keep the given path.
+            return path_str
+
+    # Unregistered prefix — fall back to the turn's originating chat.
+    origin = None
+    if isinstance(context, dict):
+        origin = context.get("interface_path")
+    if not origin and original_message is not None:
+        origin = getattr(original_message, "interface_path", None)
+    if origin and str(origin) != path_str:
+        o_iface, _ = parse_interface_path(str(origin))
+        if o_iface:
+            try:
+                from core.core_initializer import INTERFACE_REGISTRY
+
+                if INTERFACE_REGISTRY.get(o_iface):
+                    return str(origin)
+            except Exception:
+                return None
+    return None
+
+
+def is_vessel_interface_path(interface_path: Any) -> bool:
+    """Return whether a path belongs to the Rift Vessel interface.
+
+    Interface paths are structural routing metadata.  Match the complete
+    interface segment so an unrelated path such as ``vessel_preview/...`` is
+    not treated as an embodiment path.
+    """
+    return isinstance(interface_path, str) and (
+        interface_path == "vessel" or interface_path.startswith("vessel/")
+    )
+
+
+def is_vessel_history_entry(entry: Any) -> bool:
+    """Return whether a persisted/in-memory history entry is from a Vessel."""
+    if not isinstance(entry, dict):
+        return False
+    return is_vessel_interface_path(
+        entry.get("interface_path") or entry.get("source_path")
+    )
+
+
 def get_level_from_path(interface_path: str, level: int) -> Optional[str]:
     """Extract a specific level from an interface path.
 
@@ -192,3 +273,36 @@ def is_valid_interface_path(interface_path: str) -> bool:
             return False
 
     return True
+
+
+def is_vessel_embodiment_context(context: Optional[Dict[str, Any]]) -> bool:
+    """Return True when a turn originates from a Rift Vessel embodiment.
+
+    This is the single, canonical structural detector for "SyntH is in the
+    world" turns. Detection is purely from routing metadata — never from
+    message text (project rule: no keyword logic) — mirroring
+    ``core.history_engine.build_context``:
+
+    * an explicit ``vessel_focus`` context flag, or
+    * ``context['interface'] == 'vessel'``, or
+    * ``context['interface_path']`` / ``context['chat_id']`` being ``vessel``
+      or a ``vessel/...`` path.
+
+    Fully guarded: any failure degrades to ``False`` so the caller's normal
+    path is untouched.
+    """
+    if not isinstance(context, dict):
+        return False
+    try:
+        if context.get("vessel_focus"):
+            return True
+        iface = context.get("interface")
+        if isinstance(iface, str) and iface == "vessel":
+            return True
+        for key in ("interface_path", "chat_id"):
+            val = context.get(key)
+            if is_vessel_interface_path(val):
+                return True
+    except Exception:
+        return False
+    return False

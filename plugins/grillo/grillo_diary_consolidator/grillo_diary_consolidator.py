@@ -280,20 +280,20 @@ class GrilloDiaryConsolidatorPlugin:
                 "message": f"Failed to enqueue diary consolidation: {exc}",
             }
 
-        # LOW_PRIORITY beats are enqueued at priority value 2 (see
-        # core/message_queue.py LOW_PRIORITY). Report it so the WebUI can show
+        # Background beats are enqueued in the low band (see
+        # core/message_queue.py PRIORITY_LOW). Report it so the WebUI can show
         # "scheduled with priority X".
-        from core.message_queue import LOW_PRIORITY
+        from core.message_queue import PRIORITY_LOW
 
         log_info(
             f"[grillo_diary_consolidator] Diary consolidation beat scheduled "
-            f"with priority {LOW_PRIORITY} (Run Now)"
+            f"with priority {PRIORITY_LOW} (Run Now)"
         )
         return {
             "status": "scheduled",
-            "priority": LOW_PRIORITY,
+            "priority": PRIORITY_LOW,
             "beat_type": self.BEAT_TYPE,
-            "message": f"Diary consolidation scheduled with priority {LOW_PRIORITY}.",
+            "message": f"Diary consolidation scheduled with priority {PRIORITY_LOW}.",
         }
 
 

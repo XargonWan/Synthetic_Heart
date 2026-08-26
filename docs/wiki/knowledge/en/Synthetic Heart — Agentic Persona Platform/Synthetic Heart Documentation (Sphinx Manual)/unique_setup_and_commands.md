@@ -1,0 +1,1 @@
+Install dependencies from `docs/requirements.txt` then run `sphinx-build -b html docs docs/_build/html` from the repository root. Plugin guides are auto-collected at build time from `plugins/*/guide.md` and `plugins/**/*.guide.md`; the generated `docs/plugins/generated/` directory is gitignored and rebuilt on every Sphinx invocation.

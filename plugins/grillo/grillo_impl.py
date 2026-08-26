@@ -214,6 +214,13 @@ class GrilloPlugin(AIPluginBase):
         try:
             if not chat_path:
                 return False
+            from core.interface_path_utils import is_vessel_interface_path
+
+            # Vessel history is private, world-scoped context.  It may remain
+            # durable for the Vessel history UI after logout, but it is not a
+            # public conversation for Grillo's cross-chat reflection beats.
+            if is_vessel_interface_path(chat_path):
+                return False
             parts = chat_path.split("/")
             interface_name = parts[0] if len(parts) > 0 else None
             chat_id = parts[1] if len(parts) > 1 else None
@@ -481,6 +488,7 @@ class GrilloPlugin(AIPluginBase):
                 context_memory=item.get("context"),
                 interface_id="grillo",
                 original_message=None,
+                priority=message_queue.PRIORITY_BACKGROUND,
             )
             # Reset pending flag after small delay to avoid flooding.
             # The reset task reference is already managed in _grillo_beat_loop

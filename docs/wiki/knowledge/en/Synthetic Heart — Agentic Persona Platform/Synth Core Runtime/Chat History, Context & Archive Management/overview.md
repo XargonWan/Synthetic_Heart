@@ -1,0 +1,1 @@
+Centralized in-memory chat context with DB-backed persistence, prompt-context assembly from multiple sources, and persistent chat archives for cross-session recall.

@@ -6,6 +6,8 @@ from core.config_manager import config_registry
 from core.logging_utils import log_info, log_warning
 from core.transport_layer import extract_json_from_text
 from core.synth_core_memory import search_memories
+from core.interface_path_utils import is_vessel_history_entry, is_vessel_interface_path
+from core.vessel_focus import is_vessel_turn
 
 
 display_name = "Recon Memory Recollector"
@@ -99,9 +101,29 @@ class ReconMemoryRecollectorPlugin:
         if not tags and not keywords:
             return []
 
+        # The message currently being answered is already persisted to
+        # ``chat_history_cache``; excluding its own chat from the raw
+        # chat-history tier prevents the live conversation (incl. stale
+        # greetings) from being echoed back as "memories".
+        _cur_path = getattr(message, "interface_path", None)
+        if not _cur_path and isinstance(context_memory, dict):
+            _cur_path = context_memory.get("interface_path")
+        if _cur_path:
+            try:
+                from core.chat_context_manager import _resolve_context_path
+
+                _cur_path = _resolve_context_path(str(_cur_path))
+            except Exception:
+                pass
+        _excluded_paths = [str(_cur_path)] if _cur_path else None
+
         try:
             results = await search_memories(
-                tags=tags, keywords=keywords, include_chat=True, limit=max_results
+                tags=tags,
+                keywords=keywords,
+                include_chat=True,
+                limit=max_results,
+                exclude_interface_paths=_excluded_paths,
             )
         except Exception as e:
             log_warning(f"[recon_memory] search_memories failed: {e}")
@@ -168,6 +190,7 @@ class ReconMemoryRecollectorPlugin:
         global_lines: list[str] = []
 
         interface_path = getattr(message, "interface_path", None)
+        vessel_focus = is_vessel_turn(message, context_memory, interface_path)
         # Resolve the raw incoming path the same way messages are resolved when
         # persisted (alias/link map + Unified Lane), so the local-history lookup
         # keys line up with how the rows were stored.
@@ -209,7 +232,13 @@ class ReconMemoryRecollectorPlugin:
                 # history. An exact-path match silently drops thread-suffixed
                 # turns of the same chat, leaving local history empty while
                 # global history (unfiltered) survives.
-                cached = await load_chat_history(interface_path, match_chat_level=True)
+                cached = await load_chat_history(
+                    interface_path,
+                    match_chat_level=(
+                        not vessel_focus
+                        and not is_vessel_interface_path(interface_path)
+                    ),
+                )
                 for item in list(cached)[-6:]:
                     sender = item.get("sender_name") or "unknown"
                     content = item.get("text") or ""
@@ -217,6 +246,12 @@ class ReconMemoryRecollectorPlugin:
                         local_lines.append(f"[{sender}] {content}")
 
             global_cached = await load_global_chat_history(limit=6)
+            if vessel_focus:
+                global_cached = []
+            else:
+                global_cached = [
+                    item for item in global_cached if not is_vessel_history_entry(item)
+                ]
             for item in list(global_cached)[-6:]:
                 sender = item.get("sender_name") or "unknown"
                 content = item.get("text") or ""
@@ -278,9 +313,19 @@ class ReconMemoryRecollectorPlugin:
         if not tags and not keywords:
             return []
 
+        # The message currently being answered is already persisted to
+        # ``chat_history_cache``; excluding its own chat from the raw
+        # chat-history tier prevents the live conversation (incl. stale
+        # greetings) from being echoed back as "memories".
+        _excluded_paths = [str(interface_path)] if interface_path else None
+
         try:
             results = await search_memories(
-                tags=tags, keywords=keywords, include_chat=True, limit=max_results
+                tags=tags,
+                keywords=keywords,
+                include_chat=True,
+                limit=max_results,
+                exclude_interface_paths=_excluded_paths,
             )
         except Exception as e:
             log_warning(f"[recon_memory] search_memories failed: {e}")

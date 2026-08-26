@@ -1,0 +1,1 @@
+Python asyncio-based registry with MySQL/MariaDB and PostgreSQL upsert support (detects `_get_db_type` and emits `REPLACE INTO` vs `ON CONFLICT ... DO UPDATE`). Optional `dotenv` for `.env` loading and `huggingface_hub` for HF snapshot downloads. Uses aiomysql lazily so importing core.config does not fail when aiomysql is absent.

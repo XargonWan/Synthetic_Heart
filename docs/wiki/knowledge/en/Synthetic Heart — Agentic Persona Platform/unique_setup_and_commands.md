@@ -1,0 +1,1 @@
+`python main.py` starts the full runtime; `uv run scripts/run_webui.py` launches the WebUI dev server; `run_tests.sh` / `run_tests.py` execute the test suite; `scripts/bootstrap_soul_postgres.{sh,ps1}` initialize the database schema; `docker compose up` builds and runs the containerized stack with websockify and s6 services.

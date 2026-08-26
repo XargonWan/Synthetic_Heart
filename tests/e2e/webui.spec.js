@@ -130,6 +130,20 @@ test('accent color picker in settings updates --accent CSS variable and supports
   const presetSize = await presetButtons[0].evaluate(el => parseFloat(window.getComputedStyle(el).width));
   expect(presetSize).toBeGreaterThanOrEqual(34);
 
+  // custom blob sits at the end of the presets row; idle state shows the '+' badge
+  const customBlob = await page.$('#config-theme-input-container .accent-preset-custom');
+  expect(customBlob).not.toBeNull();
+  expect(await customBlob.evaluate(el => el.textContent)).toBe('+');
+
+  // the hex picker input is tethered inside the blob wrapper, covering the blob
+  const customWrap = await page.$('#config-theme-input-container .accent-preset-custom-wrap');
+  expect(customWrap).not.toBeNull();
+  const pickerInWrap = await page.$('#config-theme-input-container .accent-preset-custom-wrap input[type=color]');
+  expect(pickerInWrap).not.toBeNull();
+  const pickerBox = await pickerInWrap.evaluate(el => { const r = el.getBoundingClientRect(); return { w: r.width, h: r.height }; });
+  expect(pickerBox.w).toBeGreaterThanOrEqual(30);
+  expect(pickerBox.h).toBeGreaterThanOrEqual(30);
+
   // remember current accent so Cancel can be validated
   const originalAccent = (await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--accent').trim())).toLowerCase();
 
@@ -159,6 +173,12 @@ test('accent color picker in settings updates --accent CSS variable and supports
 
   accent = (await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--accent').trim())).toLowerCase();
   expect(accent).toBe('#00ff88');
+
+  // custom blob reflects the applied non-preset color and is highlighted
+  const customBlobApplied = await page.$('#config-theme-input-container .accent-preset-custom');
+  expect(customBlobApplied).not.toBeNull();
+  expect(await customBlobApplied.evaluate(el => el.classList.contains('is-active'))).toBe(true);
+  expect(await customBlobApplied.evaluate(el => el.style.background)).toMatch(/rgb\(0,\s*255,\s*136\)/);
 
   // verify the authoritative config row was persisted
   const rows = await page.$$('#config-general-list .config-row');

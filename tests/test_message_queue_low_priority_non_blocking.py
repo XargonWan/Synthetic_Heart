@@ -66,8 +66,8 @@ async def test_low_priority_does_not_block(monkeypatch):
 
     # Put onto the queue using internal API
     queue = message_queue._get_queue()
-    await queue.put((message_queue.LOW_PRIORITY, 1, item1))
-    await queue.put((message_queue.NORMAL_PRIORITY, 2, item2))
+    await queue.put((message_queue._heap_key(message_queue.PRIORITY_LOW), 1, item1))
+    await queue.put((message_queue._heap_key(message_queue.PRIORITY_GENERAL), 2, item2))
 
     # Run consumer loop iteration twice with a short timeout to simulate
     consumer_task = asyncio.create_task(message_queue._consumer_loop())
@@ -115,7 +115,7 @@ async def test_queue_rebinds_to_current_event_loop():
 
             await new_queue.put(
                 (
-                    message_queue.NORMAL_PRIORITY,
+                    message_queue._heap_key(message_queue.PRIORITY_GENERAL),
                     1,
                     {
                         "bot": None,
@@ -205,7 +205,9 @@ async def test_observer_background_task_is_not_cancelled_by_user_message(
 
         queue = message_queue._get_queue()
         consumer_task = asyncio.create_task(message_queue._consumer_loop())
-        await queue.put((message_queue.NORMAL_PRIORITY, 2, user_item))
+        await queue.put(
+            (message_queue._heap_key(message_queue.PRIORITY_GENERAL), 2, user_item)
+        )
         await asyncio.wait_for(finished.wait(), timeout=1.0)
 
         assert not cancelled.is_set()

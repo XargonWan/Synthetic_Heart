@@ -1,0 +1,1 @@
+Python plugins using `praw` for Reddit API access, `selenium` + `undetected_chromedriver` for browser automation against ElevenLabs web UI, and `asyncio.create_subprocess_shell` for persistent bash sessions. Logging goes through `core.logging_utils`; registration uses `core.core_initializer.register_plugin` and `core.core_initializer.PLUGIN_CLASS` discovery.

@@ -1591,5 +1591,233 @@ async def plugin_command(*args, interface_context=None) -> str:
 register_command("cancel", cancel_command)
 register_command("logchat", logchat_command)
 register_command("task", task_command)
+
+
+def _get_vessel_plugin() -> Any | None:
+    """Return the loaded Rift Vessel core plugin, or ``None``. Fully guarded."""
+    try:
+        from core.core_initializer import PLUGIN_REGISTRY
+
+        return PLUGIN_REGISTRY.get("vessel_plugin")
+    except Exception as exc:  # pragma: no cover - defensive
+        log_debug(f"[command_registry] vessel plugin lookup failed: {exc}")
+        return None
+
+
+async def vessel_command(*args) -> str:
+    """Inspect and control the Rift Vessel embodiment layer.
+
+    Usage:
+        /vessel status         Show active connector + available connectors.
+        /vessel join [world]   Enter a world (open a Vessel session).
+        /vessel logout         Leave the current world (close the session).
+    """
+    sub = args[0].lower() if args else "status"
+
+    if sub == "status":
+        return await _vessel_status_command()
+    if sub == "join":
+        world = args[1] if len(args) > 1 else None
+        return await _vessel_join_command(world)
+    if sub == "logout":
+        return await _vessel_logout_command()
+
+    return (
+        "❌ Use:\n"
+        "`/vessel status` – show connectors and connection state\n"
+        "`/vessel join [world]` – enter a world (open a session)\n"
+        "`/vessel logout` – leave the current world (close the session)"
+    )
+
+
+async def _vessel_status_command() -> str:
+    """Report the active connector, available connectors and live state."""
+    try:
+        from core.config_manager import config_registry
+        from core.vessel_registry import VESSEL_REGISTRY
+
+        active = config_registry.get_value("ACTIVE_VESSEL", "disabled") or "disabled"
+        available = VESSEL_REGISTRY.get_available_connectors()
+
+        lines = ["🌀 *Rift Vessel*", f"Active: `{active}`"]
+        if available:
+            lines.append("Available connectors:")
+            for name in available:
+                meta = VESSEL_REGISTRY.get_connector_meta(name) or {}
+                label = meta.get("label") or name
+                lines.append(f"  • `{name}` — {label}")
+        else:
+            lines.append("_No connectors registered._")
+
+        instance = (
+            VESSEL_REGISTRY.get_instance(str(active)) if active != "disabled" else None
+        )
+        if instance is not None:
+            connected = bool(getattr(instance, "is_connected", False))
+            lines.append(f"Connection: {'🟢 connected' if connected else '⚪ idle'}")
+
+        return "\n".join(lines)
+    except Exception as e:
+        log_debug(f"[command_registry] Error in vessel status: {e}")
+        return f"❌ Error handling vessel command: {e}"
+
+
+def _resolve_vessel_world(plugin: Any, requested: str | None) -> tuple[str | None, str]:
+    """Resolve which world ``/vessel join`` should enter.
+
+    Returns ``(world, message)``. When ``world`` is ``None`` the ``message``
+    explains why (no world enabled, or an ambiguous choice among several).
+    Keyword-free and fully guarded — resolution is purely structural (the set
+    of enabled worlds + the configured active connector).
+    """
+    try:
+        enabled = plugin._enabled_worlds()
+    except Exception as exc:  # pragma: no cover - defensive
+        log_debug(f"[command_registry] enabled-worlds lookup failed: {exc}")
+        enabled = []
+
+    if requested:
+        if enabled and requested not in enabled:
+            choices = ", ".join(f"`{w}`" for w in enabled) or "(none enabled)"
+            return None, f"❌ World `{requested}` is not enabled. Available: {choices}"
+        return requested, ""
+
+    if not enabled:
+        return None, "❌ No Vessel world is enabled. Enable one from the WebUI first."
+
+    try:
+        from core.config_manager import config_registry
+
+        active = str(
+            config_registry.get_value("ACTIVE_VESSEL", "disabled") or "disabled"
+        )
+    except Exception:
+        active = "disabled"
+
+    if active in enabled:
+        return active, ""
+    if len(enabled) == 1:
+        return enabled[0], ""
+
+    choices = ", ".join(f"`{w}`" for w in enabled)
+    return (
+        None,
+        f"❌ Multiple worlds enabled — pick one: `/vessel join <world>` ({choices})",
+    )
+
+
+async def _vessel_join_command(requested: str | None) -> str:
+    """Enter a world by delegating to the Vessel plugin's ``connect_world``."""
+    plugin = _get_vessel_plugin()
+    if plugin is None or not hasattr(plugin, "connect_world"):
+        return "❌ Rift Vessel plugin is not available."
+
+    world, message = _resolve_vessel_world(plugin, requested)
+    if world is None:
+        return message
+
+    try:
+        result = await plugin.connect_world(connector_name=world)
+    except Exception as exc:
+        log_debug(f"[command_registry] vessel join failed: {exc}")
+        return f"❌ Could not enter `{world}`: {exc}"
+
+    if getattr(result, "ok", False):
+        detail = getattr(result, "detail", "") or ""
+        if detail == "already_connected":
+            return f"🌀 Already embodied in `{world}`."
+        return f"🌀 Entered world `{world}`."
+    detail = getattr(result, "detail", None) or "connect_failed"
+    return f"❌ Could not enter `{world}`: {detail}"
+
+
+async def _vessel_logout_command() -> str:
+    """Leave the current world by delegating to ``disconnect_world``."""
+    plugin = _get_vessel_plugin()
+    if plugin is None or not hasattr(plugin, "disconnect_world"):
+        return "❌ Rift Vessel plugin is not available."
+
+    try:
+        world = plugin._connected_world()
+    except Exception as exc:  # pragma: no cover - defensive
+        log_debug(f"[command_registry] connected-world lookup failed: {exc}")
+        world = None
+
+    if not world:
+        return "⚪ No active Vessel session to close."
+
+    try:
+        result = await plugin.disconnect_world(connector_name=world)
+    except Exception as exc:
+        log_debug(f"[command_registry] vessel logout failed: {exc}")
+        return f"❌ Could not leave `{world}`: {exc}"
+
+    if getattr(result, "ok", False):
+        return f"🚪 Left world `{world}` and closed the session."
+    detail = getattr(result, "detail", None) or "disconnect_failed"
+    return f"❌ Could not leave `{world}`: {detail}"
+
+
+async def minecraft_command(*args) -> str:
+    """Control the Minecraft Vessel bridge provisioner.
+
+    Usage:
+        /minecraft provision start        Install (if needed) and start the bridge.
+        /minecraft provision stop         Stop the bridge subprocess.
+        /minecraft provision status       Show bridge status.
+        /minecraft provision logs [n]     Show the last n bridge log lines.
+    """
+    usage = "❌ Use: `/minecraft provision start|stop|status|logs [n]`"
+    if len(args) < 2 or args[0].lower() != "provision":
+        return usage
+
+    action = args[1].lower()
+
+    try:
+        from interface.minecraft_provisioner import get_bridge_provisioner
+
+        prov = get_bridge_provisioner()
+
+        if action == "start":
+            res = await prov.start()
+        elif action == "stop":
+            res = await prov.stop()
+        elif action == "status":
+            res = prov.status()
+        elif action == "logs":
+            n = 100
+            if len(args) >= 3:
+                try:
+                    n = int(args[2])
+                except ValueError:
+                    return "❌ logs count must be an integer"
+            res = prov.logs(n)
+        else:
+            return usage
+
+        if action == "status":
+            return (
+                "🟦 *Minecraft bridge*\n"
+                f"Enabled: `{res.get('enabled')}`\n"
+                f"Installed: `{res.get('installed')}`\n"
+                f"Running: `{res.get('running')}`"
+                + (f" (pid {res.get('pid')})" if res.get("running") else "")
+            )
+        if action == "logs":
+            if not res.get("ok"):
+                return f"❌ {res.get('detail')}"
+            body = "\n".join(res.get("lines", [])) or "(empty)"
+            return f"🟦 *Minecraft bridge logs*\n```\n{body}\n```"
+
+        ok = res.get("ok")
+        icon = "✅" if ok else "❌"
+        return f"{icon} Minecraft bridge {action}: {res.get('detail')}"
+    except Exception as e:
+        log_debug(f"[command_registry] Error in minecraft_command: {e}")
+        return f"❌ Error handling minecraft command: {e}"
+
+
+register_command("vessel", vessel_command)
+register_command("minecraft", minecraft_command)
 register_command("plugin", plugin_command)
 register_command("plugins", plugin_command)

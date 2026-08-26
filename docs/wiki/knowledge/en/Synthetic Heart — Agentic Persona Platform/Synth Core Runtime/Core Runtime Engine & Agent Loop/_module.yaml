@@ -1,0 +1,16 @@
+schema_version: 1
+module_path: core_runtime/core_runtime_engine
+title: Core Runtime Engine & Agent Loop
+scope:
+    - core/agent_core.py
+    - core/core_initializer.py
+    - core/context.py
+    - core/interfaces.py
+    - core/message_chain.py
+    - core/event_dispatcher.py
+    - core/plugin_base.py
+    - core/plugin_instance.py
+source_files: []
+depends_on: []
+related_to:
+    - path: core_runtime/chat_management

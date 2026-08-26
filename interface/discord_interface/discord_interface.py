@@ -28,6 +28,7 @@ import logging as _stdlib_logging
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.chat_attention import set_attention, evaluate_triggers
 from core.reaction_handler import get_reaction_emoji
+from core.delivery_guard import DeadTargetError
 
 # ── Route discord.ext.voice_recv logs into the synth logger ──────────────
 # voice_recv uses stdlib logging; without this its errors are invisible.
@@ -757,7 +758,10 @@ class DiscordInterface:
             "message_discord_bot",
             "join_voice_discord",
             "leave_voice_discord",
-            "audio_discord_bot",
+            # TODO(vessel-whitelist): "audio_discord_bot" temporarily removed
+            # from the exposed action catalog (see AGENTS.md §5c). Restore this
+            # list entry AND the action dict entry below to re-enable it.
+            # "audio_discord_bot",
             "send_file_discord_bot",
         ]
 
@@ -795,11 +799,14 @@ class DiscordInterface:
                 "required_fields": ["guild_id"],
                 "optional_fields": ["interface_path"],
             },
-            "audio_discord_bot": {
-                "description": "Send audio to Discord. Streams if in voice, otherwise sends as file.",
-                "required_fields": ["audio"],
-                "optional_fields": ["interface_path", "channel_id", "caption"],
-            },
+            # TODO(vessel-whitelist): "audio_discord_bot" temporarily removed
+            # from the exposed action catalog (see AGENTS.md §5c). Restore this
+            # dict entry AND the list entry in get_action_types() above.
+            # "audio_discord_bot": {
+            #     "description": "Send audio to Discord. Streams if in voice, otherwise sends as file.",
+            #     "required_fields": ["audio"],
+            #     "optional_fields": ["interface_path", "channel_id", "caption"],
+            # },
             "send_file_discord_bot": {
                 "description": (
                     "Send a file attachment (image, video, audio or document) to a "
@@ -2004,8 +2011,10 @@ class DiscordInterface:
                     f"[discord_interface] DM send attempt failed for {channel_id}: {e}"
                 )
 
-            # If we reach here, both channel and user resolution failed
-            raise RuntimeError(f"Unknown channel or user: {channel_id}")
+            # If we reach here, both channel and user resolution failed. Raise
+            # the structural DeadTargetError so the delivery circuit breaker can
+            # classify this as a permanent dead-target failure (not transient).
+            raise DeadTargetError(channel_id)
 
         # Prepare file object
         file_obj = None

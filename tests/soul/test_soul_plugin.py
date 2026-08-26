@@ -10,6 +10,7 @@ import pytest
 
 from plugins.soul_plugin import SoulPlugin
 from plugins.soul_plugin import _SessionState
+from core.plugin_base import PluginBase
 from core.soul.emotion_engine import EmotionalEngine
 from core.soul.models import EmotionalProfile, EmotionalTag, MemCell, MemCellRecall
 from core.soul.repository import InMemorySoulRepository, PostgresSoulRepository
@@ -22,14 +23,13 @@ def _default_soul_plugin_tests_to_memory(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setenv("SYNTH_DB_TYPE", "mariadb")
 
 
-def test_soul_plugin_is_enabled_uses_config_gate() -> None:
-    plugin = SoulPlugin.__new__(SoulPlugin)
-
-    with patch.object(SoulPlugin, "_is_enabled", return_value=False):
-        assert plugin.is_enabled() is False
-
-    with patch.object(SoulPlugin, "_is_enabled", return_value=True):
-        assert plugin.is_enabled() is True
+def test_soul_plugin_has_no_internal_enable_flag() -> None:
+    """soul_plugin activation is gated only by the global plugin toggle
+    (PLUGIN_ENABLED__soul_plugin). It must not expose an internal
+    `_is_enabled` config gate that duplicates the toggle, and it must not
+    override `is_enabled` (the PluginBase default already returns True)."""
+    assert not hasattr(SoulPlugin, "_is_enabled")
+    assert SoulPlugin.is_enabled is PluginBase.is_enabled
 
 
 @pytest.mark.asyncio
@@ -295,6 +295,82 @@ async def test_static_injection_excludes_diary_merge_housekeeping_memories() -> 
 
 
 @pytest.mark.asyncio
+async def test_recall_excludes_roleplay_memories() -> None:
+    """Explicit/roleplay mem-cells must not be recalled into prompts (Grillo
+    reflection beats included). An explicit cell recalled into a
+    tag_elaboration beat was elaborated into an ever-more-explicit diary entry
+    (langfuse 36cb0aca). Structural detector from core.soul.roleplay."""
+    plugin = SoulPlugin()
+    now = datetime.now(timezone.utc)
+    emotional_tag = EmotionalTag(
+        state_snapshot={"joy": 0.2, "fear": 0.0, "sad": 0.0, "anger": 0.0},
+        dominant_emotion="joy",
+        intensity=0.2,
+        valence=0.2,
+    )
+    roleplay_cell = MemCell(
+        id="rp",
+        episodic_trace=(
+            "slide my hand under your big shirt, grabbing your breast, you moan softly"
+        ),
+        atomic_facts=["you|moan|softly"],
+        emotional_tag=emotional_tag,
+        foresight_signals=[],
+        event_timestamp=now,
+        session_id="telegram_bot_5208932647",
+    )
+    normal_cell = MemCell(
+        id="normal",
+        episodic_trace="Alice loves jasmine tea on rainy evenings.",
+        atomic_facts=["Alice|likes|jasmine tea"],
+        emotional_tag=emotional_tag,
+        foresight_signals=[],
+        event_timestamp=now,
+        session_id="telegram_bot_5208932647",
+    )
+
+    plugin._compiler = SimpleNamespace(
+        embedder=SimpleNamespace(embed=AsyncMock(return_value=[0.25, 0.75]))
+    )
+    plugin._repo = SimpleNamespace(
+        get_active_dsp=AsyncMock(return_value=None),
+        list_active_foresight_signals=AsyncMock(return_value=[]),
+        recall_memories=AsyncMock(
+            return_value=[
+                MemCellRecall(
+                    cell=roleplay_cell,
+                    similarity=0.99,
+                    lexical_score=0.9,
+                    score=0.99,
+                ),
+                MemCellRecall(
+                    cell=normal_cell,
+                    similarity=0.9,
+                    lexical_score=0.8,
+                    score=0.9,
+                ),
+            ]
+        ),
+        upsert_memcell=AsyncMock(return_value=None),
+    )
+
+    # Grillo beat path (the leak scenario).
+    payload = await plugin.get_static_injection(
+        SimpleNamespace(
+            interface_path="grillo/-1",
+            text="[G.R.I.L.L.O. Tag Elaboration] Reflect on your recent conversations",
+            caption=None,
+        ),
+        {"interface_path": "grillo/-1", "grillo_beat": True},
+    )
+
+    recalled = [str(e) for e in payload.get("soul_recalled_memories", [])]
+    assert len(recalled) == 1
+    assert "jasmine tea" in recalled[0].lower()
+    assert all("breast" not in e.lower() and "moan" not in e.lower() for e in recalled)
+
+
+@pytest.mark.asyncio
 async def test_scheduler_tick_compiles_idle_sessions() -> None:
     plugin = SoulPlugin()
 
@@ -361,6 +437,50 @@ def test_repository_backend_postgres_selected(monkeypatch: pytest.MonkeyPatch) -
     plugin = SoulPlugin()
 
     assert isinstance(plugin._repo, PostgresSoulRepository)
+
+
+@pytest.mark.asyncio
+async def test_compile_interface_skips_roleplay_only_buffer() -> None:
+    plugin = SoulPlugin()
+    iface = "telegram_bot/99"
+    compiler = SimpleNamespace(
+        post_session_compile=AsyncMock(return_value=["cell-1"]),
+        async_consolidate=AsyncMock(return_value=["scene-1"]),
+    )
+    plugin._compiler = compiler
+
+    plugin._buffers[iface] = [
+        "I'm fucking cumming in your tight little ass bitch CUM WITH ME YOU SLUT"
+    ]
+    created = await plugin._compile_interface(iface)
+
+    assert created == 0
+    assert plugin._buffers[iface] == []
+    compiler.post_session_compile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_compile_interface_keeps_non_roleplay_lines() -> None:
+    plugin = SoulPlugin()
+    iface = "telegram_bot/100"
+    compiler = SimpleNamespace(
+        post_session_compile=AsyncMock(return_value=["cell-1"]),
+        async_consolidate=AsyncMock(return_value=["scene-1"]),
+    )
+    plugin._compiler = compiler
+
+    plugin._buffers[iface] = [
+        "I work on SynthHeart for real",
+        "I'm fucking cumming in your tight little ass bitch",
+        "I live in Berlin",
+    ]
+    created = await plugin._compile_interface(iface)
+
+    assert created == 1
+    compiled_transcript = compiler.post_session_compile.await_args.kwargs["transcript"]
+    assert "work on SynthHeart" in compiled_transcript
+    assert "live in Berlin" in compiled_transcript
+    assert "fucking cumming" not in compiled_transcript
 
 
 def test_build_embedder_uses_runtime_repository_backend(

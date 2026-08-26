@@ -73,24 +73,39 @@ class ReconAgentIntentPlugin:
     def get_recon_key(self) -> str:
         return "agent_intent"
 
-    def get_recon_instruction(self) -> str:
-        return (
-            "Judge whether fulfilling the user's request requires acting as an "
+    def get_recon_instruction(self, *, message=None, context_memory=None) -> str:
+        instruction = (
+            "Decide whether fulfilling the user's request requires acting as an "
             "agent that uses tools and performs work, as opposed to simply "
-            "replying with knowledge or conversation. DEFAULT TO "
-            "agent_needed=false: most messages are conversational and a single "
-            "direct reply fully satisfies them. Only set agent_needed=true when "
-            "the request CLEARLY and UNAMBIGUOUSLY needs tool-driven work. "
-            "Decide by answering these questions about the request: (1) is it "
-            "articulated enough that it clearly must be carried out in several "
-            "concrete steps? (2) does it explicitly require reading or modifying "
-            "files, inspecting the codebase, or running commands? (3) does it "
-            "require producing a substantial deliverable or an operational "
-            "result that cannot be given as a direct reply? Set agent_needed=true "
-            "only if the answer to one of these is a clear yes. When in doubt, "
-            "prefer agent_needed=false. It is NOT needed for greetings, small "
-            "talk, opinions, questions answerable from general knowledge, or any "
-            "request a single direct reply fully satisfies. "
+            "replying with knowledge or conversation. The core test is: CAN I "
+            "fulfil this in a single turn? If the answer is no — because the "
+            "request needs several concrete steps where later steps depend on "
+            "the result of earlier ones (read something, then act on what you "
+            "read; inspect, then modify; gather, then produce) — then it is "
+            "agentic work and agent_needed=true. DEFAULT TO agent_needed=false: "
+            "most messages are conversational and a single direct reply fully "
+            "satisfies them. Only set agent_needed=true when the request CLEARLY "
+            "and UNAMBIGUOUSLY needs tool-driven, multi-step work. Decide by "
+            "answering these questions about the request: (1) can it be fully "
+            "answered with one direct reply, with no tools and no follow-up "
+            "steps? (2) does it require executing multiple instructions that "
+            "depend on the result of other instructions (a chain of dependent "
+            "steps)? (3) does it explicitly require reading or modifying files, "
+            "inspecting the codebase, or running commands? (4) does it require "
+            "producing a substantial deliverable or an operational result that "
+            "cannot be given as a direct reply? Set agent_needed=true only if "
+            "the answer to (1) is no and at least one of (2)-(4) is a clear "
+            "yes. When in doubt, prefer agent_needed=false. It is NOT needed "
+            "for greetings, small talk, opinions, questions answerable from "
+            "general knowledge, or any request a single direct reply fully "
+            "satisfies. "
+            "Messages that merely TALK ABOUT the agent, tools, or the system "
+            "are NOT agentic requests: complaining that something is broken, "
+            "asking how the agent works, joking or roleplaying about it, or "
+            "reporting its state is ordinary conversation and must be "
+            "agent_needed=false. A request is agentic only when the human is "
+            "actually asking you TO DO concrete work with your tools right "
+            "now, and a single reply cannot satisfy it. "
             "Base the judgement on the meaning of the request in any language, "
             "never on specific words. Also provide a very short human-readable "
             "title (max ~6 words) that names the task, written in the same "
@@ -99,6 +114,17 @@ class ReconAgentIntentPlugin:
             'Return as an object: {"agent_needed": true|false, "reason": '
             '"short justification", "task_title": "short task name"}.'
         )
+        if isinstance(context_memory, dict) and context_memory.get("attachment_paths"):
+            instruction += (
+                " The user attached file(s) to this message. If the request is "
+                "only to read, quote, or summarise the attached content, a "
+                "single direct reply satisfies it and agent_needed=false. But "
+                "if fulfilling it requires acting on the attached content in "
+                "several dependent steps — for example reading a document and "
+                "then producing a separate deliverable for each of its parts — "
+                "that is multi-step dependent work and agent_needed=true."
+            )
+        return instruction
 
     def _enabled(self) -> bool:
         try:
@@ -109,18 +135,6 @@ class ReconAgentIntentPlugin:
             )
         except Exception:
             return True
-
-    def _agentic_routing_on(self) -> bool:
-        # No point nudging toward tool calls when the router would send the turn
-        # to FAST regardless — the agentic lane is gated by this flag.
-        try:
-            return bool(
-                config_registry.get_var(
-                    "AGENTIC_ROUTING_ENABLED", False, value_type=bool
-                )
-            )
-        except Exception:
-            return False
 
     def _agent_toggle_on(self) -> bool:
         # The user-facing agent on/off toggle. When the agent is OFF the router
@@ -146,11 +160,6 @@ class ReconAgentIntentPlugin:
         if not text or not isinstance(text, str) or not text.strip():
             return []
         if not self._enabled():
-            return []
-        if not self._agentic_routing_on():
-            log_debug(
-                "[recon_agent_intent] AGENTIC_ROUTING_ENABLED off — skipping hint"
-            )
             return []
         if not self._agent_toggle_on():
             log_debug("[recon_agent_intent] AGENT_ENABLED off — skipping hint")

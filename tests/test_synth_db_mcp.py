@@ -251,3 +251,26 @@ def test_db_type_inferred_from_port_when_undeclared(monkeypatch):
     target = synth_db._build_runtime_db_target()
 
     assert target.db_type == "postgres"
+
+
+def test_runtime_defaults_to_postgres_synth_db_when_undeclared(monkeypatch):
+    """With no DB_* declared, the runtime target must resolve to the standard
+    Postgres deployment (synth-db:5432) instead of the legacy MariaDB default."""
+    monkeypatch.setattr(synth_db, "_REPO_ENV", {})
+    monkeypatch.delenv("SYNTH_DB_TYPE", raising=False)
+    monkeypatch.delenv("DB_TYPE", raising=False)
+    monkeypatch.delenv("DB_HOST", raising=False)
+    monkeypatch.delenv("DB_PORT", raising=False)
+    monkeypatch.delenv("DB_USER", raising=False)
+    monkeypatch.delenv("DB_PASS", raising=False)
+    monkeypatch.delenv("DB_NAME", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("DB_DSN", raising=False)
+
+    target = synth_db._build_runtime_db_target()
+
+    assert target.db_type == "postgres"
+    assert target.host == "synth-db"
+    assert target.port == 5432
+    assert target.user == "synth"
+    assert target.database == "synth"

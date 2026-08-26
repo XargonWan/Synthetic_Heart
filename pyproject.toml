@@ -62,6 +62,7 @@ dependencies = [
     "recurring-ical-events>=3.8.2",
     "pillow>=10.0.0",
     "pypdfium2>=5.12.1",
+    "python-docx>=1.2.0",
 ]
 
 [project.optional-dependencies]

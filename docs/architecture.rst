@@ -132,10 +132,25 @@ Message Queue System
 The Synthetic Heart uses an **asyncio.PriorityQueue** for processing messages in the correct order. Messages are prioritized to ensure high-priority events (like scheduled messages) are processed before regular chat messages.
 
 **Priority Levels**:
-- **HIGH_PRIORITY (0)**: Scheduled events, urgent notifications
-- **NORMAL_PRIORITY (1)**: User messages, radio speech — user-facing traffic
-- **AGENT_PRIORITY (2)**: Agentic turns / tool work — below user traffic, above autonomous beats
-- **LOW_PRIORITY (3)**: Autonomous G.R.I.L.L.O. beats, processed only when the queue is idle
+
+All messages are ranked on a **0–11 absolute urgency scale** (higher = more
+urgent). The background threshold is ``PRIORITY_LOW`` (3): items at or below
+this level run as non-blocking background tasks; items above it block the
+consumer.
+
+- **PRIORITY_EMERGENCY (11)**: System emergencies
+- **PRIORITY_URGENT (10)**: Calendar reminders, urgent notifications
+- **PRIORITY_REFLECTION (9)**: Vessel reflection pauses — above player chat
+- **PRIORITY_HIGH (8)**: Direct human input (in-world player chat)
+- **PRIORITY_TRAINER (7)**: Trainer messages
+- **PRIORITY_RADIO (6)**: Radio DJ banter — above ordinary chat
+- **PRIORITY_GENERAL (5)**: Ordinary user chat — normal user-facing traffic
+- **PRIORITY_AMBIENT (4)**: Autonomous vessel perceptions — below all humans
+- **PRIORITY_LOW (3)**: Low-priority (background threshold)
+- **PRIORITY_BACKGROUND (2)**: Autonomous G.R.I.L.L.O. beats — absolute bottom, processed only when idle
+
+Callers choose their band explicitly via the ``priority`` keyword argument to
+``enqueue_low_priority()``. See :ref:`message_handling` for the full API.
 
 **Agentic turns run detached**: When the Fast/Agent router routes a turn to the
 Agent Lane, the reasoning loop is launched as a *detached* ``asyncio`` task

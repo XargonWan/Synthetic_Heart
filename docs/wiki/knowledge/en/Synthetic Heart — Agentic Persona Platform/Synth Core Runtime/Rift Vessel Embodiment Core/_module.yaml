@@ -1,0 +1,26 @@
+schema_version: 1
+module_path: core_runtime/vessel_system
+title: Rift Vessel Embodiment Core
+scope:
+    - core/vessel_beat.py
+    - core/vessel_diary_compactor.py
+    - core/vessel_focus.py
+    - core/vessel_registry.py
+    - core/vessel_session_manager.py
+    - core/vessel_goal_debrief.py
+    - plugins/goals/goals.py
+    - plugins/rift_vessel/vessel_plugin.py
+    - plugins/rift_vessel/vessel_whitelist.py
+    - plugins/rift_vessel/vessel_compactor/vessel_compactor.py
+    - plugins/rift_vessel/vessel_base.py
+    - plugins/rift_vessel/vessel_bases.py
+    - plugins/rift_vessel/vessel_quests.py
+    - plugins/rift_vessel/vessel_combat_strategy.py
+    - plugins/rift_vessel/minecraft/base_spec.py
+    - plugins/rift_vessel/minecraft/bases.py
+    - plugins/rift_vessel/minecraft/goals.py
+    - plugins/rift_vessel/minecraft/quests.py
+    - plugins/rift_vessel/minecraft/target_names.py
+source_files: []
+depends_on: []
+related_to: []

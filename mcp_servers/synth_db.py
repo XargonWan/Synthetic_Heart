@@ -16,10 +16,14 @@ correct backend instead of being pinned to a stale MCP env override.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+import gzip
 import os
 import re
+import shutil
 import socket
+import subprocess
 from typing import Any, Optional
 from urllib.parse import unquote, urlparse
 
@@ -209,8 +213,11 @@ def _build_runtime_db_target(
     declared_type = _repo_or_process_value(
         "SYNTH_DB_TYPE", _repo_or_process_value("DB_TYPE")
     )
+    # The runtime DB moved to PostgreSQL (see core/db.py), so when no engine is
+    # declared and no well-known port is present we default to postgres rather
+    # than the legacy mariadb default. Explicit config still wins.
     inferred_default = (
-        _infer_db_type_from_port(_repo_or_process_value("DB_PORT")) or "mariadb"
+        _infer_db_type_from_port(_repo_or_process_value("DB_PORT")) or "postgres"
     )
     db_type = forced_db_type or _normalize_db_type(
         declared_type, default=inferred_default
@@ -228,10 +235,14 @@ def _build_runtime_db_target(
             or None
         )
 
+    # Default the host to the Docker service name used by docker-compose
+    # (``synth-db``). _remap_for_host_access rewrites it to 127.0.0.1:<EXT_DB_PORT>
+    # when running on the host where the service name does not resolve, so the
+    # same default works both inside the container and from the host.
     return DbTarget(
         name="runtime",
         db_type=db_type,
-        host=str(_repo_or_process_value("DB_HOST", "localhost") or "localhost"),
+        host=str(_repo_or_process_value("DB_HOST", "synth-db") or "synth-db"),
         port=_coerce_port(_repo_or_process_value("DB_PORT"), default_port),
         user=str(_repo_or_process_value("DB_USER", "synth") or "synth"),
         password=str(_repo_or_process_value("DB_PASS", "synth") or "synth"),
@@ -1132,6 +1143,187 @@ def delete_memory(
         return f"OK — [{config.name}] deleted memory id={memory_id}"
     except Exception as exc:
         return f"DB error: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# Backups (shell out to pg_dump / mysqldump, gzip-compressed output)
+# ---------------------------------------------------------------------------
+
+_TABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?$")
+
+
+def _backups_dir() -> Path:
+    raw = os.getenv("SYNTH_BACKUPS_DIR", str(_REPO_ROOT / "backups"))
+    return Path(raw)
+
+
+def _sanitize_table_names(tables: list[str]) -> list[str]:
+    """Validate + de-duplicate table identifiers, raising on anything unsafe."""
+    seen: set[str] = set()
+    clean: list[str] = []
+    for raw in tables:
+        name = str(raw).strip()
+        if not name:
+            continue
+        if not _TABLE_NAME_RE.match(name):
+            raise ValueError(f"Invalid table name: {name!r}")
+        if name not in seen:
+            seen.add(name)
+            clean.append(name)
+    if not clean:
+        raise ValueError("No valid table names provided.")
+    return clean
+
+
+def _dump_binary(db_type: str) -> str | None:
+    tool = "pg_dump" if db_type == "postgres" else "mysqldump"
+    return shutil.which(tool)
+
+
+def _build_dump_command(
+    config: DbTarget, tables: list[str] | None
+) -> tuple[list[str], dict[str, str]]:
+    """Return (argv, env additions) for a pg_dump / mysqldump invocation."""
+    env: dict[str, str] = {}
+    binary = _dump_binary(config.db_type)
+    if not binary:
+        want = "pg_dump" if config.db_type == "postgres" else "mysqldump"
+        raise ValueError(f"{want} not found on PATH.")
+
+    if config.db_type == "postgres":
+        cmd = [
+            binary,
+            "--host",
+            str(config.host),
+            "--port",
+            str(config.port),
+            "--username",
+            str(config.user),
+            "--dbname",
+            str(config.database),
+            "--format=plain",
+            "--no-owner",
+            "--no-privileges",
+            "--encoding=UTF8",
+        ]
+        for tbl in tables or []:
+            cmd += ["--table", tbl]
+        env["PGPASSWORD"] = config.password or ""
+        return cmd, env
+
+    if config.db_type == "mariadb":
+        cmd = [
+            binary,
+            "--host",
+            str(config.host),
+            "--port",
+            str(config.port),
+            "--user",
+            str(config.user),
+            "--single-transaction",
+            "--quick",
+            "--routines",
+            "--triggers",
+            "--skip-lock-tables",
+            str(config.database),
+        ]
+        cmd += tables or []
+        env["MYSQL_PWD"] = config.password or ""
+        return cmd, env
+
+    raise ValueError(f"Unsupported DB_TYPE for backup: {config.db_type}")
+
+
+def _run_dump(config: DbTarget, tables: list[str] | None, prefix: str) -> Path:
+    cmd, env_add = _build_dump_command(config, tables)
+    out_dir = _backups_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    out_path = out_dir / f"{prefix}-{config.database}-{stamp}.sql.gz"
+
+    run_env = dict(os.environ)
+    run_env.update(env_add)
+    proc = subprocess.run(
+        cmd,
+        env=run_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if proc.returncode != 0:
+        err = proc.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"dump failed (exit {proc.returncode}): {err[:500]}")
+    with gzip.open(out_path, "wb") as fh:
+        fh.write(proc.stdout)
+    return out_path
+
+
+@mcp.tool()
+def backup_database(
+    confirm: bool = False,
+    target: Optional[str] = None,
+) -> str:
+    """Create a gzip-compressed full logical backup of the selected DB target.
+
+    Shells out to pg_dump (Postgres) or mysqldump (MariaDB) and writes a
+    ``.sql.gz`` file into the backups directory (``SYNTH_BACKUPS_DIR``,
+    default ``backups/``).
+
+    Args:
+        confirm: Pass True to actually run the backup (dry-run preview otherwise).
+        target: Optional DB target selector (default runtime).
+    """
+    if not confirm:
+        return (
+            "DRY RUN — would create a FULL database backup\n"
+            f"  target  = '{target or 'runtime'}'\n"
+            f"  out dir = {_backups_dir()}\n\n"
+            "Pass confirm=True to execute."
+        )
+    try:
+        config = _resolve_target(target)
+        config = _remap_for_host_access(config)
+        path = _run_dump(config, None, f"runtime-{config.db_type}")
+        return f"OK — [{config.name}] backup written: {path}"
+    except Exception as exc:
+        return f"Backup error: {exc}"
+
+
+@mcp.tool()
+def backup_table(
+    tables: list[str],
+    confirm: bool = False,
+    target: Optional[str] = None,
+) -> str:
+    """Create a gzip-compressed backup of one or more specific tables.
+
+    Args:
+        tables: A LIST of table names to include in the backup.
+        confirm: Pass True to actually run the backup (dry-run preview otherwise).
+        target: Optional DB target selector (default runtime).
+    """
+    try:
+        clean = _sanitize_table_names(list(tables or []))
+    except ValueError as exc:
+        return f"Backup rejected: {exc}"
+
+    if not confirm:
+        return (
+            "DRY RUN — would create a per-table backup\n"
+            f"  tables  = {clean}\n"
+            f"  target  = '{target or 'runtime'}'\n"
+            f"  out dir = {_backups_dir()}\n\n"
+            "Pass confirm=True to execute."
+        )
+    try:
+        config = _resolve_target(target)
+        config = _remap_for_host_access(config)
+        path = _run_dump(config, clean, f"runtime-{config.db_type}-tables")
+        return (
+            f"OK — [{config.name}] table backup written ({len(clean)} table(s)): {path}"
+        )
+    except Exception as exc:
+        return f"Backup error: {exc}"
 
 
 if __name__ == "__main__":

@@ -218,18 +218,6 @@ def _parse_time_window_spec(spec: Any) -> Optional[Tuple[datetime, datetime]]:
 
 # Exposed variables
 register_exposed_var(
-    "ENABLE_MEMORY_SEARCH",
-    label="Enable Memory Search",
-    default=True,
-    value_type=bool,
-    ui_type="bool",
-    description="Toggle memory_search plugin behavior (when off, searches are not performed)",
-    scope="core",
-    component="memory_search",
-    hidden=True,
-)
-
-register_exposed_var(
     "MEMORY_SEARCH_MAX_RESULTS",
     label="Memory Search Max Results",
     default=10,
@@ -246,11 +234,6 @@ class MemorySearchPlugin:
 
     def __init__(self):
         register_plugin("memory_search", self)
-
-    def is_enabled(self) -> bool:
-        return bool(
-            config_registry.get_value("ENABLE_MEMORY_SEARCH", True, value_type=bool)
-        )
 
     def get_supported_actions(self):
         return {
@@ -656,14 +639,6 @@ class MemorySearchPlugin:
                     self._live_search(payload, guild_id, original_message)
                 )
                 return {"processed": True, "results": [], "async": True}
-
-        # Check toggle
-        enabled = bool(
-            config_registry.get_value("ENABLE_MEMORY_SEARCH", True, value_type=bool)
-        )
-        if not enabled:
-            log_info("[memory_search] Plugin disabled by config; skipping search")
-            return {"processed": True, "results": []}
 
         # Determine max results
         default_max = int(

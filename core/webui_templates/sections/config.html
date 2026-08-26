@@ -243,9 +243,10 @@
             #config-theme-input-container .accent-presets { display:flex; gap:0.75rem; align-items:center; }
             #config-theme-input-container .accent-presets button { width:34px; height:34px; border-radius:50%; border:1px solid rgba(255,255,255,0.06); cursor:pointer; }
             #config-theme-input-container .accent-presets button.is-active { outline:2px solid var(--accent); outline-offset:2px; box-shadow:0 0 0 2px rgba(0,0,0,0.55) inset; }
-            #config-theme-input-container .accent-color-input { position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }
-            #config-theme-input-container .accent-color-dot { width:42px; height:42px; border-radius:50%; border:1px solid var(--border); background:transparent; display:inline-flex; align-items:center; justify-content:center; font-size:1.1rem; line-height:1; color:var(--text-soft); cursor:pointer; box-shadow: 0 6px 16px rgba(0,0,0,0.35); }
-            #config-theme-input-container .accent-color-dot:disabled { opacity:0.6; cursor:not-allowed; }
+            #config-theme-input-container .accent-preset-custom-wrap { position:relative; display:inline-flex; }
+            #config-theme-input-container .accent-color-input { position:absolute; inset:0; width:100%; height:100%; margin:0; padding:0; border:0; opacity:0; cursor:pointer; }
+            #config-theme-input-container .accent-preset-custom { display:inline-flex; align-items:center; justify-content:center; font-size:1.05rem; line-height:1; color:#fff; text-shadow:0 1px 2px rgba(0,0,0,0.65); background:conic-gradient(#ff6b6b, #ffd166, #6bff88, #6bfefe, #6b7bff, #ff6bd6, #ff6b6b); }
+            #config-theme-input-container .accent-preset-custom:disabled { opacity:0.6; cursor:not-allowed; }
             #config-theme-input-container .accent-actions { display:flex; gap:0.5rem; margin-left:6px; }
             #config-theme-input-container .accent-actions button { padding:0.45rem 0.65rem; border-radius:8px; border:1px solid transparent; cursor:pointer; }
             #config-theme-input-container .accent-actions .apply { background:var(--accent); color:var(--accent-contrast); }

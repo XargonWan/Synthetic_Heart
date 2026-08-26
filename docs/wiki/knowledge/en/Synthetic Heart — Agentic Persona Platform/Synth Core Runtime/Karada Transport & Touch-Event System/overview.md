@@ -1,0 +1,1 @@
+Provides the abstract transport interface and concrete WebSocket transports for broadcasting Karada avatar state to clients, plus a debounced touch-event recorder that turns 3D interactions into chat history and spontaneous LLM turns.

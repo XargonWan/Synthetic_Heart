@@ -27,16 +27,74 @@ from core.interface_paths import get_name_resolver
 from core.user_utils import ensure_message_user_fields
 
 # Use a priority queue so events can be processed before regular messages.
-# Lower value = processed first. The agent lane sits BETWEEN user-facing traffic
-# (messages / radio) and the generic autonomous beats: an agentic turn must yield
-# to real user messages and radio speech, but take precedence over background
-# G.R.I.L.L.O. beats.
-HIGH_PRIORITY = 0  # Scheduled events, urgent notifications
-NORMAL_PRIORITY = 1  # User messages, radio speech — user-facing traffic
-AGENT_PRIORITY = 2  # Agentic turns / tool work — below user traffic, above beats
-LOW_PRIORITY = (
-    3  # For autonomous beats (G.R.I.L.L.O.) - processed only when queue is idle
-)
+#
+# Priority scale: a plain 0–11 numeric axis where HIGHER = MORE URGENT.
+# The names are deliberately generic (broad-scope) — the *meaning* lives in the
+# comments, not in narrow feature-bound names. Producers pick the closest band.
+#
+# NOTE ON HEAP ORDERING: the underlying ``asyncio.PriorityQueue`` is a min-heap
+# (lowest key popped first). To make "higher = more urgent" work we push the
+# NEGATED priority as the heap key via ``_heap_key`` — never push a raw priority
+# value. The monotonic ``_counter`` stays the FIFO tie-break.
+#
+# NOTE ON VALUES: producers reference these constants **by name**, never by the
+# raw integer, so the exact numbers are free to be re-spaced. REFLECTION was
+# inserted between HIGH and URGENT (bumping EMERGENCY→11, URGENT→10) so a Vessel
+# "stop and think about my goal" turn can jump ahead of ordinary in-world player
+# chat yet still yield to a real-world emergency/safety notification.
+# BACKGROUND(2) was split below LOW(3) so G.R.I.L.L.O. background beats sit at
+# the absolute bottom and never contend with anything else.
+PRIORITY_EMERGENCY = 11  # Reserved top band — a real emergency, above everything
+PRIORITY_URGENT = 10  # Calendar reminders, auto_response(priority=True), safety
+PRIORITY_REFLECTION = 9  # Vessel "pause & reflect on my goal" turn (above player chat)
+PRIORITY_HIGH = 8  # Direct prioritised human input (e.g. in-world player chat)
+PRIORITY_TRAINER = 7  # The trainer — must always reach Synth promptly
+PRIORITY_RADIO = 6  # Radio-host DJ banter (on-the-fly LLM generation during playback)
+PRIORITY_GENERAL = 5  # Ordinary user chat (telegram/discord/matrix/webui/ollama…)
+PRIORITY_AMBIENT = 4  # Autonomous vessel perceptions / will-beats (below humans)
+PRIORITY_LOW = 3  # Background-adjacent (web-search 2nd-pass, misc fallback)
+PRIORITY_BACKGROUND = 2  # G.R.I.L.L.O. beats — absolute bottom, never starves anything
+
+# Anything at or below this band is treated as background/cancellable by the
+# consumer loop (run without blocking user-facing traffic, cancellable when a
+# user message arrives for the same interface_path).
+PRIORITY_BACKGROUND_THRESHOLD = PRIORITY_LOW
+
+
+def _heap_key(priority_val: int) -> int:
+    """Convert a semantic priority (higher = more urgent) to a min-heap key.
+
+    The queue is a min-heap, so we negate: the most urgent (largest) semantic
+    value becomes the smallest heap key and is popped first.
+    """
+    return -int(priority_val)
+
+
+# Human-readable label for each priority band, keyed by the semantic value.
+# Used only for display (e.g. the WebUI Activity → Queue tab); producers still
+# reference the numeric constants by name. A value not in the map falls back to
+# a plain ``str(priority)`` at the call site.
+_PRIORITY_LABELS: dict[int, str] = {
+    PRIORITY_EMERGENCY: "Emergency",
+    PRIORITY_URGENT: "Urgent",
+    PRIORITY_REFLECTION: "Reflection",
+    PRIORITY_HIGH: "High",
+    PRIORITY_TRAINER: "Trainer",
+    PRIORITY_RADIO: "Radio",
+    PRIORITY_GENERAL: "General",
+    PRIORITY_AMBIENT: "Ambient",
+    PRIORITY_LOW: "Low",
+    PRIORITY_BACKGROUND: "Background",
+}
+
+
+def priority_label(priority_val: int) -> str:
+    """Return a human-readable name for a semantic priority band."""
+    try:
+        return _PRIORITY_LABELS.get(int(priority_val), str(priority_val))
+    except (TypeError, ValueError):
+        return str(priority_val)
+
 
 _queue: asyncio.PriorityQueue | None = None
 _queue_loop: asyncio.AbstractEventLoop | None = None
@@ -90,6 +148,34 @@ def _extract_grillo_activity_log_id(message: object) -> int | None:
         return None
 
 
+def _reply_context_from_message(message: object) -> dict[str, str] | None:
+    """Extract the quoted-reply context from a queued inbound message.
+
+    When the user REPLIES to an earlier message, the interfaces attach the
+    platform reply payload on ``message.reply_to_message`` (Telegram wrapper,
+    Discord SimpleNamespace, Matrix fallback-parse namespace, Fluxer extraction).
+    The Agent Lane never sees that attribute — its prompt is built only from
+    goal + observations + context — so without this the model answers a quote
+    it cannot read. Returns ``{"sender_name", "text"}`` or None. Purely
+    structural (attribute reads), no keyword logic.
+    """
+    reply = getattr(message, "reply_to_message", None)
+    if reply is None:
+        return None
+    text = str(
+        getattr(reply, "text", None) or getattr(reply, "caption", None) or ""
+    ).strip()
+    if not text:
+        return None
+    sender = getattr(reply, "from_user", None)
+    sender_name = (
+        getattr(sender, "full_name", None)
+        or getattr(sender, "username", None)
+        or "Unknown"
+    )
+    return {"sender_name": str(sender_name), "text": text}
+
+
 def _get_queue() -> asyncio.PriorityQueue:
     global _queue, _queue_loop
     try:
@@ -119,6 +205,318 @@ def _get_queue() -> asyncio.PriorityQueue:
             heapq.heapify(_queue._queue)
 
     return _queue
+
+
+def _drop_stale_vessel_perceptions(world_chat_id: str) -> None:
+    """Remove queued autonomous vessel perceptions for one world scope.
+
+    Synth's own in-world perceptions (will beats, sightings) are produced on a
+    fast timer but consumed slowly on a heavy engine, so they accumulate. When a
+    real player speaks to Synth in-world, those pending autonomous beats are
+    stale — a will beat is only meaningful *now* — and would otherwise force the
+    player chat to wait one full slow turn per queued beat. We drop them so the
+    player is answered promptly. Never touches the player chat itself (kept by
+    the ``vessel_player_chat`` flag) nor any non-vessel traffic. Best-effort and
+    fully guarded; a failure leaves the queue untouched.
+    """
+    if _queue is None:
+        return
+    heap = _queue._queue
+    if not heap:
+        return
+
+    kept: list = []
+    dropped = 0
+    for entry in heap:
+        try:
+            _prio, _counter_val, entry_item = entry
+        except (TypeError, ValueError):
+            kept.append(entry)
+            continue
+        is_vessel = (
+            isinstance(entry_item, dict) and entry_item.get("interface") == "vessel"
+        )
+        same_world = (
+            isinstance(entry_item, dict) and entry_item.get("chat_id") == world_chat_id
+        )
+        is_player = isinstance(entry_item, dict) and entry_item.get(
+            "vessel_player_chat"
+        )
+        # Drop only Synth's own autonomous perceptions for THIS world.
+        if is_vessel and same_world and not is_player:
+            dropped += 1
+            continue
+        kept.append(entry)
+
+    if dropped:
+        heap[:] = kept
+        heapq.heapify(heap)
+        # Keep the Queue's unfinished-task accounting consistent: each pruned
+        # item was ``put`` (incrementing the counter) but will never be
+        # ``get``/``task_done``. Guarded — internal attr may vary across
+        # Python versions.
+        try:
+            for _ in range(dropped):
+                if getattr(_queue, "_unfinished_tasks", 0) > 0:
+                    _queue._unfinished_tasks -= 1
+            if getattr(_queue, "_unfinished_tasks", 1) == 0:
+                _queue._finished.set()
+        except Exception:  # pragma: no cover - defensive
+            pass
+        log_debug(
+            f"[QUEUE] Pruned {dropped} stale autonomous vessel perception(s) "
+            f"for '{world_chat_id}' ahead of an in-world player chat"
+        )
+
+
+def _supersede_pending_vessel_beats(world_chat_id: str) -> None:
+    """Drop older autonomous vessel perceptions superseded by a fresh one.
+
+    Synth's own in-world will beats/perceptions are produced on a fast timer
+    (``VESSEL_WILL_INTERVAL_SEC``) but each turn can take far longer to consume
+    on a heavy engine (e.g. Selenium), so successive beats pile up behind the
+    turn in flight. A will beat only means anything *now*: once a newer one is
+    ready, the queued older ones are stale snapshots of a world that has since
+    moved on. Left in the queue they would be coalesced together by
+    :func:`compact_similar_messages` (same ``chat_id``) into a single turn
+    carrying N identical "quiet moment to reflect" prompts, which makes the
+    engine emit the *same* line N times in a row.
+
+    So, right before a new autonomous perception for a world is enqueued, we
+    drop the ones already queued for that same world. At most one autonomous
+    beat is ever pending, so nothing gets coalesced and nothing is repeated.
+    Purely structural (interface + world scope + the ``vessel_player_chat``
+    flag) — never message text. Player chats and non-vessel traffic are never
+    touched. Best-effort and fully guarded.
+    """
+    if _queue is None:
+        return
+    heap = _queue._queue
+    if not heap:
+        return
+
+    kept: list = []
+    dropped = 0
+    for entry in heap:
+        try:
+            _prio, _counter_val, entry_item = entry
+        except (TypeError, ValueError):
+            kept.append(entry)
+            continue
+        is_vessel = (
+            isinstance(entry_item, dict) and entry_item.get("interface") == "vessel"
+        )
+        same_world = (
+            isinstance(entry_item, dict) and entry_item.get("chat_id") == world_chat_id
+        )
+        is_player = isinstance(entry_item, dict) and entry_item.get(
+            "vessel_player_chat"
+        )
+        # Supersede only Synth's own autonomous perceptions for THIS world; a
+        # ``no_compact`` beat is intentionally standalone and is left alone.
+        is_no_compact = isinstance(entry_item, dict) and entry_item.get("no_compact")
+        if is_vessel and same_world and not is_player and not is_no_compact:
+            dropped += 1
+            continue
+        kept.append(entry)
+
+    if dropped:
+        heap[:] = kept
+        heapq.heapify(heap)
+        # Keep the Queue's unfinished-task accounting consistent (see
+        # _drop_stale_vessel_perceptions). Guarded — internal attr may vary.
+        try:
+            for _ in range(dropped):
+                if getattr(_queue, "_unfinished_tasks", 0) > 0:
+                    _queue._unfinished_tasks -= 1
+            if getattr(_queue, "_unfinished_tasks", 1) == 0:
+                _queue._finished.set()
+        except Exception:  # pragma: no cover - defensive
+            pass
+        log_debug(
+            f"[QUEUE] Superseded {dropped} older autonomous vessel beat(s) for "
+            f"'{world_chat_id}' with a fresher one"
+        )
+
+
+def drop_vessel_queue_for_world(world_chat_id: str) -> int:
+    """Remove **every** queued item for a Vessel world when its session ends.
+
+    Called at session teardown (logout / cooldown / connector disconnect). Once
+    the session is closed, anything still queued for that ``vessel/<world>``
+    scope — autonomous will beats, action beats, sightings, *and* any pending
+    player chat — is stale: there is no live embodiment left to act on it, and
+    leaving it would either be dispatched into a dead world or, worse, be
+    coalesced into the next session's turns. So we drop the whole world scope.
+
+    Unlike :func:`_drop_stale_vessel_perceptions` and
+    :func:`_supersede_pending_vessel_beats`, this deliberately also removes the
+    player chat (``vessel_player_chat``): the session is over, so those messages
+    can no longer be answered in-world. Purely structural (interface + world
+    scope) — never message text. Non-vessel traffic is never touched. Returns
+    the number of items dropped. Best-effort and fully guarded; a failure leaves
+    the queue untouched.
+    """
+    if _queue is None:
+        return 0
+    heap = _queue._queue
+    if not heap:
+        return 0
+
+    kept: list = []
+    dropped = 0
+    for entry in heap:
+        try:
+            _prio, _counter_val, entry_item = entry
+        except (TypeError, ValueError):
+            kept.append(entry)
+            continue
+        is_vessel = (
+            isinstance(entry_item, dict) and entry_item.get("interface") == "vessel"
+        )
+        # Match the exact world scope OR any deeper per-server scope beneath it
+        # (``vessel/<game>`` also purges ``vessel/<game>/<world>``), so a purge
+        # keyed on the game token covers the concrete per-server session scope.
+        entry_chat = entry_item.get("chat_id") if isinstance(entry_item, dict) else None
+        same_world = isinstance(entry_chat, str) and (
+            entry_chat == world_chat_id or entry_chat.startswith(f"{world_chat_id}/")
+        )
+        if is_vessel and same_world:
+            dropped += 1
+            continue
+        kept.append(entry)
+
+    if dropped:
+        heap[:] = kept
+        heapq.heapify(heap)
+        # Keep the Queue's unfinished-task accounting consistent (see
+        # _drop_stale_vessel_perceptions). Guarded — internal attr may vary.
+        try:
+            for _ in range(dropped):
+                if getattr(_queue, "_unfinished_tasks", 0) > 0:
+                    _queue._unfinished_tasks -= 1
+            if getattr(_queue, "_unfinished_tasks", 1) == 0:
+                _queue._finished.set()
+        except Exception:  # pragma: no cover - defensive
+            pass
+        log_debug(
+            f"[QUEUE] Dropped {dropped} queued vessel item(s) for "
+            f"'{world_chat_id}' at session teardown"
+        )
+    return dropped
+
+
+def snapshot_queue(limit: int = 500) -> list[dict[str, object]]:
+    """Return a read-only snapshot of the currently PENDING queue items.
+
+    Powers the WebUI Activity → Queue tab. Each entry is a plain, JSON-safe dict
+    describing one queued message — never the live ``item`` (which holds the bot,
+    the raw message object and futures). Items are returned in the order they
+    would be popped by the consumer: most urgent first (highest semantic
+    priority), FIFO within a band (via the monotonic counter).
+
+    The item currently being processed by the consumer has already been
+    ``get``-ed off the heap and is therefore NOT included — this is only the
+    pending backlog.
+
+    Best-effort and fully guarded (mirrors the prune helpers): reads a copy of
+    the internal heap without a lock, so a rare concurrent mutation can only
+    yield a slightly stale snapshot, never an exception. Returns ``[]`` when the
+    queue has not been created yet or on any error.
+
+    Args:
+        limit: Maximum number of items to return (defensive cap for huge
+            backlogs). Clamped to ``[1, 5000]``.
+
+    Returns:
+        A list of dicts, each with: ``position`` (1-based pop order),
+        ``priority`` (int), ``priority_label`` (str), ``interface``,
+        ``interface_path``, ``chat_id``, ``chat_name``, ``thread_name``,
+        ``enqueued_at`` (epoch seconds, float), ``age_seconds`` (float),
+        ``text_preview`` (str, truncated), ``is_priority`` (bool) and the
+        structural vessel flags ``vessel_player_chat`` / ``vessel_reflection`` /
+        ``vessel_appraisal``.
+    """
+    try:
+        cap = max(1, min(5000, int(limit)))
+    except (TypeError, ValueError):
+        cap = 500
+
+    if _queue is None:
+        return []
+
+    try:
+        # Copy the heap before iterating so a concurrent enqueue/prune cannot
+        # mutate it mid-read. Each entry is ``(heap_key, counter, item)``.
+        entries = list(_queue._queue)
+    except Exception:  # pragma: no cover - defensive
+        return []
+
+    # Sort into the exact pop order: min-heap key first (most urgent), then the
+    # monotonic counter (FIFO tie-break).
+    def _sort_key(entry: object) -> tuple[int, int]:
+        try:
+            heap_key, counter_val, _item = entry  # type: ignore[misc]
+            return (int(heap_key), int(counter_val))
+        except (TypeError, ValueError):
+            return (0, 0)
+
+    try:
+        entries.sort(key=_sort_key)
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+    now = time.time()
+    out: list[dict[str, object]] = []
+    for position, entry in enumerate(entries[:cap], start=1):
+        try:
+            heap_key, _counter_val, item = entry
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(item, dict):
+            continue
+
+        priority_val = -int(heap_key)
+
+        # Text preview from the wrapped message object, truncated. Guarded — the
+        # message may be any interface's object; we only want its ``.text``.
+        preview = ""
+        try:
+            raw_text = getattr(item.get("message"), "text", "") or ""
+            preview = str(raw_text).strip().replace("\n", " ")
+            if len(preview) > 240:
+                preview = preview[:240] + "…"
+        except Exception:  # pragma: no cover - defensive
+            preview = ""
+
+        enqueued_at = item.get("timestamp")
+        try:
+            enqueued_at_f = float(enqueued_at) if enqueued_at is not None else None
+        except (TypeError, ValueError):
+            enqueued_at_f = None
+        age_seconds = (now - enqueued_at_f) if enqueued_at_f is not None else None
+
+        out.append(
+            {
+                "position": position,
+                "priority": priority_val,
+                "priority_label": priority_label(priority_val),
+                "interface": item.get("interface"),
+                "interface_path": item.get("interface_path"),
+                "chat_id": item.get("chat_id"),
+                "chat_name": item.get("chat_name"),
+                "thread_name": item.get("message_thread_name"),
+                "enqueued_at": enqueued_at_f,
+                "age_seconds": age_seconds,
+                "text_preview": preview,
+                "is_priority": bool(item.get("priority")),
+                "vessel_player_chat": bool(item.get("vessel_player_chat")),
+                "vessel_reflection": bool(item.get("vessel_reflection")),
+                "vessel_appraisal": bool(item.get("vessel_appraisal")),
+            }
+        )
+
+    return out
 
 
 def _get_lock() -> asyncio.Lock:
@@ -164,9 +562,9 @@ class MessageQueue:
 async def _delayed_put(item: dict, delay: float) -> None:
     global _counter
     await asyncio.sleep(delay)
-    priority = HIGH_PRIORITY if item.get("priority") else NORMAL_PRIORITY
+    priority = PRIORITY_URGENT if item.get("priority") else PRIORITY_GENERAL
     _counter += 1
-    await _get_queue().put((priority, _counter, item))
+    await _get_queue().put((_heap_key(priority), _counter, item))
 
 
 async def enqueue(
@@ -196,7 +594,16 @@ async def enqueue(
     """
     # Use centralized context manager if context_memory not provided
     if context_memory is None:
-        context_memory = get_context_memory()
+        # The shared context-manager dict is the global chat-history store
+        # (Dict[str, deque]) and must NEVER be used as the per-turn context:
+        # per-turn routing flags written into it by the pipeline (recon
+        # ``agent_needed``, attachment ``attachment_paths``, ...) would persist
+        # across every message and every chat. Observed live: after the first
+        # agentic turn, EVERY later message — including a plain "You back to
+        # normal Dee?" — classified AGENT and spawned a new task (Langfuse
+        # 21:41-21:47 chain). A shallow copy keeps the history deques shared
+        # while making the top-level dict turn-local.
+        context_memory = dict(get_context_memory())
     # Normalise the incoming message's user fields for consistent downstream handling
     try:
         ensure_message_user_fields(message)
@@ -568,12 +975,112 @@ async def enqueue(
         "history_scope": history_scope,
         "response_future": response_future,
         "media_future": media_future,
+        # Opt-out of queue coalescing. A message flagged ``_no_compact`` (e.g. a
+        # salient in-world player chat directly addressing Synth) must run as its
+        # own turn — never merged with autonomous perceptions/will-beat prompts
+        # that share the same ``chat_id`` — so its text stays the primary
+        # ``original_user_message`` and gets a direct reply. Structural flag set
+        # by the originating interface; defaults to False for every other path.
+        "no_compact": bool(getattr(message, "_no_compact", False)),
+        # Structural marker: a real in-world player chat directly addressing
+        # Synth (set by the vessel interface). Used below to rank it above
+        # Synth's own autonomous vessel perceptions and to prune stale ones.
+        "vessel_player_chat": bool(getattr(message, "_vessel_player_chat", False)),
+        # Structural marker: a Vessel "pause & reflect on my goal" turn (set by
+        # the vessel interface when Synth stops to author/expand its goal). Used
+        # below to rank it at PRIORITY_REFLECTION — ahead of ordinary in-world
+        # player chat but below any real emergency/urgent notification — and to
+        # prune stale autonomous beats so the reflection turn runs unobstructed.
+        "vessel_reflection": bool(getattr(message, "_vessel_reflection", False)),
+        # Structural marker: a Vessel post-damage appraisal turn (set by the
+        # vessel interface right after Synth took damage). Ranked at
+        # PRIORITY_URGENT so the "I was just hurt — what do I do?" cognition turn
+        # jumps ahead of ordinary autonomous play and in-world chat; the fast
+        # survival reflex already reacted mechanically, this is the deliberate
+        # combat/social appraisal on top. Prunes stale autonomous beats too.
+        "vessel_appraisal": bool(getattr(message, "_vessel_appraisal", False)),
     }
 
     global _counter
-    priority_val = HIGH_PRIORITY if priority else NORMAL_PRIORITY
+
+    # === Priority assignment (numeric 0–10 scale, higher = more urgent) ===
+    # A pure, unconditional ranking based only on the message's structural
+    # origin — never on message text (project rule: no keyword/trigger-word
+    # logic) and never conditional on whether a Vessel session is active. There
+    # is NO de-prioritisation: ordinary chat is never demoted because Synth
+    # happens to be embodied in a world. The bands, from most to least urgent:
+    #   * priority=True (scheduled events / urgent notifications) → URGENT.
+    #   * A real in-world player chat (structural ``vessel_player_chat`` flag,
+    #     set by the vessel interface from event kind + actor) → HIGH: it is a
+    #     human speaking directly, so it ranks above ordinary chat and above
+    #     Synth's own autonomous perceptions.
+    #   * The trainer (TRAINER_CHAT_ID) → TRAINER: always reaches Synth promptly.
+    #   * Synth's own autonomous vessel perceptions/will-beats → AMBIENT: below
+    #     every human, so a person is always answered before background play.
+    #   * Everything else (ordinary user chat) → GENERAL.
+    # Fully guarded + lazily imported so removing the Vessel plugin, or any
+    # failure, leaves enqueue behaviour unchanged.
+    if priority:
+        priority_val = PRIORITY_URGENT
+    elif interface == "vessel" and item.get("vessel_appraisal"):
+        # Synth just took damage. The fast survival reflex already reacted; this
+        # is the deliberate appraisal turn ("I was hurt — fight smart, disengage,
+        # or respond socially if a person struck me?"). Rank it URGENT so it is
+        # consumed ahead of ordinary autonomous play and in-world chat, and prune
+        # the older autonomous beats for this world so it runs unobstructed
+        # (structural + world scope, guarded; player chats and ``no_compact``
+        # items are preserved).
+        priority_val = PRIORITY_URGENT
+        try:
+            _supersede_pending_vessel_beats(chat_id)
+        except Exception as _apr_exc:  # pragma: no cover - defensive
+            log_debug(f"[QUEUE] Vessel appraisal prune skipped: {_apr_exc}")
+    elif interface == "vessel" and item.get("vessel_reflection"):
+        # Synth deliberately stopped to think about its goal. This ranks ABOVE
+        # ordinary in-world player chat (HIGH) yet below any urgent/emergency
+        # notification, so the reflection turn is the next thing consumed. Prune
+        # the older autonomous beats already queued for this world so the
+        # reflection turn is not coalesced with — or delayed behind — stale
+        # will/action beats (structural + world scope, guarded; player chats and
+        # ``no_compact`` items are preserved).
+        priority_val = PRIORITY_REFLECTION
+        try:
+            _supersede_pending_vessel_beats(chat_id)
+        except Exception as _ref_exc:  # pragma: no cover - defensive
+            log_debug(f"[QUEUE] Vessel reflection prune skipped: {_ref_exc}")
+    elif interface == "vessel" and item.get("vessel_player_chat"):
+        # A human speaking in-world. Prune stale autonomous perceptions for the
+        # same world so the player is answered promptly (structural, guarded).
+        priority_val = PRIORITY_HIGH
+        try:
+            _drop_stale_vessel_perceptions(chat_id)
+        except Exception as _prune_exc:  # pragma: no cover - defensive
+            log_debug(f"[QUEUE] Vessel perception prune skipped: {_prune_exc}")
+    elif interface == "vessel":
+        # Synth's own autonomous perception/will-beat: ranked BELOW any human
+        # chat. A fresh beat supersedes older queued ones for the same world so
+        # they are not coalesced into one turn with N identical prompts.
+        priority_val = PRIORITY_AMBIENT
+        try:
+            _supersede_pending_vessel_beats(chat_id)
+        except Exception as _sup_exc:  # pragma: no cover - defensive
+            log_debug(f"[QUEUE] Vessel beat supersede skipped: {_sup_exc}")
+    else:
+        priority_val = PRIORITY_GENERAL
+        try:
+            from core.config import config_registry
+
+            trainer_path = str(
+                config_registry.get_value("TRAINER_CHAT_ID", "") or ""
+            ).strip()
+            msg_path = getattr(message, "interface_path", None) or ""
+            if trainer_path and str(msg_path) == trainer_path:
+                priority_val = PRIORITY_TRAINER
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[QUEUE] Trainer priority lookup skipped: {exc}")
+
     _counter += 1
-    await _get_queue().put((priority_val, _counter, item))
+    await _get_queue().put((_heap_key(priority_val), _counter, item))
     log_debug(f"[QUEUE] Message successfully put in queue with priority {priority_val}")
 
     if priority:
@@ -629,19 +1136,36 @@ async def enqueue_low_priority(
     history_scope: str | None = None,
     interface_id: str = None,
     original_message=None,
+    priority: int = PRIORITY_LOW,
 ) -> None:
-    """Enqueue a low-priority (background) message into the global queue.
+    """Enqueue a low/background-priority message into the global queue.
 
     This is a convenience wrapper for plugins that want to submit background
-    messages that must never block other user messages. It performs the same
-    normalization and persistence steps as :func:`enqueue` but pushes the
-    item with LOW_PRIORITY (value 2).
+    messages at a specific priority band. By default items are pushed at
+    PRIORITY_LOW; callers that need a different band (e.g. radio-host banter at
+    PRIORITY_RADIO, G.R.I.L.L.O. beats at PRIORITY_BACKGROUND, or calendar
+    reminders at PRIORITY_URGENT) pass an explicit ``priority``.
+
+    Items at or below PRIORITY_BACKGROUND_THRESHOLD are treated as non-blocking
+    background work by the consumer loop; items above it are awaited normally
+    and will block the consumer until they complete.
 
     Args:
         history_scope: Optional per-message history scope propagated to the consumer/prompt builder.
+        priority: Semantic priority band (default PRIORITY_LOW).  Use the named
+                  ``PRIORITY_*`` constants.
     """
     if context_memory is None:
-        context_memory = get_context_memory()
+        # The shared context-manager dict is the global chat-history store
+        # (Dict[str, deque]) and must NEVER be used as the per-turn context:
+        # per-turn routing flags written into it by the pipeline (recon
+        # ``agent_needed``, attachment ``attachment_paths``, ...) would persist
+        # across every message and every chat. Observed live: after the first
+        # agentic turn, EVERY later message — including a plain "You back to
+        # normal Dee?" — classified AGENT and spawned a new task (Langfuse
+        # 21:41-21:47 chain). A shallow copy keeps the history deques shared
+        # while making the top-level dict turn-local.
+        context_memory = dict(get_context_memory())
 
     # Ensure message fields exist before queueing
     try:
@@ -696,10 +1220,10 @@ async def enqueue_low_priority(
 
     global _counter
     _counter += 1
-    # Use explicit LOW_PRIORITY value
-    await _get_queue().put((LOW_PRIORITY, _counter, item))
+    await _get_queue().put((_heap_key(priority), _counter, item))
     log_debug(
-        f"[QUEUE] Low-priority message enqueued from {item['interface']} chat {chat_id} thread {thread_id}"
+        f"[QUEUE] enqueue_low_priority: {priority_label(priority)} "
+        f"from {item['interface']} chat {chat_id} thread {thread_id}"
     )
 
 
@@ -710,6 +1234,14 @@ async def compact_similar_messages(first: dict, limit: int = 5) -> list:
     thread_id = first.get("thread_id")
     interface = first.get("interface")
     ts = first["timestamp"]
+
+    # A ``no_compact`` base must never absorb other queued messages: it is a
+    # direct address (e.g. an in-world player chat mentioning Synth) that has to
+    # run as its own turn so its text remains the primary user message and earns
+    # a reply — instead of being blended into a pile of autonomous perceptions
+    # (sightings / will-beat prompts) that share the same ``chat_id``.
+    if first.get("no_compact"):
+        return batch
 
     seen_ids = set()
     first_msg = first.get("message")
@@ -727,6 +1259,10 @@ async def compact_similar_messages(first: dict, limit: int = 5) -> list:
             prio, counter, item = item_tuple
         else:
             prio, item = item_tuple
+        # Never absorb a ``no_compact`` item into another base — it must run as
+        # its own standalone turn (a direct address that needs its own reply).
+        if item.get("no_compact"):
+            continue
         if (
             item["chat_id"] == chat_id
             and item.get("thread_id") == thread_id
@@ -769,15 +1305,18 @@ async def _consumer_loop() -> None:
     log_info("[QUEUE] Consumer loop started")
     while True:
         try:
-            priority, counter, item = await _get_queue().get()
+            heap_key, counter, item = await _get_queue().get()
+            # Recover the semantic priority (higher = more urgent) from the
+            # negated min-heap key pushed by every enqueue path via _heap_key.
+            priority = -int(heap_key)
             log_debug(
                 f"[QUEUE] Dequeued message from chat {item.get('chat_id')} (priority={priority}, counter={counter})"
             )
 
             # If this item carries a media_future, media processing (Auris/Iris/download)
             # is still in progress in handle_media_live. Block here until it resolves so
-            # the consumer slot is occupied at NORMAL_PRIORITY and no LOW_PRIORITY
-            # (Grillo) item can be extracted and started concurrently.
+            # the consumer slot stays occupied by this user-facing item and no
+            # background (Grillo) item can be extracted and started concurrently.
             _media_future: asyncio.Future | None = item.get("media_future")
             if _media_future is not None:
                 try:
@@ -1035,6 +1574,30 @@ async def _consumer_loop() -> None:
                             context["voice_channel_id"] = str(_vc_id)
                         else:
                             context.pop("voice_channel_id", None)
+
+                        # Propagate quoted-reply context (2026-08-21): what earlier
+                        # message the user is replying to. Reaches BOTH the Fast
+                        # Lane (build_prompt_request via this same dict) and the
+                        # Agent Lane (agent_router.route → run_agentic_turn →
+                        # _build_agent_prompt renders a QUOTED MESSAGE block).
+                        # Written/cleared every turn so a stale value never lingers.
+                        _reply_ctx = _reply_context_from_message(_queued_msg)
+                        if _reply_ctx is not None:
+                            context["reply_context"] = _reply_ctx
+                        else:
+                            context.pop("reply_context", None)
+
+                        # Propagate the structural in-world player-chat marker so
+                        # message_chain can treat a reactive vessel player turn as
+                        # user-facing (and demand a reply) while leaving Synth's own
+                        # autonomous vessel perceptions/will-beats unaffected. Set by
+                        # the vessel interface from event kind + actor presence, never
+                        # from message text. Written both True and False so a stale
+                        # value from a previous turn never lingers on the context.
+                        if getattr(_queued_msg, "_vessel_player_chat", False):
+                            context["vessel_player_chat"] = True
+                        else:
+                            context.pop("vessel_player_chat", None)
 
                         # Propagate trainer flag so plugin_instance can route
                         # to TRAINER_CORTEX when a scope override is configured.
@@ -1337,10 +1900,11 @@ async def _consumer_loop() -> None:
                             f"[QUEUE] Dispatched handle_incoming_message task for interface_path={interface_path}, interface={final.get('interface')} cancellable={task_is_cancellable}"
                         )
 
-                        # If this is a low-priority item, do not await it - run in background
+                        # If this is a background item, do not await it - run in background
                         # so long-running background beats (e.g., G.R.I.L.L.O.) do not block
-                        # processing of regular user messages.
-                        if priority == LOW_PRIORITY:
+                        # processing of regular user messages. Threshold check on the
+                        # semantic priority (any band at/below PRIORITY_LOW is background).
+                        if priority <= PRIORITY_BACKGROUND_THRESHOLD:
                             log_debug(
                                 f"[QUEUE] Low-priority task scheduled as background for interface_path={interface_path}; not awaiting"
                             )
@@ -1696,7 +2260,7 @@ async def enqueue_event(bot, prompt_data, event_id: int = None) -> None:
 
     global _counter
     _counter += 1
-    await _get_queue().put((HIGH_PRIORITY, _counter, item))
+    await _get_queue().put((_heap_key(PRIORITY_URGENT), _counter, item))
     log_debug(f"[QUEUE] Event added to the queue with priority: {prompt_data}")
     log_debug(f"[QUEUE] Current queue state: {list(_get_queue()._queue)}")
 

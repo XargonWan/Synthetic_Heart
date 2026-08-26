@@ -1,0 +1,1 @@
+Pluggable engine subsystems for the Cortex platform: agent backends, external LLM/STT/TTS providers, and live multimodal streaming engines, each auto-discovered and registered via a common plugin protocol.

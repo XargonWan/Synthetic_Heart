@@ -1,0 +1,364 @@
+# 知识卡导出索引文件
+schema_version: 1
+locale: en-US
+branch: feat/rift-vessel-new
+nodes_managed: true
+exported_at: "2026-08-02T11:13:04Z"
+modules:
+    "":
+        dir_name: Synthetic Heart — Agentic Persona Platform
+        title: Synthetic Heart — Agentic Persona Platform
+        scope:
+            - README.md
+            - main.py
+            - pyproject.toml
+            - Dockerfile
+            - docker-compose.yml
+            - .github/
+            - config/
+            - providers/
+            - scripts/
+            - tools/
+            - automation_tools/
+            - webtop/
+            - skins/
+            - .dockerignore
+            - .eslintignore
+            - .eslintrc.json
+            - .gitattributes
+            - .gitignore
+            - .htmlhintrc
+            - .mcp.json
+            - .python-version
+            - .readthedocs.yml
+            - AGENTS.md
+            - CHANGELOG.md
+            - CLAUDE.md
+            - FIXED_ISSUES.md
+            - GitVersion.yml
+            - LICENSE
+            - LICENSE_ADDENDUM.md
+            - LICENSE_EXTERNAL.md
+            - init-db.sql
+            - kronos-task.md
+            - mypy.ini
+            - package-lock.json
+            - package.json
+            - pytest.ini
+            - run_tests.py
+            - run_tests.sh
+            - start_synth.ps1
+            - synth
+            - synth.sh
+            - uv.lock
+        source_files: []
+        children:
+            - core_runtime
+            - documentation
+            - engines
+            - frontend
+            - interface_dev
+            - interfaces
+            - mcp_servers
+            - plugins
+            - plugins_dev
+            - tests
+        depends_on: []
+        related_to: []
+    core_runtime:
+        dir_name: Synth Core Runtime
+        title: Synth Core Runtime
+        scope:
+            - core/
+        source_files: []
+        children:
+            - core_runtime/action_system
+            - core_runtime/chat_management
+            - core_runtime/config_management
+            - core_runtime/core_runtime_engine
+            - core_runtime/database_layer
+            - core_runtime/karada_transport
+            - core_runtime/live_session
+            - core_runtime/media_processing
+            - core_runtime/prompt_engineering
+            - core_runtime/registry_system
+            - core_runtime/transport_layer
+            - core_runtime/utilities
+            - core_runtime/vessel_system
+        depends_on: []
+        related_to: []
+    core_runtime/action_system:
+        dir_name: Action Parsing, Safety & State Management
+        title: Action Parsing, Safety & State Management
+        scope:
+            - core/action_parser.py
+            - core/action_safety.py
+            - core/action_schema_converter.py
+            - core/action_state_manager.py
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    core_runtime/chat_management:
+        dir_name: Chat History, Context & Archive Management
+        title: Chat History, Context & Archive Management
+        scope:
+            - core/chat_context_manager.py
+            - core/chat_history_cache.py
+            - core/chat_archives.py
+            - core/chat_archives_db.py
+            - core/recent_chats.py
+            - core/history_engine.py
+            - core/history_types.py
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: core_runtime/core_runtime_engine
+    core_runtime/config_management:
+        dir_name: Configuration Registry & Model Management
+        title: Configuration Registry & Model Management
+        scope:
+            - core/config.py
+            - core/config_manager.py
+            - core/model_config.json
+            - core/model_manager.py
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    core_runtime/core_runtime_engine:
+        dir_name: Core Runtime Engine & Agent Loop
+        title: Core Runtime Engine & Agent Loop
+        scope:
+            - core/agent_core.py
+            - core/core_initializer.py
+            - core/context.py
+            - core/interfaces.py
+            - core/message_chain.py
+            - core/event_dispatcher.py
+            - core/plugin_base.py
+            - core/plugin_instance.py
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: core_runtime/chat_management
+    core_runtime/database_layer:
+        dir_name: Database Layer, Backends & Migration Tooling
+        title: Database Layer, Backends & Migration Tooling
+        scope:
+            - core/db.py
+            - core/db_backends.py
+            - core/db_backup.py
+            - core/db_cutover.py
+            - core/migrations.py
+            - core/main_db_migration.py
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    core_runtime/karada_transport:
+        dir_name: Karada Transport & Touch-Event System
+        title: Karada Transport & Touch-Event System
+        scope:
+            - core/karada_api.py
+            - core/karada_touch_events.py
+            - core/karada_transport.py
+            - core/karada_ws_transport.py
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    core_runtime/live_session:
+        dir_name: Gemini Live API Session & Tool Execution Runtime
+        title: Gemini Live API Session & Tool Execution Runtime
+        scope:
+            - core/live_session_manager.py
+            - core/live_tool_executor.py
+            - core/live_tool_registry.py
+            - core/live_api_logger.py
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    core_runtime/media_processing:
+        dir_name: Media Processing & Multimodal Attachment Pipeline
+        title: Media Processing & Multimodal Attachment Pipeline
+        scope:
+            - core/media_dispatcher.py
+            - core/media_extract.py
+            - core/media_url_utils.py
+            - core/image_processor.py
+            - core/multimodal_attachment.py
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    core_runtime/prompt_engineering:
+        dir_name: Prompt Engineering & Variable Registry
+        title: Prompt Engineering & Variable Registry
+        scope:
+            - core/prompt_engine.py
+            - core/prompt_renderers.py
+            - core/prompt_request.py
+            - core/variables_engine.py
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    core_runtime/registry_system:
+        dir_name: Core Runtime Registries & Component Validation
+        title: Core Runtime Registries & Component Validation
+        scope:
+            - core/command_registry.py
+            - core/component_auto_registration.py
+            - core/component_registry.py
+            - core/interface_adapters.py
+            - core/interfaces_registry.py
+            - core/llm_registry.py
+            - core/tool_registry.py
+            - core/validation_registry.py
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    core_runtime/transport_layer:
+        dir_name: Transport Layer & Message Queue
+        title: Transport Layer & Message Queue
+        scope:
+            - core/transport_layer.py
+            - core/message_queue.py
+            - core/message_sender.py
+            - core/response_proxy.py
+            - core/say_proxy.py
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    core_runtime/utilities:
+        dir_name: Core Utilities & Shared Helpers
+        title: Core Utilities & Shared Helpers
+        scope:
+            - core/abstract_context.py
+            - core/beat_utils.py
+            - core/calendar_utils.py
+            - core/corrector_utils.py
+            - core/json_utils.py
+            - core/languages.py
+            - core/logging_utils.py
+            - core/text_utils.py
+            - core/time_zone_utils.py
+            - core/user_utils.py
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    core_runtime/vessel_system:
+        dir_name: Rift Vessel Embodiment Core
+        title: Rift Vessel Embodiment Core
+        scope:
+            - core/vessel_beat.py
+            - core/vessel_diary_compactor.py
+            - core/vessel_focus.py
+            - core/vessel_registry.py
+            - core/vessel_session_manager.py
+            - core/vessel_goal_debrief.py
+            - plugins/goals/goals.py
+            - plugins/rift_vessel/vessel_plugin.py
+            - plugins/rift_vessel/vessel_whitelist.py
+            - plugins/rift_vessel/vessel_compactor/vessel_compactor.py
+            - plugins/rift_vessel/vessel_base.py
+            - plugins/rift_vessel/vessel_bases.py
+            - plugins/rift_vessel/vessel_quests.py
+            - plugins/rift_vessel/vessel_combat_strategy.py
+            - plugins/rift_vessel/minecraft/base_spec.py
+            - plugins/rift_vessel/minecraft/bases.py
+            - plugins/rift_vessel/minecraft/goals.py
+            - plugins/rift_vessel/minecraft/quests.py
+            - plugins/rift_vessel/minecraft/target_names.py
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    documentation:
+        dir_name: Synthetic Heart Documentation (Sphinx Manual)
+        title: Synthetic Heart Documentation (Sphinx Manual)
+        scope:
+            - docs/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    engines:
+        dir_name: Cortex Engine Subsystems (Agent, External LLM_STT_TTS, Live)
+        title: Cortex Engine Subsystems (Agent, External LLM/STT/TTS, Live)
+        scope:
+            - engines/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    frontend:
+        dir_name: SyntH Stage — Vue 3 Avatar Frontend
+        title: SyntH Stage — Vue 3 Avatar Frontend
+        scope:
+            - frontend/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    interface_dev:
+        dir_name: Development & Experimental Interfaces
+        title: Development & Experimental Interfaces
+        scope:
+            - interface_dev/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    interfaces:
+        dir_name: Channel Interfaces & Vessel Embodiment Layer
+        title: Channel Interfaces & Vessel Embodiment Layer
+        scope:
+            - interface/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    mcp_servers:
+        dir_name: Synthetic Heart MCP Servers (Observability & API Docs)
+        title: Synthetic Heart MCP Servers (Observability & API Docs)
+        scope:
+            - mcp_servers/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    plugins:
+        dir_name: Plugin Ecosystem & Engine Abstractions
+        title: Plugin Ecosystem & Engine Abstractions
+        scope:
+            - plugins/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    plugins_dev:
+        dir_name: Experimental & Development Action Plugins
+        title: Experimental & Development Action Plugins
+        scope:
+            - plugins_dev/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    tests:
+        dir_name: Synthetic Heart Test Suite
+        title: Synthetic Heart Test Suite
+        scope:
+            - tests/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []

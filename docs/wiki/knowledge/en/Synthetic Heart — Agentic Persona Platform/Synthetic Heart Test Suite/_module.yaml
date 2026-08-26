@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: tests
+title: Synthetic Heart Test Suite
+scope:
+    - tests/
+source_files: []
+depends_on: []
+related_to: []

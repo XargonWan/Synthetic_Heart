@@ -1,0 +1,5 @@
+- All cross-cutting configuration is registered declaratively via `config_registry.get_var(...)` with explicit `value_type`, `label`, `description`, `group`, and `component` metadata rather than hard-coded defaults.
+- Heavy or optional dependencies (e.g., `core.core_initializer.PLUGIN_REGISTRY`, `INTERFACE_REGISTRY`, `core.db.execute_query`) are imported lazily inside functions to avoid circular imports and failures at module load time.
+- Error paths use defensive try/except blocks that log via `log_debug`/`log_warning`/`log_error` and return safe defaults instead of raising, ensuring the action pipeline never crashes on missing components.
+- Stateful caches (_ACTION_PLUGINS, _INTERFACE_ACTIONS, _retry_tracker, _STATIC_INJECTION_CACHE) are implemented as module-level globals guarded by lazy initialization and periodic cleanup (e.g., retry entries older than 5 minutes).
+- Public APIs return structured tuples `(bool, str, Dict)` or `(bool, List[str])` carrying both a decision flag and a human-readable reason plus metadata, rather than raising exceptions for policy decisions.

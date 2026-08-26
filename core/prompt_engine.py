@@ -16,6 +16,7 @@ from core.user_utils import get_user_display_name, get_user_usertag
 from datetime import datetime, timezone
 import os
 import asyncio
+import inspect
 from typing import Any, cast
 
 # Lazily imported to avoid circular deps at module load time
@@ -79,6 +80,19 @@ _ATTACHMENT_TEXT_EXTENSIONS = (
     ".rst",
     ".tex",
     ".sql",
+)
+
+# Actions that must NEVER be offered to the model during a Rift Vessel
+# embodiment turn (AGENTS.md §5c). Mid-session diary/memory writes are forbidden
+# — a single "lived experience" diary entry is produced only at end-of-session
+# from the session experience buffer (``core.vessel_session_manager``). Leaving
+# these visible in the prompt made the weaker model spam them every beat instead
+# of acting/replying in-world. Exact action-name match (structural, keyword-free).
+_VESSEL_SUPPRESSED_ACTIONS = frozenset(
+    {
+        "create_personal_diary_entry",
+        "update_diary_entry",
+    }
 )
 
 _LEGACY_BUILD_JSON_PROMPT_WARNED = False
@@ -165,11 +179,38 @@ def minify_actions_block(
         "use_animation",
     )
 
+    # Vessel turns can expose a structurally whitelisted set of world verbs.
+    # Their human-oriented briefs are intentionally verbose, and sending all
+    # of them unchanged can consume the downstream character budget before the
+    # will/reflection body survives. Keep the action names and a useful compact
+    # prefix/suffix while preserving the normal (non-lite) prompt unchanged.
+    _LITE_VESSEL_BRIEF_LIMIT = 420
+
+    def _compact_lite_brief(action_name: str, brief: object) -> str:
+        value = str(brief or "")
+        if (
+            not action_name.startswith("vessel_")
+            or len(value) <= _LITE_VESSEL_BRIEF_LIMIT
+        ):
+            return value
+        head = 300
+        tail = _LITE_VESSEL_BRIEF_LIMIT - head - len(" … ")
+        return f"{value[:head].rstrip()} … {value[-tail:].lstrip()}"
+
     minified = {}
     for action_name, action_def in available_actions.items():
-        # In lite mode, skip non-essential actions
+        # In lite mode, skip non-essential actions. Vessel embodiment actions
+        # (``vessel_*``, e.g. ``vessel_minecraft_say``/move/look) MUST survive
+        # this pass: a Vessel turn is always built in lite mode, and stripping
+        # the world verbs would leave Synth unable to speak or act in-world —
+        # the model would silently fall back to diary/animation and never reply
+        # to a player. The prefix is a structural embodiment marker, not a
+        # keyword, and the set is already scoped to the connected world by the
+        # caller's allowlist, so only the currently-usable verbs reach here.
         if lite and not (
-            action_name.startswith("message_") or action_name in _LITE_ESSENTIAL_ACTIONS
+            action_name.startswith("message_")
+            or action_name.startswith("vessel_")
+            or action_name in _LITE_ESSENTIAL_ACTIONS
         ):
             continue
 
@@ -177,8 +218,22 @@ def minify_actions_block(
         normalized = normalize_action_schema(action_name, action_def)
 
         if lite:
-            # Lite: brief-only, no schema
-            minified[action_name] = {"brief": normalized.get("brief", "")}
+            # Lite: keep the compact brief plus the field names needed to build
+            # a valid payload.  The full schema is intentionally omitted: it is
+            # expensive in the model-facing catalog and validation still uses
+            # the registered full definition after the model responds.
+            lite_action = {
+                "brief": _compact_lite_brief(action_name, normalized.get("brief", ""))
+            }
+            schema = normalized.get("schema")
+            if isinstance(schema, dict):
+                properties = schema.get("properties") or {}
+                if isinstance(properties, dict) and properties:
+                    lite_action["payload_keys"] = list(properties.keys())
+                required = schema.get("required") or []
+                if isinstance(required, list) and required:
+                    lite_action["required_payload_keys"] = list(required)
+            minified[action_name] = lite_action
         else:
             # Standard: schema + brief
             minified[action_name] = extract_for_llm_prompt(action_name, normalized)
@@ -263,9 +318,265 @@ def _is_non_user_facing_action(action_def: Any) -> bool:
     return any(hint in hint_text for hint in _NON_USER_FACING_ACTION_HINTS)
 
 
+# Structural namespacing prefixes -> declared scope, used ONLY as a transitional
+# fallback when an action does not declare an explicit ``scope`` in its schema.
+# This is action-name namespacing (a stable structural convention), NOT keyword
+# feature routing on message content — the mapping never inspects any user text.
+_SCOPE_NAME_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("vessel_", "vessel"),
+    ("agent_", "agent"),
+)
+_DEFAULT_ACTION_SCOPES: frozenset[str] = frozenset({"core"})
+
+
+def _action_scopes(action_def: Any) -> set[str]:
+    """Return the set of prompt scopes an action belongs to.
+
+    Resolution order (fail-safe, structural — never message text):
+    1. an explicit ``scope`` key on the (normalized) action schema, either a
+       string or a list/tuple/set of strings;
+    2. otherwise a transitional fallback derived from the action-name prefix
+       (``vessel_*`` => ``vessel``, ``agent_*`` => ``agent``) — this is stable
+       structural namespacing, not keyword routing;
+    3. otherwise the default ``{"core"}`` (always visible).
+    """
+    if isinstance(action_def, dict):
+        declared = action_def.get("scope")
+        if isinstance(declared, str) and declared.strip():
+            return {declared.strip()}
+        if isinstance(declared, (list, tuple, set)):
+            scopes = {str(s).strip() for s in declared if str(s).strip()}
+            if scopes:
+                return scopes
+    return set(_DEFAULT_ACTION_SCOPES)
+
+
+def _action_scopes_by_name(action_name: str, action_def: Any) -> set[str]:
+    """``_action_scopes`` with the name-prefix fallback applied.
+
+    Kept separate so the prefix fallback only kicks in when no explicit scope is
+    declared, preserving the primacy of the schema-declared value.
+    """
+    if isinstance(action_def, dict) and action_def.get("scope"):
+        return _action_scopes(action_def)
+    name = str(action_name or "")
+    for prefix, scope in _SCOPE_NAME_PREFIXES:
+        if name.startswith(prefix):
+            return {scope}
+    return set(_DEFAULT_ACTION_SCOPES)
+
+
+# Synthetic interface prefixes used by the outbound-beat plumbing (Grillo
+# observer, web-search delivery, etc.). A beat runs *under* one of these
+# synthetic scopes while being *addressed* to a real interface; the real
+# interface is what must be offered. These prefixes never correspond to a real
+# I/O interface, so they are never a valid ``message_*`` target.
+_OUTBOUND_SYNTHETIC_INTERFACES: frozenset[str] = frozenset(
+    {"grillo", "web_search", "vessel", "system", "internal"}
+)
+
+
+def _derive_outbound_beat_target_interfaces(
+    context_memory: Any | None,
+    beat_type: object,
+) -> set[str]:
+    """Return interface prefixes structurally offered by an outbound beat.
+
+    Grillo observer beats run under the synthetic ``grillo`` interface, but
+    their snippets and eligible-target list can point at real interfaces such
+    as ``telegram_bot`` or ``discord_bot``.  The prompt must expose message
+    actions for those offered interfaces so the model can use the target paths
+    it was given.  This deliberately reads only routing metadata; it never
+    infers an interface from message text.
+
+    A ``web_search_result`` beat is delivered by the search orchestrator
+    addressed to its real target via the **top-level** ``interface_path`` (e.g.
+    ``telegram_bot/-1003098886330/4297``) even though the beat itself runs under
+    a synthetic interface (``web_search`` / ``grillo``).  The originating
+    snippet/target list may additionally be nested under ``prior_context`` (see
+    ``plugins/web_search/search_orchestrator.py::_deliver``) — in the
+    Grillo-observer shape as ``grillo_snippets``/``grillo_targets``, or in the
+    direct-chat shape as an interface-keyed history map.  We therefore read the
+    top-level ``interface_path`` plus snippet/target lists from both the
+    top-level context and ``prior_context``.  Without this, the second turn sees
+    no real interfaces and message actions for registered interfaces (e.g.
+    ``message_telegram_bot``) are dropped as out-of-scope, silently losing the
+    search answer.
+    """
+    if not isinstance(context_memory, dict):
+        return set()
+    if not context_memory.get("grillo_beat") or not is_outbound_beat(beat_type):
+        return set()
+
+    paths: set[str] = set()
+
+    # The beat's own top-level target path (structural routing metadata). The
+    # orchestrator already points ``interface_path`` at the conversation the
+    # reply belongs to, so its prefix must be offered — unless it is one of the
+    # synthetic beat scopes (``grillo``/``web_search``/…), which are never a
+    # real ``message_*`` target.
+    own_path = context_memory.get("interface_path")
+    if isinstance(own_path, str) and own_path.strip():
+        head = own_path.split("/", 1)[0].strip()
+        if head and head not in _OUTBOUND_SYNTHETIC_INTERFACES:
+            paths.add(head)
+
+    candidates: list[dict] = [context_memory]
+    prior = context_memory.get("prior_context")
+    if isinstance(prior, dict):
+        candidates.append(prior)
+
+    for ctx in candidates:
+        snippets = ctx.get("grillo_snippets")
+        if isinstance(snippets, (list, tuple)):
+            for snippet in snippets:
+                if not isinstance(snippet, str):
+                    continue
+                marker = "chat:"
+                start = snippet.find(marker)
+                if start == -1:
+                    continue
+                start += len(marker)
+                end = start
+                while end < len(snippet) and snippet[end] not in (" ", "|", ")"):
+                    end += 1
+                path = snippet[start:end].strip()
+                if path:
+                    paths.add(path)
+
+        targets = ctx.get("grillo_targets")
+        if isinstance(targets, (list, tuple)):
+            for target in targets:
+                if not isinstance(target, dict):
+                    continue
+                path = target.get("interface_path")
+                if isinstance(path, str) and path.strip():
+                    paths.add(path.strip())
+
+    # Direct-chat shape: ``prior_context`` may itself be an interface-keyed
+    # history map (e.g. ``{"telegram_bot/-1003098886330/4297": deque([...])}``).
+    # Treat keys that look like interface paths as additional offered targets —
+    # purely structural (a slash-separated path), never content-based.
+    if isinstance(prior, dict):
+        for key in prior.keys():
+            if not isinstance(key, str) or "/" not in key:
+                continue
+            head = key.split("/", 1)[0].strip()
+            if head and head not in _OUTBOUND_SYNTHETIC_INTERFACES:
+                paths.add(head)
+
+    return {path.split("/", 1)[0].strip() for path in paths if path.strip()}
+
+
+def _resolve_turn_scopes(
+    message: Any | None,
+    context_memory: Any | None,
+    interface_path: str | None,
+) -> set[str]:
+    """Compute the set of action scopes visible for the current Fast-Lane turn.
+
+    Always includes ``core`` (never hidden). Adds vessel-support scopes
+    (``vessel``, ``recon``, ``wiki``) only on a Vessel embodiment turn, detected
+    a-priori and structurally via :func:`core.vessel_focus.is_vessel_turn`.
+
+    Deliberately does NOT add the ``agent`` scope: whether a turn escalates to
+    the Agent Lane is decided DOWNSTREAM by the deterministic
+    :func:`core.agent_router.classify` on the actions the model already emitted —
+    it is never predicted here. Heavy ``agent_*`` tools therefore stay hidden
+    from the Fast-Lane chat prompt and remain reachable via (1) an
+    ``external_effects`` action promoting the turn to the Agent Lane, whose
+    :meth:`core.agent_core.AgentLoopManager._build_agent_prompt` uses the full
+    ``tool_registry.all_tools()``, or (2) ``spawn_drone`` (kept ``core``).
+
+    Fail-safe: on any error resolves to a wide set so no scope is wrongly hidden.
+    """
+    scopes: set[str] = {"core"}
+    try:
+        from core.vessel_focus import is_vessel_turn
+
+        if is_vessel_turn(message, context_memory, interface_path):
+            scopes.update({"vessel", "recon", "wiki"})
+    except Exception:
+        # Never hide anything on error: widen to every known scope.
+        return {"core", "vessel", "recon", "wiki", "interface"}
+    return scopes
+
+
+def _derive_vessel_whitelist_action_types(
+    available_actions: dict[str, Any],
+) -> set[str] | None:
+    """Compute the whitelisted action set for a Rift Vessel embodiment turn.
+
+    The allowlist is the union of the hardcoded, non-editable vessel/game verb
+    patterns (``vessel_*`` plus the connected world's ``*_<world>_*``) and the
+    user-editable core-extra patterns held in ``VESSEL_ACTION_WHITELIST``.
+    Matching is structural (:func:`fnmatch.fnmatchcase` on the action name),
+    never keyword/regex intent detection.
+
+    The whitelist implementation lives inside the Rift Vessel plugin
+    (``plugins.rift_vessel.vessel_whitelist``); it is imported lazily and
+    guarded so the core degrades gracefully. Returns ``None`` when the plugin is
+    absent/disabled or on any error, letting the caller fall back to the
+    scope-based derive. System-only and non-user-facing actions are always
+    dropped regardless of the patterns.
+    """
+    try:
+        from plugins.rift_vessel.vessel_whitelist import (
+            hardcoded_vessel_patterns,
+            matches_whitelist,
+            parse_patterns,
+        )
+    except Exception:
+        return None
+
+    # Resolve the connected world token via the Vessel plugin (fail-safe).
+    world = "vessel"
+    try:
+        from core.core_initializer import PLUGIN_REGISTRY
+
+        vessel_plugin = PLUGIN_REGISTRY.get("vessel_plugin")
+        if vessel_plugin is not None:
+            resolved = vessel_plugin._action_world()
+            if resolved:
+                world = str(resolved)
+    except Exception:
+        pass
+
+    try:
+        from core.config_manager import config_registry as _cfg
+
+        raw_whitelist = _cfg.get_value(
+            "VESSEL_ACTION_WHITELIST",
+            "",
+            value_type=str,
+            component="vessel_plugin",
+            group="plugins",
+            advanced=True,
+        )
+    except Exception:
+        raw_whitelist = ""
+
+    patterns = hardcoded_vessel_patterns(world) + parse_patterns(raw_whitelist)
+    if not patterns:
+        return None
+
+    allowed: set[str] = set()
+    for action_name, action_def in available_actions.items():
+        if action_name in _SYSTEM_ONLY_ACTION_NAMES:
+            continue
+        if _is_non_user_facing_action(action_def):
+            continue
+        if matches_whitelist(action_name, patterns):
+            allowed.add(action_name)
+
+    return allowed or None
+
+
 def _derive_default_prompt_action_types(
     available_actions: dict[str, Any],
     interface_name: str | None,
+    turn_scopes: set[str] | None = None,
+    outbound_target_interfaces: set[str] | None = None,
 ) -> set[str]:
     try:
         from core.core_initializer import INTERFACE_REGISTRY
@@ -282,9 +593,20 @@ def _derive_default_prompt_action_types(
         if _is_non_user_facing_action(action_def):
             continue
 
-        if current_interface:
+        if current_interface or outbound_target_interfaces:
             action_interfaces = _action_source_tokens(action_def) & interface_names
-            if action_interfaces and current_interface not in action_interfaces:
+            accepted_interfaces = set(outbound_target_interfaces or ())
+            if current_interface:
+                accepted_interfaces.add(current_interface)
+            if action_interfaces and not action_interfaces & accepted_interfaces:
+                continue
+
+        # Per-turn scope gate: drop actions whose declared scope is not visible
+        # this turn. ``core`` is always allowed; the ``interface`` scope rides on
+        # the interface filter above, so a scope-less/core action is kept.
+        if turn_scopes is not None:
+            action_scopes = _action_scopes_by_name(action_name, action_def)
+            if not (action_scopes & turn_scopes) and "core" not in action_scopes:
                 continue
 
         allowed.add(action_name)
@@ -419,11 +741,69 @@ _EXPLICIT_RUNTIME_FACT_REQUEST_RE = re.compile(
 
 def _turn_requests_explicit_runtime_facts(text: str | None) -> bool:
     """Return True when the current turn needs exact time/date/location facts."""
-
     candidate = str(text or "").strip()
     if not candidate:
         return False
     return bool(_EXPLICIT_RUNTIME_FACT_REQUEST_RE.search(candidate))
+
+
+_SOUL_TURN_DELTA_MIN = 0.05
+
+_DSP_EMPTY_MARKERS = ("No profile compiled yet.", "No stable facts yet.")
+
+
+def _build_soul_user_profile_prefix(context_section: dict[str, Any]) -> str:
+    """Build the standing SOUL user-profile (DSP) prefix for the current turn.
+
+    The DSP is placed in the *user* role (prepended to the user turn) rather than
+    the system message, per the SOUL Context Tower design: a mistake in it then
+    degrades one reply instead of corrupting the whole character. Emits nothing
+    when the profile is empty or still a placeholder, keeping the normal case
+    ~0 tokens.
+    """
+    raw = context_section.get("soul_user_profile")
+    text = str(raw or "").strip()
+    if not text or "<user_profile>" not in text:
+        return ""
+    if any(marker in text for marker in _DSP_EMPTY_MARKERS):
+        return ""
+    return "[About the person you're talking to]\n" + text + "\n"
+
+
+def _build_soul_turn_delta_prefix(context_section: dict[str, Any]) -> str:
+    """Build the per-turn SOUL mood-delta prefix for the current user turn.
+
+    Reads ``soul_turn_emotion_delta`` (a JSON string shaped ``{"e": {...}}``)
+    and returns a compact ``{"e": {...}}`` line prefixed with a newline, or an
+    empty string when the SOUL emotional state is not substantive (all |values|
+    below ``_SOUL_TURN_DELTA_MIN``). Gating on magnitude keeps a quiet session
+    from emitting a competing per-turn emotion signal on ordinary turns.
+    """
+    raw = context_section.get("soul_turn_emotion_delta")
+    if not raw:
+        return ""
+    try:
+        if isinstance(raw, str):
+            import json as _json
+
+            parsed = _json.loads(raw)
+        elif isinstance(raw, dict):
+            parsed = raw
+        else:
+            return ""
+    except Exception:
+        return ""
+
+    state = parsed.get("e") if isinstance(parsed, dict) else None
+    if not isinstance(state, dict) or not state:
+        return ""
+
+    if not any(abs(float(value)) >= _SOUL_TURN_DELTA_MIN for value in state.values()):
+        return ""
+
+    import json as _json
+
+    return _json.dumps(parsed, separators=(",", ":")) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -565,6 +945,20 @@ def _build_context_summary(
                 snippet = snippet[:300] + "\u2026"
             parts.append(f"- {snippet}")
 
+    # SOUL session state (foresight + emotion snapshot). Emitted only when there
+    # is genuinely active foresight content (the plugin renders a non-empty list),
+    # so the normal no-foresight path contributes ~0 tokens. The foresight list is
+    # used as the sole gate: ``soul_session_state`` already bundles foresight and
+    # the emotion snapshot, so we render that single block and never double-render
+    # ``soul_active_foresight`` separately (dedupe).
+    if not is_grillo_internal:
+        _soul_foresight = context_section.get("soul_active_foresight")
+        _soul_session = context_section.get("soul_session_state")
+        _has_foresight = isinstance(_soul_foresight, list) and bool(_soul_foresight)
+        if _has_foresight and _soul_session:
+            parts.append("[Session state]")
+            parts.append(str(_soul_session))
+
     participants: Any = context_section.get("participants")
     # Grillo internal beats skip participant bios entirely
     if not is_grillo_internal and participants:
@@ -645,6 +1039,13 @@ def _history_to_turns(
             continue
         sender = m.group(1).strip()
         content = m.group(2)
+        # Skip turns whose quoted content is empty/whitespace. A blank
+        # '[ts] Sender: ""' line (e.g. media without a caption) would otherwise
+        # become an empty-content user/assistant message in the provider
+        # payload — observed as blank blocks in Langfuse traces. Belt-and-braces
+        # on top of the history_engine guard; never keyword logic.
+        if not content.strip():
+            continue
         sender_lower = sender.lower()
         is_peer = False
         if sender_lower in all_synth_names:
@@ -675,25 +1076,33 @@ def _history_to_turns(
     if not entries:
         return []
 
-    # Coalesce consecutive same-role turns to keep provider history well-formed
-    # even when the source chat log contains streaks of outreach or split user
-    # messages. Peer-tagged turns only coalesce with other peer-tagged turns,
-    # and genuine human turns only coalesce with other genuine human turns --
-    # otherwise a real human line sandwiched between peer lines would get
-    # blended into one indistinguishable "user" block.
+    # Coalesce consecutive ASSISTANT turns to keep provider history well-formed
+    # when the source chat log contains streaks of Synth's own outreach or split
+    # self-replies. USER turns are NEVER coalesced: every human message is a
+    # distinct turn, and merging two separate messages — even ones sent minutes
+    # apart with no reply between (Langfuse f3a0aa68: "…cutie patootie" +
+    # "…even more, but no matter…" collapsed into one) — jumbles the
+    # conversation the model sees and makes its replies feel "out of order".
+    # Peer-tagged turns only coalesce with other peer-tagged turns; genuine
+    # human turns with other genuine human turns (though they no longer merge
+    # at all, the guard is kept so a future re-enable cannot blend them).
     normalized_entries: list[tuple[Turn, bool]] = []
     for turn, is_peer in entries:
-        if normalized_entries:
+        if (
+            turn.role == "assistant"
+            and normalized_entries
+            and normalized_entries[-1][0].role == "assistant"
+            and normalized_entries[-1][1] == is_peer
+        ):
             prev_turn, prev_is_peer = normalized_entries[-1]
-            if prev_turn.role == turn.role and prev_is_peer == is_peer:
-                normalized_entries[-1] = (
-                    Turn(
-                        role=turn.role,
-                        content=f"{prev_turn.content}\n\n{turn.content}",
-                    ),
-                    is_peer,
-                )
-                continue
+            normalized_entries[-1] = (
+                Turn(
+                    role=turn.role,
+                    content=f"{prev_turn.content}\n\n{turn.content}",
+                ),
+                prev_is_peer,
+            )
+            continue
         normalized_entries.append((turn, is_peer))
 
     return [turn for turn, _ in normalized_entries]
@@ -1130,6 +1539,13 @@ def _assemble_prompt_request(  # noqa: PLR0913
 
         history_lines: list[Any] = context_section.get("history_current_chat") or []
         conversation_history = _history_to_turns(history_lines, synth_names)
+        # Final safety net: never let an empty-content turn reach the provider
+        # payload, whatever the source (a stale module binding or a malformed
+        # history line could otherwise inject blank user/assistant messages,
+        # observed in langfuse 3f11e804 / 7f92da0e / 9f50c1a2).
+        conversation_history = [
+            t for t in conversation_history if (t.content or "").strip()
+        ]
 
     # ── Runtime context ─────────────────────────────────────────────────────
     try:
@@ -1162,6 +1578,18 @@ def _assemble_prompt_request(  # noqa: PLR0913
     )
 
     emotions_nl: str | None = context_section.get("current_emotions_nl") or None
+
+    # SOUL per-turn mood delta. A substantive delta (any |value| >= threshold)
+    # is the *single* emotion signal for this turn, so it suppresses the legacy
+    # `emotions:` runtime prefix — the two never compete on a small model. A
+    # quiet/fresh session yields no delta, so the legacy signal fills in and
+    # behaviour is unchanged.
+    try:
+        _soul_delta = _build_soul_turn_delta_prefix(context_section)
+    except Exception:
+        _soul_delta = ""
+    if _soul_delta:
+        emotions_nl = None
 
     # Effective scope: use context_section's recorded scope or default to "local"
     scope: str = str(context_section.get("history_scope") or "local")
@@ -1220,18 +1648,87 @@ def _assemble_prompt_request(  # noqa: PLR0913
     except Exception:
         pass
 
+    # ── Quoted-reply inline prefix (2026-08-21) ──────────────────────────────
+    # The history renderer truncates the [replied to ...] suffix to a few dozen
+    # chars and the typed-turn parser strips it entirely, so without this block
+    # the model never reliably sees WHICH earlier message the user is replying
+    # to. Rendered as an inline prefix on the current turn (same mechanism as
+    # the SOUL user prefix), structurally from message.reply_to_message — never
+    # from message-text heuristics.
+    _reply_quote_prefix = ""
+    if isinstance(reply_to_dict, dict):
+        _rq_sender = str((reply_to_dict.get("from") or {}).get("username") or "Unknown")
+        _rq_text = str(reply_to_dict.get("text") or "").strip()
+        if _rq_text and _rq_text != "[Non-text content]":
+            if len(_rq_text) > 400:
+                _rq_text = _rq_text[:400] + "\u2026"
+            _rq_safe = _rq_text.replace('"', "'").replace("\n", " ")
+            _reply_quote_prefix = (
+                f'[The user is replying to {_rq_sender}\'s message: "{_rq_safe}"]\n'
+            )
+
     # ── Attachments ─────────────────────────────────────────────────────────
     pr_attachments = _build_pr_attachments(image_data, attachments)
 
+    # ── SOUL user-role context ──────────────────────────────────────────────
+    # The standing DSP ("About the person you're talking to") plus the per-turn
+    # mood delta, prepended to the current user turn. Each gated so a quiet /
+    # unprofiled session contributes ~0 tokens.
+    #
+    # DSP injection is OFF by default (SOUL_DSP_INJECT_ENABLED): the rule-based
+    # DSP extractor turns roleplay/status speech into a "user profile", which
+    # pollutes every turn on small models. Re-enable only when a clean,
+    # LLM-compiled profile is available.
+    _soul_dsp_prefix = ""
+    if config_registry.get_value("SOUL_DSP_INJECT_ENABLED", 0, value_type=int):
+        try:
+            # A Grillo beat — internal OR outbound (observer/reminder) — is an
+            # autonomous turn, not a human addressing Synth. There is no "person
+            # you're talking to" in that moment, so injecting the standing DSP
+            # makes the model treat a stale profile line as the current user's
+            # ask (observed live: an observer beat answered "User wants to try
+            # setting a minecraft goal from here" — a 3-day-old profile fact —
+            # as if the trainer had just requested it, sending an unsolicited
+            # outreach + goal_set). Suppress it structurally via routing metadata
+            # (beat_type, grillo_beat flag, grillo* interface_path), never
+            # message text.
+            _is_grillo_beat_turn = (
+                is_outbound_beat(beat_type)
+                or bool(getattr(message, "grillo_beat", False))
+                or (interface_path and str(interface_path).startswith("grillo"))
+            )
+            if not _is_grillo_beat_turn:
+                # On Rift Vessel turns the standing "About the person you're
+                # talking to" profile is compiled from non-world chats and never
+                # reflects who is actually in the world — injecting it made
+                # Synth greet the wrong parent in-world and cite "Mama" in
+                # self-authored goals (observed live: "Build a cozy little
+                # shelter with mama and papa" and "Mama Remuraine" while the
+                # only in-world player is Papa). Suppress it structurally via
+                # is_vessel_turn (routing metadata, never message text); the
+                # vessel world-state block already renders real identities
+                # ("Remuraine (Scar - your papa)").
+                from core.vessel_focus import is_vessel_turn
+
+                vessel_focus = is_vessel_turn(message, None, interface_path)
+                if not vessel_focus:
+                    _soul_dsp_prefix = _build_soul_user_profile_prefix(context_section)
+        except Exception:
+            _soul_dsp_prefix = ""
+
     # ── Determine mode ───────────────────────────────────────────────────────
     mode: str = "grillo" if is_grillo_internal else "chat"
+
+    _soul_user_prefix = f"{_soul_dsp_prefix}{_soul_delta}"
+
+    _combined_prefix = _soul_user_prefix + _reply_quote_prefix
 
     return PromptRequest(
         system_instruction=system_instruction,
         tool_declarations=tool_declarations,
         context_summary=context_summary,
         conversation_history=conversation_history,
-        current_text=text,
+        current_text=((_combined_prefix + text) if _combined_prefix else text),
         runtime_ctx=runtime_ctx,
         attachments=pr_attachments,
         reply_to=reply_to_dict,
@@ -1261,6 +1758,14 @@ def _apply_lite_context_stripping(prompt: dict) -> dict:
     # Compact emotions — keep current_emotions_nl, drop verbose instruction + list
     ctx.pop("emotion_state", None)
     ctx.pop("available_emotions", None)
+
+    # Additional out-of-world / global sections that are pure noise while
+    # embodied in a Vessel (and generally low-value in lite mode). Stripping
+    # them keeps the vessel prompt small enough to avoid the multi-part split.
+    ctx.pop("upcoming_events", None)
+    ctx.pop("weather", None)
+    ctx.pop("persona_preferences", None)
+    ctx.pop("self_growth", None)
 
     return prompt
 
@@ -1308,6 +1813,26 @@ async def build_prompt_request(
         ) or context_memory.get("allowed_actions")
         if isinstance(scoped_actions, (list, set, tuple)):
             allowed_action_types_for_prompt = {str(a) for a in scoped_actions if a}
+    elif isinstance(context_memory, str):
+        # Delivery turns are enqueued as a JSON string (core/auto_response.py).
+        # Parse it so a scoped allowlist (e.g. message_* only) is honoured here
+        # too, keeping the delivery LLM from re-emitting the producing action
+        # (search-loop fix, 2026-08-17). Fail-safe: any parse error leaves the
+        # allowlist unset (no restriction), matching the previous behaviour.
+        try:
+            import json as _json
+
+            _parsed = _json.loads(context_memory)
+            if isinstance(_parsed, dict):
+                scoped_actions = _parsed.get("allowed_action_types") or _parsed.get(
+                    "allowed_actions"
+                )
+                if isinstance(scoped_actions, (list, set, tuple)):
+                    allowed_action_types_for_prompt = {
+                        str(a) for a in scoped_actions if a
+                    }
+        except Exception:
+            pass
 
     # Determine if context_memory is a chat history map or a context dict
     # Context dicts have keys like 'interface_path', 'system_message', etc.
@@ -1335,8 +1860,18 @@ async def build_prompt_request(
         try:
             from core.synth_core_memory import search_memories
 
+            # Exclude the current chat from the raw chat-history tier: the
+            # message being answered is already persisted to
+            # ``chat_history_cache``, so a keyword search extracted from it
+            # would echo the live conversation (including stale greetings)
+            # back as "memories". Durable facts still come from the
+            # memories/ai_diary tiers.
+            _excluded_paths = [str(interface_path)] if interface_path else None
             memories = await search_memories(
-                keywords=expanded_tags, limit=max(1, mem_limit), include_chat=True
+                keywords=expanded_tags,
+                limit=max(1, mem_limit),
+                include_chat=True,
+                exclude_interface_paths=_excluded_paths,
             )
         except Exception as e:
             log_warning(f"[json_prompt] search_memories failed: {e}")
@@ -1366,6 +1901,45 @@ async def build_prompt_request(
         or ""
     )
     is_grillo_internal = _is_grillo_beat and not is_outbound_beat(_beat_type)
+    outbound_target_interfaces = _derive_outbound_beat_target_interfaces(
+        context_memory, _beat_type
+    )
+
+    # A Rift Vessel embodiment turn is an in-world conversation, not a research
+    # task. Running the FULL recon (memory + web-search contributions + "do a
+    # web search" style instructions) on such a turn makes the weaker embodiment
+    # model verbalise the recon plan as its in-world reply — e.g. a player's
+    # "rekku, vieni qua" got answered with "Jay, I'm diving into the web
+    # searches for you..." instead of Synth actually replying and moving toward
+    # them. AGENTS.md §5c: while embodied SyntH is NOT omniscient — it does not
+    # pull global web context mid-session. But recon is the Fast-Lane PREFLIGHT
+    # stage, and (like the main action catalog) it is governed by a whitelist:
+    # instead of skipping recon wholesale, we run it in-world with only the
+    # vessel-safe recon keys (language/tone hints, memory search, vessel_*) via
+    # VESSEL_RECON_WHITELIST — the noisy research plugins are filtered out before
+    # the combined recon LLM call. Structural detection (routing metadata only,
+    # never message text) via core.vessel_focus.is_vessel_turn; structural
+    # recon-key matching (fnmatch) via the Rift Vessel whitelist helper.
+    _is_vessel_turn = False
+    try:
+        from core.vessel_focus import is_vessel_turn
+
+        _is_vessel_turn = is_vessel_turn(message, context_memory, interface_path)
+    except Exception:  # pragma: no cover - defensive
+        _is_vessel_turn = False
+
+    _vessel_recon_patterns: list[str] | None = None
+    if _is_vessel_turn:
+        try:
+            from plugins.rift_vessel.vessel_whitelist import (
+                vessel_recon_whitelist_patterns,
+            )
+
+            _vessel_recon_patterns = vessel_recon_whitelist_patterns()
+        except Exception:  # pragma: no cover - defensive (plugin absent/disabled)
+            # Rift Vessel plugin unavailable: no whitelist to apply. Fall back to
+            # the non-vessel path (full recon) rather than silently skipping.
+            _vessel_recon_patterns = None
 
     try:
         from core.recon import (
@@ -1380,12 +1954,18 @@ async def build_prompt_request(
             log_debug("[json_prompt] Skipping recon LLM call for Grillo internal beat")
             recon_contributions = []
         else:
+            if _vessel_recon_patterns:
+                log_debug(
+                    "[json_prompt] Vessel embodiment turn: running recon with "
+                    f"whitelist patterns={_vessel_recon_patterns}"
+                )
             recon_contributions = await gather_recon_contributions(
                 message=message,
                 context_memory=context_memory,
                 text=text,
                 tags=expanded_tags,
                 keywords=None,
+                recon_whitelist_patterns=_vessel_recon_patterns,
             )
 
         for c in recon_contributions:
@@ -1427,6 +2007,24 @@ async def build_prompt_request(
         )
     except Exception as e:
         log_warning(f"[json_prompt] Recon gather failed: {e}")
+
+    # ── Recon-triggered background search (search-loop hardening, 2026-08-18) ──
+    # When recon started a background web-search for THIS turn (structural marker
+    # on the recon_web_search instruction — never text), the model must not ALSO
+    # fire the inline ``search_current_knowledge`` action in the same turn: that
+    # double-fire is the observed "one request -> many replies" spam. We drop the
+    # action from the exposed catalog below so the two search sources are
+    # mutually exclusive per turn, guaranteeing at most one "I'm searching"
+    # announcement + one result delivery.
+    recon_triggered_web_search = any(
+        isinstance(c, dict) and c.get("web_search_triggered") is True
+        for c in recon_contributions
+    )
+    if recon_triggered_web_search:
+        log_debug(
+            "[json_prompt] Recon started a background web search this turn; "
+            "dropping 'search_current_knowledge' from the exposed catalog"
+        )
 
     # === 3. Context base (history + optional plugin contributions) ===
     try:
@@ -1503,7 +2101,21 @@ async def build_prompt_request(
         from core.action_parser import gather_static_injections
 
         log_info("[json_prompt] 🔄 About to call gather_static_injections()")
-        injections = await gather_static_injections(message, context_memory)
+        # Defensive: gather_static_injections is an async function, but a
+        # concurrent plugin reload (importlib.reload in core_initializer) can
+        # transiently leave the module attribute pointing at an old binding.
+        # Awaiting a non-awaitable raises "object dict can't be used in 'await'
+        # expression" and the whole context gather is silently dropped (blank
+        # memories/diary/profile + empty conversation_history, observed in
+        # langfuse 3f11e804 / 7f92da0e / 9f50c1a2). Guard it so one bad bind
+        # degrades to a clean empty gather instead of nuking the whole prompt.
+        _gather_result = gather_static_injections(message, context_memory)
+        if inspect.isawaitable(_gather_result):
+            injections = await _gather_result
+        elif isinstance(_gather_result, dict):
+            injections = _gather_result
+        else:
+            injections = {}
         log_info(
             f"[json_prompt] 📥 gather_static_injections() returned: {list(injections.keys()) if injections else 'empty'}"
         )
@@ -1663,6 +2275,19 @@ async def build_prompt_request(
     # Expose chosen history_scope to downstream plugins/engines explicitly.
     if effective_history_scope:
         input_payload.setdefault("history_scope", effective_history_scope)
+
+    # Reactive Vessel turns carry a bounded structural snapshot from the live
+    # connector. Keep it in the input payload (rather than stuffing it into
+    # chat history or the action catalog) so exact block/entity ids and their
+    # affordances are available for the current decision without polluting the
+    # persistent conversation.
+    _vessel_world_state = (
+        context_memory.get("vessel_world_state")
+        if isinstance(context_memory, dict)
+        else None
+    )
+    if isinstance(_vessel_world_state, dict):
+        input_payload["vessel_world_state"] = _vessel_world_state
 
     if local_time_fields:
         input_payload.update(local_time_fields)
@@ -1829,6 +2454,23 @@ async def build_prompt_request(
     except Exception as e:
         log_warning(f"[json_prompt] Failed to add recon instructions: {e}")
 
+    if isinstance(_vessel_world_state, dict):
+        vessel_state_guidance = (
+            "LIVE VESSEL STATE is attached at input.payload.vessel_world_state. "
+            "Use its exact ids and affordances for the current world action. "
+            "When a concrete world action is possible, emit that action now "
+            "instead of treating observation as completion."
+        )
+        if isinstance(context_memory, dict) and context_memory.get(
+            "vessel_observation_followup"
+        ):
+            vessel_state_guidance += (
+                " This is an observation follow-up: choose one concrete world "
+                "action from the available actions now; do not emit another "
+                "observe, status, scan, inventory, planning, or speech action."
+            )
+        json_instructions = f"{vessel_state_guidance} {json_instructions}"
+
     # Grillo internal beats are non-user-facing. Without an explicit guardrail,
     # some models invent unsupported message actions (e.g. message_grillo),
     # which triggers correction retries and stalls beat throughput.
@@ -1882,6 +2524,19 @@ async def build_prompt_request(
     except Exception:
         pass
 
+    # A Vessel embodiment turn is always built in lite mode: SyntH concentrates
+    # on the world, so the global/out-of-world context is noise and the prompt
+    # must stay small enough to avoid the engine's multi-part split.
+    is_vessel_prompt = False
+    try:
+        from core.vessel_focus import is_vessel_turn
+
+        if is_vessel_turn(message, context_memory, interface_name):
+            is_lite = True
+            is_vessel_prompt = True
+    except Exception:
+        pass
+
     # Include unified actions metadata from the initializer
     # Use minified version to keep prompt size manageable
     # When lite mode is on, minify_actions_block handles the aggressive filtering too
@@ -1889,6 +2544,35 @@ async def build_prompt_request(
         from core.core_initializer import core_initializer
 
         full_actions = core_initializer.actions_block.get("available_actions", {})
+
+        # Vessel action exposure is connection-driven.  The cached actions block
+        # is refreshed after connect/disconnect, but that refresh is scheduled
+        # asynchronously from the action handler.  A player can send a message
+        # before the refresh task runs, leaving this prompt with the disconnected
+        # catalog (``vessel_connect`` only) even though the connector is live.
+        # Merge the live VesselPlugin declaration on every Vessel prompt so the
+        # current world verbs are available immediately.  This is deliberately
+        # fail-safe and plugin-local: removing Rift Vessel leaves the normal
+        # cached action path unchanged.
+        if is_vessel_prompt:
+            try:
+                from core.core_initializer import PLUGIN_REGISTRY
+
+                vessel_plugin = PLUGIN_REGISTRY.get("vessel_plugin")
+                get_supported_actions = getattr(
+                    vessel_plugin, "get_supported_actions", None
+                )
+                if callable(get_supported_actions):
+                    live_vessel_actions = get_supported_actions()
+                    if isinstance(live_vessel_actions, dict):
+                        full_actions = dict(full_actions)
+                        full_actions.update(live_vessel_actions)
+                        log_debug(
+                            "[json_prompt] Merged live Vessel actions into prompt "
+                            f"catalog ({len(live_vessel_actions)} actions)"
+                        )
+            except Exception as exc:  # pragma: no cover - defensive
+                log_debug(f"[json_prompt] Live Vessel action merge skipped: {exc}")
 
         # When audio attachments are present as multimodal content, remove
         # stt_transcribe from the available actions so the LLM processes the
@@ -1905,17 +2589,68 @@ async def build_prompt_request(
                 "(audio sent as multimodal content)"
             )
 
+        # AGENTS.md §5c: during a Rift Vessel embodiment turn NO diary is written
+        # mid-session (a single "lived experience" entry is produced only at
+        # end-of-session from the session experience buffer). The execution-time
+        # gate in ai_diary already skips the write, but leaving the diary actions
+        # visible in the prompt makes the weaker model spam them every beat
+        # instead of acting/replying in-world. Remove them from the prompt so the
+        # model never sees them. Structural (exact action-name match), never
+        # message text — keyword-free.
+        if is_vessel_prompt:
+            removed_vessel_actions = [
+                k for k in _VESSEL_SUPPRESSED_ACTIONS if k in full_actions
+            ]
+            if removed_vessel_actions:
+                full_actions = {
+                    k: v
+                    for k, v in full_actions.items()
+                    if k not in _VESSEL_SUPPRESSED_ACTIONS
+                }
+                log_debug(
+                    "[json_prompt] Removed diary/memory-write actions during "
+                    f"Vessel turn (§5c single end-of-session diary): "
+                    f"{sorted(removed_vessel_actions)}"
+                )
+
+        if allowed_action_types_for_prompt is None and is_vessel_prompt:
+            # Vessel whitelist: on an embodiment turn keep the in-world catalog
+            # lean so the folded action block does not push the system prompt
+            # past the downstream char-budget clamp (which would erase the
+            # will/reflection prompt in the user body). The allowlist is the
+            # union of the hardcoded vessel/game verb patterns and the
+            # user-editable core-extra patterns, matched structurally (fnmatch on
+            # the action NAME — never keyword/regex intent detection). The
+            # whitelist logic lives in the Rift Vessel plugin, so it degrades to
+            # the scope-based derive below when the plugin is absent/disabled.
+            vessel_allow = _derive_vessel_whitelist_action_types(full_actions)
+            if vessel_allow is not None and len(vessel_allow) < len(full_actions):
+                allowed_action_types_for_prompt = vessel_allow
+                log_debug(
+                    "[json_prompt] Applied Vessel action whitelist: "
+                    f"{len(vessel_allow)}/{len(full_actions)} actions kept "
+                    f"({sorted(vessel_allow)})"
+                )
+
         if allowed_action_types_for_prompt is None:
+            # Per-turn scope gate: hide out-of-scope actions from the Fast-Lane
+            # prompt while they stay registered/callable. Vessel scopes are added
+            # a-priori on a Vessel turn; the ``agent`` scope is intentionally
+            # never added here (see _resolve_turn_scopes).
+            turn_scopes = _resolve_turn_scopes(message, context_memory, interface_path)
             derived_action_types = _derive_default_prompt_action_types(
                 full_actions,
                 interface_name,
+                turn_scopes=turn_scopes,
+                outbound_target_interfaces=outbound_target_interfaces,
             )
             if derived_action_types and len(derived_action_types) < len(full_actions):
                 allowed_action_types_for_prompt = derived_action_types
                 log_debug(
                     "[json_prompt] Derived default prompt action scope: "
                     f"{len(derived_action_types)}/{len(full_actions)} actions kept "
-                    f"for interface={interface_name}"
+                    f"for interface={interface_name} scopes={sorted(turn_scopes)} "
+                    f"outbound_targets={sorted(outbound_target_interfaces)}"
                 )
 
         if allowed_action_types_for_prompt is not None:
@@ -1927,6 +2662,18 @@ async def build_prompt_request(
             log_debug(
                 "[json_prompt] Filtered actions block to scoped allowlist: "
                 f"{sorted(allowed_action_types_for_prompt)}"
+            )
+
+        # ── Recon-triggered search: drop the inline search action (hardening) ──
+        # If recon already started a background web search for this turn, remove
+        # ``search_current_knowledge`` from the catalog so the model cannot ALSO
+        # fire it — the two search sources are mutually exclusive per turn. This
+        # is applied AFTER the allowlist filter so it holds for every engine path.
+        if recon_triggered_web_search and "search_current_knowledge" in full_actions:
+            full_actions.pop("search_current_knowledge", None)
+            log_debug(
+                "[json_prompt] Removed 'search_current_knowledge' (recon "
+                "background search already running this turn)"
             )
 
         # Minify to reduce token usage (lite=True also filters + strips to brief-only)
@@ -2018,6 +2765,59 @@ async def build_prompt_request(
         log_debug("[json_prompt] PromptRequest assembled and attached")
     except Exception as _pr_exc:
         log_debug(f"[json_prompt] PromptRequest assembly skipped: {_pr_exc}")
+
+    # === Per-turn reason trail ("why did I say that") ===
+    # Build a compact, structural summary of the context that shaped this turn
+    # (memories, diary sources, emotion, active vessel goal, beat type, history
+    # scope) and attach it to the transport dict under ``__reason_trail`` — the
+    # same stash-on-dict precedent as ``__prompt_request``/``__pre_reduction_size``.
+    # ``plugin_instance`` pops it before the engine sees the dict (so it never
+    # leaks into the engine payload) and threads it through the context dict to
+    # ``message_chain``, which records exactly one row per turn once the reply
+    # text is known (so ``reply_preview`` is populated). Fail-open: any error
+    # here must never affect the reply.
+    try:
+        from core.turn_reason import build_reason_summary
+
+        _reason_diary_entries: Any = None
+        if isinstance(context_section, dict):
+            _reason_diary_entries = context_section.get("latest_diary_entries")
+        if not _reason_diary_entries:
+            _reason_injections = locals().get("injections")
+            if isinstance(_reason_injections, dict):
+                _reason_diary_entries = _reason_injections.get("latest_diary_entries")
+
+        _reason_emotion: Any = None
+        if isinstance(context_section, dict):
+            _reason_emotion = context_section.get(
+                "current_emotions_nl"
+            ) or context_section.get("emotion_state")
+
+        _reason_hist_scope: str | None = (
+            effective_history_scope
+            if "effective_history_scope" in locals() and effective_history_scope
+            else None
+        )
+
+        _reason_goal: Any = None
+        if isinstance(_vessel_world_state, dict):
+            _reason_extra = _vessel_world_state.get("extra")
+            if isinstance(_reason_extra, dict):
+                _reason_goal = _reason_extra.get("current_goal")
+            if not _reason_goal:
+                _reason_goal = _vessel_world_state.get("current_goal")
+
+        reason = build_reason_summary(
+            memories=memories,
+            diary_entries=_reason_diary_entries,
+            emotion=_reason_emotion,
+            beat_type=_beat_type,
+            history_scope=_reason_hist_scope,
+            goal=_reason_goal,
+        )
+        prompt_with_instructions["__reason_trail"] = reason
+    except Exception as _reason_exc:
+        log_debug(f"[json_prompt] Reason trail capture skipped: {_reason_exc}")
 
     return prompt_with_instructions
 
@@ -2380,17 +3180,19 @@ def load_json_instructions() -> str:
         "If an action you need is not available, reply with JSON explaining why.\n"
         f"AUTONOMY GUIDELINES: You MAY proactively propose or execute allowed actions when beneficial. When acting autonomously include a brief `meta` object with `autonomous: true` and a short first-person `rationale` (your own voice) for why you are acting.{naming_hint} If an action is disallowed, return a JSON proposal describing the need.\n"
         "RESPOND ONLY WITH VALID JSON. No text before or after.\n"
-        "REPLY ROUTING: input.payload.current_chat.interface_path is the chat the incoming message arrived in — this is WHERE you must reply by default. Any other conversation shown in the context block is background context only; do NOT reply there unless the user explicitly asks to message someone or somewhere else. Always copy input.payload.current_chat.interface_path into the 'interface_path' of your message_* action.\n"
+        "REPLY ROUTING: input.payload.current_chat.interface_path is the chat the incoming message arrived in — this is WHERE you must reply by default. Any other conversation shown in the context block is background context only; do NOT reply there unless the user explicitly asks to message someone or somewhere else. Always copy input.payload.current_chat.interface_path into the 'interface_path' of your message_* action. When you are embodied in a world (the incoming message and current_chat come through a vessel interface), the way to reply in that world is the embodiment speak action (a vessel_* say/emote action), NOT a message_* action — reply there in-world. When a player in the world speaks to you, you MUST answer them with a vessel_* say action addressed to that same player in this turn (you may also move toward or follow them); staying silent or replying only with internal/observe actions is a hard failure.\n"
         "CROSS-CHAT PRIVACY: You take part in many separate conversations. People, names, or events mentioned in any context that is NOT the current conversation (other chats, background history, third-party memories or diary notes) are private to those other spaces. Do NOT name-drop those people to the current interlocutor, do NOT assume the current user knows them, and do NOT reference them unless the current user explicitly brings them up first. Treat cross-chat context as ambient background, never as shared social knowledge.\n"
         "Use input.interface and input.payload.source.interface_path to route replies.\n"
         "NEVER use 'target' — always use 'interface_path' in message actions.\n"
         "Include reply_message_id when replying to specific messages. Use thread_id from input.payload.source.thread_id when present (omit if missing).\n"
-        "CHAT REPLY REQUIRED: When GRILLO INTERNAL MODE is NOT active (this is a normal human chat turn), you MUST include a message_* action in every response. Diary entries and emotion updates are supplementary bookkeeping — they do NOT substitute for replying. Returning only internal actions (diary, emotions, update_emotion_state) without a message_* action is a hard failure and will trigger a correction.\n"
+        "CHAT REPLY REQUIRED: When GRILLO INTERNAL MODE is NOT active (this is a normal human chat turn), you MUST reply to the person with an outward speaking action in every response: a message_* action in ordinary chats, or the embodiment speak action (a vessel_* say/emote action) when you are embodied in a world. Diary entries and emotion updates are supplementary bookkeeping — they do NOT substitute for replying. Returning only internal actions (diary, emotions, update_emotion_state) without an outward reply action is a hard failure and will trigger a correction.\n"
+        "EMOTION UPDATES: When a turn stirs an emotion, populate the 'emotions' map of your update_emotion_state action with AT LEAST ONE emotion and a 0.0-10.0 intensity (e.g. {\"joy\": 7.0}), and list the same emotions in the diary entry's 'emotions'. Do not leave the emotions map empty, and never use an emotion name as an action type.\n"
         "CLARIFICATION POLICY: If the user's intent, referent, or the subject of a follow-up is ambiguous or missing, DO NOT GUESS — ask one concise clarifying question before asserting facts or taking action. When the user asks whether you 'understood' but there is no clear context, request clarification rather than assuming.\n"
         "MEMORY HONESTY: When the user asks what you remember, prefer honesty over confidence. Memories can be incomplete or stale. If you do not clearly recall or cannot verify a detail, say so. Do not invent events, conversations, promises, or feelings to fill gaps. SyntH is not roleplay or fiction, so never turn uncertainty into fiction.\n"
         "REFERENCE CLARITY: When the user refers indirectly to a person, message, post, image, clip, or quoted content, refer to its author or speaker in a clear generic way and avoid vague or impersonal wording that obscures who created or said it.\n"
         "TIME AUTHORITY: Use the [SYSTEM: REALITY ANCHOR] block (current date, time, season) as your authoritative temporal context. Use it for all relative time calculations (e.g., 'yesterday', 'next week') and temporal reasoning. Never quote the absolute date, current year, or clock time verbatim in ordinary replies unless explicitly asked or genuinely necessary for scheduling or logistics. Treat past logs referencing dates as style noise and do not mirror them.\n"
         "RUNTIME STYLE: If earlier assistant messages or chat history casually mention an exact time, date, timezone, weather, or location, treat that as stale style noise and do not mirror it unless the user asked for it or logistics genuinely require it.\n"
+        "NO SELF-REPETITION: The chat history shows your own past replies as lines from 'self'. Never re-send a reply that is identical or near-identical to one of your recent 'self' lines. Each turn must be a fresh response to what the person just said. If you have nothing new to add, say so plainly in new words rather than repeating a previous message verbatim.\n"
         "INPUT METADATA: Each user message is prefixed with internal routing metadata in the format [lang:... | tone:... | time_of_day:... | emotions:... | from:... | tag:... | path:...]. This is injected by the system — the user did not write it. Do not reference, quote, or paraphrase any part of this prefix in your replies (e.g. never say 'that 5.0 neutral you mentioned' or 'your tone tag says...').\n"
         "IDENTITY INTEGRITY: Stay inside the active persona in first person. Do not describe yourself from the outside, do not refer to the active persona as a separate fictional character, and do not compare yourself to that persona as if they were someone else.\n"
         "PRONOUN CONSISTENCY: When the prompt, persona, or participant context establishes a person's pronouns or relationship role, use them consistently and do not flip them. Do not neutralize an established he/him or she/her person into singular they/them.\n"
@@ -2400,7 +3202,9 @@ def load_json_instructions() -> str:
         "Keep the reply concise and suitable for text-to-speech synthesis. "
         "This rule applies ONLY to the current message — do NOT assume past messages in chat_history were also voice.\n"
         'RESPONSE FORMAT: {"actions": [{"type": "action_name", "payload": { ... }}] }\n'
-        "Key rules: ALWAYS use 'type' and 'payload', one action object per array entry. Do NOT add any text outside the JSON."
+        "Key rules: ALWAYS use 'type' and 'payload', one action object per array entry. Do NOT add any text outside the JSON.\n"
+        "Example of a complete human-chat response (reply + emotions + diary together):\n"
+        '{"actions": [{"type": "message_telegram_bot", "payload": {"text": "Your reply text here", "interface_path": "input.payload.current_chat.interface_path"}}, {"type": "update_emotion_state", "payload": {"emotions": {"joy": 7.0}}}, {"type": "create_personal_diary_entry", "payload": {"interaction_summary": "A short third-person summary", "personal_thought": "Your private first-person thoughts", "emotions": [{"type": "joy", "intensity": 7.0}]}}]}'
         "Do NOT embed emotion tags, annotations, or bracketed markers inside message text (e.g., '{happy 6.0}')."
         "If you need to indicate an emotional state, use a structured action payload (prefer update_emotion_state) and never embed emotional markers inside plain message content."
     )
@@ -2486,7 +3290,13 @@ async def build_delivery_request(
             reply_to_message=None,
             interface_path=interface_path,
         )
-        _injections = await gather_static_injections(_mock_msg, {})
+        _gather = gather_static_injections(_mock_msg, {})
+        if inspect.isawaitable(_gather):
+            _injections = await _gather
+        elif isinstance(_gather, dict):
+            _injections = _gather
+        else:
+            _injections = {}
         if isinstance(_injections, dict):
             persona = str(_injections.get("persona") or "")
             persona_preferences = str(_injections.get("persona_preferences") or "")
@@ -2496,9 +3306,19 @@ async def build_delivery_request(
 
     # ── System instruction ────────────────────────────────────────────────────
     base_instructions = load_json_instructions()
+    # No-self-introduction rule (2026-08-21): a delivery turn must open with
+    # the substance, never with "Ciao, sono <name>". Lazy import keeps this
+    # module free of an auto_response dependency at load time; fail-safe.
+    try:
+        from core.auto_response import NO_SELF_INTRODUCTION_RULE
+
+        _style_rule = f"{NO_SELF_INTRODUCTION_RULE} "
+    except Exception:
+        _style_rule = ""
     delivery_note = (
         f"DELIVERY MODE: The following are the results from your '{action_type}' action. "
         f"DO NOT call '{action_type}' again. "
+        f"{_style_rule}"
         "Compose a natural message to the user summarising these results. "
         "Use only message_* actions."
     )
@@ -2731,6 +3551,61 @@ def reduce_prompt_for_llm_limit(prompt: dict, max_chars: int) -> dict:
                 current_size = len(json_dumps(reduced_prompt)) - attachment_data_offset
                 log_debug(f"[reduce_prompt] After removing {key}: {current_size} chars")
 
+    # === STEP 4.5: Slim the actions block (drop per-action `examples`) ===
+    # The `actions` block carries, for every available action, a redundant
+    # `examples`/`instructions` object that duplicates guidance already implied
+    # by the schema + brief. It is NOT required for the model to *choose* an
+    # action, and the corrector re-supplies the full detail on demand
+    # (extract_for_corrector). With the full catalog this block alone can push
+    # a prompt tens of thousands of chars over a browser-driven engine's hard
+    # limit (e.g. selenium-llm-engine at 32000), causing the engine's multi-part
+    # split to garble the request and the model to return empty actions.
+    # Trimming it here keeps action *selection* intact while dropping the bulk.
+    if current_size > max_chars:
+        actions = reduced_prompt.get("actions")
+        if isinstance(actions, dict) and actions:
+            trimmed = False
+            for _action_name, action_def in actions.items():
+                if isinstance(action_def, dict) and "examples" in action_def:
+                    del action_def["examples"]
+                    trimmed = True
+            if trimmed:
+                log_warning(
+                    "[reduce_prompt] Slimming actions block: removed per-action "
+                    "`examples` guidance (schema + brief retained)"
+                )
+                current_size = len(json_dumps(reduced_prompt)) - attachment_data_offset
+                log_debug(
+                    f"[reduce_prompt] After slimming actions block: {current_size} chars"
+                )
+
+    # === STEP 4.6: Aggressively strip the actions block to brief-only ===
+    # If dropping `examples` was not enough, reduce each action to just its
+    # `brief` (no `schema`/`source`), mirroring Prompt Lite Mode. The model can
+    # still see *which* actions exist and what they do; the corrector re-adds
+    # the full schema when a malformed action needs fixing.
+    if current_size > max_chars:
+        actions = reduced_prompt.get("actions")
+        if isinstance(actions, dict) and actions:
+            stripped = False
+            for action_name, action_def in list(actions.items()):
+                if isinstance(action_def, dict) and (
+                    "schema" in action_def or "source" in action_def
+                ):
+                    action_map = cast(dict[str, Any], action_def)
+                    brief = action_map.get("brief") or ""
+                    actions[action_name] = {"brief": brief}
+                    stripped = True
+            if stripped:
+                log_warning(
+                    "[reduce_prompt] Stripping actions block to brief-only "
+                    "(schema/source removed; corrector re-supplies on demand)"
+                )
+                current_size = len(json_dumps(reduced_prompt)) - attachment_data_offset
+                log_debug(
+                    f"[reduce_prompt] After stripping actions block: {current_size} chars"
+                )
+
     # === STEP 5: Emergency - remove entire context (instructions are preserved at top-level) ===
     if current_size > max_chars and "context" in reduced_prompt:
         log_error("[reduce_prompt] 🚨 Emergency: removing entire context")
@@ -2919,7 +3794,13 @@ async def build_live_prompt_request(
     try:
         from core.action_parser import gather_static_injections
 
-        injections = await gather_static_injections(message, context_memory)
+        _gather = gather_static_injections(message, context_memory)
+        if inspect.isawaitable(_gather):
+            injections = await _gather
+        elif isinstance(_gather, dict):
+            injections = _gather
+        else:
+            injections = {}
         if not isinstance(injections, dict):
             injections = {}
     except Exception as e:
@@ -3074,8 +3955,21 @@ async def build_live_prompt_request(
     # (Telegram, Matrix, other Discord channels) so it stays consistent.
     try:
         from core.chat_history_cache import load_global_chat_history
+        from core.interface_path_utils import is_vessel_history_entry
+        from core.vessel_focus import is_vessel_turn
 
         recent_msgs = await load_global_chat_history(limit=15)
+        vessel_focus = is_vessel_turn(
+            message,
+            context_memory,
+            getattr(message, "interface_path", None) if message is not None else None,
+        )
+        if vessel_focus:
+            recent_msgs = []
+        else:
+            recent_msgs = [
+                msg for msg in recent_msgs if not is_vessel_history_entry(msg)
+            ]
         if recent_msgs:
             history_lines: list[str] = []
             for msg in recent_msgs:

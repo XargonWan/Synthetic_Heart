@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import inspect
+import json
 from typing import Any
 
 from core.config_manager import config_registry
@@ -146,13 +148,35 @@ class WebSearchPlugin:
         if not query:
             return {"error": "Empty query"}
 
-        log_info(f"[web_search] Performing web search for: '{query}'")
-
-        # Prevent loop: check if we are already in delivery mode
-        is_action_result_delivery = (
+        # ── Delivery-turn re-entrancy guard (search-loop hardening, 2026-08-18) ──
+        # A delivery turn's ONLY job is to report already-completed results. If the
+        # model re-emits ``search_current_knowledge`` on such a turn we must NOT run
+        # the search again (and must NOT enqueue another delivery) — that is the
+        # observed loop where one user request produced many web-search replies.
+        # Detection is purely structural (never message text): the delivery turn is
+        # flagged by ``prompt_request_mode``/``mode`` == "delivery", by the
+        # orchestrator's ``beat_type``/``web_search_task_id`` markers, or by the
+        # ``system_message.is_action_result_delivery`` flag that the Flow A delivery
+        # payload carries. Any of these means "results are already being delivered —
+        # do nothing here".
+        is_delivery_turn = (
             context.get("prompt_request_mode") == "delivery"
             or context.get("mode") == "delivery"
+            or context.get("beat_type") == "web_search_result"
+            or context.get("web_search_task_id") is not None
+            or (
+                isinstance(context.get("system_message"), dict)
+                and context["system_message"].get("is_action_result_delivery") is True
+            )
         )
+        if is_delivery_turn:
+            log_debug(
+                f"[web_search] Refusing to re-run search on delivery turn "
+                f"(query={query!r})"
+            )
+            return None
+
+        log_info(f"[web_search] Performing web search for: '{query}'")
 
         results: list[dict[str, str]] = []
         try:
@@ -183,30 +207,71 @@ class WebSearchPlugin:
                 }
             ]
 
-        if not is_action_result_delivery:
-            delivery_ok = False
-            try:
-                from core.auto_response import request_llm_delivery
+        # ── Agent-tool purity guard (2026-08-19) ───────────────────────────────
+        # When called as an agent tool (context carries ``agent_tool: True`` from
+        # ``agent_tool_executor``), this action must be a *pure tool*: return the
+        # results to the bounded loop and do NOT enqueue a separate delivery turn.
+        # The agent loop itself delivers its single final reply via
+        # ``agent_router._deliver_agent_reply`` on the originating interface_path,
+        # so a per-call delivery here is what produced the observed spam (one user
+        # request -> many web-search messages).
+        if context.get("agent_tool"):
+            log_info(
+                f"[web_search] Agent tool call: returning {len(results)} result(s) "
+                "to loop (no separate delivery)"
+            )
+            return {
+                "status": "ok",
+                "results_count": len(results),
+                "result": json.dumps(action_outputs, ensure_ascii=False, default=str),
+            }
 
-                delivered = await request_llm_delivery(
-                    action_outputs=action_outputs,
-                    original_context=context,
-                    action_type="search_current_knowledge",
-                )
-                # delivered is None in the legacy path, so treat non-exception as success
-                delivery_ok = True
-                log_info(
-                    f"[web_search] Requested LLM delivery; success={bool(delivered)}"
-                )
-            except Exception as e:
-                log_warning(f"[web_search] Failed to request LLM delivery: {e}")
+        # We only reach this point on a NON-delivery, NON-agent-tool turn, so the
+        # search result is always delivered to the user.
+        delivery_ok = False
+        try:
+            from core.auto_response import request_llm_delivery
 
-            # Fallback: if LLM delivery was not attempted or failed, send results
-            # directly to the user so they get useful information instead of "😵"
-            if not delivery_ok and results:
-                await self._send_results_directly(
-                    results, query, context, original_message
-                )
+            # Build a delivery context the auto-response system can act on.
+            # The raw action context only carries interface_path/chat_id (no
+            # interface_name), and request_llm_response bails out silently
+            # without it — the legacy memory_search plugin solves this the
+            # same way. interface_name is derived structurally from the
+            # interface_path prefix ("telegram_bot/123" -> "telegram_bot").
+            raw_interface_name = context.get("interface_name") or context.get(
+                "interface"
+            )
+            interface_path = context.get("interface_path") or getattr(
+                original_message, "interface_path", None
+            )
+            if not raw_interface_name and interface_path and "/" in str(interface_path):
+                raw_interface_name = str(interface_path).split("/", 1)[0]
+            original_context = {
+                "interface_name": raw_interface_name,
+                "interface_path": interface_path,
+                "chat_id": context.get("chat_id")
+                or getattr(original_message, "chat_id", None),
+                "message_id": context.get("message_id")
+                or getattr(original_message, "message_id", None),
+            }
+
+            delivered = await request_llm_delivery(
+                action_outputs=action_outputs,
+                original_context=original_context,
+                action_type="search_current_knowledge",
+            )
+            # The legacy path returns True once the delivery turn has been
+            # enqueued; treat a falsy return as a failed delivery.
+            delivery_ok = bool(delivered)
+            log_info(f"[web_search] Requested LLM delivery; success={bool(delivered)}")
+        except Exception as e:
+            log_warning(f"[web_search] Failed to request LLM delivery: {e}")
+
+        # Fallback: if LLM delivery was not attempted or failed, send the
+        # outcome directly to the user so they get useful information (or a
+        # clear "no results" note) instead of silence.
+        if not delivery_ok:
+            await self._send_results_directly(results, query, context, original_message)
 
         return {"status": "ok", "results_count": len(results)}
 
@@ -221,16 +286,15 @@ class WebSearchPlugin:
         try:
             from core.core_initializer import INTERFACE_REGISTRY
 
-            interface_name = context.get("interface_name") if context else None
+            interface_name = (
+                context.get("interface_name")
+                if context
+                else getattr(original_message, "interface_name", None)
+            )
             interface_path = (
                 context.get("interface_path")
                 if context
                 else getattr(original_message, "interface_path", None)
-            )
-            chat_id = (
-                context.get("chat_id")
-                if context
-                else getattr(original_message, "chat_id", None)
             )
             thread_id = (
                 context.get("thread_id")
@@ -238,10 +302,17 @@ class WebSearchPlugin:
                 else getattr(original_message, "thread_id", None)
             )
 
-            if not interface_name or not interface_path or not chat_id:
+            # The action context never carries interface_name; derive it
+            # structurally from the interface_path prefix.
+            if not interface_name and interface_path and "/" in str(interface_path):
+                interface_name = str(interface_path).split("/", 1)[0]
+
+            # interface_path is what the interface needs to resolve the target
+            # chat; chat_id alone is not required by every interface.
+            if not interface_name or not interface_path:
                 log_debug(
                     "[web_search] Cannot send direct fallback — missing "
-                    "interface_name/interface_path/chat_id in context"
+                    "interface_name/interface_path in context"
                 )
                 return
 
@@ -255,6 +326,11 @@ class WebSearchPlugin:
 
             # Build a concise text summary of results
             lines = [f"🔍 Search results for: {query}"]
+            if not results:
+                lines.append(
+                    "\nNo web search results found for this query (search backend "
+                    "unavailable or returned nothing)."
+                )
             for i, r in enumerate(results[:5], 1):
                 title = r.get("title", "")
                 snippet = r.get("snippet", "")
@@ -270,42 +346,35 @@ class WebSearchPlugin:
 
             fallback_text = "\n".join(lines)
 
-            # Try universal_send first (handles thread_id, etc.)
+            # Send through the interface's canonical payload-dict path — the same
+            # call shape the message_* actions use (see action_parser message
+            # dispatch and message_plugin). universal_send is for LLM-response
+            # flows, and hand-rolled chat_id/text kwargs break payload-style
+            # interfaces (Telegram's send_message takes a single payload dict).
             try:
-                from core.transport_layer import universal_send
-
-                await universal_send(
-                    iface,
-                    chat_id=chat_id,
-                    text=fallback_text,
-                    interface_path=interface_path,
-                    thread_id=thread_id,
-                    is_llm_response=True,
-                    skip_history=True,
+                send_payload: dict[str, Any] = {
+                    "text": fallback_text,
+                    "interface_path": interface_path,
+                }
+                if thread_id is not None:
+                    send_payload["thread_id"] = thread_id
+                result = iface.send_message(
+                    send_payload, original_message=original_message
                 )
+                if inspect.iscoroutine(result):
+                    result = await result
+                if result is False:
+                    log_warning(
+                        "[web_search] Direct fallback reported delivery failure "
+                        f"({len(results)} results, {len(fallback_text)} chars)"
+                    )
+                    return
                 log_info(
-                    "[web_search] Direct fallback sent via universal_send "
+                    "[web_search] Direct fallback sent via interface.send_message "
                     f"({len(results)} results, {len(fallback_text)} chars)"
                 )
-                return
-            except Exception as ue:
-                log_debug(
-                    f"[web_search] universal_send fallback failed, "
-                    f"trying direct send: {ue}"
-                )
-
-            # Fallback to send_message on the interface
-            if hasattr(iface, "send_message"):
-                try:
-                    kwargs = {"chat_id": chat_id, "text": fallback_text}
-                    if thread_id is not None:
-                        kwargs["message_thread_id"] = thread_id
-                    await iface.send_message(**kwargs)
-                    log_info(
-                        "[web_search] Direct fallback sent via interface.send_message"
-                    )
-                except Exception as se:
-                    log_warning(f"[web_search] Failed to send direct fallback: {se}")
+            except Exception as se:
+                log_warning(f"[web_search] Failed to send direct fallback: {se}")
         except Exception as e:
             log_warning(f"[web_search] Direct fallback error: {e}")
 

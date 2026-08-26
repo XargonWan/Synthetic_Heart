@@ -250,6 +250,36 @@ Expected output:
 - No connection errors
 - Connection acquire/release logs show proper cleanup
 
+Backup & read-only query access
+-------------------------------
+
+The runtime database can be backed up and queried through both the WebUI/HTTP
+API and the ``synth-db`` MCP server.
+
+**HTTP API** (see :doc:`api_endpoints` for full parameters):
+
+- ``POST /api/database/backup`` — full runtime backup; returns the generated
+  filename. The WebUI Settings tab triggers this and then downloads the archive
+  to the browser via ``GET /api/database/backup/download?filename=<name>``.
+- ``POST /api/database/backup/table`` — backup a **list** of tables
+  (``{"tables": ["a", "b"]}``). Table names are sanitised to identifier
+  characters; any invalid name rejects the whole request.
+- ``POST /api/database/query`` — run a **read-only** ``SELECT``/``WITH`` query.
+  Non-read-only statements (INSERT/UPDATE/DELETE/DDL/multiple statements) are
+  rejected with ``400``. ``limit`` is clamped to ``1..1000`` (default ``200``).
+
+Both backup handlers write to ``SYNTH_BACKUPS_DIR`` and the download handler
+confines the requested filename to that directory (path traversal → ``403``).
+
+**synth-db MCP server** (``mcp_servers/synth_db.py``):
+
+- ``run_select("SELECT ...")`` — read-only query, row cap ``1..200``.
+- ``backup_database(confirm=False, target=None)`` — full backup; dry-run unless
+  ``confirm=True``.
+- ``backup_table(tables=[...], confirm=False, target=None)`` — backup a list of
+  tables. Table names are sanitised; an invalid name rejects the request. Dry-run
+  unless ``confirm=True``.
+
 References
 ----------
 
@@ -282,3 +312,27 @@ The bio_manager plugin was experiencing ``TimeoutError`` when retrieving user pr
 - ``plugins/bio_manager.py``: Added ``_get_bio_light_async()``, ``_update_last_accessed_async()``
 - ``plugins/bio_manager.py``: Converted ``get_static_injection()`` to ``async def``
 - **MariaDB Connection Pooling**: https://mariadb.com/kb/en/
+
+**Agent Lane action deadlock (August 2026)**:
+
+The same ``run_coroutine_threadsafe()`` deadlock resurfaced on the *action* path: the Agent Lane
+(``core/agent_tool_executor.py`` → ``core/action_parser.run_action``) calls ``BioPlugin.execute_action``
+directly on the event-loop thread. The old sync ``execute_action`` went through ``_run()``, which
+scheduled its coroutine on the very loop it was blocking, deadlocking until the 30s ``TimeoutError``
+("Error in _run: " with an empty message, repeated every 30s — e.g. the ``bio_full_request`` tool
+with ``targets: "grillo,karada,scarlett,scarlet"``).
+
+- **Root cause**: ``_run()`` used ``run_coroutine_threadsafe(coro, loop).result(timeout=30)`` when the
+  loop is running. From the loop thread itself, the scheduled coroutine can never run while the loop
+  thread blocks in ``.result()``.
+- **Fix**: ``execute_action`` is now ``async def`` and uses loop-safe async helpers
+  (``_get_bio_light_async``, ``_get_bio_full_async``, ``_update_bio_fields_async``,
+  ``_ensure_user_exists_async``, ``_resolve_target_async``); ``action_parser`` already awaited coroutine
+  results from ``execute_action``, so no caller change was needed. ``_run()`` additionally gained a
+  defensive branch: when invoked from the loop thread it delegates to a worker thread instead of
+  deadlocking, and its error log now includes the exception type (a bare ``TimeoutError`` has an empty
+  ``str()``).
+- **Bonus fix**: ``bio_full_request`` now normalizes a comma-separated string ``targets`` into a list
+  (LLMs often emit a string, which previously iterated character-by-character).
+- **Tests**: ``tests/test_bio_manager_async.py`` proves the action path never touches the ``_run``
+  bridge and runs inside a live event loop without deadlocking.

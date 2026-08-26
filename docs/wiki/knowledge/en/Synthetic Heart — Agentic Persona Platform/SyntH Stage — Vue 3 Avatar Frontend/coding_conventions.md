@@ -1,0 +1,6 @@
+- Pinia stores are created with `defineStore('name', () => { ... })` composition API style and exported as `useXxxStore` functions consumed by components and other stores.
+- The WebSocket contract is centralized in `services/protocol.ts` as discriminated unions (`ServerMessage`, `ClientMessage`) keyed by a `type` field; new message types are added there before use elsewhere.
+- Component templates use UnoCSS utility classes directly (e.g. `class="relative h-full w-full overflow-hidden"`) rather than scoped CSS, with global resets imported once in `main.ts`.
+- Playwright smoke scripts expose store instances on `window.__stage` so test scripts can drive the app imperatively without coupling to component internals.
+- VRM-related code is isolated under `composables/vrm/` with a factory pattern (`createAvatarDriver`, `createPlaybackManager`) returning an interface object rather than class instances, keeping dependencies injectable.
+- Backend-relative paths are accessed through the Vite dev proxy (`/api`, `/ws`, `/skins`, etc.) and never hard-coded hostnames in client code.

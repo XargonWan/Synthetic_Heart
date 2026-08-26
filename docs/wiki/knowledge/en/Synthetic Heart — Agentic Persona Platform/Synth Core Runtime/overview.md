@@ -1,0 +1,1 @@
+Orchestrates Synth's agentic runtime by bootstrapping registries, loading the Cortex LLM engine, initializing plugins and interfaces, and wiring together message transport, chat context, actions, media, vessels, and live sessions into a single cohesive system.

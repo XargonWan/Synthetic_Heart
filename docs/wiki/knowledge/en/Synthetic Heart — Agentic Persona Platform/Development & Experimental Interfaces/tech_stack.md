@@ -1,0 +1,1 @@
+Async Python with `asyncpraw` for Reddit, `telethon` for Telegram userbot, and `snscrape` (disabled on Python 3.12+) for X/Twitter; configuration loaded via `python-dotenv` with graceful fallbacks when the package is absent.

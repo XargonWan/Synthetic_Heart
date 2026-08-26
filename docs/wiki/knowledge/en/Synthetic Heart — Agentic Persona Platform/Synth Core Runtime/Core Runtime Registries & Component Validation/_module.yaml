@@ -1,0 +1,15 @@
+schema_version: 1
+module_path: core_runtime/registry_system
+title: Core Runtime Registries & Component Validation
+scope:
+    - core/command_registry.py
+    - core/component_auto_registration.py
+    - core/component_registry.py
+    - core/interface_adapters.py
+    - core/interfaces_registry.py
+    - core/llm_registry.py
+    - core/tool_registry.py
+    - core/validation_registry.py
+source_files: []
+depends_on: []
+related_to: []

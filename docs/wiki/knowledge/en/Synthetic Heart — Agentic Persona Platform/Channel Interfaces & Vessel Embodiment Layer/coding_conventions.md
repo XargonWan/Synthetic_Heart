@@ -1,0 +1,6 @@
+- Every interface class exposes a duck-typed contract: `display_name`, `get_interface_id()`, `get_supported_actions()`, `send_message(...)`, `start()`, `stop()`, and registers itself through `register_interface(id, self)`.
+- Per-channel packages use an `__init__.py` shim that imports the real module and rebinding `sys.modules[__name__] = _mod` so legacy import paths (`interface.telegram_bot`, `interface.discord_interface`, …) continue to work.
+- Outbound messaging goes through shared helpers in `message_send_utils.py` (`safe_send`, `send_with_thread_fallback`, `cortex_response_send`) which encapsulate retry, cooldown, JSON-action parsing, and deduplication instead of calling the transport directly.
+- All external calls are wrapped in try/except with `log_debug`/`log_warning`/`log_error` fallbacks so failures never break interface startup or session lifecycles.
+- Configuration is read through `config_registry.get_value(...)` with explicit defaults, component/group labels, and value types rather than raw `os.environ` or config dicts.
+- Inbound event filtering uses structural, language-agnostic signals (event_type, actor presence, mention detection via `core.mention_utils.is_synth_mentioned`) — no keyword matching against natural-language text.

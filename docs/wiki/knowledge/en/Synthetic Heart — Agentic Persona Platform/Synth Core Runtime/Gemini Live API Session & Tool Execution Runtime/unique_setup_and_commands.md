@@ -1,0 +1,1 @@
+Requires `google-genai` installed (`uv add google-genai`); the `GEMINI_API_KEY` config value is reused for the Live API. Log files are written to `logs/live_api.log` with daily rotation governed by `DEFAULT_MAX_BYTES` and `DEFAULT_MAX_LINES` from `core.log_archive`.

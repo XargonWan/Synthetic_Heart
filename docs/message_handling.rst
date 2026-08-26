@@ -23,7 +23,12 @@ Key Points
   - pushes the item into the prioritized queue (HIGH/NORMAL)
 - Use `core.message_queue.enqueue_low_priority(...)` for background tasks
   (e.g. autonomous beats from G.R.I.L.L.O). This ensures the message is
-  enqueued with LOW priority so it does not block/compete with user interactions.
+  enqueued at the caller-chosen priority band so it does not block/compete
+  with user interactions. The optional ``priority`` keyword argument (default
+  ``PRIORITY_LOW`` = 3) lets callers place themselves at the correct rung:
+  Grillo beats use ``PRIORITY_BACKGROUND`` (2, absolute bottom), radio banter
+  uses ``PRIORITY_RADIO`` (6, above normal chat), calendar reminders use
+  ``PRIORITY_URGENT`` (10).
 - Do NOT write directly into the priority queue internals (``message_queue._queue``)
   or call ``._queue.put((prio, counter, item))`` from plugin code. This bypasses
   important normalization, checks, and queue invariants.
@@ -73,7 +78,27 @@ Enqueue a low-priority background message from a plugin:
 
     from core import message_queue
 
-    await message_queue.enqueue_low_priority(bot=None, message=internal_message, context_memory={'grillo_beat': True}, interface_id='grillo')
+    # Grillo background beat (absolute bottom, never blocks)
+    await message_queue.enqueue_low_priority(
+        bot=None,
+        message=internal_message,
+        context_memory={'grillo_beat': True},
+        interface_id='grillo',
+        priority=message_queue.PRIORITY_BACKGROUND,
+    )
+
+    # Radio banter (above normal chat, may briefly block)
+    await message_queue.enqueue_low_priority(
+        bot=None,
+        message=banter_message,
+        context_memory={'radio_host': True},
+        interface_id='radio',
+        priority=message_queue.PRIORITY_RADIO,
+    )
+
+The full priority scale: ``EMERGENCY`` (11) > ``URGENT`` (10) > ``REFLECTION`` (9)
+> ``HIGH`` (8) > ``TRAINER`` (7) > ``RADIO`` (6) > ``GENERAL`` (5) > ``AMBIENT``
+(4) > ``LOW`` (3, background threshold) > ``BACKGROUND`` (2).
 
   Migration from direct queue writes
   ---------------------------------
@@ -87,7 +112,12 @@ Enqueue a low-priority background message from a plugin:
   Convert it to use the official API instead. For background/low-priority messages, prefer::
 
     from core import message_queue
-    await message_queue.enqueue_low_priority(bot=None, message=message, context_memory={'your_context': True}, interface_id='your_plugin')
+    await message_queue.enqueue_low_priority(
+        bot=None, message=message,
+        context_memory={'your_context': True},
+        interface_id='your_plugin',
+        priority=message_queue.PRIORITY_BACKGROUND,  # choose the right band
+    )
 
   For normal user-triggered messages, use::
 

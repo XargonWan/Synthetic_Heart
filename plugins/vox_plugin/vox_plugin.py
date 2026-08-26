@@ -119,6 +119,8 @@ def _detect_language(text: str) -> str | None:
 config_registry.get_value(
     "ACTIVE_VOX_ENGINE",
     "disabled",
+    label="Active Vox Engine",
+    description="Active voice text-to-speech engine selection.",
     value_type=str,
     group="plugins",
     component="vox_plugin",
@@ -140,6 +142,8 @@ config_registry.get_value(
 config_registry.get_value(
     "VOX_ENGINE_SETTINGS",
     "{}",
+    label="Vox Engine Settings",
+    description="JSON string containing settings for all Vox engines.",
     value_type=str,
     group="plugins",
     component="vox_plugin",
@@ -148,6 +152,8 @@ config_registry.get_value(
 config_registry.get_value(
     "VOX_OUTPUT_DIR",
     "res/synth_webui/static/audio/tts",
+    label="Vox Output Directory",
+    description="Directory where synthesised Vox audio clips are stored.",
     value_type=str,
     group="plugins",
     component="vox_plugin",
@@ -156,6 +162,8 @@ config_registry.get_value(
 config_registry.get_value(
     "VOX_TIMEOUT_SECONDS",
     300,
+    label="Vox Timeout Seconds",
+    description="Timeout in seconds for Vox speech synthesis calls.",
     value_type=int,
     group="plugins",
     component="vox_plugin",
@@ -164,6 +172,8 @@ config_registry.get_value(
 config_registry.get_value(
     "VOX_FALLBACK_TO_TEXT",
     True,
+    label="Vox Fallback to Text",
+    description="Enable text fallback when Vox speech synthesis fails.",
     value_type=bool,
     group="plugins",
     component="vox_plugin",
@@ -172,6 +182,8 @@ config_registry.get_value(
 config_registry.get_value(
     "VOX_AUDIO_CACHE_SIZE",
     40,
+    label="Vox Audio Cache Size",
+    description="Maximum number of audio files to keep in the cache.",
     value_type=int,
     group="plugins",
     component="vox_plugin",
@@ -180,6 +192,8 @@ config_registry.get_value(
 config_registry.get_value(
     "VOX_SENTENCE_CHUNKING",
     True,
+    label="Vox Sentence Chunking",
+    description="Enable sentence-by-sentence streaming for faster response playback.",
     value_type=bool,
     group="plugins",
     component="vox_plugin",
@@ -470,6 +484,15 @@ class VoxPlugin(AIPluginBase):
                     _ip = str(context.get("interface_path") or "")
                 if not _ip and original_message:
                     _ip = getattr(original_message, "interface_path", None)
+                # A hallucinated payload prefix (e.g. 'em_chat_bridge/...')
+                # must not sink the text fallback either.
+                from core.interface_path_utils import (
+                    resolve_registered_interface_path,
+                )
+
+                _ip = resolve_registered_interface_path(
+                    _ip, context=context, original_message=original_message
+                )
                 _fallback_text = merged_text or text
                 if _ip and _fallback_text:
                     log_debug(
@@ -483,6 +506,15 @@ class VoxPlugin(AIPluginBase):
             interface_path = context.get("interface_path")
         if not interface_path and original_message:
             interface_path = getattr(original_message, "interface_path", None)
+
+        # A model-emitted tts_speak may carry a hallucinated interface prefix
+        # (e.g. 'em_chat_bridge/...') that no registered interface can route;
+        # redirect to the chat this turn arrived in so the reply is never lost.
+        from core.interface_path_utils import resolve_registered_interface_path
+
+        interface_path = resolve_registered_interface_path(
+            interface_path, context=context, original_message=original_message
+        )
 
         async def _fallback(msg_text: str) -> dict[str, Any]:
             """Delegate to _send_fallback only when allowed.
@@ -811,6 +843,12 @@ class VoxPlugin(AIPluginBase):
 
     @staticmethod
     def get_supported_actions() -> dict:
+        # The `tts_speak` action stays registered so the message_chain TTS
+        # auto-inject (Vox engine active + VOX_SPEAK_TEXT_REPLIES/voice input)
+        # can resolve a handler. It is kept OUT of the model-visible catalog by
+        # prompt_engine._SYSTEM_ONLY_ACTION_NAMES, so the prompt stays lean and
+        # the model never picks tts_speak directly (voice replies use
+        # send_as_voice on the message_* action instead).
         return {
             "tts_speak": {
                 "description": (
@@ -887,7 +925,12 @@ class VoxPlugin(AIPluginBase):
         return await self.speak(
             text=payload.get("text", ""),
             emotion=payload.get("emo"),
-            interface_path=context.get("interface_path"),
+            # Prefer an explicit interface_path carried in the payload (set by
+            # message_chain's TTS auto-inject for turns that address a chat other
+            # than the current context, e.g. outbound Grillo beats); fall back to
+            # the message-chain context.
+            interface_path=payload.get("interface_path")
+            or context.get("interface_path"),
             context=context,
             original_message=original_message,
             merged_text=payload.get("__merged_text"),

@@ -14,6 +14,19 @@ from core.config_manager import config_registry
 
 # Global context memory
 _context_memory: Dict[str, deque] = {}
+# Separate store for Synth's *own* autonomous vessel perceptions
+# (sightings/movement/damage/will-beats). These are kept out of the main
+# conversational deque so a rapid burst of world perceptions (e.g. repeated
+# environmental damage while drowning) can never *evict* a player's chat from
+# the bounded conversational window. The vessel prompt path (history_engine,
+# vessel-focus) merges the two: ALL conversation + the most recent N
+# perceptions. Removing the vessel subsystem simply leaves this map empty.
+_perception_memory: Dict[str, deque] = {}
+# Perceptions are ambient grounding, not conversation: a small ring buffer is
+# enough — the prompt only ever surfaces the most recent few
+# (``VESSEL_PERCEPTION_CONTEXT_CAP``). Kept comfortably larger than that cap so
+# a burst never starves the perception window itself.
+_PERCEPTION_MEMORY_MAXLEN = 32
 _initialized = False
 
 # Register configuration variable at module level to ensure visibility
@@ -102,6 +115,29 @@ def get_context_memory() -> Dict[str, deque]:
     return _context_memory
 
 
+def get_perception_memory() -> Dict[str, deque]:
+    """Get the global vessel-perception memory dictionary.
+
+    Holds Synth's own autonomous world perceptions, kept separate from the
+    conversational deque so a perception burst can never evict player chat.
+    Only the vessel prompt path (history_engine, vessel-focus) reads it.
+    """
+    return _perception_memory
+
+
+def get_or_create_perception_context(interface_path: str) -> deque:
+    """Get or create the autonomous-perception ring buffer for a path.
+
+    Sized by :data:`_PERCEPTION_MEMORY_MAXLEN` (independent of the
+    conversational ``CHAT_HISTORY_LIMIT``) so perceptions and conversation
+    never compete for the same bounded window.
+    """
+    interface_path = _resolve_context_path(interface_path)
+    if interface_path not in _perception_memory:
+        _perception_memory[interface_path] = deque(maxlen=_PERCEPTION_MEMORY_MAXLEN)
+    return _perception_memory[interface_path]
+
+
 def get_or_create_chat_context(interface_path: str) -> deque:
     """Get or create a context deque for an interface path.
 
@@ -148,6 +184,7 @@ async def add_message_to_context(
     message_id: Optional[int] = None,
     timestamp: Optional[str] = None,
     metadata: dict[str, Any] | None = None,
+    persist_to_db: bool = True,
     **extra_fields,
 ) -> None:
     """Add a message to chat context with automatic persistence.
@@ -165,12 +202,15 @@ async def add_message_to_context(
         message_id: Optional message ID from interface
         timestamp: Optional ISO format timestamp
         metadata: Optional dict of extra metadata (e.g. reply context).
+        persist_to_db: When ``False``, the message is kept only in the
+            appropriate in-memory buffer (conversational deque or the vessel
+            perception ring) and is NOT written to ``chat_history_cache``. Used
+            for pure-log vessel telemetry (sightings/gather/proximity/...) that
+            provides live ambient grounding but must not bloat the durable
+            history. Defaults to ``True`` (normal persistence).
         **extra_fields: Additional fields to store in context
     """
     interface_path = _resolve_context_path(interface_path)
-
-    # Add to in-memory context
-    context = get_or_create_chat_context(interface_path)
 
     message_obj: dict[str, Any] = {
         "message_id": message_id,
@@ -184,10 +224,30 @@ async def add_message_to_context(
         message_obj["metadata"] = metadata
     message_obj.update(extra_fields)
 
-    context.append(message_obj)
-    log_debug(
-        f"[context_manager] Added message to context for interface_path {interface_path}"
+    # Route Synth's own autonomous vessel perceptions to a SEPARATE in-memory
+    # ring buffer so a burst of world perceptions (e.g. repeated environmental
+    # damage) can never evict a player's chat from the bounded conversational
+    # deque. Structural (a persisted metadata flag), never keyword matching.
+    # Durable perceptions (damage/death/self-monologue) are also persisted to
+    # the DB cache below; pure-log telemetry passes ``persist_to_db=False`` and
+    # lives ONLY in this ring for live ambient grounding.
+    is_vessel_perception = bool(
+        isinstance(metadata, dict) and metadata.get("vessel_perception")
     )
+    if is_vessel_perception:
+        perception_ctx = get_or_create_perception_context(interface_path)
+        perception_ctx.append(message_obj)
+        log_debug(
+            f"[context_manager] Added vessel perception to perception buffer "
+            f"for interface_path {interface_path}"
+        )
+    else:
+        # Add to in-memory conversational context
+        context = get_or_create_chat_context(interface_path)
+        context.append(message_obj)
+        log_debug(
+            f"[context_manager] Added message to context for interface_path {interface_path}"
+        )
 
     # Automatically update chat activity (mechanical action, centralized here).
     # Tracks last-used time and refreshes the pretty-name labels for this
@@ -199,20 +259,24 @@ async def add_message_to_context(
     except Exception as e:
         log_debug(f"[context_manager] Failed to update chat activity: {e}")
 
-    # Persist to database (non-blocking, don't let DB failures affect message processing)
-    try:
-        from core.chat_history_cache import save_chat_message
+    # Persist to database (non-blocking, don't let DB failures affect message processing).
+    # Pure-log vessel telemetry opts out of durable persistence: it lives only
+    # in the in-memory perception ring for live ambient grounding and must not
+    # bloat ``chat_history_cache`` (nor be re-loaded at restart).
+    if persist_to_db:
+        try:
+            from core.chat_history_cache import save_chat_message
 
-        await save_chat_message(
-            interface_path=interface_path,
-            message_text=message_text,
-            sender_name=sender_name,
-            sender_id=sender_id,
-            timestamp=timestamp,
-            metadata=metadata,
-        )
-    except Exception as e:
-        log_warning(f"[context_manager] Failed to persist message to cache: {e}")
+            await save_chat_message(
+                interface_path=interface_path,
+                message_text=message_text,
+                sender_name=sender_name,
+                sender_id=sender_id,
+                timestamp=timestamp,
+                metadata=metadata,
+            )
+        except Exception as e:
+            log_warning(f"[context_manager] Failed to persist message to cache: {e}")
 
 
 async def update_message_in_context(
@@ -275,19 +339,41 @@ async def load_chat_history(interface_path: str) -> None:
         from core.chat_history_cache import load_chat_history as cache_load
 
         interface_path = _resolve_context_path(interface_path)
-        history = await cache_load(interface_path, match_chat_level=True)
+        from core.interface_path_utils import is_vessel_interface_path
+
+        # Vessel paths identify a concrete world/session context.  Broad
+        # chat-level matching would merge sibling worlds/old server targets
+        # back into the active context after a restart.
+        history = await cache_load(
+            interface_path,
+            match_chat_level=not is_vessel_interface_path(interface_path),
+        )
         context = get_or_create_chat_context(interface_path)
+        perception_ctx = get_or_create_perception_context(interface_path)
         # IMPORTANT: This function is used to rehydrate memory from persistence.
         # It must be idempotent (e.g., WebUI refresh/reconnect calls it again).
         # Replace in-memory history with persisted history to avoid duplicates.
         previous_len = len(context)
         context.clear()
+        perception_ctx.clear()
         if history:
+            # Rehydrate into the SAME split the live path uses: autonomous vessel
+            # perceptions go to the perception ring buffer, everything else to
+            # the conversational deque — otherwise a restart would refill the
+            # conversational window with old perceptions and re-trigger the
+            # eviction problem. Structural (metadata flag), never keyword.
+            perception_count = 0
             for msg in history:
-                context.append(msg)
+                meta = msg.get("metadata") if isinstance(msg, dict) else None
+                if isinstance(meta, dict) and meta.get("vessel_perception"):
+                    perception_ctx.append(msg)
+                    perception_count += 1
+                else:
+                    context.append(msg)
             log_info(
                 f"[context_manager] Loaded {len(history)} messages for interface_path {interface_path} "
-                f"(replaced {previous_len} in-memory messages)"
+                f"({len(context)} conversational, {perception_count} perceptions; "
+                f"replaced {previous_len} in-memory messages)"
             )
         else:
             log_debug(
@@ -311,6 +397,11 @@ def clear_chat_context(interface_path: str) -> None:
         _context_memory[interface_path].clear()
         log_debug(
             f"[context_manager] Cleared context for interface_path {interface_path}"
+        )
+    if interface_path in _perception_memory:
+        _perception_memory[interface_path].clear()
+        log_debug(
+            f"[context_manager] Cleared perception buffer for interface_path {interface_path}"
         )
 
 

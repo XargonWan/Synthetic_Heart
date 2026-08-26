@@ -1,0 +1,1 @@
+Monorepo for Synthetic Heart, a modular AI persona platform that wires together pluggable LLM engines, chat interfaces, media subsystems, plugins, and a Vue 3 avatar frontend into a single persistent, self-growing agent.

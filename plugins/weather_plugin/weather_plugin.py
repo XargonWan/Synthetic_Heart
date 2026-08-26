@@ -417,6 +417,22 @@ class WeatherPlugin:
                         continue
                     self._cached_weather = f"{location}: ⚠️ Cannot reach weather service (connection failed)"
                     return
+                except TimeoutError:
+                    # socket.timeout is an alias of TimeoutError on 3.10+.
+                    # A read/connect timeout is an expected transient network
+                    # condition, not an application error — retry, then degrade
+                    # gracefully without logging a full traceback.
+                    log_warning(
+                        f"[weather_plugin] Timed out fetching weather after "
+                        f"{WEATHER_FETCH_TIMEOUT_SECONDS}s (attempt {attempt})"
+                    )
+                    if attempt < MAX_WEATHER_FETCH_RETRIES:
+                        await asyncio.sleep(1)
+                        continue
+                    self._cached_weather = (
+                        f"{location}: ⚠️ Cannot reach weather service (timed out)"
+                    )
+                    return
                 except RuntimeError as e:
                     log_warning(
                         f"[weather_plugin] Could not schedule weather read: {e}"

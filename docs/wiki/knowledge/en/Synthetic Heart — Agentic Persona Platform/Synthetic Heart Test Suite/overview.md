@@ -1,0 +1,1 @@
+Comprehensive pytest-based test suite covering unit, integration, and end-to-end tests for Synthetic Heart's core message pipeline, plugins, interfaces, WebUI, and LLM engine integrations.

@@ -13,10 +13,9 @@ for the system. For the full runtime model (tools, routing, drones), see
 Configuration
 -------------
 - ``AGENT_ENABLED``: user-facing toggle to enable or disable the agent
-  (default: enabled). When off, SyntH stays on the Fast Lane.
-- ``AGENTIC_ROUTING_ENABLED``: gate for the Runtime 2.0 router (default: off).
-  Both ``AGENT_ENABLED`` and ``AGENTIC_ROUTING_ENABLED`` must be on for a turn
-  to leave the Fast Lane and enter the Agent Lane.
+  (default: enabled). This is the **single authoritative gate** for the router:
+  when off, SyntH stays on the Fast Lane; when on, the router is active and
+  escalates agentic turns to the Agent Lane.
 - ``AGENT_CORTEX``: agent-scope cortex engine (falls back to ``BASE_CORTEX``).
 - ``AGENT_MAX_ITERATIONS`` / ``AGENT_TURN_TIMEOUT_SEC``: bounds for the agent
   loop.

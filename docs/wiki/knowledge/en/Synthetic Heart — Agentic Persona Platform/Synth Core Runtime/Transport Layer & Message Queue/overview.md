@@ -1,0 +1,1 @@
+Core transport subsystem that queues incoming messages with priority, serializes processing through a single consumer loop, and dispatches outbound responses across all interface backends.

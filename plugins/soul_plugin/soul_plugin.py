@@ -35,17 +35,6 @@ from core.soul.repository import (
 from core.soul.strategies import RuleBasedDspExtractor, RuleBasedMemCellExtractor
 
 register_exposed_var(
-    "SOUL_PLUGIN_ENABLED",
-    label="SOUL Plugin Enabled",
-    default=1,
-    value_type=int,
-    ui_type="bool",
-    description="Enable runtime SOUL memory/emotion orchestration plugin.",
-    scope="plugins",
-    component="soul_plugin",
-)
-
-register_exposed_var(
     "SOUL_COMPILE_IDLE_SECONDS",
     label="SOUL Compile Idle Seconds",
     default=300,
@@ -89,6 +78,39 @@ register_exposed_var(
     component="soul_plugin",
 )
 
+register_exposed_var(
+    "SOUL_DSP_INJECT_ENABLED",
+    label="Inject DSP user profile into prompts",
+    default=0,
+    value_type=int,
+    ui_type="bool",
+    description=(
+        "Inject the compiled SOUL user profile (DSP) into the user-role context "
+        "of every turn so Synth always knows who she is talking to. Intended for "
+        "a clean, LLM-compiled profile only — the rule-based extractor can still "
+        "produce speech-shaped content. When off, only session-state and the "
+        "per-turn emotion delta are injected."
+    ),
+    scope="plugins",
+    component="soul_plugin",
+)
+
+register_exposed_var(
+    "SOUL_DSP_LLM_ENABLED",
+    label="LLM-compiled DSP profile",
+    default=1,
+    value_type=int,
+    ui_type="bool",
+    description=(
+        "Compile the DSP user profile with an LLM: extract biography from the "
+        "daily transcript and compile it into a clean, self-healing profile. "
+        "Uses the DSP_CORTEX engine scope. Falls back to the rule-based "
+        "extractor/builder on any failure."
+    ),
+    scope="plugins",
+    component="soul_plugin",
+)
+
 
 @dataclass(slots=True)
 class _SessionState:
@@ -122,8 +144,8 @@ class SoulPlugin(PluginBase):
         self._compiler = SoulCompiler(
             repository=self._repo,
             memcell_extractor=RuleBasedMemCellExtractor(),
-            dsp_extractor=RuleBasedDspExtractor(),
-            dsp_builder=RuleBasedDspBuilder(),
+            dsp_extractor=self._build_dsp_extractor(),
+            dsp_builder=self._build_dsp_builder(),
             summary_builder=RuleBasedSummaryBuilder(),
             embedder=self._build_embedder(),
         )
@@ -132,6 +154,58 @@ class SoulPlugin(PluginBase):
         self._scheduler_task: asyncio.Task[None] | None = None
         self._last_rollup_date: date | None = None
         self._last_consolidated_at: datetime | None = None
+
+    @staticmethod
+    def _is_dsp_llm_enabled() -> bool:
+        """Return whether the LLM DSP extractor/builder path is active.
+
+        ``SOUL_DSP_LLM_ENABLED`` defaults on. The LLM strategies internally fall
+        back to their rule-based counterparts on any failure, so enabling the
+        LLM path can never break the nightly rollup.
+        """
+        try:
+            from core.config_manager import config_registry
+
+            return bool(
+                config_registry.get_value("SOUL_DSP_LLM_ENABLED", 1, value_type=int)
+            )
+        except Exception:
+            return True
+
+    @staticmethod
+    def _build_dsp_extractor() -> Any:
+        """Return the DSP extractor: LLM-backed when enabled, else rule-based."""
+        if not SoulPlugin._is_dsp_llm_enabled():
+            return RuleBasedDspExtractor()
+        try:
+            from core.soul.llm_strategies import LlmDspExtractor
+
+            return LlmDspExtractor()
+        except Exception as exc:
+            log_warning(
+                f"[soul_plugin] LLM DSP extractor unavailable ({exc}); using rule-based"
+            )
+            return RuleBasedDspExtractor()
+
+    @staticmethod
+    def _build_dsp_builder() -> Any:
+        """Return the DSP builder: LLM-compiled when enabled, else rule-based.
+
+        ``SOUL_DSP_LLM_ENABLED`` defaults on; the LLM builder internally falls
+        back to the rule-based builder on any failure (no engine, exception,
+        bad JSON), so enabling it can never break the nightly rollup.
+        """
+        if not SoulPlugin._is_dsp_llm_enabled():
+            return RuleBasedDspBuilder()
+        try:
+            from core.soul.llm_strategies import LlmDspBuilder
+
+            return LlmDspBuilder()
+        except Exception as exc:
+            log_warning(
+                f"[soul_plugin] LLM DSP builder unavailable ({exc}); using rule-based"
+            )
+            return RuleBasedDspBuilder()
 
     def _build_embedder(self) -> Any:
         from importlib.util import find_spec
@@ -173,9 +247,6 @@ class SoulPlugin(PluginBase):
         return EmotionalProfile()
 
     async def start(self) -> None:
-        if not self._is_enabled():
-            log_info("[soul_plugin] Disabled by config")
-            return
         if self._scheduler_task and not self._scheduler_task.done():
             return
         self._scheduler_task = asyncio.create_task(self._scheduler_loop())
@@ -207,9 +278,6 @@ class SoulPlugin(PluginBase):
             },
         }
 
-    def is_enabled(self) -> bool:
-        return self._is_enabled()
-
     async def execute_action(
         self,
         action: dict[str, Any],
@@ -218,7 +286,6 @@ class SoulPlugin(PluginBase):
         original_message: Any,
     ) -> Any:
         action_type = action.get("type")
-        payload = action.get("payload") or {}
 
         if action_type == "static_inject":
             return await self.get_static_injection(original_message, context)
@@ -227,9 +294,6 @@ class SoulPlugin(PluginBase):
     async def get_static_injection(
         self, message: Any = None, context_memory: dict[str, Any] | None = None
     ) -> dict[str, object]:
-        if not self._is_enabled():
-            return {}
-
         interface_path = self._extract_interface_path(message, context_memory)
         if interface_path.startswith("grillo/"):
             return await self._get_grillo_beat_context(message)
@@ -406,7 +470,16 @@ class SoulPlugin(PluginBase):
         if not lines:
             return 0
 
-        transcript = "\n".join(lines)
+        # Roleplay/explicit turns stay in the buffer (they still drive emotion
+        # and memory recall) but are excluded from what gets compiled into
+        # memcells — in-character fiction is not a durable event record.
+        from core.soul.roleplay import strip_roleplay_lines
+
+        transcript = strip_roleplay_lines("\n".join(lines))
+        if not transcript.strip():
+            self._buffers[interface_path] = []
+            return 0
+
         safe_session_id = self._normalize_session_id(interface_path)
 
         created = await self._compiler.post_session_compile(
@@ -453,7 +526,13 @@ class SoulPlugin(PluginBase):
         return {"compiled_memcells": total}
 
     async def _run_rollup_now(self) -> dict[str, int]:
-        transcript = await self._build_daily_transcript()
+        # On the LLM DSP path the transcript is judged by the model itself, so
+        # the aggressive roleplay regex filter is not needed there — the model is
+        # instructed to ignore in-character speech. The deterministic rule-based
+        # path keeps the filter so its structural guards never see RP content.
+        transcript = await self._build_daily_transcript(
+            filter_roleplay=not SoulPlugin._is_dsp_llm_enabled()
+        )
         backfilled = await self._compiler.backfill_embeddings(limit=500)
         result = await self._compiler.nightly_rollup(
             current_date=datetime.now(timezone.utc).date(),
@@ -491,7 +570,7 @@ class SoulPlugin(PluginBase):
     async def _get_status(self) -> dict[str, object]:
         dsp = await self._repo.get_active_dsp()
         return {
-            "enabled": self._is_enabled(),
+            "enabled": True,
             "tracked_sessions": len(self._sessions),
             "buffered_sessions": sum(1 for v in self._buffers.values() if v),
             "active_dsp": bool(dsp),
@@ -502,7 +581,7 @@ class SoulPlugin(PluginBase):
             ),
         }
 
-    async def _build_daily_transcript(self) -> str:
+    async def _build_daily_transcript(self, *, filter_roleplay: bool = True) -> str:
         try:
             cutoff = datetime.now(timezone.utc) - timedelta(days=1)
             async with get_conn_ctx() as conn:
@@ -512,6 +591,10 @@ class SoulPlugin(PluginBase):
                         SELECT sender_name, sender_id, message_text, created_at
                         FROM chat_history_cache
                         WHERE created_at >= %s
+                          AND (interface_path IS NULL OR NOT (
+                                interface_path LIKE 'vessel/%'
+                             OR interface_path LIKE 'grillo/%'
+                          ))
                         ORDER BY created_at ASC
                         LIMIT 500
                         """,
@@ -529,7 +612,17 @@ class SoulPlugin(PluginBase):
                         parts.append(
                             f"{prefix}{speaker}: {json.dumps(message_text, ensure_ascii=False)}"
                         )
-                    return "\n".join(parts)
+                    transcript = "\n".join(parts)
+                    # Roleplay/explicit turns are in-character fiction, not a
+                    # stable record of the user — keep them out of the DSP
+                    # profile input on the deterministic path (structural
+                    # data-cleaning, never routing). The LLM DSP extractor
+                    # receives the unfiltered transcript and judges it itself.
+                    if filter_roleplay:
+                        from core.soul.roleplay import strip_roleplay_lines
+
+                        transcript = strip_roleplay_lines(transcript)
+                    return transcript
         except Exception as exc:
             log_debug(f"[soul_plugin] Falling back to buffered transcript: {exc}")
 
@@ -575,6 +668,20 @@ class SoulPlugin(PluginBase):
                 continue
             if self._should_exclude_recalled_memory(cell):
                 continue
+            # Roleplay/explicit exchanges are in-character fiction, not a stable
+            # record of the user or an event (the compile path already strips
+            # them via strip_roleplay_lines — this keeps recall consistent).
+            # Feeding them back into a Grillo reflection beat made the beat
+            # elaborate the explicit content into ever-more-explicit diary
+            # entries (observed in tag_elaboration langfuse 36cb0aca). Structural
+            # detector from core.soul.roleplay; data-cleaning only, never routing.
+            try:
+                from core.soul.roleplay import is_roleplay_turn
+
+                if is_roleplay_turn(cell.episodic_trace):
+                    continue
+            except Exception:
+                pass
             memory_emotion = self._normalize_memory_emotion(
                 cell.emotional_tag.dominant_emotion
             )
@@ -789,17 +896,6 @@ class SoulPlugin(PluginBase):
                 "[soul_plugin] Runtime Postgres DSN is empty; falling back to memory"
             )
         return InMemorySoulRepository()
-
-    @staticmethod
-    def _is_enabled() -> bool:
-        try:
-            from core.config_manager import config_registry
-
-            return bool(
-                config_registry.get_value("SOUL_PLUGIN_ENABLED", 1, value_type=int)
-            )
-        except Exception:
-            return True
 
     @staticmethod
     def _get_compile_idle_seconds() -> int:

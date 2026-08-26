@@ -43,6 +43,16 @@ _IRIS_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days
 # tab / external_endpoints, not the Settings page).
 # ---------------------------------------------------------------------------
 
+# Default instruction sent to the vision engine when no custom prompt is
+# configured (IRIS_DEFAULT_PROMPT).  A neutral plain-text framing stops
+# session-aware LLM backends from replying with structured/JSON output
+# instead of a description.
+_IRIS_DEFAULT_PROMPT_TEXT = (
+    "IMPORTANT: Respond in plain conversational text only. "
+    "Do NOT use JSON, XML or any structured format. "
+    "Simply describe what you see in the image."
+)
+
 
 config_registry.get_value(
     "ACTIVE_IRIS_ENGINE",
@@ -62,7 +72,7 @@ config_registry.get_value(
 )
 config_registry.get_value(
     "IRIS_DEFAULT_PROMPT",
-    "Describe this image in detail.",
+    _IRIS_DEFAULT_PROMPT_TEXT,
     value_type=str,
     group="plugins",
     component="iris_plugin",
@@ -95,7 +105,7 @@ class IrisPlugin(AIPluginBase):
         super().__init__()
         self._active_engine_name: str = "disabled"
         self._engine_settings: dict[str, Any] = {}
-        self._default_prompt: str = "Describe this image in detail."
+        self._default_prompt: str = _IRIS_DEFAULT_PROMPT_TEXT
         self._default_model: str = ""
 
         # Import built-in engine modules so they self-register.
@@ -294,7 +304,7 @@ class IrisPlugin(AIPluginBase):
             self._default_prompt = str(
                 config_registry.get_value(
                     "IRIS_DEFAULT_PROMPT",
-                    "Describe this image in detail.",
+                    _IRIS_DEFAULT_PROMPT_TEXT,
                     value_type=str,
                     group="plugins",
                     component="iris_plugin",

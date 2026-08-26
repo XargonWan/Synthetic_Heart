@@ -1,0 +1,1 @@
+Engine modules are auto-registered at import time by calling their `discover_and_register(registry, dev_enabled=False)` function from the parent subsystem. Dev-only engines under `engines/external_engines/dev/` are only loaded when `dev_enabled=True`. No build step is required beyond standard Python imports.

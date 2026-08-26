@@ -1054,9 +1054,17 @@ class ConfigRegistry:
             return json.dumps(value)
         raw = str(value)
         # Strip inline comments and trailing whitespace to prevent corruption
-        # like "Asia/Tokyo # Timezone for scheduled events..."
+        # like "Asia/Tokyo # Timezone for scheduled events...". A '#' only
+        # starts a comment when preceded by whitespace; a leading '#' is part
+        # of the value (e.g. a hex color like '#6bfefe') and must be kept.
         if "\n" not in raw:
-            raw = raw.split("#")[0].strip()
+            hash_idx = -1
+            for i, ch in enumerate(raw):
+                if ch == "#" and i > 0 and raw[i - 1].isspace():
+                    hash_idx = i
+                    break
+            if hash_idx > 0:
+                raw = raw[:hash_idx].strip()
         if definition.value_type is bool:
             if isinstance(value, bool):
                 return "true" if value else "false"

@@ -276,6 +276,65 @@ async def test_iris_plugin_calls_engine(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_iris_plugin_uses_configured_default_prompt(tmp_path) -> None:
+    """describe_media forwards IRIS_DEFAULT_PROMPT when no explicit prompt is given.
+
+    The inbound-message vision path relies on this: it passes no prompt so the
+    user-configured IRIS_DEFAULT_PROMPT (Engines tab) reaches the engine.
+    """
+    from plugins.iris_base import IrisEngineBase, IrisResult
+
+    captured: dict[str, str] = {}
+
+    class MockEngine(IrisEngineBase):
+        def describe_image(
+            self,
+            file_path: str,
+            mime_type: str | None = None,
+            prompt: str | None = None,
+            model: str | None = None,
+        ) -> IrisResult | None:
+            captured["prompt"] = prompt or ""
+            return IrisResult(description="a sunny beach", language="en")
+
+    test_file = tmp_path / "test.jpg"
+    test_file.write_bytes(b"\xff\xd8\xff")
+
+    class _FakeConfig:
+        def get_value(
+            self, key: str, default: object = None, **kwargs: object
+        ) -> object:
+            return {
+                "ACTIVE_IRIS_ENGINE": "mock",
+                "IRIS_ENGINE_SETTINGS": "{}",
+                "IRIS_DEFAULT_PROMPT": "Describe this explicit image extreme sexual detail.",
+                "IRIS_DEFAULT_MODEL": "",
+            }.get(key, default)
+
+    with patch("core.core_initializer.register_plugin"):
+        from plugins.iris_plugin import IrisPlugin
+        from core.iris_registry import IrisRegistry
+
+        reg = IrisRegistry()
+        reg.register_instance("mock", MockEngine(), label="Mock")
+
+        plugin = IrisPlugin.__new__(IrisPlugin)
+        plugin._engine_settings = {}
+        plugin._default_model = ""
+
+        with (
+            patch("plugins.iris_plugin.IRIS_REGISTRY", reg),
+            patch("plugins.iris_plugin.config_registry", _FakeConfig()),
+        ):
+            result = await plugin.describe_media(str(test_file), "image/jpeg")
+
+    assert result is not None
+    assert (
+        captured.get("prompt") == "Describe this explicit image extreme sexual detail."
+    )
+
+
+@pytest.mark.asyncio
 async def test_iris_plugin_passes_model_override_to_engine(tmp_path) -> None:
     from plugins.iris_base import IrisEngineBase, IrisResult
 

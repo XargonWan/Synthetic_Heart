@@ -9,6 +9,9 @@ const historyState = {
     grillo: { page: 1, per_page: 20, search: '', beat_type: '', sort: 'desc' },
     dreams: { page: 1, per_page: 15, search: '', sort: 'desc' },
     chat: { page: 1, per_page: 50, search: '', interface_path: '', sort: 'desc' },
+    vessel: { page: 1, per_page: 20, search: '', environment: '', sort: 'desc' },
+    queue: { search: '', priority: '', loaded: false, pollTimer: null, pollMs: 3000, inFlight: false },
+    goals: { loaded: false },
     calendar: { year: null, month: null, events: [], loaded: false },
     growth: { current: null, entries: [], currentLikes: [], currentDislikes: [], pendingProposal: null }
 };
@@ -104,6 +107,22 @@ function initializeHistoryTab() {
     document.getElementById('history-chat-interface')?.addEventListener('change', () => { historyState.chat.interface_path = document.getElementById('history-chat-interface').value; historyState.chat.page = 1; loadHistoryChat(); });
     document.getElementById('history-chat-search')?.addEventListener('input', SynthUtils.debounce(() => { historyState.chat.search = document.getElementById('history-chat-search').value; historyState.chat.page = 1; loadHistoryChat(); }, 500));
     document.getElementById('history-chat-sort')?.addEventListener('change', () => { historyState.chat.sort = document.getElementById('history-chat-sort').value; historyState.chat.page = 1; loadHistoryChat(); });
+
+    document.getElementById('history-vessel-search')?.addEventListener('input', SynthUtils.debounce(() => { historyState.vessel.search = document.getElementById('history-vessel-search').value; historyState.vessel.page = 1; loadHistoryVessel(); }, 500));
+    document.getElementById('history-vessel-environment')?.addEventListener('change', () => { historyState.vessel.environment = document.getElementById('history-vessel-environment').value; historyState.vessel.page = 1; loadHistoryVessel(); });
+    document.getElementById('history-vessel-sort')?.addEventListener('change', () => { historyState.vessel.sort = document.getElementById('history-vessel-sort').value; historyState.vessel.page = 1; loadHistoryVessel(); });
+
+    document.getElementById('history-goals-search')?.addEventListener('input', SynthUtils.debounce(() => { goalsFilterState.search = document.getElementById('history-goals-search').value; renderGoalsFiltered(); }, 300));
+    document.getElementById('history-goals-status')?.addEventListener('change', () => { goalsFilterState.status = document.getElementById('history-goals-status').value; renderGoalsFiltered(); });
+    document.getElementById('history-goals-scope')?.addEventListener('change', () => { goalsFilterState.scope = document.getElementById('history-goals-scope').value; renderGoalsFiltered(); });
+    document.getElementById('history-goals-refresh')?.addEventListener('click', () => { loadHistoryGoals(); });
+    document.getElementById('history-goals-clear-all')?.addEventListener('click', clearAllGoals);
+
+    // Queue controls (read-only snapshot, live auto-refreshing — see repo memory
+    // webui-agent-tab-polling: diff-aware, selection-safe render, no blind innerHTML).
+    document.getElementById('history-queue-search')?.addEventListener('input', SynthUtils.debounce(() => { historyState.queue.search = document.getElementById('history-queue-search').value; loadHistoryQueue(); }, 400));
+    document.getElementById('history-queue-priority')?.addEventListener('change', () => { historyState.queue.priority = document.getElementById('history-queue-priority').value; loadHistoryQueue(); });
+    document.getElementById('history-queue-refresh')?.addEventListener('click', () => { loadHistoryQueue(); });
 
     // Calendar controls
     document.getElementById('calendar-prev')?.addEventListener('click', () => shiftCalendarMonth(-1));
@@ -669,12 +688,18 @@ function openInterfacePathPicker(onSelect) {
 }
 
 function loadHistoryData(subtab) {
+    // Leaving the Queue tab: stop its auto-refresh loop so it never polls in
+    // the background while another sub-tab is shown.
+    if (subtab !== 'queue') stopQueueAutoRefresh();
     if (subtab === 'diary') return loadHistoryDiary();
     if (subtab === 'grillo') return loadHistoryGrillo();
     if (subtab === 'calendar') return loadHistoryCalendar();
     if (subtab === 'dreams') return loadHistoryDreams();
     if (subtab === 'growth') return loadHistoryGrowth();
     if (subtab === 'chat') return loadHistoryChat();
+    if (subtab === 'vessel') return loadHistoryVessel();
+    if (subtab === 'queue') return loadHistoryQueue();
+    if (subtab === 'goals') return loadHistoryGoals();
     if (subtab === 'agent') {
         try { if (window.SynthWebUI && typeof window.SynthWebUI.initAgentTab === 'function') window.SynthWebUI.initAgentTab(); } catch (e) { /* ignore */ }
         return;
@@ -1075,6 +1100,10 @@ function deleteGrowthState(id) {
     deleteHistoryItem('/api/history/growth/' + id, loadHistoryGrowth, 'Delete this self-growth history entry? This cannot be undone.');
 }
 
+function deleteVesselEntry(id) {
+    deleteHistoryItem('/api/history/vessel/' + id, loadHistoryVessel, 'Delete this vessel activity entry? This cannot be undone.');
+}
+
 async function loadHistoryChat() {
     const content = document.getElementById('history-chat-content'); if (!content) return;
     console.log('[History] loadHistoryChat called with state:', historyState.chat);
@@ -1230,6 +1259,555 @@ function renderGrilloActions(actions) {
 
 function formatJsonBlock(value) { return SynthUtils.formatJsonBlock(value); }
 
+async function loadHistoryVessel() {
+    const content = document.getElementById('history-vessel-content'); if (!content) return;
+    console.log('[History] loadHistoryVessel called with state:', historyState.vessel);
+    content.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><p>Loading vessel activity...</p></div>';
+    const params = new URLSearchParams({ page: historyState.vessel.page, per_page: historyState.vessel.per_page, search: historyState.vessel.search, environment: historyState.vessel.environment, sort: historyState.vessel.sort });
+    try {
+        const response = await fetch(`/api/history/vessel?${params}`);
+        const data = await response.json();
+        console.log('[History] vessel response:', data);
+        if (data && data.success) {
+            const envSelect = document.getElementById('history-vessel-environment');
+            if (envSelect && Array.isArray(data.environments)) {
+                const defaultOption = envSelect.options && envSelect.options[0] ? envSelect.options[0] : null;
+                envSelect.innerHTML = '';
+                if (defaultOption) envSelect.appendChild(defaultOption);
+                const existing = new Set();
+                data.environments.forEach(env => {
+                    const trimmed = String(env).trim();
+                    if (!trimmed || existing.has(trimmed)) return;
+                    const option = document.createElement('option');
+                    option.value = trimmed;
+                    option.textContent = trimmed.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+                    envSelect.appendChild(option);
+                    existing.add(trimmed);
+                });
+            }
+            if (Array.isArray(data.sessions) && data.sessions.length > 0) {
+                content.innerHTML = data.sessions.map(session => renderVesselSession(session)).join('');
+                content.classList.add('history-populated');
+                try { content.scrollTop = 0; content.tabIndex = -1; setTimeout(() => { try { content.focus(); } catch (e) {} }, 50); } catch (e) {}
+                renderPagination('vessel', data.page, data.total_pages, data.total_count);
+            } else {
+                content.classList.remove('history-populated');
+                content.innerHTML = '<div class="empty-state"><div class="icon">🌀</div><p>No vessel activity found</p></div>';
+            }
+        } else {
+            console.warn('[History] vessel response indicates failure or unexpected shape:', data);
+            content.classList.remove('history-populated');
+            content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load vessel activity</p></div>';
+        }
+    } catch (error) {
+        console.error('Failed to load vessel history:', error);
+        content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load vessel activity</p></div>';
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Queue sub-tab: read-only snapshot of the pending message-chain backlog.
+// Manual refresh only (no auto-poll — see repo memory webui-agent-tab-polling).
+// ---------------------------------------------------------------------------
+
+// Format a short "N ago" label from a numeric age in seconds.
+function formatQueueAge(ageSeconds) {
+    const s = Number(ageSeconds);
+    if (!Number.isFinite(s) || s < 0) return '';
+    if (s < 60) return `${Math.round(s)}s ago`;
+    if (s < 3600) return `${Math.round(s / 60)}m ago`;
+    if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+    return `${Math.round(s / 86400)}d ago`;
+}
+
+// Convert an epoch-seconds value to an ISO string formatTimestamp understands.
+function epochToIso(epochSeconds) {
+    const s = Number(epochSeconds);
+    if (!Number.isFinite(s) || s <= 0) return '';
+    try { return new Date(s * 1000).toISOString(); } catch (e) { return ''; }
+}
+
+// True when the user has a non-collapsed text selection anchored inside `el`.
+// Auto-refresh must not rewrite the DOM while text is being selected there
+// (see repo memory webui-agent-tab-polling — blind innerHTML kills selection).
+function _queueUserIsSelectingIn(el) {
+    try {
+        const sel = window.getSelection && window.getSelection();
+        if (!sel || sel.isCollapsed || sel.rangeCount === 0) return false;
+        const node = sel.anchorNode;
+        return !!(node && el && el.contains(node.nodeType === 1 ? node : node.parentNode));
+    } catch (e) { return false; }
+}
+
+// Write innerHTML ONLY when it actually changed AND the user is not selecting
+// inside `el`. Defers a pending render (picked up on the next poll) otherwise,
+// so live polling never destroys an active selection or flickers unchanged DOM.
+function _queueRenderIfChanged(el, html) {
+    if (!el) return false;
+    if (el.__lastRenderedHtml === html) { el.__pendingRenderHtml = null; return false; }
+    if (_queueUserIsSelectingIn(el)) { el.__pendingRenderHtml = html; return false; }
+    el.innerHTML = html;
+    el.__lastRenderedHtml = html;
+    el.__pendingRenderHtml = null;
+    return true;
+}
+
+// Build the full inner markup for the queue content pane from a response.
+function _queueBuildHtml(data) {
+    if (!(data && data.success)) {
+        return '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load queue</p></div>';
+    }
+    const items = Array.isArray(data.items) ? data.items : [];
+    if (items.length === 0) {
+        return '<div class="empty-state"><div class="icon">📥</div><p>Queue is empty</p></div>';
+    }
+    const summary = `<div class="queue-summary">${items.length} item(s) queued${data.generated_at ? ' · snapshot ' + formatTimestamp(data.generated_at) : ''}</div>`;
+    return summary + items.map(renderQueueItem).join('');
+}
+
+// Fetch + render one queue snapshot. `silent` skips the loading spinner (used
+// by the auto-refresh poll so live ticks don't flash a spinner every time).
+async function loadHistoryQueue(silent) {
+    const content = document.getElementById('history-queue-content'); if (!content) return;
+    if (historyState.queue.inFlight) return; // avoid overlapping polls
+    if (!silent && content.__lastRenderedHtml == null) {
+        content.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><p>Loading queue...</p></div>';
+        content.__lastRenderedHtml = null;
+    }
+    historyState.queue.inFlight = true;
+    const params = new URLSearchParams({ search: historyState.queue.search || '', priority: historyState.queue.priority || '' });
+    try {
+        const response = await fetch(`/api/history/queue?${params}`);
+        const data = await response.json();
+        historyState.queue.loaded = true;
+        const html = _queueBuildHtml(data);
+        const populated = !!(data && data.success && Array.isArray(data.items) && data.items.length > 0);
+        _queueRenderIfChanged(content, html);
+        content.classList.toggle('history-populated', populated);
+    } catch (error) {
+        console.error('Failed to load queue:', error);
+        _queueRenderIfChanged(content, '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load queue</p></div>');
+        content.classList.remove('history-populated');
+    } finally {
+        historyState.queue.inFlight = false;
+    }
+    // (Re)arm the live auto-refresh loop; safe to call repeatedly.
+    startQueueAutoRefresh();
+}
+
+// Start the live auto-refresh poll for the Queue sub-tab (idempotent). Only
+// polls while the Queue panel is the active sub-tab and the document is visible.
+function startQueueAutoRefresh() {
+    if (historyState.queue.pollTimer) return;
+    historyState.queue.pollTimer = setInterval(() => {
+        if (historyState.currentSubTab !== 'queue') { stopQueueAutoRefresh(); return; }
+        if (document.hidden) return; // don't poll a backgrounded tab
+        loadHistoryQueue(true);
+    }, historyState.queue.pollMs);
+}
+
+// Stop the live auto-refresh poll.
+function stopQueueAutoRefresh() {
+    if (historyState.queue.pollTimer) {
+        clearInterval(historyState.queue.pollTimer);
+        historyState.queue.pollTimer = null;
+    }
+}
+
+// CSS-class suffix for a priority band, derived from its display label so the
+// badge colour tracks the label (never a hardcoded priority-name match).
+function queuePriorityClass(label) {
+    const l = String(label || '').trim().toLowerCase().replace(/[^a-z]/g, '');
+    return l ? `prio-${l}` : '';
+}
+
+function renderQueueItem(it) {
+    const pos = it && it.position != null ? it.position : '';
+    const label = escapeHtml((it && it.priority_label) || String((it && it.priority) || ''));
+    const prioClass = queuePriorityClass(it && it.priority_label);
+
+    // "Who enqueued": interface + interface_path + chat_name.
+    const iface = String((it && it.interface) || '').trim();
+    const ipath = String((it && it.interface_path) || '').trim();
+    const chatName = String((it && it.chat_name) || '').trim();
+    const sourceParts = [];
+    if (ipath) sourceParts.push(ipath);
+    else if (iface) sourceParts.push(iface);
+    if (chatName && chatName !== ipath) sourceParts.push(chatName);
+    const source = escapeHtml(sourceParts.join(' · ') || 'unknown');
+
+    // "When": absolute timestamp + relative age.
+    const iso = epochToIso(it && it.enqueued_at);
+    const absTime = iso ? formatTimestamp(iso) : '';
+    const age = formatQueueAge(it && it.age_seconds);
+    const timeText = escapeHtml([absTime, age ? `(${age})` : ''].filter(Boolean).join(' '));
+
+    // Vessel flags (structural, from the snapshot — no keyword logic).
+    const flags = [];
+    if (it && it.vessel_player_chat) flags.push('player-chat');
+    if (it && it.vessel_reflection) flags.push('reflection');
+    if (it && it.vessel_appraisal) flags.push('appraisal');
+    if (it && it.is_priority) flags.push('priority');
+    const flagsHtml = flags.length ? `<span class="queue-item-flags">${escapeHtml(flags.join(', '))}</span>` : '';
+
+    const previewRaw = (it && it.text_preview) || '';
+    const preview = previewRaw
+        ? `<div class="queue-item-preview">${escapeHtml(previewRaw)}</div>`
+        : '<div class="queue-item-preview empty">(no text)</div>';
+
+    return `
+        <div class="queue-item">
+            <span class="queue-item-pos">#${pos}</span>
+            <div class="queue-item-body">
+                <div class="queue-item-top">
+                    <span class="queue-priority-badge ${prioClass}">${label}</span>
+                    <span class="queue-item-source">${source}</span>
+                    <span class="queue-item-time">${timeText}</span>
+                    ${flagsHtml}
+                </div>
+                ${preview}
+            </div>
+        </div>
+    `;
+}
+
+// Map a vessel environment (e.g. "minecraft") to its world sub-plugin icon.
+// World sub-plugins are named "<environment>_vessel" and serve their icon at
+// /api/plugins/<name>/icon (falls back to the SyntH logo server-side).
+function vesselEnvIconUrl(environment) {
+    const env = String(environment || '').trim();
+    if (!env || env === 'unknown') return '';
+    return `/api/plugins/${encodeURIComponent(env + '_vessel')}/icon`;
+}
+
+// Map a goal SCOPE to the icon of the plugin that owns it, served dynamically
+// at /api/plugins/<plugin>/icon (falls back to the SyntH logo server-side, and
+// to a text badge client-side via onerror). "vessel" is owned by the Rift
+// Vessel core plugin (``vessel_plugin``); every other scope is owned by the
+// generic Goals plugin (``goals``). Keyed off the loaded plugin's icon so the
+// badge is driven by whatever plugin is actually in charge, never hardcoded.
+function scopeIconUrl(scope) {
+    const s = String(scope || '').trim();
+    if (!s || s === 'none') return `/api/plugins/goals/icon`;
+    const plugin = (s === 'vessel') ? 'vessel_plugin' : 'goals';
+    return `/api/plugins/${encodeURIComponent(plugin)}/icon`;
+}
+
+// Render ONE embodiment session (login -> logout) as a single block containing
+// every activity of that session, so we never produce an infinite list of
+// one-event-per-block cards.
+function renderVesselSession(session) {
+    const environment = String(session.environment || 'unknown');
+    const envLabel = escapeHtml(environment.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()));
+    const startTs = formatTimestamp(session.started_at);
+    const endTs = formatTimestamp(session.last_at);
+    const timeRange = (startTs === endTs) ? startTs : `${startTs} → ${endTs}`;
+    const iconUrl = vesselEnvIconUrl(environment);
+    const iconHtml = iconUrl
+        ? `<img class="vessel-env-icon" src="${iconUrl}" alt="" onerror="this.style.display='none'">`
+        : '';
+
+    const activities = Array.isArray(session.activities) ? session.activities : [];
+    const activitiesHtml = activities.length
+        ? activities.map(a => {
+            const at = formatTimestamp(a.created_at);
+            const summary = escapeHtml(a.summary || '');
+            const eventTypeLabel = escapeHtml((a.event_type || 'event').replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()));
+            const del = a.id ? `<button type="button" class="history-delete-btn" title="Delete this activity" onclick="window.SynthWebUI.deleteVesselEntry(${a.id})">🗑</button>` : '';
+            return `
+                <div class="vessel-activity">
+                    <span class="vessel-activity-time">${at}</span>
+                    <span class="history-entry-type">${eventTypeLabel}</span>
+                    <span class="vessel-activity-summary">${summary}</span>
+                    ${del}
+                </div>
+            `;
+        }).join('')
+        : '<div class="vessel-activity-empty">No activity recorded for this session.</div>';
+
+    return `
+        <div class="vessel-session">
+            <div class="vessel-session-header">
+                <div class="vessel-session-title">
+                    ${iconHtml}
+                    <span>${iconUrl ? '' : '🌀 '}${envLabel}</span>
+                    <span class="history-entry-type">${activities.length} ${activities.length === 1 ? 'activity' : 'activities'}</span>
+                </div>
+                <span class="vessel-session-time">${timeRange}</span>
+            </div>
+            <div class="vessel-session-activities">
+                ${activitiesHtml}
+            </div>
+        </div>
+    `;
+}
+
+// Goals sub-tab: one group per (scope, game, world) bucket, each a set of goal
+// cards showing the current objective (first) and recent goals, with their
+// free-text steps. Backed by the generic, scope-aware Goals plugin — objectives
+// belong to the Rift Vessel AND to any other scope (personal life goals,
+// planning, future games), so a scope badge distinguishes them.
+// Client-side filter state for the Goals sub-tab and the last-fetched groups,
+// so status/scope/text filtering re-renders without a round-trip.
+const goalsFilterState = { search: '', status: '', scope: '' };
+let goalsGroupsCache = [];
+
+async function loadHistoryGoals() {
+    const content = document.getElementById('history-goals-content'); if (!content) return;
+    content.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><p>Loading goals...</p></div>';
+    try {
+        const response = await fetch('/api/goals');
+        const data = await response.json();
+        if (data && data.success && Array.isArray(data.groups)) {
+            goalsGroupsCache = data.groups.filter(g => Array.isArray(g.goals) && g.goals.length > 0);
+            populateGoalsFilterOptions(goalsGroupsCache);
+            renderGoalsFiltered();
+        } else {
+            goalsGroupsCache = [];
+            content.classList.remove('history-populated');
+            content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load goals</p></div>';
+        }
+    } catch (error) {
+        console.error('Failed to load goals:', error);
+        goalsGroupsCache = [];
+        content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load goals</p></div>';
+    }
+}
+
+// Populate the status and scope <select> filters from the fetched data, keeping
+// the current selection when the option still exists.
+function populateGoalsFilterOptions(groups) {
+    const titleCase = (s) => String(s).replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+    const statuses = new Set();
+    const scopes = new Set();
+    groups.forEach(g => {
+        const scope = String(g.scope || 'none');
+        if (g.scope !== undefined && g.scope !== null) scopes.add(scope);
+        (g.goals || []).forEach(goal => statuses.add(String(goal.status || 'active')));
+    });
+    const fill = (selectId, values, current) => {
+        const sel = document.getElementById(selectId);
+        if (!sel) return;
+        const opts = ['<option value="">' + (selectId.endsWith('status') ? 'All Statuses' : 'All Scopes') + '</option>'];
+        Array.from(values).sort().forEach(v => {
+            opts.push(`<option value="${escapeHtml(v)}">${escapeHtml(titleCase(v))}</option>`);
+        });
+        sel.innerHTML = opts.join('');
+        if (current && values.has(current)) sel.value = current;
+    };
+    fill('history-goals-status', statuses, goalsFilterState.status);
+    fill('history-goals-scope', scopes, goalsFilterState.scope);
+}
+
+// Apply the current filter state to the cached groups and re-render.
+function renderGoalsFiltered() {
+    const content = document.getElementById('history-goals-content'); if (!content) return;
+    const q = String(goalsFilterState.search || '').trim().toLowerCase();
+    const statusFilter = String(goalsFilterState.status || '');
+    const scopeFilter = String(goalsFilterState.scope || '');
+
+    const matchesText = (goal) => {
+        if (!q) return true;
+        const hay = [goal.description, goal.note, ...(Array.isArray(goal.steps) ? goal.steps : [])]
+            .filter(Boolean).join(' ').toLowerCase();
+        return hay.includes(q);
+    };
+
+    const filteredGroups = goalsGroupsCache
+        .filter(g => !scopeFilter || String(g.scope || 'none') === scopeFilter)
+        .map(g => {
+            const goals = (g.goals || []).filter(goal =>
+                (!statusFilter || String(goal.status || 'active') === statusFilter) && matchesText(goal));
+            return { ...g, goals };
+        })
+        .filter(g => g.goals.length > 0);
+
+    if (filteredGroups.length > 0) {
+        content.innerHTML = filteredGroups.map(g => renderGoalsGroup(g)).join('');
+        content.classList.add('history-populated');
+    } else {
+        content.classList.remove('history-populated');
+        const anyGoals = goalsGroupsCache.length > 0;
+        const msg = anyGoals ? 'No goals match the filters' : 'No goals yet';
+        content.innerHTML = `<div class="empty-state"><div class="icon">🎯</div><p>${msg}</p></div>`;
+    }
+}
+
+// Render one goal group (a scope/game/world bucket): a light group header with
+// just the count + clear-abandoned button, then a grid of goal cards. The
+// scope/game/world identity now lives INSIDE each card (per user request), so
+// the group header no longer carries the scope badge, icon, or world title.
+function renderGoalsGroup(group) {
+    const goals = Array.isArray(group.goals) ? group.goals : [];
+    const cardsHtml = goals.map(g => renderGoalCard(g, group)).join('');
+    const abandonedCount = goals.filter(g => String(g.status || '') === 'abandoned').length;
+    const clearBtn = abandonedCount > 0
+        ? `<button class="goals-clear-abandoned-btn" onclick="clearAbandonedGoals()" title="Delete all abandoned goals">🗑️ Clear abandoned (${abandonedCount})</button>`
+        : '';
+    return `
+        <div class="goals-world">
+            <div class="goals-world-header">
+                <span class="history-entry-type">${goals.length} ${goals.length === 1 ? 'goal' : 'goals'}</span>
+                ${clearBtn}
+            </div>
+            <div class="goals-cards">
+                ${cardsHtml}
+            </div>
+        </div>
+    `;
+}
+
+// Build the per-card scope/icon/world identity strip (moved out of the group
+// header). Derives the label + icon from the group's scope/game/world.
+function renderGoalIdentity(group) {
+    const scope = String((group && group.scope) || 'none');
+    const game = String((group && group.game) || 'none');
+    const world = String((group && group.world) || 'none');
+    const player = String((group && group.player) || '').trim();
+    // For embodiment goals the icon is keyed off the GAME (its ``<game>_vessel``
+    // sub-plugin owns the icon), NOT the world slug — the world is a concrete
+    // server identity (a ``host:port`` token) with no icon of its own. The
+    // label reads ``<Game>: <world>, <player>`` so the card shows which world
+    // and character the goals belong to.
+    let label;
+    let iconGame = '';
+    if (scope === 'vessel') {
+        iconGame = (game && game !== 'none') ? game : '';
+        const gameLabel = String(iconGame || 'vessel').replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+        const parts = [];
+        if (world && world !== 'none') parts.push(world);
+        if (player) parts.push(player);
+        label = escapeHtml(parts.length ? `${gameLabel}: ${parts.join(', ')}` : gameLabel);
+    } else {
+        label = escapeHtml(String(scope).replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()));
+    }
+    const iconUrl = iconGame ? vesselEnvIconUrl(iconGame) : '';
+    const iconHtml = iconUrl
+        ? `<img class="vessel-env-icon" src="${iconUrl}" alt="" onerror="this.style.display='none'">`
+        : '';
+    const scopeLabel = escapeHtml(String(scope).replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()));
+    // Show the scope's PLUGIN icon instead of a text badge to save space; the
+    // icon is served dynamically from whichever plugin owns the scope. If the
+    // icon fails to load we swap in the original text badge (onerror).
+    const scopeIcon = scopeIconUrl(scope);
+    const textBadgeHtml = `<span class="goals-scope-badge goals-scope-${escapeHtml(scope)}">${scopeLabel}</span>`;
+    const scopeBadge = scopeIcon
+        ? `<img class="goals-scope-icon goals-scope-${escapeHtml(scope)}" src="${scopeIcon}" alt="${scopeLabel}" title="${scopeLabel}" onerror="this.outerHTML=${JSON.stringify(textBadgeHtml).replace(/"/g, '&quot;')}">`
+        : textBadgeHtml;
+    return `
+        <div class="goal-identity">
+            ${scopeBadge}
+            ${iconHtml}
+            <span class="goal-identity-world">${iconUrl ? '' : '🎯 '}${label}</span>
+        </div>
+    `;
+}
+
+// Render ONE goal card: identity strip (scope/icon/world), description, optional
+// note, status badge, last-updated time, and its steps with the current step
+// highlighted. Steps are free-text authored by Synth; we render whatever is
+// stored (no fixed schema).
+function renderGoalCard(goal, group) {
+    const status = String(goal.status || 'active');
+    const isActive = status === 'active';
+    const statusLabel = escapeHtml(status.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()));
+    const description = escapeHtml(goal.description || '(no description)');
+    const note = goal.note ? `<div class="goal-note">${escapeHtml(goal.note)}</div>` : '';
+    const updated = formatTimestamp(goal.updated_at || goal.created_at);
+    const identityHtml = renderGoalIdentity(group);
+
+    const steps = Array.isArray(goal.steps) ? goal.steps : [];
+    const currentStep = Number.isInteger(goal.current_step) ? goal.current_step : -1;
+    let stepsHtml;
+    if (steps.length > 0) {
+        const stepsList = '<ul class="goal-steps">' + steps.map((step, idx) => {
+            let cls = 'goal-step';
+            let marker = '○';
+            if (idx < currentStep) { cls += ' goal-step-done'; marker = '✓'; }
+            else if (idx === currentStep) { cls += ' goal-step-current'; marker = '▶'; }
+            return `<li class="${cls}"><span class="goal-step-marker">${marker}</span><span class="goal-step-text">${escapeHtml(step)}</span></li>`;
+        }).join('') + '</ul>';
+        const doneCount = currentStep >= 0 ? Math.min(currentStep, steps.length) : 0;
+        const summaryLabel = `Plan · ${doneCount}/${steps.length} steps`;
+        // Collapsed by default so a card stays compact; expand to inspect the plan.
+        stepsHtml = `<details class="goal-steps-details"><summary class="goal-steps-summary">${summaryLabel}</summary>${stepsList}</details>`;
+    } else {
+        stepsHtml = '<div class="goal-no-steps">No steps recorded.</div>';
+    }
+
+    const goalId = goal.id;
+    const deleteBtn = (!isActive && goalId != null)
+        ? `<button class="goal-delete-btn" onclick="deleteGoal(${goalId})" title="Delete this goal">🗑️</button>`
+        : '';
+
+    return `
+        <div class="goal-card ${isActive ? 'goal-active' : ''}">
+            <div class="goal-card-header">
+                ${identityHtml}
+                <span class="goal-status ${isActive ? 'goal-status-active' : ''}">${statusLabel}</span>
+                ${deleteBtn}
+            </div>
+            <div class="goal-description">${description}</div>
+            ${note}
+            ${stepsHtml}
+            <div class="goal-card-footer">
+                <span class="goal-updated-label">Last updated</span>
+                <span class="goal-card-time">${updated}</span>
+            </div>
+        </div>
+    `;
+}
+
+// Delete a single non-active goal (generic Goals API), then refresh the sub-tab.
+async function deleteGoal(goalId) {
+    if (!confirm('Delete this goal?')) return;
+    try {
+        const response = await fetch(`/api/goals/${goalId}`, { method: 'DELETE' });
+        const data = await response.json();
+        if (!data || !data.success) {
+            alert('Failed to delete goal: ' + ((data && data.error) || 'unknown error'));
+        }
+    } catch (error) {
+        console.error('Failed to delete goal:', error);
+        alert('Failed to delete goal.');
+    }
+    loadHistoryGoals();
+}
+
+// Delete every abandoned goal across all scopes (generic Goals API), then refresh.
+async function clearAbandonedGoals() {
+    if (!confirm('Delete all abandoned goals?')) return;
+    try {
+        const response = await fetch('/api/goals/clear-abandoned', { method: 'POST' });
+        const data = await response.json();
+        if (!data || !data.success) {
+            alert('Failed to clear abandoned goals: ' + ((data && data.error) || 'unknown error'));
+        }
+    } catch (error) {
+        console.error('Failed to clear abandoned goals:', error);
+        alert('Failed to clear abandoned goals.');
+    }
+    loadHistoryGoals();
+}
+
+// Delete EVERY goal (all scopes, all statuses) — a clean-attempt reset, then
+// refresh the sub-tab. Uses the generic Goals API so vessel AND personal goals
+// are wiped alike; confirm() guards the destructive call.
+async function clearAllGoals() {
+    if (!confirm('Delete ALL goals (active, done and abandoned — every scope)? This gives Synth a completely clean attempt and cannot be undone.')) return;
+    try {
+        const response = await fetch('/api/goals', { method: 'DELETE' });
+        const data = await response.json();
+        if (!data || !data.success) {
+            alert('Failed to clear all goals: ' + ((data && data.error) || 'unknown error'));
+        }
+    } catch (error) {
+        console.error('Failed to clear all goals:', error);
+        alert('Failed to clear all goals.');
+    }
+    loadHistoryGoals();
+}
+
 function renderChatMessage(msg) {
     const timestamp = formatTimestamp(msg.timestamp);
     let safeMessage = escapeHtml(msg.message_text || ''); safeMessage = safeMessage.replace(/^[\s\u00A0]+/, '').replace(/[\n\r]+$/, ''); const isLong = safeMessage.split('\n').length > 6 || safeMessage.length > 600; const longClass = isLong ? ' chat-text--limited' : '';
@@ -1272,6 +1850,10 @@ function changePage(type, newPage) { historyState[type].page = newPage; loadHist
 // Expose to the global scope so the inline onclick="changePage(...)" handlers in
 // renderPagination() can reach it (this file runs inside an IIFE).
 window.changePage = changePage;
+// Same reason: the inline onclick handlers in renderGoalsGroup()/renderGoalCard()
+// call these, so they must be reachable on the global scope.
+window.deleteGoal = deleteGoal;
+window.clearAbandonedGoals = clearAbandonedGoals;
 
 function debounce(func, wait) { let timeout; return function executedFunction(...args) { const later = () => { clearTimeout(timeout); func(...args); }; clearTimeout(timeout); timeout = setTimeout(later, wait); }; }
 
@@ -1289,6 +1871,7 @@ window.SynthWebUI.deleteDiaryDay = deleteDiaryDay;
 window.SynthWebUI.deleteGrilloEntry = deleteGrilloEntry;
 window.SynthWebUI.deleteDreamEntry = deleteDreamEntry;
 window.SynthWebUI.deleteGrowthState = deleteGrowthState;
+window.SynthWebUI.deleteVesselEntry = deleteVesselEntry;
 
 // Fallback: if the tab is active on DOMContentLoaded, initialize
 document.addEventListener('DOMContentLoaded', () => {

@@ -6,7 +6,49 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from core.config_manager import config_registry
 from core.logging_utils import log_debug, log_warning
+from core.variables_engine import register_exposed_var
+
+
+register_exposed_var(
+    "INCLUDE_TEST_FAILURES",
+    label="Include Test Failures",
+    default=False,
+    value_type=bool,
+    ui_type="bool",
+    description=(
+        "Include test-isolated failure entries (interface_path='fake' or "
+        "reason='test reason') in failure summaries and the failure log."
+    ),
+    scope="core",
+    component="diagnostics",
+    advanced=True,
+)
+
+_INCLUDE_TEST_FAILURES = config_registry.get_var(
+    "INCLUDE_TEST_FAILURES",
+    False,
+    label="Include Test Failures",
+    description=(
+        "Include test-isolated failure entries (interface_path='fake' or "
+        "reason='test reason') in failure summaries and the failure log."
+    ),
+    value_type=bool,
+    component="diagnostics",
+    advanced=True,
+)
+
+
+def _include_test_failures_enabled() -> bool:
+    """Read INCLUDE_TEST_FAILURES (default False), fail-closed on any error."""
+    try:
+        value = _INCLUDE_TEST_FAILURES.value
+        if isinstance(value, str):
+            return value.strip().lower() not in ("", "0", "false", "no", "off")
+        return bool(value)
+    except Exception:
+        return False
 
 
 _TABLE_SQL = """
@@ -23,6 +65,7 @@ CREATE TABLE IF NOT EXISTS llm_failure_log (
     message_id VARCHAR(255),
     content_preview TEXT,
     metadata JSON,
+    is_test TINYINT(1) NOT NULL DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_failure_created_at (created_at),
     INDEX idx_failure_code (failure_code),
@@ -95,6 +138,7 @@ def build_failure_entry(
     correction_context: dict[str, Any] | None = None,
     metadata: dict[str, Any] | None = None,
     failure_code: str | None = None,
+    is_test: bool = False,
 ) -> dict[str, Any]:
     normalized_metadata: dict[str, Any] = {}
     if isinstance(metadata, dict):
@@ -103,6 +147,11 @@ def build_failure_entry(
         normalized_metadata.setdefault(
             "correction_context", _sanitize_for_storage(correction_context)
         )
+
+    if not is_test:
+        interface_prefix = str(interface_path or "").lower()
+        if interface_prefix.startswith("fake") or str(reason or "") == "test reason":
+            is_test = True
 
     return {
         "failure_code": failure_code
@@ -121,6 +170,7 @@ def build_failure_entry(
         "message_id": None if message_id is None else str(message_id),
         "content_preview": content_preview,
         "metadata": normalized_metadata,
+        "is_test": bool(is_test),
     }
 
 
@@ -210,6 +260,7 @@ def _normalize_entry_for_storage(entry: dict[str, Any]) -> dict[str, Any]:
         else str(entry.get("message_id")),
         "content_preview": entry.get("content_preview"),
         "metadata": _sanitize_for_storage(entry.get("metadata") or {}),
+        "is_test": bool(entry.get("is_test")),
         "created_at": _normalize_created_at(entry.get("created_at")),
     }
 
@@ -284,12 +335,14 @@ async def _list_in_memory_failure_entries(
     failure_code: str,
     stage: str,
 ) -> list[dict[str, Any]]:
+    include_test = _include_test_failures_enabled()
     async with _get_in_memory_failure_lock():
         _prune_in_memory_failure_entries_locked()
         entries = [
             dict(entry)
             for entry in _in_memory_failure_entries
-            if _entry_matches_filters(
+            if (include_test or not bool(entry.get("is_test")))
+            and _entry_matches_filters(
                 entry,
                 search=search,
                 failure_code=failure_code,
@@ -323,6 +376,9 @@ async def _list_db_failure_entries(
     order = "DESC" if str(sort).lower() != "asc" else "ASC"
     where_clauses: list[str] = []
     where_params: list[Any] = []
+
+    if not _include_test_failures_enabled():
+        where_clauses.append("is_test = 0")
 
     if search:
         search_term = f"%{search}%"
@@ -393,10 +449,14 @@ async def _list_db_failure_entries(
     return entries
 
 
-async def record_failure_entry(entry: dict[str, Any]) -> int | None:
+async def record_failure_entry(
+    entry: dict[str, Any], *, is_test: bool = False
+) -> int | None:
     from core.db import get_conn_ctx
 
     normalized_entry = _normalize_entry_for_storage(entry)
+    if is_test:
+        normalized_entry["is_test"] = True
     metadata_json = json.dumps(normalized_entry["metadata"], ensure_ascii=False)
 
     try:
@@ -417,8 +477,9 @@ async def record_failure_entry(entry: dict[str, Any]) -> int | None:
                         model,
                         message_id,
                         content_preview,
+                        is_test,
                         metadata
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     [
                         normalized_entry["failure_code"],
@@ -431,6 +492,7 @@ async def record_failure_entry(entry: dict[str, Any]) -> int | None:
                         normalized_entry["model"],
                         normalized_entry["message_id"],
                         normalized_entry["content_preview"],
+                        1 if normalized_entry["is_test"] else 0,
                         metadata_json,
                     ],
                 )

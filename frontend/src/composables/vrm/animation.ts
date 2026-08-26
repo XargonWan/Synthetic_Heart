@@ -312,14 +312,40 @@ export class KaradaAnimationEngine {
   private updateDescriptorStateMachine(): void {
     if (!this.currentDescriptor || !this.currentState || !this.currentAction)
       return
-    const { intro, loop } = this.currentDescriptor
+    const { intro, loop, outro } = this.currentDescriptor
     if (this.currentSection === 'intro' && intro) {
       const fps = this.currentDescriptor.fps || 30
       const introDuration = (intro.end_frame - intro.start_frame) / fps
-      if (this.animationClock - this.sectionStartTime >= introDuration && loop)
-        this.playSection('loop')
+      if (this.animationClock - this.sectionStartTime >= introDuration) {
+        if (loop) {
+          this.playSection('loop')
+        }
+        else if (outro) {
+          // No loop section (e.g. skin_change's "Look Around": intro+outro,
+          // play_once). The intro is a one-shot that clamps on its last frame;
+          // without a loop to hand off to, nothing advanced the state and the
+          // action froze mid-pose. Drive intro → outro → idle so the animation
+          // completes instead of clamping on the intro's final frame.
+          this.playSection('outro')
+          const outroDuration = (outro.end_frame - outro.start_frame) / fps
+          setTimeout(() => {
+            if (this.currentSection === 'outro' && this.currentState !== IDLE_FALLBACK_STATE) {
+              const idle = this.resolveIdleClip()
+              if (idle)
+                this.transitionToIdle(idle)
+            }
+          }, outroDuration * 1000 + 100)
+        }
+        else {
+          // Intro-only, no loop and no outro: fall straight back to idle
+          // rather than clamping forever on the intro's last frame.
+          const idle = this.resolveIdleClip()
+          if (idle)
+            this.transitionToIdle(idle)
+        }
+      }
     }
-    // outro is triggered externally via stopAnimation()
+    // outro after a loop section is still triggered externally via stopAnimation()
   }
 
   /**
@@ -356,7 +382,15 @@ export class KaradaAnimationEngine {
       clearTimeout(this.baseIdleFloorTimer)
     this.baseIdleFloorTimer = setTimeout(() => {
       this.baseIdleFloorTimer = null
-      this.baseIdleAction?.setEffectiveWeight(targetWeight)
+      // Only lower the base idle when a DISTINCT foreground action is covering
+      // the skeleton. When the current foreground action IS the base idle
+      // (e.g. an `idle` state whose clip resolves to the same fallback idle
+      // clip — three.js caches actions by clip, so `clipAction()` returns the
+      // very same object), dropping it to the floor would leave the skeleton
+      // at ~12% animation / ~88% bind pose = a partial T-pose. Keep it at full
+      // weight in that case.
+      if (this.baseIdleAction && this.currentAction !== this.baseIdleAction)
+        this.baseIdleAction.setEffectiveWeight(targetWeight)
     }, delayMs)
   }
 

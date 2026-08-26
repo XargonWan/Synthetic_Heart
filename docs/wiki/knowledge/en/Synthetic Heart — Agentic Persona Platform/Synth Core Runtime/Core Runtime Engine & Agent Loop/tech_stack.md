@@ -1,0 +1,1 @@
+Python asyncio for concurrency; SQLite/PostgreSQL via `core.db` connection contexts with `RETURNING id` fallback to `lastrowid`; `contextvars` for per-task LLM chain depth tracking; `importlib` for lazy module loading to avoid circular imports; `json` for persistent serialization of agent task payloads.

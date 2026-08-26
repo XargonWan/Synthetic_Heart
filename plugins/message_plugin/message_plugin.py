@@ -146,6 +146,24 @@ class MessagePlugin:
         target = payload.get("target")
         thread_id = payload.get("thread_id")
 
+        # A hallucinated interface prefix (e.g. 'em_chat_bridge/...') matches
+        # no registered interface and would sink the reply. Route to the chat
+        # the turn actually arrived in instead — the same structural
+        # guarantee the openai_compat mirror below gives local models, applied
+        # to every engine.
+        if interface_path:
+            from core.interface_path_utils import resolve_registered_interface_path
+
+            routed_path = resolve_registered_interface_path(
+                interface_path, context=context, original_message=original_message
+            )
+            if routed_path and routed_path != interface_path:
+                log_warning(
+                    f"[message_plugin] Redirecting unregistered interface_path "
+                    f"'{interface_path}' -> '{routed_path}'"
+                )
+                interface_path = routed_path
+
         # Decompose interface_path into components
         if interface_path:
             parts = interface_path.split("/")

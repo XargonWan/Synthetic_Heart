@@ -1,0 +1,1 @@
+ffmpeg + ffprobe for audio/video extraction and frame decomposition; yt-dlp for YouTube subtitle/audio fetching; base64 encoding for inline media payloads; asyncio subprocess calls for all external tool invocations; optional gemini_api-compatible multimodal format.
