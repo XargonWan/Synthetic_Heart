@@ -14,11 +14,15 @@ class ValidationRule:
         required_fields: List[str] = None,
         custom_validator: callable = None,
         component_name: str = None,
+        one_of_groups: List[List[str]] = None,
     ):
         self.action_type = action_type
         self.required_fields = required_fields or []
         self.custom_validator = custom_validator
         self.component_name = component_name or "unknown"
+        # OR groups: within each group at least one field must be present;
+        # every group must pass (AND across groups).
+        self.one_of_groups = [list(g) for g in (one_of_groups or [])]
 
     def validate(self, payload: Dict[str, Any]) -> List[str]:
         """Validate payload against this rule. Returns list of error messages."""
@@ -34,6 +38,20 @@ class ValidationRule:
                 errors.append(
                     f"Field '{field}' cannot be empty for action '{self.action_type}'"
                 )
+
+        # Check OR groups (at least one field per group must be present)
+        for group in self.one_of_groups:
+            if not group:
+                continue
+            if any(
+                payload.get(field) is not None and payload.get(field) != ""
+                for field in group
+            ):
+                continue
+            errors.append(
+                f"At least one of [{', '.join(group)}] is required for action "
+                f"'{self.action_type}'"
+            )
 
         # Run custom validator if provided
         if self.custom_validator and callable(self.custom_validator):
@@ -246,12 +264,14 @@ def register_component_validation_rules(
     for action_type, rule_config in action_rules.items():
         required_fields = rule_config.get("required_fields", [])
         custom_validator = rule_config.get("custom_validator")
+        one_of_groups = rule_config.get("one_of") or rule_config.get("one_of_groups")
 
         rule = ValidationRule(
             action_type=action_type,
             required_fields=required_fields,
             custom_validator=custom_validator,
             component_name=component_name,
+            one_of_groups=one_of_groups,
         )
         rules.append(rule)
 
