@@ -6953,6 +6953,11 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 const logsFailuresCode = document.getElementById('logs-failures-code');
                 const logsFailuresStage = document.getElementById('logs-failures-stage');
                 const logsFailuresSort = document.getElementById('logs-failures-sort');
+                const logsDeadTargetsOutput = document.getElementById('logs-dead-targets-output');
+                const logsDeadTargetsRefreshBtn = document.getElementById('logs-dead-targets-refresh');
+                const logsReasonTrailOutput = document.getElementById('logs-reason-trail-output');
+                const logsReasonTrailRefreshBtn = document.getElementById('logs-reason-trail-refresh');
+                const logsReasonTrailSearch = document.getElementById('logs-reason-trail-search');
                 const logsState = window.__synth_logs_state || {
                     currentSubtab: 'live',
                     failurePage: 1,
@@ -6963,6 +6968,9 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     failureSort: 'desc',
                     failureTotalPages: 1,
                     loadingFailures: false,
+                    loadingDeadTargets: false,
+                    reasonTrailSearch: '',
+                    loadingReasonTrail: false,
                 };
                 window.__synth_logs_state = logsState;
 
@@ -7035,6 +7043,14 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     });
                     if (nextSubtab === 'failures') {
                         loadFailureLog();
+                        return;
+                    }
+                    if (nextSubtab === 'dead-targets') {
+                        loadDeadTargets();
+                        return;
+                    }
+                    if (nextSubtab === 'reason-trail') {
+                        loadReasonTrail();
                         return;
                     }
                     applyFilters();
@@ -7169,6 +7185,179 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     }
                 }
 
+                function renderDeadTargets(payload) {
+                    if (!logsDeadTargetsOutput) return;
+                    const entries = Array.isArray(payload.entries) ? payload.entries : [];
+                    if (!entries.length) {
+                        logsDeadTargetsOutput.innerHTML = '<div class="logs-empty-state">No dead delivery targets. The circuit breaker is closed everywhere.</div>';
+                        return;
+                    }
+                    logsDeadTargetsOutput.innerHTML = entries.map((entry) => {
+                        const reason = safeEscapeHtml(entry.reason || 'Unknown channel or user');
+                        const meta = [
+                            `Interface: ${entry.interface || 'unknown'}`,
+                            `Target: ${entry.chat_id}`,
+                            `Failures: ${entry.consecutive_failures}`,
+                            `Marked dead: ${formatFailureDate(entry.marked_dead_at)}`,
+                        ].map((value) => `<span>${safeEscapeHtml(value)}</span>`).join('');
+                        return `
+                            <article class="logs-failure-entry" data-dead-target-id="${safeEscapeHtml(String(entry.id))}">
+                                <div class="logs-failure-entry-header">
+                                    <div>
+                                        <div class="logs-failure-title">
+                                            <span class="logs-failure-pill code">dead_target</span>
+                                            <span class="logs-failure-pill stage">${safeEscapeHtml(entry.interface || 'unknown')}</span>
+                                        </div>
+                                        <div class="logs-failure-meta">${meta}</div>
+                                    </div>
+                                    <button class="logs-failure-delete" type="button" data-revive-dead-target="${safeEscapeHtml(String(entry.id))}">Revive</button>
+                                </div>
+                                <div class="logs-failure-reason">${reason}</div>
+                            </article>
+                        `;
+                    }).join('');
+
+                    logsDeadTargetsOutput.querySelectorAll('[data-revive-dead-target]').forEach((button) => {
+                        button.addEventListener('click', async () => {
+                            const targetId = button.dataset.reviveDeadTarget;
+                            if (!targetId) return;
+                            if (!window.confirm('Revive this delivery target? The circuit breaker will re-arm and delivery will resume.')) return;
+                            try {
+                                const response = await fetch(`/api/dead-targets/${encodeURIComponent(targetId)}`, { method: 'DELETE' });
+                                if (!response.ok) {
+                                    const payloadText = await response.text();
+                                    throw new Error(payloadText || `HTTP ${response.status}`);
+                                }
+                                if (window.showToast) window.showToast('Delivery target revived', false);
+                                loadDeadTargets();
+                            } catch (error) {
+                                console.error('[logs] failed to revive dead target', error);
+                                if (window.showToast) window.showToast('Failed to revive delivery target', true);
+                            }
+                        });
+                    });
+                }
+
+                async function loadDeadTargets() {
+                    if (!logsDeadTargetsOutput || logsState.loadingDeadTargets) return;
+                    logsState.loadingDeadTargets = true;
+                    logsDeadTargetsOutput.innerHTML = '<div class="logs-empty-state">Loading dead targets...</div>';
+                    try {
+                        const response = await fetch('/api/dead-targets');
+                        const payload = await response.json();
+                        if (!response.ok || !payload.success) {
+                            throw new Error((payload && payload.error) || `HTTP ${response.status}`);
+                        }
+                        renderDeadTargets(payload);
+                    } catch (error) {
+                        console.error('[logs] failed to load dead targets', error);
+                        logsDeadTargetsOutput.innerHTML = '<div class="logs-empty-state">Failed to load dead delivery targets.</div>';
+                    } finally {
+                        logsState.loadingDeadTargets = false;
+                    }
+                }
+
+                function formatReasonTrailJson(value) {
+                    if (value == null) return '';
+                    try {
+                        return safeEscapeHtml(typeof value === 'string' ? value : JSON.stringify(value));
+                    } catch (e) {
+                        return safeEscapeHtml(String(value));
+                    }
+                }
+
+                function renderReasonTrail(payload) {
+                    if (!logsReasonTrailOutput) return;
+                    const entries = Array.isArray(payload.entries) ? payload.entries : [];
+                    if (!entries.length) {
+                        logsReasonTrailOutput.innerHTML = '<div class="logs-empty-state">No reason trail entries yet. Replies will be recorded here once the trail is enabled.</div>';
+                        return;
+                    }
+                    logsReasonTrailOutput.innerHTML = entries.map((entry) => {
+                        const pills = [];
+                        if (entry.beat_type) pills.push(`<span class="logs-failure-pill stage">${safeEscapeHtml(entry.beat_type)}</span>`);
+                        if (entry.emotion) pills.push(`<span class="logs-failure-pill">${safeEscapeHtml(entry.emotion)}</span>`);
+                        if (entry.history_scope) pills.push(`<span class="logs-failure-pill code">${safeEscapeHtml(entry.history_scope)}</span>`);
+
+                        const meta = [
+                            entry.interface_path ? `Interface: ${entry.interface_path}` : '',
+                            `At: ${formatFailureDate(entry.created_at)}`,
+                        ].filter(Boolean).map((value) => `<span>${safeEscapeHtml(value)}</span>`).join('');
+
+                        const preview = entry.reply_preview
+                            ? `<div class="logs-failure-preview">${safeEscapeHtml(entry.reply_preview)}</div>`
+                            : '';
+
+                        const memories = Array.isArray(entry.memories) && entry.memories.length
+                            ? `<div class="logs-failure-preview">Memories: ${formatReasonTrailJson(entry.memories)}</div>`
+                            : '';
+                        const diary = Array.isArray(entry.diary_sources) && entry.diary_sources.length
+                            ? `<div class="logs-failure-preview">Diary sources: ${formatReasonTrailJson(entry.diary_sources)}</div>`
+                            : '';
+                        const goal = entry.goal && Object.keys(entry.goal).length
+                            ? `<div class="logs-failure-preview">Goal: ${formatReasonTrailJson(entry.goal)}</div>`
+                            : '';
+
+                        return `
+                            <article class="logs-failure-entry" data-reason-id="${safeEscapeHtml(String(entry.id))}">
+                                <div class="logs-failure-entry-header">
+                                    <div>
+                                        <div class="logs-failure-title">${pills.join('') || '<span class="logs-failure-pill stage">reason</span>'}</div>
+                                        <div class="logs-failure-meta">${meta}</div>
+                                    </div>
+                                    <button class="logs-failure-delete" type="button" data-delete-reason="${safeEscapeHtml(String(entry.id))}">Delete</button>
+                                </div>
+                                ${preview}
+                                ${memories}
+                                ${diary}
+                                ${goal}
+                            </article>
+                        `;
+                    }).join('');
+
+                    logsReasonTrailOutput.querySelectorAll('[data-delete-reason]').forEach((button) => {
+                        button.addEventListener('click', async () => {
+                            const reasonId = button.dataset.deleteReason;
+                            if (!reasonId) return;
+                            if (!window.confirm('Delete this reason trail entry? This cannot be undone.')) return;
+                            try {
+                                const response = await fetch(`/api/reason-trail/${encodeURIComponent(reasonId)}`, { method: 'DELETE' });
+                                if (!response.ok) {
+                                    const payloadText = await response.text();
+                                    throw new Error(payloadText || `HTTP ${response.status}`);
+                                }
+                                if (window.showToast) window.showToast('Reason trail entry deleted', false);
+                                loadReasonTrail();
+                            } catch (error) {
+                                console.error('[logs] failed to delete reason trail entry', error);
+                                if (window.showToast) window.showToast('Failed to delete reason trail entry', true);
+                            }
+                        });
+                    });
+                }
+
+                async function loadReasonTrail() {
+                    if (!logsReasonTrailOutput || logsState.loadingReasonTrail) return;
+                    logsState.loadingReasonTrail = true;
+                    logsReasonTrailOutput.innerHTML = '<div class="logs-empty-state">Loading reason trail...</div>';
+
+                    const params = new URLSearchParams({ search: logsState.reasonTrailSearch || '' });
+
+                    try {
+                        const response = await fetch(`/api/reason-trail?${params.toString()}`);
+                        const payload = await response.json();
+                        if (!response.ok || !payload.success) {
+                            throw new Error((payload && payload.error) || `HTTP ${response.status}`);
+                        }
+                        renderReasonTrail(payload);
+                    } catch (error) {
+                        console.error('[logs] failed to load reason trail', error);
+                        logsReasonTrailOutput.innerHTML = '<div class="logs-empty-state">Failed to load reason trail.</div>';
+                    } finally {
+                        logsState.loadingReasonTrail = false;
+                    }
+                }
+
                 function connectLogs() {
                     if (window.__synth_logs_socket && (window.__synth_logs_socket.readyState === WebSocket.OPEN || window.__synth_logs_socket.readyState === WebSocket.CONNECTING)) {
                         return;
@@ -7211,6 +7400,22 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     logsFailuresRefreshBtn.addEventListener('click', () => {
                         loadFailureLog();
                     });
+                }
+                if (logsDeadTargetsRefreshBtn) {
+                    logsDeadTargetsRefreshBtn.addEventListener('click', () => {
+                        loadDeadTargets();
+                    });
+                }
+                if (logsReasonTrailRefreshBtn) {
+                    logsReasonTrailRefreshBtn.addEventListener('click', () => {
+                        loadReasonTrail();
+                    });
+                }
+                if (logsReasonTrailSearch) {
+                    logsReasonTrailSearch.addEventListener('input', debounce(() => {
+                        logsState.reasonTrailSearch = logsReasonTrailSearch.value || '';
+                        loadReasonTrail();
+                    }, 350));
                 }
                 if (logsFailuresSearch) {
                     logsFailuresSearch.addEventListener('input', debounce(() => {

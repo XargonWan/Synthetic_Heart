@@ -1939,12 +1939,34 @@ async def ensure_plugin_tables() -> None:
                         message_id VARCHAR(255),
                         content_preview TEXT,
                         metadata JSON,
+                        is_test TINYINT(1) NOT NULL DEFAULT 0,
                         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                         INDEX idx_failure_created_at (created_at),
                         INDEX idx_failure_code (failure_code),
                         INDEX idx_failure_stage (stage),
                         INDEX idx_failure_interface_path (interface_path),
                         INDEX idx_failure_engine (engine)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+                    """
+                )
+
+                # turn_reason_trail (core/turn_reason.py) — per-turn structural
+                # summary of what drove a reply ("why did I say that").
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS turn_reason_trail (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        interface_path VARCHAR(255),
+                        reply_preview TEXT,
+                        memories JSON,
+                        diary_sources JSON,
+                        emotion VARCHAR(255),
+                        goal JSON,
+                        beat_type VARCHAR(100),
+                        history_scope VARCHAR(50),
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        INDEX idx_reason_trail_created_at (created_at),
+                        INDEX idx_reason_trail_interface_path (interface_path)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
                     """
                 )

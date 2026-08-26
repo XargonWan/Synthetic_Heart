@@ -380,3 +380,39 @@ async def test_agent_read_file_pdf_failure_returns_error(monkeypatch, tmp_path):
     )
     assert res["status"] == "error"
     assert "pdf" in res["reason"].lower()
+
+
+@pytest.mark.asyncio
+async def test_agent_wait_clamps_and_sleeps(monkeypatch):
+    """agent_wait paces polls: seconds clamped to [1, 60], actual sleep is
+    awaited exactly once with the clamped value."""
+    p = AgentPlugin()
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(agent_plugin_mod.asyncio, "sleep", fake_sleep)
+
+    result = await p.execute_action(
+        {"type": "agent_wait", "payload": {"seconds": 99}}, {}, None, None
+    )
+    assert result["status"] == "ok"
+    assert result["seconds"] == 60
+    assert sleeps == [60.0]
+
+    await p.execute_action({"type": "agent_wait", "payload": {"seconds": 0}}, {}, None, None)
+    assert sleeps[-1] == 1.0
+
+    # No seconds given -> default 5.
+    await p.execute_action({"type": "agent_wait", "payload": {}}, {}, None, None)
+    assert sleeps[-1] == 5.0
+
+
+def test_agent_wait_in_supported_actions():
+    p = AgentPlugin()
+    spec = p.get_supported_actions()["agent_wait"]
+    assert spec["optional_fields"] == ["seconds"]
+    # No external effects: waiting is pure pacing, it must not affect routing.
+    assert not spec.get("external_effects")

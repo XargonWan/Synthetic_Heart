@@ -484,6 +484,15 @@ class VoxPlugin(AIPluginBase):
                     _ip = str(context.get("interface_path") or "")
                 if not _ip and original_message:
                     _ip = getattr(original_message, "interface_path", None)
+                # A hallucinated payload prefix (e.g. 'em_chat_bridge/...')
+                # must not sink the text fallback either.
+                from core.interface_path_utils import (
+                    resolve_registered_interface_path,
+                )
+
+                _ip = resolve_registered_interface_path(
+                    _ip, context=context, original_message=original_message
+                )
                 _fallback_text = merged_text or text
                 if _ip and _fallback_text:
                     log_debug(
@@ -497,6 +506,15 @@ class VoxPlugin(AIPluginBase):
             interface_path = context.get("interface_path")
         if not interface_path and original_message:
             interface_path = getattr(original_message, "interface_path", None)
+
+        # A model-emitted tts_speak may carry a hallucinated interface prefix
+        # (e.g. 'em_chat_bridge/...') that no registered interface can route;
+        # redirect to the chat this turn arrived in so the reply is never lost.
+        from core.interface_path_utils import resolve_registered_interface_path
+
+        interface_path = resolve_registered_interface_path(
+            interface_path, context=context, original_message=original_message
+        )
 
         async def _fallback(msg_text: str) -> dict[str, Any]:
             """Delegate to _send_fallback only when allowed.

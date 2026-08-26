@@ -149,6 +149,48 @@ _APOSTROPHE_ESCAPED_TAIL_RE = re.compile(
 )
 
 
+# Adjacent JSON string literals separated only by whitespace, e.g.
+# ``"text": "First part." "Second part."`` — valid JavaScript (implicit
+# string concatenation), invalid JSON. The trailing literal must NOT be
+# followed by a colon, otherwise a ``"key":`` run would be merged into the
+# previous value.
+_ADJACENT_STRINGS_RE = re.compile(
+    r'("(?:[^"\\]|\\.)*")((?:\s+"(?:[^"\\]|\\.)*")+)(?!\s*:)',
+    re.DOTALL,
+)
+
+
+def _repair_adjacent_string_literals(text: str) -> str:
+    """Merge JS-style adjacent string literals into one string value.
+
+    Weak models occasionally emit ``"text": "First part." "Second part."``
+    — two adjacent string literals, which is valid in JavaScript but invalid
+    in JSON. Standard parsing rejects it and the ``json_repair`` fallback
+    silently keeps only the FIRST literal, dropping the rest of the reply
+    (e.g. a multi-sentence message arrives as just its first sentence).
+    This pass joins the literals into a single space-separated string value
+    so the full text survives.
+
+    A literal directly followed by a colon is a JSON key, not a value, so
+    such pairs are left untouched (``"a": "b"`` and missing-comma
+    ``"value" "key": ...`` shapes are never merged).
+
+    Args:
+        text: The raw (possibly invalid) JSON text.
+
+    Returns:
+        The text with adjacent string literal runs merged into one string.
+    """
+
+    def _fix(m: re.Match) -> str:
+        first = m.group(1)[1:-1]
+        rest = re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(2))
+        merged = " ".join([first] + rest)
+        return f'"{merged}"'
+
+    return _ADJACENT_STRINGS_RE.sub(_fix, text)
+
+
 def _repair_apostrophe_closed_escaped_tail(text: str) -> str:
     """Repair JSON where the LLM closes a string value with an apostrophe
     instead of a double quote, then continues with escaped-quote sibling
@@ -601,7 +643,9 @@ def extract_json_from_text(
     # Pass 2: apostrophe used as a string closer, followed by an escaped-quote
     #         or single-quoted run of sibling keys that belong outside the string
     # Pass 3: re-escape unescaped speech quotes inside text-heavy fields
+    # Pass 4: merge JS-style adjacent string literals ("a" "b") into one string
     repaired_text = _normalize_smart_quotes(cleaned_text)
+    repaired_text = _repair_adjacent_string_literals(repaired_text)
     repaired_text = _repair_premature_string_close(repaired_text)
     repaired_text = _repair_apostrophe_closed_escaped_tail(repaired_text)
     repaired_text = _repair_apostrophe_closed_single_quoted_tail(repaired_text)

@@ -312,7 +312,7 @@ def _fallback_to_trainer(message: str) -> None:
             return
 
     # No fallback available
-    log_warning(f"[notifier] No trainer available, message lost: {message[:50]}...")
+    log_warning(f"[notifier] No trainer available, message lost: {message[:200]}...")
 
 
 def notify_trainer(message: str) -> None:

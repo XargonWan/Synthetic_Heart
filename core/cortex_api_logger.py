@@ -45,6 +45,12 @@ _langfuse_client: Any | None = None
 _langfuse_ctx: contextvars.ContextVar[Sequence[dict[str, Any]]] = (
     contextvars.ContextVar("cortex_api_langfuse_ctx", default=())
 )
+# Per-turn attribution context (interface, user, session, mode) bound by the
+# engine bridge so every log_cortex_request/response pair — including retries
+# and nested calls such as TTS — is attributed to the same conversation.
+_langfuse_turn_ctx: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextVar(
+    "cortex_api_langfuse_turn_ctx", default={}
+)
 _langfuse_warning_keys: set[str] = set()
 _langfuse_sdk_handler_marker = "_synth_langfuse_sdk_handler"
 
@@ -240,9 +246,19 @@ def _langfuse_client_health(client: Any) -> str:
 def _flush_langfuse_client(client: Any, *, context: str) -> None:
     """Flush Langfuse and report worker health without affecting the caller."""
     try:
+        flush_started = time.monotonic()
         flush_fn = getattr(client, "flush", None)
         if callable(flush_fn):
             flush_fn()
+        flush_elapsed_ms = (time.monotonic() - flush_started) * 1000
+        if flush_elapsed_ms > 10_000:
+            _get_runtime_logger().warning(
+                "[langfuse-sdk] flush after %s took %.0fms — the Langfuse "
+                "server (ingestion pipeline / ClickHouse) is the bottleneck; "
+                "SyntH delivered the events, server-side queryability lags",
+                context,
+                flush_elapsed_ms,
+            )
         health = _langfuse_client_health(client)
         if "dead=" in health and "dead=0" not in health:
             _warn_langfuse_once(
@@ -531,6 +547,55 @@ def _extract_tool_prompt_metadata(payload: dict[str, Any] | None) -> dict[str, A
     return metadata
 
 
+def set_langfuse_turn_context(context: dict[str, Any] | None) -> None:
+    """Bind per-turn attribution context for the next Langfuse traces.
+
+    The engine bridge calls this once per LLM turn so every
+    ``log_cortex_request``/``log_cortex_response`` pair that follows — including
+    retries and nested calls such as TTS — is attributed to the same
+    conversation. Keys consumed: ``user_id``, ``username``, ``usertag``,
+    ``interface_path``, ``interface_name``, ``chat_type``, ``scope``, ``mode``,
+    ``input_source``.
+    """
+    _langfuse_turn_ctx.set(dict(context or {}))
+
+
+def get_langfuse_turn_context() -> dict[str, Any]:
+    """Return a copy of the current per-turn attribution context."""
+    return dict(_langfuse_turn_ctx.get())
+
+
+def _extract_model_parameters(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Extract common sampling parameters from a provider request payload.
+
+    These populate Langfuse's ``model_parameters`` column so the model-params
+    graph is not empty. Only JSON-scalar values are kept (the SDK's
+    ``model_parameters`` expects ``str|int|float|bool`` map values), and unknown
+    keys are ignored rather than risking a malformed value.
+    """
+    if not isinstance(payload, dict):
+        return None
+    keys = (
+        "temperature",
+        "top_p",
+        "top_k",
+        "max_tokens",
+        "max_completion_tokens",
+        "presence_penalty",
+        "frequency_penalty",
+        "seed",
+        "stream",
+    )
+    params: dict[str, Any] = {}
+    for key in keys:
+        value = payload.get(key)
+        if value is None or value == "":
+            continue
+        if isinstance(value, bool) or isinstance(value, (str, int, float)):
+            params[key] = value
+    return params or None
+
+
 def _get_langfuse_client() -> Any | None:
     global _langfuse_client
     if _langfuse_client is not None:
@@ -574,6 +639,37 @@ def _push_langfuse_request(
 ) -> str:
     request_id = uuid4().hex[:12]
     trace: Any | None = None
+    turn_context = get_langfuse_turn_context()
+
+    # Stable per-conversation session: group traces of one chat under the same
+    # session id so Langfuse's Sessions view and session-level graphs work.
+    # Falls back to a per-request session id when no interface context is bound.
+    interface_path = str(turn_context.get("interface_path") or "")
+    if interface_path:
+        session_id = f"chat:{interface_path}"
+    else:
+        session_id = f"{engine}:{request_id}"
+
+    user_id = (
+        str(turn_context.get("user_id") or "")
+        or str(turn_context.get("username") or "")
+        or str(turn_context.get("usertag") or "")
+        or None
+    )
+
+    tags: list[str] = [f"engine:{engine}"]
+    if model:
+        tags.append(f"model:{model}")
+    interface_name = str(turn_context.get("interface_name") or "")
+    if interface_name:
+        tags.append(f"interface:{interface_name}")
+    mode = str(turn_context.get("mode") or "")
+    if mode:
+        tags.append(f"mode:{mode}")
+    scope = str(turn_context.get("scope") or "")
+    if scope:
+        tags.append(f"scope:{scope}")
+
     request_metadata: dict[str, Any] = {
         "request_id": request_id,
         "engine": engine,
@@ -581,13 +677,32 @@ def _push_langfuse_request(
         "url": url,
         **_extract_tool_prompt_metadata(payload),
     }
+    for key in (
+        "user_id",
+        "username",
+        "usertag",
+        "interface_path",
+        "interface_name",
+        "chat_type",
+        "scope",
+        "mode",
+        "input_source",
+    ):
+        value = turn_context.get(key)
+        if value:
+            request_metadata[key] = value
+
+    model_parameters = _extract_model_parameters(payload)
 
     client = _get_langfuse_client()
     if client is not None:
         try:
             trace = client.trace(
                 name=f"cortex_api:{engine}",
-                session_id=f"{engine}:{request_id}",
+                session_id=session_id,
+                user_id=user_id,
+                tags=tags,
+                version=os.getenv("SYNTH_VERSION") or "dev",
                 metadata=request_metadata,
             )
             if trace is not None and hasattr(trace, "update"):
@@ -620,6 +735,7 @@ def _push_langfuse_request(
             "headers": headers,
             "input_payload": payload,
             "request_metadata": request_metadata,
+            "model_parameters": model_parameters,
             "started_at_monotonic": time.monotonic(),
             "started_at_utc": datetime.now(timezone.utc),
         }
@@ -755,6 +871,9 @@ def log_cortex_response(
     request_metadata = (
         lf_item.get("request_metadata") if isinstance(lf_item, dict) else None
     )
+    model_parameters = (
+        lf_item.get("model_parameters") if isinstance(lf_item, dict) else None
+    )
     url = lf_item.get("url") if isinstance(lf_item, dict) else ""
     started = lf_item.get("started_at_monotonic") if isinstance(lf_item, dict) else None
     started_utc = lf_item.get("started_at_utc") if isinstance(lf_item, dict) else None
@@ -823,6 +942,8 @@ def log_cortex_response(
                     "output": _coerce_for_langfuse(output_payload),
                     "metadata": generation_metadata,
                 }
+                if model_parameters:
+                    gen_kwargs["model_parameters"] = model_parameters
                 if normalized_langfuse_usage is not None:
                     gen_kwargs["usage"] = normalized_langfuse_usage
                 if normalized_langfuse_usage_details is not None:

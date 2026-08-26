@@ -280,6 +280,23 @@ CREATE TABLE IF NOT EXISTS web_search_tasks (
     INDEX idx_web_search_created (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Turn Reason Trail: per-turn structural summary of what drove a reply
+-- ("why did I say that"). Lazy-init mirrors core/turn_reason.py::_TABLE_SQL.
+CREATE TABLE IF NOT EXISTS turn_reason_trail (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    interface_path VARCHAR(255),
+    reply_preview TEXT,
+    memories JSON,
+    diary_sources JSON,
+    emotion VARCHAR(255),
+    goal JSON,
+    beat_type VARCHAR(100),
+    history_scope VARCHAR(50),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_reason_trail_created_at (created_at),
+    INDEX idx_reason_trail_interface_path (interface_path)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- External Endpoints: user-defined external AI service endpoints
 -- (OpenAI-compatible, Gemini, Anthropic, custom)
 CREATE TABLE IF NOT EXISTS external_endpoints (

@@ -38,6 +38,50 @@ try:
         component="agent",
         needs_component_reload=False,
     )
+    # Interim (mid-loop) outbound user-facing messages per agentic turn. The
+    # final answer (attempt_completion summary / pause-composer message) is
+    # NOT counted — this caps only status updates sent while the loop keeps
+    # working. Default 1: the user hears one interim update, then the final
+    # answer — never a re-worded status message on every iteration (observed
+    # live: three near-identical Telegram updates from one turn).
+    register_exposed_var(
+        "AGENT_MAX_INTERIM_MESSAGES",
+        label="Agent max interim messages",
+        default=1,
+        value_type=int,
+        ui_type="number",
+        description=(
+            "Maximum number of mid-task status messages a single agent turn "
+            "may send to the user (the final answer is not counted). Raise "
+            "for long-running tasks that benefit from milestone updates."
+        ),
+        scope="agent",
+        component="agent",
+        needs_component_reload=False,
+    )
+    # Persona voiceover at agent delivery: the tool-calling loop deliberately
+    # runs persona-free (a ~32k persona prompt on every iteration would bloat
+    # each call and degrade tool discipline), so the agent's raw final text is
+    # operationally correct but tonally flat. When on, the final message is
+    # re-voiced ONCE by the Base Cortex with the full persona chat context
+    # before delivery; any failure falls back to the original text.
+    register_exposed_var(
+        "AGENT_PERSONA_DELIVERY",
+        label="Agent persona delivery",
+        default=True,
+        value_type=bool,
+        ui_type="bool",
+        description=(
+            "Re-voice the agent's final result through the persona chat "
+            "engine (Base Cortex + full persona context) before it is "
+            "delivered to the interface. Tool-calling iterations stay "
+            "persona-free either way; on any restyle failure the original "
+            "agent text is delivered unchanged."
+        ),
+        scope="agent",
+        component="agent",
+        needs_component_reload=False,
+    )
     # Drones are ephemeral, task-scoped sub-agents spawned by the Agent via the
     # `spawn_drone` tool. They run through the same bounded agent loop but with a
     # tighter budget and cannot spawn further Drones (single-level delegation).
@@ -364,6 +408,29 @@ def _system_only_action_names() -> frozenset[str]:
         return frozenset({"tts_speak"})
 
 
+def _repeatable_action_names() -> frozenset[str]:
+    """Action names that legitimately re-run identically within one turn.
+
+    Poll/refresh actions (e.g. ``agpeer_transfer``) declare ``"repeatable":
+    true`` in their schema so the loop's identical-call dedup does not serve
+    them a stale cached first result. Read fresh from the live action catalog
+    (a tiny walk — the catalog is a few hundred entries) so runtime plugin
+    enable/disable is picked up immediately; fail-safe to an empty set (dedup
+    then behaves exactly as before).
+    """
+    try:
+        from core.core_initializer import core_initializer
+
+        actions = (core_initializer.actions_block or {}).get("available_actions", {})
+        return frozenset(
+            name
+            for name, defn in (actions or {}).items()
+            if isinstance(defn, dict) and defn.get("repeatable")
+        )
+    except Exception:
+        return frozenset()
+
+
 def _build_openai_tool_manifests() -> list[dict[str, Any]]:
     """OpenAI function schemas for every registered agent tool.
 
@@ -444,6 +511,227 @@ async def _call_with_hard_timeout(
         return task.result()
     task.cancel()
     raise asyncio.TimeoutError()
+
+
+# --------------------------------------------------------------------------
+# Engine-failure classification
+#
+# The agent loop must report WHY an engine call produced nothing (endpoint
+# offline / rejected credentials / empty body / timeout) instead of guessing a
+# single cause. Markers are matched against transport/provider ERROR strings
+# only (never message content), mirroring the bridge's own
+# ``_is_retryable_exception`` — this is diagnostics, not product routing.
+# --------------------------------------------------------------------------
+
+_ENGINE_FAILURE_AUTH_MARKERS = (
+    "unauthorized",
+    "forbidden",
+    "invalid api key",
+    "incorrect api key",
+    "api key",
+    "authentication",
+    "error code: 401",
+    "error code: 403",
+)
+_ENGINE_FAILURE_CONNECTION_MARKERS = (
+    "connection",
+    "refused",
+    "reset by peer",
+    "unreachable",
+    "dns",
+    "getaddrinfo",
+    "name or service not known",
+    "no route to host",
+    "network",
+    "ssl",
+)
+_ENGINE_FAILURE_BAD_REQUEST_MARKERS = (
+    "error code: 400",
+    "invalid request",
+    "tool definitions",
+    "context length",
+    "model not found",
+    "does not exist",
+)
+_ENGINE_FAILURE_RATE_LIMIT_MARKERS = (
+    "error code: 429",
+    "rate limit",
+    "too many requests",
+    "quota",
+    "resource exhausted",
+    "overloaded",
+)
+_ENGINE_FAILURE_SERVER_MARKERS = (
+    "error code: 5",
+    "internal server error",
+    "bad gateway",
+    "service unavailable",
+    "gateway timeout",
+    "server error",
+)
+
+# Failure kinds that cannot self-heal within a turn: retrying the same engine
+# (or burning the turn budget iterating) is pure waste, so the loop fails fast
+# with ``engine_error`` once the base-cortex safety net is exhausted.
+_STRUCTURAL_ENGINE_FAILURES = frozenset({"connection", "auth", "bad_request"})
+
+_ENGINE_FAILURE_HINTS = {
+    "auth": (
+        "the endpoint rejected the credentials — check that engine's API key "
+        "in the Engines settings"
+    ),
+    "connection": (
+        "the endpoint is unreachable — it looks offline, or its URL/port is wrong"
+    ),
+    "bad_request": (
+        "the endpoint rejected the request itself — e.g. an unsupported model, "
+        "a request-size/tool limit, or a malformed parameter"
+    ),
+    "rate_limited": (
+        "the endpoint is rate-limiting or out of quota — retry later or raise "
+        "its limits"
+    ),
+    "server_error": (
+        "the endpoint reported a server-side error — it may be overloaded or broken"
+    ),
+    "timeout": (
+        "no response within the time budget — the endpoint may be offline, "
+        "overloaded, or too slow for this agent turn"
+    ),
+    "empty": (
+        "the endpoint answered but returned an empty body — often a broken "
+        "engine config (e.g. an invalid API key or model name)"
+    ),
+    "unknown": (
+        "the engine failed without a specific error — check the endpoint "
+        "config and logs"
+    ),
+}
+
+
+def classify_engine_failure(
+    error_text: str | None = None,
+    *,
+    timed_out: bool = False,
+    empty_body: bool = False,
+) -> tuple[str, str]:
+    """Classify an engine/cortex failure into ``(kind, operator_hint)``.
+
+    ``kind`` is one of ``auth``, ``connection``, ``bad_request``,
+    ``rate_limited``, ``server_error``, ``timeout``, ``empty``, ``unknown``.
+    A recorded provider error wins over the timeout/empty flags: an offline
+    endpoint typically surfaces to the loop as a hard timeout (the bridge's
+    connection retries outlive the turn budget) while the bridge has already
+    recorded the underlying ``Connection error`` — the truthful kind is then
+    ``connection``, not ``timeout``.
+    """
+    if error_text:
+        lowered = error_text.lower()
+        for marker in _ENGINE_FAILURE_AUTH_MARKERS:
+            if marker in lowered:
+                return "auth", _ENGINE_FAILURE_HINTS["auth"]
+        for marker in _ENGINE_FAILURE_CONNECTION_MARKERS:
+            if marker in lowered:
+                return "connection", _ENGINE_FAILURE_HINTS["connection"]
+        for marker in _ENGINE_FAILURE_BAD_REQUEST_MARKERS:
+            if marker in lowered:
+                return "bad_request", _ENGINE_FAILURE_HINTS["bad_request"]
+        for marker in _ENGINE_FAILURE_RATE_LIMIT_MARKERS:
+            if marker in lowered:
+                return "rate_limited", _ENGINE_FAILURE_HINTS["rate_limited"]
+        for marker in _ENGINE_FAILURE_SERVER_MARKERS:
+            if marker in lowered:
+                return "server_error", _ENGINE_FAILURE_HINTS["server_error"]
+        if "timeout" in lowered or "timed out" in lowered:
+            return "timeout", _ENGINE_FAILURE_HINTS["timeout"]
+    if timed_out:
+        return "timeout", _ENGINE_FAILURE_HINTS["timeout"]
+    if empty_body:
+        return "empty", _ENGINE_FAILURE_HINTS["empty"]
+    return "unknown", _ENGINE_FAILURE_HINTS["unknown"]
+
+
+def _peek_engine_diagnostics(engine_name: str | None) -> dict[str, Any] | None:
+    """Fail-safe read of a cortex engine's last-call diagnostics.
+
+    External-endpoint bridges expose ``_last_attempt_error`` (last transport/
+    provider error inside ``generate_response``) and ``_last_response_metadata``
+    (with ``empty_response`` for 200-but-empty bodies). Reading them after a
+    failed/cancelled call recovers the real cause — e.g. a hard agent timeout
+    that was actually the endpoint being offline. Purely diagnostic: any error
+    (unknown engine, non-bridge engine, registry failure) returns ``None``.
+    """
+    if not engine_name:
+        return None
+    try:
+        from core.cortex_registry import get_cortex_registry
+
+        engine_obj = get_cortex_registry().get_engine(engine_name)
+        if engine_obj is None:
+            return None
+        error_text = getattr(engine_obj, "_last_attempt_error", None)
+        metadata = getattr(engine_obj, "_last_response_metadata", None)
+        return {
+            "error": str(error_text) if error_text else None,
+            "empty_body": bool(
+                isinstance(metadata, dict) and metadata.get("empty_response")
+            ),
+        }
+    except Exception:
+        return None
+
+
+def _engine_failure_from_diagnostics(engine_name: str | None) -> dict[str, Any] | None:
+    """Build a classified failure record from an engine's bridge diagnostics.
+
+    Returns ``None`` when the engine carries no failure diagnostics (plain
+    plugin engines, or a call that genuinely never reached the bridge).
+    """
+    diag = _peek_engine_diagnostics(engine_name)
+    if not diag:
+        return None
+    if diag.get("error"):
+        kind, hint = classify_engine_failure(diag["error"])
+        return {
+            "kind": kind,
+            "hint": hint,
+            "detail": diag["error"],
+            "engine": engine_name,
+        }
+    if diag.get("empty_body"):
+        kind, hint = classify_engine_failure(empty_body=True)
+        return {
+            "kind": kind,
+            "hint": hint,
+            "detail": "endpoint returned an empty body (HTTP 200, no content)",
+            "engine": engine_name,
+        }
+    return None
+
+
+def _describe_engine_failure(
+    failure: dict[str, Any] | None, engine: str | None
+) -> str:
+    """Render a classified failure for logs/notifications, truthfully.
+
+    When no diagnostics exist (e.g. the generic plugin path) the description
+    stays at the honest symptom ("empty response") instead of guessing a cause.
+    """
+    engine_label = engine or "active cortex"
+    if not failure:
+        return (
+            f"empty response from '{engine_label}' — no error detail was "
+            f"recorded by the engine"
+        )
+    kind = str(failure.get("kind") or "unknown")
+    detail = str(failure.get("detail") or "").strip()
+    hint = str(failure.get("hint") or "").strip()
+    parts = [f"{kind} from '{failure.get('engine') or engine_label}'"]
+    if detail:
+        parts.append(detail)
+    if hint:
+        parts.append(hint)
+    return "; ".join(parts)
 
 
 # DB helper is imported lazily inside methods for testability/mocking
@@ -929,14 +1217,16 @@ class AgentLoopManager:
                 "timeout",
                 "engine_error",
                 "empty_response",
+                "malformed_response",
                 "delivery_failed",
             }:
                 status = "failed"
-            elif stop_reason == "paused_max_iterations":
-                # Iteration budget exhausted without an explicit completion: the
-                # goal is not finished. Park the task as ``pending`` so the user
-                # can grant more iterations via "Continue" (WebUI) instead of it
-                # being falsely reported as ``completed``.
+            elif stop_reason in ("paused_max_iterations", "paused_timeout"):
+                # Iteration or TIME budget exhausted without an explicit
+                # completion: the goal is not finished. Park the task as
+                # ``pending`` so the user can grant more iterations via
+                # "Continue" (WebUI) or a chat reply instead of it being
+                # falsely reported as ``completed``.
                 status = "pending"
             else:
                 status = "completed"
@@ -1254,6 +1544,23 @@ class AgentLoopManager:
         # observation records "already delivered" so the model sees it went out.
         delivered_texts: set[str] = set()
 
+        # Interim-message damper: even NON-identical re-worded status messages
+        # must not spam the user on every iteration (observed live: one turn
+        # sent three near-identical Telegram updates because each iteration
+        # re-narrated the same status slightly differently — exact-text dedup
+        # can not catch that). At most ``AGENT_MAX_INTERIM_MESSAGES``
+        # successful mid-loop user-facing deliveries per turn; anything beyond
+        # is suppressed with an observation steering the model to finish and
+        # use attempt_completion for the final answer. Failed deliveries do
+        # not count against the cap (a retry must remain possible).
+        interim_messages_delivered = 0
+        try:
+            max_interim_messages = max(
+                0, min(int(config_registry.get_var("AGENT_MAX_INTERIM_MESSAGES", 1)), 10)
+            )
+        except (TypeError, ValueError):
+            max_interim_messages = 1
+
         # Cross-iteration tool-call dedup: a weak loop engine re-issues the SAME
         # tool call on later iterations (observed live: the same
         # ``agent_read_file`` call repeated 7x because the engine thought the
@@ -1271,11 +1578,17 @@ class AgentLoopManager:
         prev_iteration_message_only = False
 
         # LogChat is warned at most once per turn when the agent-scope engine
-        # produces an empty response and the loop falls back to the Base Cortex
-        # (see the base-cortex safety net inside the iteration loop below), so a
-        # persistently broken AGENT_CORTEX does not spam the operator every
-        # iteration.
-        agent_engine_fallback_notified = False
+        # fails (empty response, offline endpoint, rejected credentials — see
+        # the classified engine-failure handling inside the iteration loop
+        # below), so a persistently broken AGENT_CORTEX does not spam the
+        # operator every iteration.
+        agent_engine_failure_notified = False
+
+        # Responses that contained JSON-looking (or error-page) content but
+        # could not be parsed into any action — surfaced in the final result so
+        # a turn that produced nothing usable is auditable as malformed output
+        # rather than silent no-op.
+        malformed_response_count = 0
 
         # Diary discipline: a single agentic turn is ONE moment, not many. The
         # model must not write a diary entry on every iteration — at most one at
@@ -1393,6 +1706,11 @@ class AgentLoopManager:
             # Build the iteration prompt: goal + prior observations.
             prompt = self._build_agent_prompt(goal, observations, engine, context)
 
+            # Classified failure of THIS iteration's engine call, populated by
+            # the handlers below / diagnostics peek. ``None`` means the engine
+            # answered (or no diagnostics exist).
+            engine_failure: dict[str, Any] | None = None
+
             try:
                 if engine:
                     # An engine is pinned (via caller or the AGENT_CORTEX
@@ -1413,16 +1731,64 @@ class AgentLoopManager:
                         timeout=per_call_timeout,
                     )
             except asyncio.TimeoutError:
-                log_warning(
-                    f"[agent_core] Engine call timed out at iteration {i} "
+                # Recover the REAL cause before reporting a bare timeout: an
+                # offline endpoint makes each bridge connection attempt hang
+                # until the turn budget dies, so the loop sees a timeout while
+                # the bridge has already recorded the underlying connection
+                # error on its earlier attempts (peek survives the cancellation
+                # because the bridge writes it before its retry sleep).
+                bridge_error = (
+                    _peek_engine_diagnostics(engine) or {}
+                ).get("error")
+                timeout_detail = (
+                    f"engine call timed out at iteration {i} "
                     f"after {per_call_timeout:.1f}s"
                 )
+                if bridge_error:
+                    timeout_detail = f"{timeout_detail}; last engine error: {bridge_error}"
+                kind, hint = classify_engine_failure(bridge_error, timed_out=True)
+                engine_failure = {
+                    "kind": kind,
+                    "hint": hint,
+                    "detail": timeout_detail,
+                    "engine": engine,
+                }
+                log_warning(f"[agent_core] {timeout_detail}")
                 raw_response = ""
             except Exception as exc:
-                log_error(f"[agent_core] Engine call failed at iteration {i}: {exc}")
-                observations.append(
-                    {"iteration": i, "role": "error", "content": str(exc)}
+                kind, hint = classify_engine_failure(str(exc))
+                engine_failure = {
+                    "kind": kind,
+                    "hint": hint,
+                    "detail": f"{type(exc).__name__}: {exc}",
+                    "engine": engine,
+                }
+                log_error(
+                    f"[agent_core] Engine call failed at iteration {i} "
+                    f"({kind}): {exc}"
                 )
+                observations.append(
+                    {
+                        "iteration": i,
+                        "role": "error",
+                        "content": f"engine_error ({kind}): {exc}",
+                    }
+                )
+                if not agent_engine_failure_notified:
+                    agent_engine_failure_notified = True
+                    try:
+                        from core.notifier import notifier
+
+                        notifier(
+                            f"⚠️ Agent cortex '{engine or 'active cortex'}' "
+                            f"failed ({engine_failure['detail'][:300]}). "
+                            f"{hint}"
+                        )
+                    except Exception as notify_exc:
+                        log_debug(
+                            f"[agent_core] Could not notify LogChat about the "
+                            f"engine failure: {notify_exc}"
+                        )
                 stop_reason = "engine_error"
                 break
 
@@ -1433,31 +1799,50 @@ class AgentLoopManager:
             )
 
             if not raw_text.strip():
-                try:
-                    remaining_after_primary = max(
-                        1.0, timeout_seconds - (time.monotonic() - start)
-                    )
-                    fallback_text = await _call_with_hard_timeout(
-                        self._call_engine_direct(prompt, engine, cortex_scope),
-                        timeout=max(2.0, min(engine_timeout, remaining_after_primary)),
-                    )
-                except asyncio.TimeoutError:
-                    fallback_text = ""
-                if fallback_text:
-                    raw_text = fallback_text
+                # The engine produced nothing. Recover the classified cause from
+                # the bridge diagnostics (``_call_engine_direct`` swallows the
+                # raised error, but the bridge records it) so the rest of this
+                # block can report and act on the truthful failure kind.
+                if engine_failure is None:
+                    engine_failure = _engine_failure_from_diagnostics(engine)
+
+                # Same-engine retry is pointless for structural failures (the
+                # endpoint is offline or rejected the credentials and the bridge
+                # already retried internally) — skip straight to the safety net.
+                structural = bool(
+                    engine_failure
+                    and engine_failure.get("kind") in _STRUCTURAL_ENGINE_FAILURES
+                )
+                if not structural:
+                    try:
+                        remaining_after_primary = max(
+                            1.0, timeout_seconds - (time.monotonic() - start)
+                        )
+                        fallback_text = await _call_with_hard_timeout(
+                            self._call_engine_direct(prompt, engine, cortex_scope),
+                            timeout=max(2.0, min(engine_timeout, remaining_after_primary)),
+                        )
+                    except asyncio.TimeoutError:
+                        fallback_text = ""
+                    if fallback_text:
+                        raw_text = fallback_text
+                        engine_failure = None
 
             # Base-cortex safety net. The agent-scope engine (AGENT_CORTEX /
             # scope="agent") can be a registered endpoint that passes the
-            # startup probe yet returns a hard error at call time (e.g. an
-            # expired/invalid API key answering HTTP 401). Its response is then
-            # empty, the primary retry above hits the same broken engine, and
-            # the whole turn ends ``empty_response`` — silently starving the
-            # out-of-band Drones (goal expander / planner) so goals never gain
-            # sub-steps and never advance. When the response is still empty and
-            # the agent engine is NOT already the Base Cortex, retry once on the
-            # Base Cortex so a misconfigured AGENT_CORTEX degrades gracefully
-            # instead of blocking autonomy entirely. Warn loudly (log + LogChat,
-            # once per turn) so the misconfiguration is visible to the operator.
+            # startup probe yet fails at call time — an offline endpoint
+            # (connection errors outliving the turn budget), an expired/invalid
+            # API key answering HTTP 401, or a 200 with an empty body. The
+            # bridge-level retries and the same-engine retry above then hit the
+            # same broken engine and the whole turn would end
+            # ``empty_response`` — silently starving the out-of-band Drones
+            # (goal expander / planner) so goals never gain sub-steps and never
+            # advance. When the response is still empty and the agent engine is
+            # NOT already the Base Cortex, retry once on the Base Cortex so a
+            # misconfigured AGENT_CORTEX degrades gracefully instead of
+            # blocking autonomy entirely. The warning carries the CLASSIFIED
+            # cause (offline / auth / empty / timeout) instead of a single
+            # guessed reason, so the operator is told what actually happened.
             if not raw_text.strip():
                 base_engine: str | None = None
                 try:
@@ -1470,23 +1855,22 @@ class AgentLoopManager:
                         f"empty-response safety net: {exc}"
                     )
                 if base_engine and base_engine != engine:
+                    failure_desc = _describe_engine_failure(engine_failure, engine)
                     warn_msg = (
-                        f"[agent_core] Agent engine {engine!r} returned an empty "
-                        f"response (likely a broken AGENT_CORTEX, e.g. an invalid "
-                        f"API key); falling back to Base Cortex {base_engine!r}. "
-                        f"Fix AGENT_CORTEX to silence this."
+                        f"[agent_core] Agent engine {engine!r} failed "
+                        f"({failure_desc}); falling back to Base Cortex "
+                        f"{base_engine!r}."
                     )
                     log_warning(warn_msg)
-                    if not agent_engine_fallback_notified:
-                        agent_engine_fallback_notified = True
+                    if not agent_engine_failure_notified:
+                        agent_engine_failure_notified = True
                         try:
                             from core.notifier import notifier
 
                             notifier(
-                                f"⚠️ Agent cortex '{engine}' failed (empty "
-                                f"response — likely a broken AGENT_CORTEX / bad "
-                                f"API key). Falling back to Base Cortex "
-                                f"'{base_engine}'. Please fix AGENT_CORTEX."
+                                f"⚠️ Agent cortex '{engine}' failed "
+                                f"({failure_desc}). Falling back to Base Cortex "
+                                f"'{base_engine}'."
                             )
                         except Exception as notify_exc:
                             log_debug(
@@ -1503,8 +1887,77 @@ class AgentLoopManager:
                         )
                     except asyncio.TimeoutError:
                         base_text = ""
+                    except Exception as base_exc:
+                        # The safety net must never kill the turn itself.
+                        log_warning(
+                            f"[agent_core] Base Cortex fallback call raised: "
+                            f"{base_exc}"
+                        )
+                        base_text = ""
                     if base_text and base_text.strip():
                         raw_text = base_text
+                        engine_failure = None
+                    else:
+                        base_failure = _engine_failure_from_diagnostics(base_engine)
+                        observations.append(
+                            {
+                                "iteration": i,
+                                "role": "error",
+                                "content": (
+                                    f"base_cortex_fallback_failed "
+                                    f"({_describe_engine_failure(base_failure, base_engine)}); "
+                                    f"primary failure: {_describe_engine_failure(engine_failure, engine)}"
+                                ),
+                            }
+                        )
+                elif engine_failure is not None and not agent_engine_failure_notified:
+                    # No distinct Base Cortex to fall back to (unresolvable, or
+                    # identical to the broken agent engine). Still surface the
+                    # classified failure once so the operator is not left with
+                    # an unexplained silent turn.
+                    agent_engine_failure_notified = True
+                    try:
+                        from core.notifier import notifier
+
+                        notifier(
+                            f"⚠️ Agent cortex '{engine or 'active cortex'}' failed "
+                            f"({_describe_engine_failure(engine_failure, engine)}) "
+                            f"and no separate Base Cortex fallback is available."
+                        )
+                    except Exception as notify_exc:
+                        log_debug(
+                            f"[agent_core] Could not notify LogChat about the "
+                            f"engine failure: {notify_exc}"
+                        )
+
+            # Fail fast on structural engine failures (offline endpoint /
+            # rejected credentials / rejected request): both the same-engine
+            # retry and the Base Cortex safety net are exhausted, and further
+            # iterations would just re-walk the same dead path until the turn
+            # budget drains. End the turn promptly with the true cause instead
+            # of grinding to ``timeout``/``empty_response``.
+            if (
+                not raw_text.strip()
+                and engine_failure is not None
+                and engine_failure.get("kind") in _STRUCTURAL_ENGINE_FAILURES
+            ):
+                observations.append(
+                    {
+                        "iteration": i,
+                        "role": "error",
+                        "content": (
+                            f"engine_failure ({engine_failure['kind']}): "
+                            f"{engine_failure['detail']}. {engine_failure['hint']}"
+                        ),
+                    }
+                )
+                log_error(
+                    f"[agent_core] Ending agent turn at iteration {i}: engine "
+                    f"failure is structural "
+                    f"({engine_failure['kind']}) — {_describe_engine_failure(engine_failure, engine)}"
+                )
+                stop_reason = "engine_error"
+                break
 
             parsed, _meta = extract_json_from_text(raw_text, return_metadata=True)
             tool_calls = self._extract_tool_calls(parsed)
@@ -1622,7 +2075,13 @@ class AgentLoopManager:
                     if not isinstance(args, dict):
                         args = {}
                     text = str(args.get("text") or args.get("content") or "").strip()
-                    if text:
+                    is_delivery = mc_name.startswith(_DELIVERY_ACTION_PREFIX)
+                    # Non-delivery speech actions are only captured; delivery
+                    # actions are collected once they pass the dedup + interim
+                    # cap below (a suppressed message must not be hoisted into
+                    # ``final_text`` — the closing message belongs to
+                    # attempt_completion / the pause composer).
+                    if text and not is_delivery:
                         collected.append(text)
 
                     # Deliver the message to the interface. Only actual outbound
@@ -1653,6 +2112,53 @@ class AgentLoopManager:
                                 }
                             )
                             continue
+                        # Interim-message damper: the cap for THIS turn is
+                        # already spent — suppress the re-worded update and
+                        # steer the model toward completing properly. Only a
+                        # MIXED iteration (message + further tool calls) is an
+                        # interim update; a message-ONLY iteration is the
+                        # model's answer channel (two consecutive message-only
+                        # iterations end the turn as model_done) and must stay
+                        # deliverable. The suppressed text is NOT hoisted into
+                        # final_text (the pause composer or attempt_completion
+                        # own the closing message).
+                        if (
+                            interim_messages_delivered >= max_interim_messages
+                            and tool_calls
+                        ):
+                            log_info(
+                                f"[agent_core] Iteration {i}: suppressing interim "
+                                f"message '{mc_name}' — cap of "
+                                f"{max_interim_messages} mid-task message(s) "
+                                "already delivered this turn"
+                            )
+                            observations.append(
+                                {
+                                    "iteration": i,
+                                    "role": "tool_results",
+                                    "content": [
+                                        {
+                                            "tool": mc_name,
+                                            "ok": True,
+                                            "result": (
+                                                "suppressed: the user was "
+                                                f"already updated {interim_messages_delivered} "
+                                                "time(s) this turn — do not send "
+                                                "more interim status messages. "
+                                                "Keep working silently and "
+                                                "deliver the final answer via "
+                                                f"{_COMPLETION_TOOL} (or tell "
+                                                "the user you need more time "
+                                                "in that final message)."
+                                            ),
+                                            "error": None,
+                                        }
+                                    ],
+                                }
+                            )
+                            continue
+                        if text:
+                            collected.append(text)
                         exec_result = await agent_tool_executor.execute(
                             mc_name,
                             args,
@@ -1678,6 +2184,7 @@ class AgentLoopManager:
                         delivered_ok = bool(exec_result.get("ok"))
                         if delivered_ok:
                             delivered_message_ok = True
+                            interim_messages_delivered += 1
                             delivered_text = str(
                                 args.get("text") or args.get("content") or ""
                             ).strip()
@@ -1846,15 +2353,74 @@ class AgentLoopManager:
                 prev_iteration_message_only = False
 
                 if not raw_text.strip():
+                    # Carry the classified cause into the audit observation so a
+                    # failed task explains itself (offline endpoint vs bad key
+                    # vs plain empty body) instead of a bare marker.
+                    empty_detail = (
+                        f" ({engine_failure['kind']}: {engine_failure['detail']})"
+                        if engine_failure
+                        else ""
+                    )
                     observations.append(
                         {
                             "iteration": i,
                             "role": "error",
-                            "content": "empty_model_response",
+                            "content": f"empty_model_response{empty_detail}",
                         }
                     )
                     stop_reason = "empty_response"
                     continue
+
+                # Malformed protocol response: the model emitted JSON-looking
+                # content that failed to parse (or an HTML error page from a
+                # broken proxy/gateway) and no tool call, completion, or message
+                # could be extracted. This is NOT a valid answer — the raw text
+                # must never become ``final_text``. Record it so the task audit
+                # shows why the turn produced nothing usable, and nudge the
+                # model to re-emit valid JSON. Structural (parse metadata +
+                # response shape only, never content keywords).
+                _malformed = (
+                    parsed is None
+                    and bool(raw_text.strip())
+                    and (
+                        int(_meta.get("error_count") or 0) > 0
+                        or raw_text.lstrip().lower().startswith(
+                            ("<html", "<!doctype")
+                        )
+                    )
+                )
+                if _malformed:
+                    malformed_response_count += 1
+                    _malformed_head = raw_text.strip()[:120].replace("\n", " ")
+                    observations.append(
+                        {
+                            "iteration": i,
+                            "role": "error",
+                            "content": (
+                                f"malformed_response: output could not be parsed "
+                                f"({_meta.get('error_count', 0)} broken JSON "
+                                f"fragment(s)); starts with: {_malformed_head!r}"
+                            ),
+                        }
+                    )
+                    if i < max_iterations:
+                        observations.append(
+                            {
+                                "iteration": i,
+                                "role": "system",
+                                "content": (
+                                    "Your previous response contained malformed "
+                                    "or unparseable JSON, so no action could be "
+                                    "executed. Re-emit ONE valid JSON object with "
+                                    "your next tool calls (or a user message if "
+                                    "you genuinely mean to reply in text)."
+                                ),
+                            }
+                        )
+                        stop_reason = "max_iterations"
+                        continue
+                    stop_reason = "malformed_response"
+                    break
 
                 # Bare text, no tool calls, no user-facing message. Under the
                 # explicit-completion contract this is NOT "done": weak models
@@ -1943,12 +2509,24 @@ class AgentLoopManager:
                 # re-issue the identical call when they think a result was
                 # truncated (observed live: the same agent_read_file call
                 # repeated 7x). Return the first result with a structural note.
-                # Diary tools are exempt: their start/end slots are enforced
-                # deterministically above, and the closing entry is expected to
-                # run even when its content resembles the opening one.
+                # Two structural exemptions:
+                # * Diary tools: their start/end slots are enforced
+                #   deterministically above, and the closing entry is expected
+                #   to run even when its content resembles the opening one.
+                # * Repeatable (poll/refresh) actions: re-invoking them is the
+                #   POINT — serving a cached first result made every poll of a
+                #   slow external operation see stale state forever, so the
+                #   model could never observe progress and looped until the
+                #   turn budget died (observed live: a Soulseek transfer stuck
+                #   "queued" polled ~15x, each poll returning the cached first
+                #   snapshot). Actions opt in via ``"repeatable": true`` in
+                #   their get_supported_actions() schema.
                 _call_key = (name, json.dumps(args, sort_keys=True, default=str))
                 cached = (
-                    executed_calls.get(_call_key) if name not in _DIARY_TOOLS else None
+                    executed_calls.get(_call_key)
+                    if name not in _DIARY_TOOLS
+                    and name not in _repeatable_action_names()
+                    else None
                 )
                 if cached is not None:
                     log_info(
@@ -2087,6 +2665,45 @@ class AgentLoopManager:
             if composed:
                 final_text = composed
 
+        # Timeout with real work done: the turn ran out of TIME (not
+        # iterations) while still mid-task. Without this, the loop ends with
+        # an empty ``final_text`` and NOTHING is delivered — the user sees
+        # silence even though the agent diagnosed the situation mid-loop
+        # (observed live: a stuck-queued download was analysed in every
+        # iteration's reasoning, yet Telegram never received a word because
+        # the turn died at the budget with no message). Compose the same
+        # model-authored "here's where I am, shall I continue?" pause message
+        # and re-classify the stop reason so the task parks as resumable
+        # ``pending`` (a raw ``timeout`` persists as ``failed``) and the
+        # router's garbage-output guard (which only suppresses ``timeout``
+        # with ZERO actions) lets it through.
+        if (
+            stop_reason == "timeout"
+            and not str(final_text or "").strip()
+        ):
+            actions_executed = 0
+            for obs in observations:
+                if isinstance(obs, dict) and obs.get("role") == "tool_results":
+                    content = obs.get("content")
+                    if isinstance(content, list):
+                        actions_executed += len(content)
+            if actions_executed > 0:
+                composed = await self._compose_pause_message(
+                    goal=goal,
+                    observations=observations,
+                    actions_executed=actions_executed,
+                    engine=engine,
+                    context=context,
+                )
+                if composed:
+                    final_text = composed
+                    stop_reason = "paused_timeout"
+                    log_info(
+                        "[agent_core] Turn hit the time budget mid-task after "
+                        f"{actions_executed} action(s); composed a pause message "
+                        "for delivery (task parks as resumable 'pending')."
+                    )
+
         # Completion-integrity gate. A turn must never report "completed" while
         # an outbound message it claimed to send actually failed to reach the
         # interface. If every attempted delivery failed and none succeeded,
@@ -2124,6 +2741,8 @@ class AgentLoopManager:
             "final_text": final_text,
             "stop_reason": stop_reason,
         }
+        if malformed_response_count:
+            result["malformed_responses"] = malformed_response_count
         result["task_id"] = await self._persist_agentic_turn(
             engine=engine,
             goal=goal,
@@ -2424,8 +3043,140 @@ class AgentLoopManager:
                     res = await engine.generate_response(messages)
                 return res if isinstance(res, str) else (str(res) if res else "")
         except Exception as exc:
-            log_debug(f"[agent_core] Direct engine fallback failed: {exc}")
+            log_warning(
+                f"[agent_core] Direct engine call to {engine_name!r} failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
         return ""
+
+    async def persona_voiceover(
+        self,
+        final_text: str,
+        *,
+        goal: str = "",
+        context: Dict[str, Any] | None = None,
+        message: Any = None,
+    ) -> str:
+        """Re-voice an agent turn's final result through the persona.
+
+        The agentic loop deliberately runs persona-free (the ~32k persona
+        prompt on every tool iteration would bloat each call and degrade
+        tool discipline), so its final text is operationally correct but
+        tonally flat. This asks the **Base Cortex** — the engine that speaks
+        as Synth in ordinary chat — with the FULL persona chat context
+        (persona, memories, conversation, language) to deliver the result in
+        Synth's own voice, keeping every fact intact.
+
+        Returns the re-voiced text, or ``""`` on any failure — the caller
+        then delivers the original agent text unchanged. A styling hiccup
+        must never lose the result.
+        """
+        if not str(final_text or "").strip():
+            return ""
+        try:
+            from types import SimpleNamespace
+
+            from core.prompt_engine import build_prompt_request
+
+            # Build the SAME persona prompt an ordinary chat reply on this
+            # interface would get: the synthetic user message carries the
+            # restyle instruction, and the history/persona machinery keys on
+            # the real interface_path from the original message / context.
+            interface_path = None
+            if isinstance(context, dict):
+                interface_path = context.get("interface_path")
+            if not interface_path:
+                interface_path = getattr(message, "interface_path", None)
+            interface_name = None
+            if isinstance(interface_path, str) and "/" in interface_path:
+                interface_name = interface_path.split("/", 1)[0]
+
+            instruction = (
+                "Your tool-using agent side just finished working on a task"
+                + (f" ('{goal.strip()}')" if str(goal or "").strip() else "")
+                + " — it does the mechanical work, you do the talking. It "
+                "produced this result to report to the user:\n\n"
+                f"{final_text.strip()}\n\n"
+                "Deliver this result to the user now, in YOUR own voice — "
+                "same language and tone as this conversation. Keep every "
+                "fact and outcome intact (paths, names, numbers, successes, "
+                "failures); change only the voice, and keep it about as "
+                "short as the original. Reply ONLY with the message text."
+            )
+            synth_message = SimpleNamespace(
+                interface_path=interface_path,
+                text=instruction,
+                sender_id=getattr(message, "sender_id", None),
+                is_from_self=False,
+            )
+            prompt = await build_prompt_request(
+                synth_message,
+                {"interface_path": interface_path} if interface_path else {},
+                interface_name,
+            )
+            payload = (prompt.get("input") or {}).get("payload") or {}
+            persona_system = str(payload.get("system") or "")
+
+            # Route through the Base Cortex (the persona chat engine), prose
+            # only — no thinking, no native tools. Same bounded/detachable
+            # call shape as the pause composer.
+            from core.config import get_active_cortex_engine
+
+            base_engine = await get_active_cortex_engine()
+            if not base_engine:
+                return ""
+            voice_prompt: Dict[str, Any] = {
+                "input": {
+                    "payload": {
+                        "text": instruction,
+                        "system": persona_system,
+                    }
+                },
+                "system_message": {
+                    "type": "agent_turn",
+                    "engine": base_engine,
+                    "goal": goal,
+                },
+                "agent_mode": True,
+                "observation_history": [],
+            }
+            if context:
+                voice_prompt["context"] = context
+            text = await _call_with_hard_timeout(
+                self._call_engine_direct(voice_prompt, base_engine, native_tools=False),
+                timeout=30.0,
+            )
+            if not isinstance(text, str):
+                return ""
+            text = text.strip()
+            if not text:
+                return ""
+            # The chat-shaped persona prompt invites an action JSON reply —
+            # a message action's text IS the styled reply, so unwrap it.
+            if text.startswith("{") or text.startswith("```"):
+                try:
+                    from core.transport_layer import extract_json_from_text
+
+                    parsed = extract_json_from_text(text)
+                    if isinstance(parsed, dict):
+                        actions = parsed.get("actions")
+                        if isinstance(actions, list):
+                            for act in actions:
+                                if not isinstance(act, dict):
+                                    continue
+                                a_text = str(
+                                    (act.get("payload") or {}).get("text") or ""
+                                ).strip()
+                                if a_text:
+                                    return a_text
+                except Exception:
+                    pass
+                # Unparseable JSON wrapper — do not ship raw JSON to the user.
+                return ""
+            return text
+        except Exception as exc:
+            log_debug(f"[agent_core] persona_voiceover failed: {exc}")
+            return ""
 
     async def _compose_pause_message(
         self,
@@ -2660,8 +3411,15 @@ class AgentLoopManager:
             f"{_COMPLETION_TOOL} tool with a short summary of what you "
             "accomplished, once the goal is genuinely done (or you can clearly "
             "explain, based on tool results, why it cannot be). Send message "
-            "actions to talk to the user while you work, but keep emitting the "
+            "actions to talk to the user while you work, but send at most ONE "
+            "brief interim update per task — repeating status updates on later "
+            "iterations is spam and will be suppressed; the complete answer "
+            f"belongs in the {_COMPLETION_TOOL} summary. Keep emitting the "
             f"next tool call until you call {_COMPLETION_TOOL}.\n"
+            "USER-FACING VOICE: any text you send to the user (interim update "
+            "or completion summary) must already be written in your own voice "
+            "and the conversation's language — natural and personal, never a "
+            "dry technical log. Keep the facts exact; keep the tone yours.\n"
             "Each tool observation is already in PRIOR OBSERVATIONS — build on it "
             "rather than repeating an identical call.\n"
             "INTERNAL NOTES vs USER MESSAGES: keep your private reasoning "

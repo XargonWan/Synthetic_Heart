@@ -224,6 +224,13 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         translation at the adapter boundary so neither internal alias leaks
         into action payloads or middleware.  Non-Venice OpenAI-compatible
         endpoints receive no Venice-specific key.
+
+        Also suppresses ``include_venice_system_prompt``: Venice injects its own
+        system prompt alongside the caller's by default, and that injected
+        prompt identifies the model by name (``model`` id).  A persona model has
+        been observed leaking that identity into its roleplay output
+        ("Gemma 4 Uncensored — I mean, Dee..."), so the Venice-supplied system
+        prompt is explicitly disabled for SyntH prompts.
         """
         body = extra_body if isinstance(extra_body, dict) else {}
         enabled = kwargs.pop("enable_thinking", None)
@@ -252,6 +259,10 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             if not isinstance(venice_body, dict):
                 venice_body = {}
             venice_body["disable_thinking"] = disabled
+            # Venice injects its own system prompt (which names the model) by
+            # default; disable it so the model identity never reaches the
+            # persona conversation. Documented Venice parameter.
+            venice_body["include_venice_system_prompt"] = False
             body["venice_parameters"] = venice_body
         else:
             # A top-level disable_thinking is invalid for Venice and is also

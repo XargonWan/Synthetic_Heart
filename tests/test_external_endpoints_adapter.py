@@ -2056,7 +2056,12 @@ def test_thinking_alias_uses_nested_venice_disable_key():
         default_adapter._resolve_disable_thinking(default_kwargs, default_body) is True
     )
     assert default_kwargs == {}
-    assert default_body == {"venice_parameters": {"disable_thinking": True}}
+    assert default_body == {
+        "venice_parameters": {
+            "disable_thinking": True,
+            "include_venice_system_prompt": False,
+        }
+    }
 
     enabled_kwargs = {"enable_thinking": True}
     enabled_body: dict[str, Any] = {}
@@ -2064,7 +2069,12 @@ def test_thinking_alias_uses_nested_venice_disable_key():
         default_adapter._resolve_disable_thinking(enabled_kwargs, enabled_body) is False
     )
     assert enabled_kwargs == {}
-    assert enabled_body == {"venice_parameters": {"disable_thinking": False}}
+    assert enabled_body == {
+        "venice_parameters": {
+            "disable_thinking": False,
+            "include_venice_system_prompt": False,
+        }
+    }
 
     generic_adapter = OpenAICompatAdapter(
         base_url="http://127.0.0.1:8081/v1", api_key="x"
@@ -2107,7 +2117,12 @@ async def test_openai_compat_venice_request_nests_thinking_parameter(monkeypatch
         enable_thinking=False,
     )
 
-    assert captured["extra_body"] == {"venice_parameters": {"disable_thinking": True}}
+    assert captured["extra_body"] == {
+        "venice_parameters": {
+            "disable_thinking": True,
+            "include_venice_system_prompt": False,
+        }
+    }
     assert "enable_thinking" not in captured
     assert "disable_thinking" not in captured
 
@@ -2145,7 +2160,12 @@ async def test_openai_compat_venice_thinking_rejection_falls_back(monkeypatch):
     )
 
     assert response.content == '{"actions": []}'
-    assert calls[0]["extra_body"] == {"venice_parameters": {"disable_thinking": True}}
+    assert calls[0]["extra_body"] == {
+        "venice_parameters": {
+            "disable_thinking": True,
+            "include_venice_system_prompt": False,
+        }
+    }
     assert calls[1]["model"] == "gemma-4:disable_thinking=true"
     assert calls[1]["extra_body"] is None
     assert calls[2]["model"] == "gemma-4"

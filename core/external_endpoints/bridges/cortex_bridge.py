@@ -220,6 +220,11 @@ class ExternalCortexEngine(AIPluginBase):
         self.notify_fn = notify_fn
         self.display_name = endpoint.display_label or endpoint.name
         self._last_response_metadata: dict[str, Any] = {}
+        # Last transport/provider error seen inside generate_response (cleared
+        # at the start of each call, set on every failed attempt). Callers such
+        # as the agent loop read this after a cancelled/failed call to report
+        # the real cause ("endpoint offline") instead of a bare timeout/empty.
+        self._last_attempt_error: str | None = None
         # Transient, per-call model override applied by scope-aware call sites
         # (see ``scope_model_override``). Unlike ``_endpoint.default_model`` this
         # is NOT persisted and is scoped to a single ``generate_response`` call,
@@ -1200,6 +1205,52 @@ class ExternalCortexEngine(AIPluginBase):
         finally:
             self._scope_model_override = previous
 
+    def _bind_langfuse_turn_context(self, messages: Any) -> None:
+        """Attach per-turn attribution context for Langfuse tracing.
+
+        Pulls structural turn metadata (interface, user, mode, scope) from a
+        typed ``PromptRequest`` so every cortex trace for this turn — including
+        retries and nested TTS calls — groups under the same Langfuse session
+        and user. The call site is structural: it never reads message text.
+        """
+        try:
+            from core.cortex_api_logger import set_langfuse_turn_context
+            from core.prompt_request import PromptRequest
+
+            prompt_request: PromptRequest | None = None
+            if isinstance(messages, PromptRequest):
+                prompt_request = messages
+            elif isinstance(messages, dict):
+                candidate = messages.get("__prompt_request")
+                if isinstance(candidate, PromptRequest):
+                    prompt_request = candidate
+
+            if prompt_request is None:
+                set_langfuse_turn_context(None)
+                return
+
+            runtime_ctx = prompt_request.runtime_ctx
+            context: dict[str, Any] = {
+                "interface_path": runtime_ctx.interface_path,
+                "interface_name": runtime_ctx.interface_name,
+                "chat_type": runtime_ctx.chat_type,
+                "username": runtime_ctx.username,
+                "usertag": runtime_ctx.usertag,
+                "scope": runtime_ctx.scope,
+                "mode": prompt_request.mode,
+                "input_source": runtime_ctx.input_source,
+            }
+            set_langfuse_turn_context(
+                {k: v for k, v in context.items() if v not in (None, "")}
+            )
+        except Exception:
+            try:
+                from core.cortex_api_logger import set_langfuse_turn_context
+
+                set_langfuse_turn_context(None)
+            except Exception:
+                pass
+
     async def generate_response(
         self,
         messages: list[dict[str, Any]] | Any,
@@ -1225,10 +1276,13 @@ class ExternalCortexEngine(AIPluginBase):
             msg_list = self._build_messages(messages)
             msg_list = self._clamp_messages_to_char_budget(msg_list)
 
+        self._bind_langfuse_turn_context(messages)
+
         model = self._scope_model_override or self._endpoint.default_model
         if not model and self._endpoint.available_models:
             model = self._endpoint.available_models[0]
         self._last_response_metadata = {}
+        self._last_attempt_error = None
         max_retries, backoff = self._get_retry_settings()
         request_timeout = self._get_request_timeout()
         retry_on_timeout = self._retry_on_timeout()
@@ -1324,6 +1378,9 @@ class ExternalCortexEngine(AIPluginBase):
                 self._last_response_metadata = response_metadata
                 return response_content
             except asyncio.TimeoutError:
+                self._last_attempt_error = (
+                    f"TimeoutError: LLM request timed out after {request_timeout}s"
+                )
                 log_warning(
                     f"[cortex_bridge:{self._endpoint.name}] generate_response timed out "
                     f"after {request_timeout}s (attempt {attempt}/{max_retries})"
@@ -1341,6 +1398,7 @@ class ExternalCortexEngine(AIPluginBase):
                     f"and {max_retries} retry attempts"
                 )
             except Exception as exc:
+                self._last_attempt_error = f"{type(exc).__name__}: {exc}"
                 should_retry = attempt < max_retries and self._is_retryable_exception(
                     exc
                 )

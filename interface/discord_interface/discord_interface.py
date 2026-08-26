@@ -28,6 +28,7 @@ import logging as _stdlib_logging
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.chat_attention import set_attention, evaluate_triggers
 from core.reaction_handler import get_reaction_emoji
+from core.delivery_guard import DeadTargetError
 
 # ── Route discord.ext.voice_recv logs into the synth logger ──────────────
 # voice_recv uses stdlib logging; without this its errors are invisible.
@@ -2010,8 +2011,10 @@ class DiscordInterface:
                     f"[discord_interface] DM send attempt failed for {channel_id}: {e}"
                 )
 
-            # If we reach here, both channel and user resolution failed
-            raise RuntimeError(f"Unknown channel or user: {channel_id}")
+            # If we reach here, both channel and user resolution failed. Raise
+            # the structural DeadTargetError so the delivery circuit breaker can
+            # classify this as a permanent dead-target failure (not transient).
+            raise DeadTargetError(channel_id)
 
         # Prepare file object
         file_obj = None

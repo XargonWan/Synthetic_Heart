@@ -101,9 +101,29 @@ class ReconMemoryRecollectorPlugin:
         if not tags and not keywords:
             return []
 
+        # The message currently being answered is already persisted to
+        # ``chat_history_cache``; excluding its own chat from the raw
+        # chat-history tier prevents the live conversation (incl. stale
+        # greetings) from being echoed back as "memories".
+        _cur_path = getattr(message, "interface_path", None)
+        if not _cur_path and isinstance(context_memory, dict):
+            _cur_path = context_memory.get("interface_path")
+        if _cur_path:
+            try:
+                from core.chat_context_manager import _resolve_context_path
+
+                _cur_path = _resolve_context_path(str(_cur_path))
+            except Exception:
+                pass
+        _excluded_paths = [str(_cur_path)] if _cur_path else None
+
         try:
             results = await search_memories(
-                tags=tags, keywords=keywords, include_chat=True, limit=max_results
+                tags=tags,
+                keywords=keywords,
+                include_chat=True,
+                limit=max_results,
+                exclude_interface_paths=_excluded_paths,
             )
         except Exception as e:
             log_warning(f"[recon_memory] search_memories failed: {e}")
@@ -215,7 +235,8 @@ class ReconMemoryRecollectorPlugin:
                 cached = await load_chat_history(
                     interface_path,
                     match_chat_level=(
-                        not vessel_focus and not is_vessel_interface_path(interface_path)
+                        not vessel_focus
+                        and not is_vessel_interface_path(interface_path)
                     ),
                 )
                 for item in list(cached)[-6:]:
@@ -229,9 +250,7 @@ class ReconMemoryRecollectorPlugin:
                 global_cached = []
             else:
                 global_cached = [
-                    item
-                    for item in global_cached
-                    if not is_vessel_history_entry(item)
+                    item for item in global_cached if not is_vessel_history_entry(item)
                 ]
             for item in list(global_cached)[-6:]:
                 sender = item.get("sender_name") or "unknown"
@@ -294,9 +313,19 @@ class ReconMemoryRecollectorPlugin:
         if not tags and not keywords:
             return []
 
+        # The message currently being answered is already persisted to
+        # ``chat_history_cache``; excluding its own chat from the raw
+        # chat-history tier prevents the live conversation (incl. stale
+        # greetings) from being echoed back as "memories".
+        _excluded_paths = [str(interface_path)] if interface_path else None
+
         try:
             results = await search_memories(
-                tags=tags, keywords=keywords, include_chat=True, limit=max_results
+                tags=tags,
+                keywords=keywords,
+                include_chat=True,
+                limit=max_results,
+                exclude_interface_paths=_excluded_paths,
             )
         except Exception as e:
             log_warning(f"[recon_memory] search_memories failed: {e}")

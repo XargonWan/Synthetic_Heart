@@ -509,3 +509,101 @@ def test_langfuse_http_response_hook_reports_batch_errors_without_payload(
     )
     assert captured[0][1][0:2] == (207, "/api/public/ingestion")
     assert '"status": 400' in captured[0][1][2]
+
+
+def test_langfuse_turn_context_sets_user_session_tags_and_version(monkeypatch):
+    monkeypatch.setenv("CORTEX_API_LOG_ENABLED", "false")
+    monkeypatch.setenv("CORTEX_LANGFUSE_ENABLED", "true")
+    monkeypatch.setenv("CORTEX_LANGFUSE_CAPTURE_GENERATIONS", "true")
+    monkeypatch.setenv("SYNTH_VERSION", "1.2.3")
+
+    captured: dict[str, Any] = {}
+
+    class DummyTrace:
+        def update(self, **kwargs):
+            return None
+
+        def generation(self, **kwargs):
+            captured["generation_kwargs"] = kwargs
+
+    class DummyClient:
+        def trace(self, **kwargs):
+            captured["trace_kwargs"] = kwargs
+            return DummyTrace()
+
+        def flush(self):
+            return None
+
+    monkeypatch.setattr(cal, "_get_langfuse_client", lambda: DummyClient())
+
+    cal.set_langfuse_turn_context(
+        {
+            "user_id": "Scar",
+            "username": "Scar",
+            "usertag": "scar",
+            "interface_path": "telegram_bot/5208932647",
+            "interface_name": "telegram_bot",
+            "chat_type": "dm",
+            "scope": "local",
+            "mode": "chat",
+            "input_source": "text",
+        }
+    )
+    try:
+        cal.log_cortex_request(
+            "test",
+            model="m",
+            payload={
+                "messages": [{"role": "user", "content": "hi"}],
+                "temperature": 0.7,
+                "max_tokens": 256,
+            },
+        )
+        cal.log_cortex_response("test", model="m", status=200, body={"ok": True})
+    finally:
+        cal.set_langfuse_turn_context(None)
+
+    trace_kwargs = cast(dict[str, Any], captured["trace_kwargs"])
+    assert trace_kwargs["session_id"] == "chat:telegram_bot/5208932647"
+    assert trace_kwargs["user_id"] == "Scar"
+    assert trace_kwargs["version"] == "1.2.3"
+    assert "engine:test" in trace_kwargs["tags"]
+    assert "interface:telegram_bot" in trace_kwargs["tags"]
+    assert "mode:chat" in trace_kwargs["tags"]
+    assert trace_kwargs["metadata"]["interface_path"] == "telegram_bot/5208932647"
+    assert trace_kwargs["metadata"]["chat_type"] == "dm"
+
+    generation_kwargs = cast(dict[str, Any], captured["generation_kwargs"])
+    assert generation_kwargs["model_parameters"] == {
+        "temperature": 0.7,
+        "max_tokens": 256,
+    }
+
+
+def test_langfuse_turn_context_fallback_without_context(monkeypatch):
+    monkeypatch.setenv("CORTEX_API_LOG_ENABLED", "false")
+    monkeypatch.setenv("CORTEX_LANGFUSE_ENABLED", "true")
+
+    captured: dict[str, Any] = {}
+
+    class DummyTrace:
+        def update(self, **kwargs):
+            return None
+
+    class DummyClient:
+        def trace(self, **kwargs):
+            captured["trace_kwargs"] = kwargs
+            return DummyTrace()
+
+        def flush(self):
+            return None
+
+    monkeypatch.setattr(cal, "_get_langfuse_client", lambda: DummyClient())
+
+    cal.set_langfuse_turn_context(None)
+    cal.log_cortex_request("test", model="m", payload={"x": 1})
+
+    trace_kwargs = cast(dict[str, Any], captured["trace_kwargs"])
+    assert trace_kwargs["session_id"].startswith("test:")
+    assert trace_kwargs["user_id"] is None
+    assert "engine:test" in trace_kwargs["tags"]
