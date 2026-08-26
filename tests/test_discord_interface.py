@@ -19,7 +19,7 @@ def test_execute_action_with_interface_path(monkeypatch):
     monkeypatch.setattr(di, "send_message", fake_send_message)
 
     action = {
-        "type": "message_discord_bot",
+        "type": "send_message",
         "payload": {
             "interface_path": "discord_bot/111111111/222222222",
             "text": "hello from test",
