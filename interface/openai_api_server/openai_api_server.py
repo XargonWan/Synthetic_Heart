@@ -127,27 +127,38 @@ class OpenAIApiServer:
 
     @staticmethod
     def get_supported_actions() -> dict[str, dict[str, Any]]:
+        from core.message_registry import get_send_message_schema
+
         return {
-            "message_ollama_serve": {
-                "description": "Send a text message through the OpenAI-compatible HTTP interface.",
-                "required_fields": ["text", "target"],
-                "optional_fields": ["conversation_id"],
-            }
+            "send_message": get_send_message_schema(["ollama_serve"]),
         }
 
     @staticmethod
     def get_prompt_instructions(action_name: str) -> dict[str, Any]:
-        if action_name == "message_ollama_serve":
+        if action_name == "send_message":
             return {
-                "description": "Send a message back to an OpenAI-compatible HTTP client.",
+                "description": (
+                    "Send a text message back to an OpenAI-compatible HTTP client."
+                ),
                 "payload": {
                     "text": {
                         "type": "string",
                         "description": "Message content to deliver to the client.",
                     },
+                    "interface_path": {
+                        "type": "string",
+                        "description": (
+                            "Destination path ('ollama_serve/<chat_id>'). OPTIONAL "
+                            "when replying to an incoming request; REQUIRED for "
+                            "spontaneous messages."
+                        ),
+                    },
                     "target": {
                         "type": "string",
-                        "description": "Internal chat identifier associated with the HTTP session.",
+                        "description": (
+                            "Internal chat identifier associated with the HTTP "
+                            "session (legacy alias of interface_path's chat id)."
+                        ),
                     },
                     "conversation_id": {
                         "type": "string",
@@ -164,6 +175,16 @@ class OpenAIApiServer:
             "OpenAI-compatible HTTP API. "
             "The target field must contain the internal chat identifier provided by the request handler."
         )
+
+    @staticmethod
+    def _chat_id_from_interface_path(interface_path: Any) -> Optional[str]:
+        """Extract the chat id from an ``ollama_serve/<chat_id>`` path."""
+        if not interface_path or not isinstance(interface_path, str):
+            return None
+        parts = [p for p in interface_path.split("/") if p]
+        if not parts or parts[0] != "ollama_serve":
+            return None
+        return parts[1] if len(parts) > 1 else None
 
     # ------------------------------------------------------------------
     # FastAPI route handlers
@@ -1138,10 +1159,26 @@ class OpenAIApiServer:
         if isinstance(payload_or_chat_id, dict):
             payload = payload_or_chat_id
             text = payload.get("text", text)
-            chat_id = payload.get("target") or payload.get("chat_id")
+            chat_id = (
+                payload.get("target")
+                or payload.get("chat_id")
+                or self._chat_id_from_interface_path(payload.get("interface_path"))
+                or getattr(kwargs.get("original_message"), "chat_id", None)
+            )
             model = payload.get("model")
             conversation_id = payload.get("conversation_id")
             skip_history = payload.get("skip_history", skip_history)
+
+            # Text-only transport: report unsupported unified features.
+            from core.capability_drops import log_and_build_drop
+
+            for feature in ("media", "send_as_voice", "reply_to"):
+                if payload.get(feature):
+                    log_and_build_drop(
+                        feature,
+                        f"{feature} is not supported by the OpenAI-compatible HTTP interface",
+                        "ollama_serve",
+                    )
         else:
             chat_id = payload_or_chat_id or kwargs.get("chat_id")
             model = kwargs.get("model")
@@ -1204,7 +1241,7 @@ class OpenAIApiServer:
         bot: Any,
         original_message: Any,
     ) -> None:
-        if action.get("type") != "message_ollama_serve":
+        if action.get("type") != "send_message":
             return
         payload = action.get("payload", {})
         await self.send_message(payload)
