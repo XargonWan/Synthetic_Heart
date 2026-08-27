@@ -321,3 +321,196 @@ class TestDiscordExtraction:
         )
 
         assert len(attachments) == 0
+
+
+class TestTelegramStickerExtraction:
+    """Tests for Telegram sticker extraction."""
+
+    @pytest.mark.asyncio
+    async def test_extract_static_sticker_from_telegram(self):
+        """Test extracting a static sticker from a Telegram message."""
+        mock_bot = AsyncMock()
+        mock_file = AsyncMock()
+        mock_file.download_as_bytearray = AsyncMock(
+            return_value=bytearray(b"fake_sticker_data")
+        )
+        mock_bot.get_file = AsyncMock(return_value=mock_file)
+
+        mock_sticker = MagicMock()
+        mock_sticker.file_id = "sticker_file_id"
+        mock_sticker.file_unique_id = "sticker_unique_id"
+        mock_sticker.is_animated = False
+        mock_sticker.is_video = False
+
+        mock_message = MagicMock()
+        mock_message.photo = None
+        mock_message.document = None
+        mock_message.audio = None
+        mock_message.voice = None
+        mock_message.video = None
+        mock_message.video_note = None
+        mock_message.sticker = mock_sticker
+        mock_message.chat = MagicMock(id=123, type="private")
+
+        attachments = await extract_multimodal_from_telegram(mock_bot, mock_message)
+
+        assert len(attachments) == 1
+        assert attachments[0]["mime_type"] == "image/webp"
+        assert attachments[0]["filename"] == "sticker_sticker_unique_id.webp"
+        assert attachments[0]["is_sticker"] is True
+        assert attachments[0]["data"] == encode_bytes_to_base64(b"fake_sticker_data")
+        assert attachments[0]["media_metadata"]["type"] == "sticker"
+
+    @pytest.mark.asyncio
+    async def test_skip_animated_sticker_from_telegram(self):
+        """Test that animated Telegram stickers are skipped."""
+        mock_bot = AsyncMock()
+
+        mock_sticker = MagicMock()
+        mock_sticker.file_id = "sticker_file_id"
+        mock_sticker.file_unique_id = "sticker_unique_id"
+        mock_sticker.is_animated = True
+        mock_sticker.is_video = False
+
+        mock_message = MagicMock()
+        mock_message.photo = None
+        mock_message.document = None
+        mock_message.audio = None
+        mock_message.voice = None
+        mock_message.video = None
+        mock_message.video_note = None
+        mock_message.sticker = mock_sticker
+        mock_message.chat = MagicMock(id=123, type="private")
+
+        attachments = await extract_multimodal_from_telegram(mock_bot, mock_message)
+
+        assert len(attachments) == 0
+        mock_bot.get_file.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skip_video_sticker_from_telegram(self):
+        """Test that video Telegram stickers are skipped."""
+        mock_bot = AsyncMock()
+
+        mock_sticker = MagicMock()
+        mock_sticker.file_id = "sticker_file_id"
+        mock_sticker.file_unique_id = "sticker_unique_id"
+        mock_sticker.is_animated = False
+        mock_sticker.is_video = True
+
+        mock_message = MagicMock()
+        mock_message.photo = None
+        mock_message.document = None
+        mock_message.audio = None
+        mock_message.voice = None
+        mock_message.video = None
+        mock_message.video_note = None
+        mock_message.sticker = mock_sticker
+        mock_message.chat = MagicMock(id=123, type="private")
+
+        attachments = await extract_multimodal_from_telegram(mock_bot, mock_message)
+
+        assert len(attachments) == 0
+        mock_bot.get_file.assert_not_called()
+
+
+class TestDiscordStickerExtraction:
+    """Tests for Discord sticker extraction."""
+
+    @pytest.mark.asyncio
+    async def test_extract_standard_sticker_from_discord(self, monkeypatch):
+        """Test extracting a standard PNG sticker from a Discord message."""
+        mock_sticker = MagicMock()
+        mock_sticker.id = 123456789
+        mock_sticker.name = "test_sticker"
+        mock_sticker.format = 1  # PNG
+        mock_sticker.url = "https://cdn.discordapp.com/stickers/123456789.png"
+
+        mock_message = MagicMock()
+        mock_message.attachments = []
+        mock_message.embeds = []
+        mock_message.guild = None
+        mock_message.stickers = [mock_sticker]
+
+        mock_response = MagicMock()
+        mock_response.content = b"fake_sticker_png_data"
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        mock_httpx = MagicMock()
+        mock_httpx.AsyncClient = MagicMock(return_value=mock_client)
+        monkeypatch.setitem(__import__("sys").modules, "httpx", mock_httpx)
+
+        attachments = await extract_multimodal_from_discord(mock_message)
+
+        assert len(attachments) == 1
+        assert attachments[0]["mime_type"] == "image/png"
+        assert attachments[0]["filename"] == "sticker_123456789_test_sticker.png"
+        assert attachments[0]["is_sticker"] is True
+        assert attachments[0]["media_metadata"]["type"] == "sticker"
+        assert attachments[0]["media_metadata"]["name"] == "test_sticker"
+        assert attachments[0]["media_metadata"]["viewable"] is True
+
+    @pytest.mark.asyncio
+    async def test_skip_lottie_sticker_from_discord(self, monkeypatch):
+        """Test that Lottie Discord stickers are skipped with a placeholder."""
+        mock_sticker = MagicMock()
+        mock_sticker.id = 987654321
+        mock_sticker.name = "lottie_sticker"
+        mock_sticker.format = 3  # LOTTIE
+
+        mock_message = MagicMock()
+        mock_message.attachments = []
+        mock_message.embeds = []
+        mock_message.guild = None
+        mock_message.stickers = [mock_sticker]
+
+        attachments = await extract_multimodal_from_discord(mock_message)
+
+        assert len(attachments) == 1
+        assert attachments[0]["mime_type"] == "text/plain"
+        assert attachments[0]["is_sticker"] is True
+        assert attachments[0]["media_metadata"]["type"] == "sticker"
+        assert attachments[0]["media_metadata"]["viewable"] is False
+        assert b"lottie_sticker" in base64.b64decode(attachments[0]["data"])
+
+    @pytest.mark.asyncio
+    async def test_sticker_download_failure_generates_placeholder(self, monkeypatch):
+        """Test that a failed sticker download generates a placeholder."""
+        mock_sticker = MagicMock()
+        mock_sticker.id = 111111111
+        mock_sticker.name = "broken_sticker"
+        mock_sticker.format = 1  # PNG
+        mock_sticker.url = "https://cdn.discordapp.com/stickers/111111111.png"
+
+        mock_message = MagicMock()
+        mock_message.attachments = []
+        mock_message.embeds = []
+        mock_message.guild = None
+        mock_message.stickers = [mock_sticker]
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock(
+            side_effect=Exception("network error")
+        )
+
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        mock_httpx = MagicMock()
+        mock_httpx.AsyncClient = MagicMock(return_value=mock_client)
+        monkeypatch.setitem(__import__("sys").modules, "httpx", mock_httpx)
+
+        attachments = await extract_multimodal_from_discord(mock_message)
+
+        assert len(attachments) == 1
+        assert attachments[0]["mime_type"] == "text/plain"
+        assert attachments[0]["is_sticker"] is True
+        assert attachments[0]["media_metadata"]["viewable"] is False
+        assert b"broken_sticker" in base64.b64decode(attachments[0]["data"])

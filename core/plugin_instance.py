@@ -716,8 +716,13 @@ async def handle_incoming_message(
                             parts.append(f"language: {iris_result.language}")
                         if iris_result.confidence is not None:
                             parts.append(f"confidence: {iris_result.confidence:.2f}")
+                        media_label = (
+                            "Sticker"
+                            if getattr(iris_result, "is_sticker", False)
+                            else "Image"
+                        )
                         description_block = (
-                            "[Image the user just shared with you — this is what "
+                            f"[{media_label} the user just shared with you — this is what "
                             "you can see in it right now: " + " | ".join(parts) + "]"
                         )
                         if original_text:
@@ -762,6 +767,8 @@ async def handle_incoming_message(
                                         "iris_cached_path": iris_result.cached_path,
                                         "iris_cached_mime": _cached_mime,
                                     }
+                                    if getattr(iris_result, "is_sticker", False):
+                                        update_meta["iris_is_sticker"] = True
                                 from core.chat_context_manager import (
                                     update_message_in_context,
                                 )
@@ -1677,6 +1684,7 @@ async def _extract_image_data_from_message(message, interface_name: str):
 def _build_unviewable_media_placeholder(
     mime_type: str | None,
     reason: str = "unavailable",
+    is_sticker: bool = False,
 ) -> str:
     """Build a text placeholder informing the Cortex that media was received but not analysed.
 
@@ -1684,7 +1692,14 @@ def _build_unviewable_media_placeholder(
         mime_type: MIME type of the attachment (e.g. ``"image/png"``).
         reason:    Why the vision analysis could not run.
                    Typical values: ``"disabled"``, ``"unavailable"``, ``"error"``.
+        is_sticker: Whether the attachment is a sticker.
     """
+    if is_sticker:
+        return (
+            "The user sent a sticker that could not be analysed. "
+            "Acknowledge that a sticker was shared and that you cannot "
+            "see its content right now."
+        )
     media_label = mime_type or "media file"
     return (
         f"The user sent a {media_label} attachment. "
@@ -1784,6 +1799,7 @@ async def _describe_attachment_images_with_iris(
         return None
 
     first_media_mime_type = None
+    first_media_is_sticker = False
     for attachment in attachments:
         mime_type = str(
             attachment.get("mime_type")
@@ -1793,6 +1809,7 @@ async def _describe_attachment_images_with_iris(
         )
         if mime_type.startswith(("image/", "video/")):
             first_media_mime_type = mime_type
+            first_media_is_sticker = bool(attachment.get("is_sticker"))
             break
 
     if first_media_mime_type is None:
@@ -1808,8 +1825,11 @@ async def _describe_attachment_images_with_iris(
             )
             return IrisResult(
                 description=_build_unviewable_media_placeholder(
-                    first_media_mime_type, reason="unavailable"
-                )
+                    first_media_mime_type,
+                    reason="unavailable",
+                    is_sticker=first_media_is_sticker,
+                ),
+                is_sticker=first_media_is_sticker,
             )
         # Refresh config before reading _active_engine_name so we get the
         # DB-loaded value rather than the hard-coded startup default ("disabled").
@@ -1824,8 +1844,11 @@ async def _describe_attachment_images_with_iris(
             log_info(f"[plugin_instance] Iris skip: active engine is '{active_engine}'")
             return IrisResult(
                 description=_build_unviewable_media_placeholder(
-                    first_media_mime_type, reason="disabled"
-                )
+                    first_media_mime_type,
+                    reason="disabled",
+                    is_sticker=first_media_is_sticker,
+                ),
+                is_sticker=first_media_is_sticker,
             )
         log_info(
             f"[plugin_instance] Iris active engine: '{active_engine}', processing {len(attachments)} attachment(s)"
@@ -1834,8 +1857,11 @@ async def _describe_attachment_images_with_iris(
         log_debug(f"[plugin_instance] Iris plugin lookup failed: {exc}")
         return IrisResult(
             description=_build_unviewable_media_placeholder(
-                first_media_mime_type, reason="unavailable"
-            )
+                first_media_mime_type,
+                reason="unavailable",
+                is_sticker=first_media_is_sticker,
+            ),
+            is_sticker=first_media_is_sticker,
         )
 
     for attachment in attachments:
@@ -1915,9 +1941,15 @@ async def _describe_attachment_images_with_iris(
             log_info(
                 f"[plugin_instance] Iris: calling describe_media for {mime_type} ({len(image_bytes)} bytes)"
             )
+            attachment_is_sticker = bool(attachment.get("is_sticker"))
+            effective_prompt = prompt
+            if attachment_is_sticker:
+                sticker_hint = "\n\nThis is a sticker image. Describe what is depicted in the sticker."
+                base_prompt = prompt or getattr(iris, "_default_prompt", "") or ""
+                effective_prompt = base_prompt + sticker_hint
             try:
                 result = await asyncio.wait_for(
-                    iris.describe_media(analysis_path, mime_type, prompt),
+                    iris.describe_media(analysis_path, mime_type, effective_prompt),
                     timeout=120.0,
                 )
             except asyncio.TimeoutError:
@@ -1929,6 +1961,7 @@ async def _describe_attachment_images_with_iris(
                 # Record the durable cache location on the result so callers can
                 # persist it into chat-history metadata for re-inspection.
                 result.cached_path = cached_path
+                result.is_sticker = attachment_is_sticker
                 log_info(
                     f"[plugin_instance] Iris: got description ({len(result.description)} chars)"
                 )
@@ -1949,8 +1982,9 @@ async def _describe_attachment_images_with_iris(
 
     return IrisResult(
         description=_build_unviewable_media_placeholder(
-            first_media_mime_type, reason="error"
-        )
+            first_media_mime_type, reason="error", is_sticker=first_media_is_sticker
+        ),
+        is_sticker=first_media_is_sticker,
     )
 
 

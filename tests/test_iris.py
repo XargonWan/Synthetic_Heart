@@ -881,3 +881,140 @@ async def test_audio_attachments_not_stripped() -> None:
     assert len(filtered) == 2
     assert filtered[0]["mime_type"] == "audio/ogg"
     assert filtered[1]["mime_type"] == "application/pdf"
+
+
+@pytest.mark.asyncio
+async def test_describe_sticker_attachment_appends_sticker_prompt() -> None:
+    from core.iris_registry import IrisRegistry
+    from core.plugin_instance import _describe_attachment_images_with_iris
+    from plugins.iris_base import IrisEngineBase, IrisResult
+    from plugins.iris_plugin import IrisPlugin
+
+    captured_prompt = None
+
+    class MockEngine(IrisEngineBase):
+        def describe_image(
+            self,
+            file_path: str,
+            mime_type: str | None = None,
+            prompt: str | None = None,
+            model: str | None = None,
+        ) -> IrisResult | None:
+            nonlocal captured_prompt
+            captured_prompt = prompt
+            return IrisResult(description="a happy cat sticker", language="en")
+
+    reg = IrisRegistry()
+    reg.register_instance(
+        "mock", MockEngine(), label="Mock", capabilities={"vision": True}
+    )
+
+    plugin = IrisPlugin.__new__(IrisPlugin)
+    plugin._active_engine_name = "mock"
+    plugin._engine_settings = {}
+    plugin._default_prompt = "IMPORTANT: Respond in plain conversational text only."
+    plugin._default_model = ""
+
+    data = base64.b64encode(b"dummy").decode("ascii")
+    attachment = {"mime_type": "image/webp", "data": data, "is_sticker": True}
+
+    with (
+        patch("plugins.iris_plugin.IRIS_REGISTRY", reg),
+        patch.object(plugin, "refresh_config"),
+        patch.dict(
+            "core.core_initializer.PLUGIN_REGISTRY",
+            {"iris_plugin": plugin},
+            clear=True,
+        ),
+    ):
+        result = await _describe_attachment_images_with_iris([attachment])
+
+    assert result is not None
+    assert result.description == "a happy cat sticker"
+    assert result.is_sticker is True
+    assert captured_prompt is not None
+    assert "sticker image" in captured_prompt
+    assert captured_prompt.startswith(
+        "IMPORTANT: Respond in plain conversational text only."
+    )
+
+
+@pytest.mark.asyncio
+async def test_describe_non_sticker_attachment_does_not_append_sticker_prompt() -> None:
+    from core.iris_registry import IrisRegistry
+    from core.plugin_instance import _describe_attachment_images_with_iris
+    from plugins.iris_base import IrisEngineBase, IrisResult
+    from plugins.iris_plugin import IrisPlugin
+
+    captured_prompt = None
+
+    class MockEngine(IrisEngineBase):
+        def describe_image(
+            self,
+            file_path: str,
+            mime_type: str | None = None,
+            prompt: str | None = None,
+            model: str | None = None,
+        ) -> IrisResult | None:
+            nonlocal captured_prompt
+            captured_prompt = prompt
+            return IrisResult(description="a landscape", language="en")
+
+    reg = IrisRegistry()
+    reg.register_instance(
+        "mock", MockEngine(), label="Mock", capabilities={"vision": True}
+    )
+
+    plugin = IrisPlugin.__new__(IrisPlugin)
+    plugin._active_engine_name = "mock"
+    plugin._engine_settings = {}
+    plugin._default_prompt = "IMPORTANT: Respond in plain conversational text only."
+    plugin._default_model = ""
+
+    data = base64.b64encode(b"dummy").decode("ascii")
+    attachment = {"mime_type": "image/jpeg", "data": data, "is_sticker": False}
+
+    with (
+        patch("plugins.iris_plugin.IRIS_REGISTRY", reg),
+        patch.object(plugin, "refresh_config"),
+        patch.dict(
+            "core.core_initializer.PLUGIN_REGISTRY",
+            {"iris_plugin": plugin},
+            clear=True,
+        ),
+    ):
+        result = await _describe_attachment_images_with_iris([attachment])
+
+    assert result is not None
+    assert result.is_sticker is False
+    assert captured_prompt is not None
+    assert "sticker image" not in captured_prompt
+
+
+@pytest.mark.asyncio
+async def test_describe_sticker_attachment_with_disabled_engine_returns_sticker_placeholder() -> (
+    None
+):
+    from core.plugin_instance import _describe_attachment_images_with_iris
+    from plugins.iris_plugin import IrisPlugin
+
+    plugin = IrisPlugin.__new__(IrisPlugin)
+    plugin._active_engine_name = "disabled"
+    plugin._default_model = ""
+
+    attachment = {"mime_type": "image/webp", "data": "ZmFrZQ==", "is_sticker": True}
+
+    with (
+        patch.dict(
+            "core.core_initializer.PLUGIN_REGISTRY",
+            {"iris_plugin": plugin},
+            clear=True,
+        ),
+        patch.object(plugin, "refresh_config"),
+    ):
+        result = await _describe_attachment_images_with_iris([attachment])
+
+    assert result is not None
+    assert result.is_sticker is True
+    assert "sticker" in result.description.lower()
+    assert "could not be analysed" in result.description.lower()
