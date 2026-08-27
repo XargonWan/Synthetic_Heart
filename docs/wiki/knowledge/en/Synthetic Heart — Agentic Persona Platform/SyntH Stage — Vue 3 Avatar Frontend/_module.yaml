@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: frontend
+title: SyntH Stage — Vue 3 Avatar Frontend
+scope:
+    - frontend/
+source_files: []
+depends_on: []
+related_to: []

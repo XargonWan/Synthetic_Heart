@@ -94,6 +94,62 @@ _VRM_DIR_ENV = "SYNTH_WEBUI_VRM_DIR"
 _WEBUI_TOUCH_CONTEXT_ID = "__webui_touch_overlay"
 _WEBUI_TOUCH_PRIORITY = 11
 
+# Read-only query guard for the /api/database/query endpoint. Anything that is
+# not a single SELECT/WITH statement is rejected before it reaches the DB.
+_READ_ONLY_QUERY_RE = re.compile(r"^\s*(?:select|with)\b", re.IGNORECASE)
+_WRITE_QUERY_RE = re.compile(
+    r"\b(?:insert|update|delete|drop|alter|create|truncate|replace|grant|"
+    r"revoke|merge|call|exec|execute|attach|detach|vacuum|pragma|set|copy)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_read_only_query(query: str) -> bool:
+    """Return True only for a single read-only SELECT/WITH statement."""
+    if not isinstance(query, str):
+        return False
+    stripped = query.strip().rstrip(";").strip()
+    if not stripped:
+        return False
+    # Reject multiple statements.
+    if ";" in stripped:
+        return False
+    if not _READ_ONLY_QUERY_RE.match(stripped):
+        return False
+    if _WRITE_QUERY_RE.search(stripped):
+        return False
+    return True
+
+
+def _serialize_query_rows(rows: list, limit: int) -> list:
+    """Coerce DB rows into JSON-serialisable values, capped at *limit*."""
+    from datetime import date, datetime
+    from decimal import Decimal
+
+    def _coerce(value: object) -> object:
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, (datetime, date)):
+            return value.isoformat()
+        if isinstance(value, Decimal):
+            return float(value)
+        if isinstance(value, (bytes, bytearray)):
+            try:
+                return value.decode("utf-8", errors="replace")
+            except Exception:
+                return repr(value)
+        return str(value)
+
+    out: list = []
+    for row in rows[:limit]:
+        if isinstance(row, dict):
+            out.append({str(k): _coerce(v) for k, v in row.items()})
+        elif isinstance(row, (list, tuple)):
+            out.append([_coerce(v) for v in row])
+        else:
+            out.append(_coerce(row))
+    return out
+
 
 # Ensure correct MIME types are registered
 mimetypes.init()
@@ -784,6 +840,9 @@ class SynthWebUIInterface:
         self.app.post("/api/components/reload")(self.reload_component)
         self.app.post("/api/components/dev/toggle")(self.toggle_dev_components)
         self.app.get("/api/plugins/{name}/icon")(self.plugin_icon)
+        # Minecraft Vessel skin: served as a real image/png (inline, .png path)
+        # so server-side skin providers (SkinRestorer / SkinsRestorer) accept it.
+        self.app.get("/api/plugins/minecraft_vessel/skin.png")(self.minecraft_skin_png)
         self.app.post("/api/components/toggle")(self.toggle_plugin)
         self.app.post("/api/system/restart")(self.restart_system)
         self.app.get("/api/config")(self.config_summary)
@@ -843,6 +902,21 @@ class SynthWebUIInterface:
         )
         self.app.get("/api/history/dreams")(self.history_dreams)
         self.app.get("/api/history/growth")(self.history_growth)
+        self.app.get("/api/history/vessel")(self.history_vessel)
+        self.app.get("/api/history/queue")(self.history_queue)
+        self.app.get("/api/history/vessel/goals")(self.history_vessel_goals)
+        self.app.delete("/api/history/vessel/goals/{world}/{goal_id}")(
+            self.delete_vessel_goal
+        )
+        self.app.post("/api/history/vessel/goals/{world}/clear-abandoned")(
+            self.clear_vessel_abandoned_goals
+        )
+        self.app.delete("/api/history/vessel/goals/{world}")(self.clear_vessel_goals)
+        # Generic, scope-aware goals API (Goals plugin — vessel + personal/other).
+        self.app.get("/api/goals")(self.list_goals)
+        self.app.delete("/api/goals/{goal_id}")(self.delete_goal)
+        self.app.post("/api/goals/clear-abandoned")(self.clear_abandoned_goals)
+        self.app.delete("/api/goals")(self.clear_all_goals)
         self.app.post("/api/growth/current")(self.update_growth_current)
         self.app.post("/api/growth/revert")(self.revert_growth_state)
         # Per-item delete for History sub-tabs
@@ -850,10 +924,15 @@ class SynthWebUIInterface:
         self.app.delete("/api/history/grillo/{entry_id}")(self.delete_grillo_entry)
         self.app.delete("/api/history/dreams/{entry_id}")(self.delete_grillo_entry)
         self.app.delete("/api/history/growth/{entry_id}")(self.delete_growth_state)
+        self.app.delete("/api/history/vessel/{entry_id}")(self.delete_vessel_entry)
         self.app.get("/api/history/interface-paths")(self.list_known_interface_paths)
         self.app.get("/api/history/chat")(self.history_chat)
         self.app.get("/api/log-failures")(self.list_log_failures)
         self.app.delete("/api/log-failures/{failure_id}")(self.delete_log_failure)
+        self.app.get("/api/dead-targets")(self.list_dead_targets)
+        self.app.delete("/api/dead-targets/{target_id}")(self.delete_dead_target)
+        self.app.get("/api/reason-trail")(self.list_reason_trail)
+        self.app.delete("/api/reason-trail/{reason_id}")(self.delete_reason_trail)
 
         # Agent tasks endpoints (Agentic Runtime persistence)
         self.app.get("/api/agent/tasks")(self.list_agent_tasks)
@@ -936,6 +1015,9 @@ class SynthWebUIInterface:
         self.app.post("/api/external-endpoints/{ep_id}/ping")(
             self.ping_external_endpoint
         )
+        self.app.post("/api/external-endpoints/{ep_id}/vision-test")(
+            self.test_external_endpoint_vision
+        )
         self.app.post("/api/external-endpoints/{ep_id}/enable")(
             self.enable_external_endpoint
         )
@@ -948,7 +1030,34 @@ class SynthWebUIInterface:
         self.app.put("/api/external-endpoints/{ep_id}/model")(
             self.set_external_endpoint_model
         )
+        self.app.get("/api/engine-config-presets")(self.list_engine_config_presets)
+        self.app.post("/api/engine-config-presets")(self.save_engine_config_preset)
+        self.app.post("/api/engine-config-presets/apply")(
+            self.apply_engine_config_preset
+        )
+        self.app.delete("/api/engine-config-presets")(self.delete_engine_config_preset)
         self.app.post("/api/database/backup")(self.create_database_backup_endpoint)
+        self.app.get(
+            "/api/database/backup/download",
+            dependencies=[Depends(_require_api_token)],
+        )(self.download_database_backup_endpoint)
+        self.app.post(
+            "/api/database/backup/table",
+            dependencies=[Depends(_require_api_token)],
+        )(self.create_table_backup_endpoint)
+        self.app.post(
+            "/api/database/query",
+            dependencies=[Depends(_require_api_token)],
+        )(self.database_query_endpoint)
+        # Log archive: filtered query, one-shot ZIP download of the whole logs dir.
+        self.app.get(
+            "/api/logs/query",
+            dependencies=[Depends(_require_api_token)],
+        )(self.logs_query_endpoint)
+        self.app.get(
+            "/api/logs/download",
+            dependencies=[Depends(_require_api_token)],
+        )(self.download_logs_archive_endpoint)
 
         # Template sections route for modular loading
         self.app.get("/templates/{section}.html")(self.serve_template_section)
@@ -1491,6 +1600,230 @@ class SynthWebUIInterface:
             )
             raise HTTPException(status_code=500, detail=error_msg)
 
+    async def create_table_backup_endpoint(self, request: Request):
+        """Create a gzip SQL dump restricted to a list of tables.
+
+        Body: ``{"tables": ["table_a", "table_b", ...]}``.
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+        tables = body.get("tables") if isinstance(body, dict) else None
+        if not isinstance(tables, list) or not tables:
+            raise HTTPException(
+                status_code=400,
+                detail="Body must contain a non-empty 'tables' list",
+            )
+        try:
+            from core.db_backup import create_table_backup
+
+            backup_path = await create_table_backup([str(t) for t in tables])
+            if backup_path is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Per-table database backup did not produce an output file",
+                )
+            return JSONResponse(
+                {
+                    "success": True,
+                    "path": str(backup_path),
+                    "filename": backup_path.name,
+                    "tables": [str(t) for t in tables],
+                }
+            )
+        except HTTPException:
+            raise
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} create_table_backup_endpoint failed: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
+
+    async def download_database_backup_endpoint(self, filename: str):
+        """Stream a previously-created backup file as an attachment.
+
+        The *filename* is confined to the configured backups directory to
+        prevent path traversal.
+        """
+        try:
+            from core.db_backup import _backups_dir
+
+            backups_root = _backups_dir().resolve()
+            # Reject any path component / traversal outright.
+            candidate = (backups_root / Path(filename).name).resolve()
+            try:
+                candidate.relative_to(backups_root)
+            except ValueError:
+                raise HTTPException(status_code=403, detail="Access denied")
+            if not candidate.exists() or not candidate.is_file():
+                raise HTTPException(status_code=404, detail="Backup file not found")
+            return FileResponse(
+                str(candidate),
+                media_type="application/gzip",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{candidate.name}"'
+                },
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            error_msg = str(e)
+            log_error(
+                f"{LOG_PREFIX} download_database_backup_endpoint failed: {error_msg}"
+            )
+            raise HTTPException(status_code=500, detail=error_msg)
+
+    async def database_query_endpoint(self, request: Request):
+        """Run a read-only (SELECT/WITH) query and return rows as JSON.
+
+        Body: ``{"query": "SELECT ...", "limit": 200}``.
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+        query = body.get("query") if isinstance(body, dict) else None
+        if not isinstance(query, str) or not query.strip():
+            raise HTTPException(status_code=400, detail="Body must contain a 'query'")
+        raw_limit = body.get("limit", 200) if isinstance(body, dict) else 200
+        try:
+            limit = max(1, min(int(raw_limit), 1000))
+        except (TypeError, ValueError):
+            limit = 200
+
+        if not _is_read_only_query(query):
+            raise HTTPException(
+                status_code=400,
+                detail="Only read-only queries (SELECT / WITH) are permitted",
+            )
+
+        try:
+            from core.db import execute_query
+
+            rows = await execute_query(query)
+            serialized = _serialize_query_rows(rows, limit)
+            return JSONResponse(
+                {
+                    "success": True,
+                    "row_count": len(serialized),
+                    "truncated": len(serialized) >= limit,
+                    "rows": serialized,
+                }
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} database_query_endpoint failed: {error_msg}")
+            raise HTTPException(status_code=400, detail=error_msg)
+
+    async def logs_query_endpoint(self, request: Request):
+        """Search on-disk log files (gzip-aware) with filters.
+
+        Query params: ``q`` (text/regex), ``regex`` (bool), ``stems`` (comma
+        list), ``level`` (min level), ``since`` (ISO timestamp), ``limit``.
+        """
+        try:
+            from core import log_archive
+
+            params = request.query_params
+            query = params.get("q", "") or ""
+            is_regex = str(params.get("regex", "")).lower() in {"1", "true", "yes"}
+            stems_raw = params.get("stems", "") or ""
+            stems = [s.strip() for s in stems_raw.split(",") if s.strip()] or None
+            level = params.get("level") or None
+            since_raw = params.get("since") or None
+            since = None
+            if since_raw:
+                try:
+                    from datetime import datetime as _dt
+
+                    since = _dt.fromisoformat(since_raw)
+                except ValueError:
+                    since = None
+            try:
+                limit = max(1, min(int(params.get("limit", 500)), 5000))
+            except (TypeError, ValueError):
+                limit = 500
+
+            log_dir = Path(os.getenv("LOG_DIR", "logs"))
+            hits = log_archive.search(
+                query=query,
+                is_regex=is_regex,
+                stems=stems,
+                level=level,
+                since=since,
+                max_results=limit,
+                log_dir=log_dir,
+                truncate_large=2000,
+            )
+            return JSONResponse(
+                {
+                    "success": True,
+                    "count": len(hits),
+                    "truncated": len(hits) >= limit,
+                    "hits": [
+                        {
+                            "stem": h.stem,
+                            "file": h.file,
+                            "level": h.level,
+                            "timestamp": h.timestamp,
+                            "line": h.line,
+                        }
+                        for h in hits
+                    ],
+                }
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            error_msg = str(e)
+            log_error(f"{LOG_PREFIX} logs_query_endpoint failed: {error_msg}")
+            raise HTTPException(status_code=400, detail=error_msg)
+
+    async def download_logs_archive_endpoint(self):
+        """Stream a ZIP archive of the entire log directory (all rotations)."""
+        try:
+            import io
+            import zipfile
+            from datetime import datetime as _dt
+
+            from core import log_archive
+            from fastapi.responses import StreamingResponse
+
+            log_dir = Path(os.getenv("LOG_DIR", "logs"))
+            files = list(log_archive.iter_all_files(log_dir))
+            if not files:
+                raise HTTPException(status_code=404, detail="No log files found")
+
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for path in files:
+                    try:
+                        zf.write(str(path), arcname=path.name)
+                    except OSError:
+                        continue
+            buffer.seek(0)
+            stamp = _dt.now().strftime("%Y%m%dT%H%M%S")
+            headers = {
+                "Content-Disposition": f'attachment; filename="synth-logs-{stamp}.zip"'
+            }
+            return StreamingResponse(
+                buffer,
+                media_type="application/zip",
+                headers=headers,
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            error_msg = str(e)
+            log_error(
+                f"{LOG_PREFIX} download_logs_archive_endpoint failed: {error_msg}"
+            )
+            raise HTTPException(status_code=500, detail=error_msg)
+
     async def delete_agent_task(self, task_id: int):
         try:
             from core.db import get_conn_ctx
@@ -1911,7 +2244,11 @@ class SynthWebUIInterface:
 
             # Accent color config + presets (exposed to client as runtime config)
             try:
-                accent = str(config_registry.get_value("WEBUI_ACCENT_COLOR", "#6bfefe"))
+                accent = str(
+                    config_registry.get_value("WEBUI_ACCENT_COLOR", "#6bfefe") or ""
+                ).strip()
+                if not re.fullmatch(r"#[0-9a-fA-F]{3}|#[0-9a-fA-F]{6}", accent):
+                    accent = "#6bfefe"
             except Exception:
                 accent = "#6bfefe"
             presets = ["#6bfefe", "#ff6bd6", "#18c98c", "#ffd166", "#ff9ecb"]
@@ -2132,12 +2469,12 @@ class SynthWebUIInterface:
             return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
     async def stats(self):
-        uptime = int((datetime.utcnow() - self.start_time).total_seconds())
+        uptime = int((datetime.now(timezone.utc) - self.start_time).total_seconds())
         return JSONResponse({"uptime": uptime, "sessions": len(self.connections)})
 
     async def about_summary(self) -> JSONResponse:
         """Return lightweight About tab metadata (uptime, system, and component counts)."""
-        uptime = int((datetime.utcnow() - self.start_time).total_seconds())
+        uptime = int((datetime.now(timezone.utc) - self.start_time).total_seconds())
         sessions = len(self.connections)
         python_version = platform.python_version()
         platform_label = os.getenv("SYNTH_HOST_OS") or platform.platform()
@@ -2723,6 +3060,7 @@ class SynthWebUIInterface:
                 "diary",
                 "history",
                 "config",
+                "dashboard",
                 "plugins",
                 "settings",
                 "about",
@@ -2796,6 +3134,7 @@ class SynthWebUIInterface:
                 "diary",
                 "history",
                 "config",
+                "dashboard",
                 "components",
                 "settings",
                 "about",
@@ -5785,7 +6124,8 @@ class SynthWebUIInterface:
             "message_send": "Outbound message delivery tuning.",
             "action_safety": "Action execution safety policy settings.",
             "weather_plugin": "Weather plugin scheduling and delivery settings.",
-            "cortex": "Cortex engine selection for base, trainer, agent, Grillo and live scopes.",
+            "cortex": "Cortex engine selection for base, trainer, agent, Grillo and Rift Vessel scopes.",
+            "soul_plugin": "SOUL memory/emotion orchestration: compile, rollup, curator and prompt-injection toggles.",
         }
 
         try:
@@ -5857,6 +6197,8 @@ class SynthWebUIInterface:
                 "TRAINER_CORTEX",
                 "LIVE_CORTEX",
                 "AGENT_CORTEX",
+                "VESSEL_CORTEX",
+                "DSP_CORTEX",
             ):
                 ui_type = "select"
                 if entry.get("key") == "LIVE_CORTEX":
@@ -5874,6 +6216,8 @@ class SynthWebUIInterface:
                     "GRILLO_CORTEX",
                     "TRAINER_CORTEX",
                     "AGENT_CORTEX",
+                    "VESSEL_CORTEX",
+                    "DSP_CORTEX",
                 ):
                     options = ["Default"] + available_cortex_engines
                 else:
@@ -6671,6 +7015,143 @@ class SynthWebUIInterface:
             log_error(f"{LOG_PREFIX} ping_external_endpoint failed: {exc}")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+    async def test_external_endpoint_vision(
+        self, ep_id: int, request: Request
+    ) -> JSONResponse:
+        """POST /api/external-endpoints/{ep_id}/vision-test — test vision support.
+
+        Sends a small generated test image through the endpoint's
+        ``describe_image`` adapter and returns the resulting description, so
+        the WebUI can verify the endpoint actually understands images (not just
+        the probe's capability flag).  Never mutates endpoint state.
+
+        Body: ``{"model"?: ...}`` — optional model override; otherwise the
+        endpoint's default model is used, falling back to a probed model
+        flagged vision-capable.
+        """
+        import struct
+        import zlib
+
+        def _test_image_bytes() -> bytes:
+            """Build a small 64x64 RGB gradient PNG in pure Python."""
+            width = 64
+            height = 64
+
+            def _chunk(tag: bytes, data: bytes) -> bytes:
+                return (
+                    struct.pack(">I", len(data))
+                    + tag
+                    + data
+                    + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+                )
+
+            rows = bytearray()
+            for y in range(height):
+                rows.append(0)  # filter: none
+                for x in range(width):
+                    rows.extend(((x * 255) // width, (y * 255) // height, 128))
+            ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+            return (
+                b"\x89PNG\r\n\x1a\n"
+                + _chunk(b"IHDR", ihdr)
+                + _chunk(b"IDAT", zlib.compress(bytes(rows)))
+                + _chunk(b"IEND", b"")
+            )
+
+        try:
+            body: dict = {}
+            try:
+                body = await request.json()
+            except Exception:
+                pass
+            model = str(body.get("model") or "").strip() or None
+
+            from core.external_endpoints.crypto import decrypt_api_key
+            from core.external_endpoints.probe import get_adapter_for_endpoint
+            from core.external_endpoints.registry import (
+                get_external_endpoint_registry,
+            )
+
+            reg = get_external_endpoint_registry()
+            ep = await reg.get_endpoint(ep_id)
+            if ep is None:
+                raise HTTPException(status_code=404, detail="Endpoint not found")
+
+            if not model and ep.default_model:
+                model = ep.default_model
+            if not model and ep.available_models:
+                # Prefer a probed model flagged vision-capable (structural).
+                for candidate in ep.available_models:
+                    meta = next(
+                        (
+                            m
+                            for m in (ep.models_metadata or [])
+                            if str(m.get("id") or "") == candidate
+                        ),
+                        None,
+                    )
+                    caps = (meta or {}).get("capabilities") or {}
+                    if isinstance(caps, dict) and caps.get("vision"):
+                        model = candidate
+                        break
+                else:
+                    model = ep.available_models[0]
+
+            api_key = decrypt_api_key(ep.api_key_enc or "")
+            adapter = get_adapter_for_endpoint(ep, api_key)
+
+            prompt = "Describe what you see in this image in one short sentence."
+            timeout_seconds = float(
+                os.getenv(
+                    "EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS",
+                    str(EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS),
+                )
+            )
+            description: str | None = None
+            try:
+                description = await asyncio.wait_for(
+                    adapter.describe_image(
+                        _test_image_bytes(),
+                        "image/png",
+                        prompt,
+                        model=model,
+                    ),
+                    timeout=timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "model": model or "",
+                        "error": (
+                            f"Vision request timed out after {timeout_seconds:.0f}s"
+                        ),
+                    }
+                )
+            except Exception as exc:
+                return JSONResponse(
+                    {"ok": False, "model": model or "", "error": str(exc)}
+                )
+
+            desc = (description or "").strip()
+            if not desc:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "model": model or "",
+                        "error": (
+                            "No description returned — the model/endpoint may "
+                            "not support vision"
+                        ),
+                    }
+                )
+            return JSONResponse({"ok": True, "model": model or "", "description": desc})
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} test_external_endpoint_vision failed: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
     async def enable_external_endpoint(self, ep_id: int) -> JSONResponse:
         """POST /api/external-endpoints/{ep_id}/enable."""
         try:
@@ -6750,12 +7231,181 @@ class SynthWebUIInterface:
             if ep is None:
                 raise HTTPException(status_code=404, detail="Endpoint not found")
             await reg.set_default_model(ep_id, model)
+            # set_default_model only persists the DB row; reload the endpoint so
+            # the live engine bridges are rebuilt from the fresh row and the
+            # running engine starts using the model immediately.
+            await reg.reload_endpoint(ep_id)
             ep = await reg.get_endpoint(ep_id)
             return JSONResponse({"endpoint": ep.to_dict() if ep else {}})
         except HTTPException:
             raise
         except Exception as exc:
             log_error(f"{LOG_PREFIX} set_external_endpoint_model failed: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # ------------------------------------------------------------------
+    # Named engine-config presets (structured Engines-tab config editor)
+    # ------------------------------------------------------------------
+
+    async def list_engine_config_presets(self) -> JSONResponse:
+        """GET /api/engine-config-presets — list named engine-config presets."""
+        try:
+            from core.engine_config_presets import load_presets
+
+            return JSONResponse({"presets": load_presets()})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} list_engine_config_presets failed: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def save_engine_config_preset(self, request: Request) -> JSONResponse:
+        """POST /api/engine-config-presets — create or replace a named preset.
+
+        Body: ``{"name": ..., "model"?: ..., "description"?: ...,
+        "extra_config"?: {...}, "scopes"?: [...]}``
+        """
+        try:
+            data = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
+        name = str(data.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Missing 'name'")
+        model = data.get("model")
+        model = str(model).strip() if model else None
+        description = str(data.get("description") or "").strip()
+        extra_config = data.get("extra_config")
+        if extra_config is not None and not isinstance(extra_config, dict):
+            raise HTTPException(
+                status_code=400, detail="'extra_config' must be an object"
+            )
+        scopes = data.get("scopes")
+        if scopes is not None and not isinstance(scopes, list):
+            raise HTTPException(status_code=400, detail="'scopes' must be an array")
+        try:
+            from core.engine_config_presets import save_preset
+
+            preset = await save_preset(
+                name,
+                model=model,
+                description=description,
+                extra_config=extra_config,
+                scopes=scopes,
+            )
+            return JSONResponse({"preset": preset})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} save_engine_config_preset failed: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def delete_engine_config_preset(self, request: Request) -> JSONResponse:
+        """DELETE /api/engine-config-presets?name=... — remove a named preset."""
+        name = str(request.query_params.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Missing 'name' query param")
+        try:
+            from core.engine_config_presets import delete_preset
+
+            removed = await delete_preset(name)
+            if not removed:
+                raise HTTPException(
+                    status_code=404, detail=f"Preset '{name}' not found"
+                )
+            return JSONResponse({"status": "deleted"})
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} delete_engine_config_preset failed: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def apply_engine_config_preset(self, request: Request) -> JSONResponse:
+        """POST /api/engine-config-presets/apply — apply a preset to an endpoint.
+
+        Body: ``{"ep_id": ..., "name": ..., "scopes"?: [...]}``.  Replaces the
+        endpoint's ``extra_config`` with the preset's bundle (and sets its
+        default model when the preset carries one), then re-probes the endpoint.
+        When ``scopes`` is present, the preset's engine + model are also applied
+        to those Cortex scopes (``"base"``/``"agent"``/``"grillo"``/...).
+        """
+        try:
+            data = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
+        try:
+            ep_id = int(data.get("ep_id", data.get("endpoint_id")))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Missing or invalid 'ep_id'")
+        name = str(data.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Missing 'name'")
+        scopes = data.get("scopes")
+        if scopes is not None and not isinstance(scopes, list):
+            raise HTTPException(status_code=400, detail="'scopes' must be an array")
+
+        try:
+            from core.engine_config_presets import apply_preset
+            from core.external_endpoints.crypto import decrypt_api_key
+            from core.external_endpoints.registry import (
+                get_external_endpoint_registry,
+            )
+
+            reg = get_external_endpoint_registry()
+            ep, preset = await apply_preset(ep_id, name)
+            if preset is None:
+                raise HTTPException(
+                    status_code=404, detail=f"Preset '{name}' not found"
+                )
+            if ep is None:
+                raise HTTPException(status_code=404, detail="Endpoint not found")
+
+            # When the preset carries a model, push it onto the live engine
+            # instance too.  apply_preset already re-synced the bridge from a
+            # DB row carrying the new default_model; this is a belt-and-
+            # suspenders push for instances that did not re-register, so the
+            # swap applies even without a probe round-trip.
+            preset_model = str(preset.get("model") or "").strip()
+            if preset_model:
+                try:
+                    from core.cortex_registry import get_cortex_registry
+
+                    instance = get_cortex_registry().get_engine(ep.engine_name())
+                    if instance is not None and hasattr(instance, "set_current_model"):
+                        instance.set_current_model(preset_model)
+                except Exception as exc:
+                    log_warning(
+                        f"{LOG_PREFIX} preset model '{preset_model}' could not be "
+                        f"applied to live engine '{ep.engine_name()}': {exc}"
+                    )
+
+            # Auto-probe after the config swap so the new settings are reflected
+            api_key = decrypt_api_key(ep.api_key_enc or "")
+            probe_data = await self._run_auto_probe(ep.id, api_key, reg)
+
+            # Optionally point the selected Cortex scopes at this engine + model.
+            scopes_applied: list[str] = []
+            if scopes:
+                try:
+                    from core.engine_config_presets import apply_preset_to_scopes
+
+                    scopes_applied = await apply_preset_to_scopes(
+                        ep.engine_name(), preset_model, scopes
+                    )
+                except Exception as exc:
+                    log_warning(f"{LOG_PREFIX} preset scope apply failed: {exc}")
+
+            ep_updated = await reg.get_endpoint(ep.id) or ep
+            return JSONResponse(
+                {
+                    "endpoint": ep_updated.to_dict(),
+                    "preset": preset,
+                    "probe": probe_data,
+                    "scopes_applied": scopes_applied,
+                }
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} apply_engine_config_preset failed: {exc}")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     async def diary_summary(self, request: Request):
@@ -7671,6 +8321,608 @@ class SynthWebUIInterface:
             log_error(f"{LOG_PREFIX} Failed to fetch grillo history: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
+    async def history_vessel(self, request: Request):
+        """Return the Rift Vessel activity log for the History > Vessel sub-tab."""
+        params = request.query_params
+
+        def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return default
+            return max(minimum, min(maximum, parsed))
+
+        page = _bounded_int(params.get("page"), default=1, minimum=1, maximum=1000)
+        per_page = _bounded_int(
+            params.get("per_page"), default=20, minimum=1, maximum=100
+        )
+        search = params.get("search", "").strip()
+        environment_filter = params.get("environment", "").strip()
+        sort = params.get("sort", "desc")
+
+        try:
+            from core.db import get_conn_ctx
+
+            offset = (page - 1) * per_page
+            order = "DESC" if sort == "desc" else "ASC"
+
+            where_conditions = []
+            where_params: list[Any] = []
+            if search:
+                where_conditions.append("(summary LIKE %s OR event_type LIKE %s)")
+                where_params.extend([f"%{search}%", f"%{search}%"])
+            if environment_filter:
+                where_conditions.append("environment = %s")
+                where_params.append(environment_filter)
+            where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
+
+            # Each rendered block must be one embodiment session (login->logout),
+            # not one block per event. We therefore paginate over *sessions*
+            # (grouped by session_id) and load every activity of the sessions on
+            # the current page. Rows without a session_id are grouped under a
+            # synthetic per-row bucket so they still show up.
+            def _decode_metadata(metadata_raw: Any) -> Any:
+                if not metadata_raw:
+                    return None
+                if isinstance(metadata_raw, (bytes, bytearray)):
+                    metadata_raw = metadata_raw.decode("utf-8", errors="replace")
+                if isinstance(metadata_raw, str):
+                    try:
+                        return json.loads(metadata_raw)
+                    except Exception:
+                        return None
+                return metadata_raw
+
+            sessions: list[dict[str, Any]] = []
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    # Step 1: pick the sessions for this page. A session's sort
+                    # key is the most recent activity it contains.
+                    group_key = "COALESCE(session_id, CONCAT('row-', id))"
+                    session_query = f"""
+                        SELECT {group_key} AS grp,
+                               MIN(created_at) AS started_at,
+                               MAX(created_at) AS last_at,
+                               COUNT(*) AS activity_count
+                        FROM vessel_activity_log
+                        WHERE {where_clause}
+                        GROUP BY grp
+                        ORDER BY last_at {order}
+                        LIMIT %s OFFSET %s
+                    """
+                    await cur.execute(
+                        session_query, where_params + [per_page + 1, offset]
+                    )
+                    session_rows = await cur.fetchall()
+
+                    has_more = len(session_rows) > per_page
+                    if has_more:
+                        session_rows = session_rows[:per_page]
+
+                    group_keys = [row[0] for row in session_rows]
+
+                    # Step 2: load every activity of the selected sessions.
+                    activities_by_group: dict[str, list[dict[str, Any]]] = {
+                        gk: [] for gk in group_keys
+                    }
+                    if group_keys:
+                        placeholders = ", ".join(["%s"] * len(group_keys))
+                        # Newest activity first within each session block so the
+                        # most recent event of the current Rift session shows at
+                        # the top (mirrors the session-level DESC ordering).
+                        activity_query = f"""
+                            SELECT id, session_id, interface_path, environment,
+                                   event_type, summary, metadata, created_at,
+                                   {group_key} AS grp
+                            FROM vessel_activity_log
+                            WHERE {group_key} IN ({placeholders})
+                            ORDER BY created_at DESC
+                        """
+                        await cur.execute(activity_query, group_keys)
+                        for row in await cur.fetchall():
+                            grp = row[8]
+                            if grp not in activities_by_group:
+                                continue
+                            activities_by_group[grp].append(
+                                {
+                                    "id": row[0],
+                                    "session_id": row[1],
+                                    "interface_path": row[2],
+                                    "environment": row[3],
+                                    "event_type": row[4],
+                                    "summary": row[5],
+                                    "metadata": _decode_metadata(row[6]),
+                                    "created_at": self._dt_to_utc_iso(row[7]),
+                                }
+                            )
+
+                    for row in session_rows:
+                        grp = row[0]
+                        activities = activities_by_group.get(grp, [])
+                        environment = (
+                            activities[0]["environment"] if activities else "unknown"
+                        )
+                        interface_path = (
+                            activities[0]["interface_path"] if activities else ""
+                        )
+                        sessions.append(
+                            {
+                                "session_id": grp,
+                                "environment": environment,
+                                "interface_path": interface_path,
+                                "started_at": self._dt_to_utc_iso(row[1]),
+                                "last_at": self._dt_to_utc_iso(row[2]),
+                                "activity_count": int(row[3]),
+                                "activities": activities,
+                            }
+                        )
+
+            environments = []
+            if page == 1 and not environment_filter:
+                async with get_conn_ctx() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            "SELECT DISTINCT environment FROM vessel_activity_log"
+                            " ORDER BY environment LIMIT 1000"
+                        )
+                        rows_env = await cur.fetchall()
+                        environments = [
+                            row[0].strip()
+                            for row in rows_env
+                            if row[0] and str(row[0]).strip()
+                        ]
+
+            # total_count / total_pages are counted in *sessions* now (one block
+            # per session), matching the session-grouped pagination above.
+            total_count = offset + len(sessions) + (per_page if has_more else 0)
+            total_pages = (total_count + per_page - 1) // per_page
+
+            return JSONResponse(
+                {
+                    "success": True,
+                    "sessions": sessions,
+                    "environments": environments,
+                    "page": page,
+                    "per_page": per_page,
+                    "total_count": total_count,
+                    "total_pages": total_pages,
+                }
+            )
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to fetch vessel history: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def history_queue(self, request: Request):
+        """Return a snapshot of the pending message-queue backlog.
+
+        Powers the History > Queue sub-tab. Read-only: it never dequeues or
+        reorders anything, it just reflects what is currently waiting to be
+        processed (most urgent first, FIFO within a band). The single in-flight
+        item being processed by the consumer is not included (it has already
+        left the heap). Optional query filters: ``search`` (substring across
+        interface_path / chat_name / text preview) and ``priority`` (exact
+        numeric priority band).
+        """
+        params = request.query_params
+        search = params.get("search", "").strip().lower()
+        priority_filter = params.get("priority", "").strip()
+
+        try:
+            from core.message_queue import snapshot_queue
+
+            items = snapshot_queue()
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to snapshot message queue: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+        # Exact priority-band filter (numeric). Structural — never text matching.
+        if priority_filter:
+            try:
+                wanted = int(priority_filter)
+                items = [it for it in items if it.get("priority") == wanted]
+            except (TypeError, ValueError):
+                pass
+
+        # Free-text search across the human-facing source/preview fields.
+        if search:
+
+            def _matches(it: dict[str, Any]) -> bool:
+                for key in ("interface_path", "chat_name", "text_preview", "interface"):
+                    val = it.get(key)
+                    if isinstance(val, str) and search in val.lower():
+                        return True
+                return False
+
+            items = [it for it in items if _matches(it)]
+
+        return JSONResponse(
+            {
+                "success": True,
+                "items": items,
+                "total_count": len(items),
+                "generated_at": self._dt_to_utc_iso(datetime.now(timezone.utc)),
+            }
+        )
+
+    async def history_vessel_goals(self, request: Request):
+        """Return self-authored goals grouped per game/world for the Goals sub-tab.
+
+        Mirrors the per-voice History pattern but keyed on the Rift Vessel's
+        enabled worlds instead of a flat activity log. Each enabled world that
+        has a goal store contributes a group of goal cards (current goal first,
+        then recent history, each with its free-text steps and progress).
+
+        Fully fail-safe and lazily wired: if the Rift Vessel plugin or a world's
+        goal store is missing/disabled, that world is simply skipped so removing
+        the subsystem never breaks the WebUI.
+        """
+        del request  # no query params needed; goals are global per world
+        worlds_payload: list[dict[str, Any]] = []
+        try:
+            enabled_worlds = self._enabled_vessel_worlds()
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} history_vessel_goals: world enum failed: {exc}")
+            enabled_worlds = []
+
+        for world in enabled_worlds:
+            reader = self._resolve_world_goal_reader(world)
+            if reader is None:
+                continue
+            try:
+                goals = await reader(50)
+            except Exception as exc:  # pragma: no cover - defensive
+                log_debug(
+                    f"{LOG_PREFIX} history_vessel_goals: {world} reader failed: {exc}"
+                )
+                goals = []
+            worlds_payload.append({"world": world, "goals": goals or []})
+
+        return JSONResponse({"success": True, "worlds": worlds_payload})
+
+    def _enabled_vessel_worlds(self) -> list[str]:
+        """Return the Rift Vessel's enabled worlds, or ``[]`` if unavailable."""
+        vessel_plugin = None
+        try:
+            from core.core_initializer import PLUGIN_REGISTRY
+
+            if isinstance(PLUGIN_REGISTRY, dict):
+                vessel_plugin = PLUGIN_REGISTRY.get("vessel_plugin")
+        except Exception:
+            vessel_plugin = None
+        if vessel_plugin is None or not hasattr(vessel_plugin, "_enabled_worlds"):
+            return []
+        try:
+            return list(vessel_plugin._enabled_worlds())
+        except Exception:  # pragma: no cover - defensive
+            return []
+
+    @staticmethod
+    def _resolve_world_goal_reader(world: str):
+        """Return an ``async (limit) -> list[dict]`` goal reader for ``world``.
+
+        Only worlds that ship a goal store are supported; today that is
+        Minecraft. Returns ``None`` for worlds with no goal store so the caller
+        skips them. Structural dispatch — no keyword/trigger logic.
+        """
+        if world == "minecraft":
+            try:
+                from plugins.rift_vessel.minecraft import goals as mc_goals
+
+                return mc_goals.list_all_goals
+            except Exception:
+                return None
+        return None
+
+    @staticmethod
+    def _resolve_world_goal_deleter(world: str):
+        """Return an ``async (goal_id) -> dict`` goal deleter for ``world``.
+
+        Mirrors :meth:`_resolve_world_goal_reader`. Only worlds with a goal
+        store are supported (today: Minecraft). Returns ``None`` otherwise so
+        the caller can respond with a clean error. Structural dispatch — no
+        keyword/trigger logic.
+        """
+        if world == "minecraft":
+            try:
+                from plugins.rift_vessel.minecraft import goals as mc_goals
+
+                return mc_goals.delete_goal
+            except Exception:
+                return None
+        return None
+
+    @staticmethod
+    def _resolve_world_goal_clearer(world: str):
+        """Return an ``async () -> dict`` abandoned-goal clearer for ``world``.
+
+        Mirrors :meth:`_resolve_world_goal_reader`. Only worlds with a goal
+        store are supported (today: Minecraft). Returns ``None`` otherwise.
+        """
+        if world == "minecraft":
+            try:
+                from plugins.rift_vessel.minecraft import goals as mc_goals
+
+                return mc_goals.clear_abandoned_goals
+            except Exception:
+                return None
+        return None
+
+    @staticmethod
+    def _resolve_world_goal_clearer_all(world: str):
+        """Return an ``async () -> dict`` full goal clearer for ``world``.
+
+        The "clear all" counterpart of :meth:`_resolve_world_goal_clearer`:
+        deletes active, done and abandoned goals alike so Synth gets a
+        completely clean attempt. Returns ``None`` for worlds with no goal
+        store. Structural dispatch — no keyword/trigger logic.
+        """
+        if world == "minecraft":
+            try:
+                from plugins.rift_vessel.minecraft import goals as mc_goals
+
+                return mc_goals.clear_all_goals
+            except Exception:
+                return None
+        return None
+
+    async def delete_vessel_goal(self, request: Request):
+        """Delete a single non-active goal for a world (Goals sub-tab)."""
+        world = str(request.path_params.get("world") or "").strip()
+        goal_id_raw = request.path_params.get("goal_id")
+        try:
+            goal_id = int(goal_id_raw)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"success": False, "error": "Invalid goal id"}, status_code=400
+            )
+
+        deleter = self._resolve_world_goal_deleter(world)
+        if deleter is None:
+            return JSONResponse(
+                {"success": False, "error": "No goal store for this world"},
+                status_code=404,
+            )
+        try:
+            result = await deleter(goal_id)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} delete_vessel_goal failed: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+        status = (result or {}).get("status")
+        if status != "ok":
+            message = (result or {}).get("message", "delete_failed")
+            code = 400 if message == "cannot_delete_active" else 404
+            return JSONResponse({"success": False, "error": message}, status_code=code)
+        return JSONResponse(
+            {"success": True, "deleted_count": result.get("deleted_count", 0)}
+        )
+
+    async def clear_vessel_abandoned_goals(self, request: Request):
+        """Delete every abandoned goal for a world (Goals sub-tab)."""
+        world = str(request.path_params.get("world") or "").strip()
+        clearer = self._resolve_world_goal_clearer(world)
+        if clearer is None:
+            return JSONResponse(
+                {"success": False, "error": "No goal store for this world"},
+                status_code=404,
+            )
+        try:
+            result = await clearer()
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} clear_vessel_abandoned_goals failed: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+        if (result or {}).get("status") != "ok":
+            return JSONResponse(
+                {"success": False, "error": (result or {}).get("message", "failed")},
+                status_code=500,
+            )
+        return JSONResponse(
+            {"success": True, "deleted_count": result.get("deleted_count", 0)}
+        )
+
+    async def clear_vessel_goals(self, request: Request):
+        """Delete EVERY goal for a world — clean-attempt reset (Goals sub-tab).
+
+        Unlike :meth:`clear_vessel_abandoned_goals`, this wipes active, done
+        and abandoned goals alike so Synth starts a completely fresh attempt.
+        """
+        world = str(request.path_params.get("world") or "").strip()
+        clearer = self._resolve_world_goal_clearer_all(world)
+        if clearer is None:
+            return JSONResponse(
+                {"success": False, "error": "No goal store for this world"},
+                status_code=404,
+            )
+        try:
+            result = await clearer()
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} clear_vessel_goals failed: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+        if (result or {}).get("status") != "ok":
+            return JSONResponse(
+                {"success": False, "error": (result or {}).get("message", "failed")},
+                status_code=500,
+            )
+        return JSONResponse(
+            {"success": True, "deleted_count": result.get("deleted_count", 0)}
+        )
+
+    @staticmethod
+    def _goals_store():
+        """Return the generic Goals plugin store module, or ``None`` if absent.
+
+        Lazily imported and fully fail-safe so removing the Goals plugin never
+        breaks the WebUI. Structural — no keyword/trigger logic.
+        """
+        try:
+            # ``plugins.goals/__init__`` rebinds the package to the ``goals``
+            # module via a sys.modules shim, so ``from plugins.goals import
+            # goals`` fails at runtime. Import the concrete submodule instead.
+            import importlib
+
+            return importlib.import_module("plugins.goals.goals")
+        except Exception:
+            return None
+
+    async def list_goals(self, request: Request):
+        """Return every goal grouped by its ``(scope, game, world)`` bucket.
+
+        Scope-agnostic, generic replacement for the vessel-only Goals view: the
+        Goals plugin owns objectives for the Rift Vessel *and* any other scope
+        (personal life goals, planning, future games). Each group carries its
+        ``scope`` / ``game`` / ``world`` so the frontend can render a scope badge
+        and filter. Fully fail-safe — degrades to an empty list when the plugin
+        is missing/disabled.
+        """
+        del request  # goals are global; the frontend does its own filtering
+        store = self._goals_store()
+        if store is None:
+            return JSONResponse({"success": True, "groups": []})
+        try:
+            goals = await store.list_all_goals(200)
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} list_goals failed: {exc}")
+            goals = []
+
+        buckets: dict[tuple[str, str, str], dict[str, Any]] = {}
+        order: list[tuple[str, str, str]] = []
+        for goal in goals or []:
+            if not isinstance(goal, dict):
+                continue
+            scope = str(goal.get("scope") or "none")
+            game = str(goal.get("game") or "none")
+            world = str(goal.get("world") or "none")
+            key = (scope, game, world)
+            if key not in buckets:
+                buckets[key] = {
+                    "scope": scope,
+                    "game": game,
+                    "world": world,
+                    "player": self._resolve_goal_group_player(game),
+                    "goals": [],
+                }
+                order.append(key)
+            buckets[key]["goals"].append(goal)
+
+        groups = [buckets[key] for key in order]
+        return JSONResponse({"success": True, "groups": groups})
+
+    @staticmethod
+    def _resolve_goal_group_player(game: str) -> str:
+        """Return the in-world character name for a goal group, or ``""``.
+
+        Embodiment goals belong to Synth playing under an in-world nickname; the
+        Goals card shows it next to the world. The name is a config fact (the
+        bot username), not stored on the goal, so it is resolved here fail-safe
+        and works even when no session is live. Only Minecraft ships a concrete
+        identity today; other games/scopes get an empty name (no player line).
+        Structural dispatch — no keyword/trigger logic.
+        """
+        if game != "minecraft":
+            return ""
+        try:
+            from core.config_manager import config_registry
+
+            override = str(
+                config_registry.get_value(
+                    "MINECRAFT_BOT_USERNAME_OVERRIDE",
+                    "",
+                    group="plugins",
+                    component="minecraft_vessel",
+                )
+                or ""
+            ).strip()
+            if override:
+                return override
+            return str(config_registry.get_value("SYNTH_NAME", "") or "").strip()
+        except Exception:  # pragma: no cover - defensive
+            return ""
+
+    async def delete_goal(self, request: Request):
+        """Delete a single non-active goal by id (generic Goals view)."""
+        goal_id_raw = request.path_params.get("goal_id")
+        try:
+            goal_id = int(goal_id_raw)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"success": False, "error": "Invalid goal id"}, status_code=400
+            )
+        store = self._goals_store()
+        if store is None:
+            return JSONResponse(
+                {"success": False, "error": "Goals plugin unavailable"},
+                status_code=404,
+            )
+        try:
+            result = await store.delete_goal(goal_id)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} delete_goal failed: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+        status = (result or {}).get("status")
+        if status != "ok":
+            message = (result or {}).get("message", "delete_failed")
+            code = 400 if message == "cannot_delete_active" else 404
+            return JSONResponse({"success": False, "error": message}, status_code=code)
+        return JSONResponse(
+            {"success": True, "deleted_count": result.get("deleted_count", 0)}
+        )
+
+    async def clear_abandoned_goals(self, request: Request):
+        """Delete every abandoned goal across all scopes (generic Goals view)."""
+        del request
+        store = self._goals_store()
+        if store is None:
+            return JSONResponse(
+                {"success": False, "error": "Goals plugin unavailable"},
+                status_code=404,
+            )
+        try:
+            result = await store.clear_abandoned_goals()
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} clear_abandoned_goals failed: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+        if (result or {}).get("status") != "ok":
+            return JSONResponse(
+                {"success": False, "error": (result or {}).get("message", "failed")},
+                status_code=500,
+            )
+        return JSONResponse(
+            {"success": True, "deleted_count": result.get("deleted_count", 0)}
+        )
+
+    async def clear_all_goals(self, request: Request):
+        """Delete EVERY goal across all scopes — clean-attempt reset.
+
+        Wipes active, done and abandoned goals alike (the per-goal delete
+        protects the active goal; this is the explicit "clear all" for a fresh
+        start). Fail-safe; the Goals plugin is lazily imported.
+        """
+        del request
+        store = self._goals_store()
+        if store is None:
+            return JSONResponse(
+                {"success": False, "error": "Goals plugin unavailable"},
+                status_code=404,
+            )
+        try:
+            result = await store.clear_all_goals()
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} clear_all_goals failed: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+        if (result or {}).get("status") != "ok":
+            return JSONResponse(
+                {"success": False, "error": (result or {}).get("message", "failed")},
+                status_code=500,
+            )
+        return JSONResponse(
+            {"success": True, "deleted_count": result.get("deleted_count", 0)}
+        )
+
     async def _fetch_calendar_event_rows(self) -> list[dict[str, Any]]:
         """Fetch all ``scheduled_events`` rows as plain dicts for calendar use."""
         from core.db import get_conn_ctx
@@ -8186,6 +9438,30 @@ class SynthWebUIInterface:
             log_error(f"{LOG_PREFIX} Failed to delete grillo entry: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
+    async def delete_vessel_entry(self, request: Request):
+        """Delete a single vessel_activity_log row by id (Vessel sub-tab)."""
+        entry_id_raw = request.path_params.get("entry_id")
+        try:
+            entry_id = int(entry_id_raw)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"success": False, "error": "Invalid entry id"}, status_code=400
+            )
+
+        try:
+            from core.db import get_conn_ctx
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "DELETE FROM vessel_activity_log WHERE id = %s", (entry_id,)
+                    )
+                    deleted = getattr(cur, "rowcount", 0) or 0
+            return JSONResponse({"success": True, "deleted_count": deleted})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to delete vessel entry: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
     async def delete_growth_state(self, request: Request):
         """Delete a single self-growth history row by id.
 
@@ -8390,15 +9666,27 @@ class SynthWebUIInterface:
         create_personal_diary_entry action's payload.content. The linked diary
         entry (diary_entry_id) is a separate interaction diary, NOT the dream,
         so we must read the dream text from here.
+
+        Note: some beats prefix the envelope with a literal ``JSON`` label
+        (e.g. ``JSON\\n{...}``) and/or markdown code fences. ``json.loads``
+        fails on that prefix, which would otherwise make callers fall back to
+        the linked (unrelated) daily diary row. We normalize the text before
+        parsing and use the robust extractor.
         """
         if not response_text or not isinstance(response_text, str):
             return None
-        import json as _json
+        import re as _re
+        from core.json_utils import extract_json_from_text
 
-        try:
-            data = _json.loads(response_text)
-        except (ValueError, TypeError):
-            return None
+        # Normalize: strip a leading bare "JSON" label + optional colon/space,
+        # then any markdown code fences. Do this BEFORE extract_json_from_text,
+        # which deliberately skips candidates whose prefix is literally "json".
+        candidate = response_text.strip()
+        candidate = _re.sub(r"(?i)^\s*json\s*:?\s*", "", candidate)
+        candidate = _re.sub(r"^```(?:json)?\s*", "", candidate)
+        candidate = _re.sub(r"\s*```$", "", candidate)
+
+        data = extract_json_from_text(candidate)
         if not isinstance(data, dict):
             return None
         actions = data.get("actions")
@@ -8709,6 +9997,96 @@ class SynthWebUIInterface:
             raise
         except Exception as exc:
             log_error(f"{LOG_PREFIX} Failed to delete log failure {failure_id}: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def list_dead_targets(self, request: Request):
+        """Return the dead-delivery-target registry (Logs > Dead Targets)."""
+        try:
+            from core.delivery_guard import delivery_guard
+
+            entries = await delivery_guard.list_dead_targets()
+            normalized = []
+            for entry in entries:
+                item = dict(entry)
+                item["last_failure_at"] = self._dt_to_utc_iso(
+                    entry.get("last_failure_at")
+                )
+                item["marked_dead_at"] = self._dt_to_utc_iso(
+                    entry.get("marked_dead_at")
+                )
+                normalized.append(item)
+            return JSONResponse(
+                {"success": True, "entries": normalized, "total_count": len(normalized)}
+            )
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to fetch dead delivery targets: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def list_reason_trail(self, request: Request):
+        """Return the per-turn reason trail (Logs > Reason Trail)."""
+        params = request.query_params
+
+        def _bounded_int(value: Any, default: int | None, maximum: int) -> int | None:
+            if value is None:
+                return default
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return default
+            return max(1, min(maximum, parsed))
+
+        limit = _bounded_int(params.get("limit"), default=None, maximum=5000)
+        search = params.get("search", "").strip() or None
+
+        try:
+            from core.turn_reason import list_reasons
+
+            entries = await list_reasons(limit=limit, search=search)
+            normalized = []
+            for entry in entries:
+                item = dict(entry)
+                item["created_at"] = self._dt_to_utc_iso(entry.get("created_at"))
+                normalized.append(item)
+            return JSONResponse(
+                {"success": True, "entries": normalized, "total_count": len(normalized)}
+            )
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to fetch reason trail: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def delete_reason_trail(self, reason_id: int):
+        """Delete one reason-trail entry."""
+        try:
+            from core.turn_reason import delete_reason
+
+            deleted = await delete_reason(reason_id)
+            if not deleted:
+                raise HTTPException(
+                    status_code=404, detail="Reason trail entry not found"
+                )
+            return JSONResponse({"success": True, "deleted": True, "id": reason_id})
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(
+                f"{LOG_PREFIX} Failed to delete reason trail entry {reason_id}: {exc}"
+            )
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def delete_dead_target(self, target_id: int):
+        """Revive a dead delivery target (removes the registry entry so the
+        circuit breaker re-arms and delivery resumes)."""
+        try:
+            from core.delivery_guard import delivery_guard
+
+            revived = await delivery_guard.revive_target(target_id)
+            if not revived:
+                raise HTTPException(status_code=404, detail="Dead target not found")
+            return JSONResponse({"success": True, "revived": True, "id": target_id})
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to revive dead target {target_id}: {exc}")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     # ------------------------------------------------------------------
@@ -9141,6 +10519,8 @@ class SynthWebUIInterface:
             "TRAINER_CORTEX",
             "AGENT_CORTEX",
             "LIVE_CORTEX",
+            "VESSEL_CORTEX",
+            "DSP_CORTEX",
         }
         if key in _CORTEX_SCOPE_KEYS and isinstance(value, dict):
             try:
@@ -9551,6 +10931,48 @@ class SynthWebUIInterface:
             raise
         except Exception as exc:
             log_error(f"{LOG_PREFIX} Unexpected error in upload_exposed_file: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def minecraft_skin_png(self) -> FileResponse:
+        """Serve the uploaded Minecraft skin as a real ``image/png`` (inline).
+
+        Server-side skin providers (SkinRestorer mod, SkinsRestorer plugin)
+        fetch the URL and validate the response as a PNG image. The generic
+        exposed-file endpoint serves ``application/octet-stream`` as an
+        attachment on an extension-less URL, which those providers reject. This
+        dedicated endpoint serves the same uploaded ``MINECRAFT_SKIN_FILE`` with
+        ``Content-Type: image/png`` inline on a ``.png`` path so the skin is
+        accepted out of the box.
+        """
+        try:
+            from core.variables_engine import exposed_vars
+
+            stored = exposed_vars.get_value("MINECRAFT_SKIN_FILE")
+            if not stored:
+                raise HTTPException(status_code=404, detail="No skin uploaded")
+
+            file_path = Path(str(stored))
+            if not file_path.exists() or not file_path.is_file():
+                raise HTTPException(status_code=404, detail="Skin file not found")
+
+            storage_root = Path(
+                os.getenv("SYNTH_EXPOSED_STORAGE_ROOT", "/config/storage")
+            ).resolve()
+            file_path_resolved = file_path.resolve()
+            try:
+                file_path_resolved.relative_to(storage_root)
+            except Exception:
+                raise HTTPException(status_code=403, detail="Access denied")
+
+            return FileResponse(
+                str(file_path_resolved),
+                media_type="image/png",
+                headers={"Content-Disposition": 'inline; filename="skin.png"'},
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Unexpected error in minecraft_skin_png: {exc}")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     async def get_exposed_file(self, key: str):
@@ -10470,8 +11892,12 @@ class SynthWebUIInterface:
                         endpoint_extra_config = _ep_fresh.extra_config
                         if not supported_models and _ep_fresh.available_models:
                             supported_models = list(_ep_fresh.available_models)
-                            if not current_model and _ep_fresh.default_model:
-                                current_model = _ep_fresh.default_model
+                        # The DB row is authoritative for the endpoint's default
+                        # model — the in-memory bridge copy can lag a DB-only
+                        # write, and the engine-config picker + presets must
+                        # reflect the model actually configured on the endpoint.
+                        if _ep_fresh.default_model:
+                            current_model = _ep_fresh.default_model
                 except Exception:
                     pass
 
@@ -10522,6 +11948,13 @@ class SynthWebUIInterface:
             )
         interfaces_data: List[dict] = []
         for name, interface in sorted(INTERFACE_REGISTRY.items()):
+            # Some interfaces are internal I/O adapters, not user-configurable
+            # chat interfaces. They opt out of the WebUI list by declaring
+            # ``hidden_from_ui = True`` (e.g. the Vessel embodiment interface,
+            # which is surfaced instead as the "Rift Vessel" plugin under the
+            # Vessels category — avoids a confusing duplicate banner).
+            if getattr(interface, "hidden_from_ui", False):
+                continue
             description = ""
             if hasattr(interface, "get_interface_instructions"):
                 try:
@@ -10635,13 +12068,30 @@ class SynthWebUIInterface:
             return (has_suffix, len(candidate), candidate)
 
         canonical_names: Dict[str, str] = {}
+        # Every registration alias for a given plugin identity. A plugin can be
+        # registered under more than one name (see case 1 above): the core loader
+        # registers it under its module short-name (e.g. ``minecraft``) while the
+        # plugin author may also call ``register_plugin`` with an explicit name
+        # (e.g. ``minecraft_vessel``). The config registry is keyed on the
+        # explicit component name, so the WebUI must know EVERY alias to gather
+        # this plugin's exposed variables regardless of which alias became the
+        # canonical display name.
+        identity_aliases: Dict[str, list[str]] = {}
         for reg_name, reg_plugin in PLUGIN_REGISTRY.items():
             key = _plugin_identity(reg_plugin)
+            identity_aliases.setdefault(key, []).append(reg_name)
             current = canonical_names.get(key)
             if current is None or _canonical_score(reg_name) < _canonical_score(
                 current
             ):
                 canonical_names[key] = reg_name
+
+        # Rift Vessel coherence: a *world* sub-plugin (category "Vessels", any
+        # name other than the core "vessel_plugin") can be enabled while the
+        # Vessel core is disabled — in which case that world cannot actually be
+        # entered. Compute the core's presence once so the loop can flag such
+        # incoherent worlds with an orange LED.
+        vessel_core_enabled = "vessel_plugin" in PLUGIN_REGISTRY
 
         emitted_plugin_identities: set[str] = set()
         for name, plugin in sorted(PLUGIN_REGISTRY.items()):
@@ -10678,6 +12128,40 @@ class SynthWebUIInterface:
             category = getattr(info, "category", "") or "Various"
             run_meta = self._plugin_run_meta(plugin)
             capability_flags = self._plugin_capability_flags(plugin)
+            # All registration aliases (canonical + any explicit names). The
+            # frontend unions the config items of every alias so a plugin whose
+            # config lives under a non-canonical component name (e.g.
+            # ``minecraft_vessel`` while the card is named ``minecraft``) still
+            # shows its exposed variables and the Advanced section.
+            config_components = sorted(set(identity_aliases.get(identity, [name])))
+
+            led = self._led_for_status(meta["status"])
+            led_details = meta["details"]
+            led_error = meta["error"]
+            # Coherence warning ("chicca"): an enabled Vessel *world* whose core
+            # Vessel plugin is disabled cannot connect — flag it orange so the
+            # operator notices the dependency without hunting through logs.
+            try:
+                if (
+                    category == "Vessels"
+                    and name != "vessel_plugin"
+                    and not vessel_core_enabled
+                    and led == "green"
+                ):
+                    led = "orange"
+                    warn = (
+                        "Vessel core is disabled — this world cannot connect "
+                        "until the Rift Vessel plugin is enabled."
+                    )
+                    led_details = (
+                        f"{led_details} {warn}".strip() if led_details else warn
+                    )
+                    led_error = led_error or warn
+            except Exception as exc:  # pragma: no cover - defensive
+                log_warning(
+                    f"{LOG_PREFIX} vessel coherence LED check failed for {name}: {exc}"
+                )
+
             plugins_data.append(
                 {
                     "name": name,
@@ -10685,15 +12169,16 @@ class SynthWebUIInterface:
                     "description": description,
                     "actions": actions,
                     "status": meta["status"],
-                    "details": meta["details"],
-                    "error": meta["error"],
+                    "details": led_details,
+                    "error": led_error,
                     "category": category,
-                    "led": self._led_for_status(meta["status"]),
+                    "led": led,
                     "enabled": True,
                     "disable_allowed": not core_initializer.is_core_plugin(name),
                     "has_icon": self._plugin_has_icon(info, name),
                     "icon_url": f"/api/plugins/{name}/icon",
                     "guide": self._read_plugin_guide(info, name),
+                    "config_components": config_components,
                     **capability_flags,
                     **run_meta,
                 }
@@ -11100,20 +12585,6 @@ class SynthWebUIInterface:
                 for e in by_cortex.get("llm_provider", [])
                 if e.get("is_external")
             )
-            # Live scope: LIVE_REGISTRY is the authoritative source for streaming
-            # engines; fall back to CortexRegistry if the registry is unavailable.
-            live_engine_names: list[str] = ["disabled"]
-            try:
-                from core.live_registry import LIVE_REGISTRY as _LIVE_REG
-
-                live_engine_names += sorted(_LIVE_REG.get_available_engines())
-            except Exception:
-                try:
-                    live_engine_names += sorted(
-                        cortex_reg.get_engines_by_cortex("live")
-                    )
-                except Exception:
-                    pass
             # Map engine name -> its selectable models, so the UI can render a
             # single "engine / model" combo per scope. Derived from the same
             # cortex_engines list built above (supported_models per engine).
@@ -11151,7 +12622,10 @@ class SynthWebUIInterface:
                     "AGENT_CORTEX", "Agent", ["Default"] + llm_engines_sorted
                 ),
                 _build_scope_entry(
-                    "LIVE_CORTEX", "Live", ["Default"] + live_engine_names
+                    "VESSEL_CORTEX", "Rift Vessel", ["Default"] + llm_engines_sorted
+                ),
+                _build_scope_entry(
+                    "DSP_CORTEX", "SOUL / DSP", ["Default"] + llm_engines_sorted
                 ),
             ]
         except Exception as exc:
@@ -11171,6 +12645,18 @@ class SynthWebUIInterface:
             "iris": iris_data,
             "iris_current_model": (
                 config_registry.get_value("IRIS_DEFAULT_MODEL", "") or ""
+            ),
+            "iris_default_prompt": (
+                config_registry.get_value(
+                    "IRIS_DEFAULT_PROMPT",
+                    "IMPORTANT: Respond in plain conversational text only. "
+                    "Do NOT use JSON, XML or any structured format. "
+                    "Simply describe what you see in the image.",
+                    value_type=str,
+                    group="plugins",
+                    component="iris_plugin",
+                )
+                or ""
             ),
             "vox_current_model": (
                 config_registry.get_value("VOX_DEFAULT_MODEL", "") or ""

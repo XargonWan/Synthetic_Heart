@@ -1,5 +1,11 @@
 <section class="tab-panel" id="tab-plugins" data-tab="plugins" role="tabpanel">
     <div class="settings-grid" style="flex-direction: column;">
+        <nav class="plugins-subnav" role="tablist" aria-label="Plugins views">
+            <button class="plugins-subnav-btn active" type="button" data-plugins-subtab="installed" aria-selected="true">Installed</button>
+            <button class="plugins-subnav-btn" type="button" data-plugins-subtab="store" aria-selected="false">Store</button>
+        </nav>
+
+        <div class="plugins-subpanel active" id="plugins-panel-installed" data-plugins-subtab="installed">
         <article class="card">
             <h2>Plugins</h2>
             <div class="plugins-search-row">
@@ -67,10 +73,63 @@
                 ⚠️ <strong>Warning:</strong> This setting is not persistent and will reset to OFF when SyntH restarts. SyntH will restart automatically after toggling.
             </div>
         </article>
+        </div>
+
+        <div class="plugins-subpanel" id="plugins-panel-store" data-plugins-subtab="store">
+            <article class="card">
+                <h2>Store</h2>
+                <div class="plugins-store-coming-soon">Coming soon</div>
+            </article>
+        </div>
     </div>
 </section>
 
 <style>
+    .plugins-subnav {
+        display: flex;
+        gap: 0.75rem;
+        margin-bottom: 1rem;
+        padding: 0.5rem;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 10px;
+        background: rgba(12, 12, 20, 0.35);
+    }
+
+    .plugins-subnav-btn {
+        border: 0;
+        border-radius: 8px;
+        padding: 0.55rem 0.95rem;
+        background: transparent;
+        color: var(--text-soft);
+        cursor: pointer;
+        transition: background 0.2s ease, color 0.2s ease;
+    }
+
+    .plugins-subnav-btn:hover {
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--text);
+    }
+
+    .plugins-subnav-btn.active {
+        background: var(--accent);
+        color: var(--accent-contrast, #fff);
+    }
+
+    .plugins-subpanel {
+        display: none;
+    }
+
+    .plugins-subpanel.active {
+        display: block;
+    }
+
+    .plugins-store-coming-soon {
+        padding: 3rem 1rem;
+        text-align: center;
+        color: var(--text-soft);
+        font-size: 1.1rem;
+    }
+
     .plugins-search-row {
         display: flex;
         gap: 0.6rem;

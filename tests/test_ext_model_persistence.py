@@ -1,12 +1,14 @@
 """Tests that setting a model on an external Cortex engine persists to the DB."""
 
 import asyncio
+import json
 from types import SimpleNamespace
 from typing import cast
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
@@ -472,3 +474,145 @@ async def test_ping_external_endpoint_uses_300_second_timeout(monkeypatch):
         model="gemini-3-flash-preview",
         timeout=300.0,
     )
+
+
+class _DummyJsonRequest:
+    def __init__(self, payload: dict | None = None) -> None:
+        self._payload = payload or {}
+
+    async def json(self):
+        return self._payload
+
+
+async def _vision_test_ok(
+    endpoint: ExternalEndpoint,
+) -> tuple[SynthWebUIInterface, JSONResponse, AsyncMock]:
+    """Common mocks: registry returning *endpoint*, adapter with describe_image."""
+    from core.webui import SynthWebUIInterface
+
+    webui = SynthWebUIInterface(autostart=False)
+    describe_image = AsyncMock(return_value="a blue and red gradient")
+    adapter = SimpleNamespace(describe_image=describe_image)
+    registry = SimpleNamespace(get_endpoint=AsyncMock(return_value=endpoint))
+
+    with (
+        patch(
+            "core.external_endpoints.registry.get_external_endpoint_registry",
+            return_value=registry,
+        ),
+        patch(
+            "core.external_endpoints.crypto.decrypt_api_key",
+            return_value="secret",
+        ),
+        patch(
+            "core.external_endpoints.probe.get_adapter_for_endpoint",
+            return_value=adapter,
+        ),
+    ):
+        response: JSONResponse = await webui.test_external_endpoint_vision(
+            endpoint.id, cast(Request, _DummyJsonRequest({}))
+        )
+
+    return webui, response, describe_image
+
+
+@pytest.mark.asyncio
+async def test_vision_test_uses_endpoint_default_model() -> None:
+    endpoint = _make_endpoint(default_model="model-a")
+    webui, response, describe_image = await _vision_test_ok(endpoint)
+
+    assert response.status_code == 200
+    data = json.loads(bytes(response.body))
+    assert data["ok"] is True
+    assert data["model"] == "model-a"
+    assert data["description"] == "a blue and red gradient"
+    describe_image.assert_awaited_once()
+    call_args = describe_image.await_args
+    assert call_args is not None
+    assert call_args.kwargs.get("model") == "model-a"
+
+
+@pytest.mark.asyncio
+async def test_vision_test_falls_back_to_vision_capable_model() -> None:
+    from core.webui import SynthWebUIInterface
+
+    endpoint = ExternalEndpoint(
+        id=2,
+        name="ep2",
+        display_label="EP 2",
+        protocol=EndpointProtocol.OPENAI,
+        base_url="http://localhost:11435",
+        api_key_enc=None,
+        enabled=True,
+        capabilities={},
+        subsystem_map={"cortex": True},
+        available_models=["model-a", "model-b"],
+        default_model=None,
+        probe_status="success",
+        last_probe_at=None,
+        extra_config={},
+        models_metadata=[
+            {"id": "model-a", "capabilities": {"cortex": True}},
+            {"id": "model-b", "capabilities": {"vision": True}},
+        ],
+    )
+
+    webui = SynthWebUIInterface(autostart=False)
+    describe_image = AsyncMock(return_value="a blue and red gradient")
+    adapter = SimpleNamespace(describe_image=describe_image)
+    registry = SimpleNamespace(get_endpoint=AsyncMock(return_value=endpoint))
+
+    with (
+        patch(
+            "core.external_endpoints.registry.get_external_endpoint_registry",
+            return_value=registry,
+        ),
+        patch(
+            "core.external_endpoints.crypto.decrypt_api_key",
+            return_value="secret",
+        ),
+        patch(
+            "core.external_endpoints.probe.get_adapter_for_endpoint",
+            return_value=adapter,
+        ),
+    ):
+        response: JSONResponse = await webui.test_external_endpoint_vision(
+            endpoint.id, cast(Request, _DummyJsonRequest({}))
+        )
+
+    assert response.status_code == 200
+    data = json.loads(bytes(response.body))
+    assert data["ok"] is True
+    assert data["model"] == "model-b"
+
+
+@pytest.mark.asyncio
+async def test_vision_test_empty_description_reports_failure() -> None:
+    endpoint = _make_endpoint(default_model="model-a")
+    webui = SynthWebUIInterface(autostart=False)
+    describe_image = AsyncMock(return_value=None)
+    adapter = SimpleNamespace(describe_image=describe_image)
+    registry = SimpleNamespace(get_endpoint=AsyncMock(return_value=endpoint))
+
+    with (
+        patch(
+            "core.external_endpoints.registry.get_external_endpoint_registry",
+            return_value=registry,
+        ),
+        patch(
+            "core.external_endpoints.crypto.decrypt_api_key",
+            return_value="secret",
+        ),
+        patch(
+            "core.external_endpoints.probe.get_adapter_for_endpoint",
+            return_value=adapter,
+        ),
+    ):
+        response: JSONResponse = await webui.test_external_endpoint_vision(
+            endpoint.id, cast(Request, _DummyJsonRequest({}))
+        )
+
+    assert response.status_code == 200
+    data = json.loads(bytes(response.body))
+    assert data["ok"] is False
+    assert "no description returned" in data["error"].lower()

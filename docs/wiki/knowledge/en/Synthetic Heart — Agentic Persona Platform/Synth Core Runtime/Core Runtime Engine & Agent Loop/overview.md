@@ -1,0 +1,1 @@
+Bootstraps the Synth runtime, manages plugin and interface lifecycle, routes messages through the LLM chain, and executes bounded agentic turns with persistence, pause/resume, and drone sub-agents.

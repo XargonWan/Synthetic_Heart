@@ -1,0 +1,1 @@
+Manages real-time Gemini Live WebSocket sessions for Discord voice channels, handling bidirectional audio streaming, automatic session reconnection, and model-driven tool calls dispatched through the SyntH action pipeline.

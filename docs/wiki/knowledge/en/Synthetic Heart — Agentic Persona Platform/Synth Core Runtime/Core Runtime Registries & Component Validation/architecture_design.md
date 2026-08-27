@@ -1,0 +1,11 @@
+The module is a collection of singleton-backed registries, each exposing a global accessor (`get_*_registry()`) so other subsystems can look up components without hard imports:
+- `validation_registry.py` defines `ValidationRule` and `ValidationRegistry`, the single source of truth for action-payload validation, response-metadata key whitelisting, and legacy alias resolution.
+- `component_registry.py` wraps validation rules into `ComponentDescriptor`s managed by a `ComponentRegistryManager`, which persists descriptors and coordinates registration/unregistration with the validation registry.
+- `component_auto_registration.py` introspects already-loaded plugins and interfaces (via `_load_action_plugins` and `INTERFACE_REGISTRY`) to auto-populate validation rules from `get_supported_actions()` / `get_supported_action_types()`.
+- `interfaces_registry.py` holds live interface instances, per-interface trainer-ID mappings (int, string username, or list), and default-interface selection logic.
+- `interface_adapters.py` provides factory helpers (`register_interface_with_trainer`, `create_generic_adapter`, `create_generic_reply_function`) that bridge interface-specific payloads into the abstract `AbstractContext`/`AbstractUser`/`AbstractMessage`/`AbstractChat` types.
+- `tool_registry.py` unifies internal SyntH actions and external MCP-discovered tools into `UnifiedToolManifest` objects, preserving security metadata so the existing safety gate stays unchanged.
+- `command_registry.py` is a simple name→async-handler dict plus a generic dispatcher (`handle_command_message`) that enforces trainer-permission checks via the interface registry.
+- `llm_registry.py` is a dead stub that raises `RuntimeError` to force migration to `core.cortex_registry`.
+
+Dependency direction is one-way: adapters → interface registry; component registry → validation registry; auto-registration → both; tool registry → `core.live_tool_registry`; command registry → interface registry. No cross-imports between sibling registries except through their global accessors.

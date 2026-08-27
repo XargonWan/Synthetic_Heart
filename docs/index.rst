@@ -36,6 +36,7 @@ getting started.
    external_endpoints
    auris_vox
    radio_azuracast
+   rift_vessel
    vrm_animations
    animation_system
    webui_controls
@@ -55,6 +56,7 @@ getting started.
    COMPONENT_DEVELOPMENT_GUIDE
    dev_components
    api_endpoints
+   logging
    agent_integration
    agentic_tools
    component_pattern

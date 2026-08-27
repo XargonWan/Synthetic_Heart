@@ -13,6 +13,10 @@ def test_exposed_variables_have_label_description_and_component():
         "SYNTH_PEER_ENABLED": "peer_policy",
         "SYNTH_PEER_TURN_FLOOR_SECONDS": "peer_policy",
         "SYNTH_PEER_RELAY_TIMEOUT_SECONDS": "peer_policy",
+        "SYNTH_PEER_MENTION_COOLDOWN_SECONDS": "peer_policy",
+        "RECON_VIDEO_INCLUDE_VISION": "agent",
+        "RECON_VIDEO_MAX_SECONDS": "agent",
+        "RECON_VIDEO_SNIPPET_MAX_CHARS": "agent",
     }
 
     # Helper expected component for common prefixes
@@ -26,6 +30,8 @@ def test_exposed_variables_have_label_description_and_component():
 
     for d in defs:
         key = d.get("key")
+        if not key or not isinstance(key, str):
+            continue
         label = d.get("label")
         desc = d.get("description")
         comp = d.get("component")

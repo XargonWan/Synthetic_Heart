@@ -1,0 +1,6 @@
+- All public functions are pure and side-effect-free, accepting a `config_get(key, default)` callable instead of importing the config subsystem directly, so they can be unit-tested without DB or LLM.
+- External subsystems (Cortex engine, message queue, compaction plugins) are accessed via lazy `from ... import` inside the function body rather than top-level imports, keeping this core module free of hard dependencies.
+- Every database operation is wrapped in `async with get_conn_ctx() as conn:` with explicit `try/except` that logs via `log_debug/log_error/log_warning` and never re-raises, making the whole module best-effort and fail-safe.
+- Module-level singletons are exposed alongside a `get_*_manager()` accessor (e.g. `vessel_session_manager` + `get_vessel_session_manager()`, `VESSEL_REGISTRY` + `register_vessel_connector`).
+- Structural data from connectors is always consumed as dicts/dataclasses with explicit field names — no keyword/text matching against free text anywhere in prompt building or affordance rendering.
+- Config values are read with bounded clamping (`max(lo, min(hi, value))`) and a try/except fallback to defaults, so misconfiguration cannot crash the hot path.

@@ -1,0 +1,12 @@
+schema_version: 1
+module_path: core_runtime/transport_layer
+title: Transport Layer & Message Queue
+scope:
+    - core/transport_layer.py
+    - core/message_queue.py
+    - core/message_sender.py
+    - core/response_proxy.py
+    - core/say_proxy.py
+source_files: []
+depends_on: []
+related_to: []

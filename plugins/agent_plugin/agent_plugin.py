@@ -184,20 +184,38 @@ class AgentPlugin(AIPluginBase):
 
     def get_supported_actions(self) -> Dict[str, Any]:
         return {
+            "agent_wait": {
+                "required_fields": [],
+                "optional_fields": ["seconds"],
+                "scope": "agent",
+                "description": (
+                    "Pause briefly (default 5s, max 60s) before your next "
+                    "step — use it to SPACE OUT polls of slow external "
+                    "operations (a download transfer, an asynchronous search "
+                    "gathering results) instead of re-checking back-to-back. "
+                    "Waiting counts toward the turn's time budget."
+                ),
+            },
             "agent_list_files": {
                 "required_fields": [],
                 "optional_fields": ["path", "recursive", "max_depth", "limit"],
+                "scope": "agent",
                 "description": "List files/directories within the allowed agent filesystem roots.",
             },
             "agent_read_file": {
                 "required_fields": ["path"],
                 "optional_fields": ["start_line", "end_line", "max_chars"],
-                "description": "Read a text file within the allowed agent filesystem roots.",
+                "scope": "agent",
+                "description": (
+                    "Read a text file within the allowed agent filesystem roots. "
+                    "PDF files are handled automatically: their text is extracted and returned."
+                ),
             },
             "agent_write_file": {
                 "required_fields": ["path", "content"],
                 "optional_fields": ["mode"],
                 "security_level": "medium",
+                "scope": "agent",
                 "external_effects": ["filesystem"],
                 "description": (
                     "Write a text file within the allowed agent filesystem roots. "
@@ -210,6 +228,7 @@ class AgentPlugin(AIPluginBase):
                 "required_fields": ["path", "old_string", "new_string"],
                 "optional_fields": ["expected_replacements"],
                 "security_level": "medium",
+                "scope": "agent",
                 "external_effects": ["filesystem"],
                 "description": (
                     "Edit an existing text file in place by replacing an exact literal "
@@ -231,6 +250,7 @@ class AgentPlugin(AIPluginBase):
                     "max_results",
                     "max_file_bytes",
                 ],
+                "scope": "agent",
                 "description": (
                     "Search file contents within the allowed sandbox roots (a native grep). "
                     "'pattern' is plain text by default; set 'regex' true for a Python regex. "
@@ -243,6 +263,7 @@ class AgentPlugin(AIPluginBase):
                 "required_fields": ["command"],
                 "optional_fields": ["cwd", "timeout"],
                 "security_level": "high",
+                "scope": "agent",
                 "external_effects": ["shell"],
                 "description": (
                     "Run a shell command and capture its stdout/stderr/exit code. "
@@ -259,6 +280,10 @@ class AgentPlugin(AIPluginBase):
                 "required_fields": ["goal"],
                 "optional_fields": ["engine", "max_iterations"],
                 "security_level": "medium",
+                # Escape hatch: kept visible on every turn (``core``) so a
+                # Fast-Lane turn can always delegate real filesystem/shell work
+                # to a Drone, whose own prompt uses the full unfiltered tool set.
+                "scope": "core",
                 "external_effects": ["drone"],
                 "description": (
                     "Delegate a focused sub-task to an ephemeral sub-agent (a 'Drone'). "
@@ -273,6 +298,7 @@ class AgentPlugin(AIPluginBase):
                 "required_fields": ["task_id"],
                 "optional_fields": [],
                 "security_level": "medium",
+                "scope": "agent",
                 "external_effects": ["agent_task"],
                 "description": (
                     "Resume a previously paused agent task by its numeric id, continuing "
@@ -691,6 +717,17 @@ class AgentPlugin(AIPluginBase):
         action_type = action.get("type")
         payload = action.get("payload", {})
 
+        if action_type == "agent_wait":
+            seconds = _safe_int(
+                payload.get("seconds"), 5, min_value=1, max_value=60
+            )
+            await asyncio.sleep(seconds)
+            return {
+                "status": "ok",
+                "result": f"waited {seconds}s",
+                "seconds": seconds,
+            }
+
         if action_type == "agent_list_files":
             raw_path = str(payload.get("path") or ".")
             recursive = bool(payload.get("recursive", False))
@@ -724,6 +761,52 @@ class AgentPlugin(AIPluginBase):
             if safe_path.is_dir():
                 return {"status": "error", "reason": "path is a directory"}
 
+            max_chars = _safe_int(
+                payload.get("max_chars"), 40_000, min_value=500, max_value=200_000
+            )
+
+            # Binary PDFs must not be read as UTF-8 text — that returns raw
+            # PDF markup, which made the agent loop re-read the file endlessly
+            # (Langfuse ff1bbae0). Detect via the structural %PDF- magic and
+            # extract real text with pypdf (the same library the prompt engine
+            # uses for attachments).
+            try:
+                with safe_path.open("rb") as fh:
+                    head = fh.read(5)
+                is_pdf = head.startswith(b"%PDF-")
+            except Exception:
+                is_pdf = False
+            if is_pdf:
+                try:
+                    from pypdf import PdfReader
+
+                    page_chunks: list[str] = []
+                    with safe_path.open("rb") as fh:
+                        reader = PdfReader(fh)
+                        for page_num, page in enumerate(reader.pages, start=1):
+                            page_text = str(page.extract_text() or "").strip()
+                            if page_text:
+                                page_chunks.append(f"[Page {page_num}]\n{page_text}")
+                    content = "\n\n".join(page_chunks)
+                    if not content.strip():
+                        return {
+                            "status": "error",
+                            "reason": "pdf contains no extractable text",
+                        }
+                    if len(content) > max_chars:
+                        content = content[:max_chars] + "\n... (truncated)"
+                    return {
+                        "status": "ok",
+                        "path": str(safe_path),
+                        "extracted": "pdf_text",
+                        "content": content,
+                    }
+                except Exception as exc:
+                    return {
+                        "status": "error",
+                        "reason": f"pdf text extraction failed: {exc}",
+                    }
+
             start_line = _safe_int(
                 payload.get("start_line"), 1, min_value=1, max_value=1_000_000
             )
@@ -732,9 +815,6 @@ class AgentPlugin(AIPluginBase):
                 start_line + 199,
                 min_value=start_line,
                 max_value=1_000_000,
-            )
-            max_chars = _safe_int(
-                payload.get("max_chars"), 40_000, min_value=500, max_value=200_000
             )
 
             try:

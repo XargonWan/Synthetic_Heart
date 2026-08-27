@@ -149,6 +149,48 @@ _APOSTROPHE_ESCAPED_TAIL_RE = re.compile(
 )
 
 
+# Adjacent JSON string literals separated only by whitespace, e.g.
+# ``"text": "First part." "Second part."`` — valid JavaScript (implicit
+# string concatenation), invalid JSON. The trailing literal must NOT be
+# followed by a colon, otherwise a ``"key":`` run would be merged into the
+# previous value.
+_ADJACENT_STRINGS_RE = re.compile(
+    r'("(?:[^"\\]|\\.)*")((?:\s+"(?:[^"\\]|\\.)*")+)(?!\s*:)',
+    re.DOTALL,
+)
+
+
+def _repair_adjacent_string_literals(text: str) -> str:
+    """Merge JS-style adjacent string literals into one string value.
+
+    Weak models occasionally emit ``"text": "First part." "Second part."``
+    — two adjacent string literals, which is valid in JavaScript but invalid
+    in JSON. Standard parsing rejects it and the ``json_repair`` fallback
+    silently keeps only the FIRST literal, dropping the rest of the reply
+    (e.g. a multi-sentence message arrives as just its first sentence).
+    This pass joins the literals into a single space-separated string value
+    so the full text survives.
+
+    A literal directly followed by a colon is a JSON key, not a value, so
+    such pairs are left untouched (``"a": "b"`` and missing-comma
+    ``"value" "key": ...`` shapes are never merged).
+
+    Args:
+        text: The raw (possibly invalid) JSON text.
+
+    Returns:
+        The text with adjacent string literal runs merged into one string.
+    """
+
+    def _fix(m: re.Match) -> str:
+        first = m.group(1)[1:-1]
+        rest = re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(2))
+        merged = " ".join([first] + rest)
+        return f'"{merged}"'
+
+    return _ADJACENT_STRINGS_RE.sub(_fix, text)
+
+
 def _repair_apostrophe_closed_escaped_tail(text: str) -> str:
     """Repair JSON where the LLM closes a string value with an apostrophe
     instead of a double quote, then continues with escaped-quote sibling
@@ -245,6 +287,14 @@ def _repair_json_string_speech_quotes(raw: str) -> str:
     bracket or a ``"key":`` pattern — otherwise it's prose punctuation after
     embedded dialogue (e.g. ``"spoken line," she said, "more dialogue"``) and
     the quote is treated as embedded.
+
+    A ``")`` (quote directly followed by a stray ``)`` plus optional ``;``) is
+    a *corrupted* closer: the LLM closed the string and then wrote a paren
+    where the JSON comma (or the object's closing brace) belongs, e.g.
+    ``"text": "...!!"); "interface_path": "..."``. When what follows the paren
+    is a sibling ``"key":`` pattern, the quote is the true closer and the
+    paren/semicolon become the missing comma; when it is a closing bracket or
+    end-of-text, the parens are simply dropped.
 
     ``\"`` (backslash-quote) where the character following the pair is structural,
     or immediately precedes a ``"key":`` pattern, is treated as a mistakenly-escaped
@@ -407,6 +457,36 @@ def _repair_json_string_speech_quotes(raw: str) -> str:
                     found_close = True
                     break
 
+                elif s[j] == ")":
+                    # Stray closing paren after the quote: the LLM closed the
+                    # string and then wrote a ')' (plus optional ';') where the
+                    # JSON comma (or the object's closing brace) belongs, e.g.
+                    # `"text": "...!!"); "interface_path": "..."`. ')' is never
+                    # valid JSON, so when what follows looks like a sibling key
+                    # or a closing bracket, this quote is the true closer and
+                    # the paren/semicolon garbage is consumed.
+                    k = j + 1
+                    while k < n and s[k] in " \t;":
+                        k += 1
+                    if k >= n or s[k] in "}]":
+                        # Stray paren before a closing bracket / end-of-text →
+                        # true closer; drop the parens, no comma needed.
+                        out.append('"')
+                        pos = k
+                        found_close = True
+                        break
+                    elif _looks_like_next_key(s, k):
+                        # Paren where a comma should separate the string from
+                        # the next sibling key → true closer + missing comma.
+                        out.append('", ')
+                        pos = k
+                        found_close = True
+                        break
+                    else:
+                        # Followed by prose → embedded speech quote.
+                        out.append('\\"')
+                        pos += 1
+
                 elif s[j] == "{":
                     # Stray opening brace where a comma should separate the
                     # string from sibling keys (e.g. `"...Daddy..." {
@@ -563,7 +643,9 @@ def extract_json_from_text(
     # Pass 2: apostrophe used as a string closer, followed by an escaped-quote
     #         or single-quoted run of sibling keys that belong outside the string
     # Pass 3: re-escape unescaped speech quotes inside text-heavy fields
+    # Pass 4: merge JS-style adjacent string literals ("a" "b") into one string
     repaired_text = _normalize_smart_quotes(cleaned_text)
+    repaired_text = _repair_adjacent_string_literals(repaired_text)
     repaired_text = _repair_premature_string_close(repaired_text)
     repaired_text = _repair_apostrophe_closed_escaped_tail(repaired_text)
     repaired_text = _repair_apostrophe_closed_single_quoted_tail(repaired_text)

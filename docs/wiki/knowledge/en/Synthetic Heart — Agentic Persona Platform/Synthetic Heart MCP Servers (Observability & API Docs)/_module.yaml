@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: mcp_servers
+title: Synthetic Heart MCP Servers (Observability & API Docs)
+scope:
+    - mcp_servers/
+source_files: []
+depends_on: []
+related_to: []

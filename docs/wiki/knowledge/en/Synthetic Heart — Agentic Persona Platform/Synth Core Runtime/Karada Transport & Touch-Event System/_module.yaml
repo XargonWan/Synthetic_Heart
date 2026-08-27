@@ -1,0 +1,11 @@
+schema_version: 1
+module_path: core_runtime/karada_transport
+title: Karada Transport & Touch-Event System
+scope:
+    - core/karada_api.py
+    - core/karada_touch_events.py
+    - core/karada_transport.py
+    - core/karada_ws_transport.py
+source_files: []
+depends_on: []
+related_to: []

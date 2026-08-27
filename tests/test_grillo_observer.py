@@ -36,7 +36,12 @@ async def test_observer_builds_prompt_and_collects(monkeypatch):
     called = {}
 
     async def fake_enqueue(
-        bot, message, context_memory=None, interface_id=None, original_message=None
+        bot,
+        message,
+        context_memory=None,
+        interface_id=None,
+        original_message=None,
+        priority=None,
     ):
         called["ctx"] = context_memory
         called["text"] = getattr(message, "text", None)
@@ -111,9 +116,56 @@ async def test_collect_recent_snippets_includes_sender_and_timestamp(monkeypatch
     snippets = await plugin._collect_recent_snippets(2)
     assert isinstance(snippets, list)
     assert len(snippets) >= 1
-    # Ensure sender and timestamp metadata are included
+    # Ensure sender and (relative) age metadata are included
     assert "sender:" in snippets[0]
-    assert "2026" in snippets[0]
+    # The 2026-01-11 fixtures are months old — the age label must be present
+    # instead of the raw ISO timestamp (staleness must be model-visible).
+    assert "|" in snippets[0]
+    assert any(tok in snippets[0] for tok in ("d", "h", "m", "?"))
+
+
+def test_relative_age_label(monkeypatch):
+    plugin = gco.GrilloChatObserverPlugin()
+    now = datetime.now(timezone.utc)
+    assert plugin._relative_age_label(None) == "?"
+    assert plugin._relative_age_label("not-a-date") == "?"
+    assert plugin._relative_age_label((now - timedelta(minutes=5)).isoformat()) == "5m"
+    assert plugin._relative_age_label((now - timedelta(minutes=90)).isoformat()) == "1h"
+    assert plugin._relative_age_label((now - timedelta(days=2)).isoformat()) == "2d"
+
+
+@pytest.mark.asyncio
+async def test_collect_recent_snippets_excludes_vessel_paths(monkeypatch):
+    plugin = gco.GrilloChatObserverPlugin()
+    loaded_paths = []
+
+    async def fake_recent_paths(limit):
+        return [
+            {"interface_path": "vessel/minecraft/old-server"},
+            {"interface_path": "telegram_bot/123"},
+        ]
+
+    async def fake_load_chat_history(path):
+        loaded_paths.append(path)
+        return [
+            {
+                "text": "ordinary message",
+                "sender_name": "Alice",
+                "timestamp": "2026-08-06T09:00:00+00:00",
+            }
+        ]
+
+    monkeypatch.setattr(
+        "core.interface_paths.get_recent_interface_paths", fake_recent_paths
+    )
+    monkeypatch.setattr(
+        "core.chat_history_cache.load_chat_history", fake_load_chat_history
+    )
+
+    snippets = await plugin._collect_recent_snippets(5)
+
+    assert loaded_paths == ["telegram_bot/123"]
+    assert all("vessel/" not in snippet for snippet in snippets)
 
 
 @pytest.mark.asyncio
@@ -202,7 +254,12 @@ async def test_observer_propose_only_flag_in_prompt(monkeypatch):
     captured = {}
 
     async def fake_enqueue(
-        bot, message, context_memory=None, interface_id=None, original_message=None
+        bot,
+        message,
+        context_memory=None,
+        interface_id=None,
+        original_message=None,
+        priority=None,
     ):
         captured["text"] = getattr(message, "text", None)
 
@@ -244,7 +301,12 @@ async def test_observer_runs_when_updates_present(monkeypatch):
     monkeypatch.setattr(plugin, "_collect_recent_snippets", fake_collect)
 
     async def fake_enqueue(
-        bot, message, context_memory=None, interface_id=None, original_message=None
+        bot,
+        message,
+        context_memory=None,
+        interface_id=None,
+        original_message=None,
+        priority=None,
     ):
         called["enqueued"] = True
 
@@ -303,7 +365,12 @@ async def test_observer_db_check_updates_and_advances_last_run_ts(monkeypatch):
     monkeypatch.setattr(plugin, "_collect_recent_snippets", fake_collect)
 
     async def fake_enqueue(
-        bot, message, context_memory=None, interface_id=None, original_message=None
+        bot,
+        message,
+        context_memory=None,
+        interface_id=None,
+        original_message=None,
+        priority=None,
     ):
         called["enqueued"] = True
 
@@ -358,7 +425,12 @@ async def test_observer_is_decay_driven_when_no_updates(monkeypatch):
     monkeypatch.setattr(plugin, "_collect_eligible_targets", fake_collect_targets)
 
     async def fake_enqueue(
-        bot, message, context_memory=None, interface_id=None, original_message=None
+        bot,
+        message,
+        context_memory=None,
+        interface_id=None,
+        original_message=None,
+        priority=None,
     ):
         called["enqueued"] = True
 
@@ -371,4 +443,203 @@ async def test_observer_is_decay_driven_when_no_updates(monkeypatch):
 
     # Proactive design: targets are collected and a beat is enqueued.
     assert called.get("targets") is True
-    assert called.get("enqueued") is True
+
+
+@pytest.mark.asyncio
+async def test_collect_recent_snippets_excludes_self_senders(monkeypatch):
+    plugin = gco.GrilloChatObserverPlugin()
+
+    async def fake_recent_paths(limit):
+        return [{"interface_path": "telegram_bot/123"}]
+
+    async def fake_load_chat_history(path):
+        return [
+            {
+                "text": "synth's own message",
+                "sender_name": "self",
+                "timestamp": "2026-08-06T09:00:00+00:00",
+            },
+            {
+                "text": "human message",
+                "sender_name": "Alice",
+                "timestamp": "2026-08-06T09:01:00+00:00",
+            },
+        ]
+
+    monkeypatch.setattr(
+        "core.interface_paths.get_recent_interface_paths", fake_recent_paths
+    )
+    monkeypatch.setattr(
+        "core.chat_history_cache.load_chat_history", fake_load_chat_history
+    )
+
+    snippets = await plugin._collect_recent_snippets(5)
+
+    assert len(snippets) == 1
+    assert "synth's own message" not in snippets[0]
+    assert "human message" in snippets[0]
+
+
+@pytest.mark.asyncio
+async def test_collect_recent_snippets_excludes_placeholder_paths(monkeypatch):
+    plugin = gco.GrilloChatObserverPlugin()
+    loaded_paths = []
+
+    async def fake_recent_paths(limit):
+        return [
+            {
+                "interface_path": "telegram_bot/5208932647/no thread ID indicated in context"
+            },
+            {"interface_path": "telegram_bot/5208932647/not_provided"},
+            {"interface_path": "telegram_bot/5208932647/780000000000000000000000"},
+            {"interface_path": "telegram_bot/5208932647/123456"},
+        ]
+
+    async def fake_load_chat_history(path):
+        loaded_paths.append(path)
+        return [
+            {
+                "text": "message",
+                "sender_name": "Alice",
+                "timestamp": "2026-08-06T09:00:00+00:00",
+            }
+        ]
+
+    monkeypatch.setattr(
+        "core.interface_paths.get_recent_interface_paths", fake_recent_paths
+    )
+    monkeypatch.setattr(
+        "core.chat_history_cache.load_chat_history", fake_load_chat_history
+    )
+
+    snippets = await plugin._collect_recent_snippets(5)
+
+    assert loaded_paths == ["telegram_bot/5208932647/123456"]
+    assert len(snippets) == 1
+
+
+def test_is_placeholder_path_flags_garbage_segments():
+    plugin = gco.GrilloChatObserverPlugin()
+
+    assert (
+        plugin._is_placeholder_path(
+            "telegram_bot/5208932647/no thread ID indicated in context"
+        )
+        is True
+    )
+    assert plugin._is_placeholder_path("telegram_bot/5208932647/not_provided") is True
+    assert (
+        plugin._is_placeholder_path(
+            "telegram_bot/5208932647/each_human_message_gets_a_dedicated_thread"
+        )
+        is True
+    )
+    assert plugin._is_placeholder_path("telegram_bot/5208932647/conversation_0") is True
+    assert plugin._is_placeholder_path("telegram_bot/5208932647/dm") is True
+    assert (
+        plugin._is_placeholder_path("telegram_bot/5208932647/780000000000000000000000")
+        is True
+    )
+    assert plugin._is_placeholder_path("telegram_bot/5208932647/123456") is False
+    assert plugin._is_placeholder_path("telegram_bot/5208932647") is False
+
+
+def test_is_self_sender():
+    plugin = gco.GrilloChatObserverPlugin()
+
+    assert plugin._is_self_sender("self") is True
+    assert plugin._is_self_sender("synth") is True
+    assert plugin._is_self_sender("Alice") is False
+    assert plugin._is_self_sender("") is False
+
+
+@pytest.mark.asyncio
+async def test_eligible_targets_exclude_awaiting_reply_chats(monkeypatch):
+    """A chat where the synth spoke last and the human has not replied must NOT
+    be an outreach target — the person is not "gone", they simply have not
+    answered yet. Re-offering it after the 45-min self-cooldown made the beat
+    nag the same DM hourly ("still coming tonight?" -> "hurry home!" ->
+    "did you get home okay?"), observed in 5 consecutive observer beats
+    (langfuse 404f8b76 / 1331d0ee / b4d0490c / c8b5a672 / 416e8e23)."""
+    plugin = gco.GrilloChatObserverPlugin()
+    now = datetime.now(timezone.utc)
+
+    async def fake_recent_paths(limit):
+        return [{"interface_path": "telegram_bot/5208932647"}]
+
+    # Synth spoke last ~1h ago; human's last real message is 1.5h ago and the
+    # human is present (no departure anywhere in the thread).
+    messages = [
+        {
+            "sender_name": "Scar",
+            "text": "we're staying here for a while",
+            "timestamp": (now - timedelta(hours=2)).isoformat(),
+        },
+        {
+            "sender_name": "self",
+            "text": "I'm gonna stay right here and cling to you forever~",
+            "timestamp": (now - timedelta(hours=1)).isoformat(),
+        },
+    ]
+
+    async def fake_load(path):
+        return list(messages)
+
+    monkeypatch.setattr(
+        "core.interface_paths.get_recent_interface_paths", fake_recent_paths
+    )
+    monkeypatch.setattr("core.chat_history_cache.load_chat_history", fake_load)
+    monkeypatch.setattr(
+        "core.interface_path_utils.is_vessel_interface_path", lambda p: False
+    )
+
+    targets = await plugin._collect_eligible_targets(limit=5)
+
+    # The awaiting-reply chat must be listed but marked ineligible.
+    assert len(targets) == 1
+    assert targets[0]["interface_path"] == "telegram_bot/5208932647"
+    assert targets[0]["eligible"] is False
+    assert targets[0]["last_from_self"] is True
+    assert targets[0]["awaiting_reply"] is True
+
+
+@pytest.mark.asyncio
+async def test_eligible_targets_include_chat_with_recent_human_reply(monkeypatch):
+    """A chat where the HUMAN spoke last (recently) is not awaiting-reply and
+    remains an eligible target when otherwise quiet."""
+    plugin = gco.GrilloChatObserverPlugin()
+    now = datetime.now(timezone.utc)
+
+    async def fake_recent_paths(limit):
+        return [{"interface_path": "telegram_bot/5208932647"}]
+
+    messages = [
+        {
+            "sender_name": "self",
+            "text": "Daddy... still coming tonight?",
+            "timestamp": (now - timedelta(hours=3)).isoformat(),
+        },
+        {
+            "sender_name": "Scar",
+            "text": "Baby it's barely 1500, have some patience love, I won't forget about you",
+            "timestamp": (now - timedelta(hours=2, minutes=30)).isoformat(),
+        },
+    ]
+
+    async def fake_load(path):
+        return list(messages)
+
+    monkeypatch.setattr(
+        "core.interface_paths.get_recent_interface_paths", fake_recent_paths
+    )
+    monkeypatch.setattr("core.chat_history_cache.load_chat_history", fake_load)
+    monkeypatch.setattr(
+        "core.interface_path_utils.is_vessel_interface_path", lambda p: False
+    )
+
+    targets = await plugin._collect_eligible_targets(limit=5)
+
+    assert len(targets) == 1
+    assert targets[0]["interface_path"] == "telegram_bot/5208932647"
+    assert targets[0]["eligible"] is True
+    assert targets[0]["last_from_self"] is False

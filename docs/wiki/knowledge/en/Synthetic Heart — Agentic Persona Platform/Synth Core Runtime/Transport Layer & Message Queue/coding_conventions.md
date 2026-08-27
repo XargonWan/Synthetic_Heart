@@ -1,0 +1,5 @@
+- All cross-cutting concerns (logging, config access, plugin registry lookups) are performed inside try/except blocks that log at debug level and fall back to safe defaults so failures never break the main flow.
+- JSON extraction from LLM text goes through a staged pipeline: strip control chars → strip stacktraces → normalize smart quotes → fix premature string closes → escape inner quotes → raw_decode → json_repair fallback, with metadata tracking each stage's outcome.
+- Interface calls are wrapped in `_call_interface_send` which auto-retries with reduced argument sets (dropping unsupported kwargs like `message_thread_id` or `text=`) and supports both sync and async interface implementations via `inspect.isawaitable`.
+- Priority constants use a fixed numeric scale where higher means more urgent, and `_heap_key()` negates the value because `asyncio.PriorityQueue` is a min-heap.
+- Module-level mutable state (queues, locks, pending targets, system-reply expectations) is lazily initialized per event loop and guarded by `_get_*` helpers that detect loop mismatches and recreate primitives.

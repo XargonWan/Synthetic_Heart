@@ -1,0 +1,1 @@
+Python asyncio with aiomysql for MySQL access via `core.db.get_conn_ctx`; JSON columns for flexible metadata storage; UUID-based archive IDs; timestamps stored as UTC ISO strings; configuration exposed through `config_registry` with typed variables (int/bool) registered at module load.

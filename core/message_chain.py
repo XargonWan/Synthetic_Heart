@@ -26,7 +26,7 @@ is treated as a correctable error; the corrector will request valid JSON format.
 
 import asyncio
 from types import SimpleNamespace
-from typing import Any, Dict, Optional, cast
+from typing import Any, Dict, List, Optional, cast
 
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.config_manager import config_registry
@@ -110,6 +110,68 @@ _ACTION_SYSTEM_KEYS = frozenset(
         "input",
     }
 )
+
+
+def _resolve_message_action_for_path(interface_path: Optional[str]) -> Optional[str]:
+    """Resolve the outbound message action type for an interface path.
+
+    Standard interfaces map through ``_INTERFACE_TO_MESSAGE_ACTION``. A Vessel
+    embodiment path (``vessel/<world>``) has no chat ``message_*`` action — its
+    outbound reply is a spoken action ``vessel_<world>_say``. The world is taken
+    structurally from the second path segment (no keyword matching). Returns
+    ``None`` when the path carries no resolvable outbound action.
+    """
+    if not interface_path:
+        return None
+    parts = str(interface_path).split("/")
+    prefix = parts[0] if parts else str(interface_path)
+    if prefix == "vessel":
+        if len(parts) >= 2 and parts[1].strip():
+            return f"vessel_{parts[1].strip()}_say"
+        return None
+    return _INTERFACE_TO_MESSAGE_ACTION.get(prefix)
+
+
+def _collect_message_texts(actions: list) -> list:
+    """Collect the ordered, non-empty text bodies of every ``message_*`` action.
+
+    A single LLM turn may emit several message actions (e.g. a multi-part
+    reply).  When those messages are folded into one TTS voice note, every
+    text must be preserved — historically only the first one survived the
+    merge, silently dropping the rest.
+
+    Args:
+        actions: List of action dicts to scan.
+
+    Returns:
+        List of stripped message texts, in emission order.
+    """
+    if not actions:
+        return []
+    texts: list = []
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        action_type = action.get("type") or action.get("action")
+        if not (isinstance(action_type, str) and action_type.startswith("message_")):
+            continue
+        payload = action.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        text = payload.get("text") or payload.get("content") or payload.get("message")
+        if isinstance(text, str) and text.strip():
+            texts.append(text.strip())
+    return texts
+
+
+def _join_message_texts(texts: list) -> str:
+    """Join several message bodies into a single voice-note text.
+
+    Paragraph breaks (``\\n\\n``) give TTS engines a natural pause between the
+    messages that were originally separate bubbles, and the same joined text
+    becomes the audio caption.
+    """
+    return "\n\n".join(t for t in texts if isinstance(t, str) and t.strip())
 
 
 def _normalize_message_payload_text(actions: list) -> list:
@@ -365,6 +427,23 @@ def _collect_beat_allowed_paths(ctx: Optional[dict]) -> Optional[set[str]]:
     if not isinstance(ctx, dict) or not ctx.get("grillo_beat"):
         return None
 
+    # Web-search delivery turns (search_orchestrator._deliver) are a second turn
+    # whose ONLY job is to report the completed search results. They are
+    # hard-scoped to their originating interface_path: the report belongs in the
+    # chat where the search was prompted, never redirected elsewhere. Without
+    # this, the model can deliver the results to an unrelated conversation —
+    # observed: a Grillo self-initiated search (origin ``grillo/-1``, no human
+    # requester) spammed Discord channels with unsolicited store/link messages
+    # pulled from the observer snippets. Scoping to the origin means a real
+    # human chat delivers only there, while an internal origin (``grillo/-1``)
+    # allows no outward message_* routing at all (there is no grillo message
+    # interface), so the delivery degrades to a no-op instead of spamming.
+    if ctx.get("beat_type") == "web_search_result":
+        origin = ctx.get("interface_path")
+        if isinstance(origin, str) and origin.strip():
+            return {origin.strip()}
+        return None
+
     allowed: set[str] = set()
 
     snippets = ctx.get("grillo_snippets")
@@ -457,6 +536,134 @@ def _drop_misrouted_beat_actions(actions: list, ctx: Optional[dict]) -> list:
     return kept
 
 
+def _drop_leaked_recon_actions(actions: list) -> list:
+    """Drop actions whose type is a Recon-schema key leaked into the main pass.
+
+    The Recon pass ("prompt 0") runs its own LLM call on the *same* engine
+    immediately before the main pass. State-retaining external engines (e.g. the
+    browser-driven selenium endpoint, which cannot be reset from our side) can
+    carry that priming forward, so the main pass sometimes echoes Recon-schema
+    keys (``tone_hint``, ``agent_intent``, ``memory_search`` …) back inside its
+    ``actions`` array. Those keys are *never* real actions — validation would
+    reject every one of them, starving the turn of any deliverable action and
+    driving the corrector into an exhausting loop that ends in the ``😵``
+    fallback.
+
+    This filter removes any action whose ``type`` matches a currently-registered
+    Recon key *before* action-type validation runs, so a real deliverable action
+    (e.g. ``vessel_minecraft_say``) present in the same array can still succeed.
+    The key set is collected reflectively from the plugin registry — there is no
+    hardcoded keyword list, so it stays correct in every language and as plugins
+    change. Fully guarded: any failure leaves ``actions`` untouched.
+
+    Args:
+        actions: List of action dicts to filter.
+
+    Returns:
+        The filtered list of actions (leaked Recon-schema actions removed).
+    """
+    if not isinstance(actions, list) or not actions:
+        return actions
+
+    try:
+        from core.recon import get_registered_recon_keys
+
+        recon_keys = get_registered_recon_keys()
+    except Exception as e:
+        log_debug(f"[message_chain] Could not load Recon keys for drop-filter: {e}")
+        return actions
+
+    if not recon_keys:
+        return actions
+
+    kept: list = []
+    dropped: list = []
+    for action in actions:
+        if not isinstance(action, dict):
+            kept.append(action)
+            continue
+        atype = action.get("type") or action.get("action")
+        if isinstance(atype, str) and atype.strip() in recon_keys:
+            dropped.append(atype.strip())
+        else:
+            kept.append(action)
+
+    if dropped:
+        log_warning(
+            f"[message_chain] Dropped {len(dropped)} leaked Recon-schema "
+            f"action(s) before validation (engine state contamination): "
+            f"{dropped}; {len(kept)} action(s) remain"
+        )
+
+    return kept
+
+
+def _drop_out_of_scope_leaked_actions(actions: list, ctx: Optional[dict]) -> list:
+    """Drop actions the current turn never offered (engine state contamination).
+
+    The per-turn Fast-Lane prompt hides out-of-scope actions via the Hybrid-C
+    scope gate (see ``core.prompt_engine._derive_default_prompt_action_types``):
+    on a plain chat turn (e.g. ``ollama_serve``) the ``vessel_*`` / ``agent_*``
+    actions are removed from the prompt, so a well-behaved model can only choose
+    from the in-scope allowlist. A *state-retaining* external engine (e.g. the
+    browser-driven selenium endpoint, which cannot be reset from our side) keeps
+    the conversation history across turns, so on a core turn it sometimes echoes
+    an action it was offered on an earlier *Vessel* turn — e.g.
+    ``vessel_minecraft_collect_block`` — even though the current prompt never
+    contained it. That leaked action is not deliverable on this interface: the
+    corrector then demands a chat reply, the model re-emits the same off-scope
+    action, and the turn loops into the ``😵`` fallback.
+
+    This filter drops any action whose ``type`` is NOT in the scoped allowlist
+    (``ctx['allowed_action_types']``) that ``plugin_instance`` recorded from the
+    exact prompt generated for this turn. It is fully structural — the allowlist
+    is the set of action names actually offered, there is no keyword list and no
+    message-text inspection — so it stays correct in every language and as the
+    action set changes. Guarded: if no scoped allowlist is available (the turn
+    was not scope-gated, e.g. a beat with its own explicit scope) the list is
+    returned untouched so this never narrows a legitimately-wide turn.
+
+    Args:
+        actions: List of action dicts to filter.
+        ctx: The runtime context dict for the current turn.
+
+    Returns:
+        The filtered list of actions (out-of-scope leaked actions removed).
+    """
+    if not isinstance(actions, list) or not actions or not isinstance(ctx, dict):
+        return actions
+
+    scoped = ctx.get("allowed_action_types") or ctx.get("allowed_actions")
+    if not isinstance(scoped, (list, set, tuple)) or not scoped:
+        # No scoped allowlist recorded for this turn — do not narrow it.
+        return actions
+
+    allowlist = {str(a).strip() for a in scoped if a}
+    if not allowlist:
+        return actions
+
+    kept: list = []
+    dropped: list = []
+    for action in actions:
+        if not isinstance(action, dict):
+            kept.append(action)
+            continue
+        atype = action.get("type") or action.get("action")
+        if isinstance(atype, str) and atype.strip() and atype.strip() not in allowlist:
+            dropped.append(atype.strip())
+        else:
+            kept.append(action)
+
+    if dropped:
+        log_warning(
+            f"[message_chain] Dropped {len(dropped)} out-of-scope action(s) not "
+            f"offered this turn (state-retaining engine leak): {dropped}; "
+            f"{len(kept)} action(s) remain"
+        )
+
+    return kept
+
+
 def _normalize_message_unknown(actions: list, interface_path: Optional[str]) -> list:
     """Normalize 'message_unknown' action types to the correct interface-specific type.
 
@@ -521,6 +728,181 @@ def _normalize_message_unknown(actions: list, interface_path: Optional[str]) -> 
             )
 
     return actions
+
+
+def _build_missing_reply_hint(
+    interface_path: str,
+    is_reactive_vessel_chat: bool,
+    current_player_message: str | None = None,
+    last_self_line: str | None = None,
+) -> str:
+    """Build the corrector hint shown when a user-facing turn produced no reply.
+
+    For an embodied vessel turn the correct outward reply is a spoken action
+    (``vessel_<world>_say``), not a chat ``message_*`` action, so the hint must
+    name the right action family. The vessel world is the second segment of the
+    interface path (e.g. ``vessel/minecraft`` -> ``vessel_minecraft_say``); if it
+    is missing we fall back to the generic ``vessel_<world>_say`` placeholder.
+
+    ``current_player_message`` and ``last_self_line`` steer the retry toward the
+    player's *new* message and away from parroting Synth's own previous line
+    (the weak-cortex self-echo loop). Both are passed through verbatim from the
+    turn context — the hint never inspects their content for keywords, so it
+    stays multi-language safe.
+    """
+    if is_reactive_vessel_chat:
+        parts = (interface_path or "").split("/")
+        world = parts[1] if len(parts) > 1 and parts[1] else "<world>"
+        say_action = f"vessel_{world}_say"
+        hint = (
+            "CHAT REPLY REQUIRED: A player spoke to you in-world and is waiting for a reply. "
+            f"You MUST include a speak action for this world (e.g., '{say_action}') so your words "
+            "are voiced in the world. Internal actions like diary entries and emotion updates do "
+            "NOT substitute for speaking back to the player."
+        )
+        if current_player_message and current_player_message.strip():
+            hint += (
+                " Answer THIS latest message from the player: "
+                f'"{current_player_message.strip()}".'
+            )
+        if last_self_line and last_self_line.strip():
+            hint += (
+                " Do NOT repeat your own previous line "
+                f'("{last_self_line.strip()}") — write a new, relevant reply.'
+            )
+        return hint
+    return (
+        "CHAT REPLY REQUIRED: The user is waiting for a reply in this active conversation turn. "
+        f"You MUST include a message action targeting the originating interface '{(interface_path or '').split('/')[0]}' "
+        "(e.g., 'message_telegram_bot') to reply to the user. Internal actions like diary entries "
+        "and emotion updates do NOT substitute for replying."
+    )
+
+
+def _vessel_say_delivered(processed: Any) -> bool:
+    """Return True if any successfully-processed action was an in-world speak verb.
+
+    Detection is purely structural (``vessel_<world>_say`` prefix/suffix), never
+    based on the message text, so it stays world-agnostic and keyword-free.
+    """
+    if not isinstance(processed, list):
+        return False
+    for item in processed:
+        name: str | None = None
+        if isinstance(item, dict):
+            name = item.get("action") or item.get("type")
+        elif isinstance(item, str):
+            name = item
+        if (
+            isinstance(name, str)
+            and name.startswith("vessel_")
+            and name.endswith("_say")
+        ):
+            return True
+    return False
+
+
+def _contains_vessel_disconnect_action(actions: Any) -> bool:
+    """Return True when an action collection contains ``vessel_disconnect``.
+
+    ``vessel_disconnect`` is a terminal lifecycle action for an in-world chat
+    turn.  Once it succeeds, the world-specific ``vessel_<world>_say`` action
+    is intentionally removed from the live action set, so the generic
+    user-facing missing-reply corrector must not ask the model to emit one.
+    Detection is based on the registered action name, never on message text.
+    """
+    if not isinstance(actions, list):
+        return False
+    for item in actions:
+        name: str | None = None
+        if isinstance(item, dict):
+            name = item.get("action") or item.get("type")
+        elif isinstance(item, str):
+            name = item
+        if name == "vessel_disconnect":
+            return True
+    return False
+
+
+def _last_self_vessel_utterance(ctx: dict[str, Any], interface_path: str) -> str | None:
+    """Return the text of Synth's most recent own reply in this vessel chat.
+
+    Reads the current-chat history the prompt was built from (the per-interface
+    deque stored on ``ctx`` under ``interface_path``) and returns the text of the
+    latest entry authored by Synth itself (``user_id``/``sender_id`` == ``self``).
+    Used to detect and suppress a verbatim self-echo on a weak cortex, where the
+    model parrots its own last spoken line instead of answering the player.
+
+    Detection is purely structural (author identity + exact string equality),
+    never based on the message text or any language-specific token, so it stays
+    multi-language safe and keyword-free. Returns None when nothing is found.
+    """
+    if not interface_path:
+        return None
+    try:
+        history = ctx.get(interface_path)
+    except Exception:
+        return None
+    if not history:
+        return None
+    try:
+        entries = list(history)
+    except Exception:
+        return None
+    for entry in reversed(entries):
+        if not isinstance(entry, dict):
+            continue
+        author = entry.get("user_id") or entry.get("sender_id")
+        if isinstance(author, str) and author == "self":
+            text = entry.get("text")
+            if isinstance(text, str) and text.strip():
+                return text
+    return None
+
+
+async def _deliver_vessel_fallback_reply(
+    bot: Any,
+    message: Any,
+    ctx: dict[str, Any],
+    reason: str,
+) -> bool:
+    """Speak a deterministic in-world reply when the LLM never produced a ``say``.
+
+    The weak vessel cortex sometimes answers a reactive player chat with only an
+    internal verb (e.g. ``vessel_<world>_observe``) and ignores the corrector's
+    request for a speak action, leaving the player with no reply at all. As a
+    last-resort safety net we synthesise a ``vessel_<world>_say`` ourselves and
+    run it through the normal action dispatch so the connector voices it in-world.
+
+    Purely structural: the world is the second segment of the vessel
+    ``interface_path`` (``vessel/minecraft`` -> ``vessel_minecraft_say``). Returns
+    True when a fallback speak action was dispatched.
+    """
+    interface_path = str(ctx.get("interface_path") or "")
+    parts = interface_path.split("/")
+    world = parts[1] if len(parts) > 1 and parts[1] else ""
+    if not world:
+        return False
+
+    fallback_text = get_failed_message_text()
+    say_action_type = f"vessel_{world}_say"
+    say_action = {
+        "type": say_action_type,
+        "payload": {"text": fallback_text},
+    }
+    log_warning(
+        f"[message_chain] 🌀 Vessel reactive turn produced no in-world reply "
+        f"({reason}); dispatching deterministic '{say_action_type}' fallback so "
+        "the player still hears back"
+    )
+    try:
+        from core.action_parser import run_actions
+
+        result = await run_actions([say_action], ctx, bot, message)
+        return bool(result.get("processed"))
+    except Exception as exc:  # pragma: no cover - defensive
+        log_error(f"[message_chain] Failed to dispatch vessel fallback reply: {exc}")
+        return False
 
 
 async def send_llm_fallback_message(
@@ -635,6 +1017,30 @@ async def send_llm_fallback_message(
 
     await _record_failure_event("llm_fallback", failure_reason)
 
+    # Autonomous Rift Vessel cognition turns (will-beats, sightings, reflection,
+    # post-damage appraisal) are purely internal: no human is awaiting a reply.
+    # When the weak vessel/base cortex exhausts the correction loop on such a
+    # turn, speaking the "😵" fallback *in-world* pollutes the player's chat with
+    # a failure emoji for a turn nobody addressed. The failure is still recorded
+    # above for diagnostics; we simply must not voice it. A reactive player chat
+    # (``vessel_player_chat``) is user-facing and keeps its audible fallback.
+    # Structural detection via routing metadata only, never message text.
+    try:
+        from core.interface_path_utils import is_vessel_embodiment_context
+
+        _is_reactive_vessel_chat = bool((context or {}).get("vessel_player_chat"))
+        if is_vessel_embodiment_context(context or {}) and not _is_reactive_vessel_chat:
+            log_warning(
+                "[message_chain] Suppressing in-world '😵' fallback for autonomous "
+                f"vessel turn (interface_path={interface_path}, reason={failure_reason}); "
+                "failure recorded but not voiced to avoid polluting player chat"
+            )
+            return fallback_text
+    except Exception as exc:  # pragma: no cover - defensive
+        log_warning(
+            f"[message_chain] Autonomous-vessel fallback suppression check failed: {exc}"
+        )
+
     # Clear transient avatar face state so upstream outages do not leave the
     # persona stuck with stale failure-adjacent expressions on reconnect.
     try:
@@ -707,6 +1113,55 @@ async def send_llm_fallback_message(
         return fallback_text
 
 
+def _merge_correction_successes(
+    previous: Any, current: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Merge newly-executed actions into the accumulated correction context.
+
+    ``message.correction_context`` is rebuilt on every correction pass. Naively
+    replacing it with the *current* pass's successes loses the memory that a
+    ``message_*`` action already delivered on an earlier pass — so the retry
+    filter (``successful_types``) stops stripping it and the model's re-emitted
+    reply gets delivered a second time (CHANGELOG 2026-06-26 duplicate
+    Telegram messages). This merges the previous context's successful
+    actions/types (deduplicated, order-stable) with the current pass's, so the
+    "already delivered" knowledge accumulates across passes.
+    """
+    merged_actions: List[Dict[str, Any]] = []
+    merged_types: List[str] = []
+    seen_types: set = set()
+
+    prev = previous if isinstance(previous, dict) else {}
+    prev_actions = prev.get("successful_actions") or []
+    prev_types = prev.get("successful_types") or []
+    if isinstance(prev_actions, list):
+        for a in prev_actions:
+            if isinstance(a, dict):
+                atype = a.get("type") or a.get("action")
+                if atype not in seen_types:
+                    seen_types.add(atype)
+                    merged_actions.append(a)
+                    merged_types.append(atype)
+    if isinstance(prev_types, (list, tuple, set)):
+        for atype in prev_types:
+            if atype not in seen_types:
+                seen_types.add(atype)
+                merged_types.append(atype)
+
+    for a in current.get("successful_actions") or []:
+        if isinstance(a, dict):
+            atype = a.get("type") or a.get("action")
+            if atype not in seen_types:
+                seen_types.add(atype)
+                merged_actions.append(a)
+                merged_types.append(atype)
+
+    merged = dict(current)
+    merged["successful_actions"] = merged_actions
+    merged["successful_types"] = merged_types
+    return merged
+
+
 async def handle_incoming_message(
     bot,
     message: Optional[SimpleNamespace],
@@ -730,7 +1185,11 @@ async def handle_incoming_message(
     """
     # Local imports to avoid circular dependencies
     from core.transport_layer import extract_json_from_text, run_corrector_middleware
-    from core.action_parser import run_actions, CORRECTOR_RETRIES
+    from core.action_parser import (
+        run_actions,
+        CORRECTOR_RETRIES,
+        _is_delivered_auto_tts_failure,
+    )
     from types import SimpleNamespace
     from datetime import datetime, timezone
 
@@ -792,6 +1251,33 @@ async def handle_incoming_message(
             ctx["llm_response_text"] = text or ""
         except Exception:
             ctx["llm_response_text"] = ""
+
+        # Per-turn reason trail ("why did I say that"): the structural reason
+        # summary built in ``build_prompt_request`` rides the context dict
+        # (``plugin_instance`` stashes it under ``_reason_trail`` before the
+        # engine call). Record it here once per LLM turn, now that the reply
+        # text is known. Fail-open: any error must never affect the reply.
+        try:
+            _reason_trail = ctx.get("_reason_trail")
+            if isinstance(_reason_trail, dict):
+                from core.turn_reason import record_reason
+
+                await record_reason(
+                    interface_path=ctx.get("interface_path") or _entry_interface_path,
+                    reply_preview=str(text or "")[:200],
+                    memories=_reason_trail.get("memories"),
+                    diary_sources=_reason_trail.get("diary_sources"),
+                    emotion=_reason_trail.get("emotion"),
+                    goal=_reason_trail.get("goal"),
+                    beat_type=_reason_trail.get("beat_type"),
+                    history_scope=_reason_trail.get("history_scope"),
+                )
+                # Never leave the internal key on a context dict that could be
+                # reused by a later turn (a stale reason must not pair with a
+                # newer reply).
+                ctx.pop("_reason_trail", None)
+        except Exception as _reason_exc:
+            log_debug(f"[message_chain] Reason trail record skipped: {_reason_exc}")
 
     # Also set on message object if possible (for corrector_orchestrator and action_parser detection)
     try:
@@ -928,6 +1414,16 @@ async def handle_incoming_message(
     # iteration failed (or there was a technical error with no reply at all).
     actions_executed_during_loop = False
 
+    # Track whether a ``vessel_<world>_say`` was actually voiced in-world at any
+    # point during the loop (across correction retries). Used only for a reactive
+    # in-world player chat: if the loop ends without one, we deterministically
+    # speak a fallback so the player never gets total silence from a weak cortex.
+    vessel_reply_delivered = False
+    # A successful disconnect intentionally ends the in-world turn without a
+    # spoken reply. Keep this across correction iterations because successful
+    # actions are removed from retry payloads.
+    vessel_disconnect_succeeded = False
+
     while True:
         log_info(
             f"[message_chain] 🔄 LOOP: attempt={attempt} source={source} chat={getattr(message, 'chat_id', None)} text_len={len(text) if text else 0}"
@@ -944,8 +1440,23 @@ async def handle_incoming_message(
         interface_path = ctx.get("interface_path") or ""
         chat_id = ctx.get("chat_id")
 
-        is_user_facing = interface_path and any(
-            interface_path.startswith(f"{iface}/") for iface in user_facing_interfaces
+        # A reactive in-world player chat (structural ``vessel_player_chat`` flag,
+        # set by the vessel interface from event kind + actor and propagated by the
+        # queue) is a human speaking directly to Synth and therefore user-facing:
+        # it must receive an outward reply just like an ordinary chat. Synth's own
+        # autonomous vessel perceptions/will-beats leave the flag False, so they are
+        # NOT treated as user-facing and never trigger the missing-reply corrector.
+        is_reactive_vessel_chat = bool(ctx.get("vessel_player_chat"))
+
+        is_user_facing = bool(
+            interface_path
+            and (
+                any(
+                    interface_path.startswith(f"{iface}/")
+                    for iface in user_facing_interfaces
+                )
+                or is_reactive_vessel_chat
+            )
         )
 
         is_internal_chat = chat_id == -1 or chat_id == "-1" or str(chat_id) == "-1"
@@ -1415,16 +1926,14 @@ async def handle_incoming_message(
                 # but omitted the actions wrapper entirely.  Infer the
                 # correct message action from the context interface_path.
                 _ctx_ipath = ctx.get("interface_path", "") if ctx else ""
-                _ctx_iface = (
-                    _ctx_ipath.split("/")[0] if "/" in _ctx_ipath else _ctx_ipath
-                )
-                _inferred_type = _INTERFACE_TO_MESSAGE_ACTION.get(_ctx_iface)
+                _inferred_type = _resolve_message_action_for_path(_ctx_ipath)
                 if _inferred_type:
                     _text_content = parsed.get("text", "")
-                    _payload: dict[str, Any] = {
-                        "text": _text_content,
-                        "interface_path": _ctx_ipath,
-                    }
+                    # A vessel say action takes only `text`; a chat message
+                    # action also carries interface_path for routing.
+                    _payload: dict[str, Any] = {"text": _text_content}
+                    if not _inferred_type.startswith("vessel_"):
+                        _payload["interface_path"] = _ctx_ipath
                     _msg_action: dict[str, Any] = {
                         "type": _inferred_type,
                         "payload": _payload,
@@ -1569,13 +2078,20 @@ async def handle_incoming_message(
                                     "response",
                                 ) and isinstance(value, str):
                                     if ctx_ipath:
-                                        iface_prefix = str(ctx_ipath).split("/")[0]
-                                        resolved = _INTERFACE_TO_MESSAGE_ACTION.get(
-                                            iface_prefix
+                                        resolved = _resolve_message_action_for_path(
+                                            str(ctx_ipath)
                                         )
                                         if resolved:
                                             synthetic_type = resolved
-                                        if "interface_path" not in payload:
+                                        # A vessel say action carries only text;
+                                        # only chat message actions need routing
+                                        # via interface_path.
+                                        if (
+                                            not str(synthetic_type).startswith(
+                                                "vessel_"
+                                            )
+                                            and "interface_path" not in payload
+                                        ):
                                             payload["interface_path"] = str(ctx_ipath)
                                 synthetic_actions.append(
                                     {"type": synthetic_type, "payload": payload}
@@ -1602,6 +2118,20 @@ async def handle_incoming_message(
                 # the beat never offered (snippet origin or eligible target). This
                 # prevents an observer reply from landing in the wrong chat.
                 actions = _drop_misrouted_beat_actions(actions, ctx)
+                # Drop Recon-schema keys that a state-retaining engine leaked into
+                # the main pass (see _drop_leaked_recon_actions). Doing this here —
+                # before action-type validation — stops the leaked keys from
+                # starving the turn and triggering the corrector's 😵 loop, while
+                # preserving any real deliverable action in the same array.
+                actions = _drop_leaked_recon_actions(actions)
+                # Drop actions the current turn never offered (e.g. a leaked
+                # vessel_* action echoed by a state-retaining engine on a plain
+                # chat turn). See _drop_out_of_scope_leaked_actions: this uses the
+                # per-turn scoped allowlist recorded from the exact prompt, so an
+                # off-scope leak is removed before it can drive the corrector into
+                # the 😵 loop, while every in-scope deliverable action survives.
+                if is_from_cortex:
+                    actions = _drop_out_of_scope_leaked_actions(actions, ctx)
 
                 # --- New: Validate action types early and trigger corrector for unsupported types ---
                 try:
@@ -1651,8 +2181,17 @@ async def handle_incoming_message(
                             if "/" in ctx_interface_path
                             else ctx_interface_path
                         )
-                        resolved_message_type = _INTERFACE_TO_MESSAGE_ACTION.get(
-                            interface_prefix, "message_synth_webui"
+                        # A generic message action emitted during a Vessel
+                        # embodiment turn must be spoken IN-WORLD, not routed to
+                        # the WebUI fallback. The resolver returns
+                        # vessel_<world>_say for a vessel path (world taken
+                        # structurally from interface_path, no keyword matching).
+                        # Without this, a generic "message_send" is misrouted to
+                        # message_synth_webui and the in-world player never hears
+                        # the reply.
+                        resolved_message_type = (
+                            _resolve_message_action_for_path(ctx_interface_path)
+                            or "message_synth_webui"
                         )
                         rewrote_generic_message_action = False
                         for act in actions:
@@ -1795,6 +2334,14 @@ async def handle_incoming_message(
                 if source == "llm" or getattr(message, "from_cortex", False):
                     has_user_response = False
                     has_tts = False
+                    # Set when the LLM emits an embodiment speak verb
+                    # (``vessel_<world>_say``) — the ONLY channel that reaches the
+                    # player inside the world. Tracked separately from
+                    # ``has_user_response`` so that on a reactive in-world player chat
+                    # a stray ``message_*`` action toward some other connected chat
+                    # (e.g. the WebUI) does NOT satisfy the "did the player get an
+                    # in-world reply?" check. Detection is purely structural.
+                    has_inworld_reply = False
                     # Set when the LLM emits an action that delivers user-visible
                     # output on its own (a self-replying plugin action). Tracked
                     # separately from has_user_response so it suppresses the
@@ -1804,8 +2351,6 @@ async def handle_incoming_message(
                     # Determine current set of message action types from config (dynamic)
                     current_message_action_types = []
                     try:
-                        from core.config_manager import config_registry
-
                         MESSAGE_ACTION_TYPES = config_registry.get_var(
                             "MESSAGE_ACTION_TYPES",
                             [],
@@ -1853,8 +2398,6 @@ async def handle_incoming_message(
                     # NOT be listed.
                     current_user_output_action_types = []
                     try:
-                        from core.config_manager import config_registry
-
                         USER_OUTPUT_ACTION_TYPES = config_registry.get_var(
                             "USER_OUTPUT_ACTION_TYPES",
                             ["get_recent_chats"],
@@ -1921,16 +2464,79 @@ async def handle_incoming_message(
                                         f"[message_chain] 🔇 Stripped TTS from autonomous message: {removed_payload.get('text', '')[:40]}..."
                                     )
 
-                        for action in actions:
+                        # Anti-echo guard for a reactive in-world player chat: on a
+                        # weak vessel cortex the model sometimes parrots its own last
+                        # spoken line (present in the current-chat history it was
+                        # prompted with) instead of answering the player's new
+                        # message. Compute Synth's most recent own utterance in this
+                        # vessel chat once, up front, so any ``vessel_<world>_say``
+                        # whose text is byte-identical to it can be dropped below —
+                        # leaving ``has_inworld_reply`` False so the missing-reply
+                        # corrector re-runs the turn and produces a fresh reply.
+                        # Structural (author identity + exact string equality),
+                        # keyword-free, multi-language safe.
+                        last_self_vessel_say: str | None = None
+                        if is_reactive_vessel_chat:
+                            last_self_vessel_say = _last_self_vessel_utterance(
+                                ctx, str(ctx.get("interface_path") or "")
+                            )
+                        vessel_echo_indices: list[int] = []
+
+                        for _action_idx, action in enumerate(actions):
                             # Support both 'action' and 'type' keys
                             action_name = None
                             if isinstance(action, dict):
                                 action_name = action.get("action") or action.get("type")
                             if action_name == "tts_speak":
                                 has_tts = True
-                            if action_name in current_message_action_types or (
+                            # An embodiment speak verb (structurally a
+                            # ``vessel_<world>_say`` action, namespaced per connected
+                            # world by the vessel plugin) delivers the reply in-world,
+                            # so it counts as the outward user reply just like a
+                            # ``message_*`` action. Detection is purely structural
+                            # (prefix + speak-verb suffix), never based on the message
+                            # text, so the missing-reply corrector does not fire and
+                            # try to force a non-existent ``message_*`` action on a
+                            # vessel turn.
+                            is_vessel_speak = (
                                 isinstance(action_name, str)
-                                and action_name.startswith("message_")
+                                and action_name.startswith("vessel_")
+                                and action_name.endswith("_say")
+                            )
+                            # Suppress a verbatim self-echo (see anti-echo note above).
+                            if (
+                                is_vessel_speak
+                                and last_self_vessel_say is not None
+                                and isinstance(action, dict)
+                            ):
+                                say_payload = action.get("payload")
+                                say_text = (
+                                    say_payload.get("text")
+                                    if isinstance(say_payload, dict)
+                                    else None
+                                )
+                                if (
+                                    isinstance(say_text, str)
+                                    and say_text.strip() == last_self_vessel_say.strip()
+                                ):
+                                    vessel_echo_indices.append(_action_idx)
+                                    log_warning(
+                                        "[message_chain] 🌀 Suppressing verbatim vessel "
+                                        f"self-echo ('{say_text[:40]}') — model repeated its "
+                                        "own last line; forcing a fresh reply to the player"
+                                    )
+                                    # Do NOT count this as an in-world reply so the
+                                    # corrector re-runs and produces a real answer.
+                                    continue
+                            if is_vessel_speak:
+                                has_inworld_reply = True
+                            if (
+                                action_name in current_message_action_types
+                                or (
+                                    isinstance(action_name, str)
+                                    and action_name.startswith("message_")
+                                )
+                                or is_vessel_speak
                             ):
                                 has_user_response = True
                                 if not user_message_action:
@@ -1938,6 +2544,14 @@ async def handle_incoming_message(
                                 # break
                             if action_name in current_user_output_action_types:
                                 has_user_output_action = True
+
+                        # Drop the echoed say actions so they are never dispatched.
+                        if vessel_echo_indices and isinstance(actions, list):
+                            for _idx in reversed(vessel_echo_indices):
+                                try:
+                                    actions.pop(_idx)
+                                except Exception:
+                                    pass
 
                     # ------------------------------------------------------------------
                     # LLM-CHOSEN VOICE REPLY (text turn): merge into a single voice note
@@ -2001,20 +2615,11 @@ async def handle_incoming_message(
                                     _tts_payload.get("text") or ""
                                 ).strip()
                                 # Prefer the spoken text as caption; fall back to the
-                                # text-only message body if tts_speak carried no text.
-                                _msg_payload = (
-                                    user_message_action.get("payload")
-                                    if isinstance(user_message_action, dict)
-                                    else {}
-                                )
-                                if not isinstance(_msg_payload, dict):
-                                    _msg_payload = {}
-                                _msg_text = str(
-                                    _msg_payload.get("text")
-                                    or _msg_payload.get("content")
-                                    or _msg_payload.get("message")
-                                    or ""
-                                ).strip()
+                                # text-only message bodies if tts_speak carried no
+                                # text. When the LLM emitted several message actions,
+                                # join ALL of their texts so no message is dropped.
+                                _msg_texts = _collect_message_texts(actions)
+                                _msg_text = _join_message_texts(_msg_texts)
                                 _caption = _spoken_text or _msg_text
                                 if _caption:
                                     if not _tts_payload.get("text"):
@@ -2054,10 +2659,31 @@ async def handle_incoming_message(
                         chat_id = ctx.get("chat_id")
 
                         # interface_path must have a chat_id suffix to be user-facing
-                        # e.g., "telegram_bot/5551234567" not just "telegram_bot"
-                        is_user_facing = interface_path and any(
-                            interface_path.startswith(f"{iface}/")
-                            for iface in user_facing_interfaces
+                        # e.g., "telegram_bot/5551234567" not just "telegram_bot".
+                        # A reactive in-world player chat is user-facing too (see the
+                        # earlier ``is_reactive_vessel_chat`` note); autonomous vessel
+                        # perceptions leave the structural flag False and stay excluded.
+                        is_reactive_vessel_chat = bool(ctx.get("vessel_player_chat"))
+                        # Outbound Grillo beats (observer, scheduled_reminder,
+                        # web_search_result) target a real interface and are
+                        # user-facing: their ``message_*`` actions must ride the same
+                        # TTS auto-inject path as ordinary replies. Internal beats
+                        # (self_reflection, curiosity, ...) stay excluded.
+                        is_grillo_outbound = bool(
+                            ctx.get("grillo_beat", False)
+                        ) and is_outbound_beat(ctx.get("beat_type"))
+                        is_user_facing = (
+                            bool(
+                                interface_path
+                                and (
+                                    any(
+                                        interface_path.startswith(f"{iface}/")
+                                        for iface in user_facing_interfaces
+                                    )
+                                    or is_reactive_vessel_chat
+                                )
+                            )
+                            or is_grillo_outbound
                         )
 
                         # Check if this is an internal/system message
@@ -2128,7 +2754,13 @@ async def handle_incoming_message(
                         tts_already_executed = False
                         correction_ctx = getattr(message, "correction_context", None)
                         if correction_ctx:
-                            # Check if successful_actions (list) or successful_types (list) contains tts_speak
+                            # Only treat TTS as already-executed when the SAME text
+                            # was already spoken. A correction often returns a NEW
+                            # message (e.g. after a failed action); suppressing TTS
+                            # then leaves the corrected reply as silent text
+                            # (Langfuse 11feca6f: the corrector's new reply was
+                            # sent as plain text with no voice note).
+                            spoken_texts: set[str] = set()
                             successful_actions = correction_ctx.get(
                                 "successful_actions", []
                             )
@@ -2138,15 +2770,28 @@ async def handle_incoming_message(
                                         isinstance(action, dict)
                                         and action.get("type") == "tts_speak"
                                     ):
-                                        tts_already_executed = True
-                                        break
-                            # Also check successful_types which is populated by action_parser
-                            successful_types = correction_ctx.get(
-                                "successful_types", []
-                            )
-                            if (
-                                isinstance(successful_types, list)
-                                and "tts_speak" in successful_types
+                                        spoken_payload = action.get("payload", {})
+                                        if isinstance(spoken_payload, dict):
+                                            spoken_text = spoken_payload.get("text")
+                                            if (
+                                                isinstance(spoken_text, str)
+                                                and spoken_text.strip()
+                                            ):
+                                                spoken_texts.add(spoken_text.strip())
+                            if not spoken_texts:
+                                # Fallback: keep the legacy type-only check when
+                                # no spoken text is recorded.
+                                successful_types = correction_ctx.get(
+                                    "successful_types", []
+                                )
+                                if (
+                                    isinstance(successful_types, list)
+                                    and "tts_speak" in successful_types
+                                ):
+                                    tts_already_executed = True
+                            elif (
+                                isinstance(text_to_speak, str)
+                                and text_to_speak.strip() in spoken_texts
                             ):
                                 tts_already_executed = True
 
@@ -2160,10 +2805,12 @@ async def handle_incoming_message(
 
                         # Skip for: internal grillo beats, internal chats, system messages, autonomous messages, already-executed TTS,
                         # an explicit send_as_voice request (handled in action_parser),
-                        # or if the request_tts flag/feature is off
+                        # or if the request_tts flag/feature is off.
+                        # Outbound Grillo beats are exempt from the internal-chat
+                        # skip so their user-facing messages get TTS.
                         should_skip_tts = (
                             is_grillo_internal
-                            or is_internal_chat
+                            or (is_internal_chat and not is_grillo_outbound)
                             or is_system_message
                             or is_autonomous
                             or tts_already_executed
@@ -2186,8 +2833,6 @@ async def handle_incoming_message(
                         # flags/endpoints, but they no longer drive the feature state.
                         tts_raw = ""
                         try:
-                            from core.config_manager import config_registry
-
                             active = str(
                                 config_registry.get_value(
                                     "ACTIVE_VOX_ENGINE",
@@ -2252,8 +2897,6 @@ async def handle_incoming_message(
                         ) or _is_voice_input
                         _speak_text_replies = False
                         try:
-                            from core.config_manager import config_registry
-
                             _speak_text_replies = bool(
                                 config_registry.get_value(
                                     "VOX_SPEAK_TEXT_REPLIES",
@@ -2317,9 +2960,39 @@ async def handle_incoming_message(
                                     or bool(context and context.get("request_tts"))
                                 ) and _iface_tts_prefix != "synth_webui"
 
+                                # Carry the target interface_path into the injected
+                                # tts_speak so audio dispatch works even when the
+                                # current chat context has none (e.g. outbound Grillo
+                                # beats that address another chat via the message
+                                # action's payload).
+                                _tts_target_path = payload.get(
+                                    "interface_path"
+                                ) or payload.get("chat_name")
+                                # A model may hallucinate the interface prefix
+                                # (e.g. 'em_chat_bridge/...'); the message action is
+                                # merged away below, so the voice note would otherwise
+                                # be undeliverable. Route to the chat the turn arrived
+                                # in when the payload path is not a registered
+                                # interface. Structural check, never keyword logic.
+                                if isinstance(_tts_target_path, str) and "/" in (
+                                    _tts_target_path
+                                ):
+                                    from core.interface_path_utils import (
+                                        resolve_registered_interface_path,
+                                    )
+
+                                    _routed_tts_path = (
+                                        resolve_registered_interface_path(
+                                            _tts_target_path,
+                                            context=ctx,
+                                        )
+                                    )
+                                    if _routed_tts_path:
+                                        _tts_target_path = _routed_tts_path
+
                                 if is_voice_response:
                                     # Voice response strategy:
-                                    #   • Remove the standalone message_* action so text
+                                    #   • Remove the standalone message_* actions so text
                                     #     is NOT sent as a separate message.
                                     #   • Inject tts_speak with __merged_text so the text
                                     #     becomes the audio caption (Telegram) or is sent
@@ -2327,6 +3000,20 @@ async def handle_incoming_message(
                                     #   • Do NOT set __auto_injected — if TTS fails the
                                     #     fallback will send text so the user is not left
                                     #     with zero response.
+                                    # When the LLM emitted several message actions, join
+                                    # ALL of their texts so no message is dropped: the
+                                    # voice note speaks (and captions) the full reply.
+                                    _voice_msg_texts = _collect_message_texts(actions)
+                                    if len(_voice_msg_texts) > 1:
+                                        _joined_voice_text = _join_message_texts(
+                                            _voice_msg_texts
+                                        )
+                                        log_info(
+                                            "[message_chain] 🎤 Voice response with "
+                                            f"{len(_voice_msg_texts)} message actions — "
+                                            "joining all texts into the voice note"
+                                        )
+                                        text_to_speak = _joined_voice_text
                                     log_info(
                                         f"[message_chain] 🎤 Voice response: replacing text-only message with audio+caption for: {text_to_speak[:30]}..."
                                     )
@@ -2371,6 +3058,10 @@ async def handle_incoming_message(
                                             "__auto_injected": True,
                                         },
                                     }
+                                if _tts_target_path:
+                                    tts_action["payload"]["interface_path"] = (
+                                        _tts_target_path
+                                    )
                                 actions.append(tts_action)
                                 # Update has_tts flag since we just added it
                                 has_tts = True
@@ -2391,16 +3082,23 @@ async def handle_incoming_message(
                         interface_path = ctx.get("interface_path") or ""
                     if "is_user_facing" not in locals():
                         is_user_facing = False
+                    if "is_reactive_vessel_chat" not in locals():
+                        is_reactive_vessel_chat = bool(ctx.get("vessel_player_chat"))
                     if "is_grillo_internal" not in locals():
                         is_grillo_internal = False
                     if "is_internal_chat" not in locals():
                         is_internal_chat = False
+                    if "has_user_response" not in locals():
+                        has_user_response = False
+                    if "has_inworld_reply" not in locals():
+                        has_inworld_reply = False
 
                     if not has_user_response:
                         if (
                             is_user_facing
                             and not is_grillo_internal
                             and not is_internal_chat
+                            and not _contains_vessel_disconnect_action(actions)
                         ):
                             log_warning(
                                 f"[message_chain] ⚠️ LLM generated no outbound message action for user-facing interface '{interface_path}' — user will receive no reply"
@@ -2470,22 +3168,35 @@ async def handle_incoming_message(
                                     f"[message_chain] 🔗 Merging {len(message_actions_to_remove)} message action(s) into TTS to send text+audio together"
                                 )
 
+                                # Join ALL message texts (not just the first) so a
+                                # multi-message reply survives the merge verbatim —
+                                # the voice note speaks and captions the full reply.
+                                _all_msg_texts = [
+                                    msg_text
+                                    for (_, msg_text, _) in message_actions_to_remove
+                                ]
+                                _joined_msg_text = _join_message_texts(_all_msg_texts)
+
                                 for tts_action in tts_actions:
                                     tts_payload = tts_action.get("payload", {})
                                     if not isinstance(tts_payload, dict):
                                         continue
 
-                                    for (
-                                        idx,
-                                        msg_text,
-                                        msg_ipath,
-                                    ) in message_actions_to_remove:
-                                        if "__merged_text" not in tts_payload:
-                                            tts_payload["__merged_text"] = msg_text
-                                            log_info(
-                                                f"[message_chain] ✅ Merged text into tts_speak: '{msg_text[:50]}...'"
-                                            )
-                                            break
+                                    tts_payload["__merged_text"] = _joined_msg_text
+
+                                    # When the spoken text was derived from the first
+                                    # message action (auto-injected TTS), speak the full
+                                    # merged reply instead of only the first message. An
+                                    # LLM-chosen tts_speak carries its own deliberate
+                                    # spoken text and is left untouched.
+                                    _cur_text = str(
+                                        tts_payload.get("text") or ""
+                                    ).strip()
+                                    if _cur_text and _cur_text in _all_msg_texts:
+                                        tts_payload["text"] = _joined_msg_text
+                                    log_info(
+                                        f"[message_chain] ✅ Merged {len(_all_msg_texts)} message text(s) into tts_speak: '{_joined_msg_text[:50]}...'"
+                                    )
 
                                 # Remove the standalone message actions
                                 for idx, _, _ in sorted(
@@ -2502,6 +3213,21 @@ async def handle_incoming_message(
 
                 # Execute actions regardless of whether response is included
                 if parsed is not None:
+                    # has_user_response / has_user_output_action are only
+                    # initialised in the source=="llm" branch above; on a
+                    # corrector retry we re-enter this block with parsed
+                    # re-populated but without passing through that init, so
+                    # ensure they exist before the reads below.
+                    if "has_user_response" not in locals():
+                        has_user_response = False
+                    if "has_inworld_reply" not in locals():
+                        has_inworld_reply = False
+                    if "has_user_output_action" not in locals():
+                        has_user_output_action = False
+                    if "interface_path" not in locals():
+                        interface_path = ctx.get("interface_path") or ""
+                    if "is_reactive_vessel_chat" not in locals():
+                        is_reactive_vessel_chat = bool(ctx.get("vessel_player_chat"))
                     try:
                         log_debug(
                             f"[message_chain] EXECUTING ACTIONS: count={len(actions) if actions else 0}, interface_path={ctx.get('interface_path')}, chat_id={ctx.get('chat_id')}, action_types={[a.get('type') or a.get('action') for a in (actions or []) if isinstance(a, dict)]}"
@@ -2510,7 +3236,20 @@ async def handle_incoming_message(
                         if attempt > 0:
                             cc = getattr(message, "correction_context", None) or {}
                             successful_types = cc.get("successful_types", [])
+                            if isinstance(successful_types, (list, tuple, set)):
+                                successful_types = list(successful_types)
                             if successful_types and isinstance(actions, list):
+                                # If a message action already delivered on an
+                                # earlier pass, suppress ALL message types on
+                                # the retry — a duplicate delivery to the user
+                                # is the worst failure mode, and the model
+                                # re-emitting the reply is the CHANGELOG
+                                # 2026-06-26 duplicate. Structural type-prefix
+                                # match; never keyword logic.
+                                delivered_message = any(
+                                    str(t).startswith("message_")
+                                    for t in successful_types
+                                )
                                 filtered = []
                                 for act in actions:
                                     atype = None
@@ -2520,54 +3259,56 @@ async def handle_incoming_message(
                                         log_debug(
                                             f"[message_chain] Removing previously successful action type '{atype}' from retry payload"
                                         )
+                                    elif delivered_message and str(
+                                        atype or ""
+                                    ).startswith("message_"):
+                                        log_debug(
+                                            f"[message_chain] Suppressing re-emitted message action '{atype}' on retry (already delivered)"
+                                        )
                                     else:
                                         filtered.append(act)
                                 actions = filtered
-                        # Agentic Runtime 2.0: optional deterministic router.
-                        # When AGENTIC_ROUTING_ENABLED is False (default) this is
-                        # a no-op and the Fast Lane runs exactly as before.
-                        if config_registry.get_var(
-                            "AGENTIC_ROUTING_ENABLED", False, value_type=bool
-                        ):
-                            from core.agent_router import (
-                                classify as _agent_classify,
-                                route as _agent_route,
-                            )
+                        # Agentic Runtime 2.0: deterministic router. The router
+                        # itself gates on AGENT_ENABLED (the single authoritative
+                        # agent toggle); when the agent is off it returns FAST and
+                        # the Fast Lane runs exactly as before.
+                        from core.agent_router import (
+                            classify as _agent_classify,
+                            route as _agent_route,
+                        )
 
-                            action_list = actions if isinstance(actions, list) else []
-                            lane = _agent_classify(action_list, context=ctx)
-                            if lane == "agent":
-                                log_info(
-                                    "[message_chain] 🤖 Agent Lane engaged for this turn"
-                                )
-                                result = await _agent_route(
-                                    action_list,
-                                    context=ctx,
-                                    bot=bot,
-                                    message=message,
-                                )
-                                # The agent lane returns its own result shape;
-                                # normalize to what the loop expects downstream.
-                                if not isinstance(result, dict):
-                                    result = {"processed": [], "failed_actions": []}
-                                result.setdefault("processed", [])
-                                result.setdefault("failed_actions", [])
-                                result.setdefault("errors", [])
-                                result.setdefault("action_outputs", [])
-                                actions_executed_during_loop = True
-                                # Skip the rest of the Fast-Lane correction logic.
-                                delivered_to_llm = False
-                                fixable_failures: list = []
-                                unfixable_failures: list = []
-                            else:
-                                result = await run_actions(
-                                    action_list, ctx, bot, message
-                                )
+                        action_list = actions if isinstance(actions, list) else []
+                        lane = _agent_classify(action_list, context=ctx)
+                        if lane == "agent":
+                            log_info(
+                                "[message_chain] 🤖 Agent Lane engaged for this turn"
+                            )
+                            result = await _agent_route(
+                                action_list,
+                                context=ctx,
+                                bot=bot,
+                                message=message,
+                            )
+                            # The agent lane returns its own result shape;
+                            # normalize to what the loop expects downstream.
+                            if not isinstance(result, dict):
+                                result = {"processed": [], "failed_actions": []}
+                            result.setdefault("processed", [])
+                            result.setdefault("failed_actions", [])
+                            result.setdefault("errors", [])
+                            result.setdefault("action_outputs", [])
+                            actions_executed_during_loop = True
+                            # Skip the rest of the Fast-Lane correction logic.
+                            delivered_to_llm = False
+                            fixable_failures: list = []
+                            unfixable_failures: list = []
                         else:
                             result = await run_actions(actions, ctx, bot, message)
                         processed = result.get("processed", [])
                         failed = result.get("failed_actions", [])
                         errors = result.get("errors", [])
+                        if _contains_vessel_disconnect_action(processed):
+                            vessel_disconnect_succeeded = True
                         # A non-empty action_outputs means run_actions already
                         # enqueued an LLM delivery follow-up (terminal output, or a
                         # deliver_to_llm fetch action like recall_last_dream). That
@@ -2579,6 +3320,12 @@ async def handle_incoming_message(
                         # remember if we actually ran anything
                         if processed:
                             actions_executed_during_loop = True
+                        # remember if an in-world speak verb was voiced this turn
+                        # (structural detection, keyword-free) so a reactive player
+                        # chat that never produced a ``say`` can be backfilled with a
+                        # deterministic fallback reply at loop exit
+                        if _vessel_say_delivered(processed):
+                            vessel_reply_delivered = True
 
                         log_info(
                             f"[message_chain] Actions result: {len(processed)} successful, {len(failed)} failed"
@@ -2587,8 +3334,23 @@ async def handle_incoming_message(
                         # If we had corruption recovery or validation failures, check if correction is needed
                         # But SKIP correction for "unfixable" errors (policy restrictions like whitelist/suggest mode)
                         # These can't be fixed by the LLM - they're system configuration issues
+                        # Also SKIP correction for auto-injected tts_speak failures whose VoxPlugin
+                        # text-only fallback already delivered the reply: the message action was
+                        # merged into the TTS and removed, so the fallback text IS the reply.
+                        # Re-running the LLM would re-emit the message action and deliver a
+                        # duplicate (the double-interface-output bug).
+                        delivered_auto_tts_failures = [
+                            f for f in failed if _is_delivered_auto_tts_failure(f)
+                        ]
+                        if delivered_auto_tts_failures:
+                            log_warning(
+                                f"[message_chain] Excluding {len(delivered_auto_tts_failures)} auto-injected tts_speak failure(s) from correction: text-only fallback already delivered the reply (avoiding duplicate message)"
+                            )
                         fixable_failures = [
-                            f for f in failed if not f.get("unfixable", False)
+                            f
+                            for f in failed
+                            if not f.get("unfixable", False)
+                            and not _is_delivered_auto_tts_failure(f)
                         ]
                         unfixable_failures = [
                             f for f in failed if f.get("unfixable", False)
@@ -2657,40 +3419,104 @@ async def handle_incoming_message(
                                 )
 
                             # Check if user response is required but missing.
+                            # On a reactive in-world player chat the ONLY reply that
+                            # reaches the player is an embodiment speak verb
+                            # (``vessel_<world>_say``); a ``message_*`` action toward a
+                            # different connected chat (e.g. the WebUI) does NOT count,
+                            # so require ``has_inworld_reply`` in that case. Structural,
+                            # no message-text inspection.
+                            reply_present = (
+                                has_inworld_reply
+                                if is_reactive_vessel_chat
+                                else has_user_response
+                            )
                             missing_user_reply = False
                             if (
                                 is_user_facing
                                 and not is_grillo_internal
                                 and not is_internal_chat
                                 and not is_scoped_non_message
-                                and not has_user_response
+                                and not reply_present
                                 and not has_user_output_action
                                 and not delivered_to_llm
+                                and not vessel_disconnect_succeeded
                             ):
                                 missing_user_reply = True
 
                             errors_list = list(errors)
                             if missing_user_reply:
+                                _hint_player_msg = (
+                                    ctx.get("original_user_message") or text
+                                    if is_reactive_vessel_chat
+                                    else None
+                                )
+                                _hint_last_self = (
+                                    _last_self_vessel_utterance(
+                                        ctx, str(interface_path or "")
+                                    )
+                                    if is_reactive_vessel_chat
+                                    else None
+                                )
                                 errors_list.append(
-                                    "CHAT REPLY REQUIRED: The user is waiting for a reply in this active conversation turn. "
-                                    f"You MUST include a message action targeting the originating interface '{interface_path.split('/')[0]}' "
-                                    "(e.g., 'message_telegram_bot') to reply to the user. Internal actions like diary entries "
-                                    "and emotion updates do NOT substitute for replying."
+                                    _build_missing_reply_hint(
+                                        interface_path,
+                                        is_reactive_vessel_chat,
+                                        current_player_message=_hint_player_msg,
+                                        last_self_line=_hint_last_self,
+                                    )
                                 )
 
+                            # Autonomous Rift Vessel turns (will/action/goal beats,
+                            # reflections, perceptions) have no human awaiting a reply.
+                            # When an action fails on such a turn, immediately re-invoking
+                            # the LLM to "correct" is wasteful — it burns a full LLM call
+                            # per retry and lets a weak model re-emit stray in-world `say`
+                            # spam (the reported duplicate-message flood). The failure is
+                            # already recorded above; the next (rate-limited) beat retries
+                            # on its own cadence. Reactive player chat (vessel_player_chat)
+                            # still gets correction so a person is always answered.
+                            _is_autonomous_vessel_turn = False
+                            try:
+                                from core.interface_path_utils import (
+                                    is_vessel_embodiment_context,
+                                )
+
+                                _is_autonomous_vessel_turn = (
+                                    is_vessel_embodiment_context(ctx or {})
+                                    and not is_reactive_vessel_chat
+                                )
+                            except Exception:  # pragma: no cover - defensive
+                                _is_autonomous_vessel_turn = False
+                            if (
+                                _is_autonomous_vessel_turn
+                                and len(failed) > 0
+                                and not missing_user_reply
+                                and not has_user_output_action
+                                and not delivered_to_llm
+                            ):
+                                log_warning(
+                                    "[message_chain] Skipping LLM correction for "
+                                    f"autonomous vessel turn ({len(failed)} failed "
+                                    "action(s)); next beat will retry"
+                                )
+                                return ACTIONS_EXECUTED
+
                             # Build correction context with info about what succeeded and what failed
-                            correction_context = {
-                                "successful_actions": processed,
-                                "successful_types": [
-                                    (a.get("type") or a.get("action"))
-                                    for a in processed
-                                    if isinstance(a, dict)
-                                ],
-                                "failed_actions": failed,
-                                "errors": errors_list,
-                                "had_json_errors": metadata.get("recovered", False),
-                                "original_text": text,
-                            }
+                            correction_context = _merge_correction_successes(
+                                getattr(message, "correction_context", None),
+                                {
+                                    "successful_actions": processed,
+                                    "successful_types": [
+                                        (a.get("type") or a.get("action"))
+                                        for a in processed
+                                        if isinstance(a, dict)
+                                    ],
+                                    "failed_actions": failed,
+                                    "errors": errors_list,
+                                    "had_json_errors": metadata.get("recovered", False),
+                                    "original_text": text,
+                                },
+                            )
 
                             # Store this in the message for the corrector to use
                             if hasattr(message, "__dict__"):
@@ -2713,36 +3539,61 @@ async def handle_incoming_message(
                                 )
                                 return ACTIONS_EXECUTED
                         else:
-                            # All actions succeeded, but check if user response is required and missing
+                            # All actions succeeded, but check if user response is
+                            # required and missing. Same in-world reply rule as above:
+                            # a reactive vessel player chat needs a ``vessel_*_say``,
+                            # not just any ``message_*``.
+                            reply_present = (
+                                has_inworld_reply
+                                if is_reactive_vessel_chat
+                                else has_user_response
+                            )
                             if (
                                 is_user_facing
                                 and not is_grillo_internal
                                 and not is_internal_chat
                                 and not is_scoped_non_message
-                                and not has_user_response
+                                and not reply_present
                                 and not has_user_output_action
                                 and not delivered_to_llm
+                                and not vessel_disconnect_succeeded
                             ):
                                 log_warning(
                                     f"[message_chain] ⚠️ LLM generated no outbound message action for user-facing interface '{interface_path}' — triggering corrector for missing reply"
                                 )
-                                correction_context = {
-                                    "successful_actions": processed,
-                                    "successful_types": [
-                                        (a.get("type") or a.get("action"))
-                                        for a in processed
-                                        if isinstance(a, dict)
-                                    ],
-                                    "failed_actions": [],
-                                    "errors": [
-                                        "CHAT REPLY REQUIRED: The user is waiting for a reply in this active conversation turn. "
-                                        f"You MUST include a message action targeting the originating interface '{interface_path.split('/')[0]}' "
-                                        "(e.g., 'message_telegram_bot') to reply to the user. Internal actions like diary entries "
-                                        "and emotion updates do NOT substitute for replying."
-                                    ],
-                                    "had_json_errors": False,
-                                    "original_text": text,
-                                }
+                                correction_context = _merge_correction_successes(
+                                    getattr(message, "correction_context", None),
+                                    {
+                                        "successful_actions": processed,
+                                        "successful_types": [
+                                            (a.get("type") or a.get("action"))
+                                            for a in processed
+                                            if isinstance(a, dict)
+                                        ],
+                                        "failed_actions": [],
+                                        "errors": [
+                                            _build_missing_reply_hint(
+                                                interface_path,
+                                                is_reactive_vessel_chat,
+                                                current_player_message=(
+                                                    ctx.get("original_user_message")
+                                                    or text
+                                                    if is_reactive_vessel_chat
+                                                    else None
+                                                ),
+                                                last_self_line=(
+                                                    _last_self_vessel_utterance(
+                                                        ctx, str(interface_path or "")
+                                                    )
+                                                    if is_reactive_vessel_chat
+                                                    else None
+                                                ),
+                                            )
+                                        ],
+                                        "had_json_errors": False,
+                                        "original_text": text,
+                                    },
+                                )
                                 if hasattr(message, "__dict__"):
                                     message.correction_context = correction_context
                                 parsed = None
@@ -2753,14 +3604,23 @@ async def handle_incoming_message(
                                 return ACTIONS_EXECUTED
 
                     except Exception as e:
-                        log_warning(f"[message_chain] Failed to run actions: {e}")
+                        # Log with the full traceback so the crash site is
+                        # visible in the logs (a bare str(e) hides WHERE the
+                        # exception was raised, which made UnboundLocalErrors in
+                        # this block very hard to locate).
+                        log_error(
+                            f"[message_chain] Failed to run actions: {type(e).__name__}: {e}",
+                            e,
+                        )
                         # On a hard exception during action execution we treat it as a
                         # technical failure. If nothing has run yet, propagate an LLM
                         # failure so the interface can show a fallback message. If some
                         # actions already succeeded we simply report ACTIONS_EXECUTED so
                         # the user isn't spammed with unrelated error texts.
                         if not actions_executed_during_loop:
-                            failure_reason = f"Action execution exception: {e}"
+                            failure_reason = (
+                                f"Action execution exception: {type(e).__name__}: {e}"
+                            )
                             try:
                                 await send_llm_fallback_message(
                                     bot, message, failure_reason, context=ctx
@@ -2832,6 +3692,10 @@ async def handle_incoming_message(
                 log_warning(
                     f"[message_chain] {failure_reason} but {len(actions or [])} action(s) already executed; skipping fallback"
                 )
+                if is_reactive_vessel_chat and not vessel_reply_delivered:
+                    await _deliver_vessel_fallback_reply(
+                        bot, message, ctx, failure_reason
+                    )
                 return ACTIONS_EXECUTED
 
         if text in tried_texts:
@@ -2848,6 +3712,10 @@ async def handle_incoming_message(
                 log_warning(
                     f"[message_chain] {failure_reason} but some actions already executed; skipping fallback"
                 )
+                if is_reactive_vessel_chat and not vessel_reply_delivered:
+                    await _deliver_vessel_fallback_reply(
+                        bot, message, ctx, failure_reason
+                    )
                 return ACTIONS_EXECUTED
 
         tried_texts.add(text)
@@ -2888,6 +3756,10 @@ async def handle_incoming_message(
                 log_warning(
                     "[message_chain] Corrector exception but actions already executed; skipping fallback"
                 )
+                if is_reactive_vessel_chat and not vessel_reply_delivered:
+                    await _deliver_vessel_fallback_reply(
+                        bot, message, ctx, failure_reason
+                    )
                 return ACTIONS_EXECUTED
 
         if not corrected:
@@ -2909,6 +3781,10 @@ async def handle_incoming_message(
                     log_warning(
                         f"[message_chain] {failure_reason} but some actions already executed; skipping fallback"
                     )
+                    if is_reactive_vessel_chat and not vessel_reply_delivered:
+                        await _deliver_vessel_fallback_reply(
+                            bot, message, ctx, failure_reason
+                        )
                     return ACTIONS_EXECUTED
             # On no-correction, loop and let retry counter enforce blocking
             await asyncio.sleep(0.5)

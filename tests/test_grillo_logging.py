@@ -28,7 +28,12 @@ async def test_observer_logs_activity(caplog, monkeypatch):
         return 999
 
     async def fake_enqueue_low_priority(
-        bot, message, context_memory=None, interface_id=None, original_message=None
+        bot,
+        message,
+        context_memory=None,
+        interface_id=None,
+        original_message=None,
+        priority=None,
     ):
         return True
 
@@ -69,7 +74,12 @@ async def test_dream_logs_activity(caplog, monkeypatch):
         return 4242
 
     async def fake_enqueue_low_priority(
-        bot, message, context_memory=None, interface_id=None, original_message=None
+        bot,
+        message,
+        context_memory=None,
+        interface_id=None,
+        original_message=None,
+        priority=None,
     ):
         return True
 

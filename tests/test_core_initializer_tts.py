@@ -115,8 +115,6 @@ def test_real_plugin_actions_follow_runtime_enablement(monkeypatch) -> None:
         "ACTIVE_VOX_ENGINE": "disabled",
         "ACTIVE_AURIS_ENGINE": "disabled",
         "ACTIVE_IRIS_ENGINE": "disabled",
-        "SOUL_PLUGIN_ENABLED": False,
-        "ENABLE_MEMORY_SEARCH": False,
     }
 
     def fake_get_value(key, default=None, **kwargs):
@@ -141,16 +139,16 @@ def test_real_plugin_actions_follow_runtime_enablement(monkeypatch) -> None:
         assert "tts_speak" not in available
         assert "stt_transcribe" not in available
         assert "vision_describe" not in available
-        assert "memory_search" not in available
-        assert "soul_force_compile" not in available
+        # soul_plugin and memory_search are gated only by the global plugin
+        # toggle (PLUGIN_ENABLED__<name>), not by an internal config flag, so
+        # their actions are always exposed once the plugin is loaded.
+        assert "memory_search" in available
 
         overrides.update(
             {
                 "ACTIVE_VOX_ENGINE": "kitten",
                 "ACTIVE_AURIS_ENGINE": "vosk",
                 "ACTIVE_IRIS_ENGINE": "selenium-llm-engine",
-                "SOUL_PLUGIN_ENABLED": True,
-                "ENABLE_MEMORY_SEARCH": True,
             }
         )
 

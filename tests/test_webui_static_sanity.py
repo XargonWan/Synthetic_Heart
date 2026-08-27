@@ -75,3 +75,51 @@ def test_try_catch_balance_in_main_js():
     assert tries <= catches, (
         f"Unbalanced try/catch/finally in main.js (try: {tries}, catch|finally: {catches})"
     )
+
+
+def test_engine_config_save_does_not_replace_active_endpoint_cards() -> None:
+    """Engine config saves must leave the active editor DOM intact."""
+    text = (Path("res/synth_webui/js/main.js")).read_text(encoding="utf-8")
+    start = text.index("function initEngineConfigEditor()")
+    end = text.index("async function loadComponentsSummary()", start)
+    editor = text[start:end]
+    assert "refreshEndpoints" not in editor
+
+
+def test_toggle_focus_target_stays_in_visible_layout() -> None:
+    """Styled checkbox labels must not focus an off-screen absolute input.
+
+    Chromium scrolls an associated checkbox into view when its label is clicked.
+    An absolutely positioned 1px checkbox without a positioned parent acquired a
+    static position far below the engine-config slider, scrolling the whole app
+    past the active panel and leaving only the page background visible.
+    """
+    for template in (
+        Path("core/webui_templates/synth_webui_shell.html"),
+        Path("core/webui_templates/base.html"),
+    ):
+        text = template.read_text(encoding="utf-8")
+        selector = 'input[type="checkbox"]:has(+ .toggle-switch) {'
+        start = text.index(selector)
+        end = text.index("}", start)
+        rule = text[start:end]
+        assert "position: static" in rule
+        assert "position: absolute" not in rule
+
+
+def test_preset_apply_updates_visible_model_from_apply_response() -> None:
+    """Preset application must not wait for a page refresh to show its model."""
+    text = Path("res/synth_webui/js/main.js").read_text(encoding="utf-8")
+    helper_start = text.index("function syncAppliedEnginePreset(data)")
+    helper_end = text.index("function initEngineConfigEditor()", helper_start)
+    helper = text[helper_start:helper_end]
+    assert "preset.model" in helper
+    assert "endpoint.default_model" in helper
+    assert "cortex-model-search" in helper
+    assert "cortex-engine-model" in helper
+
+    apply_start = text.index("if (applyBtn && !applyBtn.dataset.bound)")
+    apply_end = text.index("if (delBtn && !delBtn.dataset.bound)", apply_start)
+    apply_handler = text[apply_start:apply_end]
+    assert "await loadComponentsSummary()" in apply_handler
+    assert "syncAppliedEnginePreset(data)" in apply_handler

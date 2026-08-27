@@ -14,11 +14,12 @@ performs periodic roll-ups. Persistence can be in-memory or PostgreSQL.
 |--------|---------|
 | `static_inject` | Inject SOUL context into the prompt. |
 
+Enabled/disabled via its global plugin toggle (`PLUGIN_ENABLED__soul_plugin`).
+
 ## Configuration
 
 | Key | Purpose |
 |-----|---------|
-| `SOUL_PLUGIN_ENABLED` | Master enable toggle. |
 | `SOUL_COMPILE_IDLE_SECONDS` | Idle seconds before compiling buffered transcript. |
 | `SOUL_SCHEDULER_INTERVAL_SECONDS` | Scheduler tick interval. |
 | `SOUL_REPOSITORY_BACKEND` | Persistence backend (`memory` or `postgres`). |

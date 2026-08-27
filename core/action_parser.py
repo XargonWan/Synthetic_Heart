@@ -17,6 +17,22 @@ import json
 from core.transport_layer import run_corrector_middleware
 from core.core_initializer import INTERFACE_REGISTRY
 
+# Interface capability introspection — guarded import so a failure in the new
+# module can never break dispatch (fail-open: dispatch proceeds unimpeded).
+try:
+    from core.interface_capabilities import (
+        capability_gate_enabled as _interface_capability_gate_enabled,
+        has_capability as _has_capability,
+    )
+except Exception:  # pragma: no cover - import safety
+
+    def _interface_capability_gate_enabled() -> bool:
+        return True
+
+    def _has_capability(iface: Any, cap: str) -> bool:
+        return True
+
+
 # Global dictionary to track retry attempts per chat/message thread for the corrector
 # Use a ConfigVar so consumers always see the latest value (set via WebUI/API)
 CORRECTOR_RETRIES = config_registry.get_var("CORRECTOR_RETRIES", 2)
@@ -537,6 +553,117 @@ def _normalize_text_field_alias(action_type: str, payload: dict) -> None:
             return
 
 
+# Vessel actions: the canonical structural field each verb family requires.
+# Small models frequently emit a synonym (``recipe``/``block``/``id``/
+# ``amount``) instead of the required field, which fails validation/dispatch and,
+# for an autonomous beat, silently drops the whole action (the "walks around,
+# does nothing" symptom). Renaming is safe: only applied when the canonical key
+# is absent and only for ``vessel_*`` actions.
+_VESSEL_ITEM_FIELD_VERBS = frozenset({"craft", "smelt", "drop", "place", "equip"})
+_VESSEL_NAME_FIELD_VERBS = frozenset({"collect_block"})
+_VESSEL_TARGET_FIELD_VERBS = frozenset({"mine", "goto", "follow", "attack"})
+_VESSEL_ALL_VERBS = (
+    _VESSEL_ITEM_FIELD_VERBS | _VESSEL_NAME_FIELD_VERBS | _VESSEL_TARGET_FIELD_VERBS
+)
+
+
+def _rename_first_payload_alias(
+    payload: dict, canonical: str, aliases: tuple[str, ...]
+) -> None:
+    """Rename the first present alias to ``canonical`` (only when canonical absent)."""
+    if payload.get(canonical):
+        return
+    for alias in aliases:
+        value = payload.get(alias)
+        if isinstance(value, str) and value.strip():
+            payload[canonical] = payload.pop(alias)
+            log_debug(
+                f"[action_parser] Normalized payload: renamed '{alias}' -> "
+                f"'{canonical}'"
+            )
+            return
+
+
+def _vessel_action_verb(action_type: str) -> str | None:
+    """Return the bare verb of a namespaced ``vessel_<world>_<verb>`` action.
+
+    Both the world token and the verb may be underscore-joined (e.g.
+    ``vessel_minecraft_collect_block`` -> ``collect_block``), so the verb is
+    matched as the longest known ``_<verb>`` suffix, never by splitting on
+    underscores (which would truncate multi-word verbs).
+    """
+    for verb in sorted(_VESSEL_ALL_VERBS, key=len, reverse=True):
+        if action_type.endswith("_" + verb):
+            return verb
+    return None
+
+
+def _normalize_vessel_payload_alias(action_type: str, payload: dict) -> None:
+    """Map common misnamed vessel payload keys to the canonical field names."""
+    if not action_type.startswith("vessel_"):
+        return
+    verb = _vessel_action_verb(action_type)
+    if verb in _VESSEL_ITEM_FIELD_VERBS:
+        _rename_first_payload_alias(
+            payload, "item", ("recipe", "id", "block", "block_name", "name")
+        )
+    elif verb in _VESSEL_NAME_FIELD_VERBS:
+        _rename_first_payload_alias(
+            payload, "name", ("block", "block_name", "id", "type", "target")
+        )
+    elif verb in _VESSEL_TARGET_FIELD_VERBS:
+        _rename_first_payload_alias(
+            payload, "target", ("block", "block_name", "name", "entity", "type", "id")
+        )
+    if "count" not in payload and "amount" in payload:
+        payload["count"] = payload.pop("amount")
+        log_debug("[action_parser] Normalized payload: renamed 'amount' -> 'count'")
+
+
+def _normalize_emotion_payload_alias(payload: dict) -> None:
+    """update_emotion_state: accept the ``feelings`` object the prompt asks for.
+
+    The JSON instructions tell models "Emotions MUST be provided in the
+    'feelings' metadata object", and a model reliably places that object inside
+    the ``update_emotion_state`` payload (``payload['feelings']``) instead of at
+    the response top level. The action schema requires ``payload['emotions']``,
+    so without normalization the action fails validation and the whole turn's
+    output is rejected — the "output failure" seen on Telegram. Rename the
+    payload-level ``feelings`` dict to ``emotions`` when ``emotions`` is absent.
+    The feelings values use a 0-1 scale while the schema/executor use 0-10, so
+    they are scaled up only when every value is a 0-1 float.
+    """
+    if "emotions" not in payload and isinstance(payload.get("feelings"), dict):
+        feelings = payload.pop("feelings")
+        try:
+            values = [
+                float(v) for v in feelings.values() if isinstance(v, (int, float))
+            ]
+        except (TypeError, ValueError):
+            values = []
+        if values and all(0.0 <= v <= 1.0 for v in values):
+            feelings = {
+                k: float(v) * 10.0
+                for k, v in feelings.items()
+                if isinstance(v, (int, float))
+            }
+            log_debug(
+                "[action_parser] update_emotion_state: scaled 'feelings' "
+                "0-1 values to the 0-10 'emotions' scale"
+            )
+        else:
+            log_debug(
+                "[action_parser] update_emotion_state: renamed payload "
+                "'feelings' -> 'emotions'"
+            )
+        payload["emotions"] = feelings
+    elif "feelings" in payload and "emotions" in payload:
+        # A stray payload-level 'feelings' object next to a valid 'emotions'
+        # map is not an action field (the 'feelings' metadata belongs at the
+        # response top level); drop it so nothing downstream trips on it.
+        payload.pop("feelings")
+
+
 def _normalize_payload(action_type: str, payload: dict) -> None:
     """Normalize a payload in-place so quoted numbers become real numbers.
 
@@ -556,6 +683,9 @@ def _normalize_payload(action_type: str, payload: dict) -> None:
     """
 
     _normalize_text_field_alias(action_type, payload)
+    _normalize_vessel_payload_alias(action_type, payload)
+    if action_type == "update_emotion_state":
+        _normalize_emotion_payload_alias(payload)
 
     def _coerce_int(value):
         """Convert a clean integer string to ``int``; otherwise return as-is."""
@@ -954,7 +1084,11 @@ def _plugins_for(action_type: str) -> List[Any]:
     # Special handling for tts_speak: explicitly check for master TTS plugin if not found
     if action_type == "tts_speak" and not plugins:
         for plugin in loaded_plugins:
-            if plugin.__class__.__name__ in {"TTSMasterPlugin", "TTSPlugin"}:
+            if plugin.__class__.__name__ in {
+                "TTSMasterPlugin",
+                "TTSPlugin",
+                "VoxPlugin",
+            }:
                 plugins.append(plugin)
                 log_info(
                     "[action_parser] ✅ Explicitly added TTS master plugin for tts_speak"
@@ -1155,6 +1289,39 @@ async def _handle_plugin_action(
             from core.core_initializer import INTERFACE_REGISTRY
 
             interface = INTERFACE_REGISTRY.get(iface_name) if iface_name else None
+
+            # Interface capability gate (fail-open): before dispatching to an
+            # interface, verify it structurally advertises the capability the
+            # action needs. A missing capability is an explicit, correctable
+            # failure — never a silent fall-through.
+            if interface and action_type.startswith("audio"):
+                if _interface_capability_gate_enabled() and not (
+                    _has_capability(interface, "send_audio")
+                    or _has_capability(interface, "send_voice")
+                ):
+                    log_warning(
+                        f"[action_parser] ⚠️ Interface '{iface_name}' lacks audio "
+                        f"capability; refusing to dispatch '{action_type}'"
+                    )
+                    return {
+                        "ok": False,
+                        "error": f"interface '{iface_name}' lacks audio capability",
+                    }
+
+            if interface and action_type.startswith("message"):
+                if _interface_capability_gate_enabled() and not _has_capability(
+                    interface, "send_message"
+                ):
+                    log_warning(
+                        f"[action_parser] ⚠️ Interface '{iface_name}' lacks "
+                        f"'send_message' capability; refusing to dispatch "
+                        f"'{action_type}'"
+                    )
+                    return {
+                        "ok": False,
+                        "error": f"interface '{iface_name}' lacks send_message capability",
+                    }
+
             if (
                 interface
                 and action_type.startswith("message")
@@ -1510,9 +1677,20 @@ async def _request_selective_correction(
     """Request LLM to fix only the failed actions, while preserving successful ones."""
 
     fixable_failed_actions = [
-        failed for failed in failed_actions if not failed.get("unfixable")
+        failed
+        for failed in failed_actions
+        if not failed.get("unfixable") and not _is_delivered_auto_tts_failure(failed)
     ]
     unfixable_failed_count = len(failed_actions) - len(fixable_failed_actions)
+    delivered_auto_tts_count = sum(
+        1 for failed in failed_actions if _is_delivered_auto_tts_failure(failed)
+    )
+    if delivered_auto_tts_count:
+        log_warning(
+            f"[action_parser] Excluding {delivered_auto_tts_count} auto-injected "
+            "tts_speak failure(s) from correction: text-only fallback already "
+            "delivered the reply (avoiding duplicate message)"
+        )
     if not fixable_failed_actions:
         log_info(
             "[action_parser] Skipping selective correction because all failed actions are unfixable"
@@ -1743,6 +1921,38 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
         log_error(error_msg)
         return {"processed": [], "errors": [error_msg], "failed_actions": []}
 
+    # Drop leaked Recon-schema entries before validation. A state-retaining
+    # browser engine (e.g. selenium-llm-engine) can echo the separate Recon
+    # call's JSON keys (tone_hint, agent_intent, language_hint, ...) back into
+    # the main-pass ``actions`` array. Those keys are preflight metadata, not
+    # executable actions; validating them yields "Unsupported type" errors that
+    # can constitute the entire turn and dead-end in the correction/fallback
+    # loop (the "😵" bug). The drop-set is derived reflectively from registered
+    # recon plugins (no keyword list), so it stays correct as plugins change.
+    # Fully guarded: any failure drops nothing.
+    if actions:
+        try:
+            from core.recon import get_registered_recon_keys
+
+            _recon_keys = get_registered_recon_keys()
+        except Exception:
+            _recon_keys = set()
+        if _recon_keys:
+            _kept = []
+            for _a in actions:
+                _atype = _a.get("type") if isinstance(_a, dict) else None
+                if isinstance(_atype, str) and _atype.strip() in _recon_keys:
+                    continue
+                _kept.append(_a)
+            _dropped = len(actions) - len(_kept)
+            if _dropped:
+                log_warning(
+                    f"[action_parser] Dropped {_dropped} leaked Recon-schema "
+                    f"action(s) before validation (engine state contamination); "
+                    f"{len(_kept)} action(s) remain"
+                )
+                actions = _kept
+
     log_debug(f"[action_parser] run_actions called with {len(actions)} actions")
     log_debug(f"[action_parser] Actions: {actions}")
 
@@ -1864,11 +2074,28 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
             log_debug(f"[action_parser] Running action {idx}: {action_type}")
             result = await run_action(action, context, bot, original_message)
 
-            # Check if run_action returned error info
-            if isinstance(result, dict) and "error" in result:
-                collected_errors.append(result["error"])
+            # Plugins use both the legacy ``{"error": ...}`` shape and the
+            # structured ``{"status": "error", "message": ...}`` shape.
+            # Treat both as failed dispatches. In particular, Vessel actions
+            # can reach the world successfully at the transport level while
+            # the connector rejects the requested operation; classifying that
+            # as processed suppresses selective correction and leaves the model
+            # believing that a failed action happened.
+            result_error = _action_result_error(result)
+            if result_error is not None:
+                collected_errors.append(result_error)
                 failed_actions.append(
-                    {"index": idx, "action": action, "errors": [result["error"]]}
+                    {
+                        "index": idx,
+                        "action": action,
+                        "errors": [result_error],
+                        "result_reason": (
+                            result.get("reason")
+                            if isinstance(result, dict)
+                            and isinstance(result.get("reason"), str)
+                            else None
+                        ),
+                    }
                 )
             else:
                 processed_actions.append(action)
@@ -2027,6 +2254,48 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
     }
 
 
+def _action_result_error(result: Any) -> str | None:
+    """Extract a failure message from either supported action-result shape."""
+
+    if not isinstance(result, dict):
+        return None
+    if "error" in result:
+        value = result.get("error")
+        return str(value or "action failed")
+    status = str(result.get("status") or "").strip().lower()
+    if status in {"error", "failed"}:
+        value = result.get("message") or result.get("detail")
+        return str(value or "action failed")
+    return None
+
+
+def _is_delivered_auto_tts_failure(failed_item: Any) -> bool:
+    """True when a failed action is an auto-injected ``tts_speak`` whose
+    VoxPlugin text-only fallback already delivered the reply.
+
+    message_chain merges a standalone ``message_*`` action into an auto-injected
+    ``tts_speak`` and drops the message action, so when synthesis fails
+    VoxPlugin's text-only fallback (reason ``tts_failed_fallback_sent``) is the
+    only delivery — and it has already happened. Such failures must NOT trigger
+    LLM correction: re-running the model re-emits the message action and
+    delivers a duplicate (the double-interface-output bug). Structural check
+    only (action type + ``__auto_injected`` payload flag + result reason);
+    never inspects message text.
+    """
+    if not isinstance(failed_item, dict):
+        return False
+    action = failed_item.get("action")
+    if not isinstance(action, dict):
+        return False
+    atype = action.get("type") or action.get("action")
+    if atype != "tts_speak":
+        return False
+    payload = action.get("payload")
+    if not isinstance(payload, dict) or not payload.get("__auto_injected"):
+        return False
+    return failed_item.get("result_reason") == "tts_failed_fallback_sent"
+
+
 def _llm_already_provided_diary_content(processed_actions: list) -> bool:
     """Return True if any action is create_personal_diary_entry with explicit content.
 
@@ -2039,8 +2308,14 @@ def _llm_already_provided_diary_content(processed_actions: list) -> bool:
         if action.get("type") != "create_personal_diary_entry":
             continue
         payload = action.get("payload") or {}
-        content = (payload.get("content") or "").strip()
-        if content:
+        if (payload.get("content") or "").strip():
+            return True
+        # The model often provides interaction_summary / personal_thought without
+        # `content`; the diary plugin now writes those directly too, so the
+        # automatic summary must also detect them to avoid a duplicate entry.
+        if (payload.get("interaction_summary") or "").strip():
+            return True
+        if (payload.get("personal_thought") or "").strip():
             return True
     return False
 

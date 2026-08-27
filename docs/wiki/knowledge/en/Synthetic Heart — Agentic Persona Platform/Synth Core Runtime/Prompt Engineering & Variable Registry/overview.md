@@ -1,0 +1,1 @@
+Builds engine-agnostic PromptRequest objects from conversation context, renders them into provider-specific wire formats (OpenAI, Anthropic, Gemini), and exposes system-wide configurable variables through a validated registry.

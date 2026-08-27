@@ -123,7 +123,8 @@ turn is recorded in the WebUI Agent panel **no matter which interface or API
 call originated it** (Telegram, Discord, Matrix, the OpenAI-compatible API, or
 the WebUI ``POST /api/agent/run`` route). The row records the resolved engine,
 a status derived from the ``stop_reason`` (``failed`` for ``timeout`` /
-``engine_error`` / ``empty_response``, otherwise ``completed``), the per-turn
+``engine_error`` / ``empty_response`` / ``malformed_response`` /
+``delivery_failed``, otherwise ``completed``), the per-turn
 ``iterations_meta``, the ``final_text`` / ``stop_reason`` output, the
 originating ``trainer_id`` (from the message ``sender_id``), and a
 ``metadata.source`` label taken from the originating interface context. The
@@ -189,8 +190,10 @@ Routing (Phase E)
 * A single pure message (``message``/``tts_speak``/…) → **Fast Lane**.
 * Unknown single action → **Fast Lane** (unchanged behaviour).
 
-The router is gated by the ``AGENTIC_ROUTING_ENABLED`` config flag (default
-``False``). When disabled, the message chain executes exactly as before.
+The router is gated by the single authoritative agent toggle ``AGENT_ENABLED``
+(the user-facing on/off switch). When the agent is disabled, the message chain
+executes exactly as before (classic Fast Lane). When enabled, the router is
+active and escalates agentic turns to the Agent Lane.
 
 Exposing Synth actions as MCP (Phase F)
 ---------------------------------------
@@ -336,7 +339,7 @@ Configuration reference
 ================================  ============================================
 Key                               Meaning
 ================================  ============================================
-``AGENTIC_ROUTING_ENABLED``       Enable the Fast/Agent router (default False).
+``AGENT_ENABLED``                 Master agent on/off toggle (also gates the router).
 ``AGENT_MAX_ITERATIONS``          Hard cap on agent-loop iterations (default 30).
 ``AGENT_TURN_TIMEOUT_SEC``        Wall-clock budget per agent turn (default 120).
 ``SYNTH_MCP_CONFIG``              Override path to ``config/synth_mcp.json``.

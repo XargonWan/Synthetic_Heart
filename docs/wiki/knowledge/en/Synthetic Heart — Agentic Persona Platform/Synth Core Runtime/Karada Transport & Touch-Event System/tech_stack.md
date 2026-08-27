@@ -1,0 +1,1 @@
+FastAPI + Starlette WebSockets for the API surface; async SQLite/PostgreSQL via `core.db` for event persistence; asyncio tasks for debounce timers and periodic cleanup; SHA-256 hashing for asset manifest generation.

@@ -37,7 +37,7 @@ _BOT_NONE_LOG_THROTTLE_SEC = 5  # Log at most once every 5 seconds
 
 # Short-lived dedupe cache for outgoing LLM-originated messages
 _OUTGOING_DEDUPE: dict = {}  # key -> last_sent_timestamp
-_DEFAULT_DEDUPE_WINDOW = 30  # seconds (configurable via OUTGOING_DEDUPE_WINDOW)
+_DEFAULT_DEDUPE_WINDOW = 120  # seconds (configurable via OUTGOING_DEDUPE_WINDOW)
 
 # Per-chat cooldowns to avoid retry storms when Telegram reports flood/network errors
 _CHAT_COOLDOWNS: dict = {}

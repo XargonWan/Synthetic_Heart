@@ -1,0 +1,6 @@
+- Each plugin module exports a `PLUGIN_CLASS` variable pointing to its main class so `core.core_initializer` can auto-discover it.
+- Action metadata is declared via `get_supported_actions()` returning a dict with `description`, `required_fields`, and `optional_fields` keys, plus a parallel `get_supported_action_types()` returning a list of action type strings.
+- Optional or non-core imports (e.g. `telegram`, `core.notifier`, `core.config`) are wrapped in try/except blocks that define safe fallback stubs so the plugin loads even when dependencies are missing.
+- All runtime logging uses `core.logging_utils` functions (`log_info`, `log_debug`, `log_warning`, `log_error`) prefixed with the plugin name in brackets for traceability.
+- Plugins register themselves at import time by calling `register_plugin('<name>', self)` inside `__init__`, making them available to the action dispatcher without explicit instantiation.
+- Error paths consistently log via `log_error`/`log_warning` and attempt to notify a trainer via `notify_trainer(...)` before returning or raising.

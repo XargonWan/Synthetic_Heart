@@ -122,6 +122,35 @@ def _cfg_bool(key: str, default: bool) -> bool:
         return default
 
 
+def _is_self_initiated(context_memory: dict[str, Any] | None) -> bool:
+    """Structurally decide whether the search had no human requester.
+
+    Reads ONLY the routing origin carried on the originating turn's
+    ``context_memory`` — never any message text (project rule: no keyword
+    logic). A Grillo beat, any autonomous beat, or a Vessel embodiment turn is
+    self-initiated (nobody asked); a direct user turn is not. Fail-safe: on any
+    doubt it returns ``False`` so the delivery keeps the ordinary
+    user-addressed register rather than wrongly dropping it.
+    """
+    if not isinstance(context_memory, dict):
+        return False
+    try:
+        if context_memory.get("grillo_beat"):
+            return True
+        if context_memory.get("beat_type"):
+            return True
+        if context_memory.get("vessel_focus"):
+            return True
+        path = context_memory.get("interface_path")
+        from core.interface_path_utils import is_vessel_interface_path
+
+        if is_vessel_interface_path(path):
+            return True
+    except Exception:
+        return False
+    return False
+
+
 async def _init_table() -> None:
     """Create the ``web_search_tasks`` table if it does not exist (backend-aware)."""
     from core.db import get_conn_ctx
@@ -211,6 +240,11 @@ class SearchOrchestrator:
 
     def __init__(self) -> None:
         self._table_ready = False
+        # interface_path -> task_id of the background search currently in flight
+        # for that conversation. Used to reject duplicate submissions so a single
+        # user request can never stack multiple background searches (and thus
+        # multiple delivery turns) — the "max 2 messages" guarantee.
+        self._active_paths: dict[str, str] = {}
 
     async def _ensure_table(self) -> None:
         if self._table_ready:
@@ -249,7 +283,25 @@ class SearchOrchestrator:
             if u and u.strip().lower().startswith(("http://", "https://"))
         ][:max_urls]
 
+        # ── In-flight dedup (search-loop hardening, 2026-08-18) ──────────────
+        # A single conversation must never run two background searches at once:
+        # each one wakes Synth with its own delivery turn, so stacking them is
+        # exactly the "one request -> many replies" spam. If a task for this
+        # interface_path is already pending/running, reject the new submission
+        # and return the existing task id (the caller treats it as "already
+        # searching"). Structural only — keyed by routing path, never by text.
+        if interface_path:
+            existing = self._active_paths.get(interface_path)
+            if existing:
+                log_info(
+                    f"[web_search] Rejecting duplicate background search for "
+                    f"path={interface_path}: task {existing} already in flight"
+                )
+                return existing
+
         task_id = uuid.uuid4().hex
+        if interface_path:
+            self._active_paths[interface_path] = task_id
 
         await self._ensure_table()
         try:
@@ -269,8 +321,16 @@ class SearchOrchestrator:
                 urls=clean_urls,
             )
         )
-        _BACKGROUND_TASKS.add(task)
-        task.add_done_callback(_BACKGROUND_TASKS.discard)
+
+        def _on_done(t: asyncio.Task[Any]) -> None:
+            _BACKGROUND_TASKS.discard(t)
+            # Release the in-flight slot for this path once the task (including
+            # its delivery) has completed, so a later, genuinely new request can
+            # search again.
+            if interface_path and self._active_paths.get(interface_path) == task_id:
+                self._active_paths.pop(interface_path, None)
+
+        task.add_done_callback(_on_done)
         log_info(
             f"[web_search] Submitted task {task_id} "
             f"({len(clean)} queries, {len(clean_urls)} direct link(s)) "
@@ -599,29 +659,77 @@ class SearchOrchestrator:
             from core import message_queue
 
             links_line = f"Direct links: {', '.join(urls)}\n" if urls else ""
-            # Default delivery target is the originating interface_path. We tell
-            # Synth explicitly where the search came from and that she should
-            # reply there by default. She MAY override the destination, but we
-            # strongly discourage it: the user asked in that chat and expects the
-            # answer there. This is a soft, freedom-preserving instruction — not
-            # a hard constraint — so a deliberate cross-chat reply is still
-            # possible if she has a good reason.
-            origin_note = (
-                f"ORIGIN: this search was requested on interface_path "
-                f"'{interface_path}'. Reply on that same interface_path by default. "
-                f"You MAY redirect the reply elsewhere if you have a clear reason, "
-                f"but doing so is strongly discouraged — the user expects the "
-                f"answer in the chat where they asked.\n"
-                if interface_path
-                else ""
-            )
+            # Who initiated this search? Decided STRUCTURALLY from the routing
+            # origin carried on the originating turn's context_memory — never
+            # from message text (project rule: no keyword logic). A Grillo beat,
+            # a Vessel embodiment turn, or any autonomous beat has NO human
+            # requester; a direct user turn does. This drives the *attribution*
+            # of the report only — not where it is delivered.
+            self_initiated = _is_self_initiated(context_memory)
+            # Default delivery target is the originating interface_path. This is
+            # now a HARD constraint, not a soft suggestion: a web-search delivery
+            # turn is structurally scoped to its origin (see
+            # message_chain._collect_beat_allowed_paths), so any message_* action
+            # routed elsewhere is dropped. The prompt text below aligns the model
+            # with that enforced behaviour so it does not waste a turn.
+            if not interface_path:
+                origin_note = ""
+            elif self_initiated:
+                origin_note = (
+                    f"ORIGIN: you started this search yourself, and it is tied to "
+                    f"the conversation on interface_path '{interface_path}'. If you "
+                    f"choose to say anything about what you found, that is the "
+                    f"natural place for it. You are under no obligation to report "
+                    f"back — share only if you genuinely want to. You must NOT "
+                    f"post the findings to any other chat or channel: this was "
+                    f"your own initiative and nobody asked for it.\n"
+                )
+            else:
+                origin_note = (
+                    f"ORIGIN: this search was prompted by the conversation on "
+                    f"interface_path '{interface_path}'. Reply on that SAME "
+                    f"interface_path — and only there. Do NOT redirect the reply "
+                    f"to any other chat or channel, even if you find the topic "
+                    f"relevant elsewhere: the person expects the answer in the "
+                    f"chat where the topic came up.\n"
+                )
+
+            # No-self-introduction rule (2026-08-21): the delivery must open
+            # with what was found, never with a self-presentation ("Ciao, sono
+            # Rekku!"). Lazy import, fail-safe to empty.
+            try:
+                from core.auto_response import NO_SELF_INTRODUCTION_RULE
+
+                _style_rule = f"{NO_SELF_INTRODUCTION_RULE} "
+            except Exception:
+                _style_rule = ""
+            if self_initiated:
+                framing = (
+                    "A background web search you started on your own initiative "
+                    "has completed — nobody asked you for this; it came from your "
+                    "own curiosity or your own plan. If you decide to share what "
+                    "you found, do it naturally, in your own voice, in the "
+                    "relevant language, as YOU bringing something up — NOT as an "
+                    "assistant delivering a requested report. Never say 'here are "
+                    "the results you asked for' or address a requester; there is "
+                    "no requester. "
+                    f"{_style_rule}"
+                )
+            else:
+                framing = (
+                    "A background web search you announced earlier has completed. "
+                    "Report the findings naturally, in your own voice, in the "
+                    "relevant language, phrasing it however feels natural — do "
+                    "not fall back on a scripted 'here are the results you "
+                    "requested' register. "
+                    f"{_style_rule}"
+                )
             prompt = (
                 "=== WEB SEARCH RESULTS ===\n"
-                "A background web search you announced earlier has completed. "
-                "Report the findings to the user naturally, in your own voice, in "
-                "their language. The following is an aseptic factual summary with "
+                f"{framing}"
+                "The following is an aseptic factual summary with "
                 "sources — do not read it verbatim, integrate it. If any links "
-                "could not be visited, tell the user which specific ones failed "
+                "could not be visited, tell which specific ones failed "
                 "(and why) while still reporting everything that succeeded.\n\n"
                 f"{origin_note}"
                 f"Search intent: {search_context}\n"
@@ -665,6 +773,51 @@ class SearchOrchestrator:
                 "web_search_link_outcomes": link_outcomes,
                 "prior_context": context_memory,
             }
+
+            # ── Delivery-turn structural scoping (search-loop fix, 2026-08-17) ──
+            # This second turn is a delivery: its ONLY job is to report the
+            # completed search results to the user. Without an allowlist it is
+            # built with the FULL action catalog (including
+            # search_current_knowledge), so the model re-emits the search and
+            # enqueues yet another delivery — the observed loop where one user
+            # message produced many web-search replies. Restrict this turn to
+            # message_* only via allowed_action_types; build_prompt_request reads
+            # it from this context dict and filters the catalog, so the model
+            # literally cannot re-run the search. Scoped to this single delivery
+            # turn — never persisted, never inherited. FAIL-CLOSED (hardening,
+            # 2026-08-18): the allowlist is always set to a non-empty message_*
+            # set, with a structural fallback to the registered interfaces'
+            # message actions, so a delivery turn can never silently fall back to
+            # the full (unrestricted) catalog.
+            delivery_allowed_action_types: list[str] = []
+            try:
+                from core.core_initializer import core_initializer
+
+                _full_actions = dict(
+                    core_initializer.actions_block.get("available_actions", {}) or {}
+                )
+                delivery_allowed_action_types = sorted(
+                    k for k in _full_actions if k.startswith("message_")
+                )
+            except Exception as _aa_exc:
+                log_debug(f"[web_search] delivery allowlist derive skipped: {_aa_exc}")
+            if not delivery_allowed_action_types:
+                try:
+                    from core.core_initializer import INTERFACE_REGISTRY
+
+                    delivery_allowed_action_types = sorted(
+                        {
+                            f"message_{name}"
+                            for name in INTERFACE_REGISTRY
+                            if name and not str(name).startswith("_")
+                        }
+                    )
+                except Exception as _fb_exc:
+                    log_debug(
+                        f"[web_search] delivery allowlist fallback skipped: {_fb_exc}"
+                    )
+            if delivery_allowed_action_types:
+                context["allowed_action_types"] = delivery_allowed_action_types
 
             await message_queue.enqueue_low_priority(
                 None,

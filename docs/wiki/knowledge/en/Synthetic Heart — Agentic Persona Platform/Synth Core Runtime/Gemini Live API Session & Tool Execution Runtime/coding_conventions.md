@@ -1,0 +1,6 @@
+- Module-level constants define protocol defaults (sample rates, MIME types, model names, session timeouts) at the top of each file rather than inlining magic numbers.
+- Optional external SDKs are imported inside try/except blocks with a module-level `_HAS_*` flag so the code degrades gracefully when dependencies are missing.
+- Configuration values are read lazily from `core.config_manager.config_registry.get_value(...)` with explicit type coercion and fallback defaults, never assumed to be present at import time.
+- Async background work is launched via `asyncio.create_task` with descriptive `name=` arguments (e.g. `live_receive_{guild_id}`, `live_flush_{guild_id}`) for traceability.
+- All I/O paths wrap operations in try/except that log warnings/errors but never propagate exceptions up to the event loop, keeping the receive loop resilient.
+- Logging follows a consistent `[live_session]` / `[live_tool_executor]` / `[live_tool_registry]` prefix pattern via the shared `core.logging_utils` functions.

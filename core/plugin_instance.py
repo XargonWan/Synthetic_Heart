@@ -12,7 +12,7 @@ import base64
 import os
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.json_utils import (
     dumps as json_dumps,
@@ -35,6 +35,11 @@ plugin = None
 
 if TYPE_CHECKING:
     from plugins.iris_base import IrisResult
+
+# Max characters of inbound text-attachment content injected into the current
+# turn, so the full-context Fast Lane model can read attached documents
+# directly (no agent/tool needed just to read what the user attached).
+_TEXT_ATTACHMENT_MAX_CHARS = 16000
 
 
 def _get_grillo_engine_label(plugin_obj: Any) -> str | None:
@@ -74,6 +79,27 @@ def _build_empty_grillo_response_text(
     if details:
         return "[EMPTY LLM RESPONSE] " + " ".join(details)
     return "[EMPTY LLM RESPONSE]"
+
+
+def _compute_prompt_signature(prompt_for_engine: Any) -> str | None:
+    """Return a short, bounded fingerprint of a prompt for the cached-safe-response store.
+
+    Best-effort: any failure returns ``None`` (which disables caching for the
+    turn). Only a bounded prefix of the serialized prompt is hashed so large
+    prompts never cost a full re-serialization on the hot path.
+    """
+    try:
+        import hashlib
+
+        if isinstance(prompt_for_engine, bytes):
+            blob = prompt_for_engine
+        elif isinstance(prompt_for_engine, str):
+            blob = prompt_for_engine.encode("utf-8", "replace")
+        else:
+            blob = json_dumps(prompt_for_engine).encode("utf-8", "replace")
+        return hashlib.sha256(blob[:8192]).hexdigest()[:16]
+    except Exception:
+        return None
 
 
 def _restore_plugin_instance(instance: object) -> None:
@@ -623,6 +649,38 @@ async def handle_incoming_message(
             log_info(
                 f"[plugin_instance] Message contains {len(attachments)} attachments from user {user_id}"
             )
+            # Materialize inbound document/audio attachments onto a sandbox path
+            # the agent tools (agent_read_file) and Auris (stt_transcribe) can
+            # actually resolve. The multimodal extractor only keeps base64 bytes
+            # in memory — a downstream tool call then receives a bare filename
+            # that does not exist ("File not found: Untitled document.pdf",
+            # Langfuse 11feca6f). Images/videos stay in-memory for Iris/inline
+            # vision; only non-visual media is persisted. Fail-safe: any error
+            # skips persistence, the turn proceeds unchanged.
+            _sandbox_paths: list[str] = []
+            try:
+                _sandbox_paths = _persist_attachments_to_sandbox(attachments)
+                if _sandbox_paths:
+                    log_info(
+                        f"[plugin_instance] Persisted {len(_sandbox_paths)} "
+                        f"attachment(s) for agent/auris access: {_sandbox_paths}"
+                    )
+            except Exception as _persist_exc:
+                log_warning(
+                    f"[plugin_instance] Attachment persistence skipped: {_persist_exc}"
+                )
+            # Surface the persisted paths on the shared context so the Agent
+            # Lane prompt can point the model at the actual file instead of a
+            # nonexistent bare filename (the recon/agent-intent path inherits
+            # context_memory into the router ctx).
+            if _sandbox_paths and isinstance(context_memory_or_prompt, dict):
+                _existing = context_memory_or_prompt.get("attachment_paths") or []
+                if isinstance(_existing, list):
+                    context_memory_or_prompt["attachment_paths"] = (
+                        _existing + _sandbox_paths
+                    )
+                else:
+                    context_memory_or_prompt["attachment_paths"] = _sandbox_paths
             # 'inline' is a hardcoded Iris pseudo-engine: skip the description
             # step entirely and let image/video bytes flow through to the Cortex
             # engine so a vision-capable multimodal model can see them directly.
@@ -638,15 +696,10 @@ async def handle_incoming_message(
                 # receive a neutral plain-text instruction so the vision engine
                 # returns a description rather than formatted/structured output.
                 # The user's actual question is answered by the main LLM after the
-                # Iris description is injected into the context.
-                _IRIS_PLAIN_TEXT_PROMPT = (
-                    "IMPORTANT: Respond in plain conversational text only. "
-                    "Do NOT use JSON, XML or any structured format. "
-                    "Simply describe what you see in the image."
-                )
-                iris_result = await _describe_attachment_images_with_iris(
-                    attachments, prompt=_IRIS_PLAIN_TEXT_PROMPT
-                )
+                # Iris description is injected into the context.  The instruction
+                # is user-editable via IRIS_DEFAULT_PROMPT (Engines tab); no
+                # prompt is passed here so describe_media falls back to it.
+                iris_result = await _describe_attachment_images_with_iris(attachments)
                 if iris_result is not None:
                     try:
                         original_text = getattr(message, "text", "") or ""
@@ -748,6 +801,12 @@ async def handle_incoming_message(
                     ).startswith(("image/", "video/"))
                 ]
 
+                # Inline bounded content of inbound TEXT attachments into the
+                # current turn (see _inject_text_attachment_content) so the
+                # full-context model can read what the user attached without
+                # needing the Agent Lane's filesystem tools.
+                _inject_text_attachment_content(message, attachments)
+
         if isinstance(context_memory_or_prompt, str):
             try:
                 import json
@@ -795,6 +854,27 @@ async def handle_incoming_message(
                     attachments=attachments,
                     max_chars=max_chars,
                 )
+
+            # ── Delivery-turn structural scoping (search-loop fix, 2026-08-17) ──
+            # A delivery turn is enqueued as a JSON string ({system_message,
+            # allowed_action_types}) and parsed successfully above, so it BYPASSES
+            # build_prompt_request — the prior allowed_action_types allowlist was
+            # therefore never applied to the action catalog the weak selenium model
+            # saw, and it re-emitted the producing action (e.g.
+            # search_current_knowledge) in a loop. Here we rebuild the delivery
+            # turn as a PromptRequest whose tool_declarations are message_* only;
+            # cortex_bridge._inject_actions_into_prompt folds exactly those into the
+            # system prompt, so the model literally cannot see the producing action.
+            # The original dict (system_message + allowed_action_types) is kept intact
+            # so the corrector metadata and allowlist still reach message_chain
+            # unchanged (plugin_instance pops __prompt_request before sanitizing and
+            # routes it to PromptRequest-aware engines below).
+            if isinstance(prompt, dict):
+                _pr = await _scope_delivery_prompt_request(
+                    prompt, interface_name, getattr(message, "interface_path", None)
+                )
+                if _pr is not None:
+                    prompt["__prompt_request"] = _pr
         else:
             # Get model's max chars limit - try plugin, then fallback to DEFAULT
             max_chars = None
@@ -858,8 +938,43 @@ async def handle_incoming_message(
     # Only PromptRequest-aware engines receive this object directly; legacy
     # engines keep the sanitized transport dict until they opt in.
     prompt_request_obj: object | None = None
+    _reason_trail_dict: dict | None = None
     if isinstance(prompt, dict):
         prompt_request_obj = prompt.pop("__prompt_request", None)
+        # Per-turn reason trail ("why did I say that") is a diagnostics payload
+        # only. It must never reach the engine, so pop it here exactly like
+        # ``__prompt_request`` before sanitization (see core/turn_reason.py).
+        _reason_trail_dict = prompt.pop("__reason_trail", None)
+        if not isinstance(_reason_trail_dict, dict):
+            _reason_trail_dict = None
+        if _reason_trail_dict is not None and isinstance(
+            context_memory_or_prompt, dict
+        ):
+            # Thread the reason to the send path: the llm_context built below
+            # inherits from context_memory_or_prompt, so message_chain records
+            # exactly one row per turn once the reply text is known (and fills
+            # reply_preview). The key is internal and never part of a prompt.
+            context_memory_or_prompt["_reason_trail"] = _reason_trail_dict
+        elif _reason_trail_dict is not None:
+            # Non-dict context: there is no ctx thread to message_chain, so
+            # record directly here (the reply preview is not known yet).
+            try:
+                from core.turn_reason import record_reason
+
+                await record_reason(
+                    interface_path=getattr(message, "interface_path", None),
+                    reply_preview=None,
+                    memories=_reason_trail_dict.get("memories"),
+                    diary_sources=_reason_trail_dict.get("diary_sources"),
+                    emotion=_reason_trail_dict.get("emotion"),
+                    goal=_reason_trail_dict.get("goal"),
+                    beat_type=_reason_trail_dict.get("beat_type"),
+                    history_scope=_reason_trail_dict.get("history_scope"),
+                )
+            except Exception as _reason_exc:
+                log_debug(
+                    f"[plugin_instance] Reason trail fallback record skipped: {_reason_exc}"
+                )
 
     prompt = sanitize_for_json(prompt)
     log_debug("🌐 JSON PROMPT built for the plugin:")
@@ -913,6 +1028,8 @@ async def handle_incoming_message(
     # flags (is_trainer, grillo_beat) to scope strings.
     effective_plugin = plugin
     _scope_model: str | None = None
+    _scope: str | None = None
+    _primary_engine_name: str | None = original_plugin_name
     try:
         from core.config import derive_cortex_scope, get_active_cortex_scope
 
@@ -929,6 +1046,7 @@ async def handle_incoming_message(
         )
 
         active_engine_name, _scope_model = await get_active_cortex_scope(scope=_scope)
+        _primary_engine_name = active_engine_name
         reg = get_cortex_registry()
         resolved = reg.get_engine(active_engine_name)
         if resolved is None:
@@ -956,10 +1074,64 @@ async def handle_incoming_message(
             prompt_for_engine = prompt_request_obj
         from core.config import scope_model_override
 
-        with scope_model_override(effective_plugin, _scope_model):
-            result = await effective_plugin.handle_incoming_message(
-                bot, message, prompt_for_engine
+        # ── Staged cortex fallback (primary → local → cached/safe) ─────
+        # This is the single choke point where every chat turn generates text,
+        # for both built-in engines (which implement handle_incoming_message)
+        # and external engines (which implement generate_response). Route the
+        # generation through core.cortex_fallback so an empty or timed-out
+        # primary engine degrades to a configured fallback engine and then to a
+        # cached safe response. Everything is fail-open: if the module cannot be
+        # imported, or the wrapper raises, the primary outcome is preserved so
+        # the direct call is indistinguishable from the pre-fallback behavior.
+        async def _call_engine(engine_name: str) -> Any:
+            instance = effective_plugin
+            if engine_name != _primary_engine_name:
+                _fallback_reg = get_cortex_registry()
+                instance = _fallback_reg.get_engine(engine_name)
+                if instance is None:
+                    instance = _fallback_reg.load_engine(engine_name)
+                if instance is None:
+                    raise ValueError(f"Cortex engine {engine_name!r} is not registered")
+            with scope_model_override(instance, _scope_model):
+                return await instance.handle_incoming_message(
+                    bot, message, prompt_for_engine
+                )
+
+        _prompt_signature = _compute_prompt_signature(prompt_for_engine)
+
+        try:
+            from core import cortex_fallback
+        except Exception as _import_exc:  # pragma: no cover - defensive
+            log_warning(
+                f"[plugin_instance] core.cortex_fallback import failed: "
+                f"{_import_exc}; using direct call"
             )
+            cortex_fallback = None
+
+        if cortex_fallback is not None:
+            try:
+                result = await cortex_fallback.run_cortex_with_fallback(
+                    engine_name=_primary_engine_name or "default",
+                    scope=_scope,
+                    call_engine=_call_engine,
+                    prompt_signature=_prompt_signature,
+                )
+            except Exception as _fb_exc:
+                # The wrapper is fail-open and only propagates the primary
+                # engine's own outcome (a TimeoutError or the primary's original
+                # exception). Re-running the direct call here would double the
+                # primary call (and double a timeout), so propagate it exactly
+                # as the direct call would have.
+                log_warning(
+                    f"[plugin_instance] Staged cortex fallback raised; "
+                    f"propagating primary outcome: {_fb_exc}"
+                )
+                raise
+        else:
+            with scope_model_override(effective_plugin, _scope_model):
+                result = await effective_plugin.handle_incoming_message(
+                    bot, message, prompt_for_engine
+                )
         try:
             _log_llm_traffic(prompt, result, interface)
         except Exception as e:
@@ -1059,10 +1231,33 @@ async def handle_incoming_message(
             try:
                 if isinstance(prompt, dict) and isinstance(prompt.get("actions"), dict):
                     llm_context["allowed_action_types"] = list(prompt["actions"].keys())
+                elif isinstance(prompt, dict) and prompt.get("allowed_action_types"):
+                    # Delivery / scoped turns carry an explicit allowlist (e.g.
+                    # message_* only, set by auto_response.py) so the corrector and
+                    # the leaked-action filter in message_chain stay in scope. This
+                    # is the structural search-loop fix (2026-08-17): the delivery
+                    # LLM must never re-emit the producing action.
+                    llm_context["allowed_action_types"] = list(
+                        prompt["allowed_action_types"]
+                    )
                 else:
                     llm_context["allowed_action_types"] = None
             except Exception:
                 llm_context["allowed_action_types"] = None
+
+            # Propagate the delivery system_message (when present) into the
+            # corrector context so message_chain honours its metadata (e.g.
+            # max_correction_attempts / is_action_result_delivery). For a
+            # delivery turn context_memory_or_prompt is the enqueued JSON string,
+            # so the update above (which only inherits from a dict context) never
+            # carried it — copy it here so the delivery corrector stays bounded.
+            try:
+                if isinstance(prompt, dict) and isinstance(
+                    prompt.get("system_message"), dict
+                ):
+                    llm_context.setdefault("system_message", prompt["system_message"])
+            except Exception:
+                pass
 
             # Explicitly tag the action scope for the corrector
             llm_context["action_scope"] = "main"
@@ -1197,6 +1392,52 @@ def set_current_model(model: str) -> None:
             plugin.set_current_model(model)
         except Exception:
             pass
+
+
+async def _scope_delivery_prompt_request(
+    prompt: object,
+    interface_name: str | None,
+    interface_path: str | None,
+) -> object | None:
+    """If ``prompt`` is a delivery-turn dict, build a message_*-only PromptRequest.
+
+    Delivery turns are enqueued as a JSON string (``{system_message,
+    allowed_action_types}``) and parsed to a dict that BYPASSES
+    ``build_prompt_request``, so the action catalog was never trimmed for the
+    weak model and it re-emitted the producing action (search-loop fix,
+    2026-08-17). Rebuilding the delivery turn as a ``PromptRequest`` whose
+    ``tool_declarations`` are ``message_*`` only hides the producing action
+    from the model. Returns ``None`` for any non-delivery turn or on any error
+    (fail-closed to the legacy path).
+    """
+    if not isinstance(prompt, dict):
+        return None
+    _prompt_dict = cast(dict[str, Any], prompt)
+    try:
+        _sm = _prompt_dict.get("system_message")
+        if not (
+            isinstance(_sm, dict)
+            and _sm.get("is_action_result_delivery") is True
+            and _sm.get("action_type")
+            and _sm.get("action_outputs") is not None
+        ):
+            return None
+        from core.prompt_engine import build_delivery_request
+
+        _pr = await build_delivery_request(
+            str(_sm.get("action_type")),
+            _sm.get("action_outputs") or [],
+            interface_name,
+            interface_path,
+        )
+        log_info(
+            f"[plugin_instance] Delivery turn '{_sm.get('action_type')}' "
+            f"scoped to message_* via PromptRequest"
+        )
+        return _pr
+    except Exception as _de:
+        log_warning(f"[plugin_instance] Delivery PromptRequest scoping skipped: {_de}")
+        return None
 
 
 def _log_llm_traffic(prompt, response, interface_name):
@@ -1711,6 +1952,130 @@ async def _describe_attachment_images_with_iris(
             first_media_mime_type, reason="error"
         )
     )
+
+
+def _inject_text_attachment_content(message: Any, attachments: list) -> bool:
+    """Append bounded content of inbound ``text/*`` attachments to ``message.text``.
+
+    The multimodal extractor keeps document bytes as base64 in memory and only
+    the Agent Lane can read them from disk — the full-context Fast Lane model
+    never saw attached documents, so "read this md and tell me what you think"
+    was escalated to the Agent Lane (Langfuse 2a09c706-era: recon judged the
+    request agentic because the main model had no way to read the file).
+    Inlining the content (bounded) into the current turn lets the main model
+    answer directly. Images/videos are handled by Iris, audio by Auris; only
+    ``text/*`` is inlined here. Language-neutral framing, no keyword logic.
+    Fail-safe: any decode error skips that attachment; never raises.
+
+    Returns True when content was injected.
+    """
+    try:
+        blocks: list[str] = []
+        for att in attachments or []:
+            if not isinstance(att, dict):
+                continue
+            mime = str(att.get("mime_type") or att.get("content_type") or "")
+            if not mime.startswith("text/"):
+                continue
+            data_b64 = att.get("data")
+            if not isinstance(data_b64, str) or not data_b64.strip():
+                continue
+            try:
+                text_content = base64.b64decode(data_b64).decode(
+                    "utf-8", errors="replace"
+                )
+            except Exception:
+                continue
+            if not text_content.strip():
+                continue
+            name = str(att.get("filename") or "attachment").strip()
+            blocks.append(f"[Attachment: {name}]\n{text_content}")
+        if not blocks:
+            return False
+        joined = "\n\n".join(blocks)[:_TEXT_ATTACHMENT_MAX_CHARS]
+        original = getattr(message, "text", "") or ""
+        setattr(message, "text", f"{original}\n\n{joined}" if original else joined)
+        log_info(
+            f"[plugin_instance] Injected {len(joined)} chars of text "
+            "attachment content into the current turn"
+        )
+        return True
+    except Exception as exc:
+        log_warning(f"[plugin_instance] Text attachment injection failed: {exc}")
+        return False
+
+
+def _persist_attachments_to_sandbox(attachments: list[dict]) -> list[str]:
+    """Persist non-visual attachment bytes onto an agent-sandbox-readable path.
+
+    The multimodal extractor keeps document/audio bytes base64-in-memory only,
+    so a downstream tool call (``agent_read_file``, ``stt_transcribe``) receives
+    a bare filename that does not exist on disk — observed live as "File not
+    found: Untitled document.pdf" (Langfuse 11feca6f). This helper writes those
+    bytes under the first configured agent filesystem root (``AGENT_FS_ROOTS`` /
+    ``AGENT_FS_ROOT``, falling back to ``/app``) so the Agent Lane and Auris can
+    resolve the real path. Images/videos are intentionally skipped: they flow
+    through Iris/inline vision instead. Fail-safe: any error skips that
+    attachment and never raises.
+
+    Args:
+        attachments: Extracted attachment dicts (``mime_type``, ``data`` base64,
+            optional ``filename``).
+
+    Returns:
+        List of persisted absolute paths (possibly empty).
+    """
+    import base64 as _b64
+    import re as _re
+    import time as _time
+
+    roots_raw = os.getenv("AGENT_FS_ROOTS") or ""
+    if roots_raw.strip():
+        roots = [p.strip() for p in roots_raw.split(":") if p.strip()]
+    else:
+        roots = [os.getenv("AGENT_FS_ROOT", "/app")]
+    if not roots:
+        return []
+
+    root = roots[0]
+    try:
+        sandbox_root = Path(root).resolve()
+    except Exception:
+        return []
+
+    persisted: list[str] = []
+    for att in attachments or []:
+        try:
+            if not isinstance(att, dict):
+                continue
+            mime = str(att.get("mime_type") or att.get("content_type") or "")
+            # Only non-visual media benefits from a sandbox path.
+            if mime.startswith(("image/", "video/")):
+                continue
+            data_b64 = att.get("data")
+            if not isinstance(data_b64, str) or not data_b64.strip():
+                continue
+            raw_bytes = _b64.b64decode(data_b64)
+            if not raw_bytes:
+                continue
+
+            filename = str(att.get("filename") or "").strip() or "attachment"
+            # Sanitize: keep only safe filename characters (never a path).
+            safe_name = _re.sub(r"[^A-Za-z0-9._-]+", "_", filename).strip("._")
+            if not safe_name:
+                safe_name = "attachment"
+            target_dir = sandbox_root / "attachments"
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target = target_dir / f"{int(_time.time() * 1000)}_{safe_name}"
+            target.write_bytes(raw_bytes)
+            att["path"] = str(target)
+            persisted.append(str(target))
+        except Exception as exc:
+            log_warning(
+                f"[plugin_instance] Failed to persist attachment to sandbox: {exc}"
+            )
+            continue
+    return persisted
 
 
 async def _extract_multimodal_attachments(

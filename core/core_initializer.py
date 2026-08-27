@@ -62,6 +62,22 @@ CORE_PLUGIN_SHORT_NAMES: frozenset[str] = frozenset({"message_plugin"})
 # config edit + restart.
 CORE_INTERFACE_NAMES: frozenset[str] = frozenset({"synth_webui"})
 
+# Directory segments whose contents are vendored third-party runtimes, never
+# SyntH plugins. The recursive plugin scan must not import (or fail on) their
+# ``.py`` files — e.g. the Minecraft bridge's npm ``node_modules`` tree and the
+# vendored SearXNG source under ``plugins/web_search/searxng-runtime/``. Files
+# beneath these segments are skipped before the import attempt, so missing
+# third-party dependencies no longer spam warnings or pollute startup_errors.
+VENDORED_RUNTIME_DIR_SEGMENTS: frozenset[str] = frozenset(
+    {
+        "node_modules",
+        "searxng-runtime",
+        "site-packages",
+        "dist-packages",
+        ".venv",
+    }
+)
+
 
 def derive_plugin_category(
     module_name: str, dir_path: str, declared: str | None = None
@@ -84,7 +100,7 @@ def derive_plugin_category(
         return "Interfaces"
     if "grillo" in lowered:
         return "Grillo"
-    if "vessels" in lowered:
+    if "vessels" in lowered or "rift_vessel" in lowered:
         return "Vessels"
 
     short_name = parts[-1] if parts else ""
@@ -448,28 +464,13 @@ class CoreInitializer:
             # functions on the chat path (core.agent_router.classify, the gate in
             # core.message_chain, plugins.recon_agent_intent), never at module import
             # time. That means they are not in _definitions when load_all_from_db()
-            # runs below, so their DB value (e.g. AGENTIC_ROUTING_ENABLED=true) is
-            # never loaded and they permanently fall back to their code default —
-            # the Fast/Agent router would stay disabled even when enabled in the DB.
-            # Registering them here ensures the DB sweep populates them. Same class
-            # of bug as BOTFATHER_TOKEN (see FIXED_ISSUES.md).
+            # runs below, so their DB value is never loaded and they permanently
+            # fall back to their code default. Registering them here ensures the DB
+            # sweep populates them. Same class of bug as BOTFATHER_TOKEN (see
+            # FIXED_ISSUES.md).
             try:
                 from core.config_manager import config_registry as _cfg_reg
 
-                _cfg_reg.get_var(
-                    "AGENTIC_ROUTING_ENABLED",
-                    False,
-                    value_type=bool,
-                    label="Enable Agentic Routing",
-                    description=(
-                        "Enable the deterministic Fast/Agent router. When on, "
-                        "turns that need tools or multiple steps are escalated "
-                        "to the bounded Agent lane; otherwise every turn uses "
-                        "the Fast lane."
-                    ),
-                    group="agent",
-                    component="agent",
-                )
                 # AGENT_ENABLED (the user-facing on/off toggle) is registered at
                 # module import time by plugins.agent_plugin, but the plugin is
                 # loaded AFTER load_all_from_db() runs — so its DB value would
@@ -495,10 +496,19 @@ class CoreInitializer:
                 )
                 _cfg_reg.get_var(
                     "AGENT_TURN_TIMEOUT_SEC",
-                    120,
+                    3600,
                     value_type=int,
                     label="Agent Turn Timeout (s)",
-                    description="Wall-clock budget in seconds for a single Agent turn.",
+                    description=(
+                        "Wall-clock budget in seconds for a single Agent turn. "
+                        "Set well above the Fast-Lane LLM response timeout "
+                        "(AWAIT_RESPONSE_TIMEOUT) because the agent runs many "
+                        "dependent steps (read -> plan -> act) within one turn. "
+                        "A generous bound is safe: the agent turn runs DETACHED "
+                        "off the message-queue consumer (agent_router.route "
+                        "spawns _run_agent_turn_detached and returns immediately), "
+                        "so it never blocks other queued messages while it works."
+                    ),
                     group="agent",
                     component="agent",
                     advanced=True,
@@ -529,6 +539,137 @@ class CoreInitializer:
             except Exception as _e:
                 log_warning(
                     f"[core_initializer] Failed to eagerly register agentic config keys: {_e}"
+                )
+
+            # 4.5.2. Eagerly register Rift Vessel config keys.
+            # The Vessel plugin/interface register ACTIVE_VESSEL / VESSEL_SETTINGS
+            # at module import time, but they are loaded AFTER load_all_from_db()
+            # runs, so their DB values would never be swept in. The keys below are
+            # read on the chat path / by the session scheduler and must reflect the
+            # DB. Register them eagerly so the bulk load populates them. Same class
+            # of bug as AGENT_ENABLED above.
+            try:
+                from core.config_manager import config_registry as _cfg_reg
+
+                # Global Rift Vessel keys (owned by the vessel_plugin core).
+                _cfg_reg.get_var(
+                    "ACTIVE_VESSEL",
+                    "disabled",
+                    value_type=str,
+                    label="Active Vessel Connector",
+                    description=(
+                        "Name of the active Rift Vessel world connector "
+                        "(e.g. 'minecraft'), or 'disabled'."
+                    ),
+                    group="plugins",
+                    component="vessel_plugin",
+                    hidden=True,
+                )
+                _cfg_reg.get_var(
+                    "VESSEL_SETTINGS",
+                    "{}",
+                    value_type=str,
+                    label="Vessel Settings (JSON)",
+                    description="JSON settings passed to the active Vessel connector.",
+                    group="plugins",
+                    component="vessel_plugin",
+                    hidden=True,
+                )
+                _cfg_reg.get_var(
+                    "VESSEL_SESSION_COOLDOWN_SEC",
+                    3600,
+                    value_type=int,
+                    label="Vessel Session Cooldown (s)",
+                    description=(
+                        "Inactivity window before a Vessel session is closed and "
+                        "its buffered experience is flushed to a single diary entry."
+                    ),
+                    group="plugins",
+                    component="vessel_plugin",
+                    advanced=True,
+                )
+                # Minecraft-specific keys (owned by the attachable minecraft_vessel
+                # sub-plugin). Registered under its own component so the WebUI shows
+                # them as a distinct entity from the global Rift Vessel.
+                _cfg_reg.get_var(
+                    "MINECRAFT_BRIDGE_RUN_AT_START",  # opt-in boot override
+                    False,
+                    value_type=bool,
+                    label="Minecraft Bridge Autostart",
+                    description=(
+                        "Optional: start the Minecraft bridge at boot. By "
+                        "default the bridge is started on demand, only when "
+                        "Synth actually enters the world."
+                    ),
+                    group="plugins",
+                    component="minecraft_vessel",
+                    advanced=True,
+                )
+                _cfg_reg.get_var(
+                    "MINECRAFT_BRIDGE_HOST",
+                    "127.0.0.1",
+                    value_type=str,
+                    label="Minecraft Bridge Host",
+                    description=(
+                        "Host the local Mineflayer bridge listens on for HTTP commands."
+                    ),
+                    group="plugins",
+                    component="minecraft_vessel",
+                    advanced=True,
+                )
+                _cfg_reg.get_var(
+                    "MINECRAFT_BRIDGE_PORT",
+                    8137,
+                    value_type=int,
+                    label="Minecraft Bridge Port",
+                    description=(
+                        "TCP port the local Mineflayer bridge listens on for "
+                        "HTTP commands."
+                    ),
+                    group="plugins",
+                    component="minecraft_vessel",
+                    advanced=True,
+                )
+                _cfg_reg.get_var(
+                    "MINECRAFT_SERVER_HOST",
+                    "127.0.0.1",
+                    value_type=str,
+                    label="Minecraft Server Host",
+                    description=(
+                        "Hostname or IP of the Minecraft server the bot connects to."
+                    ),
+                    group="plugins",
+                    component="minecraft_vessel",
+                )
+                _cfg_reg.get_var(
+                    "MINECRAFT_SERVER_PORT",
+                    44383,
+                    value_type=int,
+                    label="Minecraft Server Port",
+                    description="TCP port of the Minecraft server the bot connects to.",
+                    group="plugins",
+                    component="minecraft_vessel",
+                )
+                _cfg_reg.get_var(
+                    "MINECRAFT_BOT_USERNAME_OVERRIDE",
+                    "",
+                    value_type=str,
+                    label="Minecraft Bot Username Override",
+                    description=(
+                        "Optional in-world username for the Minecraft bot. "
+                        "Leave empty to use Synth's configured name "
+                        "(SYNTH_NAME)."
+                    ),
+                    group="plugins",
+                    component="minecraft_vessel",
+                    advanced=True,
+                )
+                log_debug(
+                    "[core_initializer] Eagerly registered Rift Vessel config keys"
+                )
+            except Exception as _e:
+                log_warning(
+                    f"[core_initializer] Failed to eagerly register vessel config keys: {_e}"
                 )
 
             # 3.5. Load all configurations from DB AFTER persona manager initialization
@@ -1022,6 +1163,14 @@ class CoreInitializer:
         # Include cortex locations; legacy paths are removed
         search_dirs = ["plugins", "cortex", "interface"]
 
+        # Minimal, fail-safe plugin dependency bookkeeping. A plugin may declare
+        # ``depends_on: [<short_name>, ...]`` in its metadata; after all plugins
+        # are loaded we emit a warning for any dependency that did not load. This
+        # is advisory only — plugins resolve their dependencies lazily at
+        # runtime via PLUGIN_REGISTRY.get(), so a missing dependency never blocks
+        # the load (Golden rule: removing any component must not break the rest).
+        declared_dependencies: dict[str, list[str]] = {}
+
         # If dev components are enabled, also scan dev directories
         if self._enable_dev_components:
             search_dirs.extend(["plugins_dev", "interface_dev"])
@@ -1036,6 +1185,14 @@ class CoreInitializer:
 
             for py_file in base_path.rglob("*.py"):
                 if py_file.name == "__init__.py" or py_file.name.startswith("_"):
+                    continue
+
+                # Skip vendored third-party runtime trees (npm node_modules,
+                # the SearXNG vendored source, etc.). These are not SyntH
+                # plugins and must not be imported or tracked as components.
+                if isinstance(py_file, Path) and any(
+                    part in VENDORED_RUNTIME_DIR_SEGMENTS for part in py_file.parts
+                ):
                     continue
 
                 if (
@@ -1182,6 +1339,15 @@ class CoreInitializer:
                         meta = instance.get_metadata()
                         if isinstance(meta, dict):
                             declared_category = meta.get("category")
+                            deps = meta.get("depends_on")
+                            if isinstance(deps, (list, tuple)):
+                                clean_deps = [
+                                    str(d).strip() for d in deps if str(d or "").strip()
+                                ]
+                                if clean_deps:
+                                    declared_dependencies[plugin_short_name] = (
+                                        clean_deps
+                                    )
                     except Exception:
                         declared_category = None
 
@@ -1212,6 +1378,19 @@ class CoreInitializer:
                         f"[core_initializer] Failed to start plugin {module_name}: {repr(e)}"
                     )
                     self.startup_errors.append(f"Plugin {module_name}: {e}")
+
+        # Advisory dependency check (fail-safe): warn about any declared
+        # ``depends_on`` target that is not present in PLUGIN_REGISTRY. Never
+        # blocks or unloads anything — plugins degrade gracefully when a
+        # dependency is absent (they resolve it lazily at runtime).
+        for dependent, deps in declared_dependencies.items():
+            for dep in deps:
+                if dep not in PLUGIN_REGISTRY:
+                    log_warning(
+                        f"[core_initializer] Plugin '{dependent}' declares a "
+                        f"dependency on '{dep}', which is not loaded; "
+                        f"'{dependent}' features that rely on it may be inactive."
+                    )
 
     async def _initialize_persona_manager(self):
         """Initialize the core persona manager and await async init."""
@@ -2235,6 +2414,62 @@ class CoreInitializer:
         actions immediately to the rest of the system.
         """
         await self._build_actions_block()
+
+    def schedule_actions_block_refresh(self, reason: str = "") -> None:
+        """Fail-safe, loop-aware trigger to rebuild the cached actions block.
+
+        The actions block (``self.actions_block``) is a cache read on every
+        prompt build. Anything that changes which actions are exposed — a
+        config variable, a plugin being enabled/disabled, or the Rift Vessel
+        entering/leaving a world (which changes ``get_supported_actions``) —
+        must call this so the newly exposed/hidden actions are picked up
+        without a restart.
+
+        This wrapper hides all the event-loop / re-entrancy handling so any
+        caller (sync or async context) can invoke it safely. It never raises.
+
+        Args:
+            reason: Short human-readable label for logging (e.g. the caller).
+        """
+        tag = f" ({reason})" if reason else ""
+        try:
+            # During the very first initialization the block is (re)built at
+            # the end of startup; an early refresh would be wasted work.
+            if getattr(self, "_initial_initialization", False):
+                log_debug(
+                    f"[core_initializer] Skipping actions block refresh{tag}: "
+                    "initial initialization in progress"
+                )
+                return
+
+            import asyncio
+
+            async def _do_refresh() -> None:
+                # If a build is already running, wait briefly and retry so we
+                # don't clobber the in-flight build or drop this request.
+                if self._building_actions_block:
+                    await asyncio.sleep(0.1)
+                try:
+                    await self.refresh_actions_block()
+                    log_debug(f"[core_initializer] Actions block refreshed{tag}")
+                except Exception as exc:  # pragma: no cover - defensive
+                    log_warning(
+                        f"[core_initializer] Actions block refresh failed{tag}: {exc}"
+                    )
+
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop is not None and loop.is_running():
+                loop.create_task(_do_refresh())
+            else:
+                asyncio.run(_do_refresh())
+        except Exception as exc:  # pragma: no cover - defensive
+            log_warning(
+                f"[core_initializer] schedule_actions_block_refresh failed{tag}: {exc}"
+            )
 
     async def start_pending_async_plugins(self):
         """Start async plugins that were pending due to no event loop."""

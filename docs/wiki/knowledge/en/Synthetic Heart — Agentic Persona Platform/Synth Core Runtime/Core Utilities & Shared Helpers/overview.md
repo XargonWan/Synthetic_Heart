@@ -1,0 +1,1 @@
+Cross-cutting utility modules providing JSON parsing/repair, logging with rotation and LogChat notifications, timezone/calendar handling, text mojibake recovery, language catalogues, beat classification, user display helpers, and an abstract context layer for interface-agnostic operations.

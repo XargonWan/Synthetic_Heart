@@ -537,6 +537,28 @@ def _normalize_emotions(emotions: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _emotions_to_state_map(emotions: Any) -> dict[str, float]:
+    """Convert a diary ``emotions`` value into an ``update_emotion_state`` map.
+
+    The diary plugin normalises emotions to ``[{"type", "intensity"}]``; the live
+    emotion state consumes ``{emotion_name: intensity}`` (0-10 scale). Returns an
+    empty dict when nothing usable is present. Purely structural, fail-safe.
+    """
+    state_map: dict[str, float] = {}
+    for entry in _normalize_emotions(emotions):
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("type", "")).strip()
+        intensity = entry.get("intensity")
+        if not name or not isinstance(intensity, (int, float)):
+            continue
+        try:
+            state_map[name] = float(intensity)
+        except (TypeError, ValueError):
+            continue
+    return state_map
+
+
 def _isoformat_timestamp(value: Any) -> Any:
     """Convert a datetime column value to ISO text, passing through others."""
     if value is None:
@@ -557,6 +579,36 @@ def _merge_json_list(existing_json: str | None, new_items: list) -> list:
             combined.append(item)
             seen.add(str(item))
     return combined
+
+
+def _norm_segment(text: str) -> str:
+    """Normalise a text segment for dedup comparison (lowercase, collapse whitespace)."""
+    return " ".join(text.split()).lower()
+
+
+def _append_dedup_segment(
+    existing: str | None, new_text: str | None, separator: str
+) -> str | None:
+    """Append ``new_text`` to ``existing`` unless it duplicates a segment already present.
+
+    The daily diary row concatenates every entry with ``separator``. Without a
+    text dedup, an LLM that re-emits the same summary/thought/content on repeated
+    turns makes the row grow with identical fragments. This splits the existing
+    blob on ``separator``, normalises each segment (lowercase + collapsed
+    whitespace), and drops ``new_text`` when a matching segment is already there.
+
+    Returns the (possibly unchanged) merged string, or the single non-empty side
+    when the other is empty. Structural/normalised comparison only — no keyword
+    or phrase matching.
+    """
+    if not new_text:
+        return existing
+    if not existing:
+        return new_text
+    seen = {_norm_segment(seg) for seg in existing.split(separator) if seg.strip()}
+    if _norm_segment(new_text) in seen:
+        return existing
+    return f"{existing}{separator}{new_text}"
 
 
 async def _get_user_message_column_limit(cursor: Any) -> int:
@@ -708,23 +760,15 @@ async def _upsert_diary_impl(
                     ex_chat_id,
                     ex_thread_id,
                 ) = existing
-                merged_content = (
-                    f"{ex_content}{_SEP}{content}" if ex_content else content
+                merged_content = _append_dedup_segment(ex_content, content, _SEP)
+                merged_thought = _append_dedup_segment(
+                    ex_thought, personal_thought, _SEP
                 )
-                merged_thought = (
-                    f"{ex_thought}{_SEP}{personal_thought}"
-                    if ex_thought and personal_thought
-                    else (personal_thought or ex_thought)
+                merged_summary = _append_dedup_segment(
+                    ex_summary, interaction_summary, "\n---\n"
                 )
-                merged_summary = (
-                    f"{ex_summary}\n---\n{interaction_summary}"
-                    if ex_summary and interaction_summary
-                    else (interaction_summary or ex_summary)
-                )
-                merged_user_msg = (
-                    f"{ex_user_msg}\n---\n{user_message}"
-                    if ex_user_msg and user_message
-                    else (user_message or ex_user_msg)
+                merged_user_msg = _append_dedup_segment(
+                    ex_user_msg, user_message, "\n---\n"
                 )
                 merged_user_msg = _clip_for_column(merged_user_msg, user_message_limit)
                 merged_interface = _merge_diary_interface(ex_interface, interface)
@@ -1574,7 +1618,7 @@ class DiaryPlugin:
                             "items": {"type": "string"},
                         },
                     },
-                    "required": ["interaction_summary"],
+                    "required": ["interaction_summary", "personal_thought"],
                 },
                 "brief": "Add a new diary entry to synth's memory - REQUIRED in every response. Never include weather/location data in summaries.",
                 "examples": {
@@ -1712,6 +1756,27 @@ class DiaryPlugin:
         payload = action.get("payload", {})
 
         if action_type == "create_personal_diary_entry":
+            # AGENTS.md §5c: during a Rift Vessel embodiment session there must be
+            # NO diary written mid-session — a single autobiographical "lived
+            # experience" entry is produced only at end-of-session from the
+            # session experience buffer. If the will-beat cognition emits a diary
+            # action while embodied, skip it here (structural, routing-metadata
+            # only — never message text). Fully guarded.
+            try:
+                from core.interface_path_utils import is_vessel_embodiment_context
+
+                if is_vessel_embodiment_context(context):
+                    log_debug(
+                        "[ai_diary] Skipping create_personal_diary_entry during "
+                        "Vessel embodiment (§5c: single end-of-session diary)"
+                    )
+                    return {
+                        "success": True,
+                        "skipped": True,
+                        "reason": "vessel_embodiment_no_mid_session_diary",
+                    }
+            except Exception:
+                pass
             try:
                 # Extract information from context and payload
                 interface_name = context.get("interface", "unknown")
@@ -1767,7 +1832,14 @@ class DiaryPlugin:
                     context.get("activity_log_id") if context else None
                 )
 
-                # If no content provided, extract from recent actions in context
+                # The model reliably provides interaction_summary / personal_thought
+                # but often omits `content`; treat those as sufficient grounds to
+                # write the entry directly (deriving content from the summary) so
+                # the rich thoughts are captured and the diary→emotion sync below
+                # runs. Only defer to the automatic summary when nothing usable
+                # is present.
+                if not content and (interaction_summary or personal_thought):
+                    content = (interaction_summary or personal_thought or "").strip()
                 if not content:
                     # This will be handled by the automatic diary creation in action_parser
                     # Just log that we received the action
@@ -1793,6 +1865,31 @@ class DiaryPlugin:
                     thread_id=str(thread_id) if thread_id else None,
                     grillo_activity_log_id=grillo_activity_log_id,
                 )
+
+                # The model reliably carries this turn's intended emotions in the
+                # diary entry while emitting ``update_emotion_state`` with an
+                # empty map — so the live emotion state (avatar/UI/emotion
+                # injections) never reflects the turn. Apply the diary's
+                # normalized emotions to the live emotion state as a structural
+                # fallback (the diary emotions are the canonical record of the
+                # turn). Fully guarded: no emotion_manager loaded → no-op.
+                try:
+                    emotion_map = _emotions_to_state_map(emotions)
+                    if emotion_map:
+                        from core.core_initializer import PLUGIN_REGISTRY
+
+                        emotion_plugin = PLUGIN_REGISTRY.get("emotion_manager")
+                        update_emotion_state = getattr(
+                            emotion_plugin, "update_emotion_state", None
+                        )
+                        if callable(update_emotion_state):
+                            await update_emotion_state(emotion_map)
+                            log_debug(
+                                "[ai_diary] Synced diary emotions to live emotion "
+                                f"state: {sorted(emotion_map)}"
+                            )
+                except Exception as _em_sync:
+                    log_debug(f"[ai_diary] Diary→emotion sync skipped: {_em_sync}")
 
                 log_debug(
                     f"[ai_diary] Created diary entry via action: '{interaction_summary}'"

@@ -96,6 +96,13 @@ def normalize_action_schema(
             "external_effects": action_def.get("external_effects"),
         }
 
+        # Propagate the optional per-action prompt scope (str | list[str]) so the
+        # prompt engine can filter out-of-scope actions per turn. Absent => the
+        # action is treated as ``core`` (always visible). Purely structural — no
+        # behaviour change until the prompt engine consumes it.
+        if "scope" in action_def:
+            normalized["scope"] = action_def.get("scope")
+
         return normalized
 
     # Unknown format - return as-is

@@ -211,7 +211,7 @@ try {
     // Apply accent color from server-rendered runtime config (if provided)
     try {
       const accent = window.__SYNTH_CONFIG.WEBUI_ACCENT_COLOR;
-      if (accent) {
+      if (accent && /^#([0-9a-f]{3}){1,2}$/i.test(accent)) {
         document.documentElement.style.setProperty('--accent', accent);
         // set a soft variant at ~16% alpha and compute readable contrast color
         const hexToRgb = (h) => { const c = h.replace('#',''); const bigint = parseInt(c.length===3?c.split('').map(x=>x+x).join(''):c,16); return [(bigint>>16)&255, (bigint>>8)&255, bigint&255]; };
@@ -2422,27 +2422,6 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         const presets = (window.__SYNTH_CONFIG && window.__SYNTH_CONFIG.WEBUI_ACCENT_PRESETS) || ['#6bfefe','#ff6bd6','#18c98c','#ffd166','#ff9ecb'];
                         const presetsWrap = document.createElement('div');
                         presetsWrap.className = 'accent-presets';
-                        const setActivePreset = (val) => {
-                            const needle = String(val || '').toLowerCase();
-                            presetsWrap.querySelectorAll('button[data-color]').forEach((btn) => {
-                                const btnColor = String(btn.getAttribute('data-color') || '').toLowerCase();
-                                btn.classList.toggle('is-active', !!needle && btnColor === needle);
-                            });
-                        };
-                        presets.forEach((c) => {
-                            const b = document.createElement('button');
-                            b.type = 'button';
-                            b.style.background = c;
-                            b.title = c;
-                            b.setAttribute('data-color', c);
-                            b.addEventListener('click', () => {
-                                previewVal = c;
-                                try { document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch (e) {}
-                                updateColorDot(c);
-                                setActivePreset(c);
-                            });
-                            presetsWrap.appendChild(b);
-                        });
 
                         const colorInput = document.createElement('input');
                         colorInput.type = 'color';
@@ -2452,29 +2431,65 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         colorInput.addEventListener('input', (ev) => {
                             previewVal = ev.target.value;
                             try { const c = previewVal; document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch (e) {}
-                            updateColorDot(previewVal);
+                            setActivePreset(previewVal);
                         });
 
-                        const colorDot = document.createElement('button');
-                        colorDot.type = 'button';
-                        colorDot.className = 'accent-color-dot';
-                        colorDot.disabled = !isEditable;
-                        const updateColorDot = (val) => {
-                            if (isValidHex(val)) {
-                                colorDot.style.background = val;
-                                colorDot.textContent = '';
-                                colorDot.setAttribute('aria-label', `Color ${val}`);
-                            } else {
-                                colorDot.style.background = 'transparent';
-                                colorDot.textContent = '🎨';
-                                colorDot.setAttribute('aria-label', 'Pick accent color');
-                            }
+                        // Custom blob: last swatch of the row. Shows the current custom
+                        // color when one is set, otherwise a rainbow badge; clicking it
+                        // opens the native hex color wheel.
+                        const customBtn = document.createElement('button');
+                        customBtn.type = 'button';
+                        customBtn.className = 'accent-preset-custom';
+                        customBtn.title = 'Custom color';
+                        customBtn.disabled = !isEditable;
+                        const paintCustom = (val) => {
+                            const valid = isValidHex(val);
+                            const needle = String(val || '').toLowerCase();
+                            const isCustom = valid && !presets.some((p) => String(p || '').toLowerCase() === needle);
+                            customBtn.classList.toggle('is-active', isCustom);
+                            customBtn.style.background = isCustom ? val : '';
+                            customBtn.textContent = isCustom ? '' : '+';
+                            customBtn.setAttribute('aria-label', isCustom ? `Custom color ${val}` : 'Pick a custom accent color');
                         };
-                        updateColorDot(current);
-                        setActivePreset(current);
-                        colorDot.addEventListener('click', () => {
+                        customBtn.addEventListener('click', () => {
                             if (!colorInput.disabled) colorInput.click();
                         });
+
+                        // Tether the hidden color input to the blob: the wrapper is
+                        // position:relative and the input covers the blob exactly, so
+                        // the native hex picker opens anchored at the blob instead of
+                        // the bottom of the screen.
+                        const customWrap = document.createElement('span');
+                        customWrap.className = 'accent-preset-custom-wrap';
+                        colorInput.title = 'Custom color';
+                        customWrap.appendChild(customBtn);
+                        customWrap.appendChild(colorInput);
+
+                        const setActivePreset = (val) => {
+                            const needle = String(val || '').toLowerCase();
+                            presetsWrap.querySelectorAll('button[data-color]').forEach((btn) => {
+                                const btnColor = String(btn.getAttribute('data-color') || '').toLowerCase();
+                                btn.classList.toggle('is-active', !!needle && btnColor === needle);
+                            });
+                            paintCustom(val);
+                        };
+
+                        presets.forEach((c) => {
+                            const b = document.createElement('button');
+                            b.type = 'button';
+                            b.style.background = c;
+                            b.title = c;
+                            b.setAttribute('data-color', c);
+                            b.addEventListener('click', () => {
+                                previewVal = c;
+                                try { document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch (e) {}
+                                setActivePreset(c);
+                            });
+                            presetsWrap.appendChild(b);
+                        });
+                        presetsWrap.appendChild(customWrap);
+
+                        setActivePreset(current);
 
                         const applyBtn = document.createElement('button');
                         applyBtn.type = 'button';
@@ -2507,7 +2522,6 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             previewVal = null;
                             colorInput.value = current;
                             try { const c = current; document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch (e) {}
-                            updateColorDot(current);
                             setActivePreset(current);
                         });
 
@@ -2519,7 +2533,6 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             const def = accentItem.default || '#6bfefe';
                             previewVal = def;
                             colorInput.value = def;
-                            updateColorDot(def);
                             setActivePreset(def);
                             try { const payload = { key: accentItem.key, value: def }; const res = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); if (res.ok) await refreshConfig(); } catch (e) { window.showToast && window.showToast('Save failed', true); }
                         });
@@ -2531,8 +2544,6 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         actions.appendChild(resetBtn);
 
                         container.appendChild(presetsWrap);
-                        container.appendChild(colorDot);
-                        container.appendChild(colorInput);
                         container.appendChild(actions);
                     };
 
@@ -2616,7 +2627,404 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
         (function(){
             'use strict';
 
-            async function loadComponentsSummary() {
+            // -----------------------------------------------------------------------------
+        // Structured engine-config editor + named presets (Engines tab)
+        // -----------------------------------------------------------------------------
+
+        // Known structured extra_config fields. Bool fields render as toggle
+        // switches; number fields as value boxes (empty = keep engine default,
+        // the key is omitted on save).
+        const ENGINE_CONFIG_FIELDS = [
+            { key: 'enable_thinking', id: 'cfg-bool-enable-thinking', type: 'bool', label: 'Enable thinking', desc: 'Opt-in model thinking (translated to disable_thinking for providers that nest it).' },
+            { key: 'enable_tools', id: 'cfg-bool-enable-tools', type: 'bool', label: 'Enable tools', desc: 'Opt-in native function calling (tool definitions).' },
+            { key: 'enable_tools_parallel', id: 'cfg-bool-enable-tools-parallel', type: 'bool', label: 'Parallel tool calls', desc: 'Allow parallel native tool-calling.' },
+            { key: 'disable_tools', id: 'cfg-bool-disable-tools', type: 'bool', label: 'Disable tools', desc: 'Force the legacy in-prompt JSON protocol instead of native tools.' },
+            { key: 'force_action_grammar', id: 'cfg-bool-force-action-grammar', type: 'bool', label: 'Force action grammar', desc: 'Strongest constraint: GBNF-constrain output to the action schema (implies disable_tools).' },
+            { key: 'force_json_object', id: 'cfg-bool-force-json-object', type: 'bool', label: 'Force JSON object', desc: 'Request response_format={"type":"json_object"}.' },
+            { key: 'retry_on_timeout', id: 'cfg-bool-retry-on-timeout', type: 'bool', label: 'Retry on timeout', desc: 'Retry the request when it times out.' },
+            { key: 'retry_on_empty', id: 'cfg-bool-retry-on-empty', type: 'bool', label: 'Retry on empty', desc: 'Retry when the provider returns an empty-content 200 (engine default: on).' },
+            { key: 'max_tools', id: 'cfg-num-max-tools', type: 'number', label: 'Max tools', desc: 'Cap on native tool definitions (Venice default: 20).', step: 1, min: 0 },
+            { key: 'max_tokens', id: 'cfg-num-max-tokens', type: 'number', label: 'Max tokens', desc: 'Cap on completion length. Blank = no cap (or 4096 on local-model endpoints).', step: 1, min: 1 },
+            { key: 'timeout', id: 'cfg-num-timeout', type: 'number', label: 'Timeout (s)', desc: 'Per-endpoint request timeout in seconds.', step: 1, min: 1 },
+            { key: 'retry_attempts', id: 'cfg-num-retry-attempts', type: 'number', label: 'Retry attempts', desc: 'Max retries (default 3).', step: 1, min: 0 },
+            { key: 'retry_backoff', id: 'cfg-num-retry-backoff', type: 'number', label: 'Retry backoff (s)', desc: 'Backoff between retries (default 0.5).', step: 0.1, min: 0 },
+            { key: 'downstream_char_budget', id: 'cfg-num-char-budget', type: 'number', label: 'Char budget', desc: 'Hard char clamp on assembled messages; ≤ 0 disables (default 24000).', step: 500, min: 0 },
+        ];
+
+        let _engineCfgActive = null;    // current active external engine (model source for presets)
+        let _engineCfgPresets = [];     // cached preset list
+
+        // The model currently configured in the Engine Configuration card.  The
+        // live model-picker input is authoritative when visible (so a model just
+        // picked in this card — without a full components reload — is captured
+        // too); otherwise fall back to the engine's cached current_model.
+        function currentEngineConfigModel() {
+            const picker = document.getElementById('cortex-model-picker');
+            const search = document.getElementById('cortex-model-search');
+            if (picker && search && picker.style.display !== 'none') {
+                const picked = (search.value || '').trim();
+                if (picked) return picked;
+            }
+            return (_engineCfgActive && _engineCfgActive.current_model) || '';
+        }
+
+        function _engineCfgInputStyle() {
+            return 'min-width:110px; padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:6px; font-size:0.85rem;';
+        }
+
+        function renderEngineConfigForm(active) {
+            _engineCfgActive = active || null;
+            const fieldsEl = document.getElementById('engine-config-fields');
+            const grammarEl = document.getElementById('cortex-engine-config-grammar');
+            const rfEl = document.getElementById('cortex-engine-config-response-format');
+            const rawEl = document.getElementById('cortex-engine-config-raw');
+            if (!fieldsEl) return;
+            const ec = (active && active.extra_config) || {};
+            fieldsEl.innerHTML = '';
+
+            // Boolean toggles — compact responsive grid
+            const boolGrid = document.createElement('div');
+            boolGrid.style.cssText = 'display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:6px 16px;';
+            for (const f of ENGINE_CONFIG_FIELDS) {
+                if (f.type !== 'bool') continue;
+                const row = document.createElement('div');
+                row.style.cssText = 'display:flex; align-items:center; gap:8px; padding:5px 8px; border:1px solid var(--border,#444); border-radius:8px; background:var(--background,#1a1a22);';
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.id = f.id;
+                cb.checked = !!ec[f.key];
+                const toggleLbl = document.createElement('label');
+                toggleLbl.className = 'toggle-switch';
+                toggleLbl.setAttribute('for', f.id);
+                const slider = document.createElement('span');
+                slider.className = 'toggle-slider';
+                toggleLbl.appendChild(slider);
+                const textWrap = document.createElement('div');
+                textWrap.style.cssText = 'flex:1; min-width:0;';
+                const tLabel = document.createElement('div');
+                tLabel.style.cssText = 'font-size:0.85rem; font-weight:600; color:var(--text);';
+                tLabel.textContent = f.label;
+                textWrap.appendChild(tLabel);
+                if (f.desc) {
+                    const tDesc = document.createElement('div');
+                    tDesc.style.cssText = 'font-size:0.74rem; color:var(--muted); line-height:1.25;';
+                    tDesc.textContent = f.desc;
+                    textWrap.appendChild(tDesc);
+                }
+                row.appendChild(cb);
+                row.appendChild(toggleLbl);
+                row.appendChild(textWrap);
+                boolGrid.appendChild(row);
+            }
+            fieldsEl.appendChild(boolGrid);
+
+            // Number fields — label + value box grid
+            const numGrid = document.createElement('div');
+            numGrid.style.cssText = 'display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:8px 16px; margin-top:10px;';
+            for (const f of ENGINE_CONFIG_FIELDS) {
+                if (f.type !== 'number') continue;
+                const col = document.createElement('div');
+                col.style.cssText = 'display:flex; flex-direction:column; gap:3px;';
+                const lbl = document.createElement('label');
+                lbl.setAttribute('for', f.id);
+                lbl.style.cssText = 'font-size:0.82rem; font-weight:600; color:var(--text);';
+                lbl.textContent = f.label;
+                const inp = document.createElement('input');
+                inp.type = 'number';
+                inp.id = f.id;
+                if (f.step !== undefined) inp.step = String(f.step);
+                if (f.min !== undefined) inp.min = String(f.min);
+                inp.placeholder = 'default';
+                inp.style.cssText = _engineCfgInputStyle();
+                const v = ec[f.key];
+                if (v !== undefined && v !== null) inp.value = v;
+                col.appendChild(lbl);
+                col.appendChild(inp);
+                if (f.desc) {
+                    const desc = document.createElement('div');
+                    desc.style.cssText = 'font-size:0.74rem; color:var(--muted); line-height:1.25;';
+                    desc.textContent = f.desc;
+                    col.appendChild(desc);
+                }
+                numGrid.appendChild(col);
+            }
+            fieldsEl.appendChild(numGrid);
+
+            // Advanced textareas (grammar / response_format / other keys)
+            if (grammarEl) grammarEl.value = typeof ec.grammar === 'string' ? ec.grammar : '';
+            if (rfEl) {
+                const rf = ec.response_format;
+                rfEl.value = (rf && typeof rf === 'object') ? JSON.stringify(rf, null, 2) : '';
+            }
+            if (rawEl) {
+                const known = new Set(ENGINE_CONFIG_FIELDS.map(f => f.key));
+                known.add('grammar');
+                known.add('response_format');
+                const rest = {};
+                for (const k of Object.keys(ec)) {
+                    if (!known.has(k)) rest[k] = ec[k];
+                }
+                rawEl.value = Object.keys(rest).length ? JSON.stringify(rest, null, 2) : '';
+            }
+        }
+
+        function collectEngineConfig() {
+            const cfg = {};
+            for (const f of ENGINE_CONFIG_FIELDS) {
+                const el = document.getElementById(f.id);
+                if (!el) continue;
+                if (f.type === 'bool') {
+                    cfg[f.key] = el.checked;
+                } else {
+                    const raw = (el.value || '').trim();
+                    if (raw === '') continue;
+                    const n = Number(raw);
+                    if (Number.isFinite(n)) cfg[f.key] = n;
+                }
+            }
+            const grammarEl = document.getElementById('cortex-engine-config-grammar');
+            if (grammarEl && grammarEl.value.trim()) cfg.grammar = grammarEl.value;
+            const rfEl = document.getElementById('cortex-engine-config-response-format');
+            if (rfEl && rfEl.value.trim()) cfg.response_format = JSON.parse(rfEl.value); // caller validates
+            const rawEl = document.getElementById('cortex-engine-config-raw');
+            if (rawEl && rawEl.value.trim()) {
+                const extra = JSON.parse(rawEl.value); // caller validates
+                if (extra && typeof extra === 'object' && !Array.isArray(extra)) {
+                    Object.assign(cfg, extra);
+                }
+            }
+            return cfg;
+        }
+
+        async function loadEngineConfigPresets(selectName) {
+            try {
+                const res = await fetch('/api/engine-config-presets');
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const data = await res.json();
+                _engineCfgPresets = Array.isArray(data.presets) ? data.presets : [];
+            } catch (e) {
+                console.error('[synth_webui] Failed to load engine config presets', e);
+                _engineCfgPresets = [];
+            }
+            populateEngineConfigPresetSelect(selectName || '');
+            return _engineCfgPresets;
+        }
+
+        function populateEngineConfigPresetSelect(selectName) {
+            const sel = document.getElementById('engine-config-preset-select');
+            if (!sel) return;
+            const keep = selectName || sel.value || '';
+            sel.innerHTML = '';
+            const none = document.createElement('option');
+            none.value = '';
+            none.textContent = '— no preset selected —';
+            sel.appendChild(none);
+            for (const p of _engineCfgPresets) {
+                const opt = document.createElement('option');
+                opt.value = p.name;
+                opt.textContent = p.model ? `${p.name} · ${p.model}` : p.name;
+                if (p.name === keep) opt.selected = true;
+                sel.appendChild(opt);
+            }
+            if (keep) sel.value = keep;
+        }
+
+        const ENGINE_CONFIG_SCOPE_IDS = {
+            base: 'engine-config-scope-base',
+            agent: 'engine-config-scope-agent',
+            grillo: 'engine-config-scope-grillo',
+            trainer: 'engine-config-scope-trainer',
+            vessel: 'engine-config-scope-vessel',
+            dsp: 'engine-config-scope-dsp',
+            live: 'engine-config-scope-live',
+        };
+
+        function collectEngineConfigScopes() {
+            const out = [];
+            for (const [scope, id] of Object.entries(ENGINE_CONFIG_SCOPE_IDS)) {
+                const el = document.getElementById(id);
+                if (el && el.checked) out.push(scope);
+            }
+            return out;
+        }
+
+        function setEngineConfigScopes(scopes) {
+            const wanted = new Set(Array.isArray(scopes) ? scopes : []);
+            for (const [scope, id] of Object.entries(ENGINE_CONFIG_SCOPE_IDS)) {
+                const el = document.getElementById(id);
+                if (el) el.checked = wanted.has(scope);
+            }
+        }
+
+        function syncAppliedEnginePreset(data) {
+            // The apply endpoint is authoritative.  The immediately-following
+            // /api/components response may still expose the registry's previous
+            // current_model, which left the visible model textbox stale until a
+            // full page refresh even though the preset was already active.
+            const endpoint = (data && data.endpoint && typeof data.endpoint === 'object')
+                ? data.endpoint : {};
+            const preset = (data && data.preset && typeof data.preset === 'object')
+                ? data.preset : {};
+            const appliedModel = String(
+                preset.model || endpoint.default_model || endpoint.current_model || ''
+            ).trim();
+
+            if (_engineCfgActive) {
+                const activeId = Number(_engineCfgActive.id);
+                const endpointId = Number(endpoint.id);
+                if (!Number.isFinite(activeId) || !Number.isFinite(endpointId) || activeId === endpointId) {
+                    if (endpoint.extra_config && typeof endpoint.extra_config === 'object') {
+                        _engineCfgActive.extra_config = { ...endpoint.extra_config };
+                    } else if (preset.extra_config && typeof preset.extra_config === 'object') {
+                        _engineCfgActive.extra_config = { ...preset.extra_config };
+                    }
+                    if (appliedModel) _engineCfgActive.current_model = appliedModel;
+                    renderEngineConfigForm(_engineCfgActive);
+                }
+            }
+
+            if (appliedModel) {
+                const modelSearch = document.getElementById('cortex-model-search');
+                const modelLabel = document.getElementById('cortex-engine-model');
+                if (modelSearch) modelSearch.value = appliedModel;
+                if (modelLabel) modelLabel.textContent = `model: ${appliedModel}`;
+            }
+        }
+
+        function initEngineConfigEditor() {
+            const cfgStatus = document.getElementById('cortex-engine-config-status');
+            const setCfgStatus = (msg, ok) => {
+                if (!cfgStatus) return;
+                cfgStatus.textContent = msg;
+                cfgStatus.style.color = ok ? 'var(--success,#27ae60)' : 'var(--danger,#c0392b)';
+            };
+            const currentEndpointId = () => {
+                const el = document.getElementById('cortex-engine-config-wrap');
+                return el && el.dataset.endpointId ? Number(el.dataset.endpointId) : null;
+            };
+
+            const cfgSave = document.getElementById('cortex-engine-config-save');
+            if (cfgSave && !cfgSave.dataset.bound) {
+                cfgSave.dataset.bound = '1';
+                cfgSave.addEventListener('click', async () => {
+                    const epId = currentEndpointId();
+                    if (epId == null) { setCfgStatus('No endpoint selected.', false); return; }
+                    let cfg;
+                    try {
+                        cfg = collectEngineConfig();
+                    } catch (err) {
+                        setCfgStatus('Invalid JSON in advanced/other keys: ' + err.message, false);
+                        return;
+                    }
+                    try {
+                        const res = await fetch(`/api/external-endpoints/${epId}`, {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ extra_config: cfg }),
+                        });
+                        if (!res.ok) throw new Error('HTTP ' + res.status);
+                        setCfgStatus('Saved — applied to this engine.', true);
+                        if (window.showToast) window.showToast('Engine config saved', false);
+                    } catch (err) {
+                        setCfgStatus('Save failed: ' + err.message, false);
+                    }
+                });
+            }
+
+            const sel = document.getElementById('engine-config-preset-select');
+            const applyBtn = document.getElementById('engine-config-preset-apply-btn');
+            const delBtn = document.getElementById('engine-config-preset-delete-btn');
+            const savePresetBtn = document.getElementById('engine-config-preset-save-btn');
+            const nameInput = document.getElementById('engine-config-preset-name');
+
+            if (sel && !sel.dataset.scopeBound) {
+                sel.dataset.scopeBound = '1';
+                sel.addEventListener('change', () => {
+                    const preset = _engineCfgPresets.find((p) => p.name === sel.value);
+                    setEngineConfigScopes(preset && Array.isArray(preset.scopes) ? preset.scopes : []);
+                });
+            }
+
+            if (applyBtn && !applyBtn.dataset.bound) {
+                applyBtn.dataset.bound = '1';
+                applyBtn.addEventListener('click', async () => {
+                    const epId = currentEndpointId();
+                    const name = sel ? sel.value : '';
+                    if (epId == null) { setCfgStatus('No endpoint selected.', false); return; }
+                    if (!name) { setCfgStatus('Select a preset to apply.', false); return; }
+                    try {
+                        const res = await fetch('/api/engine-config-presets/apply', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ ep_id: epId, name, scopes: collectEngineConfigScopes() }),
+                        });
+                        const data = await res.json().catch(() => ({}));
+                        if (!res.ok) throw new Error((data && data.detail) || ('HTTP ' + res.status));
+                        setCfgStatus(`Applied "${name}".`, true);
+                        if (window.showToast) window.showToast(`Engine preset "${name}" applied`, false);
+                        await loadComponentsSummary();
+                        syncAppliedEnginePreset(data);
+                    } catch (err) {
+                        setCfgStatus('Apply failed: ' + err.message, false);
+                    }
+                });
+            }
+
+            if (delBtn && !delBtn.dataset.bound) {
+                delBtn.dataset.bound = '1';
+                delBtn.addEventListener('click', async () => {
+                    const name = sel ? sel.value : '';
+                    if (!name) { setCfgStatus('Select a preset to delete.', false); return; }
+                    if (!window.confirm(`Delete engine preset "${name}"?`)) return;
+                    try {
+                        const res = await fetch(`/api/engine-config-presets?name=${encodeURIComponent(name)}`, { method: 'DELETE' });
+                        if (!res.ok) {
+                            const data = await res.json().catch(() => ({}));
+                            throw new Error((data && data.detail) || ('HTTP ' + res.status));
+                        }
+                        await loadEngineConfigPresets();
+                        setCfgStatus('Preset deleted.', true);
+                        if (window.showToast) window.showToast('Engine preset deleted', false);
+                    } catch (err) {
+                        setCfgStatus('Delete failed: ' + err.message, false);
+                    }
+                });
+            }
+
+            if (savePresetBtn && !savePresetBtn.dataset.bound) {
+                savePresetBtn.dataset.bound = '1';
+                savePresetBtn.addEventListener('click', async () => {
+                    const epId = currentEndpointId();
+                    if (epId == null) { setCfgStatus('No endpoint selected.', false); return; }
+                    const presetName = nameInput ? nameInput.value.trim() : '';
+                    if (!presetName) { setCfgStatus('Enter a preset name first.', false); return; }
+                    let cfg;
+                    try {
+                        cfg = collectEngineConfig();
+                    } catch (err) {
+                        setCfgStatus('Invalid JSON in advanced/other keys: ' + err.message, false);
+                        return;
+                    }
+                    const model = currentEngineConfigModel();
+                    try {
+                        const res = await fetch('/api/engine-config-presets', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ name: presetName, model, extra_config: cfg, scopes: collectEngineConfigScopes() }),
+                        });
+                        const data = await res.json().catch(() => ({}));
+                        if (!res.ok) throw new Error((data && data.detail) || ('HTTP ' + res.status));
+                        await loadEngineConfigPresets(presetName);
+                        setCfgStatus(`Preset "${presetName}" saved.`, true);
+                        if (window.showToast) window.showToast(`Engine preset "${presetName}" saved`, false);
+                    } catch (err) {
+                        setCfgStatus('Preset save failed: ' + err.message, false);
+                    }
+                });
+            }
+        }
+
+        async function loadComponentsSummary() {
                 try {
                     const componentsCortexSummaryEl = document.getElementById('components-cortex-summary');
                     const componentsCortexListEl = document.getElementById('components-cortex-list');
@@ -2803,6 +3211,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                                 body: JSON.stringify({ engine: active.name, model: m })
                                             }).then((res) => {
                                                 if (!res.ok) throw new Error('HTTP ' + res.status);
+                                                if (_engineCfgActive) _engineCfgActive.current_model = m;
                                                 if (engineModelLabel) engineModelLabel.textContent = `model: ${m}`;
                                                 if (window.showToast) window.showToast('Saved', false);
                                             }).catch((err) => {
@@ -2845,6 +3254,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                                     body: JSON.stringify({ engine: active.name, model: val })
                                                 }).then((res) => {
                                                     if (!res.ok) throw new Error('HTTP ' + res.status);
+                                                    if (_engineCfgActive) _engineCfgActive.current_model = val;
                                                     if (engineModelLabel) engineModelLabel.textContent = `model: ${val}`;
                                                     if (window.showToast) window.showToast('Saved', false);
                                                 }).catch((err) => {
@@ -2886,56 +3296,21 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                         // --- Per-endpoint extra config editor (external endpoints only) ---
                         const cfgWrap = document.getElementById('cortex-engine-config-wrap');
-                        const cfgArea = document.getElementById('cortex-engine-config');
-                        const cfgSave = document.getElementById('cortex-engine-config-save');
                         const cfgStatus = document.getElementById('cortex-engine-config-status');
-                        if (cfgWrap && cfgArea) {
+                        if (cfgWrap) {
                             if (active && active.is_external && active.endpoint_id != null) {
                                 cfgWrap.style.display = '';
-                                const ec = active.extra_config || {};
-                                cfgArea.value = Object.keys(ec).length ? JSON.stringify(ec, null, 2) : '';
+                                cfgWrap.dataset.endpointId = String(active.endpoint_id);
                                 if (cfgStatus) cfgStatus.textContent = '';
-                                if (cfgSave) {
-                                    cfgSave._epId = active.endpoint_id;
-                                    if (!cfgSave.dataset.bound) {
-                                        cfgSave.dataset.bound = '1';
-                                        cfgSave.addEventListener('click', async () => {
-                                            const setCfgStatus = (msg, ok) => {
-                                                if (!cfgStatus) return;
-                                                cfgStatus.textContent = msg;
-                                                cfgStatus.style.color = ok ? 'var(--success,#27ae60)' : 'var(--danger,#c0392b)';
-                                            };
-                                            const raw = (cfgArea.value || '').trim();
-                                            let parsed = {};
-                                            if (raw) {
-                                                try {
-                                                    parsed = JSON.parse(raw);
-                                                } catch (err) {
-                                                    setCfgStatus('Invalid JSON: ' + err.message, false);
-                                                    return;
-                                                }
-                                                if (typeof parsed !== 'object' || Array.isArray(parsed) || parsed === null) {
-                                                    setCfgStatus('Extra Config must be a JSON object.', false);
-                                                    return;
-                                                }
-                                            }
-                                            try {
-                                                const res = await fetch(`/api/external-endpoints/${cfgSave._epId}`, {
-                                                    method: 'PUT',
-                                                    headers: { 'Content-Type': 'application/json' },
-                                                    body: JSON.stringify({ extra_config: parsed }),
-                                                });
-                                                if (!res.ok) throw new Error('HTTP ' + res.status);
-                                                setCfgStatus('Saved — reload this engine to apply.', true);
-                                                if (window.showToast) window.showToast('Engine config saved', false);
-                                            } catch (err) {
-                                                setCfgStatus('Save failed: ' + err.message, false);
-                                            }
-                                        });
-                                    }
+                                if (!cfgWrap.dataset.bound) {
+                                    cfgWrap.dataset.bound = '1';
+                                    initEngineConfigEditor();
                                 }
+                                renderEngineConfigForm(active);
+                                if (!_engineCfgPresets.length) loadEngineConfigPresets();
                             } else {
                                 cfgWrap.style.display = 'none';
+                                cfgWrap.dataset.endpointId = '';
                             }
                         }
                     };
@@ -3212,6 +3587,105 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 if (ev.key === 'Enter') { ev.preventDefault(); saveCfg(inp.value, inp); }
                             });
                             inputEl = wrap;
+                        } else if (ci.ui_type === 'file') {
+                            // File upload control for exposed file variables.
+                            // Files are uploaded automatically on selection (no explicit
+                            // Upload button). Image files get a scaled-up preview and a
+                            // Clear button removes the stored file.
+                            const fileWrap = document.createElement('div');
+                            fileWrap.style.cssText = 'display:flex; flex-direction:column; gap:8px; max-width:400px;';
+
+                            const fileUrl = `/api/config/${encodeURIComponent(ci.key)}/file`;
+                            const fileName = (typeof val === 'string' && val) ? val.split('/').pop() : '';
+                            const isImage = /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(fileName);
+
+                            const current = document.createElement('div');
+                            current.style.cssText = 'font-size:0.82rem; color:var(--text-soft);';
+                            if (val) {
+                                const link = document.createElement('a');
+                                link.textContent = fileName || 'file';
+                                link.href = fileUrl;
+                                link.target = '_blank';
+                                link.style.color = 'var(--accent)';
+                                current.appendChild(link);
+                            } else {
+                                current.textContent = 'No file uploaded.';
+                            }
+
+                            // Scaled-up image preview (min 5x for tiny textures like
+                            // Minecraft skins). Uses pixelated rendering + a cache-buster.
+                            const previewWrap = document.createElement('div');
+                            if (val && isImage) {
+                                const img = document.createElement('img');
+                                img.src = `${fileUrl}?t=${Date.now()}`;
+                                img.alt = fileName;
+                                img.style.cssText = 'image-rendering:pixelated; border:1px solid var(--border); border-radius:6px; background:var(--surface-alt); display:block;';
+                                img.onload = () => {
+                                    const scale = Math.max(5, Math.ceil(160 / Math.max(1, img.naturalWidth)));
+                                    img.style.width = (img.naturalWidth * scale) + 'px';
+                                    img.style.height = (img.naturalHeight * scale) + 'px';
+                                };
+                                previewWrap.appendChild(img);
+                            }
+
+                            const uploadRow = document.createElement('div');
+                            uploadRow.style.cssText = 'display:flex; align-items:center; gap:8px; flex-wrap:wrap;';
+
+                            const inputFile = document.createElement('input');
+                            inputFile.type = 'file';
+                            inputFile.disabled = !editable;
+                            inputFile.style.cssText = 'font-size:0.82rem; color:var(--text); flex:1 1 auto; min-width:0;';
+                            // Auto-upload as soon as a file is selected.
+                            inputFile.addEventListener('change', async () => {
+                                const f = inputFile.files && inputFile.files[0];
+                                if (!f) { return; }
+                                try {
+                                    const fd = new FormData();
+                                    fd.append('file', f);
+                                    inputFile.disabled = true;
+                                    if (clearBtn) clearBtn.disabled = true;
+                                    const res = await fetch(`/api/config/${encodeURIComponent(ci.key)}/upload`, { method: 'POST', body: fd });
+                                    if (!res.ok) {
+                                        const t = await res.text();
+                                        window.showToast && window.showToast('Upload failed: ' + t, true);
+                                    } else {
+                                        window.showToast && window.showToast('Uploaded', false);
+                                        await loadComponentsSummary();
+                                    }
+                                } catch (e) {
+                                    console.error('[synth_webui] File upload failed', e);
+                                    window.showToast && window.showToast('File upload failed', true);
+                                } finally {
+                                    inputFile.disabled = !editable;
+                                    if (clearBtn) clearBtn.disabled = !editable;
+                                }
+                            });
+
+                            const clearBtn = document.createElement('button');
+                            clearBtn.textContent = 'Clear';
+                            clearBtn.disabled = !editable || !val;
+                            clearBtn.style.cssText = 'padding:5px 12px; background:var(--accent); color:var(--accent-contrast); border:none; border-radius:6px; font-size:0.82rem; cursor:pointer;';
+                            clearBtn.addEventListener('click', async () => {
+                                try {
+                                    clearBtn.disabled = true;
+                                    inputFile.disabled = true;
+                                    await saveCfg('', clearBtn);
+                                    await loadComponentsSummary();
+                                } catch (e) {
+                                    console.error('[synth_webui] File clear failed', e);
+                                    window.showToast && window.showToast('Clear failed', true);
+                                } finally {
+                                    inputFile.disabled = !editable;
+                                    clearBtn.disabled = !editable || !val;
+                                }
+                            });
+
+                            uploadRow.appendChild(inputFile);
+                            uploadRow.appendChild(clearBtn);
+                            fileWrap.appendChild(current);
+                            if (val && isImage) fileWrap.appendChild(previewWrap);
+                            fileWrap.appendChild(uploadRow);
+                            inputEl = fileWrap;
                         } else {
                             // Default: text / password / number input
                             const inp = document.createElement('input');
@@ -3439,8 +3913,24 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 details.appendChild(actionsWrap);
                             }
                             // ── Inline config editing for cortex engines ──────────
+                            // Union the config items of every registration alias so a
+                            // component whose config lives under a non-canonical name
+                            // still shows its Configuration/Advanced section.
                             const compName = item.name || '';
-                            const cfgItems = _componentConfigMap[compName] || [];
+                            const _cfgComponentNames = (Array.isArray(item.config_components) && item.config_components.length)
+                                ? item.config_components
+                                : [compName];
+                            const _seenCfgKeys = new Set();
+                            const cfgItems = [];
+                            _cfgComponentNames.forEach(cn => {
+                                (_componentConfigMap[cn] || []).forEach(ci => {
+                                    if (!ci) return;
+                                    const dedupeKey = ci.key || JSON.stringify(ci);
+                                    if (_seenCfgKeys.has(dedupeKey)) return;
+                                    _seenCfgKeys.add(dedupeKey);
+                                    cfgItems.push(ci);
+                                });
+                            });
                             if (cfgItems.length) {
                                 const cfgSection = document.createElement('div');
                                 cfgSection.className = 'component-config-section';
@@ -3810,9 +4300,27 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         // WEBUI_ACCENT_COLOR is intentionally hidden here: it already has
                         // a dedicated control in the Settings tab, so showing it in the
                         // plugin detail pane would be a confusing duplicate.
-                        const cfgItems = (_componentConfigMap[item.name] || []).filter(ci =>
-                            !(ci && ((ci.key === 'WEBUI_ACCENT_COLOR') || (ci.label && /accent\s*color/i.test(ci.label))))
-                        );
+                        // A plugin may be registered under several component names
+                        // (canonical card name + explicit names used for its config).
+                        // Union the config items of every declared config_component so
+                        // the exposed variables and the Advanced section always appear,
+                        // even when the config lives under a non-canonical name.
+                        const _cfgComponentNames = (Array.isArray(item.config_components) && item.config_components.length)
+                            ? item.config_components
+                            : [item.name];
+                        const _seenCfgKeys = new Set();
+                        const cfgItems = [];
+                        _cfgComponentNames.forEach(cn => {
+                            (_componentConfigMap[cn] || []).forEach(ci => {
+                                if (!ci) return;
+                                if (ci.key === 'WEBUI_ACCENT_COLOR') return;
+                                if (ci.label && /accent\s*color/i.test(ci.label)) return;
+                                const dedupeKey = ci.key || JSON.stringify(ci);
+                                if (_seenCfgKeys.has(dedupeKey)) return;
+                                _seenCfgKeys.add(dedupeKey);
+                                cfgItems.push(ci);
+                            });
+                        });
                         if (cfgItems.length) {
                             const section = document.createElement('div');
                             section.className = 'plugin-vars-section';
@@ -4495,6 +5003,43 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             }
                         });
                         irisModelSel.dataset.bound = '1';
+                    }
+                    // ────────────────────────────────────────────────────────
+
+                    // ── Iris vision prompt (sent to the Iris engine; its description is injected into the next turn as context) ──
+                    const irisPromptWrap = document.getElementById('iris-prompt-wrap');
+                    const irisPrompt = document.getElementById('iris-default-prompt');
+                    const irisPromptSave = document.getElementById('iris-default-prompt-save');
+                    const irisPromptStatus = document.getElementById('iris-default-prompt-status');
+                    const setIrisPromptStatus = (msg, ok) => {
+                        if (!irisPromptStatus) return;
+                        irisPromptStatus.textContent = msg;
+                        irisPromptStatus.style.color = ok ? 'var(--success,#27ae60)' : 'var(--danger,#c0392b)';
+                    };
+                    if (irisPromptWrap && irisPrompt) {
+                        if (Array.isArray(data.iris) && data.iris.length) {
+                            irisPromptWrap.style.display = '';
+                        }
+                        irisPrompt.value = data.iris_default_prompt || '';
+                        if (irisPromptSave && !irisPromptSave.dataset.bound) {
+                            irisPromptSave.dataset.bound = '1';
+                            irisPromptSave.addEventListener('click', async () => {
+                                const value = (irisPrompt.value || '').trim();
+                                try {
+                                    const r = await fetch('/api/config', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ key: 'IRIS_DEFAULT_PROMPT', value }),
+                                    });
+                                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                                    setIrisPromptStatus('Saved — used by the next vision turn.', true);
+                                    window.showToast && window.showToast('Iris vision prompt saved', false);
+                                } catch (e) {
+                                    console.error('[synth_webui] Failed to set IRIS_DEFAULT_PROMPT', e);
+                                    setIrisPromptStatus('Save failed: ' + e.message, false);
+                                }
+                            });
+                        }
                     }
                     // ────────────────────────────────────────────────────────
 
@@ -5504,7 +6049,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     if (componentsLiveListEl)  renderDetailsList(data.live  || [], componentsLiveListEl);
                     if (componentsIrisListEl)   renderDetailsList(data.iris  || [], componentsIrisListEl);
 
-                    // Render cortex scope selectors (Grillo / Trainer / Live)
+                    // Render cortex scope selectors (Grillo / Trainer / Agent / Rift Vessel)
                     try {
                         const cortexScopesEl = document.getElementById('cortex-scopes');
                         if (cortexScopesEl && data.cortex && Array.isArray(data.cortex.scopes) && data.cortex.scopes.length) {
@@ -6020,6 +6565,30 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 const filename = payload.filename || payload.path || 'backup completed';
                                 if (backupStatus) backupStatus.textContent = `Backup created: ${filename}`;
                                 try { if (window.showToast) window.showToast(`Database backup created: ${filename}`, false); } catch (e) { /* ignore */ }
+                                // Trigger a browser download of the freshly created backup.
+                                const downloadName = payload.filename || (payload.path ? String(payload.path).split('/').pop() : '');
+                                if (downloadName) {
+                                    try {
+                                        if (backupStatus) backupStatus.textContent = `Downloading ${downloadName}…`;
+                                        const dl = await fetch(`/api/database/backup/download?filename=${encodeURIComponent(downloadName)}`);
+                                        if (dl.ok) {
+                                            const blob = await dl.blob();
+                                            const objectUrl = window.URL.createObjectURL(blob);
+                                            const anchor = document.createElement('a');
+                                            anchor.href = objectUrl;
+                                            anchor.download = downloadName;
+                                            document.body.appendChild(anchor);
+                                            anchor.click();
+                                            document.body.removeChild(anchor);
+                                            window.setTimeout(() => window.URL.revokeObjectURL(objectUrl), 4000);
+                                            if (backupStatus) backupStatus.textContent = `Backup downloaded: ${downloadName}`;
+                                        } else if (backupStatus) {
+                                            backupStatus.textContent = `Backup created: ${downloadName} (download failed: HTTP ${dl.status})`;
+                                        }
+                                    } catch (dlErr) {
+                                        if (backupStatus) backupStatus.textContent = `Backup created: ${downloadName} (download failed)`;
+                                    }
+                                }
                             } catch (error) {
                                 const message = error && error.message ? error.message : 'Backup failed';
                                 if (backupStatus) backupStatus.textContent = `Backup failed: ${message}`;
@@ -6116,6 +6685,35 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
             function initPluginsTab() {
                 loadComponentsSummary();
                 setupPluginsColResizer();
+                setupPluginsSubnav();
+            }
+
+            // Installed / Store sub-tab switcher for the Plugins section.
+            // The section HTML is re-injected on each navigation, so bind
+            // per-element via dataset.bound to keep this idempotent.
+            function setupPluginsSubnav() {
+                const buttons = document.querySelectorAll('.plugins-subnav-btn[data-plugins-subtab]');
+                const panels = document.querySelectorAll('.plugins-subpanel[data-plugins-subtab]');
+                if (!buttons.length || !panels.length) return;
+
+                const switchTo = (next) => {
+                    buttons.forEach((btn) => {
+                        const active = btn.dataset.pluginsSubtab === next;
+                        btn.classList.toggle('active', active);
+                        btn.setAttribute('aria-selected', active ? 'true' : 'false');
+                    });
+                    panels.forEach((panel) => {
+                        panel.classList.toggle('active', panel.dataset.pluginsSubtab === next);
+                    });
+                };
+
+                buttons.forEach((btn) => {
+                    if (btn.dataset.bound) return;
+                    btn.addEventListener('click', () => {
+                        switchTo(btn.dataset.pluginsSubtab || 'installed');
+                    });
+                    btn.dataset.bound = '1';
+                });
             }
             // Also expose as initEnginesTab so that the Engines tab triggers the engine selector UI
             function initEnginesTab() {
@@ -6355,6 +6953,11 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 const logsFailuresCode = document.getElementById('logs-failures-code');
                 const logsFailuresStage = document.getElementById('logs-failures-stage');
                 const logsFailuresSort = document.getElementById('logs-failures-sort');
+                const logsDeadTargetsOutput = document.getElementById('logs-dead-targets-output');
+                const logsDeadTargetsRefreshBtn = document.getElementById('logs-dead-targets-refresh');
+                const logsReasonTrailOutput = document.getElementById('logs-reason-trail-output');
+                const logsReasonTrailRefreshBtn = document.getElementById('logs-reason-trail-refresh');
+                const logsReasonTrailSearch = document.getElementById('logs-reason-trail-search');
                 const logsState = window.__synth_logs_state || {
                     currentSubtab: 'live',
                     failurePage: 1,
@@ -6365,6 +6968,9 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     failureSort: 'desc',
                     failureTotalPages: 1,
                     loadingFailures: false,
+                    loadingDeadTargets: false,
+                    reasonTrailSearch: '',
+                    loadingReasonTrail: false,
                 };
                 window.__synth_logs_state = logsState;
 
@@ -6437,6 +7043,14 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     });
                     if (nextSubtab === 'failures') {
                         loadFailureLog();
+                        return;
+                    }
+                    if (nextSubtab === 'dead-targets') {
+                        loadDeadTargets();
+                        return;
+                    }
+                    if (nextSubtab === 'reason-trail') {
+                        loadReasonTrail();
                         return;
                     }
                     applyFilters();
@@ -6571,6 +7185,179 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     }
                 }
 
+                function renderDeadTargets(payload) {
+                    if (!logsDeadTargetsOutput) return;
+                    const entries = Array.isArray(payload.entries) ? payload.entries : [];
+                    if (!entries.length) {
+                        logsDeadTargetsOutput.innerHTML = '<div class="logs-empty-state">No dead delivery targets. The circuit breaker is closed everywhere.</div>';
+                        return;
+                    }
+                    logsDeadTargetsOutput.innerHTML = entries.map((entry) => {
+                        const reason = safeEscapeHtml(entry.reason || 'Unknown channel or user');
+                        const meta = [
+                            `Interface: ${entry.interface || 'unknown'}`,
+                            `Target: ${entry.chat_id}`,
+                            `Failures: ${entry.consecutive_failures}`,
+                            `Marked dead: ${formatFailureDate(entry.marked_dead_at)}`,
+                        ].map((value) => `<span>${safeEscapeHtml(value)}</span>`).join('');
+                        return `
+                            <article class="logs-failure-entry" data-dead-target-id="${safeEscapeHtml(String(entry.id))}">
+                                <div class="logs-failure-entry-header">
+                                    <div>
+                                        <div class="logs-failure-title">
+                                            <span class="logs-failure-pill code">dead_target</span>
+                                            <span class="logs-failure-pill stage">${safeEscapeHtml(entry.interface || 'unknown')}</span>
+                                        </div>
+                                        <div class="logs-failure-meta">${meta}</div>
+                                    </div>
+                                    <button class="logs-failure-delete" type="button" data-revive-dead-target="${safeEscapeHtml(String(entry.id))}">Revive</button>
+                                </div>
+                                <div class="logs-failure-reason">${reason}</div>
+                            </article>
+                        `;
+                    }).join('');
+
+                    logsDeadTargetsOutput.querySelectorAll('[data-revive-dead-target]').forEach((button) => {
+                        button.addEventListener('click', async () => {
+                            const targetId = button.dataset.reviveDeadTarget;
+                            if (!targetId) return;
+                            if (!window.confirm('Revive this delivery target? The circuit breaker will re-arm and delivery will resume.')) return;
+                            try {
+                                const response = await fetch(`/api/dead-targets/${encodeURIComponent(targetId)}`, { method: 'DELETE' });
+                                if (!response.ok) {
+                                    const payloadText = await response.text();
+                                    throw new Error(payloadText || `HTTP ${response.status}`);
+                                }
+                                if (window.showToast) window.showToast('Delivery target revived', false);
+                                loadDeadTargets();
+                            } catch (error) {
+                                console.error('[logs] failed to revive dead target', error);
+                                if (window.showToast) window.showToast('Failed to revive delivery target', true);
+                            }
+                        });
+                    });
+                }
+
+                async function loadDeadTargets() {
+                    if (!logsDeadTargetsOutput || logsState.loadingDeadTargets) return;
+                    logsState.loadingDeadTargets = true;
+                    logsDeadTargetsOutput.innerHTML = '<div class="logs-empty-state">Loading dead targets...</div>';
+                    try {
+                        const response = await fetch('/api/dead-targets');
+                        const payload = await response.json();
+                        if (!response.ok || !payload.success) {
+                            throw new Error((payload && payload.error) || `HTTP ${response.status}`);
+                        }
+                        renderDeadTargets(payload);
+                    } catch (error) {
+                        console.error('[logs] failed to load dead targets', error);
+                        logsDeadTargetsOutput.innerHTML = '<div class="logs-empty-state">Failed to load dead delivery targets.</div>';
+                    } finally {
+                        logsState.loadingDeadTargets = false;
+                    }
+                }
+
+                function formatReasonTrailJson(value) {
+                    if (value == null) return '';
+                    try {
+                        return safeEscapeHtml(typeof value === 'string' ? value : JSON.stringify(value));
+                    } catch (e) {
+                        return safeEscapeHtml(String(value));
+                    }
+                }
+
+                function renderReasonTrail(payload) {
+                    if (!logsReasonTrailOutput) return;
+                    const entries = Array.isArray(payload.entries) ? payload.entries : [];
+                    if (!entries.length) {
+                        logsReasonTrailOutput.innerHTML = '<div class="logs-empty-state">No reason trail entries yet. Replies will be recorded here once the trail is enabled.</div>';
+                        return;
+                    }
+                    logsReasonTrailOutput.innerHTML = entries.map((entry) => {
+                        const pills = [];
+                        if (entry.beat_type) pills.push(`<span class="logs-failure-pill stage">${safeEscapeHtml(entry.beat_type)}</span>`);
+                        if (entry.emotion) pills.push(`<span class="logs-failure-pill">${safeEscapeHtml(entry.emotion)}</span>`);
+                        if (entry.history_scope) pills.push(`<span class="logs-failure-pill code">${safeEscapeHtml(entry.history_scope)}</span>`);
+
+                        const meta = [
+                            entry.interface_path ? `Interface: ${entry.interface_path}` : '',
+                            `At: ${formatFailureDate(entry.created_at)}`,
+                        ].filter(Boolean).map((value) => `<span>${safeEscapeHtml(value)}</span>`).join('');
+
+                        const preview = entry.reply_preview
+                            ? `<div class="logs-failure-preview">${safeEscapeHtml(entry.reply_preview)}</div>`
+                            : '';
+
+                        const memories = Array.isArray(entry.memories) && entry.memories.length
+                            ? `<div class="logs-failure-preview">Memories: ${formatReasonTrailJson(entry.memories)}</div>`
+                            : '';
+                        const diary = Array.isArray(entry.diary_sources) && entry.diary_sources.length
+                            ? `<div class="logs-failure-preview">Diary sources: ${formatReasonTrailJson(entry.diary_sources)}</div>`
+                            : '';
+                        const goal = entry.goal && Object.keys(entry.goal).length
+                            ? `<div class="logs-failure-preview">Goal: ${formatReasonTrailJson(entry.goal)}</div>`
+                            : '';
+
+                        return `
+                            <article class="logs-failure-entry" data-reason-id="${safeEscapeHtml(String(entry.id))}">
+                                <div class="logs-failure-entry-header">
+                                    <div>
+                                        <div class="logs-failure-title">${pills.join('') || '<span class="logs-failure-pill stage">reason</span>'}</div>
+                                        <div class="logs-failure-meta">${meta}</div>
+                                    </div>
+                                    <button class="logs-failure-delete" type="button" data-delete-reason="${safeEscapeHtml(String(entry.id))}">Delete</button>
+                                </div>
+                                ${preview}
+                                ${memories}
+                                ${diary}
+                                ${goal}
+                            </article>
+                        `;
+                    }).join('');
+
+                    logsReasonTrailOutput.querySelectorAll('[data-delete-reason]').forEach((button) => {
+                        button.addEventListener('click', async () => {
+                            const reasonId = button.dataset.deleteReason;
+                            if (!reasonId) return;
+                            if (!window.confirm('Delete this reason trail entry? This cannot be undone.')) return;
+                            try {
+                                const response = await fetch(`/api/reason-trail/${encodeURIComponent(reasonId)}`, { method: 'DELETE' });
+                                if (!response.ok) {
+                                    const payloadText = await response.text();
+                                    throw new Error(payloadText || `HTTP ${response.status}`);
+                                }
+                                if (window.showToast) window.showToast('Reason trail entry deleted', false);
+                                loadReasonTrail();
+                            } catch (error) {
+                                console.error('[logs] failed to delete reason trail entry', error);
+                                if (window.showToast) window.showToast('Failed to delete reason trail entry', true);
+                            }
+                        });
+                    });
+                }
+
+                async function loadReasonTrail() {
+                    if (!logsReasonTrailOutput || logsState.loadingReasonTrail) return;
+                    logsState.loadingReasonTrail = true;
+                    logsReasonTrailOutput.innerHTML = '<div class="logs-empty-state">Loading reason trail...</div>';
+
+                    const params = new URLSearchParams({ search: logsState.reasonTrailSearch || '' });
+
+                    try {
+                        const response = await fetch(`/api/reason-trail?${params.toString()}`);
+                        const payload = await response.json();
+                        if (!response.ok || !payload.success) {
+                            throw new Error((payload && payload.error) || `HTTP ${response.status}`);
+                        }
+                        renderReasonTrail(payload);
+                    } catch (error) {
+                        console.error('[logs] failed to load reason trail', error);
+                        logsReasonTrailOutput.innerHTML = '<div class="logs-empty-state">Failed to load reason trail.</div>';
+                    } finally {
+                        logsState.loadingReasonTrail = false;
+                    }
+                }
+
                 function connectLogs() {
                     if (window.__synth_logs_socket && (window.__synth_logs_socket.readyState === WebSocket.OPEN || window.__synth_logs_socket.readyState === WebSocket.CONNECTING)) {
                         return;
@@ -6614,6 +7401,22 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         loadFailureLog();
                     });
                 }
+                if (logsDeadTargetsRefreshBtn) {
+                    logsDeadTargetsRefreshBtn.addEventListener('click', () => {
+                        loadDeadTargets();
+                    });
+                }
+                if (logsReasonTrailRefreshBtn) {
+                    logsReasonTrailRefreshBtn.addEventListener('click', () => {
+                        loadReasonTrail();
+                    });
+                }
+                if (logsReasonTrailSearch) {
+                    logsReasonTrailSearch.addEventListener('input', debounce(() => {
+                        logsState.reasonTrailSearch = logsReasonTrailSearch.value || '';
+                        loadReasonTrail();
+                    }, 350));
+                }
                 if (logsFailuresSearch) {
                     logsFailuresSearch.addEventListener('input', debounce(() => {
                         logsState.failureSearch = logsFailuresSearch.value || '';
@@ -6642,6 +7445,144 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         loadFailureLog();
                     });
                 }
+
+                // ── Archive & Query sub-tab ──
+                const logsArchiveDownloadBtn = document.getElementById('logs-archive-download');
+                const logsArchiveDownloadStatus = document.getElementById('logs-archive-download-status');
+                const logsQueryText = document.getElementById('logs-query-text');
+                const logsQueryRegex = document.getElementById('logs-query-regex');
+                const logsQueryStems = document.getElementById('logs-query-stems');
+                const logsQueryLevel = document.getElementById('logs-query-level');
+                const logsQueryLimit = document.getElementById('logs-query-limit');
+                const logsQueryRunBtn = document.getElementById('logs-query-run');
+                const logsQueryMeta = document.getElementById('logs-query-meta');
+                const logsQueryOutput = document.getElementById('logs-query-output');
+
+                async function downloadBlobFromUrl(url, statusEl, opts) {
+                    const options = opts || {};
+                    if (statusEl) statusEl.textContent = options.pending || 'Preparing download…';
+                    try {
+                        const response = await fetch(url, { method: options.method || 'GET', headers: options.headers, body: options.body });
+                        if (!response.ok) {
+                            let detail = `HTTP ${response.status}`;
+                            try {
+                                const payload = await response.json();
+                                detail = payload.detail || payload.error || detail;
+                            } catch (e) { /* not json */ }
+                            throw new Error(detail);
+                        }
+                        const disposition = response.headers.get('content-disposition') || '';
+                        let filename = options.fallbackName || 'download';
+                        const match = disposition.match(/filename="?([^"]+)"?/i);
+                        if (match && match[1]) filename = match[1];
+                        const blob = await response.blob();
+                        const objectUrl = window.URL.createObjectURL(blob);
+                        const anchor = document.createElement('a');
+                        anchor.href = objectUrl;
+                        anchor.download = filename;
+                        document.body.appendChild(anchor);
+                        anchor.click();
+                        document.body.removeChild(anchor);
+                        window.setTimeout(() => window.URL.revokeObjectURL(objectUrl), 4000);
+                        if (statusEl) statusEl.textContent = `Downloaded ${filename}`;
+                        return filename;
+                    } catch (error) {
+                        const message = error && error.message ? error.message : 'Download failed';
+                        if (statusEl) statusEl.textContent = `Download failed: ${message}`;
+                        try { if (window.showToast) window.showToast(`Download failed: ${message}`, true); } catch (e) { /* ignore */ }
+                        throw error;
+                    }
+                }
+
+                if (logsArchiveDownloadBtn) {
+                    logsArchiveDownloadBtn.addEventListener('click', async () => {
+                        logsArchiveDownloadBtn.disabled = true;
+                        try {
+                            await downloadBlobFromUrl('/api/logs/download', logsArchiveDownloadStatus, {
+                                pending: 'Building log archive…',
+                                fallbackName: 'synth-logs.zip',
+                            });
+                        } catch (e) { /* status already set */ }
+                        finally { logsArchiveDownloadBtn.disabled = false; }
+                    });
+                }
+
+                function renderLogQueryResults(payload) {
+                    if (!logsQueryOutput) return;
+                    const hits = Array.isArray(payload.hits) ? payload.hits : [];
+                    if (!hits.length) {
+                        logsQueryOutput.innerHTML = '<div class="logs-empty-state">No matching log lines.</div>';
+                        return;
+                    }
+                    const frag = document.createDocumentFragment();
+                    hits.forEach((hit) => {
+                        const level = String(hit.level || 'other').toLowerCase();
+                        const row = document.createElement('div');
+                        row.className = `logs-query-hit level-${level}`;
+                        const stem = document.createElement('span');
+                        stem.className = 'lqh-stem';
+                        stem.textContent = hit.stem || '';
+                        const lvl = document.createElement('span');
+                        lvl.className = 'lqh-level';
+                        lvl.textContent = hit.level || '';
+                        const text = document.createElement('span');
+                        text.className = 'lqh-text';
+                        text.textContent = hit.line || '';
+                        row.appendChild(stem);
+                        row.appendChild(lvl);
+                        row.appendChild(text);
+                        frag.appendChild(row);
+                    });
+                    logsQueryOutput.innerHTML = '';
+                    logsQueryOutput.appendChild(frag);
+                }
+
+                async function runLogsQuery() {
+                    if (!logsQueryOutput) return;
+                    const params = new URLSearchParams();
+                    const q = (logsQueryText && logsQueryText.value || '').trim();
+                    if (q) params.set('q', q);
+                    if (logsQueryRegex && logsQueryRegex.checked) params.set('regex', 'true');
+                    const stems = (logsQueryStems && logsQueryStems.value || '').trim();
+                    if (stems) params.set('stems', stems);
+                    const level = logsQueryLevel && logsQueryLevel.value || '';
+                    if (level) params.set('level', level);
+                    let limit = parseInt(logsQueryLimit && logsQueryLimit.value, 10);
+                    if (!Number.isFinite(limit) || limit < 1) limit = 500;
+                    if (limit > 5000) limit = 5000;
+                    params.set('limit', String(limit));
+                    if (logsQueryMeta) logsQueryMeta.textContent = 'Searching…';
+                    logsQueryOutput.innerHTML = '<div class="logs-empty-state">Searching…</div>';
+                    try {
+                        const response = await fetch(`/api/logs/query?${params.toString()}`);
+                        const payload = await response.json().catch(() => ({}));
+                        if (!response.ok || !payload.success) {
+                            throw new Error(payload.detail || payload.error || `HTTP ${response.status}`);
+                        }
+                        renderLogQueryResults(payload);
+                        if (logsQueryMeta) {
+                            const truncNote = payload.truncated ? ' (truncated — refine query or raise limit)' : '';
+                            logsQueryMeta.textContent = `${payload.count || 0} matches${truncNote}`;
+                        }
+                    } catch (error) {
+                        const message = error && error.message ? error.message : 'Query failed';
+                        if (logsQueryMeta) logsQueryMeta.textContent = `Query failed: ${message}`;
+                        logsQueryOutput.innerHTML = `<div class="logs-empty-state">Query failed: ${safeEscapeHtml(message)}</div>`;
+                    }
+                }
+
+                if (logsQueryRunBtn) {
+                    logsQueryRunBtn.addEventListener('click', runLogsQuery);
+                }
+                if (logsQueryText) {
+                    logsQueryText.addEventListener('keydown', (event) => {
+                        if (event.key === 'Enter') {
+                            event.preventDefault();
+                            runLogsQuery();
+                        }
+                    });
+                }
+
                 switchLogsSubtab(logsState.currentSubtab || 'live');
                 window.__synth_logs_initialized = true;
             }

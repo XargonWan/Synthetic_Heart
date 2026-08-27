@@ -73,6 +73,7 @@ _[Bb]uild
 docs/plugins/generated/
 .gitnexus
 .gitnexus-home
+.tools/
 opencode.json
 .claude
 .clinerules
@@ -93,4 +94,30 @@ installer/vendor/*.msi
 frontend/node_modules/
 frontend/dist/
 frontend/.pnpm-store
+
+# Minecraft Vessel bridge — the ``mineflayer/`` package folder is committed
+# source (its package.json ships with the plugin), but the installed Node
+# modules and runtime artefacts (state, logs) are not. node_modules/ is already
+# covered globally above; ignore the per-run state/log artefacts here.
+plugins/rift_vessel/minecraft/mineflayer/bridge.json
+plugins/rift_vessel/minecraft/mineflayer/bridge.log
+plugins/rift_vessel/minecraft/mineflayer/package-lock.json
+
+# Native Windows SearXNG runtime — provisioned by scripts/searxng_windows.ps1
+# (source clone, venv, logs, pid). The settings live in the committed
+# container/searxng/settings.yml, so only the runtime artefacts are ignored.
+plugins/web_search/searxng-runtime/
+
+# Rift Vessel Minecraft knowledge-base cache — LLM-summarised wiki pages the
+# vessel fetches while playing (plugins/rift_vessel/knowledge_client.py writes
+# one JSON per fact slug). Generated at runtime and rebuilt on demand; the
+# client creates the directory itself, so fresh clones start empty.
+plugins/rift_vessel/minecraft/wiki/cache/
 memories/session
+
+# Kilo agent config (per-workspace, not shared)
+.kilo/
+# Local dev artifacts
+frontend/scripts/voice-settings.png
+# Runtime-generated TTS audio
+res/synth_webui/static/audio/tts/

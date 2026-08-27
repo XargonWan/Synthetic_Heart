@@ -1,0 +1,6 @@
+- Each engine module declares its plugin class via a module-level `PLUGIN_CLASS` (and optionally `ENGINE_CLASS` / `VOX_ENGINE_CLASS`) attribute so the base discoverer can find it automatically.
+- Engine modules expose human-readable labels through a module-level `ENGINE_LABEL` string, falling back to the class's `engine_label` attribute when absent.
+- Discovery functions use `pkgutil.iter_modules` over the module's own directory, skipping packages, private modules (underscore prefix), and `_base` suffix modules before importing.
+- Import of heavy third-party SDKs (e.g. `google.genai`, `telegram.constants`) is deferred inside functions with try/except ImportError blocks so the engine remains loadable even when optional dependencies are missing.
+- All logging goes through `core.logging_utils` helpers (`log_debug`, `log_info`, `log_warning`, `log_error`) rather than the stdlib `logging` module directly.
+- Configuration values are read through `config_registry.get_value(...)` with explicit `label`, `description`, `value_type`, `group`, and `component` arguments so they appear in the UI configuration system.

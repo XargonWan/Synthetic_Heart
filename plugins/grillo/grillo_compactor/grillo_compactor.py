@@ -207,6 +207,27 @@ class GrilloCompactorPlugin:
         """
         return {}
 
+    def get_metadata(self) -> dict:
+        """Declare the on-demand "Run Now" button for the WebUI Plugins tab.
+
+        Opts the compactor into the runnable quartet so a maintainer can trigger
+        a compaction cycle manually. The button posts to ``run_component`` which
+        dispatches to ``run_action("compact_now", ...)``.
+        """
+        return {
+            "name": "grillo.grillo_compactor",
+            "display_name": self.display_name,
+            "description": (
+                "Group old memories by tag and synthesize a compacted memory. "
+                "Runs nightly on a schedule; can also be triggered manually."
+            ),
+            "category": "Grillo",
+            "runnable": True,
+            "run_action": "compact_now",
+            "run_label": "Run compaction",
+            "run_title": "Run one memory-compaction cycle now",
+        }
+
     async def start(self):
         if not self.enabled:
             log_info(

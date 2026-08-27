@@ -27,9 +27,21 @@
               <span class="icon">💬</span>
               <span>Chat</span>
             </button>
+            <button class="sub-nav-btn" data-subtab="vessel" role="tab" aria-selected="false">
+              <span class="icon">🌀</span>
+              <span>Vessel</span>
+            </button>
+            <button class="sub-nav-btn" data-subtab="goals" role="tab" aria-selected="false">
+              <span class="icon">🎯</span>
+              <span>Goals</span>
+            </button>
             <button class="sub-nav-btn" data-subtab="agent" role="tab" aria-selected="false">
               <span class="icon">🤖</span>
               <span>Agent</span>
+            </button>
+            <button class="sub-nav-btn" data-subtab="queue" role="tab" aria-selected="false">
+              <span class="icon">📥</span>
+              <span>Queue</span>
             </button>
           </nav>
         </header>
@@ -157,6 +169,48 @@
         <div id="history-chat-pagination" class="pagination-controls"></div>
       </div>
 
+      <!-- Vessel Sub-Tab -->
+      <div class="sub-tab-panel" id="subtab-vessel" data-subtab="vessel">
+        <div class="section-controls">
+          <input type="text" id="history-vessel-search" placeholder="Search vessel activity..." class="search-input" />
+          <select id="history-vessel-environment" class="filter-select">
+            <option value="">All Environments</option>
+          </select>
+          <select id="history-vessel-sort" class="sort-select">
+            <option value="desc">Newest First</option>
+            <option value="asc">Oldest First</option>
+          </select>
+        </div>
+        <div id="history-vessel-content" class="history-container">
+          <div class="loading-state">
+            <div class="loading-spinner"></div>
+            <p>Loading vessel activity...</p>
+          </div>
+        </div>
+        <div id="history-vessel-pagination" class="pagination-controls"></div>
+      </div>
+
+      <!-- Goals Sub-Tab -->
+      <div class="sub-tab-panel" id="subtab-goals" data-subtab="goals">
+        <div class="section-controls">
+          <input type="text" id="history-goals-search" placeholder="Search goals..." class="search-input" />
+          <select id="history-goals-status" class="filter-select">
+            <option value="">All Statuses</option>
+          </select>
+          <select id="history-goals-scope" class="filter-select">
+            <option value="">All Scopes</option>
+          </select>
+          <button type="button" id="history-goals-refresh" class="filter-refresh-btn" title="Reload goals">🔄</button>
+          <button type="button" id="history-goals-clear-all" class="filter-refresh-btn" style="color: var(--danger, #e05a5a);" title="Delete every goal for a clean attempt">🗑️ Clear all</button>
+        </div>
+        <div id="history-goals-content" class="history-container">
+          <div class="loading-state">
+            <div class="loading-spinner"></div>
+            <p>Loading goals...</p>
+          </div>
+        </div>
+      </div>
+
       <!-- Agent Sub-Tab -->
       <div class="sub-tab-panel" id="subtab-agent" data-subtab="agent">
         <div class="section-controls">
@@ -181,6 +235,31 @@
               <textarea id="agent-msg-input" class="agent-msg-input" rows="1" placeholder="Message the agent… (Enter to send, Shift+Enter for newline)"></textarea>
               <button type="button" id="agent-send-btn" class="agent-send-btn" title="Send">Send</button>
             </form>
+          </div>
+        </div>
+      </div>
+
+      <!-- Queue Sub-Tab -->
+      <div class="sub-tab-panel" id="subtab-queue" data-subtab="queue">
+        <div class="section-controls">
+          <input type="text" id="history-queue-search" placeholder="Search queue..." class="search-input" />
+          <select id="history-queue-priority" class="filter-select">
+            <option value="">All Priorities</option>
+            <option value="11">Emergency</option>
+            <option value="10">Urgent</option>
+            <option value="9">Reflection</option>
+            <option value="8">High</option>
+            <option value="7">Trainer</option>
+            <option value="6">General</option>
+            <option value="4">Ambient</option>
+            <option value="3">Low</option>
+          </select>
+          <button type="button" id="history-queue-refresh" class="filter-refresh-btn" title="Reload queue">🔄</button>
+        </div>
+        <div id="history-queue-content" class="history-container">
+          <div class="loading-state">
+            <div class="loading-spinner"></div>
+            <p>Loading queue...</p>
           </div>
         </div>
       </div>
@@ -318,6 +397,23 @@
         min-width: 150px;
       }
 
+      .filter-refresh-btn {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        color: var(--text);
+        cursor: pointer;
+        padding: 0.4rem 0.6rem;
+        font-size: 1rem;
+        line-height: 1;
+        transition: background 0.15s ease, border-color 0.15s ease;
+      }
+
+      .filter-refresh-btn:hover {
+        background: rgba(255, 255, 255, 0.06);
+        border-color: var(--accent);
+      }
+
       .control-label {
         display: flex;
         align-items: center;
@@ -423,7 +519,7 @@
         padding: 0.2rem 0.5rem;
         border-radius: 4px;
         background: var(--accent);
-        color: white;
+        color: var(--bg);
         font-size: 0.7rem;
         font-weight: 600;
         text-transform: uppercase;
@@ -463,6 +559,435 @@
 
       .history-entry-detail strong {
         color: var(--text);
+      }
+
+      /* Vessel session block: one card per embodiment session (login->logout),
+         grouping every activity of that session so we don't get an infinite
+         list of single-event blocks. */
+      .vessel-session {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-left: 4px solid var(--accent);
+        border-radius: 12px;
+        padding: 1.25rem 1.5rem;
+        margin-bottom: 1.25rem;
+      }
+
+      .vessel-session-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 0.75rem;
+        margin-bottom: 0.75rem;
+      }
+
+      .vessel-session-title {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 1rem;
+        font-weight: 600;
+        color: var(--text);
+      }
+
+      .vessel-env-icon {
+        width: 22px;
+        height: 22px;
+        object-fit: contain;
+        border-radius: 4px;
+        flex-shrink: 0;
+      }
+
+      .vessel-session-time {
+        font-size: 0.8rem;
+        color: var(--text-soft);
+        font-weight: 500;
+      }
+
+      .vessel-session-activities {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+      }
+
+      .vessel-activity {
+        display: flex;
+        align-items: baseline;
+        gap: 0.6rem;
+        padding: 0.4rem 0.5rem;
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.02);
+      }
+
+      .vessel-activity-time {
+        font-size: 0.72rem;
+        color: var(--text-soft);
+        white-space: nowrap;
+        flex-shrink: 0;
+      }
+
+      .vessel-activity-summary {
+        font-size: 0.9rem;
+        color: var(--text);
+        word-break: break-word;
+        flex: 1;
+      }
+
+      .vessel-activity-empty {
+        font-size: 0.85rem;
+        color: var(--text-soft);
+        font-style: italic;
+        padding: 0.4rem 0.5rem;
+      }
+
+      /* Queue sub-tab: pending message-chain backlog (read-only snapshot). */
+      .queue-summary {
+        font-size: 0.82rem;
+        color: var(--text-soft);
+        margin-bottom: 0.75rem;
+      }
+
+      .queue-item {
+        display: flex;
+        align-items: flex-start;
+        gap: 0.7rem;
+        padding: 0.6rem 0.7rem;
+        margin-bottom: 0.5rem;
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid rgba(255, 255, 255, 0.05);
+      }
+
+      .queue-item-pos {
+        font-size: 0.78rem;
+        color: var(--text-soft);
+        min-width: 1.6rem;
+        text-align: right;
+        flex-shrink: 0;
+        padding-top: 0.1rem;
+      }
+
+      .queue-item-body {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .queue-item-top {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        margin-bottom: 0.25rem;
+      }
+
+      .queue-priority-badge {
+        font-size: 0.7rem;
+        font-weight: 600;
+        padding: 0.1rem 0.45rem;
+        border-radius: 999px;
+        background: var(--accent, #4a90d9);
+        color: #fff;
+        white-space: nowrap;
+      }
+
+      .queue-priority-badge.prio-emergency,
+      .queue-priority-badge.prio-urgent {
+        background: #d9534f;
+      }
+
+      .queue-priority-badge.prio-reflection,
+      .queue-priority-badge.prio-high {
+        background: #e0883a;
+      }
+
+      .queue-priority-badge.prio-ambient,
+      .queue-priority-badge.prio-low {
+        background: #6c757d;
+      }
+
+      .queue-item-source {
+        font-size: 0.82rem;
+        color: var(--text);
+        word-break: break-word;
+      }
+
+      .queue-item-time {
+        font-size: 0.72rem;
+        color: var(--text-soft);
+        white-space: nowrap;
+      }
+
+      .queue-item-flags {
+        font-size: 0.7rem;
+        color: var(--text-soft);
+      }
+
+      .queue-item-preview {
+        font-size: 0.88rem;
+        color: var(--text);
+        word-break: break-word;
+        white-space: pre-wrap;
+      }
+
+      .queue-item-preview.empty {
+        color: var(--text-soft);
+        font-style: italic;
+      }
+
+      /* Goals sub-tab: per-world groups, each a set of goal cards. */
+      .goals-world {
+        margin-bottom: 1.75rem;
+      }
+
+      .goals-world-header {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        margin-bottom: 0.9rem;
+      }
+
+      .goals-world-title {
+        font-size: 1.05rem;
+        font-weight: 600;
+        color: var(--text);
+      }
+
+      .goals-scope-badge {
+        font-size: 0.66rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        font-weight: 700;
+        padding: 0.15rem 0.55rem;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--text-soft);
+        white-space: nowrap;
+      }
+
+      .goals-scope-badge.goals-scope-vessel {
+        background: color-mix(in srgb, var(--accent) 20%, transparent);
+        color: var(--accent);
+      }
+
+      /* Scope shown as its owning plugin's icon (saves space vs. the text
+         badge). Swapped back to the text badge client-side if it fails to
+         load. */
+      .goals-scope-icon {
+        width: 20px;
+        height: 20px;
+        object-fit: contain;
+        border-radius: 4px;
+        flex-shrink: 0;
+      }
+
+      .goals-cards {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+        gap: 1rem;
+      }
+
+      .goal-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-left: 4px solid var(--border);
+        border-radius: 12px;
+        padding: 1.1rem 1.25rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.7rem;
+      }
+
+      .goal-card.goal-active {
+        border-left-color: var(--accent);
+      }
+
+      .goal-card-header {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        flex-wrap: wrap;
+      }
+
+      /* Per-card identity strip (scope badge + world icon + world title),
+         moved out of the group header so each card is self-describing. */
+      .goal-identity {
+        display: flex;
+        align-items: center;
+        gap: 0.45rem;
+        margin-right: auto;
+        min-width: 0;
+      }
+
+      .goal-identity-world {
+        font-size: 0.9rem;
+        font-weight: 600;
+        color: var(--text);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .goal-card-footer {
+        display: flex;
+        align-items: baseline;
+        gap: 0.4rem;
+        margin-top: 0.15rem;
+        padding-top: 0.5rem;
+        border-top: 1px solid var(--border);
+      }
+
+      .goal-updated-label {
+        font-size: 0.68rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--text-soft);
+        font-weight: 600;
+      }
+
+      .goal-status {
+        font-size: 0.68rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        font-weight: 700;
+        padding: 0.15rem 0.5rem;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--text-soft);
+        white-space: nowrap;
+      }
+
+      .goal-status.goal-status-active {
+        background: color-mix(in srgb, var(--accent) 22%, transparent);
+        color: var(--accent);
+      }
+
+      .goal-card-time {
+        font-size: 0.72rem;
+        color: var(--text-soft);
+      }
+
+      .goals-clear-abandoned-btn {
+        margin-left: auto;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--border);
+        color: var(--text-soft);
+        font-size: 0.78rem;
+        padding: 0.3rem 0.7rem;
+        border-radius: 8px;
+        cursor: pointer;
+        white-space: nowrap;
+        transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+      }
+
+      .goals-clear-abandoned-btn:hover {
+        background: color-mix(in srgb, #e5484d 18%, transparent);
+        border-color: #e5484d;
+        color: #e5484d;
+      }
+
+      .goal-delete-btn {
+        background: transparent;
+        border: none;
+        color: var(--text-soft);
+        font-size: 0.85rem;
+        line-height: 1;
+        padding: 0.2rem 0.3rem;
+        border-radius: 6px;
+        cursor: pointer;
+        opacity: 0.6;
+        transition: opacity 0.15s ease, background 0.15s ease;
+      }
+
+      .goal-delete-btn:hover {
+        opacity: 1;
+        background: color-mix(in srgb, #e5484d 18%, transparent);
+      }
+
+      .goal-description {
+        font-size: 0.95rem;
+        font-weight: 600;
+        color: var(--text);
+        word-break: break-word;
+      }
+
+      .goal-note {
+        font-size: 0.85rem;
+        color: var(--text-soft);
+        font-style: italic;
+        word-break: break-word;
+      }
+
+      .goal-steps-details {
+        margin: 0;
+      }
+
+      .goal-steps-summary {
+        cursor: pointer;
+        font-size: 0.8rem;
+        color: var(--text-soft);
+        list-style: none;
+        user-select: none;
+        padding: 0.15rem 0;
+      }
+
+      .goal-steps-summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .goal-steps-summary::before {
+        content: '▸';
+        display: inline-block;
+        margin-right: 0.35rem;
+        transition: transform 0.15s ease;
+      }
+
+      .goal-steps-details[open] > .goal-steps-summary::before {
+        transform: rotate(90deg);
+      }
+
+      .goal-steps {
+        list-style: none;
+        margin: 0.35rem 0 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 0.35rem;
+      }
+
+      .goal-step {
+        display: flex;
+        align-items: baseline;
+        gap: 0.5rem;
+        font-size: 0.85rem;
+        color: var(--text-soft);
+      }
+
+      .goal-step-marker {
+        flex-shrink: 0;
+        width: 1.2rem;
+        text-align: center;
+      }
+
+      .goal-step.goal-step-done .goal-step-text {
+        text-decoration: line-through;
+        opacity: 0.7;
+      }
+
+      .goal-step.goal-step-current {
+        color: var(--text);
+        font-weight: 600;
+      }
+
+      .goal-step-text {
+        word-break: break-word;
+      }
+
+      .goal-no-steps {
+        font-size: 0.8rem;
+        color: var(--text-soft);
+        font-style: italic;
       }
 
       /* Diary day-entry card */

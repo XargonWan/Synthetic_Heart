@@ -104,7 +104,9 @@ async def test_run_agentic_turn_completed(monkeypatch):
         goal="read the file", max_iterations=5, timeout_seconds=30
     )
     assert out["stop_reason"] == "completed"
-    assert out["final_text"] == "All done, file read."
+    # The completion summary is structurally prefixed so the saved "final
+    # result" context reads as finished (Langfuse f1684175 misread).
+    assert out["final_text"] == "Task complete: All done, file read."
     assert out["iterations"] >= 2
     # Observation history must include the tool result.
     tool_obs = [o for o in out["observations"] if o.get("role") == "tool_results"]
@@ -141,7 +143,7 @@ async def test_run_agentic_turn_completed_tool_key(monkeypatch):
         goal="tell Jay", max_iterations=5, timeout_seconds=30
     )
     assert out["stop_reason"] == "completed"
-    assert out["final_text"] == "Message delivered to Jay."
+    assert out["final_text"] == "Task complete: Message delivered to Jay."
 
 
 @pytest.mark.asyncio
@@ -172,7 +174,7 @@ async def test_run_agentic_turn_completed_params_key(monkeypatch):
         goal="finish", max_iterations=5, timeout_seconds=30
     )
     assert out["stop_reason"] == "completed"
-    assert out["final_text"] == "All done via params."
+    assert out["final_text"] == "Task complete: All done via params."
 
 
 @pytest.mark.asyncio
@@ -349,7 +351,7 @@ async def test_run_agentic_turn_intent_text_does_not_stop(monkeypatch):
     # It must NOT have stopped on the intent-only iteration 2.
     assert out["stop_reason"] == "completed"
     assert out["iterations"] >= 3
-    assert out["final_text"] == "Done."
+    assert out["final_text"] == "Task complete: Done."
     # The nudge must have been re-injected after the intent-only iteration.
     nudge_obs = [
         o
@@ -427,7 +429,7 @@ async def test_run_agentic_turn_message_intent_does_not_stop(monkeypatch):
     # It must NOT have stopped on the message-intent iteration 2.
     assert out["stop_reason"] == "completed"
     assert out["iterations"] >= 3
-    assert out["final_text"] == "Exploration complete."
+    assert out["final_text"] == "Task complete: Exploration complete."
     # A nudge must have been re-injected after the intent-only message.
     nudge_obs = [
         o
@@ -576,13 +578,21 @@ async def test_find_resumable_task_for_interface_hit(monkeypatch):
     must resume THAT task, not spawn a new one. The lookup is purely by
     interface_path — no keyword/language detection.
     """
+    from datetime import datetime, timezone
+
     iterations = json.dumps(
         [
             {"iteration": 1, "role": "tool_results", "result": [{"tool": "x"}]},
             {"iteration": 2, "role": "assistant", "result": "progress"},
         ]
     )
-    row = (42, "logfare-claude", json.dumps({"goal": "finish the report"}), iterations)
+    row = (
+        42,
+        "logfare-claude",
+        json.dumps({"goal": "finish the report"}),
+        iterations,
+        datetime.now(timezone.utc),
+    )
 
     manager = AgentLoopManager()
 
@@ -598,6 +608,7 @@ async def test_find_resumable_task_for_interface_hit(monkeypatch):
     assert out["engine"] == "logfare-claude"
     assert out["prior_observations"][0]["content"] == [{"tool": "x"}]
     assert out["prior_observations"][1]["content"] == "progress"
+    assert out["updated_at"] is not None
 
 
 @pytest.mark.asyncio
@@ -789,22 +800,203 @@ def test_router_disabled_returns_fast(monkeypatch):
     assert lane == "fast"
 
 
-def test_router_context_agent_needed_forces_agent(monkeypatch):
-    """The pre-LLM recon flag ``agent_needed`` deterministically forces AGENT.
+def test_router_grillo_beat_stays_fast(monkeypatch):
+    """G.R.I.L.L.O. autonomous beats must never enter the Agent Lane — one
+    reflection beat must not become a 30-iteration tool-calling turn
+    (Langfuse 5fe657db)."""
+    monkeypatch.setattr(
+        "core.agent_router.config_registry",
+        type("C", (), {"get_var": lambda *a, **k: True})(),
+    )
+    lane = classify(
+        [{"type": "get_recent_chats", "payload": {"limit": "10"}}],
+        context={
+            "interface": "grillo",
+            "interface_path": "grillo/-1",
+            "agent_needed": True,
+        },
+    )
+    assert lane == "fast"
 
-    This is the authoritative routing signal: even a batch that would otherwise
-    look like a plain message must go to the Agent Lane when the recon judged
-    the user's request as agentic work.
+
+def test_router_agent_needed_escalates_under_emission(monkeypatch):
+    """agent_needed is authoritative even when the main model only emitted a
+    conversational promise (message + no tool call).
+
+    Regression guard (Langfuse 0ee26438): a genuine request ("read this pdf
+    into a voice note") was judged agent_needed=true, but the model replied
+    "I'll have the voice note sent over in a moment!" without emitting any
+    tool call. The turn must STILL escalate so the Agent Lane does the actual
+    work from the user's request text — the loop handles over-routing safely
+    (message-only first iteration is delivered once and ends cleanly).
     """
     monkeypatch.setattr(
         "core.agent_router.config_registry",
         type("C", (), {"get_var": lambda *a, **k: True})(),
     )
     lane = classify(
-        [{"type": "message", "payload": {"text": "hi"}}],
+        [{"type": "message", "payload": {"text": "I'll do it!"}}],
         context={"agent_needed": True},
     )
     assert lane == "agent"
+
+
+def test_router_agent_needed_escalates_bookkeeping_only(monkeypatch):
+    """agent_needed escalates when the model did NOT produce a user-facing
+    reply (bookkeeping-only batch): the Agent Lane re-prompts with the user's
+    actual request and real tools.
+    """
+    monkeypatch.setattr(
+        "core.agent_router.config_registry",
+        type("C", (), {"get_var": lambda *a, **k: True})(),
+    )
+    lane = classify(
+        [
+            {"type": "create_personal_diary_entry", "payload": {"content": "x"}},
+            {"type": "update_emotion_state", "payload": {"emotions": {"joy": 1.0}}},
+        ],
+        context={"agent_needed": True},
+    )
+    assert lane == "agent"
+
+
+def test_router_agent_needed_escalates_empty_batch(monkeypatch):
+    """agent_needed escalates an empty batch: the model emitted nothing, so
+    the Agent Lane works from the user's request text."""
+    monkeypatch.setattr(
+        "core.agent_router.config_registry",
+        type("C", (), {"get_var": lambda *a, **k: True})(),
+    )
+    lane = classify([], context={"agent_needed": True})
+    assert lane == "agent"
+
+
+def test_seed_calls_extracts_bookkeeping_for_under_emission():
+    """Non-message, non-tool actions are seeded for the loop; messages are not."""
+    from core.agent_router import _seed_calls_for_under_emission
+
+    actions = [
+        {"type": "update_emotion_state", "payload": {"emotions": {"joy": 1.0}}},
+        {"type": "message_telegram_bot", "payload": {"text": "I'll do it!"}},
+        {"type": "create_personal_diary_entry", "payload": {"content": "x"}},
+    ]
+    seeds = _seed_calls_for_under_emission(actions)
+    assert [s["name"] for s in seeds] == [
+        "update_emotion_state",
+        "create_personal_diary_entry",
+    ]
+    assert seeds[0]["arguments"] == {"emotions": {"joy": 1.0}}
+
+
+def test_seed_calls_empty_for_tool_batch():
+    """A batch containing a real tool call must never be seeded (double
+    execution of side effects)."""
+    from core.agent_router import _seed_calls_for_under_emission
+
+    actions = [
+        {"type": "message_telegram_bot", "payload": {"text": "on it"}},
+        {"type": "mcp_fs_read", "payload": {"path": "/x"}},
+    ]
+    assert _seed_calls_for_under_emission(actions) == []
+
+
+def test_seed_calls_empty_for_message_only():
+    from core.agent_router import _seed_calls_for_under_emission
+
+    assert (
+        _seed_calls_for_under_emission([{"type": "message", "payload": {"text": "hi"}}])
+        == []
+    )
+    assert _seed_calls_for_under_emission([]) == []
+
+
+def test_derive_goal_prefers_user_request_over_raw_llm_json():
+    """The goal must be the user's request, never the model's own JSON reply
+    (message_chain stores the raw LLM response into context['goal'] /
+    context['original_text'] on LLM-origin turns)."""
+    from core.agent_router import _derive_goal
+
+    context = {
+        "goal": '{"actions": [{"type": "message_telegram_bot", "payload": {"text": "hi"}}]}',
+        "original_text": '{"actions": [{"type": "message_telegram_bot", "payload": {"text": "hi"}}]}',
+        "original_user_message": "read me this pdf into a voice note",
+    }
+    assert _derive_goal([], context) == "read me this pdf into a voice note"
+
+
+def test_derive_goal_skips_llm_response_json_when_no_user_text():
+    """Without user text, a JSON actions object in goal/original_text is
+    treated as model output pollution and skipped — the fallback must not
+    re-run the model's own reply."""
+    from core.agent_router import _derive_goal
+
+    context = {
+        "goal": '{"actions": [{"type": "message_telegram_bot", "payload": {"text": "hi"}}]}',
+        "original_text": '{"actions": [{"type": "message_telegram_bot", "payload": {"text": "hi"}}]}',
+    }
+    goal = _derive_goal(
+        [{"type": "message_telegram_bot", "payload": {"text": "hi"}}],
+        context,
+    )
+    assert goal == "Complete the user's request using the available tools."
+
+
+def test_derive_goal_tool_batch_fallback_describes_actions():
+    """When no user text is available but the batch contains a real tool call,
+    the fallback describes the planned actions so the loop knows what to do."""
+    from core.agent_router import _derive_goal
+
+    goal = _derive_goal(
+        [{"type": "mcp_fs_read", "payload": {"path": "/x"}}],
+        {},
+    )
+    assert goal.startswith("Execute: ")
+    assert "mcp_fs_read" in goal
+
+
+def test_looks_like_llm_response_json():
+    from core.agent_router import _looks_like_llm_response_json
+
+    assert _looks_like_llm_response_json('{"actions": []}') is True
+    assert _looks_like_llm_response_json('{"tool_calls": []}') is True
+    assert (
+        _looks_like_llm_response_json('{"type": "mcp_fs_read", "payload": {}}') is True
+    )
+    assert _looks_like_llm_response_json("can you read me this pdf?") is False
+    assert _looks_like_llm_response_json('{"not_an_action": 1}') is False
+
+
+def test_router_vessel_embodiment_stays_fast_even_when_agent_needed(monkeypatch):
+    """A Rift Vessel embodiment turn must ALWAYS stay on the Fast Lane.
+
+    Regression guard (AGENTS.md §5c): the will-beat "moment of will" prompt can
+    be flagged ``agent_needed`` by the recon plugin, which previously misrouted
+    the turn to the Agent Lane and left the emitted ``vessel_*`` actions
+    unexecuted (0 processed) — so autonomous goal-authoring never persisted and
+    the body froze. The vessel gate must win over ``agent_needed``. Detection is
+    purely structural (routing metadata), never message text.
+    """
+    monkeypatch.setattr(
+        "core.agent_router.config_registry",
+        type("C", (), {"get_var": lambda *a, **k: True})(),
+    )
+    # Even with agent_needed set AND a namespaced vessel action, embodiment
+    # turns stay Fast Lane. Any of interface / interface_path / chat_id /
+    # vessel_focus is a sufficient structural signal.
+    for ctx in (
+        {"agent_needed": True, "interface": "vessel"},
+        {"agent_needed": True, "interface_path": "vessel/minecraft"},
+        {"agent_needed": True, "chat_id": "vessel/minecraft"},
+        {"agent_needed": True, "vessel_focus": True},
+    ):
+        lane = classify(
+            [
+                {"type": "vessel_minecraft_set_goal", "payload": {"description": "go"}},
+                {"type": "create_personal_diary_entry", "payload": {"content": "x"}},
+            ],
+            context=ctx,
+        )
+        assert lane == "fast", ctx
 
 
 def test_router_mixed_non_tool_stays_fast(monkeypatch):
@@ -927,3 +1119,390 @@ async def test_call_engine_direct_agent_mode_uses_role_separated_messages(monkey
         {"role": "system", "content": "AGENTIC SYS"},
         {"role": "user", "content": "GOAL: do the thing"},
     ]
+
+
+def test_resume_allowed_rejects_poisoned_goal():
+    """A parked task whose stored goal is a self-referential LLM JSON
+    artifact must never be auto-resumed (Langfuse 7b31c7c8 chain)."""
+    from core.agent_router import _resume_allowed
+
+    allowed, reason = _resume_allowed(
+        '{"actions": [{"type": "message_telegram_bot", "payload": {"text": "hi"}}]}',
+        {},
+    )
+    assert allowed is False
+    assert reason == "poisoned_goal"
+
+
+def test_resume_allowed_rejects_fresh_attachments():
+    """A turn carrying new uploaded attachments is a fresh request, not a
+    continuation of the parked task."""
+    from core.agent_router import _resume_allowed
+
+    allowed, reason = _resume_allowed(
+        "read the pdf into a voice note",
+        {"attachment_paths": ["D:\\app\\a.pdf"]},
+    )
+    assert allowed is False
+    assert reason == "fresh_attachments"
+
+
+def test_resume_allowed_accepts_continuation():
+    from core.agent_router import _resume_allowed
+
+    allowed, reason = _resume_allowed(
+        "read the pdf into a voice note",
+        {},
+    )
+    assert allowed is True
+    assert reason == ""
+
+
+def test_resume_age_allowed_rejects_stale_task():
+    """A parked task older than the freshness window must never auto-resume
+    (Langfuse 00:49 chain: a 3.5h-old task absorbed a chat message)."""
+    from datetime import datetime, timedelta, timezone
+
+    from core.agent_router import _resume_age_allowed
+
+    now = datetime.now(timezone.utc)
+    assert _resume_age_allowed(now - timedelta(seconds=3600), 900, now=now) is False
+    assert _resume_age_allowed(now - timedelta(seconds=600), 900, now=now) is True
+    assert _resume_age_allowed(now - timedelta(seconds=10), 900, now=now) is True
+
+
+def test_resume_age_allowed_missing_timestamp_degrades_to_allow():
+    """A missing/unparseable timestamp preserves the pre-existing behavior."""
+    from core.agent_router import _resume_age_allowed
+
+    assert _resume_age_allowed(None, 900) is True
+    assert _resume_age_allowed("garbage", 900) is True
+
+
+@pytest.mark.asyncio
+async def test_agent_engine_call_passes_native_tools_kwargs(monkeypatch):
+    """The agent-route engine call enables thinking and passes native tool
+    manifests to external bridges, so capable engines (Venice deepseek)
+    return structured tool_calls instead of ad-hoc text protocols."""
+    from core import agent_core as agent_core_module
+
+    captured = {}
+
+    class FakeBridge:
+        _adapter = object()
+
+        async def generate_response(self, messages, **kwargs):
+            captured.update(kwargs)
+            return "bridge reply"
+
+    fake_engine = FakeBridge()
+
+    class FakeRegistry:
+        def get_engine(self, name):
+            return fake_engine
+
+        def load_engine(self, name):
+            return fake_engine
+
+    monkeypatch.setattr(
+        "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
+    )
+    monkeypatch.setattr(
+        "core.config.get_active_cortex_engine",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should use pinned")),
+    )
+    monkeypatch.setattr(
+        agent_core_module.config_registry,
+        "get_var",
+        lambda key, default=None: {
+            "AGENT_ENABLE_THINKING": True,
+            "AGENT_NATIVE_TOOLS": True,
+            "AGENT_PARALLEL_TOOL_CALLS": True,
+        }.get(key, default),
+    )
+
+    prompt = {
+        "input": {"payload": {"text": "GOAL: do the thing", "system": "AGENTIC SYS"}},
+        "system_message": {"type": "agent_turn", "goal": "do the thing"},
+        "agent_mode": True,
+    }
+
+    manager = agent_core_module.AgentLoopManager()
+    out = await manager._call_engine_direct(prompt, "pinned-engine")
+
+    assert out == "bridge reply"
+    assert captured.get("enable_thinking") is True
+    assert captured.get("tool_choice") == "auto"
+    assert captured.get("parallel_tool_calls") is True
+    tools = captured.get("tools") or []
+    assert tools
+    assert all(t["type"] == "function" for t in tools)
+    names = [t["function"]["name"] for t in tools]
+    assert "attempt_completion" in names
+    completion = [t for t in tools if t["function"]["name"] == "attempt_completion"]
+    assert completion
+    assert completion[0]["function"]["parameters"]["required"] == ["summary"]
+
+
+@pytest.mark.asyncio
+async def test_agent_engine_call_plain_for_plugin_engines(monkeypatch):
+    """Engines without the external-bridge marker get the plain positional
+    generate_response call — no kwargs that would TypeError."""
+    from core import agent_core as agent_core_module
+
+    captured = {}
+
+    class FakePluginEngine:
+        async def generate_response(self, messages):
+            captured["called_plain"] = True
+            return "plain reply"
+
+    fake_engine = FakePluginEngine()
+
+    class FakeRegistry:
+        def get_engine(self, name):
+            return fake_engine
+
+        def load_engine(self, name):
+            return fake_engine
+
+    monkeypatch.setattr(
+        "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
+    )
+    monkeypatch.setattr(
+        "core.config.get_active_cortex_engine",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should use pinned")),
+    )
+    monkeypatch.setattr(
+        agent_core_module.config_registry,
+        "get_var",
+        lambda key, default=None: True,
+    )
+
+    prompt = {
+        "input": {"payload": {"text": "GOAL: do the thing", "system": "AGENTIC SYS"}},
+        "system_message": {"type": "agent_turn", "goal": "do the thing"},
+        "agent_mode": True,
+    }
+
+    manager = agent_core_module.AgentLoopManager()
+    out = await manager._call_engine_direct(prompt, "pinned-engine")
+
+    assert out == "plain reply"
+    assert captured.get("called_plain") is True
+
+
+def test_build_openai_tool_manifests_shape():
+    """Manifests are OpenAI function schemas including the completion
+    sentinel with a required summary."""
+    from core import agent_core as agent_core_module
+
+    manifests = agent_core_module._build_openai_tool_manifests()
+    assert isinstance(manifests, list) and manifests
+    completion = [m for m in manifests if m["function"]["name"] == "attempt_completion"]
+    assert completion
+    assert completion[0]["function"]["parameters"]["required"] == ["summary"]
+    assert all(m["type"] == "function" for m in manifests)
+
+
+def test_system_only_action_names_contains_tts_speak():
+    """The avatar-only tts_speak (voice = send_as_voice on message_*) is
+    excluded from the agent tool set."""
+    from core import agent_core as agent_core_module
+
+    excluded = agent_core_module._system_only_action_names()
+    assert "tts_speak" in excluded
+
+
+@pytest.mark.asyncio
+async def test_agent_engine_call_skips_kwargs_when_native_tools_disabled(monkeypatch):
+    """native_tools=False (pause composer) makes a plain positional call with
+    no thinking/tools kwargs — the engine writes prose, not JSON actions."""
+    from core import agent_core as agent_core_module
+
+    captured = {}
+
+    class FakeBridge:
+        _adapter = object()
+
+        async def generate_response(self, messages, **kwargs):
+            captured.update(kwargs)
+            return "prose reply"
+
+    fake_engine = FakeBridge()
+
+    class FakeRegistry:
+        def get_engine(self, name):
+            return fake_engine
+
+        def load_engine(self, name):
+            return fake_engine
+
+    monkeypatch.setattr(
+        "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
+    )
+    monkeypatch.setattr(
+        "core.config.get_active_cortex_engine",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should use pinned")),
+    )
+    monkeypatch.setattr(
+        agent_core_module.config_registry,
+        "get_var",
+        lambda key, default=None: True,
+    )
+
+    prompt = {
+        "input": {"payload": {"text": "GOAL: do the thing", "system": "AGENTIC SYS"}},
+        "system_message": {"type": "agent_turn", "goal": "do the thing"},
+        "agent_mode": True,
+    }
+
+    manager = agent_core_module.AgentLoopManager()
+    out = await manager._call_engine_direct(prompt, "pinned-engine", native_tools=False)
+
+    assert out == "prose reply"
+    assert captured == {}
+
+
+@pytest.mark.asyncio
+async def test_run_agentic_turn_dedupes_identical_tool_calls(monkeypatch):
+    """An identical (name, args) tool call on a later iteration must NOT re-execute.
+
+    Regression for the observed live loop where the same ``agent_read_file``
+    call was re-issued 7 times (the engine thought the file content was
+    truncated). The first result is cached and returned with a structural note.
+    """
+
+    calls = []
+
+    async def fake_handle(bot, message, context_memory_or_prompt):
+        calls.append(context_memory_or_prompt)
+        if len(calls) == 1:
+            return json.dumps(
+                {"actions": [{"type": "mcp_fs_read", "payload": {"path": "/x"}}]}
+            )
+        if len(calls) == 2:
+            # Same call again — must be deduped, not re-executed.
+            return json.dumps(
+                {"actions": [{"type": "mcp_fs_read", "payload": {"path": "/x"}}]}
+            )
+        return json.dumps(
+            {
+                "actions": [
+                    {
+                        "type": "attempt_completion",
+                        "payload": {"summary": "Read it."},
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr("core.plugin_instance.handle_incoming_message", fake_handle)
+
+    executed: list = []
+
+    async def fake_execute(name, arguments, context=None, original_message=None):
+        executed.append((name, arguments))
+        return {
+            "ok": True,
+            "tool": name,
+            "source": "mcp:fs",
+            "result": "file contents",
+            "error": None,
+        }
+
+    monkeypatch.setattr(agent_tool_executor, "execute", fake_execute)
+
+    manager = AgentLoopManager()
+    out = await manager.run_agentic_turn(
+        goal="read the file", max_iterations=5, timeout_seconds=30
+    )
+    assert out["stop_reason"] == "completed"
+    # Only one real execution of the identical call.
+    assert executed == [("mcp_fs_read", {"path": "/x"})]
+    # The deduped repeat surfaces a structural note to the model.
+    notes = [
+        r.get("note")
+        for o in out["observations"]
+        if o.get("role") == "tool_results"
+        for r in (o.get("content") or [])
+        if isinstance(r, dict)
+    ]
+    assert any("already executed" in str(n) for n in notes)
+
+
+@pytest.mark.asyncio
+async def test_run_agentic_turn_ends_after_two_message_only_iterations(monkeypatch):
+    """Two consecutive message-only iterations end the turn with the reply.
+
+    Regression for the observed live run where the agent delivered an answer,
+    was nudged to keep working, then re-issued the same file read 6 more times
+    and sent a second duplicate reply. A second consecutive message-only
+    iteration means the loop engine has no further tool intent.
+    """
+
+    calls = []
+
+    async def fake_handle(bot, message, context_memory_or_prompt):
+        calls.append(1)
+        # Iteration 1 does real tool work (keeps the loop past the iteration-1
+        # conversational-reply short-circuit), then the model switches to
+        # message-only iterations — the observed live failure shape.
+        if len(calls) == 1:
+            return json.dumps(
+                {"actions": [{"type": "mcp_fs_read", "payload": {"path": "/x"}}]}
+            )
+        if len(calls) == 2:
+            return json.dumps(
+                {
+                    "actions": [
+                        {
+                            "type": "message_telegram_bot",
+                            "payload": {
+                                "interface_path": "telegram_bot/31321637",
+                                "text": "I read the file, here are my thoughts.",
+                            },
+                        }
+                    ]
+                }
+            )
+        return json.dumps(
+            {
+                "actions": [
+                    {
+                        "type": "message_telegram_bot",
+                        "payload": {
+                            "interface_path": "telegram_bot/31321637",
+                            "text": "And one more thought on top of that.",
+                        },
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr("core.plugin_instance.handle_incoming_message", fake_handle)
+
+    async def fake_execute(name, arguments, context=None, original_message=None):
+        return {
+            "ok": True,
+            "tool": name,
+            "source": "internal",
+            "result": "delivered" if name.startswith("message_") else "file contents",
+            "error": None,
+        }
+
+    monkeypatch.setattr(agent_tool_executor, "execute", fake_execute)
+
+    manager = AgentLoopManager()
+    out = await manager.run_agentic_turn(
+        goal="give thoughts", max_iterations=10, timeout_seconds=30
+    )
+    # Turn ended at the second consecutive message-only iteration, never
+    # nagging for more tools.
+    assert out["stop_reason"] == "model_done"
+    assert len(calls) == 3
+    # The messages were delivered through the executor, so final_text stays
+    # empty — a delivered message must never be re-sent as final_text.
+    assert out["final_text"] == ""
+    # The end-of-turn observation is the assistant's delivered reply marker.
+    assert out["observations"][-1].get("role") == "assistant"

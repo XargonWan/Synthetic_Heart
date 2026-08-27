@@ -1,0 +1,6 @@
+- Optional dependencies (`aiomysql`, `asyncpg`) are imported inside try/except blocks at module top and replaced with minimal stubs or None guards so modules importing this package never fail at import time.
+- Configuration is resolved by reading environment variables first, falling back to `config_registry.get_value(...)` only for missing keys — environment always wins over persisted config.
+- Each migration function is wrapped in a try/except that logs warnings but never aborts the migration pipeline, making every startup migration idempotent and best-effort.
+- Per-table migration specs use a `TableMigrationSpec` dataclass with explicit `columns`, `conflict_keys`, optional `serial_column`/`fetch_order`, and a `transform` callable that coerces source rows into target-safe Python types.
+- SQL translation helpers in `db_backends.py` operate as pure regex-based rewrite functions chained together (`translate_postgres_sql` composes `_translate_*` helpers) rather than using a SQL parser.
+- Backup plans are constructed as immutable `@dataclass(slots=True)` objects (`DatabaseBackupPlan`, `DbCutoverState`) and passed through the call chain instead of passing raw tuples or dicts.

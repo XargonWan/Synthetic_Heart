@@ -1,0 +1,6 @@
+- All cross-cutting configuration is exposed through `config_registry.get_var(...)` with explicit `label`, `description`, `value_type`, `group`, and `component` fields rather than bare constants.
+- Database access goes through `core.db.get_conn_ctx()` async context managers, with best-effort try/except blocks that log warnings and return safe defaults instead of raising.
+- Module-level side effects (e.g., registering exposed variables, plugin metadata) are wrapped in `try/except Exception: pass` to tolerate missing optional dependencies during import or tests.
+- Plugin and interface discovery uses reflective attribute checks (`hasattr`, `callable(getattr(...))`) and registry lookups instead of hard-coded class names, keeping components pluggable.
+- Agent turn persistence follows a two-phase pattern: `_begin_agentic_turn` inserts a `running` row before the loop, and `_persist_agentic_turn` updates or creates the final row with status derived from `stop_reason`.
+- Logging uses the centralized `core.logging_utils` functions (`log_debug`, `log_info`, `log_warning`, `log_error`) with `[module]` prefixed messages rather than `print` or stdlib logging.

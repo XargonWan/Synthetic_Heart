@@ -1,0 +1,1 @@
+Standalone Vue 3/Three.js frontend (SyntH Stage) that renders a Karada-driven VRM avatar, streams TTS audio, and drives facial animation via a typed WebSocket protocol against the SyntH backend.

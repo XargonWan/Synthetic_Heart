@@ -1,0 +1,1 @@
+Python servers use `mcp.server.fastmcp.FastMCP` (stdio transport); DB access via `pymysql` (MariaDB) and `psycopg2` (PostgreSQL). The TypeScript server uses `@modelcontextprotocol/sdk` v1.x with `zod` for schema validation and `node` ESM modules. Log parsing relies on the project's internal `core.log_archive` module for gzip-compressed daily rotation handling.

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Goals">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5b8def"/>
+      <stop offset="1" stop-color="#8f5bef"/>
+    </linearGradient>
+  </defs>
+  <circle cx="128" cy="128" r="112" fill="none" stroke="url(#g)" stroke-width="16"/>
+  <circle cx="128" cy="128" r="72" fill="none" stroke="url(#g)" stroke-width="16" opacity="0.7"/>
+  <circle cx="128" cy="128" r="30" fill="url(#g)"/>
+  <path d="M128 128 L232 40" fill="none" stroke="#e64a4a" stroke-width="14" stroke-linecap="round"/>
+  <path d="M232 40 L200 44 L228 72 Z" fill="#e64a4a"/>
+</svg>

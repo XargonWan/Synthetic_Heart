@@ -140,6 +140,21 @@ async def stop_interfaces() -> None:
             log_warning(f"[main] Error stopping interface '{name}': {e}")
 
 
+async def stop_synth_mcp() -> None:
+    """Close Synth-owned MCP sessions before the event loop is torn down."""
+    try:
+        from core.mcp_bridge.client import mcp_client_bridge
+
+        await asyncio.wait_for(mcp_client_bridge.disconnect_all(), timeout=10)
+        log_debug("[main] Stopped Synth MCP client")
+    except TimeoutError:
+        log_warning("[main] Synth MCP client did not stop within 10s")
+    except Exception as exc:
+        # MCP is optional; a failed teardown must never prevent the rest of
+        # the application from shutting down cleanly.
+        log_warning(f"[main] Error stopping Synth MCP client: {exc}")
+
+
 def signal_handler(signum, frame):
     """Request a graceful shutdown; never blocks or exits from this raw signal frame.
 
@@ -451,11 +466,45 @@ if __name__ == "__main__":
                 # whichever comes first.
                 restart_wait = asyncio.create_task(_restart_event.wait())
                 shutdown_wait = asyncio.create_task(_shutdown_event.wait())
+                done, pending = set(), set()
                 try:
                     done, pending = await asyncio.wait(
                         {restart_wait, shutdown_wait},
                         return_when=asyncio.FIRST_COMPLETED,
                     )
+                except asyncio.CancelledError:
+                    # A background task (e.g. an MCP stdio client teardown)
+                    # spuriously cancelled the main wait. This is NOT a
+                    # shutdown request. Cancel the waiters and restart the
+                    # loop cleanly instead of crashing the whole process.
+                    # (Previously this raised UnboundLocalError because
+                    # `pending` was never assigned when the wait raised,
+                    # crash-looping the app under s6-overlay.)
+                    if _shutdown_event.is_set():
+                        log_info(
+                            "[main] Shutdown requested during wait - cleaning up..."
+                        )
+                        await stop_interfaces()
+                        await stop_synth_mcp()
+                        cleanup_components()
+                        break
+                    log_warning(
+                        "[main] Main wait spuriously cancelled by a background "
+                        "task; restarting cleanly."
+                    )
+                    for task in (restart_wait, shutdown_wait):
+                        task.cancel()
+                    await stop_synth_mcp()
+                    cleanup_components()
+                    from core.core_initializer import (
+                        INTERFACE_REGISTRY,
+                        PLUGIN_REGISTRY,
+                    )
+                    INTERFACE_REGISTRY.clear()
+                    PLUGIN_REGISTRY.clear()
+                    from core.cortex_registry import get_cortex_registry
+                    get_cortex_registry()._engines.clear()
+                    continue
                 finally:
                     for task in pending:
                         task.cancel()
@@ -463,6 +512,7 @@ if __name__ == "__main__":
                 if shutdown_wait in done:
                     log_info("[main] Shutdown requested - cleaning up...")
                     await stop_interfaces()
+                    await stop_synth_mcp()
                     cleanup_components()
                     log_info("[main] Shutdown cleanup complete - exiting...")
                     break
@@ -472,6 +522,7 @@ if __name__ == "__main__":
                         "[main] 🔄 Restart requested - cleaning up and restarting..."
                     )
 
+                    await stop_synth_mcp()
                     # Cleanup components
                     cleanup_components()
 
@@ -497,6 +548,7 @@ if __name__ == "__main__":
             except KeyboardInterrupt:
                 log_info("[main] Received shutdown signal, exiting...")
                 await stop_interfaces()
+                await stop_synth_mcp()
                 cleanup_components()
                 break
 

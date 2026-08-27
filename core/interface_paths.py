@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime
 from typing import Any, Awaitable, Callable, Optional
 
 import aiomysql
@@ -342,6 +343,60 @@ async def get_recent_interface_paths(limit: int = 10) -> list[dict[str, Any]]:
                 "display": " / ".join(labels) if labels else row.get("interface_path"),
             }
         )
+    # Defensive fallback: if the registry is empty (e.g. a freshly-created table
+    # that missed its backfill window, or one out of sync with the chat cache),
+    # derive recent paths directly from chat_history_cache so consumers such as
+    # the Grillo chat observer are never silently starved of candidate chats.
+    if not results:
+        results = await _recent_paths_from_history(limit)
+    return results
+
+
+async def _recent_paths_from_history(limit: int) -> list[dict[str, Any]]:
+    """Fallback: derive recent interface paths straight from chat_history_cache.
+
+    Used only when ``interface_paths`` is empty. Returns the same item shape as
+    :func:`get_recent_interface_paths`, ordered by most recent message. Labels
+    are unavailable here, so ``display`` falls back to the raw path.
+    """
+    results: list[dict[str, Any]] = []
+    try:
+        async with get_conn_ctx() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """
+                    SELECT interface_path, MAX(timestamp) AS last_ts
+                    FROM chat_history_cache
+                    WHERE interface_path IS NOT NULL
+                    GROUP BY interface_path
+                    ORDER BY last_ts DESC
+                    LIMIT %s
+                    """,
+                    (int(limit),),
+                )
+                rows = await cur.fetchall()
+    except Exception as exc:
+        log_warning(f"[interface_paths] history fallback failed: {exc}")
+        return results
+    for row in rows or []:
+        last_ts = row.get("last_ts")
+        last_used: float = 0.0
+        if isinstance(last_ts, datetime):
+            last_used = last_ts.timestamp()
+        elif last_ts is not None:
+            try:
+                last_used = float(last_ts)
+            except (TypeError, ValueError):
+                last_used = 0.0
+        path = row.get("interface_path")
+        results.append(
+            {
+                "interface_path": path,
+                "last_used": last_used,
+                "segment_labels": [],
+                "display": path,
+            }
+        )
     return results
 
 
@@ -529,6 +584,14 @@ async def init_interface_paths_table() -> None:
 
     Written in MariaDB DDL; the backend translation layer converts it to the
     Postgres equivalent automatically. Idempotent (``IF NOT EXISTS``).
+
+    After ensuring the table exists, seeds it from ``chat_history_cache`` for
+    any ``interface_path`` not already present (see
+    :func:`backfill_interface_paths_from_history`). The registry is otherwise
+    only populated by :func:`touch_interface_path` on live message flow, so a
+    freshly-created (or previously-empty) table would leave consumers such as
+    the Grillo chat observer with zero candidate chats until new traffic
+    arrives. The backfill closes that gap on startup.
     """
     async with get_conn_ctx() as conn:
         async with conn.cursor() as cur:
@@ -545,3 +608,62 @@ async def init_interface_paths_table() -> None:
             )
             await conn.commit()
     log_debug("[interface_paths] ensured interface_paths table")
+
+    try:
+        seeded = await backfill_interface_paths_from_history()
+        if seeded:
+            log_debug(
+                f"[interface_paths] backfilled {seeded} path(s) from chat_history_cache"
+            )
+    except Exception as exc:
+        # Never let a backfill failure block startup — the table still exists
+        # and live traffic will populate it via touch_interface_path.
+        log_warning(f"[interface_paths] backfill from history failed: {exc}")
+
+
+async def backfill_interface_paths_from_history() -> int:
+    """Seed ``interface_paths`` from ``chat_history_cache`` where rows are missing.
+
+    Inserts one row per distinct ``interface_path`` present in
+    ``chat_history_cache`` but absent from ``interface_paths``, using that
+    chat's most recent message timestamp as ``last_used`` (float epoch).
+    Existing rows are never modified (``last_used`` written by
+    :func:`touch_interface_path` remains authoritative). Backend-aware:
+    Postgres uses ``EXTRACT(EPOCH FROM ...)``, MariaDB uses
+    ``UNIX_TIMESTAMP(...)``. Returns the number of rows inserted.
+
+    ``segment_labels`` is left NULL here; it is refreshed on the next
+    ``touch_interface_path`` / ``resolve_and_touch`` for that path. Consumers
+    fall back to the raw ``interface_path`` for display when labels are absent.
+    """
+    from core.db import _get_db_type
+
+    is_postgres = _get_db_type() == "postgres"
+    epoch_expr = (
+        "EXTRACT(EPOCH FROM MAX(timestamp))"
+        if is_postgres
+        else "UNIX_TIMESTAMP(MAX(timestamp))"
+    )
+    insert_sql = f"""
+        INSERT INTO interface_paths (interface_path, last_used)
+        SELECT c.interface_path, {epoch_expr} AS last_used
+        FROM chat_history_cache c
+        WHERE c.interface_path IS NOT NULL
+          AND c.interface_path NOT IN (
+              SELECT interface_path FROM interface_paths
+          )
+        GROUP BY c.interface_path
+    """
+    inserted = 0
+    try:
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(insert_sql)
+                inserted = int(cur.rowcount or 0)
+            await conn.commit()
+    except Exception as exc:
+        log_warning(
+            f"[interface_paths] backfill_interface_paths_from_history failed: {exc}"
+        )
+        return 0
+    return max(inserted, 0)

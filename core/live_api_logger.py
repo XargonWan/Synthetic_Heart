@@ -23,7 +23,6 @@ import logging
 import os
 import textwrap
 from datetime import datetime, timezone
-from logging.handlers import RotatingFileHandler
 from typing import Any
 
 _DEFAULT_LOG_DIR = os.path.join(os.getcwd(), "logs")
@@ -48,10 +47,15 @@ def _get_logger() -> logging.Logger:
     logger.propagate = False
 
     if not logger.handlers:
-        handler = RotatingFileHandler(
+        # Daily rotation aligned with the shared archive naming scheme.
+        from core import log_archive
+        from core.logging_utils import TimestampedRotatingFileHandler
+
+        handler = TimestampedRotatingFileHandler(
             _LOG_FILE,
-            maxBytes=10 * 1024 * 1024,  # 10 MB
-            backupCount=3,
+            maxBytes=log_archive.DEFAULT_MAX_BYTES,
+            maxLines=log_archive.DEFAULT_MAX_LINES,
+            backupCount=0,
             encoding="utf-8",
         )
         handler.setLevel(logging.DEBUG)

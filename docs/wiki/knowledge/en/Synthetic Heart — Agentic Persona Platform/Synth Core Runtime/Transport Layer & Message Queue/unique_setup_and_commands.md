@@ -1,0 +1,1 @@
+The queue must be accessed from within a running asyncio event loop; calling `_get_queue()` or `_get_lock()` outside one raises `RuntimeError`. Per-event-loop lifecycle is enforced via `_queue_loop`/`_lock_loop` globals that recreate primitives when the loop changes. System-reply expectations are gated by the `AWAIT_RESPONSE_TIMEOUT` config variable (default 2400s).

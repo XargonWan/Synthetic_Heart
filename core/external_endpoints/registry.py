@@ -474,6 +474,18 @@ class ExternalEndpointRegistry:
                 pass
         log_debug(f"[ext_endpoints] Set default_model='{model}' for id={endpoint_id}")
 
+    async def reload_endpoint(self, endpoint_id: int) -> ExternalEndpoint | None:
+        """Re-read an endpoint from the DB and re-register it in all subsystems.
+
+        Paths that change the DB directly (e.g. ``set_default_model``) use this
+        to rebuild the live bridges from the fresh row, so the running engine
+        picks up the change without a restart.
+        """
+        ep = await self.get_endpoint(endpoint_id)
+        if ep is not None:
+            await self._sync_registries(ep)
+        return ep
+
     # ------------------------------------------------------------------
     # Registry synchronisation
     # ------------------------------------------------------------------

@@ -30,6 +30,11 @@ AUDIO_KEEP_COUNT = 30
 # beat pipeline (LLM + TTS), which routinely takes 30-45s end-to-end.  Poll
 # long enough to actually capture our own generation instead of timing out.
 _ON_THE_FLY_POLL_TIMEOUT_S = 60.0
+# The winding-down on-the-fly generation runs as a background task (never
+# blocking the track monitor) and waits longer than the immediate-injection
+# poll above, because a slow LLM turn (e.g. selenium) routinely exceeds 60s
+# and the freshness guard makes a late, stale banter safe to skip.
+_ON_THE_FLY_BACKGROUND_TIMEOUT_S = 120.0
 _ON_THE_FLY_POLL_INTERVAL_S = 0.25
 
 register_exposed_var(
@@ -182,6 +187,17 @@ register_exposed_var(
     value_type=bool,
     ui_type="toggle",
     description="(EXPERIMENTAL) When enabled, Synth announces the next song ('Avete ascoltato X, ora Y'). When disabled, Synth only de-announces the song that just finished ('Avete ascoltato X') without mentioning what's coming next.",
+    scope="plugins",
+    component="radio_host",
+)
+
+register_exposed_var(
+    "RADIO_HOST_ON_THE_FLY_TIMEOUT_S",
+    label="On-the-fly Banter Timeout (s)",
+    default=_ON_THE_FLY_BACKGROUND_TIMEOUT_S,
+    value_type=float,
+    ui_type="string",
+    description="How long (seconds) to wait for an on-the-fly LLM banter generation before giving up. The LLM turn (e.g. a slow selenium engine) can take well over a minute, so this is run in a background task and never blocks the track monitor. Stale banter is still safely skipped by the freshness guard.",
     scope="plugins",
     component="radio_host",
 )
@@ -349,6 +365,16 @@ class RadioHostPlugin:
                 group="plugins",
                 component="radio_host",
             )
+        )
+        self._on_the_fly_timeout_s = float(
+            config_registry.get_value(
+                "RADIO_HOST_ON_THE_FLY_TIMEOUT_S",
+                _ON_THE_FLY_BACKGROUND_TIMEOUT_S,
+                value_type=float,
+                group="plugins",
+                component="radio_host",
+            )
+            or _ON_THE_FLY_BACKGROUND_TIMEOUT_S
         )
         self._announce_if_no_listeners = bool(
             config_registry.get_value(
@@ -996,19 +1022,21 @@ class RadioHostPlugin:
                     f"[radio_host] No pre-generated banter available; "
                     f"generating LLM banter on the fly: '{curr_title}' -> '{actual_next}'"
                 )
-                banter_to_inject = await self._generate_banter_on_the_fly(
-                    prev_title=curr_title,
-                    prev_artist=curr_artist,
-                    curr_title=actual_next,
-                    curr_artist=actual_next_artist,
-                    deannounce_only=False,
-                )
-                if banter_to_inject is None:
-                    log_error(
-                        "[radio_host] On-the-fly LLM banter generation failed; "
-                        "skipping winding-down injection"
+                # Run generation + timed injection as a background task so the
+                # track monitor's poll loop is never blocked by the (potentially
+                # slow) LLM turn, and so a slow-but-recoverable turn is still
+                # captured instead of failing the old fixed 60 s poll.
+                asyncio.create_task(
+                    self._generate_and_inject_winding_down_banter(
+                        prev_title=curr_title,
+                        prev_artist=curr_artist,
+                        curr_title=actual_next,
+                        curr_artist=actual_next_artist,
+                        deannounce_only=False,
+                        song_end_ts=_time.time() + remaining,
                     )
-                    return
+                )
+                return
         else:
             # De-announce only: mention the song that just finished,
             # without mentioning what's coming next.  Still uses the
@@ -1017,19 +1045,21 @@ class RadioHostPlugin:
                 f"[radio_host] No pre-generated banter available; "
                 f"generating LLM banter on the fly (de-announce): '{curr_title}'"
             )
-            banter_to_inject = await self._generate_banter_on_the_fly(
-                prev_title=curr_title,
-                prev_artist=curr_artist,
-                curr_title="",
-                curr_artist="",
-                deannounce_only=True,
-            )
-            if banter_to_inject is None:
-                log_error(
-                    "[radio_host] On-the-fly LLM banter generation failed; "
-                    "skipping winding-down injection"
+            # Run generation + timed injection as a background task so the
+            # track monitor's poll loop is never blocked by the (potentially
+            # slow) LLM turn, and so a slow-but-recoverable turn is still
+            # captured instead of failing the old fixed 60 s poll.
+            asyncio.create_task(
+                self._generate_and_inject_winding_down_banter(
+                    prev_title=curr_title,
+                    prev_artist=curr_artist,
+                    curr_title="",
+                    curr_artist="",
+                    deannounce_only=True,
+                    song_end_ts=_time.time() + remaining,
                 )
-                return
+            )
+            return
 
         # Clear the fallback flag — we just injected
         self._inject_at_track_change = False
@@ -1366,6 +1396,56 @@ class RadioHostPlugin:
                 return banter
         return None
 
+    async def _generate_and_inject_winding_down_banter(
+        self,
+        prev_title: str,
+        prev_artist: str,
+        curr_title: str,
+        curr_artist: str,
+        deannounce_only: bool,
+        song_end_ts: float,
+    ) -> None:
+        """Enqueue an on-the-fly banter generation and inject it when ready.
+
+        Runs as a background task so the track monitor's poll loop is never
+        blocked by the (potentially slow) LLM turn.  Polls ``_pending_banter``
+        for up to ``RADIO_HOST_ON_THE_FLY_TIMEOUT_S`` seconds — long enough to
+        capture a slow-but-recoverable turn that the old fixed 60 s poll always
+        missed — then hands off to the timed winding-down injection, which
+        already guards against a stale transition
+        (``_deannounce_target_expired``), so a late generation is safely
+        skipped rather than mis-broadcast.
+        """
+        await self._enqueue_banter_generation(
+            prev_title=prev_title,
+            prev_artist=prev_artist,
+            curr_title=curr_title,
+            curr_artist=curr_artist,
+            pre_generate=True,
+            deannounce_only=deannounce_only,
+        )
+        key = (prev_title, prev_artist)
+        timeout_s = max(float(self._on_the_fly_timeout_s or 0.0), 0.0)
+        waited = 0.0
+        while self._running and waited < timeout_s:
+            await asyncio.sleep(_ON_THE_FLY_POLL_INTERVAL_S)
+            waited += _ON_THE_FLY_POLL_INTERVAL_S
+            banter = self._pending_banter.pop(key, None)
+            if banter:
+                self._inject_at_track_change = False
+                await self._inject_winding_down_banter(
+                    banter_to_inject=banter,
+                    curr_title=prev_title,
+                    curr_artist=prev_artist,
+                    song_end_ts=song_end_ts,
+                )
+                return
+        if self._running:
+            log_error(
+                "[radio_host] On-the-fly LLM banter generation timed out; "
+                "skipping winding-down injection"
+            )
+
     def _set_animation(self, state: str) -> None:
         pm = get_persona_manager()
         if pm:
@@ -1529,6 +1609,7 @@ class RadioHostPlugin:
                 context_memory=context_memory,
                 interface_id="radio_host",
                 original_message=None,
+                priority=message_queue.PRIORITY_RADIO,
             )
             if pre_generate:
                 log_info(

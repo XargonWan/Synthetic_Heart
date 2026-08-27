@@ -1,3 +1,4 @@
+import json
 import sys
 import types
 from types import SimpleNamespace
@@ -129,6 +130,32 @@ async def test_openai_compat_http_chat_urls_include_api_v1_paths():
     assert any(url.endswith("/v1/chat") for url in urls)
     assert any(url.endswith("/api/v1/chat/completions") for url in urls)
     assert any(url.endswith("/api/v1/chat") for url in urls)
+
+
+def test_extract_message_reasoning_from_dict():
+    adapter = OpenAICompatAdapter(base_url="http://localhost:14848")
+    assert (
+        adapter._extract_message_reasoning(
+            {"content": "reply", "reasoning_content": "let me think"}
+        )
+        == "let me think"
+    )
+
+
+def test_extract_message_reasoning_empty():
+    adapter = OpenAICompatAdapter(base_url="http://localhost:14848")
+    assert adapter._extract_message_reasoning({"content": "reply"}) == ""
+    assert adapter._extract_message_reasoning({}) == ""
+    assert adapter._extract_message_reasoning(None) == ""
+
+
+def test_extract_message_reasoning_from_object():
+    adapter = OpenAICompatAdapter(base_url="http://localhost:14848")
+
+    class _Msg:
+        reasoning_content = "step one"
+
+    assert adapter._extract_message_reasoning(_Msg()) == "step one"
 
 
 @pytest.mark.asyncio
@@ -1129,6 +1156,153 @@ def _openai_endpoint(extra_config: dict) -> "ExternalEndpoint":
 
 
 @pytest.mark.asyncio
+async def test_vessel_prompt_uses_turn_lite_catalog_and_preserves_current_user():
+    """Vessel lite mode must survive bridge catalog injection."""
+    from core.core_initializer import core_initializer
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from core.prompt_request import PromptRequest, RuntimeContext
+
+    original_actions = core_initializer.actions_block
+    core_initializer.actions_block = {
+        "available_actions": {
+            "vessel_minecraft_mine": {
+                "description": "Break " + ("a nearby block " * 120),
+                "required_fields": ["target"],
+                "optional_fields": ["search_radius", "timeout_ms"],
+            }
+        }
+    }
+    captured: dict[str, Any] = {}
+
+    class FakeAdapter:
+        async def chat_completion(self, messages, model=None, **kwargs):
+            captured["messages"] = messages
+            return SimpleNamespace(content='{"actions": []}', model=model)
+
+    try:
+        prompt = PromptRequest(
+            system_instruction="Use valid JSON.",
+            current_text="Go hit a tree and get some wood.",
+            tool_declarations=[SimpleNamespace(name="vessel_minecraft_mine")],
+            runtime_ctx=RuntimeContext(
+                interface_name="vessel",
+                interface_path="vessel/minecraft",
+            ),
+        )
+        engine = ExternalCortexEngine(
+            _openai_endpoint({"downstream_char_budget": 1200}),
+            FakeAdapter(),
+        )
+
+        await engine.handle_incoming_message(None, None, prompt)
+
+        system = captured["messages"][0]["content"]
+        current = captured["messages"][-1]["content"]
+        assert "Go hit a tree and get some wood." in current
+        assert len(system) < 1000
+        assert "vessel_minecraft_mine" in system
+        assert "payload keys: target, search_radius, timeout_ms" in system
+        assert "required: target" in system
+    finally:
+        core_initializer.actions_block = original_actions
+
+
+def test_downstream_clamp_preserves_latest_user_turn():
+    """Older context may be trimmed, but the current request must survive."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+
+    engine = ExternalCortexEngine(
+        _openai_endpoint({"downstream_char_budget": 120}),
+        SimpleNamespace(),
+    )
+    messages = [
+        {"role": "system", "content": "instructions"},
+        {"role": "user", "content": "old history " * 40},
+        {"role": "assistant", "content": "old result " * 40},
+        {"role": "user", "content": "Go hit a tree and get some wood."},
+    ]
+    old_history_length = len(messages[1]["content"])
+
+    clamped = engine._clamp_messages_to_char_budget(messages)
+
+    assert clamped[-1]["content"] == "Go hit a tree and get some wood."
+    assert len(clamped[1]["content"]) < old_history_length
+
+
+def test_downstream_clamp_never_emits_blank_turns():
+    """Fully-consumed history turns are DROPPED, not left as empty-content
+    messages. Langfuse d3e58a80: a 25703-char payload vs a 24000 budget fully
+    consumed 8 short history turns, which ``_truncate_message_content`` turned
+    into ``{"content": ""}`` blanks in the provider payload (the upstream
+    empty-turn filters run before this clamp, so nothing caught them)."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+
+    engine = ExternalCortexEngine(
+        _openai_endpoint({"downstream_char_budget": 24000}),
+        SimpleNamespace(),
+    )
+    messages = [
+        {"role": "system", "content": "S" * 23556},
+        {"role": "user", "content": "H" * 200},
+        {"role": "assistant", "content": "H" * 200},
+        {"role": "user", "content": "H" * 200},
+        {"role": "assistant", "content": "H" * 200},
+        {"role": "user", "content": "H" * 200},
+        {"role": "assistant", "content": "H" * 200},
+        {"role": "user", "content": "H" * 200},
+        {"role": "assistant", "content": "H" * 200},
+        {"role": "user", "content": "Heheh yeah go ahead darling"},
+    ]
+
+    clamped = engine._clamp_messages_to_char_budget(messages)
+
+    # System and current user turn survive intact.
+    assert clamped[0]["content"] == "S" * 23556
+    assert clamped[-1]["content"] == "Heheh yeah go ahead darling"
+    # No blank turns may reach the provider; whatever survived has content.
+    assert all(
+        isinstance(m.get("content"), str) and m["content"].strip() for m in clamped
+    )
+    # The history turns (all below the consumed threshold) are gone, not blank.
+    assert not any(m.get("content") == "" for m in clamped)
+
+
+def test_downstream_clamp_unreachable_baseline_preserves_everything():
+    """System + current turn alone > budget: history must survive untouched.
+
+    Langfuse 04247e00 / 3e3bd8eb: a ~23.9k system + ~0.5k current turn
+    (baseline ~24.4k) vs the 24000 budget produced system+current-only
+    prompts with ALL history turns dropped (the clamp consumed them and
+    still logged "Remaining overflow: 164"). When the protected baseline
+    already exceeds the budget, dropping history cannot reach it — keep the
+    assembled messages as-is."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+
+    engine = ExternalCortexEngine(
+        _openai_endpoint({"downstream_char_budget": 24000}),
+        SimpleNamespace(),
+    )
+    messages = [
+        {"role": "system", "content": "S" * 23907},
+        {"role": "user", "content": "H" * 200},
+        {"role": "assistant", "content": "H" * 200},
+        {"role": "user", "content": "H" * 200},
+        {"role": "assistant", "content": "H" * 200},
+        {"role": "user", "content": "C" * 300},
+    ]
+    original = [m["content"] for m in messages]
+
+    clamped = engine._clamp_messages_to_char_budget(messages)
+
+    # Baseline 23907 + 300 = 24207 > 24000 -> unreachable -> as-is, history kept.
+    assert [m["content"] for m in clamped] == original
+    assert len(clamped) == len(messages)
+    assert all(
+        isinstance(m.get("content"), str) and m["content"].strip() for m in clamped
+    )
+
+
+@pytest.mark.asyncio
 async def test_force_json_object_sets_response_format():
     """force_json_object in extra_config asks the server for valid-JSON output."""
     from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
@@ -1281,6 +1455,721 @@ def test_max_tokens_default_only_for_local_flagged_endpoints():
         _openai_endpoint({"max_tokens": 1234}), cast(Any, SimpleNamespace())
     )
     assert explicit._extra_api_kwargs()["max_tokens"] == 1234
+
+
+def test_thinking_is_opt_in_and_native_tools_are_per_endpoint():
+    """Thinking and native tools stay off unless an endpoint opts in."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+
+    plain = ExternalCortexEngine(_openai_endpoint({}), cast(Any, SimpleNamespace()))
+    assert plain._extra_api_kwargs()["enable_thinking"] is False
+    assert plain._native_tools_enabled() is False
+
+    enabled = ExternalCortexEngine(
+        _openai_endpoint({"enable_thinking": True, "enable_tools": True}),
+        cast(Any, SimpleNamespace()),
+    )
+    assert enabled._extra_api_kwargs()["enable_thinking"] is True
+    assert enabled._native_tools_enabled() is True
+
+    legacy_thinking = ExternalCortexEngine(
+        _openai_endpoint({"disable_thinking": False}),
+        cast(Any, SimpleNamespace()),
+    )
+    assert legacy_thinking._extra_api_kwargs()["enable_thinking"] is True
+
+    legacy_override = ExternalCortexEngine(
+        _openai_endpoint({"enable_tools": True, "disable_tools": True}),
+        cast(Any, SimpleNamespace()),
+    )
+    assert legacy_override._native_tools_enabled() is False
+
+
+def test_venice_native_tools_are_scoped_and_capped_for_vessel_turns():
+    """Venice receives only embodied tools and never more than its model limit."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from core.prompt_request import PromptRequest, RuntimeContext
+
+    endpoint = ExternalEndpoint(
+        id=77,
+        name="Venice2",
+        display_label="Venice",
+        protocol=EndpointProtocol.OPENAI,
+        base_url="https://api.venice.ai/api/v1",
+        api_key_enc=None,
+        enabled=True,
+        capabilities={"cortex": True},
+        subsystem_map={"cortex": True},
+        available_models=["gemma-4-uncensored"],
+        default_model="gemma-4-uncensored",
+        probe_status="success",
+        last_probe_at=None,
+        extra_config={"enable_tools": True},
+    )
+    names = [
+        "event",
+        "schedule_message",
+        "message_telegram_bot",
+        "message_discord_bot",
+        "message_synth_webui",
+        "message_reddit",
+        "message_x",
+        "message_matrix_chat",
+        "message_ollama_serve",
+        "vessel_minecraft_say",
+        "vessel_minecraft_move",
+        "vessel_minecraft_look",
+        "vessel_minecraft_use",
+        "vessel_minecraft_attack",
+        "vessel_minecraft_follow",
+        "vessel_minecraft_unfollow",
+        "vessel_minecraft_respawn",
+        "vessel_minecraft_status",
+        "vessel_minecraft_observe",
+        "vessel_minecraft_shoot",
+        "vessel_minecraft_goto",
+        "vessel_minecraft_mine",
+        "vessel_minecraft_collect_block",
+        "vessel_minecraft_place",
+        "vessel_minecraft_drop",
+        "vessel_minecraft_craft",
+        "vessel_minecraft_smelt",
+        "vessel_minecraft_equip",
+        "vessel_minecraft_inventory",
+        "vessel_minecraft_wander",
+        "vessel_minecraft_dig_staircase",
+        "vessel_minecraft_return_surface",
+        "vessel_minecraft_climb_staircase",
+        "vessel_minecraft_scan",
+        "vessel_minecraft_goals",
+        "vessel_minecraft_set_goal",
+        "vessel_minecraft_update_goal",
+        "vessel_minecraft_lookup_knowledge",
+        "vessel_minecraft_set_base",
+        "vessel_minecraft_list_bases",
+        "vessel_minecraft_build_base",
+        "vessel_disconnect",
+        "message_fluxer_bot",
+        "message_integration",
+    ]
+    manifests = [
+        SimpleNamespace(name=name, description=name, parameters=[]) for name in names
+    ]
+    prompt = PromptRequest(
+        system_instruction="Use tools.",
+        current_text="get wood",
+        tool_declarations=manifests,
+        runtime_ctx=RuntimeContext(
+            interface_name="vessel",
+            interface_path="vessel/minecraft/player",
+        ),
+    )
+    engine = ExternalCortexEngine(
+        endpoint,
+        OpenAICompatAdapter(base_url="https://api.venice.ai/api/v1", api_key="test"),
+    )
+
+    kwargs = engine._tool_api_kwargs(prompt)
+    tool_names = [tool["function"]["name"] for tool in kwargs["tools"]]
+
+    assert len(tool_names) == 20
+    assert "event" not in tool_names
+    assert "message_telegram_bot" not in tool_names
+    assert "vessel_disconnect" in tool_names
+    assert "vessel_minecraft_mine" in tool_names
+    assert "vessel_minecraft_collect_block" in tool_names
+    assert "vessel_minecraft_craft" in tool_names
+    assert "vessel_minecraft_inventory" in tool_names
+    assert "vessel_minecraft_drop" in tool_names
+    assert "vessel_minecraft_climb_staircase" in tool_names
+    assert "vessel_minecraft_shoot" not in tool_names
+    assert kwargs["tool_choice"] == "required"
+    assert kwargs["parallel_tool_calls"] is False
+    assert "SYNTH NATIVE TOOL MODE" in prompt.system_instruction
+    assert prompt.supports_tool_calling is True
+    # The caller's full registry remains intact for action validation/dispatch.
+    assert len(prompt.tool_declarations) == len(names)
+
+
+def test_venice_native_tools_not_forced_on_ordinary_chat():
+    """Ordinary (non-vessel) chat does not enter single-tool native mode.
+
+    Venice2 opts into native tools via ``enable_tools: true`` in its endpoint
+    config, but that contract (tool_choice required + exactly one call) cannot
+    express the reply + bookkeeping a normal chat turn needs.  A small model
+    then picks the emotion action, never replies, and every manual turn trips
+    the missing-reply corrector (which drops all chat context).  Native
+    single-tool mode must therefore be gated to Vessel turns; ordinary chat
+    keeps the in-prompt JSON-action protocol, so the model can emit both the
+    outgoing message and supplementary actions together.
+    """
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from core.prompt_request import PromptRequest, RuntimeContext
+
+    endpoint = ExternalEndpoint(
+        id=78,
+        name="Venice3",
+        display_label="Venice",
+        protocol=EndpointProtocol.OPENAI,
+        base_url="https://api.venice.ai/api/v1",
+        api_key_enc=None,
+        enabled=True,
+        capabilities={"cortex": True},
+        subsystem_map={"cortex": True},
+        available_models=["gemma-4-uncensored"],
+        default_model="gemma-4-uncensored",
+        probe_status="success",
+        last_probe_at=None,
+        extra_config={"enable_tools": True},
+    )
+    manifests = [
+        SimpleNamespace(
+            name="message_telegram_bot", description="reply", parameters=[]
+        ),
+        SimpleNamespace(
+            name="update_emotion_state", description="bookkeeping", parameters=[]
+        ),
+        SimpleNamespace(
+            name="create_personal_diary_entry", description="diary", parameters=[]
+        ),
+    ]
+    prompt = PromptRequest(
+        system_instruction="Use tools.",
+        current_text="hello",
+        tool_declarations=manifests,
+        runtime_ctx=RuntimeContext(
+            interface_name="telegram_bot",
+            interface_path="telegram_bot/5208932647",
+        ),
+    )
+    engine = ExternalCortexEngine(
+        endpoint,
+        OpenAICompatAdapter(base_url="https://api.venice.ai/api/v1", api_key="test"),
+    )
+
+    kwargs = engine._tool_api_kwargs(prompt)
+
+    # Ordinary chat: no native single-tool forcing.
+    assert "tools" not in kwargs
+    assert "tool_choice" not in kwargs
+    assert prompt.supports_tool_calling is False
+
+
+def test_parallel_tools_is_opt_in_via_extra_config():
+    """parallel_tool_calls stays off unless the endpoint opts into it."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+
+    plain = ExternalCortexEngine(_openai_endpoint({}), cast(Any, SimpleNamespace()))
+    assert plain._parallel_tools_enabled() is False
+
+    parallel = ExternalCortexEngine(
+        _openai_endpoint({"enable_tools_parallel": True}),
+        cast(Any, SimpleNamespace()),
+    )
+    assert parallel._parallel_tools_enabled() is True
+
+    # Wire-level alias some endpoint configs use.
+    alias = ExternalCortexEngine(
+        _openai_endpoint({"parallel_tool_calls": True}),
+        cast(Any, SimpleNamespace()),
+    )
+    assert alias._parallel_tools_enabled() is True
+
+    # A non-boolean value must not enable it.
+    bogus = ExternalCortexEngine(
+        _openai_endpoint({"parallel_tool_calls": "auto"}),
+        cast(Any, SimpleNamespace()),
+    )
+    assert bogus._parallel_tools_enabled() is False
+
+
+def test_parallel_tools_do_not_enable_native_tools_for_ordinary_chat():
+    """Native tools stay Vessel-only even when an endpoint opts into parallel
+    calls: the current Venice model returns a single tool call per response, so
+    a chat first attempt degenerates to a lone bookkeeping call and every turn
+    needs a correction — the in-prompt JSON protocol (with the concrete response
+    example) reliably produces the full reply + emotion + diary triple instead."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from core.prompt_request import PromptRequest, RuntimeContext
+
+    endpoint = _openai_endpoint({"enable_tools": True, "enable_tools_parallel": True})
+    manifests = [
+        SimpleNamespace(
+            name="message_telegram_bot", description="reply", parameters=[]
+        ),
+        SimpleNamespace(
+            name="update_emotion_state", description="bookkeeping", parameters=[]
+        ),
+        SimpleNamespace(
+            name="create_personal_diary_entry", description="diary", parameters=[]
+        ),
+    ]
+    prompt = PromptRequest(
+        system_instruction="Use tools.",
+        current_text="hello",
+        tool_declarations=manifests,
+        runtime_ctx=RuntimeContext(
+            interface_name="telegram_bot",
+            interface_path="telegram_bot/5208932647",
+        ),
+    )
+    engine = ExternalCortexEngine(
+        endpoint,
+        OpenAICompatAdapter(base_url="https://api.venice.ai/api/v1", api_key="test"),
+    )
+
+    kwargs = engine._tool_api_kwargs(prompt)
+
+    # Ordinary chat: no native tools — the reliable in-prompt JSON protocol.
+    assert "tools" not in kwargs
+    assert prompt.supports_tool_calling is False
+    assert "SYNTH NATIVE TOOL MODE" not in prompt.system_instruction
+
+
+def test_vessel_keeps_single_call_even_when_parallel_configured():
+    """Vessel turns keep the reliable single-call contract even on an endpoint
+    that opts into parallel tools (the embodiment loop wants one action)."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from core.prompt_request import PromptRequest, RuntimeContext
+
+    endpoint = _openai_endpoint({"enable_tools": True, "enable_tools_parallel": True})
+    manifests = [
+        SimpleNamespace(name="vessel_minecraft_say", description="say", parameters=[]),
+        SimpleNamespace(
+            name="vessel_minecraft_mine", description="mine", parameters=[]
+        ),
+    ]
+    prompt = PromptRequest(
+        system_instruction="Use tools.",
+        current_text="get wood",
+        tool_declarations=manifests,
+        runtime_ctx=RuntimeContext(
+            interface_name="vessel",
+            interface_path="vessel/minecraft/player",
+        ),
+    )
+    engine = ExternalCortexEngine(
+        endpoint,
+        OpenAICompatAdapter(base_url="https://api.venice.ai/api/v1", api_key="test"),
+    )
+
+    kwargs = engine._tool_api_kwargs(prompt)
+
+    assert kwargs["parallel_tool_calls"] is False
+    assert "Call exactly one supplied function" in prompt.system_instruction
+
+
+def test_chat_tool_scope_excludes_other_interfaces_delivery_actions():
+    """A Telegram chat turn must not be offered Mate's ``send_mate_message`` or
+    another interface's delivery actions — a parallel-capable model otherwise
+    "replies" with the wrong channel action."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+
+    engine = ExternalCortexEngine(_openai_endpoint({}), cast(Any, SimpleNamespace()))
+
+    # Current interface is telegram_bot.
+    assert (
+        engine._is_other_interface_delivery_action("send_mate_message", "telegram_bot")
+        is True
+    )
+    assert (
+        engine._is_other_interface_delivery_action(
+            "message_discord_bot", "telegram_bot"
+        )
+        is True
+    )
+    assert (
+        engine._is_other_interface_delivery_action(
+            "send_file_discord_bot", "telegram_bot"
+        )
+        is True
+    )
+    # The current interface's delivery actions stay.
+    assert (
+        engine._is_other_interface_delivery_action(
+            "message_telegram_bot", "telegram_bot"
+        )
+        is False
+    )
+    assert (
+        engine._is_other_interface_delivery_action(
+            "send_file_telegram_bot", "telegram_bot"
+        )
+        is False
+    )
+    assert (
+        engine._is_other_interface_delivery_action("audio_telegram_bot", "telegram_bot")
+        is False
+    )
+    # Non-delivery actions are untouched.
+    assert (
+        engine._is_other_interface_delivery_action(
+            "update_emotion_state", "telegram_bot"
+        )
+        is False
+    )
+    # On the mate interface itself, send_mate_message is the reply action.
+    assert (
+        engine._is_other_interface_delivery_action("send_mate_message", "mate") is False
+    )
+
+
+def test_update_emotion_state_tool_schema_requires_emotions():
+    """update_emotion_state used the legacy required_params format that produced
+    an empty native tool schema (model called it with {}). After the fix its
+    tool manifest must expose `emotions` as a required parameter."""
+    from core.live_tool_registry import _parameters_from_action_definition
+
+    from plugins.emotion_manager.emotion_manager import EmotionManager
+
+    actions = EmotionManager().get_supported_actions()
+    params = _parameters_from_action_definition(
+        "update_emotion_state", actions["update_emotion_state"]
+    )
+    by_name = {p.name: p for p in params}
+    assert by_name["emotions"].required is True
+    assert by_name["emotions"].type == "object"
+    assert (by_name["emotions"].schema or {}).get("minProperties") == 1
+    assert by_name["apply_balancing"].required is False
+
+
+def _venice_endpoint(extra_config: dict) -> ExternalEndpoint:
+    return ExternalEndpoint(
+        id=78,
+        name="Venice2",
+        display_label="Venice",
+        protocol=EndpointProtocol.OPENAI,
+        base_url="https://api.venice.ai/api/v1",
+        api_key_enc=None,
+        enabled=True,
+        capabilities={"cortex": True},
+        subsystem_map={"cortex": True},
+        available_models=["deepseek-v4-flash-0731"],
+        default_model="deepseek-v4-flash-0731",
+        probe_status="success",
+        last_probe_at=None,
+        extra_config=extra_config,
+    )
+
+
+def test_max_native_tools_parallel_endpoint_has_no_cap():
+    """A parallel-capable endpoint must not be capped at the conservative
+    Venice-20 default: ``vessel_connect`` (alphabetically at "v") was being
+    dropped from ordinary-chat tool sets, leaving the model unable to honour a
+    "connect to the vessel" request. Explicit ``max_tools`` still wins; 0
+    disables the cap entirely."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+
+    engine = ExternalCortexEngine(_venice_endpoint({}), cast(Any, SimpleNamespace()))
+    # Conservative default for a plain Venice endpoint (old Gemma limit).
+    assert engine._max_native_tools() == 20
+
+    engine_parallel = ExternalCortexEngine(
+        _venice_endpoint({"enable_tools": True, "parallel_tool_calls": True}),
+        cast(Any, SimpleNamespace()),
+    )
+    # Parallel-capable model: full scoped tool set (no cap).
+    assert engine_parallel._max_native_tools() is None
+
+    engine_explicit = ExternalCortexEngine(
+        _venice_endpoint({"max_tools": 50}), cast(Any, SimpleNamespace())
+    )
+    # Operator override wins for Venice too (no clamp to 20).
+    assert engine_explicit._max_native_tools() == 50
+
+    engine_zero = ExternalCortexEngine(
+        _venice_endpoint({"max_tools": 0}), cast(Any, SimpleNamespace())
+    )
+    # max_tools=0 disables the cap entirely.
+    assert engine_zero._max_native_tools() is None
+
+
+def test_build_correction_messages_includes_sender():
+    """The corrector is stripped of routing prefix + history, so a multi-person
+    persona makes the model guess the sender (Papa answered as 'mama'). The
+    corrected user message must surface who sent it."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+
+    engine = ExternalCortexEngine(_openai_endpoint({}), cast(Any, SimpleNamespace()))
+    payload = {
+        "system_message": {
+            "type": "correction",
+            "message": "PARTIAL SUCCESS - Some actions completed, others failed.",
+            "your_reply": '{"actions": []}',
+            "original_user_message": "nighty night i love you Dee",
+            "sender": "Scar",
+            "chat_id": 123,
+        }
+    }
+    messages = engine._build_correction_messages(payload)
+    user_content = messages[-1]["content"]
+    assert "Original user message (from Scar):" in user_content
+    assert "nighty night i love you Dee" in user_content
+
+
+def test_build_correction_messages_omits_sender_when_unknown():
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+
+    engine = ExternalCortexEngine(_openai_endpoint({}), cast(Any, SimpleNamespace()))
+    payload = {
+        "system_message": {
+            "type": "correction",
+            "message": "CORRECTION",
+            "original_user_message": "hello there",
+        }
+    }
+    messages = engine._build_correction_messages(payload)
+    user_content = messages[-1]["content"]
+    assert "Original user message:\nhello there" in user_content
+    assert "from " not in user_content.split("Original user message:")[1][:40]
+
+
+def test_build_correction_messages_role_separation():
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+
+    engine = ExternalCortexEngine(_openai_endpoint({}), cast(Any, SimpleNamespace()))
+    payload = {
+        "system_message": {
+            "type": "correction",
+            "message": "CORRECTION HEADER",
+            "your_reply": '{"actions": []}',
+            "original_user_message": "ping",
+            "required_format": {"actions": [{"type": "message_telegram_bot"}]},
+        }
+    }
+    messages = engine._build_correction_messages(payload)
+    assert [m["role"] for m in messages] == ["system", "assistant", "user"]
+    assert messages[1]["content"] == '{"actions": []}'
+    assert "Required format:" in messages[2]["content"]
+
+
+def test_json_format_reminder_appended_to_json_protocol_turn():
+    """JSON-protocol turns must carry a salient format reminder in the user
+    message — the huge system prompt buries it and the model replies in plain
+    prose, forcing a correction round-trip."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from core.prompt_request import PromptRequest, RuntimeContext
+
+    engine = ExternalCortexEngine(_openai_endpoint({}), cast(Any, SimpleNamespace()))
+    prompt = PromptRequest(
+        system_instruction="Use JSON.",
+        current_text="hello there",
+        tool_declarations=[],
+        runtime_ctx=RuntimeContext(
+            interface_name="telegram_bot", interface_path="telegram_bot/123"
+        ),
+        supports_tool_calling=False,
+    )
+    messages = engine._build_messages(prompt)
+    last = messages[-1]
+    assert last["role"] == "user"
+    assert "Respond with ONLY valid JSON" in last["content"]
+    assert "your ENTIRE reply must be the JSON" in last["content"]
+
+
+def test_json_format_reminder_skipped_for_native_tool_turns():
+    """Native-tool turns declare the transport via tools — no JSON reminder."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from core.prompt_request import PromptRequest, RuntimeContext
+
+    engine = ExternalCortexEngine(_openai_endpoint({}), cast(Any, SimpleNamespace()))
+    prompt = PromptRequest(
+        system_instruction="Use tools.",
+        current_text="get wood",
+        tool_declarations=[],
+        runtime_ctx=RuntimeContext(
+            interface_name="vessel", interface_path="vessel/minecraft/player"
+        ),
+        supports_tool_calling=True,
+    )
+    messages = engine._build_messages(prompt)
+    last = messages[-1]
+    assert last["role"] == "user"
+    assert "Respond with ONLY valid JSON" not in last["content"]
+
+
+@pytest.mark.asyncio
+async def test_plain_native_action_json_is_capped_when_provider_ignores_tools():
+    """A 200/plain-JSON fallback cannot flood one vessel turn with actions."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from core.prompt_request import PromptRequest, RuntimeContext
+
+    endpoint = _openai_endpoint({"enable_tools": True})
+    captured: dict[str, Any] = {}
+
+    class FakeAdapter:
+        async def chat_completion(self, messages, model=None, **kwargs):
+            captured["kwargs"] = kwargs
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "actions": [
+                            {"type": "vessel_minecraft_say", "payload": {"text": "hi"}},
+                            {
+                                "type": "vessel_minecraft_mine",
+                                "payload": {"block": "*_log"},
+                            },
+                            {
+                                "type": "vessel_minecraft_mine",
+                                "payload": {"block": "*_log"},
+                            },
+                        ]
+                    }
+                ),
+                model=model,
+            )
+
+    manifests = [
+        SimpleNamespace(name="vessel_minecraft_say", description="say", parameters=[]),
+        SimpleNamespace(
+            name="vessel_minecraft_mine", description="mine", parameters=[]
+        ),
+    ]
+    prompt = PromptRequest(
+        system_instruction="Use tools.",
+        current_text="get wood",
+        tool_declarations=manifests,
+        runtime_ctx=RuntimeContext(
+            interface_name="vessel",
+            interface_path="vessel/minecraft/player",
+        ),
+    )
+    engine = ExternalCortexEngine(endpoint, cast(Any, FakeAdapter()))
+
+    response = await engine.handle_incoming_message(None, None, prompt)
+
+    assert json.loads(response) == {
+        "actions": [{"type": "vessel_minecraft_say", "payload": {"text": "hi"}}]
+    }
+    assert captured["kwargs"]["tool_choice"] == "required"
+    assert captured["kwargs"]["parallel_tool_calls"] is False
+
+
+def test_thinking_alias_uses_nested_venice_disable_key():
+    """The internal alias becomes Venice's nested provider parameter."""
+    default_adapter = OpenAICompatAdapter(
+        base_url="https://api.venice.ai/api/v1", api_key="x"
+    )
+    default_kwargs: dict[str, Any] = {}
+    default_body: dict[str, Any] = {}
+    assert (
+        default_adapter._resolve_disable_thinking(default_kwargs, default_body) is True
+    )
+    assert default_kwargs == {}
+    assert default_body == {
+        "venice_parameters": {
+            "disable_thinking": True,
+            "include_venice_system_prompt": False,
+        }
+    }
+
+    enabled_kwargs = {"enable_thinking": True}
+    enabled_body: dict[str, Any] = {}
+    assert (
+        default_adapter._resolve_disable_thinking(enabled_kwargs, enabled_body) is False
+    )
+    assert enabled_kwargs == {}
+    assert enabled_body == {
+        "venice_parameters": {
+            "disable_thinking": False,
+            "include_venice_system_prompt": False,
+        }
+    }
+
+    generic_adapter = OpenAICompatAdapter(
+        base_url="http://127.0.0.1:8081/v1", api_key="x"
+    )
+    generic_body: dict[str, Any] = {}
+    generic_adapter._resolve_disable_thinking({}, generic_body)
+    assert generic_body == {}
+    generic_opt_in_body: dict[str, Any] = {}
+    generic_adapter._resolve_disable_thinking(
+        {"enable_thinking": True}, generic_opt_in_body
+    )
+    assert generic_opt_in_body == {"enable_thinking": True}
+
+
+@pytest.mark.asyncio
+async def test_openai_compat_venice_request_nests_thinking_parameter(monkeypatch):
+    """The SDK call must serialize Venice's parameter at the documented depth."""
+    adapter = OpenAICompatAdapter(base_url="https://api.venice.ai/api/v1", api_key="x")
+    captured: dict[str, Any] = {}
+
+    class FakeCompletions:
+        async def create(self, **kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content='{"actions": []}'),
+                        finish_reason="stop",
+                    )
+                ],
+                model="gemma-4",
+                usage=None,
+            )
+
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
+    monkeypatch.setattr(adapter, "_get_client", lambda: fake_client)
+    await adapter.chat_completion(
+        [{"role": "user", "content": "get wood"}],
+        model="gemma-4",
+        enable_thinking=False,
+    )
+
+    assert captured["extra_body"] == {
+        "venice_parameters": {
+            "disable_thinking": True,
+            "include_venice_system_prompt": False,
+        }
+    }
+    assert "enable_thinking" not in captured
+    assert "disable_thinking" not in captured
+
+
+@pytest.mark.asyncio
+async def test_openai_compat_venice_thinking_rejection_falls_back(monkeypatch):
+    """An incompatible proxy cannot kill the chat path over thinking config."""
+    adapter = OpenAICompatAdapter(base_url="https://api.venice.ai/api/v1", api_key="x")
+    calls: list[dict[str, Any]] = []
+
+    class FakeCompletions:
+        async def create(self, **kwargs: Any) -> Any:
+            calls.append(kwargs)
+            if len(calls) < 3:
+                raise RuntimeError(
+                    "400 Unrecognized key(s) in object: 'disable_thinking'"
+                )
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content='{"actions": []}'),
+                        finish_reason="stop",
+                    )
+                ],
+                model="gemma-4",
+                usage=None,
+            )
+
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
+    monkeypatch.setattr(adapter, "_get_client", lambda: fake_client)
+    response = await adapter.chat_completion(
+        [{"role": "user", "content": "get wood"}],
+        model="gemma-4",
+        enable_thinking=False,
+    )
+
+    assert response.content == '{"actions": []}'
+    assert calls[0]["extra_body"] == {
+        "venice_parameters": {
+            "disable_thinking": True,
+            "include_venice_system_prompt": False,
+        }
+    }
+    assert calls[1]["model"] == "gemma-4:disable_thinking=true"
+    assert calls[1]["extra_body"] is None
+    assert calls[2]["model"] == "gemma-4"
+    assert calls[2]["extra_body"] is None
 
 
 @pytest.mark.asyncio

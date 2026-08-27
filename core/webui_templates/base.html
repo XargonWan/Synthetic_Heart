@@ -548,11 +548,18 @@
            .config-input (the slider is the visible control). The checkbox stays
            in the DOM as the adjacent sibling the :checked + label rules need. */
         input[type="checkbox"]:has(+ .toggle-switch) {
-            position: absolute;
+            /* The hidden focus target must stay beside its visible slider.
+               Absolute positioning without a positioned parent can place it
+               below the panel and make label clicks jump to a blank viewport. */
+            position: static;
+            flex: 0 0 1px;
             width: 1px;
             height: 1px;
             opacity: 0;
             margin: 0;
+            padding: 0;
+            overflow: hidden;
+            clip-path: inset(50%);
             pointer-events: none;
         }
         .toggle-switch {

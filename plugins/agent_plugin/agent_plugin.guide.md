@@ -6,7 +6,7 @@ delegate focused sub-tasks to short-lived sub-agents (Drones). Every action is
 sandboxed and gated by security levels.
 
 The plugin is enabled by the `AGENT_ENABLED` toggle (re-read on every call);
-agentic routing additionally requires `AGENTIC_ROUTING_ENABLED`.
+this is the single authoritative gate for the agentic router.
 
 ## Actions
 

@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: interfaces
+title: Channel Interfaces & Vessel Embodiment Layer
+scope:
+    - interface/
+source_files: []
+depends_on: []
+related_to: []

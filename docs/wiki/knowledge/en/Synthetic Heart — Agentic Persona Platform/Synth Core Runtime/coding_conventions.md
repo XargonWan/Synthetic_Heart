@@ -1,0 +1,5 @@
+- Every subsystem registers itself with a central registry (commands, tools, interfaces, vessels, live sessions, external endpoints) rather than being imported directly.
+- Configuration keys are declared via `config_registry.get_var(...)` at import time or eagerly during initialization so the DB sweep populates them before use.
+- Async background services are started as `asyncio.create_task` with descriptive names and errors are captured without aborting the rest of startup.
+- Cross-cutting helpers (logging, JSON repair, text utilities, beat/timezone helpers) are imported from `core.logging_utils`, `core.json_utils`, `core.text_utils`, etc., instead of re-implemented per module.
+- Component lifecycle states are tracked through the `ComponentInfo` dataclass with explicit SUCCESS/FAILED/SKIPPED/LOADING status transitions.

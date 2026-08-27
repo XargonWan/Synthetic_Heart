@@ -1,5 +1,41 @@
 import os
+from pathlib import Path
+
 import pytest
+
+
+def _load_repo_env_defaults() -> None:
+    """Load the repository ``.env`` into the process environment (setdefault).
+
+    Mirrors ``main.py::_load_repo_env_defaults`` so test runs resolve the same
+    DB host / credentials the synth uses. Without this, pytest processes that
+    import core modules (config_manager reads the DB at import time) fall back
+    to the docker-compose default hostname ``synth-db`` — which does not exist
+    on a bare host — and spam ``synth.log`` with ``getaddrinfo failed`` errors
+    that look exactly like a synth DB outage. Existing environment variables
+    win (``setdefault``), so CI overrides are preserved.
+    """
+    env_path = Path(__file__).resolve().parents[1] / ".env"
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key:
+            continue
+
+        value = value.strip()
+        if value[:1] in {'"', "'"} and value[-1:] == value[:1]:
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
+_load_repo_env_defaults()
 
 
 @pytest.fixture(autouse=True)

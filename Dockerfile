@@ -47,6 +47,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -s /bin/bash abc
 
+# --- [Node.js LTS for the Minecraft Vessel] ---
+# The runtime image (python:3.12-slim) ships WITHOUT Node. The Minecraft Rift
+# Vessel connector (issue #60) runs a Node.js Mineflayer bridge as a subprocess,
+# so Node is baked into the Docker image by DEFAULT (INSTALL_NODE=true) — the
+# Minecraft Vessel works out of the box in Docker with no extra build flags.
+# Only non-Docker / bare-metal deployments need to install Node themselves; a
+# node-free image can be built explicitly with:
+#
+#   docker build --build-arg INSTALL_NODE=false ...
+#
+ARG INSTALL_NODE=true
+ARG NODE_MAJOR=22
+RUN if [ "${INSTALL_NODE}" = "true" ]; then \
+      curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - && \
+      apt-get install -y --no-install-recommends nodejs && \
+      rm -rf /var/lib/apt/lists/* && \
+      node --version && npm --version ; \
+    else \
+      echo "INSTALL_NODE=false — skipping Node.js (Minecraft Vessel disabled)" ; \
+    fi
+
 # --- [S6 Overlay] ---
 ENV S6_OVERLAY_VERSION=v3.2.2.0
 RUN case "${TARGETARCH:-amd64}" in \

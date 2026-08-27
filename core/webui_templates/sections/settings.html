@@ -90,31 +90,35 @@
     box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.55) inset;
   }
 
-  #config-accent-input-container .accent-color-input {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    opacity: 0;
-    pointer-events: none;
+  #config-accent-input-container .accent-preset-custom-wrap {
+    position: relative;
+    display: inline-flex;
   }
 
-  #config-accent-input-container .accent-color-dot {
-    width: 42px;
-    height: 42px;
-    border-radius: 50%;
-    border: 1px solid var(--border);
-    background: transparent;
+  #config-accent-input-container .accent-color-input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    opacity: 0;
+    cursor: pointer;
+  }
+
+  #config-accent-input-container .accent-preset-custom {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    font-size: 1.1rem;
+    font-size: 1.05rem;
     line-height: 1;
-    color: var(--text-soft);
-    cursor: pointer;
-    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
+    color: #fff;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.65);
+    background: conic-gradient(#ff6b6b, #ffd166, #6bff88, #6bfefe, #6b7bff, #ff6bd6, #ff6b6b);
   }
 
-  #config-accent-input-container .accent-color-dot:disabled {
+  #config-accent-input-container .accent-preset-custom:disabled {
     opacity: 0.6;
     cursor: not-allowed;
   }

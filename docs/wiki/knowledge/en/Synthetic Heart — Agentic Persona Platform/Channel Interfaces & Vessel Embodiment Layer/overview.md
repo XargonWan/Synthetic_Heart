@@ -1,0 +1,1 @@
+Pluggable channel adapters (Discord, Telegram, Matrix, Fluxer, OpenAI API server) plus the Rift Vessel game-world embodiment interface that bridges in-game perception into SyntH's message chain.

@@ -71,6 +71,59 @@ def _extract_username(mxid: str) -> str:
     return mxid.lstrip("@")
 
 
+def parse_reply_fallback(body: str) -> tuple[str, str] | None:
+    """Split a Matrix rich-reply fallback body into (reply_text, quoted_text).
+
+    Per the Matrix spec, a rich reply carries the quoted content ONLY as the
+    plain-text fallback: leading lines starting with ``>`` (one per quoted
+    line), then blank separator line(s), then the real reply body. Clients that
+    don't render rich replies show exactly this. Parsing it structurally is the
+    only way to recover the QUOTED TEXT — ``m.in_reply_to`` carries just the
+    ``event_id``, and resolving it would need a paginated room-history fetch.
+
+    Returns None when the body is not a reply fallback (no leading ``>`` lines)
+    or when nothing usable survives; never raises.
+    """
+    try:
+        lines = (body or "").splitlines()
+        quote_lines: list[str] = []
+        idx = 0
+        while idx < len(lines) and lines[idx].startswith(">"):
+            quote_lines.append(lines[idx].lstrip(">").strip())
+            idx += 1
+        if not quote_lines:
+            return None
+        # Skip the blank separator between the fallback quote and the reply.
+        while idx < len(lines) and not lines[idx].strip():
+            idx += 1
+        reply_text = "\n".join(lines[idx:]).strip()
+        quoted_text = "\n".join(line for line in quote_lines if line).strip()
+        if not reply_text or not quoted_text:
+            return None
+        return reply_text, quoted_text
+    except Exception:
+        return None
+
+
+def _quoted_sender_from_fallback(quoted_text: str) -> str:
+    """Best-effort display name from a fallback quote's first line.
+
+    Element-family clients render the first fallback line as
+    ``> <@user:server> text`` (MXID form) or ``> * Display Name: text``.
+    Structural prefix parsing only — anything unrecognised stays "Unknown".
+    """
+    try:
+        first = quoted_text.splitlines()[0].strip()
+        if first.startswith("<") and ">" in first:
+            mxid = first[1 : first.index(">")]
+            return _extract_username(mxid) or "Unknown"
+        if first.startswith("* ") and ": " in first:
+            return first[2 : first.index(": ")].strip() or "Unknown"
+    except Exception:
+        pass
+    return "Unknown"
+
+
 class MatrixInterface:
     """Matrix chat interface wrapping matrix-nio."""
 
@@ -581,6 +634,22 @@ class MatrixInterface:
             relates_to.get("event_id") if isinstance(relates_to, dict) else None
         )
 
+        reply_payload = (
+            relates_to.get("m.in_reply_to", {}) if isinstance(relates_to, dict) else {}
+        )
+        reply_event_id = reply_payload.get("event_id")
+
+        # Recover the QUOTED TEXT from the spec'd plain-text fallback (leading
+        # "> "-prefixed lines). Previously only the event_id was kept and the
+        # quoted text was lost — the model then answered a reply without ever
+        # seeing what it replied to (2026-08-21 reply-context fix).
+        _reply_meta: dict | None = None
+        _quoted_text = ""
+        if reply_event_id:
+            _parsed = parse_reply_fallback(text)
+            if _parsed is not None:
+                text, _quoted_text = _parsed
+
         # Matrix: matrix/room_id/event_id (if threaded)
         interface_path = build_interface_path(
             "matrix", room_identifier, thread_event_id if thread_event_id else None
@@ -591,6 +660,15 @@ class MatrixInterface:
         # NOTE: chat activity tracking is now centralized in chat_context_manager.add_message_to_context
         from core.chat_context_manager import add_message_to_context
 
+        if _quoted_text:
+            _reply_meta = {
+                "reply_to": {
+                    "sender_name": _quoted_sender_from_fallback(_quoted_text),
+                    "text": _quoted_text,
+                    "message_id": reply_event_id,
+                }
+            }
+
         try:
             await add_message_to_context(
                 interface_path=interface_path,
@@ -599,23 +677,33 @@ class MatrixInterface:
                 sender_id=getattr(event, "sender", "unknown"),
                 message_id=getattr(event, "event_id", None),
                 timestamp=date.isoformat() if date else None,
+                metadata=_reply_meta,
             )
         except Exception as e:
             log_warning(f"[matrix_interface] Failed to add message to context: {e}")
 
-        reply_payload = (
-            relates_to.get("m.in_reply_to", {}) if isinstance(relates_to, dict) else {}
-        )
-        reply_event_id = reply_payload.get("event_id")
-
         reply_to_message = None
         if reply_event_id:
+            # Author of the QUOTED message (best-effort from the fallback's
+            # first line) — NOT the current replier.
+            _quote_sender = (
+                _quoted_sender_from_fallback(_quoted_text)
+                if _quoted_text
+                else "Unknown"
+            )
             reply_to_message = SimpleNamespace(
                 message_id=reply_event_id,
-                text=None,
+                # The quoted TEXT recovered from the fallback body (None when
+                # the body carried no usable fallback) so downstream prompt
+                # paths can render what the user is replying to.
+                text=_quoted_text or None,
                 caption=None,
                 date=None,
-                from_user=SimpleNamespace(id=None, username=None, full_name=None),
+                from_user=SimpleNamespace(
+                    id=None,
+                    username=_quote_sender if _quote_sender != "Unknown" else None,
+                    full_name=_quote_sender,
+                ),
             )
 
         room_name = getattr(room, "display_name", None) or getattr(

@@ -1,0 +1,9 @@
+The module is organized around a clear startup → routing → execution pipeline:
+- `core_initializer.CoreInitializer` is the single entry point (`initialize_all`) that loads registries, pre-registers config keys, discovers interfaces, builds the actions block, starts async plugins and interfaces, and recovers interrupted agent tasks.
+- `plugin_base.PluginBase` defines the non-LLM plugin contract (`start`, `stop`, `is_enabled`, `get_metadata`, `get_history_contributions`). `plugin_instance` holds the global LLM plugin instance, serializes LLM calls via `_llm_chain_lease` (asyncio lock + watchdog), resolves scope-based engines through `cortex_registry`, and normalizes multimodal attachments before calling `build_prompt_request`.
+- `message_chain.py` is the central message loop: it receives raw messages from interfaces, runs normalization/aliasing/correction passes, enforces per-turn action scoping, and dispatches actions through `run_actions`. It also implements vessel-specific fallbacks and Grillo beat safety filters.
+- `agent_core.AgentLoopManager` implements the bounded agentic turn loop (`run_agentic_turn`, `run_drone`): it opens a durable `running` row in `agent_tasks`, iterates model→tool-call→execute→observe until completion or budget exhaustion, supports pause/resume via `pending` status, and persists observations for WebUI inspection.
+- `event_dispatcher.dispatch_pending_events` polls due events from DB, builds prompts via the event plugin, and enqueues them into `message_queue`.
+- `context.py` provides a thin JSON-file-backed context toggle persisted at `config/synth_config.json`.
+- `interfaces.py` is a deprecation stub that raises `ImportError` directing callers to `action_parser` / `interfaces_registry`.
+Dependency direction is one-way: initializer → plugin/message/event subsystems; agent loop depends on tool executor and transport layer but never on UI code.

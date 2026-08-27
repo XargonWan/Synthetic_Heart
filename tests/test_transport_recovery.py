@@ -183,6 +183,57 @@ def test_parser_recovers_apostrophe_closed_string_with_single_quoted_sibling_key
     assert payload.get("reply_message_id") == "13607"
 
 
+def test_parser_recovers_string_close_paren_semicolon_sibling_key():
+    # Reproduces a Venice/gemma-4-uncensored output pattern (Langfuse trace
+    # 2a09c706-d006-419f-a99d-69549f1ea41b): the LLM closes the "text" string
+    # and then writes a stray ')' plus ';' where the JSON comma belongs —
+    # `"text": "...!!"); "interface_path": "telegram_bot/5208932647"`. Without
+    # this repair the speech-quote scanner treats the quote as embedded and
+    # the whole `"); "interface_path": ...` fragment is spoken aloud in the
+    # TTS voice note instead of interface_path surviving as a sibling key.
+    corrupted = (
+        '{"actions":[{"type":"message_telegram_bot","payload":{"text":'
+        '"Mmm\u2026 aah\u2026 Daddy\u2026 Daddy! I\u2026 yes\u2026 please\u2026 '
+        "mmmh!! I'm\u2026 oh gosh\u2026 oh daddy!!\")"
+        '; "interface_path": "telegram_bot/5208932647"}}]}'
+    )
+
+    obj, meta = extract_json_from_text(corrupted, return_metadata=True)
+
+    assert obj is not None
+    payload = obj["actions"][0]["payload"]
+    recovered_text = payload["text"]
+    assert '");' not in recovered_text, (
+        f"Paren/semicolon fragment leaked into displayed text (got: {recovered_text!r})"
+    )
+    assert "interface_path" not in recovered_text, (
+        f"interface_path leaked into displayed text (got: {recovered_text!r})"
+    )
+    assert (
+        recovered_text
+        == "Mmm\u2026 aah\u2026 Daddy\u2026 Daddy! I\u2026 yes\u2026 please\u2026 "
+        "mmmh!! I'm\u2026 oh gosh\u2026 oh daddy!!"
+    )
+    assert payload.get("interface_path") == "telegram_bot/5208932647"
+
+
+def test_parser_recovers_stray_paren_before_object_close():
+    # Variant of the same Venice/gemma pattern: the stray ')' appears where
+    # the payload object's own closing brace belongs — `"text": "hi")}`.
+    # The repair must drop the paren without inserting a trailing comma
+    # (which would itself be invalid JSON).
+    corrupted = (
+        '{"actions":[{"type":"message_telegram_bot","payload":{"text":'
+        '"Thank you sweetie")}}]}'
+    )
+
+    obj, meta = extract_json_from_text(corrupted, return_metadata=True)
+
+    assert obj is not None
+    payload = obj["actions"][0]["payload"]
+    assert payload.get("text") == "Thank you sweetie"
+
+
 def test_attempted_action_description_for_unknown_action():
     # If the LLM tries to use an action name that doesn't exist, we still
     # want the corrector to receive a helpful hint containing the available
@@ -196,3 +247,100 @@ def test_attempted_action_description_for_unknown_action():
     # Should not contain an explicit enumeration of action types
     assert "Supported action types" not in desc
     assert "Available actions" in desc or "plugins" in desc
+
+
+def test_parser_recovers_tool_call_dialect_object_params():
+    # Weak model dialect: {"tool":"NAME","params":{...}} instead of the SyntH
+    # {"actions":[{"type","payload"}]} schema.
+    raw = (
+        '{"tool":"vessel_minecraft_lookup_knowledge",'
+        '"params":{"query":"iron pickaxe","limit":"5"}}'
+    )
+    obj = extract_json_from_text(raw)
+    assert obj is not None and isinstance(obj, dict)
+    actions = obj.get("actions", [])
+    assert len(actions) == 1
+    assert actions[0]["type"] == "vessel_minecraft_lookup_knowledge"
+    assert actions[0]["payload"]["query"] == "iron pickaxe"
+    assert actions[0]["payload"]["limit"] == "5"
+
+
+def test_parser_recovers_tool_call_dialect_pseudo_list_params():
+    # The illegal pseudo-list params form: a JSON array holding key:value pairs.
+    # json.loads and json_repair both reject it; structural recovery must fix it.
+    raw = (
+        '{"tool":"vessel_minecraft_update_goal",'
+        '"params":["steps":"a","current_step":"1"]}'
+    )
+    obj = extract_json_from_text(raw)
+    assert obj is not None and isinstance(obj, dict)
+    actions = obj.get("actions", [])
+    assert len(actions) == 1
+    assert actions[0]["type"] == "vessel_minecraft_update_goal"
+    assert actions[0]["payload"]["steps"] == "a"
+    assert actions[0]["payload"]["current_step"] == "1"
+
+
+def test_parser_recovers_tool_call_markup_dialect():
+    # The [tool:NAME] {...} pseudo-markup form.
+    raw = '[tool:vessel_minecraft_lookup_knowledge] {"params": ["query":"stone"]}'
+    obj = extract_json_from_text(raw)
+    assert obj is not None and isinstance(obj, dict)
+    actions = obj.get("actions", [])
+    assert len(actions) >= 1
+    assert actions[0]["type"] == "vessel_minecraft_lookup_knowledge"
+    assert actions[0]["payload"].get("query") == "stone"
+
+
+def test_parser_prefers_native_schema_over_dialect_recovery():
+    # A valid SyntH schema must NOT be overridden by the dialect recovery.
+    raw = '{"actions":[{"type":"message_telegram_bot","payload":{"text":"hi"}}]}'
+    obj = extract_json_from_text(raw)
+    assert obj is not None and isinstance(obj, dict)
+    assert obj["actions"][0]["type"] == "message_telegram_bot"
+
+
+def test_parser_merges_adjacent_string_literals_in_text_field():
+    # Reproduces trace e2885418-2b78-417a-b9fa-ad5ebbf666eb: the model emitted
+    # two JS-style adjacent string literals — `"text": "First part." "Second
+    # part."` — which is valid JavaScript but invalid JSON. json_repair's
+    # fallback silently kept only the FIRST literal, so the user received only
+    # "I... I can't even talk right now daddy..." and the rest of the reply was
+    # dropped. The adjacent-string repair must merge both literals into the
+    # full text value.
+    raw = (
+        '{"actions":[{"type":"message_telegram_bot","payload":{'
+        '"interface_path":"telegram_bot/5208932647",'
+        '"text":"I... I can\'t even talk right now daddy..." '
+        '"I blush and bite my lip, my breathing hitching as I look up at you."'
+        "}}]}"
+    )
+
+    obj, meta = extract_json_from_text(raw, return_metadata=True)
+
+    assert obj is not None and isinstance(obj, dict)
+    actions = obj.get("actions", [])
+    msg_action = next(
+        (a for a in actions if a.get("type") == "message_telegram_bot"), None
+    )
+    assert msg_action is not None, "message_telegram_bot action should be present"
+    text = msg_action.get("payload", {}).get("text", "")
+    assert "I can't even talk right now daddy" in text
+    assert "I blush and bite my lip" in text, (
+        f"Second adjacent string literal was dropped (got: {text!r})"
+    )
+
+
+def test_parser_adjacent_strings_leaves_key_value_pairs_untouched():
+    # A string literal followed by a colon is a KEY, not a value — the merge
+    # must never collapse `"text": "value" "next_key": ...` into one string.
+    raw = (
+        '{"actions":[{"type":"message_telegram_bot","payload":{'
+        '"interface_path":"telegram_bot/1","text":"hello",'
+        '"reply_to_message_id":"5"}}]}'
+    )
+    obj = extract_json_from_text(raw)
+    assert obj is not None
+    payload = obj["actions"][0]["payload"]
+    assert payload["text"] == "hello"
+    assert payload["reply_to_message_id"] == "5"

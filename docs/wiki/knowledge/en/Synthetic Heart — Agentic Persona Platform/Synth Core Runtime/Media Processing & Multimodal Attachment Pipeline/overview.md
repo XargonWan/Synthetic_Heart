@@ -1,0 +1,1 @@
+Central dispatch, extraction, and formatting of media (audio/video/image/document) from chat interfaces into LLM-ready multimodal attachments, with STT/vision engine routing and YouTube transcription support.

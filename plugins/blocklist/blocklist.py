@@ -75,13 +75,27 @@ async def unblock_user(user_id: int):
             raise
 
 
-async def is_user_blocked(user_id: int) -> bool:
-    """Check if a user is blocked."""
+async def is_user_blocked(user_id: int | str) -> bool:
+    """Check if a user is blocked.
+
+    The ``blocklist.user_id`` column is a ``BIGINT`` sized for Telegram-style
+    numeric ids. Several interfaces (WebUI session UUIDs, the Rift Vessel
+    ``environment`` name, etc.) key users by non-numeric strings — binding
+    those against the integer column raises ``'str' object cannot be
+    interpreted as an integer`` and spams one ERROR per message. Since such
+    ids can never appear in the integer-keyed table, skip the query and
+    fail-open for any id that is not a valid integer.
+    """
+    try:
+        numeric_user_id = int(user_id)
+    except (TypeError, ValueError):
+        return False
+
     try:
         await init_blocklist_table()
     except Exception as e:
         log_warning(
-            f"[blocklist] Blocklist storage unavailable while checking user {user_id}; allowing request: {e}"
+            f"[blocklist] Blocklist storage unavailable while checking user {numeric_user_id}; allowing request: {e}"
         )
         return False
 
@@ -92,12 +106,14 @@ async def is_user_blocked(user_id: int) -> bool:
                     """
                     SELECT 1 FROM blocklist WHERE user_id = %s
                     """,
-                    (user_id,),
+                    (numeric_user_id,),
                 )
                 result = await cur.fetchone()
                 return result is not None
         except Exception as e:
-            log_error(f"[blocklist] Failed to check if user {user_id} is blocked: {e}")
+            log_error(
+                f"[blocklist] Failed to check if user {numeric_user_id} is blocked: {e}"
+            )
             return False
 
 

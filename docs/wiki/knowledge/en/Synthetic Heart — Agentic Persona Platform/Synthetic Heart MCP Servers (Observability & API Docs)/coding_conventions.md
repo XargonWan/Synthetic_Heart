@@ -1,0 +1,6 @@
+- Each Python server creates a single `FastMCP(name)` instance at module level and registers every tool with the `@mcp.tool()` decorator, returning plain formatted strings.
+- Configuration is loaded from a workspace `.env` file via a local `_load_repo_env()` helper, with real `os.environ` values taking precedence over the file.
+- Tool functions accept an optional `target: Optional[str] = None` parameter that is passed through `_resolve_target(target)` to select among runtime/source/soul/process_env database backends.
+- Database queries go through shared helpers (`_connect`, `_resolve_target`, `_rows_to_dicts`) rather than raw driver calls, ensuring consistent connection handling and row normalization across servers.
+- Long payloads are explicitly truncated with a visible marker (e.g. `...[truncated]` or `...[TRUNCATED: showing N of M chars]`) so callers know when to re-call with a larger budget.
+- The entry point follows the pattern `if __name__ == '__main__': mcp.run(transport='stdio')` so each script is both importable and directly executable.

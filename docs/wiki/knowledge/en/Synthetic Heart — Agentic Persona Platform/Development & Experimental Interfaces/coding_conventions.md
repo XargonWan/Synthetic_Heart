@@ -1,0 +1,5 @@
+- External library imports are wrapped in try/except blocks with a None fallback, and runtime checks raise a descriptive error or log a warning when the dependency is missing instead of failing at import time.
+- Each interface registers itself with the core registry at module level using both `register_interface(name, instance)` and `core_initializer.register_interface(name)` so it becomes discoverable to the action dispatcher.
+- Interface metadata is exposed through static methods `get_interface_id`, `get_supported_actions`, and `get_prompt_instructions` that return typed dicts describing required/optional fields and examples for the LLM prompt builder.
+- Configuration is read exclusively from environment variables via `os.getenv`, with missing values logged as warnings and the interface gracefully disabled rather than raising.
+- Autonomous inbound messages are routed through `core.auto_response.request_llm_delivery` with a `reason` string identifying the source interface, separating autonomous flows from explicit action dispatch.
