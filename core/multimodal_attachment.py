@@ -897,6 +897,11 @@ async def extract_multimodal_from_telegram(
                         "mime_type": "image/webp",
                         "data": encode_bytes_to_base64(bytes(file_bytes)),
                         "filename": f"sticker_{sticker.file_unique_id}.webp",
+                        "is_sticker": True,
+                        "media_metadata": {
+                            "type": "sticker",
+                            "file_unique_id": sticker.file_unique_id,
+                        },
                     }
                 )
                 log_debug(
@@ -970,6 +975,112 @@ async def extract_multimodal_from_discord(
             except Exception as e:
                 log_warning(
                     f"[multimodal] Failed to download Discord attachment {filename}: {e}"
+                )
+
+        # Handle Discord stickers
+        for sticker in getattr(message, "stickers", []):
+            sticker_format = getattr(sticker, "format", None)
+            sticker_name = getattr(sticker, "name", "unknown")
+            sticker_id = getattr(sticker, "id", None)
+
+            if sticker_format is not None:
+                try:
+                    from discord.sticker import StickerFormatType
+
+                    if sticker_format in (
+                        StickerFormatType.lottie,
+                        StickerFormatType.gif,
+                        StickerFormatType.apng,
+                    ):
+                        log_debug(
+                            f"[multimodal] Skipping unsupported Discord sticker "
+                            f"format: {sticker_format} ({sticker_name})"
+                        )
+                        attachments.append(
+                            {
+                                "mime_type": "text/plain",
+                                "data": encode_bytes_to_base64(
+                                    f"A sticker named '{sticker_name}' was sent, "
+                                    f"but its format ({sticker_format}) cannot be "
+                                    f"displayed as a static image.".encode("utf-8")
+                                ),
+                                "filename": "sticker.txt",
+                                "is_sticker": True,
+                                "media_metadata": {
+                                    "type": "sticker",
+                                    "name": sticker_name,
+                                    "id": sticker_id,
+                                    "format": str(sticker_format),
+                                    "viewable": False,
+                                },
+                            }
+                        )
+                        continue
+                except ImportError:
+                    pass
+
+            sticker_url = getattr(sticker, "url", None)
+            if not sticker_url and sticker_id:
+                sticker_url = f"https://cdn.discordapp.com/stickers/{sticker_id}.png"
+
+            if not sticker_url:
+                log_debug(
+                    f"[multimodal] Skipping Discord sticker without URL: {sticker_name}"
+                )
+                continue
+
+            try:
+                import httpx
+
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.get(sticker_url)
+                    resp.raise_for_status()
+                    sticker_bytes = resp.content
+
+                attachments.append(
+                    {
+                        "mime_type": "image/png",
+                        "data": encode_bytes_to_base64(sticker_bytes),
+                        "filename": f"sticker_{sticker_id}_{sticker_name}.png",
+                        "is_sticker": True,
+                        "media_metadata": {
+                            "type": "sticker",
+                            "name": sticker_name,
+                            "id": sticker_id,
+                            "format": str(sticker_format) if sticker_format else "png",
+                            "viewable": True,
+                        },
+                    }
+                )
+                log_debug(
+                    f"[multimodal] Extracted Discord sticker: {sticker_name} ({sticker_id})"
+                )
+            except Exception as e:
+                log_warning(
+                    f"[multimodal] Failed to download Discord sticker "
+                    f"{sticker_name}: {e}"
+                )
+                attachments.append(
+                    {
+                        "mime_type": "text/plain",
+                        "data": encode_bytes_to_base64(
+                            f"A sticker named '{sticker_name}' was sent, "
+                            f"but it could not be downloaded for analysis.".encode(
+                                "utf-8"
+                            )
+                        ),
+                        "filename": "sticker.txt",
+                        "is_sticker": True,
+                        "media_metadata": {
+                            "type": "sticker",
+                            "name": sticker_name,
+                            "id": sticker_id,
+                            "format": str(sticker_format)
+                            if sticker_format
+                            else "unknown",
+                            "viewable": False,
+                        },
+                    }
                 )
 
         # Handle embeds with images (optional - these are usually previews)

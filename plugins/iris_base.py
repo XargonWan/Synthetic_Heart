@@ -52,6 +52,7 @@ class IrisResult:
     language: str | None = field(default=None)
     confidence: float | None = field(default=None)
     cached_path: str | None = field(default=None)
+    is_sticker: bool = field(default=False)
 
 
 class IrisEngineBase(ABC):
