@@ -302,3 +302,216 @@ class TestVesselPreferredActionTypes:
         }
         preferred = DebriefActionIntentPlugin._vessel_preferred_action_types(catalog)
         assert len(preferred) == len(set(preferred))
+
+
+class TestDeferredPromiseRecovery:
+    """Debrief must not treat a confirmation as fulfillment of a deferred promise.
+
+    Regression for issue #366: Synth said "ti mando l'audio al più presto" but
+    the only processed action was an acknowledgement. The audio action was not
+    available in the catalog (vessel whitelist trim), so the promise had no
+    recovery action and was silently dropped.
+    """
+
+    async def test_deferred_audio_promise_returns_schedule_message(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        plugin = DebriefActionIntentPlugin()
+        monkeypatch.setattr(
+            "plugins.debrief.debrief_action_intent.config_registry.get_value",
+            _plugin_config_value,
+        )
+
+        from core.core_initializer import core_initializer
+
+        core_initializer.actions_block = {
+            "available_actions": {
+                "schedule_message": {
+                    "schema": {
+                        "required": ["text", "send_in"],
+                        "properties": {"text": {}, "send_in": {}, "send_at": {}},
+                    }
+                },
+                "send_message": {
+                    "schema": {
+                        "required": ["text", "interface_path"],
+                        "properties": {"text": {}, "interface_path": {}},
+                    }
+                },
+            }
+        }
+
+        monkeypatch.setattr(
+            "core.action_schema_converter.normalize_action_schema",
+            lambda action_name, action_def: action_def,
+        )
+        monkeypatch.setattr(
+            "core.action_schema_converter.extract_for_llm_prompt",
+            lambda action_name, normalized: normalized,
+        )
+
+        class DummyEngine:
+            async def generate_response(self, messages: list[dict[str, Any]]) -> str:
+                return (
+                    '{"actions": [{"type": "schedule_message", '
+                    '"payload": {"text": "Follow-up: send the promised audio", '
+                    '"send_in": "2 hours"}, '
+                    '"reason": "deferred_promise_audio", "confidence": "high"}]}'
+                )
+
+        class DummyRegistry:
+            def get_engine(self, name: str) -> DummyEngine:
+                return DummyEngine()
+
+            def load_engine(self, name: str) -> DummyEngine:
+                return DummyEngine()
+
+        async def fake_active_cortex_engine(scope: Any = None) -> str:
+            return "dummy"
+
+        monkeypatch.setattr("core.config.derive_cortex_scope", lambda ctx: "base")
+        monkeypatch.setattr(
+            "core.config.get_active_cortex_engine", fake_active_cortex_engine
+        )
+        monkeypatch.setattr(
+            "core.cortex_registry.get_cortex_registry", lambda: DummyRegistry()
+        )
+
+        original_message = SimpleNamespace(
+            text="Posso avere l'audio?",
+            chat_id=42,
+            thread_id=None,
+            interface_path="telegram/42",
+            from_cortex=True,
+        )
+        context = {
+            "from_cortex": True,
+            "original_user_message": "Posso avere l'audio?",
+            "llm_response_text": (
+                "Ho capito, se preferisci posso inviarti i messaggi vocali "
+                "direttamente qui. Sto raccogliendo le informazioni e ti mando "
+                "tutto in formato audio al più presto."
+            ),
+            "interface": "telegram",
+            "interface_path": "telegram/42",
+        }
+
+        result = await plugin.on_debrief(
+            processed_actions=[
+                {
+                    "type": "send_message",
+                    "payload": {"text": "ok", "interface_path": "telegram/42"},
+                }
+            ],
+            failed_actions=[],
+            results={
+                "llm_response_text": context["llm_response_text"],
+            },
+            context=context,
+            original_message=original_message,
+        )
+
+        assert result is not None
+        actions = result.get("recovery_actions", [])
+        assert len(actions) >= 1
+        assert any(a["action_type"] == "schedule_message" for a in actions)
+        schedule = next(a for a in actions if a["action_type"] == "schedule_message")
+        assert "audio" in schedule["payload"]["text"].lower()
+
+    async def test_confirmation_only_does_not_mask_promise(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A processed ack must not be treated as fulfillment of a different promise.
+
+        The debrief must distinguish between the action that was actually executed
+        (acknowledgement) and the action that was promised (send content later).
+        """
+        plugin = DebriefActionIntentPlugin()
+        monkeypatch.setattr(
+            "plugins.debrief.debrief_action_intent.config_registry.get_value",
+            _plugin_config_value,
+        )
+
+        from core.core_initializer import core_initializer
+
+        core_initializer.actions_block = {
+            "available_actions": {
+                "schedule_message": {
+                    "schema": {
+                        "required": ["text", "send_in"],
+                        "properties": {"text": {}, "send_in": {}, "send_at": {}},
+                    }
+                },
+            }
+        }
+
+        monkeypatch.setattr(
+            "core.action_schema_converter.normalize_action_schema",
+            lambda action_name, action_def: action_def,
+        )
+        monkeypatch.setattr(
+            "core.action_schema_converter.extract_for_llm_prompt",
+            lambda action_name, normalized: normalized,
+        )
+
+        class DummyEngine:
+            async def generate_response(self, messages: list[dict[str, Any]]) -> str:
+                return (
+                    '{"actions": [{"type": "schedule_message", '
+                    '"payload": {"text": "Follow-up: fulfill the deferred promise", '
+                    '"send_in": "1 day"}, '
+                    '"reason": "deferred_promise_generic", "confidence": "medium"}]}'
+                )
+
+        class DummyRegistry:
+            def get_engine(self, name: str) -> DummyEngine:
+                return DummyEngine()
+
+            def load_engine(self, name: str) -> DummyEngine:
+                return DummyEngine()
+
+        async def fake_active_cortex_engine(scope: Any = None) -> str:
+            return "dummy"
+
+        monkeypatch.setattr("core.config.derive_cortex_scope", lambda ctx: "base")
+        monkeypatch.setattr(
+            "core.config.get_active_cortex_engine", fake_active_cortex_engine
+        )
+        monkeypatch.setattr(
+            "core.cortex_registry.get_cortex_registry", lambda: DummyRegistry()
+        )
+
+        original_message = SimpleNamespace(
+            text="Can you send me the report?",
+            chat_id=99,
+            thread_id=None,
+            interface_path="webui/99",
+            from_cortex=True,
+        )
+        context = {
+            "from_cortex": True,
+            "original_user_message": "Can you send me the report?",
+            "llm_response_text": "Sure, I'll send it tomorrow.",
+            "interface": "webui",
+            "interface_path": "webui/99",
+        }
+
+        result = await plugin.on_debrief(
+            processed_actions=[
+                {
+                    "type": "send_message",
+                    "payload": {"text": "ok", "interface_path": "webui/99"},
+                }
+            ],
+            failed_actions=[],
+            results={
+                "llm_response_text": context["llm_response_text"],
+            },
+            context=context,
+            original_message=original_message,
+        )
+
+        assert result is not None
+        actions = result.get("recovery_actions", [])
+        assert len(actions) >= 1
+        assert any(a["action_type"] == "schedule_message" for a in actions)

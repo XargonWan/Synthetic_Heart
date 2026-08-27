@@ -546,11 +546,16 @@ class DebriefActionIntentPlugin:
                 f"   (e.g. said goodbye, announced it is logging off / 'stacco tutto')\n"
                 f"   but emitted no disconnect action, you MUST propose the vessel\n"
                 f"   disconnect action.\n"
-                f"6. Do NOT return an empty list unless {synth_name} explicitly refused\n"
+                f"6. CONFIRMATION IS NOT FULFILLMENT: a chat message or gesture that\n"
+                f"   merely acknowledges the player ('ok', 'perfetto', a wave) does NOT\n"
+                f"   count as executing the promised in-world action. If {synth_name} said\n"
+                f"   it would DO something specific and that exact action type is missing\n"
+                f"   from processed_action_types, the promise is UNHONORED.\n"
+                f"7. Do NOT return an empty list unless {synth_name} explicitly refused\n"
                 f"   or said it cannot do something.\n"
-                f"7. Do NOT repeat actions already in processed_action_types or\n"
+                f"8. Do NOT repeat actions already in processed_action_types or\n"
                 f"   failed_action_types.\n"
-                f"8. Use ONLY action types present in available_actions. Do NOT invent\n"
+                f"9. Use ONLY action types present in available_actions. Do NOT invent\n"
                 f"   verbs. Output ONLY valid JSON with the exact schema below.\n\n"
                 "Schema:\n"
                 '{"actions":[{"type":str,"payload":object,"reason":str,"confidence":"low|medium|high"}]}'
@@ -572,7 +577,7 @@ class DebriefActionIntentPlugin:
                 f"You are the Debrief Action-Intent analyzer. Your job is to identify\n"
                 f"actions {synth_name} PROMISED or IMPLIED in its response but did NOT\n"
                 f"actually execute as formal actions.\n\n"
-                f"CRITICAL RULES:\n"
+                "CRITICAL RULES:\n"
                 f"1. ALWAYS propose at least one recovery action when {synth_name} said\n"
                 f"   things like 'ok, i will do it', 'ok, i'll check', 'I will reply',\n"
                 f"   'I will send', 'i will do it tomorrow', or any other commitment.\n"
@@ -586,10 +591,20 @@ class DebriefActionIntentPlugin:
                 f"   'ok, i'll check', 'I will reply', 'I will send', 'i will do it tomorrow'\n"
                 f"   but forgets to actually schedule it.\n"
                 f"{_session_rule}"
-                f"5. Do NOT return an empty list unless {synth_name} explicitly refused\n"
+                f"5. CONFIRMATION IS NOT FULFILLMENT: a response that merely acknowledges\n"
+                f"   the user ('ok', 'perfetto', a brief reply, a voice message of receipt)\n"
+                f"   does NOT count as executing the promised action. If {synth_name} promised\n"
+                f"   to DO something specific (send audio, send a file, check something,\n"
+                f"   write back later) and that exact action type is missing from\n"
+                f"   processed_action_types, the promise is UNHONORED.\n"
+                f"6. When the promised action is not available in the catalog, or is\n"
+                f"   available but was not executed, use schedule_message as a mandatory\n"
+                f"   fallback to remind {synth_name} to fulfill the promise later. Do NOT\n"
+                f"   return an empty list just because the exact action is unavailable.\n"
+                f"7. Do NOT return an empty list unless {synth_name} explicitly refused\n"
                 f"   or said it cannot do something.\n"
-                f"6. Do NOT repeat actions already in processed_action_types or failed_action_types.\n"
-                f"7. Output ONLY valid JSON with the exact schema below.\n\n"
+                f"8. Do NOT repeat actions already in processed_action_types or failed_action_types.\n"
+                f"9. Output ONLY valid JSON with the exact schema below.\n\n"
                 "EXAMPLES:\n"
                 'User: "Remind me tomorrow"\n'
                 f'{synth_name}: "Ok, I will write it tomorrow."\n'
@@ -600,6 +615,11 @@ class DebriefActionIntentPlugin:
                 'User: "I need a reminder for the meeting"\n'
                 f'{synth_name}: "Perfect, I have set the reminder for the meeting."\n'
                 '→ [{"type": "schedule_message", "payload": {"text": "Meeting reminder", "send_in": "..."}}]\n\n'
+                "DEFERRED-PROMISE FALLBACK EXAMPLE:\n"
+                f'{synth_name}: "Ti mando l\'audio al più presto."\n'
+                'processed_action_types: ["send_message"]  # only an ack, not the audio\n'
+                "available_actions: no audio/send_file action available\n"
+                '→ [{"type": "schedule_message", "payload": {"text": "Follow-up: send the promised audio to the user", "send_in": "2 hours"}}]\n\n'
                 "Schema:\n"
                 '{"actions":[{"type":str,"payload":object,"reason":str,"confidence":"low|medium|high"}]}'
             )
