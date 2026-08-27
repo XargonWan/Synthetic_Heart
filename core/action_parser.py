@@ -207,7 +207,7 @@ async def _maybe_record_grillo_outbound_message(
         if (
             not action_type
             or not isinstance(action_type, str)
-            or not action_type.startswith("message")
+            or not (action_type == "send_message" or action_type.startswith("message"))
         ):
             return
         if not isinstance(payload, dict):
@@ -475,11 +475,8 @@ def _get_builtin_interface_message_action_types() -> set[str]:
     """Return canonical built-in interface message action types."""
 
     return {
-        "message_telegram_bot",
-        "message_discord_bot",
+        "send_message",
         "message_synth_webui",
-        "message_matrix_chat",
-        "message_ollama_serve",
     }
 
 
@@ -538,7 +535,7 @@ def _normalize_text_field_alias(action_type: str, payload: dict) -> None:
     a full LLM correction call just to rename a key. Fixing it here avoids that
     wasted correction turn.
     """
-    if not action_type.startswith("message_"):
+    if action_type != "send_message" and not action_type.startswith("message_"):
         return
     if payload.get("text"):
         return
@@ -1199,6 +1196,9 @@ def _is_interface_message_action(action_type: str) -> bool:
     This function inspects the registered interfaces, preferring the interface's
     explicit metadata rather than hard-coded name checks.
     """
+    if action_type == "send_message":
+        # The unified action is by definition a user-facing message action.
+        return True
     try:
         # Map action to interface name
         iface_name = _load_interface_actions().get(action_type)
@@ -1249,6 +1249,158 @@ ACTIVE_CORTEX_ENGINE = None
 AVAILABLE_PLUGINS = []
 
 
+async def _dispatch_send_message(
+    action: Dict[str, Any], context: Dict[str, Any], bot, original_message
+) -> Dict[str, Any]:
+    """Unified dispatcher for the single ``send_message`` action.
+
+    Destination resolution order:
+
+    (a) explicit ``payload.interface_path`` (overrides everything);
+    (b) ``original_message.interface_path`` (reply-to-origin fallback);
+    (c) otherwise a structured failure: ``interface_path`` is required for
+        spontaneous messages.
+    """
+    payload = action.get("payload", {})
+    if not isinstance(payload, dict):
+        try:
+            payload = vars(payload)
+        except Exception:
+            payload = {}
+
+    interface_path = payload.get("interface_path")
+    iface_name = None
+
+    if isinstance(interface_path, str) and interface_path.strip():
+        try:
+            from core.interface_path_utils import parse_interface_path
+
+            parsed_iface, _levels = parse_interface_path(interface_path.strip())
+            iface_name = parsed_iface or None
+        except Exception as e:
+            log_warning(
+                f"[action_parser] Failed to parse interface_path {interface_path!r}: {e}"
+            )
+            # Fall through to registry prefix matching below.
+            for registered in INTERFACE_REGISTRY:
+                if interface_path.strip().startswith(f"{registered}/"):
+                    iface_name = registered
+                    break
+
+    if not iface_name:
+        origin_path = getattr(original_message, "interface_path", None)
+        if isinstance(origin_path, str) and origin_path.strip():
+            interface_path = origin_path.strip()
+            payload["interface_path"] = interface_path
+            try:
+                from core.interface_path_utils import parse_interface_path
+
+                parsed_iface, _levels = parse_interface_path(interface_path)
+                iface_name = parsed_iface or None
+            except Exception:
+                for registered in INTERFACE_REGISTRY:
+                    if interface_path.startswith(f"{registered}/"):
+                        iface_name = registered
+                        break
+
+    if not iface_name:
+        log_warning(
+            "[action_parser] send_message without interface_path on a "
+            "spontaneous turn - rejected"
+        )
+        return {
+            "ok": False,
+            "error": (
+                "payload.interface_path is required for a spontaneous "
+                "send_message (no incoming message to reply to)"
+            ),
+        }
+
+    interface = INTERFACE_REGISTRY.get(iface_name)
+
+    # Capability gate (fail-open): refuse only when the interface explicitly
+    # lacks the send_message capability.
+    if (
+        interface is not None
+        and _interface_capability_gate_enabled()
+        and not (_has_capability(interface, "send_message"))
+    ):
+        log_warning(
+            f"[action_parser] ⚠️ Interface '{iface_name}' lacks 'send_message' "
+            "capability; refusing to dispatch"
+        )
+        return {
+            "ok": False,
+            "error": f"interface '{iface_name}' lacks send_message capability",
+        }
+
+    if interface is None or not hasattr(interface, "send_message"):
+        log_error(
+            f"[action_parser] ❌ send_message: interface '{iface_name}' not available"
+        )
+        return {
+            "ok": False,
+            "error": f"interface '{iface_name}' is not available",
+            "available_interfaces": sorted(
+                n for n, i in INTERFACE_REGISTRY.items() if hasattr(i, "send_message")
+            ),
+        }
+
+    # Compute capability drops centrally so the LLM can acknowledge them in
+    # its own words on the next turn. Unsupported features are stripped from
+    # the payload before delivery.
+    try:
+        from core.message_registry import resolve_capability_drops
+
+        drops = resolve_capability_drops(interface, payload, iface_name)
+    except Exception:
+        drops = []
+    if any(d.get("feature") == "media" for d in drops):
+        payload.pop("media", None)
+    if any(d.get("feature") == "send_as_voice" for d in drops):
+        payload["send_as_voice"] = False
+
+    # Normalize text payloads to recover double-escaped sequences
+    try:
+        _maybe_unescape_text_in_payload(payload)
+    except Exception:
+        log_debug("[action_parser] Text unescape normalization failed (non-fatal)")
+    # Strip emotion / meta tags from outbound text so they never leak to the
+    # end-user interface.
+    raw_text = payload.get("text")
+    if isinstance(raw_text, str) and "{" in raw_text:
+        try:
+            from plugins.emotion_manager import strip_emotion_tags
+
+            cleaned = strip_emotion_tags(raw_text)
+            if cleaned != raw_text:
+                payload["text"] = cleaned
+        except Exception:
+            pass
+
+    # Grillo beat bookkeeping (best-effort).
+    try:
+        await _maybe_record_grillo_outbound_message("send_message", payload, context)
+    except Exception:
+        pass
+
+    log_info(f"[action_parser] ✉️ Dispatching send_message to interface '{iface_name}'")
+    try:
+        result = interface.send_message(payload, original_message=original_message)
+        if inspect.iscoroutine(result):
+            result = await result
+        out: Dict[str, Any] = {"ok": bool(result), "result": result}
+        if drops:
+            out["capability_drops"] = drops
+        return out
+    except Exception as e:
+        log_error(
+            f"[action_parser] ❌ Error executing send_message via interface "
+            f"{iface_name}: {repr(e)}"
+        )
+        return {"ok": False, "error": str(e)}
+
+
 async def _handle_plugin_action(
     action: Dict[str, Any], context: Dict[str, Any], bot, original_message
 ):
@@ -1257,6 +1409,11 @@ async def _handle_plugin_action(
         log_warning("[action_parser] Action is missing a 'type'")
         return {"error": "Action is missing a 'type'"}
     iface_target = action.get("interface")
+
+    # Unified send_message: destination resolved from interface_path /
+    # original_message, dispatched to the owning interface directly.
+    if action_type == "send_message":
+        return await _dispatch_send_message(action, context, bot, original_message)
 
     log_info(
         f"[action_parser] 🎯 Handling action: type={action_type}, interface={iface_target}"
@@ -1961,6 +2118,7 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
     failed_actions = []
     action_outputs: List[Dict[str, Any]] = []
     terminal_seen = False
+    capability_drops_collected: List[Dict[str, Any]] = []
 
     for idx, action in enumerate(actions):
         try:
@@ -1997,7 +2155,9 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
             if is_from_cortex and context.get("grillo_beat"):
                 try:
                     action_type = action.get("type") or ""
-                    if action_type.startswith("message"):
+                    if action_type == "send_message" or action_type.startswith(
+                        "message"
+                    ):
                         payload = action.get("payload") or {}
                         text = payload.get("text")
                         interface_path = payload.get("interface_path") or context.get(
@@ -2099,6 +2259,18 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
                 )
             else:
                 processed_actions.append(action)
+                # Collect capability drops reported by successful dispatches
+                # (e.g. a send_message whose unsupported features were
+                # skipped). Reported back to the LLM via the prompt context.
+                if isinstance(result, dict) and result.get("capability_drops"):
+                    try:
+                        from core.capability_drops import collect_capability_drops
+
+                        capability_drops_collected = collect_capability_drops(
+                            capability_drops_collected + [result]
+                        )
+                    except Exception:
+                        pass
 
                 if action_type == "terminal" and isinstance(result, str):
                     terminal_seen = True
@@ -2251,6 +2423,7 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
         "errors": collected_errors,
         "failed_actions": failed_actions,
         "action_outputs": action_outputs,
+        "capability_drops": capability_drops_collected,
     }
 
 
@@ -3047,7 +3220,10 @@ async def corrector_orchestrator(
                             already_present = any(
                                 isinstance(a, dict)
                                 and isinstance(a.get("type"), str)
-                                and a["type"].startswith("message_")
+                                and (
+                                    a["type"] == "send_message"
+                                    or a["type"].startswith("message_")
+                                )
                                 and isinstance(a.get("payload"), dict)
                                 and a["payload"].get("text") == value
                                 for a in actions

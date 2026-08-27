@@ -56,6 +56,20 @@ CORRECTOR_TIMEOUT_SEC = config_registry.get_var(
 
 
 # Helpers for sanitizing and extracting JSON from noisy LLM outputs
+
+
+def _is_message_action_name(action_type) -> bool:
+    """True for the unified send_message or any legacy message_* action."""
+    try:
+        from core.message_registry import is_message_action
+
+        return is_message_action(action_type)
+    except Exception:
+        return isinstance(action_type, str) and (
+            action_type == "send_message" or action_type.startswith("message_")
+        )
+
+
 def _remove_control_chars(s: str) -> str:
     """Remove non-printable control characters that commonly break JSON parsing.
     Keep common whitespace (\n, \r, \t)."""
@@ -978,7 +992,7 @@ def _attempt_recover_actions_from_text(
             candidates = [
                 action_type
                 for action_type in available_actions.keys()
-                if isinstance(action_type, str) and action_type.startswith("message_")
+                if _is_message_action_name(action_type)
             ]
         except Exception:
             candidates = []
@@ -1085,7 +1099,11 @@ def _attempt_recover_actions_from_text(
                 if ip_match:
                     interface_path = ip_match.group(1)
 
-                if candidate.startswith("message_") and not interface_path:
+                if (
+                    candidate != "send_message"
+                    and candidate.startswith("message_")
+                    and not interface_path
+                ):
                     continue
 
                 # Build recovered action and append
@@ -1948,7 +1966,7 @@ async def universal_send(interface_send_func, *args, text: str | None = None, **
                     for action in current_interface_actions:
                         action_type = str(action.get("type") or "")
                         payload = action.get("payload")
-                        if not action_type.startswith("message_") or not isinstance(
+                        if not _is_message_action_name(action_type) or not isinstance(
                             payload, dict
                         ):
                             continue
@@ -2665,7 +2683,7 @@ async def run_corrector_middleware(
                     delivered_message_types = [
                         str(t)
                         for t in successful_types
-                        if str(t).startswith("message_")
+                        if str(t) == "send_message" or str(t).startswith("message_")
                     ]
                     if delivered_message_types:
                         correction_message_text += (
@@ -3051,8 +3069,8 @@ async def run_corrector_middleware(
                     )
                     if parsed_json:
                         # Special-case enforcement for ollama_serve: if the original
-                        # interface was `ollama_serve`, make sure any `message_*`
-                        # actions are routed back to `message_ollama_serve` and
+                        # interface was `ollama_serve`, make sure any `send_message`
+                        # actions are routed back to the ollama_serve interface and
                         # their payload.interface_path points to `ollama_serve/...`.
                         if originating_interface == "ollama_serve" and isinstance(
                             parsed_json, dict
@@ -3064,17 +3082,19 @@ async def run_corrector_middleware(
                                     if not isinstance(act, dict):
                                         continue
                                     a_type = act.get("type", "")
-                                    # Rewrite any message_* target to message_ollama_serve
+                                    # Rewrite any message_* target to send_message
                                     if (
                                         a_type.startswith("message_")
-                                        and a_type != "message_ollama_serve"
+                                        and a_type != "send_message"
                                     ):
-                                        act["type"] = "message_ollama_serve"
+                                        act["type"] = "send_message"
                                         rewritten = True
 
                                     # Ensure payload.interface_path is an ollama_serve path
                                     payload = act.get("payload") or {}
-                                    if isinstance(payload, dict):
+                                    if isinstance(payload, dict) and act.get(
+                                        "type"
+                                    ) in ("send_message", "message_ollama_serve"):
                                         iface_path = payload.get("interface_path", "")
                                         if not iface_path.startswith("ollama_serve"):
                                             id_for_iface = chat_id or (
@@ -3087,7 +3107,7 @@ async def run_corrector_middleware(
                                             )
                                             rewritten = True
 
-                                        if act.get("type") == "message_ollama_serve":
+                                        if act.get("type") == "send_message":
                                             conversation_id = payload.get(
                                                 "conversation_id"
                                             )
@@ -3114,7 +3134,7 @@ async def run_corrector_middleware(
                                 # Serialize back to JSON string before returning
                                 corrected = json.dumps(parsed_json, ensure_ascii=False)
                                 log_info(
-                                    "[corrector_middleware] Rewrote corrected actions to 'message_ollama_serve' for originating interface 'ollama_serve'"
+                                    "[corrector_middleware] Rewrote corrected actions to 'send_message' for originating interface 'ollama_serve'"
                                 )
                                 # Return rewritten JSON immediately for ollama_serve origin
                                 return corrected

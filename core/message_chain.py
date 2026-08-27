@@ -73,13 +73,15 @@ def get_failed_message_text() -> str:
     return str(fallback)
 
 
-# Map of interface prefixes to their correct message action types
+# Map of interface prefixes to their correct message action types. With the
+# unified send_message action every chat interface shares one action; the map
+# remains for special interfaces whose outbound verb differs (WebUI, radio).
 _INTERFACE_TO_MESSAGE_ACTION: Dict[str, str] = {
-    "telegram_bot": "message_telegram_bot",
-    "discord_bot": "message_discord_bot",
+    "telegram_bot": "send_message",
+    "discord_bot": "send_message",
     "synth_webui": "message_synth_webui",
-    "matrix_chat": "message_matrix_chat",
-    "ollama_serve": "message_ollama_serve",
+    "matrix_chat": "send_message",
+    "ollama_serve": "send_message",
     # radio_host: speaking on-air is the equivalent of "sending a message"
     "radio_host": "radio_speak",
 }
@@ -153,7 +155,10 @@ def _collect_message_texts(actions: list) -> list:
         if not isinstance(action, dict):
             continue
         action_type = action.get("type") or action.get("action")
-        if not (isinstance(action_type, str) and action_type.startswith("message_")):
+        if not (
+            isinstance(action_type, str)
+            and (action_type == "send_message" or action_type.startswith("message_"))
+        ):
             continue
         payload = action.get("payload")
         if not isinstance(payload, dict):
@@ -2534,7 +2539,10 @@ async def handle_incoming_message(
                                 action_name in current_message_action_types
                                 or (
                                     isinstance(action_name, str)
-                                    and action_name.startswith("message_")
+                                    and (
+                                        action_name.startswith("message_")
+                                        or action_name == "send_message"
+                                    )
                                 )
                                 or is_vessel_speak
                             ):
@@ -3382,10 +3390,26 @@ async def handle_incoming_message(
 
                         # Attach last action result to message/context so downstream hooks
                         # (e.g. Grillo action checker) can inspect what happened.
+                        try:
+                            from core.capability_drops import (
+                                collect_capability_drops as _collect_drops,
+                                remember_drops as _remember_drops,
+                            )
+
+                            _turn_drops = _collect_drops(
+                                [result.get("capability_drops")]
+                                if isinstance(result, dict)
+                                else []
+                            )
+                            if _turn_drops and interface_path:
+                                _remember_drops(str(interface_path), _turn_drops)
+                        except Exception:
+                            _turn_drops = []
                         last_action_result = {
                             "processed": processed,
                             "failed": failed,
                             "errors": errors,
+                            "capability_drops": _turn_drops,
                         }
                         try:
                             ctx["last_action_result"] = last_action_result

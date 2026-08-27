@@ -52,8 +52,7 @@ except Exception:  # pragma: no cover - dependency missing
     LocalProtocolError = Exception  # type: ignore
 
 INTERFACE_NAME = "matrix_chat"
-ACTION_TYPE = "message_matrix_chat"
-FILE_ACTION_TYPE = "send_file_matrix_chat"
+ACTION_TYPE = "send_message"
 
 _interface_registry = get_interface_registry()
 context_memory: Dict[str, deque[str]] = {}
@@ -309,30 +308,16 @@ class MatrixInterface:
     def get_action_types() -> List[str]:
         if not MatrixInterface._current_instance_enabled:
             return []
-        return [ACTION_TYPE, FILE_ACTION_TYPE]
+        return [ACTION_TYPE]
 
     @staticmethod
     def get_supported_actions() -> Dict[str, Dict[str, Any]]:
         if not MatrixInterface._current_instance_enabled:
             return {}
+        from core.message_registry import get_send_message_schema
+
         return {
-            ACTION_TYPE: {
-                "description": "Send a text message to a Matrix room.",
-                "required_fields": ["text", "target"],
-                "optional_fields": ["reply_to_event_id", "thread_event_id"],
-            },
-            FILE_ACTION_TYPE: {
-                "description": (
-                    "Send a file attachment (image, video, audio or document) to a "
-                    "Matrix room. The media kind is auto-detected from the file and "
-                    "delivered so the recipient can view/play it natively. The file "
-                    "must live inside Synth's filesystem sandbox."
-                ),
-                "required_fields": ["path", "target"],
-                "optional_fields": ["caption", "thread_event_id"],
-                "security_level": "medium",
-                "external_effects": ["filesystem"],
-            },
+            ACTION_TYPE: get_send_message_schema([INTERFACE_NAME]),
         }
 
     @staticmethod
@@ -341,56 +326,38 @@ class MatrixInterface:
             return {}
         if action_name == ACTION_TYPE:
             return {
-                "description": "Send a message to a Matrix room using its room ID or alias.",
+                "description": (
+                    "Send a message to a Matrix room using its room ID or alias."
+                ),
                 "payload": {
                     "text": {
                         "type": "string",
                         "example": "Hello Matrix!",
-                        "description": "Content of the message.",
+                        "description": (
+                            "Content of the message; also the caption for media."
+                        ),
                     },
-                    "target": {
+                    "interface_path": {
                         "type": "string",
-                        "example": "!abcdefg:example.org",
-                        "description": "Matrix room_id or room alias where the message should be delivered.",
+                        "example": "matrix_chat/!room:example.org/thread_event",
+                        "description": (
+                            "Destination path. OPTIONAL when replying to an incoming "
+                            "message (auto-routes to the origin room); REQUIRED for "
+                            "spontaneous messages."
+                        ),
                     },
-                    "reply_to_event_id": {
+                    "media": {
+                        "type": "array",
+                        "example": ["/app/data/report.pdf"],
+                        "description": (
+                            "Optional list of sandbox file paths (image/video/audio/"
+                            "document, auto-detected)."
+                        ),
+                        "optional": True,
+                    },
+                    "reply_to": {
                         "type": "string",
                         "description": "Optional event ID to reply to.",
-                        "optional": True,
-                    },
-                    "thread_event_id": {
-                        "type": "string",
-                        "description": "Optional thread root event ID.",
-                        "optional": True,
-                    },
-                },
-            }
-        if action_name == FILE_ACTION_TYPE:
-            return {
-                "description": (
-                    "Send a file attachment to a Matrix room. The media kind "
-                    "(image, video, audio, document) is auto-detected."
-                ),
-                "payload": {
-                    "path": {
-                        "type": "string",
-                        "example": "/app/data/report.pdf",
-                        "description": "Path to the file to send. Must be inside Synth's filesystem sandbox.",
-                    },
-                    "target": {
-                        "type": "string",
-                        "example": "!abcdefg:example.org",
-                        "description": "Matrix room_id or room alias where the file should be delivered.",
-                    },
-                    "caption": {
-                        "type": "string",
-                        "example": "Here is the report you asked for",
-                        "description": "Optional text sent alongside the file.",
-                        "optional": True,
-                    },
-                    "thread_event_id": {
-                        "type": "string",
-                        "description": "Optional thread root event ID.",
                         "optional": True,
                     },
                 },
@@ -400,7 +367,7 @@ class MatrixInterface:
     @staticmethod
     def validate_payload(action_type: str, payload: Dict[str, Any]) -> List[str]:
         errors: List[str] = []
-        if action_type not in (ACTION_TYPE, FILE_ACTION_TYPE):
+        if action_type != ACTION_TYPE:
             return errors
         if not MatrixInterface._current_instance_enabled:
             errors.append(
@@ -408,24 +375,21 @@ class MatrixInterface:
             )
             return errors
 
-        target = payload.get("target") or payload.get("room_id")
-        if not isinstance(target, str) or not target.strip():
-            errors.append("payload.target must be a room_id or alias string")
+        text = payload.get("text")
+        media = payload.get("media")
+        has_text = isinstance(text, str) and bool(text.strip())
+        if not has_text and not media:
+            errors.append("payload.text or payload.media is required")
+        elif text is not None and not isinstance(text, str):
+            errors.append("payload.text must be a string")
+
         thread_event = payload.get("thread_event_id")
         if thread_event is not None and not isinstance(thread_event, str):
             errors.append("payload.thread_event_id must be a string")
 
-        if action_type == ACTION_TYPE:
-            text = payload.get("text")
-            if not isinstance(text, str) or not text.strip():
-                errors.append("payload.text must be a non-empty string")
-            reply_to = payload.get("reply_to_event_id")
-            if reply_to is not None and not isinstance(reply_to, str):
-                errors.append("payload.reply_to_event_id must be a string")
-        elif action_type == FILE_ACTION_TYPE:
-            path = payload.get("path")
-            if not isinstance(path, str) or not path.strip():
-                errors.append("payload.path must be a non-empty string")
+        reply_to = payload.get("reply_to") or payload.get("reply_to_event_id")
+        if reply_to is not None and not isinstance(reply_to, str):
+            errors.append("payload.reply_to must be a string")
         return errors
 
     # ------------------------------------------------------------------
@@ -774,19 +738,91 @@ class MatrixInterface:
             )
             return False
         skip_history = False
+        media_items = []
         if isinstance(room_id, dict):
             payload = room_id
             text = payload.get("text", text)
             room_id = payload.get("target") or payload.get("room_id")
-            reply_to_event_id = payload.get("reply_to_event_id")
+            reply_to_event_id = payload.get("reply_to") or payload.get(
+                "reply_to_event_id"
+            )
             thread_event_id = payload.get("thread_event_id") or payload.get("thread_id")
             skip_history = payload.get("skip_history", False)
+            raw_media = payload.get("media")
+            if raw_media:
+                media_items = (
+                    [str(m) for m in raw_media if m]
+                    if isinstance(raw_media, (list, tuple))
+                    else [str(raw_media)]
+                )
+            if payload.get("send_as_voice"):
+                from core.capability_drops import log_and_build_drop
+
+                log_and_build_drop(
+                    "send_as_voice",
+                    "voice notes are not supported on Matrix",
+                    INTERFACE_NAME,
+                )
         else:
             payload = kwargs
             room_id = room_id or payload.get("target") or payload.get("room_id")
-            reply_to_event_id = payload.get("reply_to_event_id")
+            reply_to_event_id = kwargs.get("reply_to") or payload.get(
+                "reply_to_event_id"
+            )
             thread_event_id = payload.get("thread_event_id") or payload.get("thread_id")
             skip_history = payload.get("skip_history", False)
+            raw_media = kwargs.get("media")
+            if raw_media:
+                media_items = (
+                    [str(m) for m in raw_media if m]
+                    if isinstance(raw_media, (list, tuple))
+                    else [str(raw_media)]
+                )
+
+        # Unified 'media' list delivery (text doubles as the first caption).
+        if media_items:
+            if not self.is_enabled or not self.client:
+                log_warning("[matrix_interface] Cannot send media - interface disabled")
+                return False
+            if not room_id:
+                origin_room = getattr(
+                    (
+                        payload.get("original_message")
+                        if isinstance(payload, dict)
+                        else None
+                    ),
+                    "chat_id",
+                    None,
+                )
+                room_id = origin_room
+            if not room_id:
+                log_warning("[matrix_interface] Cannot send media - room missing")
+                return False
+            await self._ensure_login()
+            resolved_room = await self._resolve_room_identifier(str(room_id))
+            ok_all = True
+            first_caption = text if isinstance(text, str) else ""
+            for idx, item in enumerate(media_items):
+                from core.outbound_file_utils import resolve_safe_outbound_path
+
+                resolved, err = resolve_safe_outbound_path(item)
+                if err or resolved is None:
+                    log_warning(
+                        f"[matrix_interface] Rejected media path {item!r}: {err}"
+                    )
+                    ok_all = False
+                    continue
+                result = await self._send_matrix_file(
+                    resolved_room,
+                    resolved,
+                    caption=first_caption or None,
+                    thread_event_id=thread_event_id,
+                    reply_to_event_id=reply_to_event_id,
+                )
+                if isinstance(result, dict) and result.get("status") != "success":
+                    ok_all = False
+                first_caption = ""
+            return ok_all
 
         if not self.client:
             log_warning(
@@ -843,6 +879,19 @@ class MatrixInterface:
                 )
 
         return True
+
+    async def _resolve_room_identifier(self, room_identifier: str) -> str:
+        """Resolve a ``#alias`` to a room_id; other identifiers pass through."""
+        if room_identifier and room_identifier.startswith("#"):
+            try:
+                response = await self.client.room_resolve_alias(room_identifier)
+                if hasattr(response, "room_id"):
+                    return response.room_id
+            except Exception as exc:
+                log_warning(
+                    f"[matrix_interface] Failed to resolve alias {room_identifier}: {exc}"
+                )
+        return room_identifier
 
     async def _send_matrix_message(
         self,
@@ -902,6 +951,7 @@ class MatrixInterface:
         *,
         caption: Optional[str] = None,
         thread_event_id: Optional[str] = None,
+        reply_to_event_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Upload ``file_path`` to the media repo and send it into ``room_id``.
 
@@ -960,12 +1010,19 @@ class MatrixInterface:
             "url": content_uri,
             "info": {"mimetype": mime_type, "size": filesize},
         }
+        relates_to: Dict[str, Any] = {}
         if thread_event_id:
-            content["m.relates_to"] = {
-                "event_id": thread_event_id,
-                "rel_type": "m.thread",
-                "is_falling_back": True,
-            }
+            relates_to.update(
+                {
+                    "event_id": thread_event_id,
+                    "rel_type": "m.thread",
+                    "is_falling_back": True,
+                }
+            )
+        if reply_to_event_id:
+            relates_to.setdefault("m.in_reply_to", {"event_id": reply_to_event_id})
+        if relates_to:
+            content["m.relates_to"] = relates_to
 
         try:
             await self.client.room_send(
@@ -993,65 +1050,20 @@ class MatrixInterface:
         bot: Any = None,
         original_message: Any = None,
     ) -> Dict[str, Any]:
-        """Dispatch non-message Matrix actions (currently file attachments)."""
+        """Dispatch non-message Matrix actions.
+
+        All message/media delivery now flows through the unified
+        ``send_message`` action (handled by :meth:`send_message`), so no
+        legacy per-interface action types remain.
+        """
         action_type = action.get("type")
-        payload = action.get("payload", {}) or {}
-
-        if action_type != FILE_ACTION_TYPE:
-            log_warning(
-                f"[matrix_interface] execute_action: unknown action_type={action_type}"
-            )
-            return {
-                "status": "failed",
-                "message": f"Unknown action {action_type}",
-            }
-
-        if not self.is_enabled or not self.client:
-            return {
-                "status": "failed",
-                "message": "Matrix interface is disabled or not initialized",
-            }
-
-        from core.outbound_file_utils import resolve_safe_outbound_path
-
-        raw_path = payload.get("path")
-        raw_target = payload.get("target") or payload.get("room_id")
-        caption = payload.get("caption")
-        thread_event_id = payload.get("thread_event_id") or payload.get("thread_id")
-
-        if not isinstance(raw_path, str) or not raw_path.strip():
-            return {"status": "failed", "message": "payload.path must be a string"}
-        if not isinstance(raw_target, str) or not raw_target.strip():
-            return {"status": "failed", "message": "Missing target room"}
-        if thread_event_id is not None and not isinstance(thread_event_id, str):
-            thread_event_id = str(thread_event_id)
-        caption = caption if isinstance(caption, str) else None
-
-        resolved, err = resolve_safe_outbound_path(raw_path)
-        if err or resolved is None:
-            log_warning(f"[matrix_interface] Rejected file path {raw_path!r}: {err}")
-            return {"status": "failed", "message": err or "Invalid path"}
-
-        target: str = raw_target
-        await self._ensure_login()
-
-        if target.startswith("#"):
-            try:
-                response = await self.client.room_resolve_alias(target)
-                resolved_room = getattr(response, "room_id", None)
-                if isinstance(resolved_room, str):
-                    target = resolved_room
-            except Exception as exc:
-                log_warning(
-                    f"[matrix_interface] Failed to resolve alias {target}: {exc}"
-                )
-
-        return await self._send_matrix_file(
-            target,
-            resolved,
-            caption=caption,
-            thread_event_id=thread_event_id,
+        log_warning(
+            f"[matrix_interface] execute_action called for unknown action {action_type}"
         )
+        return {
+            "status": "failed",
+            "message": f"Unknown action {action_type}",
+        }
 
     async def get_me(self) -> SimpleNamespace:
         return SimpleNamespace(id=self.user_id, username=self.username)

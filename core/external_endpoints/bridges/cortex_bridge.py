@@ -898,14 +898,17 @@ class ExternalCortexEngine(AIPluginBase):
                 return
 
             # Drop message_* actions that belong to other interfaces — the
-            # model only needs the one matching its current interface.
+            # model only needs the one matching its current interface. The
+            # unified send_message is interface-agnostic and always kept.
             _rtx = getattr(prompt_request, "runtime_ctx", None)
             _iface: str = str(getattr(_rtx, "interface_name", "") or "").strip()
             if _iface:
                 names = {
                     n
                     for n in names
-                    if not n.startswith("message_") or n == f"message_{_iface}"
+                    if n == "send_message"
+                    or not n.startswith("message_")
+                    or n == f"message_{_iface}"
                 }
 
             # Drop animation/visual actions when no animation client is connected.

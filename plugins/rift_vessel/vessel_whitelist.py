@@ -39,7 +39,7 @@ __all__ = [
 #: Default value baked into the ``VESSEL_ACTION_WHITELIST`` config variable.
 #: Only the optional *core-extra* actions — the vessel/game verbs are hardcoded
 #: separately and never appear here.
-DEFAULT_WHITELIST = "message_*, event, schedule_message, blocklist, spawn_drone"
+DEFAULT_WHITELIST = "send_message, event, schedule_message, blocklist, spawn_drone"
 
 #: Default value baked into the ``VESSEL_RECON_WHITELIST`` config variable — the
 #: preflight (recon) counterpart of ``VESSEL_ACTION_WHITELIST``. During an

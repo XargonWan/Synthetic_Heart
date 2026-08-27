@@ -31,6 +31,18 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
+def _is_message_action_name(action_type) -> bool:
+    """True for the unified send_message or any legacy message_* action."""
+    try:
+        from core.message_registry import is_message_action
+
+        return is_message_action(action_type)
+    except Exception:
+        return isinstance(action_type, str) and (
+            action_type == "send_message" or action_type.startswith("message_")
+        )
+
+
 def _build_runtime_prefix(ctx: RuntimeContext) -> str:
     """Compact runtime context prefix injected at the start of the current turn.
 
@@ -72,7 +84,10 @@ def _build_runtime_prefix(ctx: RuntimeContext) -> str:
         parts.append(f"beat:{ctx.beat_type}")
     if not parts:
         return ""
-    return "[" + " | ".join(parts) + "]\n"
+    prefix = "[" + " | ".join(parts) + "]\n"
+    if ctx.addressee_note:
+        prefix += f"{ctx.addressee_note}\n"
+    return prefix
 
 
 def _build_multimodal_turn_text(
@@ -415,7 +430,7 @@ class OpenAIRenderer:
         # Only do this when the tool calls did not already carry a message.
         content_text = str(message.get("content") or "").strip()
         if content_text and not any(
-            str(a.get("type", "")).startswith("message_") for a in actions
+            _is_message_action_name(a.get("type")) for a in actions
         ):
             result["message"] = content_text
 

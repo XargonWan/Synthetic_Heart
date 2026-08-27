@@ -657,17 +657,17 @@ def test_validate_payload_coerces_string_send_as_voice():
         return {"text": "hello", "interface_path": "telegram_bot/1", "send_as_voice": sav}
 
     p = payload("true")
-    assert TelegramInterface.validate_payload("message_telegram_bot", p) == []
+    assert TelegramInterface.validate_payload("send_message", p) == []
     assert p["send_as_voice"] is True
 
     p = payload("false")
-    assert TelegramInterface.validate_payload("message_telegram_bot", p) == []
+    assert TelegramInterface.validate_payload("send_message", p) == []
     assert p["send_as_voice"] is False
 
     # A genuine boolean is untouched; a nonsense string is rejected.
     p = payload(True)
-    assert TelegramInterface.validate_payload("message_telegram_bot", p) == []
+    assert TelegramInterface.validate_payload("send_message", p) == []
     p = payload("maybe")
-    assert TelegramInterface.validate_payload("message_telegram_bot", p) == [
+    assert TelegramInterface.validate_payload("send_message", p) == [
         "payload.send_as_voice must be a boolean"
     ]

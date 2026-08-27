@@ -198,7 +198,12 @@ _COMPLETION_TOOL = "attempt_completion"
 # are attempted (text sanitisation, deriving a missing target from the
 # already-present interface_path). The interface_path itself is NEVER modified —
 # doing so could deliver the message to a chat Synth never intended.
-_DELIVERY_ACTION_PREFIX = "message_"
+_DELIVERY_ACTIONS = ("send_message", "message_")
+
+
+def _is_delivery_action(name: str) -> bool:
+    """True for the unified send_message or any legacy message_* action."""
+    return name == "send_message" or name.startswith("message_")
 
 
 def _context_allowed_tools(context: dict[str, Any] | None) -> set[str] | None:
@@ -569,6 +574,20 @@ _ENGINE_FAILURE_SERVER_MARKERS = (
     "gateway timeout",
     "server error",
 )
+# Our own engine/adapter code raising while handling the call or its response
+# (e.g. ``TypeError: 'NoneType' object is not subscriptable`` on a non-standard
+# HTTP-200 body). The bridge records these verbatim as
+# ``f"{type(exc).__name__}: {exc}"``, so the Python type name leads the string;
+# match by prefix so provider text merely *mentioning* a type name still wins.
+_ENGINE_FAILURE_INTERNAL_MARKERS = (
+    "TypeError:",
+    "AttributeError:",
+    "KeyError:",
+    "IndexError:",
+    "NameError:",
+    "UnboundLocalError:",
+    "JSONDecodeError:",
+)
 
 # Failure kinds that cannot self-heal within a turn: retrying the same engine
 # (or burning the turn budget iterating) is pure waste, so the loop fails fast
@@ -602,6 +621,11 @@ _ENGINE_FAILURE_HINTS = {
         "the endpoint answered but returned an empty body — often a broken "
         "engine config (e.g. an invalid API key or model name)"
     ),
+    "internal": (
+        "our engine code hit an unexpected Python exception handling this "
+        "endpoint's response — often a non-standard reply shape; check the "
+        "logs and report it if reproducible"
+    ),
     "unknown": (
         "the engine failed without a specific error — check the endpoint "
         "config and logs"
@@ -618,7 +642,8 @@ def classify_engine_failure(
     """Classify an engine/cortex failure into ``(kind, operator_hint)``.
 
     ``kind`` is one of ``auth``, ``connection``, ``bad_request``,
-    ``rate_limited``, ``server_error``, ``timeout``, ``empty``, ``unknown``.
+    ``rate_limited``, ``server_error``, ``timeout``, ``empty``, ``internal``
+    (our own code crashed handling the call/response), ``unknown``.
     A recorded provider error wins over the timeout/empty flags: an offline
     endpoint typically surfaces to the loop as a hard timeout (the bridge's
     connection retries outlive the turn budget) while the bridge has already
@@ -642,6 +667,11 @@ def classify_engine_failure(
         for marker in _ENGINE_FAILURE_SERVER_MARKERS:
             if marker in lowered:
                 return "server_error", _ENGINE_FAILURE_HINTS["server_error"]
+        # Our own code crashing (recorded as "TypeName: message") — never
+        # misread as a provider-side problem.
+        for marker in _ENGINE_FAILURE_INTERNAL_MARKERS:
+            if lowered.startswith(marker.lower()):
+                return "internal", _ENGINE_FAILURE_HINTS["internal"]
         if "timeout" in lowered or "timed out" in lowered:
             return "timeout", _ENGINE_FAILURE_HINTS["timeout"]
     if timed_out:
@@ -709,9 +739,7 @@ def _engine_failure_from_diagnostics(engine_name: str | None) -> dict[str, Any] 
     return None
 
 
-def _describe_engine_failure(
-    failure: dict[str, Any] | None, engine: str | None
-) -> str:
+def _describe_engine_failure(failure: dict[str, Any] | None, engine: str | None) -> str:
     """Render a classified failure for logs/notifications, truthfully.
 
     When no diagnostics exist (e.g. the generic plugin path) the description
@@ -1556,7 +1584,8 @@ class AgentLoopManager:
         interim_messages_delivered = 0
         try:
             max_interim_messages = max(
-                0, min(int(config_registry.get_var("AGENT_MAX_INTERIM_MESSAGES", 1)), 10)
+                0,
+                min(int(config_registry.get_var("AGENT_MAX_INTERIM_MESSAGES", 1)), 10),
             )
         except (TypeError, ValueError):
             max_interim_messages = 1
@@ -1737,15 +1766,15 @@ class AgentLoopManager:
                 # the bridge has already recorded the underlying connection
                 # error on its earlier attempts (peek survives the cancellation
                 # because the bridge writes it before its retry sleep).
-                bridge_error = (
-                    _peek_engine_diagnostics(engine) or {}
-                ).get("error")
+                bridge_error = (_peek_engine_diagnostics(engine) or {}).get("error")
                 timeout_detail = (
                     f"engine call timed out at iteration {i} "
                     f"after {per_call_timeout:.1f}s"
                 )
                 if bridge_error:
-                    timeout_detail = f"{timeout_detail}; last engine error: {bridge_error}"
+                    timeout_detail = (
+                        f"{timeout_detail}; last engine error: {bridge_error}"
+                    )
                 kind, hint = classify_engine_failure(bridge_error, timed_out=True)
                 engine_failure = {
                     "kind": kind,
@@ -1764,8 +1793,7 @@ class AgentLoopManager:
                     "engine": engine,
                 }
                 log_error(
-                    f"[agent_core] Engine call failed at iteration {i} "
-                    f"({kind}): {exc}"
+                    f"[agent_core] Engine call failed at iteration {i} ({kind}): {exc}"
                 )
                 observations.append(
                     {
@@ -1820,7 +1848,9 @@ class AgentLoopManager:
                         )
                         fallback_text = await _call_with_hard_timeout(
                             self._call_engine_direct(prompt, engine, cortex_scope),
-                            timeout=max(2.0, min(engine_timeout, remaining_after_primary)),
+                            timeout=max(
+                                2.0, min(engine_timeout, remaining_after_primary)
+                            ),
                         )
                     except asyncio.TimeoutError:
                         fallback_text = ""
@@ -1890,8 +1920,7 @@ class AgentLoopManager:
                     except Exception as base_exc:
                         # The safety net must never kill the turn itself.
                         log_warning(
-                            f"[agent_core] Base Cortex fallback call raised: "
-                            f"{base_exc}"
+                            f"[agent_core] Base Cortex fallback call raised: {base_exc}"
                         )
                         base_text = ""
                     if base_text and base_text.strip():
@@ -2075,7 +2104,7 @@ class AgentLoopManager:
                     if not isinstance(args, dict):
                         args = {}
                     text = str(args.get("text") or args.get("content") or "").strip()
-                    is_delivery = mc_name.startswith(_DELIVERY_ACTION_PREFIX)
+                    is_delivery = _is_delivery_action(mc_name)
                     # Non-delivery speech actions are only captured; delivery
                     # actions are collected once they pass the dedup + interim
                     # cap below (a suppressed message must not be hoisted into
@@ -2091,7 +2120,7 @@ class AgentLoopManager:
                     # is deprecated and is excluded from the loop's tool set);
                     # any stray non-message speech action (radio_speak) stays
                     # captured as text only.
-                    if mc_name.startswith(_DELIVERY_ACTION_PREFIX):
+                    if _is_delivery_action(mc_name):
                         # Cross-iteration dedup: never re-send text already
                         # delivered earlier in THIS turn (the model re-emitting
                         # the same reply instead of completing → 3x voice notes).
@@ -2384,9 +2413,7 @@ class AgentLoopManager:
                     and bool(raw_text.strip())
                     and (
                         int(_meta.get("error_count") or 0) > 0
-                        or raw_text.lstrip().lower().startswith(
-                            ("<html", "<!doctype")
-                        )
+                        or raw_text.lstrip().lower().startswith(("<html", "<!doctype"))
                     )
                 )
                 if _malformed:
@@ -2556,9 +2583,7 @@ class AgentLoopManager:
                 # missing target) and re-execute BEFORE bothering the model. The
                 # interface_path is never touched, so the retry can only reach
                 # the exact destination the model already chose.
-                if not exec_result.get("ok") and str(name).startswith(
-                    _DELIVERY_ACTION_PREFIX
-                ):
+                if not exec_result.get("ok") and _is_delivery_action(str(name)):
                     fixed_args, changed = _programmatic_delivery_fix(args)
                     if changed:
                         log_info(
@@ -2591,7 +2616,7 @@ class AgentLoopManager:
                 # monologue structure leaked into a user-facing message. This is
                 # non-blocking — the message is already delivered — but a WARNING
                 # makes the leak visible in logs for later prompt tuning.
-                if str(name).startswith(_DELIVERY_ACTION_PREFIX):
+                if _is_delivery_action(str(name)):
                     delivered_text = args.get("text") or args.get("content")
                     leak_signals = _looks_like_internal_monologue(
                         delivered_text if isinstance(delivered_text, str) else ""
@@ -2677,10 +2702,7 @@ class AgentLoopManager:
         # ``pending`` (a raw ``timeout`` persists as ``failed``) and the
         # router's garbage-output guard (which only suppresses ``timeout``
         # with ZERO actions) lets it through.
-        if (
-            stop_reason == "timeout"
-            and not str(final_text or "").strip()
-        ):
+        if stop_reason == "timeout" and not str(final_text or "").strip():
             actions_executed = 0
             for obs in observations:
                 if isinstance(obs, dict) and obs.get("role") == "tool_results":
@@ -3396,8 +3418,8 @@ class AgentLoopManager:
             '"arguments": {"path": "C:/x.pdf"}}}]}\n'
             "You may list several entries inside one tool_calls array.\n"
             "VOICE/AUDIO REPLIES: to answer with your spoken voice, call "
-            "message_telegram_bot (or the matching message_* action) with "
-            "send_as_voice=true and put the full spoken reply in 'text'.\n"
+            "send_message with send_as_voice=true and put the full spoken reply "
+            "in 'text'.\n"
             "Work like a careful engineer: break the goal into steps and keep "
             "calling tools to gather information, verify assumptions and make "
             "progress until the goal is genuinely achieved. Do NOT stop and give "

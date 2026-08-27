@@ -201,7 +201,7 @@ async def test_run_agentic_turn_message_is_actually_delivered(monkeypatch):
                     "actions": [
                         {"tool": "mcp_fs_read", "params": {"path": "/x"}},
                         {
-                            "tool": "message_telegram_bot",
+                            "tool": "send_message",
                             "params": {
                                 "interface_path": "telegram_bot/31321637",
                                 "text": "Hey, thinking of you.",
@@ -228,14 +228,14 @@ async def test_run_agentic_turn_message_is_actually_delivered(monkeypatch):
     )
     assert out["stop_reason"] == "completed"
     # The message action must have reached the executor, not just final_text.
-    assert "message_telegram_bot" in executed
+    assert "send_message" in executed
     # A tool_results observation must record the delivery.
     delivered = [
         o
         for o in out["observations"]
         if o.get("role") == "tool_results"
         and any(
-            isinstance(r, dict) and r.get("tool") == "message_telegram_bot"
+            isinstance(r, dict) and r.get("tool") == "send_message"
             for r in (o.get("content") or [])
         )
     ]
@@ -264,7 +264,7 @@ async def test_run_agentic_turn_failed_delivery_not_completed(monkeypatch):
                     "actions": [
                         {"tool": "mcp_fs_read", "params": {"path": "/x"}},
                         {
-                            "tool": "message_telegram_bot",
+                            "tool": "send_message",
                             "params": {
                                 "interface_path": "telegram_bot/31321637",
                                 "text": "This will fail to send.",
@@ -279,7 +279,7 @@ async def test_run_agentic_turn_failed_delivery_not_completed(monkeypatch):
 
     async def fake_execute(name, arguments, context=None, original_message=None):
         # The real tool succeeds; every message delivery attempt fails.
-        if name.startswith("message_"):
+        if name == "send_message" or name.startswith("message_"):
             return {"ok": False, "tool": name, "result": "", "error": "interface down"}
         return {"ok": True, "tool": name, "result": "ok", "error": None}
 
@@ -877,7 +877,7 @@ def test_seed_calls_extracts_bookkeeping_for_under_emission():
 
     actions = [
         {"type": "update_emotion_state", "payload": {"emotions": {"joy": 1.0}}},
-        {"type": "message_telegram_bot", "payload": {"text": "I'll do it!"}},
+        {"type": "send_message", "payload": {"text": "I'll do it!"}},
         {"type": "create_personal_diary_entry", "payload": {"content": "x"}},
     ]
     seeds = _seed_calls_for_under_emission(actions)
@@ -894,7 +894,7 @@ def test_seed_calls_empty_for_tool_batch():
     from core.agent_router import _seed_calls_for_under_emission
 
     actions = [
-        {"type": "message_telegram_bot", "payload": {"text": "on it"}},
+        {"type": "send_message", "payload": {"text": "on it"}},
         {"type": "mcp_fs_read", "payload": {"path": "/x"}},
     ]
     assert _seed_calls_for_under_emission(actions) == []
@@ -903,6 +903,12 @@ def test_seed_calls_empty_for_tool_batch():
 def test_seed_calls_empty_for_message_only():
     from core.agent_router import _seed_calls_for_under_emission
 
+    assert (
+        _seed_calls_for_under_emission(
+            [{"type": "send_message", "payload": {"text": "hi"}}]
+        )
+        == []
+    )
     assert (
         _seed_calls_for_under_emission([{"type": "message", "payload": {"text": "hi"}}])
         == []
@@ -917,8 +923,8 @@ def test_derive_goal_prefers_user_request_over_raw_llm_json():
     from core.agent_router import _derive_goal
 
     context = {
-        "goal": '{"actions": [{"type": "message_telegram_bot", "payload": {"text": "hi"}}]}',
-        "original_text": '{"actions": [{"type": "message_telegram_bot", "payload": {"text": "hi"}}]}',
+        "goal": '{"actions": [{"type": "send_message", "payload": {"text": "hi"}}]}',
+        "original_text": '{"actions": [{"type": "send_message", "payload": {"text": "hi"}}]}',
         "original_user_message": "read me this pdf into a voice note",
     }
     assert _derive_goal([], context) == "read me this pdf into a voice note"
@@ -931,11 +937,11 @@ def test_derive_goal_skips_llm_response_json_when_no_user_text():
     from core.agent_router import _derive_goal
 
     context = {
-        "goal": '{"actions": [{"type": "message_telegram_bot", "payload": {"text": "hi"}}]}',
-        "original_text": '{"actions": [{"type": "message_telegram_bot", "payload": {"text": "hi"}}]}',
+        "goal": '{"actions": [{"type": "send_message", "payload": {"text": "hi"}}]}',
+        "original_text": '{"actions": [{"type": "send_message", "payload": {"text": "hi"}}]}',
     }
     goal = _derive_goal(
-        [{"type": "message_telegram_bot", "payload": {"text": "hi"}}],
+        [{"type": "send_message", "payload": {"text": "hi"}}],
         context,
     )
     assert goal == "Complete the user's request using the available tools."
@@ -1127,7 +1133,7 @@ def test_resume_allowed_rejects_poisoned_goal():
     from core.agent_router import _resume_allowed
 
     allowed, reason = _resume_allowed(
-        '{"actions": [{"type": "message_telegram_bot", "payload": {"text": "hi"}}]}',
+        '{"actions": [{"type": "send_message", "payload": {"text": "hi"}}]}',
         {},
     )
     assert allowed is False

@@ -63,6 +63,24 @@ def _is_thread_or_chat_not_found(error_message: str) -> bool:
     return "thread not found" in lowered or "chat not found" in lowered
 
 
+def _is_stale_reply_target(error_message: str) -> bool:
+    """True when ``reply_to_message_id`` points at a message Telegram no longer has.
+
+    The original message may have been deleted (or purged by retention), making
+    the stored reply id permanently undeliverable. Like a stale thread id this is
+    a data problem, not a connectivity issue: no chat-wide cooldown must be set,
+    and ``send_with_thread_fallback`` retries without the reply reference.
+    """
+    return "message to be replied not found" in error_message.lower()
+
+
+def _is_stale_identifier_error(error_message: str) -> bool:
+    """True for any stale Telegram identifier (thread/chat/reply target)."""
+    return _is_thread_or_chat_not_found(error_message) or _is_stale_reply_target(
+        error_message
+    )
+
+
 def _get_telegram_trainer_id() -> int | None:
     """Resolve the Telegram trainer id from config for failure alerts."""
     try:
@@ -276,14 +294,15 @@ async def _send_with_retry(
                         int(seconds) if seconds else DEFAULT_COOLDOWN_SECONDS
                     )
                     _CHAT_COOLDOWNS[chat_id] = cooldown
-                elif isinstance(e, NetworkError) and not _is_thread_or_chat_not_found(
+                elif isinstance(e, NetworkError) and not _is_stale_identifier_error(
                     error_message
                 ):
                     # BadRequest is a NetworkError subclass in python-telegram-bot,
-                    # but "thread/chat not found" is a stale-id data problem, not a
-                    # connectivity issue — don't cooldown the whole chat for it, since
-                    # the caller (send_with_thread_fallback) retries immediately without
-                    # the thread and would otherwise walk straight into this cooldown.
+                    # but stale thread/chat/reply-target ids are data problems, not
+                    # connectivity issues — don't cooldown the whole chat for them,
+                    # since send_with_thread_fallback retries immediately without
+                    # the offending identifier and would otherwise walk straight
+                    # into this cooldown.
                     _CHAT_COOLDOWNS[chat_id] = time.time() + DEFAULT_COOLDOWN_SECONDS
             except Exception:
                 pass
@@ -318,7 +337,7 @@ async def _send_with_retry(
                             )
                         elif isinstance(
                             e2, NetworkError
-                        ) and not _is_thread_or_chat_not_found(str(e2)):
+                        ) and not _is_stale_identifier_error(str(e2)):
                             _CHAT_COOLDOWNS[chat_id] = (
                                 time.time() + DEFAULT_COOLDOWN_SECONDS
                             )
@@ -469,6 +488,38 @@ async def safe_edit(
         raise last_error
 
 
+def _record_stale_reply_drop(interface_path: str | None) -> None:
+    """Record a capability drop so Synth learns the reply target vanished.
+
+    Follows the established capability-drops pattern (core/capability_drops.py):
+    a structured record is remembered for this conversation and the prompt
+    engine renders it as an informational block on the NEXT turn, so Synth can
+    acknowledge the limitation in its own words. Never raises — notification
+    must never break delivery.
+    """
+    try:
+        if not interface_path:
+            return
+        from core.capability_drops import DROP_REPLY, make_drop, remember_drops
+
+        remember_drops(
+            interface_path,
+            [
+                make_drop(
+                    DROP_REPLY,
+                    "the replied-to message no longer exists on Telegram; "
+                    "your reply was delivered without the quote reference",
+                    "telegram",
+                )
+            ],
+        )
+        log_debug(
+            f"[telegram_utils] stale-reply capability drop recorded for {interface_path}"
+        )
+    except Exception as exc:
+        log_debug(f"[telegram_utils] stale-reply drop recording skipped: {exc}")
+
+
 async def send_with_thread_fallback(
     bot,
     chat_id: int | str,
@@ -479,6 +530,7 @@ async def send_with_thread_fallback(
     fallback_chat_id: int | None = None,
     fallback_thread_id: int | None = None,
     fallback_reply_to_message_id: int | None = None,
+    interface_path: str | None = None,
     **kwargs,
 ) -> object | None:
     """Send a Telegram message with automatic thread fallback.
@@ -489,7 +541,25 @@ async def send_with_thread_fallback(
     provided ``thread_id`` and falls back to sending without it if the
     thread does not exist.  If ``fallback_chat_id`` is provided it will then try
     sending to that chat using the accompanying fallback parameters.
+
+    ``interface_path`` is optional routing metadata (never forwarded to the
+    Telegram API): when the reply target turns out to be deleted, a structured
+    capability drop is recorded under it so Synth learns about the degraded
+    delivery on its next turn.
     """
+    if interface_path is None:
+        # These helpers are Telegram-bound; synthesise the canonical path so
+        # every caller (e.g. scheduled events) still gets drop reporting.
+        try:
+            from core.interface_path_utils import build_interface_path
+
+            interface_path = build_interface_path(
+                "telegram_bot",
+                str(chat_id),
+                str(thread_id) if thread_id else None,
+            )
+        except Exception:
+            interface_path = f"telegram_bot/{chat_id}"
 
     global _BOT_NONE_WARNED, _LAST_BOT_NONE_LOG_TIME
     if bot is None:
@@ -552,77 +622,104 @@ async def send_with_thread_fallback(
     if reply_to_message_id is not None:
         send_kwargs["reply_to_message_id"] = reply_to_message_id
 
-    try:
-        log_debug(
-            f"[telegram_utils] send_with_thread_fallback calling cortex_response_send chat_id={chat_id} send_kwargs={send_kwargs}"
-        )
-        message = await cortex_response_send(
-            bot,
-            chat_id,
-            text,
-            **send_kwargs,
-        )
-        if message is not None:
-            log_info(
-                f"[telegram_utils] Message sent to {chat_id}"
-                f" (thread: {thread_id}, reply_message_id: {reply_to_message_id})"
-            )
-        else:
-            log_warning(
-                f"[telegram_utils] Message to {chat_id} queued/skipped due to cooldown or error"
-                f" (thread: {thread_id}, reply_message_id: {reply_to_message_id})"
-            )
-        log_debug(f"[telegram_utils] cortex_response_send returned: {repr(message)}")
-        return message
-    except Exception as e:
-        # On network/flood errors, set a cooldown for this chat
+    # Bounded degradation ladder: each rung strips one stale identifier and
+    # retries. A deleted/purged original message makes ``reply_to_message_id``
+    # permanently undeliverable ("Message to be replied not found") — the text
+    # must still go out, so the reply reference is dropped first (thread kept);
+    # a stale thread id is dropped on the next rung. Unknown errors are logged
+    # as ERROR and re-raised.
+    last_error: Exception | None = None
+    dropped_stale_reply = False
+    for _attempt in range(4):
         try:
-            if isinstance(e, RetryAfter):
-                seconds = getattr(e, "retry_after", None) or getattr(
-                    e, "retry_after_seconds", None
-                )
-                _CHAT_COOLDOWNS[chat_id] = time.time() + (
-                    int(seconds) if seconds else DEFAULT_COOLDOWN_SECONDS
-                )
-            elif isinstance(e, NetworkError):
-                _CHAT_COOLDOWNS[chat_id] = time.time() + DEFAULT_COOLDOWN_SECONDS
-        except Exception:
-            pass
-
-        error_message = str(e)
-        if "chat not found" in error_message.lower():
-            log_error(
-                f"[telegram_utils] send_with_thread_fallback caught error: {repr(e)}"
-            )
-            log_error(
-                f"[telegram_utils] Failed to send to {chat_id} (thread {thread_id}): {repr(e)}"
-            )
-            raise
-
-        if thread_id and "thread not found" in error_message.lower():
-            # Don't log as ERROR since this is expected behavior - thread fallback is normal
             log_debug(
-                f"[telegram_utils] send_with_thread_fallback caught thread error: {repr(e)}"
+                f"[telegram_utils] send_with_thread_fallback calling cortex_response_send chat_id={chat_id} send_kwargs={send_kwargs}"
             )
-            log_warning(
-                f"[telegram_utils] Thread {thread_id} not found; retrying without thread"
+            message = await cortex_response_send(
+                bot,
+                chat_id,
+                text,
+                **send_kwargs,
             )
-            send_kwargs.pop("message_thread_id", None)
-            message = await cortex_response_send(bot, chat_id, text, **send_kwargs)
             if message is not None:
-                log_info(f"[telegram_utils] Message sent to {chat_id} without thread")
+                log_info(
+                    f"[telegram_utils] Message sent to {chat_id}"
+                    f" (thread: {thread_id}, reply_message_id: {reply_to_message_id})"
+                )
             else:
                 log_warning(
-                    f"[telegram_utils] Message to {chat_id} queued/failed (cooldown or other error)"
+                    f"[telegram_utils] Message to {chat_id} queued/skipped due to cooldown or error"
+                    f" (thread: {thread_id}, reply_message_id: {reply_to_message_id})"
                 )
+            log_debug(
+                f"[telegram_utils] cortex_response_send returned: {repr(message)}"
+            )
+            if dropped_stale_reply:
+                _record_stale_reply_drop(interface_path)
             return message
+        except Exception as e:
+            last_error = e
+            # On network/flood errors, set a cooldown for this chat; stale
+            # identifiers are data problems handled by the ladder below.
+            try:
+                if isinstance(e, RetryAfter):
+                    seconds = getattr(e, "retry_after", None) or getattr(
+                        e, "retry_after_seconds", None
+                    )
+                    _CHAT_COOLDOWNS[chat_id] = time.time() + (
+                        int(seconds) if seconds else DEFAULT_COOLDOWN_SECONDS
+                    )
+                elif isinstance(e, NetworkError) and not _is_stale_identifier_error(
+                    str(e)
+                ):
+                    _CHAT_COOLDOWNS[chat_id] = time.time() + DEFAULT_COOLDOWN_SECONDS
+            except Exception:
+                pass
 
-        # Log as error for all other cases
-        log_error(f"[telegram_utils] send_with_thread_fallback caught error: {repr(e)}")
-        log_error(
-            f"[telegram_utils] Failed to send to {chat_id} (thread {thread_id}): {repr(e)}"
-        )
-        raise
+            error_message = str(e)
+            lowered = error_message.lower()
+            if "chat not found" in lowered:
+                log_error(
+                    f"[telegram_utils] send_with_thread_fallback caught error: {repr(e)}"
+                )
+                log_error(
+                    f"[telegram_utils] Failed to send to {chat_id} (thread {thread_id}): {repr(e)}"
+                )
+                raise
+
+            dropped: str | None = None
+            if (
+                "message to be replied not found" in lowered
+                and "reply_to_message_id" in send_kwargs
+            ):
+                send_kwargs.pop("reply_to_message_id")
+                dropped = "reply_to_message_id"
+                dropped_stale_reply = True
+                log_warning(
+                    "[telegram_utils] Reply target no longer exists; retrying without reply_to_message_id"
+                )
+            elif (
+                thread_id
+                and "thread not found" in lowered
+                and "message_thread_id" in send_kwargs
+            ):
+                send_kwargs.pop("message_thread_id")
+                dropped = "message_thread_id"
+                log_warning(
+                    f"[telegram_utils] Thread {thread_id} not found; retrying without thread"
+                )
+
+            if dropped is None:
+                log_error(
+                    f"[telegram_utils] send_with_thread_fallback caught error: {repr(e)}"
+                )
+                log_error(
+                    f"[telegram_utils] Failed to send to {chat_id} (thread {thread_id}): {repr(e)}"
+                )
+                raise
+    if last_error is not None:
+        raise last_error
+    return None
 
     if fallback_chat_id and fallback_chat_id != chat_id:
         fallback_kwargs = {**kwargs}
@@ -1025,11 +1122,16 @@ async def cortex_response_send(
         # Return the last sent message (if any) to allow callers to track trainer-side message ids
         return last_sent
     except Exception as e:
-        # Log as WARNING if it's a thread error (will be handled by fallback), ERROR otherwise
+        # Log as WARNING if it's a stale identifier (handled by the caller's
+        # fallback ladder), ERROR otherwise
         error_msg = str(e).lower()
-        if "thread not found" in error_msg or "message thread not found" in error_msg:
+        if (
+            "thread not found" in error_msg
+            or "message thread not found" in error_msg
+            or _is_stale_reply_target(error_msg)
+        ):
             log_warning(
-                f"[cortex_response_send] Thread error (will retry without thread): {repr(e)}"
+                f"[cortex_response_send] Stale identifier error (will retry without it): {repr(e)}"
             )
         else:
             log_error(f"[cortex_response_send] Failed to send text chunks: {repr(e)}")

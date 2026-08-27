@@ -176,7 +176,7 @@ class TestXaiGrokPlugin:
         }
         si = plugin._build_system_instruction(prompt)
         assert "CURRENT INTERFACE: telegram_bot" in si
-        assert "message_telegram_bot" in si
+        assert "send_message" in si
 
         # Test grillo beat formatting
         prompt_grillo = {

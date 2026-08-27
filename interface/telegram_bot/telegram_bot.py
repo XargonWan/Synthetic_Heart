@@ -2258,387 +2258,141 @@ class TelegramInterface:
     @staticmethod
     def get_supported_actions() -> dict:
         """Return schema information for supported actions."""
-        from plugins.vox_plugin import is_vox_enabled
-
-        vox_on = is_vox_enabled()
-
-        message_optional = ["chat_name", "reply_to_message_id"]
-        message_description = (
-            "Send a reply to the user via Telegram - REQUIRED whenever responding "
-            "to a human message."
-        )
-        if vox_on:
-            message_optional.append("send_as_voice")
-            message_description += (
-                " send_as_voice defaults to false. Only set send_as_voice=true when "
-                "the user explicitly asked for a voice/audio reply, or when they "
-                "just sent you a voice message. Otherwise reply as plain text."
-            )
+        from core.message_registry import get_send_message_schema
 
         return {
-            "message_telegram_bot": {
-                "required_fields": ["text", "interface_path"],
-                "optional_fields": message_optional,
-                "description": message_description,
-            },
-            # TODO(vessel-whitelist): `audio_telegram_bot` temporarily removed
-            # from the exposed action catalog to keep the global action list lean
-            # (see AGENTS.md §5c). Restore this dict entry AND its validation rule
-            # below to re-enable it.
-            # "audio_telegram_bot": {
-            #     "required_fields": ["audio", "interface_path"],
-            #     "optional_fields": [
-            #         "chat_name",
-            #     ],
-            #     "description": "Send a voice message via Telegram",
-            # },
-            "send_file_telegram_bot": {
-                "required_fields": ["path", "interface_path"],
-                "optional_fields": ["chat_name", "caption"],
-                "description": (
-                    "Send a file attachment (image, video, audio or document) via "
-                    "Telegram. The media kind is auto-detected from the file and "
-                    "delivered so the recipient can view/play it natively. The file "
-                    "must live inside Synth's filesystem sandbox."
-                ),
-                "security_level": "medium",
-                "external_effects": ["filesystem"],
-            },
+            "send_message": get_send_message_schema(["telegram_bot"]),
         }
 
     @staticmethod
     def get_prompt_instructions(action_name: str) -> dict:
         """Prompt instructions for supported actions."""
-        if action_name == "message_telegram_bot":
-            from plugins.vox_plugin import is_vox_enabled
+        from plugins.vox_plugin import is_vox_enabled
 
-            vox_on = is_vox_enabled()
+        if action_name != "send_message":
+            return None
 
-            payload = {
-                "text": {
-                    "type": "string",
-                    "example": "Hello!",
-                    "description": "The message text to send",
-                },
-                "interface_path": {
-                    "type": "string",
-                    "example": "telegram_bot/123456789/456",
-                    "description": "REQUIRED. Interface path in format 'telegram_bot/chat_id' or 'telegram_bot/chat_id/thread_id'. Use input.payload.source.interface_path to reply in same context.",
-                },
-                "chat_name": {
-                    "type": "string",
-                    "example": "Synth Hideout",
-                    "description": "Alternative to interface_path for specifying the chat by name (will be resolved to interface_path)",
-                    "optional": True,
-                },
-                "reply_to_message_id": {
-                    "type": "integer",
-                    "example": 12345,
-                    "description": "Optional ID of the message to reply to",
-                    "optional": True,
-                },
-            }
-            important_notes = [
-                "CRITICAL: ALWAYS use interface_path from input.payload.source.interface_path to reply in same conversation!",
-                "Format: 'telegram_bot/chat_id' for regular chats or 'telegram_bot/chat_id/thread_id' for topics/threads",
-                "Example: if input shows 'telegram_bot/-1003098886330/789', use EXACTLY that as interface_path in your payload",
-                "Never use just chat_id or target - always use the complete interface_path format",
-            ]
-            if vox_on:
-                payload["send_as_voice"] = {
-                    "type": "boolean",
-                    "example": True,
-                    "description": "Optional, defaults to false. When true, your 'text' is synthesised into a spoken voice note and delivered as a single audio message (with the text as caption). Voice synthesis is slow, so use it SPARINGLY: only set it when the user EXPLICITLY asked to be answered with voice/audio (in any language), or when the user's own message was a voice note. Do NOT set it just because it might be nice. For every ordinary reply, leave it out (or false) and answer as plain text.",
-                    "optional": True,
-                }
-                important_notes.append(
-                    "send_as_voice defaults to false. Only reply with voice when the user explicitly requested audio or sent you a voice message; when you do, keep using message_telegram_bot with your full reply in 'text' and add send_as_voice=true - do NOT emit a separate audio action."
-                )
+        vox_on = is_vox_enabled()
 
-            return {
-                "description": "Send a message via Telegram bot",
-                "payload": payload,
-                "important_notes": important_notes,
-            }
-        if action_name == "audio_telegram_bot":
-            return {
-                "description": "Send a voice message via Telegram bot",
-                "payload": {
-                    "audio": {
-                        "type": "string",
-                        "example": "/path/to/file.ogg",
-                        "description": "Path to the voice file",
-                    },
-                    "interface_path": {
-                        "type": "string",
-                        "example": "telegram_bot/123456789/456",
-                        "description": "REQUIRED. Complete interface path. Use input.payload.source.interface_path to reply in same context.",
-                    },
-                    "chat_name": {
-                        "type": "string",
-                        "example": "Synth Hideout",
-                        "description": "Alternative to interface_path for specifying the chat by name",
-                        "optional": True,
-                    },
-                    "caption": {
-                        "type": "string",
-                        "example": "This is a voice message",
-                        "description": "Text caption to display with the voice message",
-                        "optional": True,
-                    },
-                },
-            }
-        if action_name == "send_file_telegram_bot":
-            return {
+        payload = {
+            "text": {
+                "type": "string",
+                "example": "Hello!",
+                "description": "The message text to send; also the caption for media.",
+            },
+            "interface_path": {
+                "type": "string",
+                "example": "telegram_bot/123456789/456",
                 "description": (
-                    "Send a file attachment via Telegram. The media kind (photo, "
-                    "video, audio or document) is auto-detected from the file."
+                    "Destination path 'telegram_bot/chat_id' or "
+                    "'telegram_bot/chat_id/thread_id'. OPTIONAL when replying to an "
+                    "incoming message (auto-routes to the origin conversation); "
+                    "REQUIRED for spontaneous messages. Use "
+                    "input.payload.source.interface_path verbatim when present."
                 ),
-                "payload": {
-                    "path": {
-                        "type": "string",
-                        "example": "/app/data/report.pdf",
-                        "description": "Path to the file to send. Must be inside Synth's filesystem sandbox.",
-                    },
-                    "interface_path": {
-                        "type": "string",
-                        "example": "telegram_bot/123456789/456",
-                        "description": "REQUIRED. Complete interface path. Use input.payload.source.interface_path to reply in same context.",
-                    },
-                    "chat_name": {
-                        "type": "string",
-                        "example": "Synth Hideout",
-                        "description": "Alternative to interface_path for specifying the chat by name",
-                        "optional": True,
-                    },
-                    "caption": {
-                        "type": "string",
-                        "example": "Here is the report you asked for",
-                        "description": "Optional caption shown alongside the file",
-                        "optional": True,
-                    },
-                },
+            },
+            "media": {
+                "type": "array",
+                "example": ["/app/data/photo.png"],
+                "description": (
+                    "Optional list of file paths to attach (image/video/audio/"
+                    "document, auto-detected). Must be inside Synth's filesystem "
+                    "sandbox."
+                ),
+                "optional": True,
+            },
+            "reply_to": {
+                "type": "integer",
+                "example": 12345,
+                "description": "Optional ID of the message to reply to",
+                "optional": True,
+            },
+        }
+        important_notes = [
+            "CRITICAL: ALWAYS use interface_path from input.payload.source.interface_path to reply in same conversation!",
+            "Format: 'telegram_bot/chat_id' for regular chats or 'telegram_bot/chat_id/thread_id' for topics/threads",
+            "Example: if input shows 'telegram_bot/-1003098886330/789', use EXACTLY that as interface_path in your payload",
+            "Never use just chat_id or target - always use the complete interface_path format",
+        ]
+        if vox_on:
+            payload["send_as_voice"] = {
+                "type": "boolean",
+                "example": True,
+                "description": "Optional, defaults to false. When true, your 'text' is synthesised into a spoken voice note and delivered as a single audio message (with the text as caption). Voice synthesis is slow, so use it SPARINGLY: only set it when the user EXPLICITLY asked to be answered with voice/audio (in any language), or when the user's own message was a voice note. Do NOT set it just because it might be nice. For every ordinary reply, leave it out (or false) and answer as plain text.",
+                "optional": True,
             }
-        return None
+            important_notes.append(
+                "send_as_voice defaults to false. Only reply with voice when the user explicitly requested audio or sent you a voice message; when you do, keep using send_message with your full reply in 'text' and add send_as_voice=true - do NOT emit a separate audio action."
+            )
+
+        return {
+            "description": "Send a message via Telegram bot",
+            "payload": payload,
+            "important_notes": important_notes,
+        }
 
     @staticmethod
     def validate_payload(action_type: str, payload: dict) -> list:
         """Validate payload for telegram actions."""
         errors = []
 
-        if action_type == "message_telegram_bot":
-            text = payload.get("text")
-            if not isinstance(text, str) or not text:
-                errors.append("payload.text must be a non-empty string")
-            send_as_voice = payload.get("send_as_voice")
-            if send_as_voice is not None and not isinstance(send_as_voice, bool):
-                # Weak models (and the agent-loop engine) often emit the flag as
-                # a JSON string ("true"/"false") because the tool manifest
-                # renders it as ``string``. Coerce the obvious string forms so a
-                # single voice note is delivered instead of the model retrying
-                # with ever-different spellings (Langfuse 00:49 chain: "must be
-                # a boolean" → 3 duplicate voice notes).
-                if isinstance(send_as_voice, str):
-                    _lower = send_as_voice.strip().lower()
-                    if _lower in ("true", "1", "yes", "on"):
-                        payload["send_as_voice"] = True
-                    elif _lower in ("false", "0", "no", "off", ""):
-                        payload["send_as_voice"] = False
-                    else:
-                        errors.append("payload.send_as_voice must be a boolean")
+        if action_type != "send_message":
+            return errors
+
+        text = payload.get("text")
+        media = payload.get("media")
+
+        # OR validation: at least one of text / media
+        has_text = isinstance(text, str) and bool(text)
+        media_list = media if isinstance(media, list) else ([media] if media else [])
+        if not has_text and not media_list:
+            errors.append("payload.text or payload.media is required")
+        elif text is not None and not isinstance(text, str):
+            errors.append("payload.text must be a string")
+
+        send_as_voice = payload.get("send_as_voice")
+        if send_as_voice is not None and not isinstance(send_as_voice, bool):
+            # Weak models (and the agent-loop engine) often emit the flag as
+            # a JSON string ("true"/"false") because the tool manifest
+            # renders it as ``string``. Coerce the obvious string forms so a
+            # single voice note is delivered instead of the model retrying
+            # with ever-different spellings (Langfuse 00:49 chain: "must be
+            # a boolean" → 3 duplicate voice notes).
+            if isinstance(send_as_voice, str):
+                _lower = send_as_voice.strip().lower()
+                if _lower in ("true", "1", "yes", "on"):
+                    payload["send_as_voice"] = True
+                elif _lower in ("false", "0", "no", "off", ""):
+                    payload["send_as_voice"] = False
                 else:
                     errors.append("payload.send_as_voice must be a boolean")
-
-        elif action_type == "audio_telegram_bot":
-            audio = payload.get("audio")
-            if not isinstance(audio, str) or not audio:
-                errors.append("payload.audio must be a non-empty string")
-
-        elif action_type == "send_file_telegram_bot":
-            path = payload.get("path")
-            if not isinstance(path, str) or not path:
-                errors.append("payload.path must be a non-empty string")
-        else:
-            return []
+            else:
+                errors.append("payload.send_as_voice must be a boolean")
 
         interface_path = payload.get("interface_path")
         chat_name = payload.get("chat_name")
 
-        if interface_path is None and chat_name is None:
-            errors.append("payload.interface_path or payload.chat_name is required")
-        else:
-            if interface_path is not None and not isinstance(interface_path, str):
-                errors.append("payload.interface_path must be a string")
-            if chat_name is not None and not isinstance(chat_name, str):
-                errors.append("payload.chat_name must be a string")
+        # interface_path is CONDITIONAL: required only for spontaneous sends.
+        # When original_message exists the dispatcher resolves the origin, so
+        # validation here accepts a missing path (context-side rule).
+        if interface_path is not None and not isinstance(interface_path, str):
+            errors.append("payload.interface_path must be a string")
+        if chat_name is not None and not isinstance(chat_name, str):
+            errors.append("payload.chat_name must be a string")
 
         return errors
 
     async def execute_action(self, action: dict, context: dict, bot, original_message):
-        """Execute non-message actions (audio, etc)."""
+        """Execute non-message actions.
+
+        All message/media delivery now flows through the unified
+        ``send_message`` action (handled by :meth:`send_message`), so no
+        legacy per-interface action types remain.
+        """
         action_type = action.get("type")
-        payload = action.get("payload", {})
-
-        if action_type == "audio_telegram_bot":
-            interface_path = payload.get("interface_path")
-            audio_path = payload.get("audio")
-            caption = payload.get("caption") or payload.get("text")
-
-            # Telegram has a 1024 char limit for captions
-            if caption and len(caption) > 1024:
-                log_warning(
-                    f"[telegram_interface] Caption length {len(caption)} exceeds limit (1024). Sending as separate text message."
-                )
-                await self.send_message(
-                    {
-                        "text": caption,
-                        "interface_path": interface_path,
-                        "chat_name": payload.get("chat_name"),
-                    }
-                )
-                caption = None
-
-            target = None
-            thread_id = None
-            if interface_path:
-                try:
-                    from core.interface_path_utils import parse_interface_path
-
-                    _, levels = parse_interface_path(interface_path)
-                    # telegram_bot/chat_id/thread_id
-                    if len(levels) >= 1:
-                        target = levels[0]
-                    if len(levels) >= 2:
-                        thread_id = levels[1]
-                except Exception as e:
-                    log_warning(
-                        f"[telegram_interface] Failed to parse path {interface_path}: {e}"
-                    )
-
-            chat_name = payload.get("chat_name")
-            if not target and chat_name:
-                # TODO: resolve chat name logic if needed, skipping for now
-                pass
-
-            if not target:
-                log_warning("[telegram_interface] Missing target for audio")
-                return {"status": "failed", "message": "Missing target"}
-
-            if not audio_path or not os.path.exists(audio_path):
-                log_warning(f"[telegram_interface] Audio file missing: {audio_path}")
-                return {"status": "failed", "message": "Audio missing"}
-
-            try:
-                log_debug(
-                    f"[telegram_interface] Sending voice to {target} (thread={thread_id})"
-                )
-                with open(audio_path, "rb") as audio_file:
-                    await self.bot.send_voice(
-                        chat_id=target,
-                        voice=audio_file,
-                        caption=caption,
-                        message_thread_id=thread_id,
-                    )
-                log_info(f"[telegram_interface] Sent audio to {target}")
-                return {"status": "success"}
-            except Exception as e:
-                log_error(f"[telegram_interface] Failed to send audio: {e}")
-                return {"status": "failed", "error": str(e)}
-
-        if action_type == "send_file_telegram_bot":
-            from core.outbound_file_utils import (
-                MEDIA_AUDIO,
-                MEDIA_IMAGE,
-                MEDIA_VIDEO,
-                classify_media,
-                resolve_safe_outbound_path,
-            )
-
-            interface_path = payload.get("interface_path")
-            raw_path = payload.get("path")
-            caption = payload.get("caption")
-
-            resolved, err = resolve_safe_outbound_path(raw_path)
-            if err or resolved is None:
-                log_warning(
-                    f"[telegram_interface] Rejected file path {raw_path!r}: {err}"
-                )
-                return {"status": "failed", "message": err or "Invalid path"}
-
-            # Telegram has a 1024 char limit for captions.
-            if caption and len(caption) > 1024:
-                log_warning(
-                    f"[telegram_interface] Caption length {len(caption)} exceeds limit (1024). Sending as separate text message."
-                )
-                await self.send_message(
-                    {
-                        "text": caption,
-                        "interface_path": interface_path,
-                        "chat_name": payload.get("chat_name"),
-                    }
-                )
-                caption = None
-
-            target = None
-            thread_id = None
-            if interface_path:
-                try:
-                    from core.interface_path_utils import parse_interface_path
-
-                    _, levels = parse_interface_path(interface_path)
-                    if len(levels) >= 1:
-                        target = levels[0]
-                    if len(levels) >= 2:
-                        thread_id = levels[1]
-                except Exception as e:
-                    log_warning(
-                        f"[telegram_interface] Failed to parse path {interface_path}: {e}"
-                    )
-
-            if not target:
-                log_warning("[telegram_interface] Missing target for file")
-                return {"status": "failed", "message": "Missing target"}
-
-            kind = classify_media(resolved)
-            try:
-                log_debug(
-                    f"[telegram_interface] Sending file ({kind}) to {target} (thread={thread_id}): {resolved}"
-                )
-                with open(resolved, "rb") as file_obj:
-                    if kind == MEDIA_IMAGE:
-                        await self.bot.send_photo(
-                            chat_id=target,
-                            photo=file_obj,
-                            caption=caption,
-                            message_thread_id=thread_id,
-                        )
-                    elif kind == MEDIA_VIDEO:
-                        await self.bot.send_video(
-                            chat_id=target,
-                            video=file_obj,
-                            caption=caption,
-                            message_thread_id=thread_id,
-                        )
-                    elif kind == MEDIA_AUDIO:
-                        await self.bot.send_audio(
-                            chat_id=target,
-                            audio=file_obj,
-                            caption=caption,
-                            message_thread_id=thread_id,
-                        )
-                    else:
-                        await self.bot.send_document(
-                            chat_id=target,
-                            document=file_obj,
-                            caption=caption,
-                            message_thread_id=thread_id,
-                        )
-                log_info(f"[telegram_interface] Sent file ({kind}) to {target}")
-                return {"status": "success"}
-            except Exception as e:
-                log_error(f"[telegram_interface] Failed to send file: {e}")
-                return {"status": "failed", "error": str(e)}
-
+        log_warning(
+            f"[telegram_interface] execute_action called for unknown action {action_type}"
+        )
         return {"status": "failed", "message": f"Unknown action {action_type}"}
 
     def _register_custom_validation(self):
@@ -2647,118 +2401,39 @@ class TelegramInterface:
             from core.validation_registry import ValidationRule, get_validation_registry
 
             def validate_telegram_message(payload):
-                """Enhanced validation for Telegram message actions."""
+                """Validation for the unified send_message action."""
                 errors = []
 
-                # Validate text content
+                # OR validation: text or media
                 text = payload.get("text")
-                if text is None or (isinstance(text, str) and not text.strip()):
-                    errors.append("Message text cannot be empty")
-                elif not isinstance(text, str):
-                    errors.append("Message text must be a string")
+                media = payload.get("media")
+                has_text = isinstance(text, str) and bool(text.strip())
+                has_media = bool(media)
+                if not has_text and not has_media:
+                    errors.append("Either text or media must be provided")
+                elif text is not None and not isinstance(text, str):
+                    errors.append("text must be a string")
 
-                # Validate interface_path or chat_name
                 interface_path = payload.get("interface_path")
                 chat_name = payload.get("chat_name")
 
-                if interface_path is None and chat_name is None:
-                    errors.append("Either interface_path or chat_name must be provided")
-
                 if interface_path is not None and not isinstance(interface_path, str):
                     errors.append("interface_path must be a string")
-                elif interface_path is not None and not interface_path.strip():
-                    errors.append("interface_path cannot be empty")
-
                 if chat_name is not None and not isinstance(chat_name, str):
                     errors.append("chat_name must be a string")
 
                 return errors
 
-            def validate_telegram_audio(payload):
-                """Enhanced validation for Telegram audio actions."""
-                errors = []
-
-                # Validate audio path
-                audio = payload.get("audio")
-                if audio is None or (isinstance(audio, str) and not audio.strip()):
-                    errors.append("Audio path cannot be empty")
-                elif not isinstance(audio, str):
-                    errors.append("Audio path must be a string")
-
-                # Validate interface_path or chat_name
-                interface_path = payload.get("interface_path")
-                chat_name = payload.get("chat_name")
-
-                if interface_path is None and chat_name is None:
-                    errors.append("Either interface_path or chat_name must be provided")
-
-                if interface_path is not None and not isinstance(interface_path, str):
-                    errors.append("interface_path must be a string")
-                elif interface_path is not None and not interface_path.strip():
-                    errors.append("interface_path cannot be empty")
-
-                if chat_name is not None and not isinstance(chat_name, str):
-                    errors.append("chat_name must be a string")
-
-                return errors
-
-            # Create validation rules for message_telegram_bot
             message_rule = ValidationRule(
-                action_type="message_telegram_bot",
-                required_fields=["text"],
+                action_type="send_message",
+                required_fields=[],
+                one_of_groups=[["text", "media"]],
                 custom_validator=validate_telegram_message,
                 component_name="telegram_bot",
             )
 
-            # TODO(vessel-whitelist): `audio_telegram_bot` action temporarily
-            # removed from the exposed catalog (see AGENTS.md §5c). Restore this
-            # validation rule AND the action dict entry above, plus the
-            # `audio_rule` reference in register_component_rules below, to
-            # re-enable it.
-            # audio_rule = ValidationRule(
-            #     action_type="audio_telegram_bot",
-            #     required_fields=["audio"],
-            #     custom_validator=validate_telegram_audio,
-            #     component_name="telegram_bot",
-            # )
-
-            def validate_telegram_file(payload):
-                """Enhanced validation for Telegram send_file actions."""
-                errors = []
-
-                path = payload.get("path")
-                if path is None or (isinstance(path, str) and not path.strip()):
-                    errors.append("File path cannot be empty")
-                elif not isinstance(path, str):
-                    errors.append("File path must be a string")
-
-                interface_path = payload.get("interface_path")
-                chat_name = payload.get("chat_name")
-
-                if interface_path is None and chat_name is None:
-                    errors.append("Either interface_path or chat_name must be provided")
-
-                if interface_path is not None and not isinstance(interface_path, str):
-                    errors.append("interface_path must be a string")
-                elif interface_path is not None and not interface_path.strip():
-                    errors.append("interface_path cannot be empty")
-
-                if chat_name is not None and not isinstance(chat_name, str):
-                    errors.append("chat_name must be a string")
-
-                return errors
-
-            # Create validation rules for send_file_telegram_bot
-            file_rule = ValidationRule(
-                action_type="send_file_telegram_bot",
-                required_fields=["path"],
-                custom_validator=validate_telegram_file,
-                component_name="telegram_bot",
-            )
-
-            # Register with validation registry
             registry = get_validation_registry()
-            registry.register_component_rules("telegram_bot", [message_rule, file_rule])
+            registry.register_component_rules("telegram_bot", [message_rule])
 
             log_debug(
                 "[telegram_bot] Registered custom validation rules with validation registry"
@@ -2809,6 +2484,190 @@ class TelegramInterface:
         # ❌ NO retry logic - causes loops
         return  # Exit immediately without any operations
 
+    @staticmethod
+    def _normalize_media_list(raw_media) -> list:
+        """Normalize the unified 'media' field into a list of paths."""
+        if not raw_media:
+            return []
+        if isinstance(raw_media, (list, tuple)):
+            return [str(m) for m in raw_media if m]
+        return [str(raw_media)]
+
+    async def _send_media(
+        self,
+        media_items: list,
+        interface_path,
+        chat_name,
+        caption: str = "",
+        send_as_voice: bool = False,
+        reply_to=None,
+        original_message=None,
+        skip_history: bool = False,
+    ) -> bool:
+        """Deliver the unified ``media`` attachments through the stored bot.
+
+        Media kind is auto-detected via ``classify_media``; ``caption`` is
+        applied to the first attachment only. ``send_as_voice`` turns an audio
+        attachment into a voice note.
+        """
+        from core.outbound_file_utils import (
+            MEDIA_AUDIO,
+            MEDIA_IMAGE,
+            MEDIA_VIDEO,
+            classify_media,
+            resolve_safe_outbound_path,
+        )
+
+        if self.bot is None:
+            restarted = await start_bot()
+            if not restarted or self.bot is None:
+                log_warning("[telegram_interface] Bot recovery failed for media send")
+                return False
+
+        target = None
+        thread_id = None
+        if interface_path:
+            from core.interface_path_utils import extract_legacy_ids
+
+            legacy_ids = extract_legacy_ids(interface_path)
+            target = legacy_ids.get("chat_id")
+            thread_id = legacy_ids.get("thread_id")
+        if not target and isinstance(chat_name, str) and chat_name:
+            # Legacy chat_name resolution no longer resolves numeric ids;
+            # surface a correctable failure instead of guessing.
+            log_warning(
+                f"[telegram_interface] Cannot resolve media destination from chat_name {chat_name!r}"
+            )
+            return False
+        if not target:
+            # Fall back to the origin conversation when replying.
+            origin_chat = getattr(original_message, "chat_id", None)
+            if origin_chat is not None:
+                target = str(origin_chat)
+                orig_thread = getattr(original_message, "thread_id", None)
+                if thread_id is None and orig_thread is not None:
+                    thread_id = orig_thread
+        if not target:
+            log_warning("[telegram_interface] Missing target for media send")
+            return False
+
+        if thread_id is not None:
+            thread_id = str(thread_id).strip() or None
+            if thread_id is not None and not thread_id.isdigit():
+                thread_id = None
+
+        explicit_reply = None
+        if reply_to is not None:
+            try:
+                explicit_reply = int(reply_to)
+            except (ValueError, TypeError):
+                log_warning(f"[telegram_interface] Bad reply_to {reply_to!r}")
+        if (
+            explicit_reply is None
+            and original_message is not None
+            and hasattr(original_message, "chat_id")
+            and str(target) == str(getattr(original_message, "chat_id"))
+            and hasattr(original_message, "message_id")
+        ):
+            try:
+                explicit_reply = int(original_message.message_id)
+            except (ValueError, TypeError):
+                explicit_reply = None
+
+        # Telegram captions max out at 1024 chars; overflow goes as its own
+        # text message before the media.
+        first_caption: Optional[str] = caption or None
+        if first_caption and len(first_caption) > 1024:
+            await self.send_message(
+                {
+                    "text": first_caption,
+                    "interface_path": interface_path,
+                    "chat_name": chat_name,
+                }
+            )
+            first_caption = None
+
+        sent_any = False
+        ok_all = True
+        for item in media_items:
+            resolved, err = resolve_safe_outbound_path(item)
+            if err or resolved is None:
+                log_warning(f"[telegram_interface] Rejected media path {item!r}: {err}")
+                ok_all = False
+                continue
+
+            kind = classify_media(resolved)
+            try:
+                with open(resolved, "rb") as file_obj:
+                    if (
+                        send_as_voice
+                        and kind == MEDIA_AUDIO
+                        and hasattr(self.bot, "send_voice")
+                    ):
+                        await self.bot.send_voice(
+                            chat_id=target,
+                            voice=file_obj,
+                            caption=first_caption,
+                            message_thread_id=thread_id,
+                            reply_to_message_id=explicit_reply,
+                        )
+                        kind = "voice"
+                    elif kind == MEDIA_IMAGE:
+                        await self.bot.send_photo(
+                            chat_id=target,
+                            photo=file_obj,
+                            caption=first_caption,
+                            message_thread_id=thread_id,
+                            reply_to_message_id=explicit_reply,
+                        )
+                    elif kind == MEDIA_VIDEO:
+                        await self.bot.send_video(
+                            chat_id=target,
+                            video=file_obj,
+                            caption=first_caption,
+                            message_thread_id=thread_id,
+                            reply_to_message_id=explicit_reply,
+                        )
+                    elif kind == MEDIA_AUDIO:
+                        await self.bot.send_audio(
+                            chat_id=target,
+                            audio=file_obj,
+                            caption=first_caption,
+                            message_thread_id=thread_id,
+                            reply_to_message_id=explicit_reply,
+                        )
+                    else:
+                        await self.bot.send_document(
+                            chat_id=target,
+                            document=file_obj,
+                            caption=first_caption,
+                            message_thread_id=thread_id,
+                            reply_to_message_id=explicit_reply,
+                        )
+                sent_any = True
+                log_info(f"[telegram_interface] Sent media ({kind}) to {target}")
+            except Exception as e:
+                log_error(f"[telegram_interface] Failed to send media {item!r}: {e}")
+                ok_all = False
+            finally:
+                first_caption = None
+
+        if sent_any and not skip_history:
+            try:
+                from core.chat_context_manager import save_response_message
+                from core.interface_path_utils import build_interface_path
+
+                msg_interface_path = build_interface_path(
+                    "telegram_bot", str(target), thread_id or None
+                )
+                await save_response_message(msg_interface_path, caption or "[media]")
+            except Exception as e:
+                log_debug(
+                    f"[telegram_interface] Failed to save media response via context_manager: {e}"
+                )
+
+        return ok_all and sent_any
+
     async def send_message(
         self, payload: dict, original_message: object | None = None
     ) -> bool:
@@ -2841,6 +2700,20 @@ class TelegramInterface:
         text = payload.get("text", "")
         interface_path = payload.get("interface_path")
         chat_name = payload.get("chat_name")
+
+        # --- Unified media delivery (send_message 'media' field) ---
+        media_items = self._normalize_media_list(payload.get("media"))
+        if media_items:
+            return await self._send_media(
+                media_items,
+                interface_path,
+                chat_name,
+                caption=text if isinstance(text, str) else "",
+                send_as_voice=bool(payload.get("send_as_voice")),
+                reply_to=payload.get("reply_to") or payload.get("reply_to_message_id"),
+                original_message=original_message,
+                skip_history=bool(payload.get("skip_history", False)),
+            )
 
         # Normalize text to recover mojibake or double-escaped unicode sequences
         try:
@@ -2937,12 +2810,23 @@ class TelegramInterface:
         if interface_path:
             await resolve_and_touch(interface_path, chat_id, thread_id, bot=self.bot)
 
-        reply_message_id = None
+        # Unified 'reply_to' overrides the automatic original-message reply.
+        explicit_reply = payload.get("reply_to") or payload.get("reply_to_message_id")
+        if explicit_reply is not None:
+            try:
+                reply_message_id = int(explicit_reply)
+            except (ValueError, TypeError):
+                log_warning(
+                    f"[telegram_interface] Discarding non-numeric reply_to {explicit_reply!r}"
+                )
+        else:
+            reply_message_id = None
         if (
             original_message
             and hasattr(original_message, "chat_id")
             and hasattr(original_message, "message_id")
             and chat_id == getattr(original_message, "chat_id")
+            and explicit_reply is None
         ):
             _raw_mid = original_message.message_id
             try:

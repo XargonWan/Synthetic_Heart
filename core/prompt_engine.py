@@ -208,7 +208,8 @@ def minify_actions_block(
         # keyword, and the set is already scoped to the connected world by the
         # caller's allowlist, so only the currently-usable verbs reach here.
         if lite and not (
-            action_name.startswith("message_")
+            action_name == "send_message"
+            or action_name.startswith("message_")
             or action_name.startswith("vessel_")
             or action_name in _LITE_ESSENTIAL_ACTIONS
         ):
@@ -1521,6 +1522,7 @@ def _assemble_prompt_request(  # noqa: PLR0913
 
     # ── Conversation history ─────────────────────────────────────────────────
     # Grillo internal beats have no ongoing conversation history.
+    addressee_note = ""
     if is_grillo_internal:
         conversation_history: list[Turn] = []
     else:
@@ -1536,6 +1538,7 @@ def _assemble_prompt_request(  # noqa: PLR0913
                     synth_names.add(a.lower())
         except Exception:
             synth_names = {"synth"}
+            synth_name = "SyntH"
 
         history_lines: list[Any] = context_section.get("history_current_chat") or []
         conversation_history = _history_to_turns(history_lines, synth_names)
@@ -1566,6 +1569,22 @@ def _assemble_prompt_request(  # noqa: PLR0913
     from_user = getattr(message, "from_user", None)
     username: str | None = get_user_display_name(from_user) if from_user else None
     usertag: str | None = get_user_usertag(from_user) if from_user else None
+
+    # Identity guard: when the human opens their message by addressing the
+    # synth with its own name/alias ("Rekku, ..."), weak models mirror that
+    # vocative back and address the USER as the synth (live incident
+    # 2026-08-26: reply began "Rekku," toward Jay). Structural — matches only
+    # Synth's own configured name set, never user text content.
+    addressee_note = ""
+    if not is_grillo_internal:
+        _lead_word = str(text or "").strip().lstrip("*_~`#> ").split(None, 1)
+        _lead_word = _lead_word[0] if _lead_word else ""
+        _lead_word = _lead_word.strip("*_~`").rstrip(":,!?;.…\"'").lower()
+        if _lead_word and username and _lead_word in synth_names:
+            addressee_note = (
+                f"note: '{synth_name}' is YOUR own name — the person addressing "
+                f"you here is {username}; never address them back by that name."
+            )
     message_id: int | str | None = getattr(message, "message_id", None)
     try:
         runtime_message_id = int(message_id) if message_id is not None else None
@@ -1620,6 +1639,7 @@ def _assemble_prompt_request(  # noqa: PLR0913
         voice_channel_id=voice_channel_id_str,
         is_grillo_beat=is_grillo_internal,
         beat_type=beat_type or None,
+        addressee_note=addressee_note,
     )
 
     # ── Tool declarations ────────────────────────────────────────────────────
@@ -2153,6 +2173,23 @@ async def build_prompt_request(
             )
     except Exception as e:
         log_warning(f"[json_prompt] Failed to gather static injections: {e}")
+
+    # === 3a-bis. Capability drops from the previous turn ===
+    # If a prior send_message skipped unsupported features (voice/media/reply)
+    # in this conversation, surface them so Synth can acknowledge naturally.
+    try:
+        from core.capability_drops import (
+            get_recent_drops,
+            render_capability_drops_block,
+        )
+
+        _drops_block = render_capability_drops_block(
+            get_recent_drops(str(interface_path or ""))
+        )
+        if _drops_block:
+            context_section["capability_drops"] = _drops_block
+    except Exception as e:
+        log_debug(f"[json_prompt] capability-drops injection skipped: {e}")
 
     # === 3b. Peer SyntH awareness block (Telegram groups only) ===
     try:
@@ -3204,7 +3241,7 @@ def load_json_instructions() -> str:
         'RESPONSE FORMAT: {"actions": [{"type": "action_name", "payload": { ... }}] }\n'
         "Key rules: ALWAYS use 'type' and 'payload', one action object per array entry. Do NOT add any text outside the JSON.\n"
         "Example of a complete human-chat response (reply + emotions + diary together):\n"
-        '{"actions": [{"type": "message_telegram_bot", "payload": {"text": "Your reply text here", "interface_path": "input.payload.current_chat.interface_path"}}, {"type": "update_emotion_state", "payload": {"emotions": {"joy": 7.0}}}, {"type": "create_personal_diary_entry", "payload": {"interaction_summary": "A short third-person summary", "personal_thought": "Your private first-person thoughts", "emotions": [{"type": "joy", "intensity": 7.0}]}}]}'
+        '{"actions": [{"type": "send_message", "payload": {"text": "Your reply text here", "interface_path": "input.payload.current_chat.interface_path"}}, {"type": "update_emotion_state", "payload": {"emotions": {"joy": 7.0}}}, {"type": "create_personal_diary_entry", "payload": {"interaction_summary": "A short third-person summary", "personal_thought": "Your private first-person thoughts", "emotions": [{"type": "joy", "intensity": 7.0}]}}]}'
         "Do NOT embed emotion tags, annotations, or bracketed markers inside message text (e.g., '{happy 6.0}')."
         "If you need to indicate an emotional state, use a structured action payload (prefer update_emotion_state) and never embed emotional markers inside plain message content."
     )
@@ -3346,7 +3383,9 @@ async def build_delivery_request(
             core_initializer.actions_block.get("available_actions", {}) or {}
         )
         msg_actions = {
-            k: v for k, v in full_actions.items() if k.startswith("message_")
+            k: v
+            for k, v in full_actions.items()
+            if k == "send_message" or k.startswith("message_")
         }
         tool_declarations = LiveToolRegistry.build_manifests_from_actions(msg_actions)
     except Exception as _td_exc:

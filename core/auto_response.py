@@ -199,7 +199,9 @@ class AutoResponseSystem:
                     core_initializer.actions_block.get("available_actions", {}) or {}
                 )
                 delivery_allowed_action_types = sorted(
-                    k for k in _full_actions if k.startswith("message_")
+                    k
+                    for k in _full_actions
+                    if k == "send_message" or k.startswith("message_")
                 )
             except Exception as _aa_exc:
                 log_debug(

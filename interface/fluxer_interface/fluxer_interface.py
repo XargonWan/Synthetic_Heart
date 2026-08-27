@@ -50,8 +50,7 @@ except Exception:  # pragma: no cover - dependency missing
     aiohttp = None  # type: ignore[assignment]
 
 INTERFACE_NAME = "fluxer_bot"
-ACTION_TYPE = "message_fluxer_bot"
-FILE_ACTION_TYPE = "send_file_fluxer_bot"
+ACTION_TYPE = "send_message"
 
 # Fluxer gateway opcodes (mirror FluxerOpCode in the Fluxer.Net source).
 OP_DISPATCH = 0
@@ -560,33 +559,16 @@ class FluxerInterface:
     def get_action_types() -> List[str]:
         if not FluxerInterface._current_instance_enabled:
             return []
-        return [ACTION_TYPE, FILE_ACTION_TYPE]
+        return [ACTION_TYPE]
 
     @staticmethod
     def get_supported_actions() -> Dict[str, Dict[str, Any]]:
         if not FluxerInterface._current_instance_enabled:
             return {}
+        from core.message_registry import get_send_message_schema
+
         return {
-            ACTION_TYPE: {
-                "description": "Send a text message to a Fluxer channel.",
-                "required_fields": ["text"],
-                "optional_fields": [
-                    "interface_path",
-                    "channel_id",
-                    "reply_to_message_id",
-                ],
-            },
-            FILE_ACTION_TYPE: {
-                "description": (
-                    "Send a file attachment (image, video, audio or document) to a "
-                    "Fluxer channel. The file must live inside Synth's filesystem "
-                    "sandbox."
-                ),
-                "required_fields": ["path"],
-                "optional_fields": ["interface_path", "channel_id", "caption"],
-                "security_level": "medium",
-                "external_effects": ["filesystem"],
-            },
+            ACTION_TYPE: get_send_message_schema([INTERFACE_NAME]),
         }
 
     @staticmethod
@@ -600,61 +582,30 @@ class FluxerInterface:
                     "text": {
                         "type": "string",
                         "example": "Hello Fluxer!",
-                        "description": "Content of the message.",
+                        "description": (
+                            "Content of the message; also the caption for media."
+                        ),
                     },
                     "interface_path": {
                         "type": "string",
                         "example": "fluxer_bot/123/456",
                         "description": (
-                            "Interface path of the originating conversation. Reuse it "
-                            "verbatim to reply in the same channel."
+                            "Destination path. OPTIONAL when replying to an incoming "
+                            "message (auto-routes to the origin channel); REQUIRED "
+                            "for spontaneous messages."
                         ),
-                        "optional": True,
                     },
-                    "channel_id": {
-                        "type": "string",
-                        "example": "456",
+                    "media": {
+                        "type": "array",
+                        "example": ["/app/data/report.pdf"],
                         "description": (
-                            "Explicit Fluxer channel id. Optional when interface_path "
-                            "is provided."
+                            "Optional list of sandbox file paths to attach."
                         ),
                         "optional": True,
                     },
-                    "reply_to_message_id": {
+                    "reply_to": {
                         "type": "string",
                         "description": "Optional message id to reply to.",
-                        "optional": True,
-                    },
-                },
-            }
-        if action_name == FILE_ACTION_TYPE:
-            return {
-                "description": "Send a file attachment to a Fluxer channel.",
-                "payload": {
-                    "path": {
-                        "type": "string",
-                        "example": "/app/data/report.pdf",
-                        "description": (
-                            "Path to the file to send. Must be inside Synth's "
-                            "filesystem sandbox."
-                        ),
-                    },
-                    "interface_path": {
-                        "type": "string",
-                        "example": "fluxer_bot/123/456",
-                        "description": "Interface path of the target channel.",
-                        "optional": True,
-                    },
-                    "channel_id": {
-                        "type": "string",
-                        "example": "456",
-                        "description": "Explicit Fluxer channel id.",
-                        "optional": True,
-                    },
-                    "caption": {
-                        "type": "string",
-                        "example": "Here is the report you asked for",
-                        "description": "Optional text sent alongside the file.",
                         "optional": True,
                     },
                 },
@@ -672,7 +623,7 @@ class FluxerInterface:
     @staticmethod
     def validate_payload(action_type: str, payload: Dict[str, Any]) -> List[str]:
         errors: List[str] = []
-        if action_type not in (ACTION_TYPE, FILE_ACTION_TYPE):
+        if action_type != ACTION_TYPE:
             return errors
         if not FluxerInterface._current_instance_enabled:
             errors.append(
@@ -681,26 +632,16 @@ class FluxerInterface:
             )
             return errors
 
-        channel_id = payload.get("channel_id")
-        interface_path = payload.get("interface_path")
-        has_target = bool(
-            (isinstance(channel_id, (str, int)) and str(channel_id).strip())
-            or (isinstance(interface_path, str) and interface_path.strip())
-        )
-        if not has_target:
-            errors.append("payload.channel_id or payload.interface_path is required")
+        text = payload.get("text")
+        has_text = isinstance(text, str) and bool(text.strip())
+        if not has_text and not payload.get("media"):
+            errors.append("payload.text or payload.media is required")
+        elif text is not None and not isinstance(text, str):
+            errors.append("payload.text must be a string")
 
-        if action_type == ACTION_TYPE:
-            text = payload.get("text")
-            if not isinstance(text, str) or not text.strip():
-                errors.append("payload.text must be a non-empty string")
-            reply_to = payload.get("reply_to_message_id")
-            if reply_to is not None and not isinstance(reply_to, (str, int)):
-                errors.append("payload.reply_to_message_id must be a string")
-        elif action_type == FILE_ACTION_TYPE:
-            path = payload.get("path")
-            if not isinstance(path, str) or not path.strip():
-                errors.append("payload.path must be a non-empty string")
+        reply_to = payload.get("reply_to") or payload.get("reply_to_message_id")
+        if reply_to is not None and not isinstance(reply_to, (str, int)):
+            errors.append("payload.reply_to must be a string")
         return errors
 
     # ------------------------------------------------------------------
@@ -954,14 +895,32 @@ class FluxerInterface:
         skip_history = False
         reply_to_message_id: Optional[str] = None
         interface_path: Optional[str] = None
+        media_items: list = []
 
         if isinstance(channel_id, dict):
             payload = channel_id
             text = payload.get("text", text)
             interface_path = payload.get("interface_path")
             resolved_channel = self._resolve_channel_id(payload)
-            reply_to_message_id = payload.get("reply_to_message_id")
+            reply_to_message_id = payload.get("reply_to") or payload.get(
+                "reply_to_message_id"
+            )
             skip_history = bool(payload.get("skip_history", False))
+            raw_media = payload.get("media")
+            if raw_media:
+                media_items = (
+                    [str(m) for m in raw_media if m]
+                    if isinstance(raw_media, (list, tuple))
+                    else [str(raw_media)]
+                )
+            if payload.get("send_as_voice"):
+                from core.capability_drops import log_and_build_drop
+
+                log_and_build_drop(
+                    "send_as_voice",
+                    "voice notes are not supported on Fluxer",
+                    INTERFACE_NAME,
+                )
         else:
             payload = kwargs
             resolved_channel = (
@@ -970,8 +929,57 @@ class FluxerInterface:
                 else self._resolve_channel_id(payload)
             )
             interface_path = payload.get("interface_path")
-            reply_to_message_id = payload.get("reply_to_message_id")
+            reply_to_message_id = kwargs.get("reply_to") or payload.get(
+                "reply_to_message_id"
+            )
             skip_history = bool(payload.get("skip_history", False))
+            raw_media = kwargs.get("media")
+            if raw_media:
+                media_items = (
+                    [str(m) for m in raw_media if m]
+                    if isinstance(raw_media, (list, tuple))
+                    else [str(raw_media)]
+                )
+
+        # Unified 'media' list delivery (text doubles as the first caption).
+        if media_items:
+            ok_all = True
+            first_caption = str(text) if text else ""
+            for idx, item in enumerate(media_items):
+                from core.outbound_file_utils import (
+                    guess_mime_type,
+                    resolve_safe_outbound_path,
+                )
+
+                resolved, err = resolve_safe_outbound_path(item)
+                if err or resolved is None:
+                    log_warning(
+                        f"[fluxer_interface] Rejected media path {item!r}: {err}"
+                    )
+                    ok_all = False
+                    continue
+                result = await self._rest.send_file(
+                    resolved_channel,
+                    resolved,
+                    caption=first_caption or None,
+                    mime_type=guess_mime_type(resolved),
+                )
+                if result is None:
+                    ok_all = False
+                first_caption = ""
+            if ok_all and not skip_history:
+                try:
+                    from core.chat_context_manager import save_response_message
+
+                    path = interface_path or build_interface_path(
+                        INTERFACE_NAME, resolved_channel
+                    )
+                    await save_response_message(path, str(text or "[media]"))
+                except Exception as exc:
+                    log_debug(
+                        f"[fluxer_interface] Failed to save media response: {exc}"
+                    )
+            return ok_all
 
         if not resolved_channel:
             log_warning("[fluxer_interface] Cannot send message - channel id missing")
@@ -1016,62 +1024,17 @@ class FluxerInterface:
         bot: Any = None,
         original_message: Any = None,
     ) -> Dict[str, Any]:
-        """Dispatch non-message Fluxer actions (currently file attachments)."""
+        """Dispatch non-message Fluxer actions.
+
+        All message/media delivery now flows through the unified
+        ``send_message`` action (handled by :meth:`send_message`), so no
+        legacy per-interface action types remain.
+        """
         action_type = action.get("type")
-        payload = action.get("payload", {}) or {}
-
-        if action_type != FILE_ACTION_TYPE:
-            log_warning(
-                f"[fluxer_interface] execute_action: unknown action_type={action_type}"
-            )
-            return {"status": "failed", "message": f"Unknown action {action_type}"}
-
-        if not self.is_enabled or not self._rest:
-            return {
-                "status": "failed",
-                "message": "Fluxer interface is disabled or not initialized",
-            }
-
-        from core.outbound_file_utils import (
-            classify_media,
-            guess_mime_type,
-            resolve_safe_outbound_path,
+        log_warning(
+            f"[fluxer_interface] execute_action called for unknown action {action_type}"
         )
-
-        raw_path = payload.get("path")
-        caption = payload.get("caption")
-        channel_id = self._resolve_channel_id(payload)
-
-        if not isinstance(raw_path, str) or not raw_path.strip():
-            return {"status": "failed", "message": "payload.path must be a string"}
-        if not channel_id:
-            return {
-                "status": "failed",
-                "message": "payload.channel_id or payload.interface_path is required",
-            }
-        caption = caption if isinstance(caption, str) else None
-
-        resolved, err = resolve_safe_outbound_path(raw_path)
-        if err or resolved is None:
-            log_warning(f"[fluxer_interface] Rejected file path {raw_path!r}: {err}")
-            return {"status": "failed", "message": err or "Invalid path"}
-
-        mime_type = guess_mime_type(resolved)
-        # classify_media is used for logging/future per-kind handling; Fluxer
-        # renders media inline from the uploaded attachment automatically.
-        kind = classify_media(resolved)
-
-        result = await self._rest.send_file(
-            channel_id,
-            resolved,
-            caption=caption,
-            mime_type=mime_type,
-        )
-        if result is None:
-            return {"status": "failed", "message": "File upload failed"}
-
-        log_info(f"[fluxer_interface] Sent file ({kind}) to channel {channel_id}")
-        return {"status": "success"}
+        return {"status": "failed", "message": f"Unknown action {action_type}"}
 
     async def get_me(self) -> SimpleNamespace:
         return SimpleNamespace(id=self._self_user_id, username=None)

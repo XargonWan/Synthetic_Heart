@@ -123,6 +123,6 @@ async def test_corrector_example_uses_canonical_interface_id_from_path(monkeypat
     required_format = payload["system_message"]["required_format"]
     example = required_format["actions"][0]
     # The canonical registered type, not the legacy-name-derived "message_telegram".
-    assert example["type"] == "message_telegram_bot"
+    assert example["type"] == "send_message"
     assert example["payload"]["interface_path"] == "telegram_bot/5208932647"
-    assert 'message_telegram"' not in prompt.replace("message_telegram_bot", "")
+    assert 'message_telegram"' not in prompt
