@@ -881,34 +881,105 @@ async def extract_multimodal_from_telegram(
             else:
                 log_debug(f"[multimodal] Video note too large: {file_size} bytes")
 
-        # Handle stickers (as images if static)
-        if (
-            sticker
-            and not getattr(sticker, "is_animated", False)
-            and not getattr(sticker, "is_video", False)
-        ):
-            try:
-                file = await bot.get_file(sticker.file_id)
-                file_bytes = await file.download_as_bytearray()
+        # Handle stickers.
+        # Static stickers are delivered as WebP images. Animated/video stickers
+        # cannot be rendered as static images directly, so we fall back to the
+        # thumbnail Telegram exposes on the sticker object. When even the thumb
+        # is missing, we emit a text placeholder so the LLM knows an animated
+        # sticker was shared instead of silently dropping it.
+        if sticker:
+            is_animated = bool(getattr(sticker, "is_animated", False))
+            is_video = bool(getattr(sticker, "is_video", False))
+            sticker_emoji = getattr(sticker, "emoji", None)
+            sticker_set_name = getattr(sticker, "set_name", None)
 
-                # Stickers are WebP format
-                attachments.append(
-                    {
-                        "mime_type": "image/webp",
-                        "data": encode_bytes_to_base64(bytes(file_bytes)),
-                        "filename": f"sticker_{sticker.file_unique_id}.webp",
-                        "is_sticker": True,
-                        "media_metadata": {
-                            "type": "sticker",
-                            "file_unique_id": sticker.file_unique_id,
-                        },
-                    }
-                )
-                log_debug(
-                    f"[multimodal] Extracted Telegram sticker: {sticker.file_unique_id}"
-                )
-            except Exception as e:
-                log_warning(f"[multimodal] Failed to download Telegram sticker: {e}")
+            if is_animated or is_video:
+                thumb = getattr(sticker, "thumb", None)
+                thumb_file_id = getattr(thumb, "file_id", None) if thumb else None
+                if thumb_file_id:
+                    try:
+                        file = await bot.get_file(thumb_file_id)
+                        file_bytes = await file.download_as_bytearray()
+                        attachments.append(
+                            {
+                                "mime_type": "image/webp",
+                                "data": encode_bytes_to_base64(bytes(file_bytes)),
+                                "filename": f"sticker_{sticker.file_unique_id}_thumb.webp",
+                                "is_sticker": True,
+                                "media_metadata": {
+                                    "type": "sticker",
+                                    "file_unique_id": sticker.file_unique_id,
+                                    "animated": is_animated,
+                                    "video": is_video,
+                                    "thumbnail": True,
+                                    "emoji": sticker_emoji,
+                                    "set_name": sticker_set_name,
+                                },
+                            }
+                        )
+                        log_debug(
+                            f"[multimodal] Extracted Telegram sticker thumb: {thumb_file_id}"
+                        )
+                    except Exception as e:
+                        log_warning(
+                            f"[multimodal] Failed to download sticker thumb: {e}"
+                        )
+                else:
+                    attachments.append(
+                        {
+                            "mime_type": "text/plain",
+                            "data": encode_bytes_to_base64(
+                                (
+                                    "The user sent an "
+                                    f"{'animated' if is_animated else 'video'} "
+                                    "sticker that cannot be displayed as a static "
+                                    "image."
+                                ).encode("utf-8")
+                            ),
+                            "filename": "sticker.txt",
+                            "is_sticker": True,
+                            "media_metadata": {
+                                "type": "sticker",
+                                "file_unique_id": sticker.file_unique_id,
+                                "animated": is_animated,
+                                "video": is_video,
+                                "viewable": False,
+                                "emoji": sticker_emoji,
+                                "set_name": sticker_set_name,
+                            },
+                        }
+                    )
+                    log_debug(
+                        f"[multimodal] Animated/video sticker without thumb: "
+                        f"{sticker.file_unique_id}"
+                    )
+            else:
+                try:
+                    file = await bot.get_file(sticker.file_id)
+                    file_bytes = await file.download_as_bytearray()
+
+                    attachments.append(
+                        {
+                            "mime_type": "image/webp",
+                            "data": encode_bytes_to_base64(bytes(file_bytes)),
+                            "filename": f"sticker_{sticker.file_unique_id}.webp",
+                            "is_sticker": True,
+                            "media_metadata": {
+                                "type": "sticker",
+                                "file_unique_id": sticker.file_unique_id,
+                                "emoji": sticker_emoji,
+                                "set_name": sticker_set_name,
+                            },
+                        }
+                    )
+                    log_debug(
+                        f"[multimodal] Extracted Telegram sticker: "
+                        f"{sticker.file_unique_id}"
+                    )
+                except Exception as e:
+                    log_warning(
+                        f"[multimodal] Failed to download Telegram sticker: {e}"
+                    )
 
     except Exception as e:
         log_error(f"[multimodal] Error extracting Telegram attachments: {e}")

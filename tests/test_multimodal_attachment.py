@@ -341,6 +341,8 @@ class TestTelegramStickerExtraction:
         mock_sticker.file_unique_id = "sticker_unique_id"
         mock_sticker.is_animated = False
         mock_sticker.is_video = False
+        mock_sticker.emoji = "🦖"
+        mock_sticker.set_name = "godzilla_stickers"
 
         mock_message = MagicMock()
         mock_message.photo = None
@@ -360,10 +362,104 @@ class TestTelegramStickerExtraction:
         assert attachments[0]["is_sticker"] is True
         assert attachments[0]["data"] == encode_bytes_to_base64(b"fake_sticker_data")
         assert attachments[0]["media_metadata"]["type"] == "sticker"
+        assert attachments[0]["media_metadata"]["emoji"] == "🦖"
+        assert attachments[0]["media_metadata"]["set_name"] == "godzilla_stickers"
 
     @pytest.mark.asyncio
-    async def test_skip_animated_sticker_from_telegram(self):
-        """Test that animated Telegram stickers are skipped."""
+    async def test_extract_animated_sticker_thumb_from_telegram(self):
+        """Test that animated Telegram stickers fall back to their static thumb."""
+        mock_bot = AsyncMock()
+        mock_thumb_file = AsyncMock()
+        mock_thumb_file.download_as_bytearray = AsyncMock(
+            return_value=bytearray(b"fake_thumb_data")
+        )
+        mock_bot.get_file = AsyncMock(return_value=mock_thumb_file)
+
+        mock_thumb = MagicMock()
+        mock_thumb.file_id = "thumb_file_id"
+        mock_thumb.file_unique_id = "thumb_unique_id"
+
+        mock_sticker = MagicMock()
+        mock_sticker.file_id = "sticker_file_id"
+        mock_sticker.file_unique_id = "sticker_unique_id"
+        mock_sticker.is_animated = True
+        mock_sticker.is_video = False
+        mock_sticker.thumb = mock_thumb
+        mock_sticker.emoji = "🦖"
+        mock_sticker.set_name = "godzilla_stickers"
+
+        mock_message = MagicMock()
+        mock_message.photo = None
+        mock_message.document = None
+        mock_message.audio = None
+        mock_message.voice = None
+        mock_message.video = None
+        mock_message.video_note = None
+        mock_message.sticker = mock_sticker
+        mock_message.chat = MagicMock(id=123, type="private")
+
+        attachments = await extract_multimodal_from_telegram(mock_bot, mock_message)
+
+        assert len(attachments) == 1
+        assert attachments[0]["mime_type"] == "image/webp"
+        assert attachments[0]["filename"] == "sticker_sticker_unique_id_thumb.webp"
+        assert attachments[0]["is_sticker"] is True
+        assert attachments[0]["data"] == encode_bytes_to_base64(b"fake_thumb_data")
+        assert attachments[0]["media_metadata"]["type"] == "sticker"
+        assert attachments[0]["media_metadata"]["animated"] is True
+        assert attachments[0]["media_metadata"]["thumbnail"] is True
+        assert attachments[0]["media_metadata"]["emoji"] == "🦖"
+        assert attachments[0]["media_metadata"]["set_name"] == "godzilla_stickers"
+        mock_bot.get_file.assert_called_once_with("thumb_file_id")
+
+    @pytest.mark.asyncio
+    async def test_extract_video_sticker_thumb_from_telegram(self):
+        """Test that video Telegram stickers fall back to their static thumb."""
+        mock_bot = AsyncMock()
+        mock_thumb_file = AsyncMock()
+        mock_thumb_file.download_as_bytearray = AsyncMock(
+            return_value=bytearray(b"fake_thumb_data")
+        )
+        mock_bot.get_file = AsyncMock(return_value=mock_thumb_file)
+
+        mock_thumb = MagicMock()
+        mock_thumb.file_id = "thumb_file_id"
+        mock_thumb.file_unique_id = "thumb_unique_id"
+
+        mock_sticker = MagicMock()
+        mock_sticker.file_id = "sticker_file_id"
+        mock_sticker.file_unique_id = "sticker_unique_id"
+        mock_sticker.is_animated = False
+        mock_sticker.is_video = True
+        mock_sticker.thumb = mock_thumb
+        mock_sticker.emoji = "🦖"
+        mock_sticker.set_name = "godzilla_stickers"
+
+        mock_message = MagicMock()
+        mock_message.photo = None
+        mock_message.document = None
+        mock_message.audio = None
+        mock_message.voice = None
+        mock_message.video = None
+        mock_message.video_note = None
+        mock_message.sticker = mock_sticker
+        mock_message.chat = MagicMock(id=123, type="private")
+
+        attachments = await extract_multimodal_from_telegram(mock_bot, mock_message)
+
+        assert len(attachments) == 1
+        assert attachments[0]["mime_type"] == "image/webp"
+        assert attachments[0]["filename"] == "sticker_sticker_unique_id_thumb.webp"
+        assert attachments[0]["is_sticker"] is True
+        assert attachments[0]["media_metadata"]["video"] is True
+        assert attachments[0]["media_metadata"]["thumbnail"] is True
+        assert attachments[0]["media_metadata"]["emoji"] == "🦖"
+        assert attachments[0]["media_metadata"]["set_name"] == "godzilla_stickers"
+        mock_bot.get_file.assert_called_once_with("thumb_file_id")
+
+    @pytest.mark.asyncio
+    async def test_animated_sticker_without_thumb_generates_placeholder(self):
+        """Test that an animated sticker without a thumb gets a text placeholder."""
         mock_bot = AsyncMock()
 
         mock_sticker = MagicMock()
@@ -371,6 +467,9 @@ class TestTelegramStickerExtraction:
         mock_sticker.file_unique_id = "sticker_unique_id"
         mock_sticker.is_animated = True
         mock_sticker.is_video = False
+        mock_sticker.thumb = None
+        mock_sticker.emoji = "🦖"
+        mock_sticker.set_name = "godzilla_stickers"
 
         mock_message = MagicMock()
         mock_message.photo = None
@@ -384,12 +483,19 @@ class TestTelegramStickerExtraction:
 
         attachments = await extract_multimodal_from_telegram(mock_bot, mock_message)
 
-        assert len(attachments) == 0
+        assert len(attachments) == 1
+        assert attachments[0]["mime_type"] == "text/plain"
+        assert attachments[0]["is_sticker"] is True
+        assert attachments[0]["media_metadata"]["type"] == "sticker"
+        assert attachments[0]["media_metadata"]["viewable"] is False
+        assert b"animated sticker" in base64.b64decode(attachments[0]["data"])
+        assert attachments[0]["media_metadata"]["emoji"] == "🦖"
+        assert attachments[0]["media_metadata"]["set_name"] == "godzilla_stickers"
         mock_bot.get_file.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_skip_video_sticker_from_telegram(self):
-        """Test that video Telegram stickers are skipped."""
+    async def test_video_sticker_without_thumb_generates_placeholder(self):
+        """Test that a video sticker without a thumb gets a text placeholder."""
         mock_bot = AsyncMock()
 
         mock_sticker = MagicMock()
@@ -397,6 +503,9 @@ class TestTelegramStickerExtraction:
         mock_sticker.file_unique_id = "sticker_unique_id"
         mock_sticker.is_animated = False
         mock_sticker.is_video = True
+        mock_sticker.thumb = None
+        mock_sticker.emoji = "🦖"
+        mock_sticker.set_name = "godzilla_stickers"
 
         mock_message = MagicMock()
         mock_message.photo = None
@@ -410,7 +519,14 @@ class TestTelegramStickerExtraction:
 
         attachments = await extract_multimodal_from_telegram(mock_bot, mock_message)
 
-        assert len(attachments) == 0
+        assert len(attachments) == 1
+        assert attachments[0]["mime_type"] == "text/plain"
+        assert attachments[0]["is_sticker"] is True
+        assert attachments[0]["media_metadata"]["type"] == "sticker"
+        assert attachments[0]["media_metadata"]["viewable"] is False
+        assert b"video sticker" in base64.b64decode(attachments[0]["data"])
+        assert attachments[0]["media_metadata"]["emoji"] == "🦖"
+        assert attachments[0]["media_metadata"]["set_name"] == "godzilla_stickers"
         mock_bot.get_file.assert_not_called()
 
 

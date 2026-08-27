@@ -1944,9 +1944,42 @@ async def _describe_attachment_images_with_iris(
             attachment_is_sticker = bool(attachment.get("is_sticker"))
             effective_prompt = prompt
             if attachment_is_sticker:
-                sticker_hint = "\n\nThis is a sticker image. Describe what is depicted in the sticker."
+                sticker_emoji = attachment.get("media_metadata", {}).get("emoji")
+                sticker_meta = attachment.get("media_metadata", {})
+                is_thumb = bool(sticker_meta.get("thumbnail"))
+                viewable = bool(sticker_meta.get("viewable", True))
+
+                if not viewable:
+                    effective_prompt = (
+                        "A user shared a sticker that cannot be displayed as a "
+                        "static image. Acknowledge that you cannot see the "
+                        "visual content and do not describe or assume anything "
+                        "about it."
+                    )
+                else:
+                    size_note = (
+                        (
+                            " This is a small thumbnail/preview of a Telegram "
+                            "sticker, so fine details may be unclear."
+                        )
+                        if is_thumb
+                        else ""
+                    )
+                    emoji_note = (
+                        f" The sticker is associated with the emoji {sticker_emoji}."
+                        if sticker_emoji
+                        else ""
+                    )
+                    effective_prompt = (
+                        "This is a sticker image. Describe ONLY what is visually "
+                        "present in the image: characters, objects, text, colors, "
+                        "style. Do NOT assume the sticker depicts the synth or the "
+                        "user unless that is clearly shown in the image. Do NOT "
+                        "confuse this sticker with any avatar, icon, or previous "
+                        "image you have seen.{size}{emoji}"
+                    ).format(size=size_note, emoji=emoji_note)
                 base_prompt = prompt or getattr(iris, "_default_prompt", "") or ""
-                effective_prompt = base_prompt + sticker_hint
+                effective_prompt = base_prompt + "\n\n" + effective_prompt
             try:
                 result = await asyncio.wait_for(
                     iris.describe_media(analysis_path, mime_type, effective_prompt),
