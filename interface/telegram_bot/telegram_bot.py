@@ -920,25 +920,42 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # check for reply-to-media first, since the incoming message may not
     # itself contain media
-    if getattr(message, "reply_to_message", None) and any(
-        getattr(message.reply_to_message, attr, None)
-        for attr in ("voice", "video", "video_note", "video", "photo")
+    _reply_msg = getattr(message, "reply_to_message", None)
+    if _reply_msg is not None and any(
+        getattr(_reply_msg, attr, None)
+        for attr in ("voice", "video", "video_note", "photo", "sticker", "document")
     ):
         # only take this path if the user explicitly directed the bot
         directed, _ = await is_message_for_bot(message, context.bot)
         if directed:
-            log_debug(
-                "[telegram_bot] Reply to media detected with bot mention; routing to live media handler"
-            )
-            try:
-                # create a synthetic update containing the original media
-                from types import SimpleNamespace
+            if any(
+                getattr(_reply_msg, attr, None)
+                for attr in ("voice", "video", "video_note")
+            ):
+                log_debug(
+                    "[telegram_bot] Reply to audio/video detected; routing to live media handler"
+                )
+                try:
+                    # create a synthetic update containing the original media
+                    from types import SimpleNamespace
 
-                fake_update = SimpleNamespace(message=message.reply_to_message)
-                await handle_media_live(fake_update, context)
-            except Exception as e:
-                log_error(f"[telegram_bot] live media handler failed: {e}")
-            return
+                    fake_update = SimpleNamespace(message=_reply_msg)
+                    await handle_media_live(fake_update, context)
+                except Exception as e:
+                    log_error(f"[telegram_bot] live media handler failed: {e}")
+                return
+
+            log_debug(
+                "[telegram_bot] Reply to photo/sticker/document detected; "
+                "promoting media to current message"
+            )
+            for _attr in ("photo", "sticker", "document"):
+                _value = getattr(_reply_msg, _attr, None)
+                if _value is not None:
+                    try:
+                        setattr(message, _attr, _value)
+                    except Exception:
+                        pass
 
     if message.voice or message.video_note or message.video:
         # before we turn the attachment into a file and start transcribing,

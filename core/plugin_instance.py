@@ -788,9 +788,9 @@ async def handle_incoming_message(
                             log_warning(
                                 f"[plugin_instance] Could not persist Iris description to history: {exc}"
                             )
-                    except Exception as exc:
+                    except Exception:
                         log_warning(
-                            f"[plugin_instance] Could not append Iris description to message text: {exc}"
+                            "[plugin_instance] Could not append Iris description to message text: {exc}"
                         )
 
                 # Strip image/video base64 data from attachments so the Cortex
@@ -1944,9 +1944,39 @@ async def _describe_attachment_images_with_iris(
             attachment_is_sticker = bool(attachment.get("is_sticker"))
             effective_prompt = prompt
             if attachment_is_sticker:
-                sticker_hint = "\n\nThis is a sticker image. Describe what is depicted in the sticker."
+                sticker_meta = attachment.get("media_metadata", {})
+                is_thumb = bool(sticker_meta.get("thumbnail"))
+                viewable = bool(sticker_meta.get("viewable", True))
+
+                if not viewable:
+                    effective_prompt = (
+                        "A user shared a sticker that cannot be displayed as a "
+                        "static image. Acknowledge that you cannot see the "
+                        "visual content and do not describe or assume anything "
+                        "about it."
+                    )
+                else:
+                    size_note = (
+                        (
+                            " This is a small thumbnail/preview of a Telegram "
+                            "sticker, so fine details may be unclear."
+                        )
+                        if is_thumb
+                        else ""
+                    )
+                    effective_prompt = (
+                        "This is a Telegram sticker image. Stickers are often "
+                        "small, simple, or stylized. Describe ONLY the most "
+                        "prominent, clearly visible elements: main subject, "
+                        "background color, and any obvious objects or text. "
+                        "If any detail is not clearly visible, say 'unclear' "
+                        "instead of guessing or inventing details. Do NOT "
+                        "assume the sticker depicts the synth or the user. "
+                        "Do NOT add details that are not present in the "
+                        "image.{size}"
+                    ).format(size=size_note)
                 base_prompt = prompt or getattr(iris, "_default_prompt", "") or ""
-                effective_prompt = base_prompt + sticker_hint
+                effective_prompt = base_prompt + "\n\n" + effective_prompt
             try:
                 result = await asyncio.wait_for(
                     iris.describe_media(analysis_path, mime_type, effective_prompt),
@@ -1964,6 +1994,10 @@ async def _describe_attachment_images_with_iris(
                 result.is_sticker = attachment_is_sticker
                 log_info(
                     f"[plugin_instance] Iris: got description ({len(result.description)} chars)"
+                )
+                log_debug(
+                    f"[plugin_instance] Iris description for {mime_type}: "
+                    f"{result.description[:500]}..."
                 )
                 return result
             log_info(

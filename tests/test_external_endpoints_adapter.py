@@ -2391,3 +2391,23 @@ async def test_openai_compat_generate_tts_tries_v1_first(monkeypatch):
     assert result == b"audio bytes"
     assert session.calls[0].endswith("/v1/audio/speech")
     assert session.calls[1].endswith("/audio/speech")
+
+
+def test_openai_compat_shrink_image_converts_webp_to_jpeg():
+    from io import BytesIO
+
+    from PIL import Image
+
+    adapter = OpenAICompatAdapter(base_url="http://fake-host", api_key="x")
+    img = Image.new("RGB", (64, 64), color="red")
+    buf = BytesIO()
+    img.save(buf, format="WEBP")
+    webp_bytes = buf.getvalue()
+
+    result_bytes, result_mime = OpenAICompatAdapter._shrink_image_for_request(
+        webp_bytes, "image/webp"
+    )
+
+    assert result_mime == "image/jpeg"
+    assert result_bytes != webp_bytes
+    assert result_bytes.startswith(b"\xff\xd8\xff")

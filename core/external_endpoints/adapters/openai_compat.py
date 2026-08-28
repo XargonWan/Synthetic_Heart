@@ -970,7 +970,7 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         type. Falls back to the original bytes if the image is already small
         enough or if Pillow is unavailable / decoding fails.
         """
-        if len(image_bytes) <= cls._VISION_MAX_RAW_IMAGE_BYTES:
+        if len(image_bytes) <= cls._VISION_MAX_RAW_IMAGE_BYTES and mime_type != "image/webp":
             return image_bytes, mime_type
 
         try:
@@ -980,7 +980,6 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
 
             resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", None)
         except Exception:
-            # Pillow not available – send as-is and let the endpoint decide.
             log_warning(
                 "[openai_compat] image is large "
                 f"({len(image_bytes)} bytes) but Pillow is unavailable; "
@@ -993,6 +992,16 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             img.load()
             if img.mode not in ("RGB", "L"):
                 img = img.convert("RGB")
+
+            if mime_type == "image/webp":
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=85, optimize=True)
+                data = buf.getvalue()
+                log_info(
+                    "[openai_compat] converted WebP image to JPEG "
+                    f"({len(image_bytes)} -> {len(data)} bytes)"
+                )
+                return data, "image/jpeg"
 
             # Iteratively shrink the longest side and/or lower JPEG quality
             # until the encoded payload fits the raw budget.
