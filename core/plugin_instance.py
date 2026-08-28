@@ -793,37 +793,6 @@ async def handle_incoming_message(
                             "[plugin_instance] Could not append Iris description to message text: {exc}"
                         )
 
-                # Fallback for sticker-only attachments: when Iris was skipped
-                # or returned nothing, inject a minimal structural note so the
-                # model knows the user shared a sticker and which emoji it uses.
-                if iris_result is None and any(
-                    att.get("is_sticker") for att in attachments
-                ):
-                    try:
-                        sticker_att = next(
-                            att for att in attachments if att.get("is_sticker")
-                        )
-                        sticker_meta = sticker_att.get("media_metadata", {})
-                        emoji = sticker_meta.get("emoji")
-                        original_text = getattr(message, "text", "") or ""
-                        if emoji:
-                            sticker_block = f"[The user just shared a sticker: {emoji}]"
-                        else:
-                            sticker_block = "[The user just shared a sticker]"
-                        augmented_text = (
-                            f"{original_text}\n\n{sticker_block}"
-                            if original_text
-                            else sticker_block
-                        )
-                        setattr(message, "text", augmented_text)
-                        log_info(
-                            "[plugin_instance] Injected sticker note into prompt text"
-                        )
-                    except Exception:
-                        log_warning(
-                            "[plugin_instance] Could not inject sticker note: {exc}"
-                        )
-
                 # Strip image/video base64 data from attachments so the Cortex
                 # engine does not receive raw vision bytes.  Iris already provided
                 # a textual description (or a placeholder).  Audio and document
@@ -1905,13 +1874,6 @@ async def _describe_attachment_images_with_iris(
         if not mime_type.startswith(("image/", "video/")):
             log_debug(
                 f"[plugin_instance] Iris skip attachment: mime_type={mime_type!r} not image/video"
-            )
-            continue
-
-        if attachment.get("is_sticker"):
-            log_debug(
-                "[plugin_instance] Iris skip attachment: sticker "
-                "(vision engine is unreliable for small sticker images)"
             )
             continue
 
