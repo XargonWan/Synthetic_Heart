@@ -675,6 +675,13 @@ async def extract_multimodal_from_telegram(
         video_note = getattr(message, "video_note", None)
         sticker = getattr(message, "sticker", None)
 
+        if not any([photos, document, sticker]):
+            reply_msg = getattr(message, "reply_to_message", None)
+            if reply_msg is not None:
+                photos = photos or getattr(reply_msg, "photo", None)
+                document = document or getattr(reply_msg, "document", None)
+                sticker = sticker or getattr(reply_msg, "sticker", None)
+
         # Handle photos (Telegram sends multiple sizes, get largest)
         if photos:
             photo = photos[-1]  # Last is largest

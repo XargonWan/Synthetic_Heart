@@ -1971,12 +1971,15 @@ async def _describe_attachment_images_with_iris(
                         else ""
                     )
                     effective_prompt = (
-                        "This is a sticker image. Describe ONLY what is visually "
-                        "present in the image: characters, objects, text, colors, "
-                        "style. Do NOT assume the sticker depicts the synth or the "
-                        "user unless that is clearly shown in the image. Do NOT "
-                        "confuse this sticker with any avatar, icon, or previous "
-                        "image you have seen.{size}{emoji}"
+                        "This is a Telegram sticker image. Stickers are often "
+                        "small, simple, or stylized. Describe ONLY the most "
+                        "prominent, clearly visible elements: main subject, "
+                        "background color, and any obvious objects or text. "
+                        "If any detail is not clearly visible, say 'unclear' "
+                        "instead of guessing or inventing details. Do NOT "
+                        "assume the sticker depicts the synth or the user. "
+                        "Do NOT add details that are not present in the "
+                        "image.{size}{emoji}"
                     ).format(size=size_note, emoji=emoji_note)
                 base_prompt = prompt or getattr(iris, "_default_prompt", "") or ""
                 effective_prompt = base_prompt + "\n\n" + effective_prompt
@@ -1997,6 +2000,10 @@ async def _describe_attachment_images_with_iris(
                 result.is_sticker = attachment_is_sticker
                 log_info(
                     f"[plugin_instance] Iris: got description ({len(result.description)} chars)"
+                )
+                log_debug(
+                    f"[plugin_instance] Iris description for {mime_type}: "
+                    f"{result.description[:500]}..."
                 )
                 return result
             log_info(
