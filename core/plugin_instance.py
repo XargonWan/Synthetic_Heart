@@ -725,13 +725,10 @@ async def handle_incoming_message(
                             f"[{media_label} the user just shared with you — this is what "
                             "you can see in it right now: " + " | ".join(parts) + "]"
                         )
-                        if media_label == "Sticker":
-                            augmented_text = original_text
+                        if original_text:
+                            augmented_text = f"{original_text}\n\n{description_block}"
                         else:
-                            if original_text:
-                                augmented_text = f"{original_text}\n\n{description_block}"
-                            else:
-                                augmented_text = description_block
+                            augmented_text = description_block
                         setattr(message, "text", augmented_text)
                         log_info(
                             "[plugin_instance] Appended Iris vision analysis to prompt text"
@@ -791,9 +788,40 @@ async def handle_incoming_message(
                             log_warning(
                                 f"[plugin_instance] Could not persist Iris description to history: {exc}"
                             )
-                    except Exception as exc:
+                    except Exception:
                         log_warning(
-                            f"[plugin_instance] Could not append Iris description to message text: {exc}"
+                            "[plugin_instance] Could not append Iris description to message text: {exc}"
+                        )
+
+                # Fallback for sticker-only attachments: when Iris was skipped
+                # or returned nothing, inject a minimal structural note so the
+                # model knows the user shared a sticker and which emoji it uses.
+                if iris_result is None and any(
+                    att.get("is_sticker") for att in attachments
+                ):
+                    try:
+                        sticker_att = next(
+                            att for att in attachments if att.get("is_sticker")
+                        )
+                        sticker_meta = sticker_att.get("media_metadata", {})
+                        emoji = sticker_meta.get("emoji")
+                        original_text = getattr(message, "text", "") or ""
+                        if emoji:
+                            sticker_block = f"[The user just shared a sticker: {emoji}]"
+                        else:
+                            sticker_block = "[The user just shared a sticker]"
+                        augmented_text = (
+                            f"{original_text}\n\n{sticker_block}"
+                            if original_text
+                            else sticker_block
+                        )
+                        setattr(message, "text", augmented_text)
+                        log_info(
+                            "[plugin_instance] Injected sticker note into prompt text"
+                        )
+                    except Exception:
+                        log_warning(
+                            "[plugin_instance] Could not inject sticker note: {exc}"
                         )
 
                 # Strip image/video base64 data from attachments so the Cortex
@@ -1880,6 +1908,13 @@ async def _describe_attachment_images_with_iris(
             )
             continue
 
+        if attachment.get("is_sticker"):
+            log_debug(
+                "[plugin_instance] Iris skip attachment: sticker "
+                "(vision engine is unreliable for small sticker images)"
+            )
+            continue
+
         data_b64 = attachment.get("data")
         if not data_b64 or not isinstance(data_b64, str):
             # Try to read from path if data is missing
@@ -1947,7 +1982,6 @@ async def _describe_attachment_images_with_iris(
             attachment_is_sticker = bool(attachment.get("is_sticker"))
             effective_prompt = prompt
             if attachment_is_sticker:
-                sticker_emoji = attachment.get("media_metadata", {}).get("emoji")
                 sticker_meta = attachment.get("media_metadata", {})
                 is_thumb = bool(sticker_meta.get("thumbnail"))
                 viewable = bool(sticker_meta.get("viewable", True))
