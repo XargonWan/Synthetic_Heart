@@ -725,10 +725,13 @@ async def handle_incoming_message(
                             f"[{media_label} the user just shared with you — this is what "
                             "you can see in it right now: " + " | ".join(parts) + "]"
                         )
-                        if original_text:
-                            augmented_text = f"{original_text}\n\n{description_block}"
+                        if media_label == "Sticker":
+                            augmented_text = original_text
                         else:
-                            augmented_text = description_block
+                            if original_text:
+                                augmented_text = f"{original_text}\n\n{description_block}"
+                            else:
+                                augmented_text = description_block
                         setattr(message, "text", augmented_text)
                         log_info(
                             "[plugin_instance] Appended Iris vision analysis to prompt text"
@@ -1965,11 +1968,6 @@ async def _describe_attachment_images_with_iris(
                         if is_thumb
                         else ""
                     )
-                    emoji_note = (
-                        f" The sticker is associated with the emoji {sticker_emoji}."
-                        if sticker_emoji
-                        else ""
-                    )
                     effective_prompt = (
                         "This is a Telegram sticker image. Stickers are often "
                         "small, simple, or stylized. Describe ONLY the most "
@@ -1979,8 +1977,8 @@ async def _describe_attachment_images_with_iris(
                         "instead of guessing or inventing details. Do NOT "
                         "assume the sticker depicts the synth or the user. "
                         "Do NOT add details that are not present in the "
-                        "image.{size}{emoji}"
-                    ).format(size=size_note, emoji=emoji_note)
+                        "image.{size}"
+                    ).format(size=size_note)
                 base_prompt = prompt or getattr(iris, "_default_prompt", "") or ""
                 effective_prompt = base_prompt + "\n\n" + effective_prompt
             try:
