@@ -789,7 +789,17 @@ class SearchOrchestrator:
             # set, with a structural fallback to the registered interfaces'
             # message actions, so a delivery turn can never silently fall back to
             # the full (unrestricted) catalog.
-            delivery_allowed_action_types: list[str] = []
+            # "send_message" is the current unified reply action (the legacy
+            # per-interface message_<name> actions below are still allowed
+            # for compatibility, but the model is instructed to use
+            # send_message for every interface - see action_parser's
+            # send_message prompt schema). Without it here, a correctly
+            # composed delivery reply gets silently dropped by
+            # _drop_out_of_scope_leaked_actions in core/message_chain.py
+            # (its type is out of this turn's scope), and the user never
+            # receives the search results despite the search having
+            # succeeded - observed 2026-09-08.
+            delivery_allowed_action_types: list[str] = ["send_message"]
             try:
                 from core.core_initializer import core_initializer
 
@@ -797,16 +807,18 @@ class SearchOrchestrator:
                     core_initializer.actions_block.get("available_actions", {}) or {}
                 )
                 delivery_allowed_action_types = sorted(
-                    k for k in _full_actions if k.startswith("message_")
+                    {"send_message"}
+                    | {k for k in _full_actions if k.startswith("message_")}
                 )
             except Exception as _aa_exc:
                 log_debug(f"[web_search] delivery allowlist derive skipped: {_aa_exc}")
-            if not delivery_allowed_action_types:
+            if len(delivery_allowed_action_types) <= 1:
                 try:
                     from core.core_initializer import INTERFACE_REGISTRY
 
                     delivery_allowed_action_types = sorted(
-                        {
+                        {"send_message"}
+                        | {
                             f"message_{name}"
                             for name in INTERFACE_REGISTRY
                             if name and not str(name).startswith("_")

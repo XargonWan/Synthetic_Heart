@@ -353,11 +353,19 @@ async def test_orchestrator_delivers_second_turn(
     assert ctx["web_search_task_id"] == "t1"
     assert ctx["prior_context"] == {"k": "v"}
     # Delivery-turn structural scoping (search-loop fix, 2026-08-17): the second
-    # turn must be restricted to message_* so the model cannot re-emit the
-    # producing search action and loop.
+    # turn must be restricted to message_*/send_message so the model cannot
+    # re-emit the producing search action and loop.
     allowed = ctx.get("allowed_action_types")
     assert isinstance(allowed, list) and len(allowed) > 0
-    assert all(str(a).startswith("message_") for a in allowed)
+    assert "search_current_knowledge" not in allowed
+    assert all(
+        str(a) == "send_message" or str(a).startswith("message_") for a in allowed
+    )
+    # send_message is the unified reply action the model actually uses for
+    # every interface; without it here, a correctly composed delivery reply
+    # gets silently dropped as out-of-scope and the user never receives the
+    # search results despite the search having succeeded (observed 2026-09-08).
+    assert "send_message" in allowed
 
 
 def test_web_search_result_is_outbound_beat() -> None:
