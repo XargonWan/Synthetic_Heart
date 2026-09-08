@@ -127,11 +127,26 @@ def _cache_ttl() -> float:
     return max(60.0, min(86400.0, value))
 
 
-def _prompt_key(engine_name: str, prompt_signature: str | None) -> str | None:
-    """Build the cache key, or ``None`` to disable caching for this call."""
+def _prompt_key(
+    engine_name: str, prompt_signature: str | None, interface_path: str | None = None
+) -> str | None:
+    """Build the cache key, or ``None`` to disable caching for this call.
+
+    ``interface_path`` scopes the cache to the exact conversation/beat that
+    produced it. Without this, two unrelated turns (e.g. a Grillo background
+    beat and a real user chat) that happen to share the same ``engine_name``
+    and an identical prompt *prefix* (``prompt_signature`` only hashes a
+    bounded prefix — see ``_compute_prompt_signature`` in plugin_instance.py)
+    would collide on the same key, and a "safe" cached response meant for one
+    conversation could be replayed into a completely different one. See the
+    incident this guards against: a Grillo diary-consolidation beat's cached
+    reply was served to a user's unrelated Telegram message, which then tried
+    to (and failed to) deliver itself back to the beat's internal pseudo
+    interface instead of answering the user.
+    """
     if not prompt_signature:
         return None
-    return f"{str(engine_name)}:{str(prompt_signature)}"
+    return f"{str(engine_name)}:{str(interface_path or '')}:{str(prompt_signature)}"
 
 
 def get_cached_response(prompt_key: str) -> str | None:
@@ -183,6 +198,7 @@ async def run_cortex_with_fallback(
     scope: str | None,
     call_engine: Callable[[str], Awaitable[Any]],
     prompt_signature: str | None = None,
+    interface_path: str | None = None,
 ) -> Any:
     """Run the staged cortex fallback chain and return the first good response.
 
@@ -191,6 +207,11 @@ async def run_cortex_with_fallback(
     result is returned untouched on success, so the primary path is
     indistinguishable from a direct call. Fail-open throughout: any failure in
     the fallback machinery degrades to the primary outcome (or empty).
+
+    ``interface_path`` (the calling turn's ``telegram_bot/<chat_id>``,
+    ``grillo/-1``, etc.) is folded into the Stage-2 cache key via
+    ``_prompt_key`` so a cached response can only ever be replayed back to the
+    same conversation/beat that produced it — never to an unrelated one.
     """
     # Stage 0 — primary engine.
     primary_text: Any = None
@@ -202,7 +223,7 @@ async def run_cortex_with_fallback(
         primary_text = None
 
     if _is_good_text(primary_text):
-        key = _prompt_key(engine_name, prompt_signature)
+        key = _prompt_key(engine_name, prompt_signature, interface_path)
         if key is not None and _cached_enabled():
             set_cached_response(key, str(primary_text))
         return primary_text
@@ -226,14 +247,14 @@ async def run_cortex_with_fallback(
                 f"good text (scope={scope!r}); served by fallback engine "
                 f"{fallback_engine!r}"
             )
-            key = _prompt_key(engine_name, prompt_signature)
+            key = _prompt_key(engine_name, prompt_signature, interface_path)
             if key is not None and _cached_enabled():
                 set_cached_response(key, str(fallback_text))
             return fallback_text
 
     # Stage 2 — cached/safe response.
     if _cached_enabled():
-        key = _prompt_key(engine_name, prompt_signature)
+        key = _prompt_key(engine_name, prompt_signature, interface_path)
         if key is not None:
             cached = get_cached_response(key)
             if cached is not None:

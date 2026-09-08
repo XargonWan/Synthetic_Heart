@@ -85,8 +85,16 @@ def _compute_prompt_signature(prompt_for_engine: Any) -> str | None:
     """Return a short, bounded fingerprint of a prompt for the cached-safe-response store.
 
     Best-effort: any failure returns ``None`` (which disables caching for the
-    turn). Only a bounded prefix of the serialized prompt is hashed so large
-    prompts never cost a full re-serialization on the hot path.
+    turn). Only bounded head/tail windows of the serialized prompt are hashed
+    so large prompts never cost a full re-serialization on the hot path.
+    Hashing both ends (not just the prefix) matters because the shared
+    boilerplate (persona, history, memories, static injections) tends to sit
+    at the front of the prompt while the part that actually varies between
+    turns — the current message / beat instructions — is usually appended
+    near the end; hashing the prefix alone let two structurally different
+    prompts collide on the same signature (paired with the cache key now also
+    including ``interface_path`` in core/cortex_fallback.py, this closes both
+    sides of that collision).
     """
     try:
         import hashlib
@@ -97,7 +105,11 @@ def _compute_prompt_signature(prompt_for_engine: Any) -> str | None:
             blob = prompt_for_engine.encode("utf-8", "replace")
         else:
             blob = json_dumps(prompt_for_engine).encode("utf-8", "replace")
-        return hashlib.sha256(blob[:8192]).hexdigest()[:16]
+        window = 8192
+        sample = (
+            blob[:window] if len(blob) <= window * 2 else blob[:window] + blob[-window:]
+        )
+        return hashlib.sha256(sample).hexdigest()[:16]
     except Exception:
         return None
 
@@ -1122,6 +1134,7 @@ async def handle_incoming_message(
                     scope=_scope,
                     call_engine=_call_engine,
                     prompt_signature=_prompt_signature,
+                    interface_path=getattr(message, "interface_path", None),
                 )
             except Exception as _fb_exc:
                 # The wrapper is fail-open and only propagates the primary

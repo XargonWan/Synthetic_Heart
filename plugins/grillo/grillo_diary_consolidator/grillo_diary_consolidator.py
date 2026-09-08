@@ -24,6 +24,14 @@ from core.config_manager import config_registry
 from core.db import DictCursor, get_conn_ctx
 from core.logging_utils import log_debug, log_info, log_error
 
+# Default cap on how many times the same unresolved diary day may be
+# re-offered to the LLM before this plugin gives up on it. Without this, a
+# day whose update_diary_entry action never actually executes (e.g. the LLM
+# fixates on an unrelated/invalid action instead) is indistinguishable from
+# "never attempted" and gets re-selected by _find_unmerged_days forever, once
+# per beat cycle, indefinitely.
+DEFAULT_MAX_CONSOLIDATION_ATTEMPTS = 5
+
 
 class GrilloDiaryConsolidatorPlugin:
     display_name = "G.R.I.L.L.O. Diary Consolidation"
@@ -99,6 +107,44 @@ class GrilloDiaryConsolidatorPlugin:
             _update_lookback,
         )
 
+        self.max_consolidation_attempts = int(
+            config_registry.get_value(
+                "GRILLO_DIARY_CONSOLIDATE_MAX_ATTEMPTS",
+                DEFAULT_MAX_CONSOLIDATION_ATTEMPTS,
+                label="Diary consolidation max attempts per day",
+                description=(
+                    "How many times the same unresolved diary day may be "
+                    "re-offered to the LLM before Grillo gives up on it "
+                    "(logged loudly) instead of retrying forever."
+                ),
+                value_type=int,
+                group="grillo",
+                component="grillo_diary_consolidator",
+            )
+        )
+
+        def _update_max_attempts(val):
+            try:
+                self.max_consolidation_attempts = int(val)
+                log_info(
+                    "[grillo_diary_consolidator] max_consolidation_attempts set to "
+                    f"{self.max_consolidation_attempts}"
+                )
+            except Exception:
+                pass
+
+        config_registry.add_listener(
+            "GRILLO_DIARY_CONSOLIDATE_MAX_ATTEMPTS",
+            _update_max_attempts,
+        )
+
+        # In-process attempt tracking, keyed by diary ``day``. Resets on
+        # restart, which is an acceptable/conservative reset (a fresh process
+        # gets a clean slate rather than needing extra DB schema to persist
+        # counts).
+        self._consolidation_attempt_counts: dict = {}
+        self._consolidation_exhausted_days: set = set()
+
     async def build_prompt(self) -> Optional[str]:
         """Build a consolidation prompt for the most recent unmerged diary day(s).
 
@@ -111,11 +157,58 @@ class GrilloDiaryConsolidatorPlugin:
         if not self.enabled:
             return None
 
-        days = await self._find_unmerged_days(self.MAX_DAYS_PER_RUN)
+        # Fetch a wider pool than MAX_DAYS_PER_RUN so that, once some days
+        # have been given up on (see _record_attempts_and_filter), there is
+        # still room to surface the next-oldest candidate instead of only
+        # ever re-checking the same permanently-stuck top day.
+        pool_size = self.MAX_DAYS_PER_RUN + len(self._consolidation_exhausted_days)
+        candidates = await self._find_unmerged_days(pool_size)
+        if not candidates:
+            return None
+
+        eligible = [
+            c for c in candidates if c[0] not in self._consolidation_exhausted_days
+        ]
+        days = eligible[: self.MAX_DAYS_PER_RUN]
+        if not days:
+            return None
+
+        days = self._record_attempts_and_filter(days)
         if not days:
             return None
 
         return self._build_multi_day_prompt(days)
+
+    def _record_attempts_and_filter(self, days: list) -> list:
+        """Record an attempt for each day about to be offered to the LLM.
+
+        ``_find_unmerged_days`` selects purely from live ``ai_diary`` content,
+        so a day whose ``update_diary_entry`` fix never actually executes
+        (e.g. the LLM/engine emits an unrelated or invalid action instead) is
+        indistinguishable from "never attempted" and would otherwise be
+        re-offered on every beat cycle forever. This caps it at
+        ``max_consolidation_attempts`` and gives up loudly (logged, not
+        silent) so a permanently-stuck day is visible instead of burning an
+        LLM call indefinitely.
+        """
+        kept = []
+        for entry in days:
+            day = entry[0]
+            count = self._consolidation_attempt_counts.get(day, 0) + 1
+            self._consolidation_attempt_counts[day] = count
+            if count > self.max_consolidation_attempts:
+                self._consolidation_exhausted_days.add(day)
+                log_error(
+                    f"[grillo_diary_consolidator] Giving up on day {day} after "
+                    f"{count - 1} failed consolidation attempt(s) (exceeded "
+                    "GRILLO_DIARY_CONSOLIDATE_MAX_ATTEMPTS="
+                    f"{self.max_consolidation_attempts}); it will not be "
+                    "re-offered automatically. Needs manual review of "
+                    "ai_diary for that day."
+                )
+                continue
+            kept.append(entry)
+        return kept
 
     async def _find_unmerged_days(self, max_days: int) -> list:
         """Return up to *max_days* unconsolidated diary days (newest first).

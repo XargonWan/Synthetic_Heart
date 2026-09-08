@@ -1344,6 +1344,16 @@ async def _dispatch_send_message(
             "available_interfaces": sorted(
                 n for n, i in INTERFACE_REGISTRY.items() if hasattr(i, "send_message")
             ),
+            # A completely unregistered interface name (e.g. an internal
+            # pseudo-interface like "grillo" that was never registered via
+            # register_interface) can never start working by retrying the
+            # same action — unlike a real, registered interface (telegram_bot,
+            # discord_bot, matrix) failing on a bad chat_id/target, which
+            # fails later inside interface.send_message() itself and stays
+            # correctable. Marking this unfixable stops the selective
+            # correction loop (and the LLM-chain lock contention it causes)
+            # from retrying something that is structurally impossible.
+            "unfixable": True,
         }
 
     # Compute capability drops centrally so the LLM can acknowledge them in
@@ -2254,6 +2264,13 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
                             if isinstance(result, dict)
                             and isinstance(result.get("reason"), str)
                             else None
+                        ),
+                        # Propagate structural "will never succeed" markers
+                        # from the dispatcher (e.g. _dispatch_send_message's
+                        # "interface is not registered at all" case) so
+                        # _request_selective_correction skips retrying them.
+                        "unfixable": bool(
+                            isinstance(result, dict) and result.get("unfixable")
                         ),
                     }
                 )
