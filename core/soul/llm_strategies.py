@@ -591,8 +591,8 @@ class LlmDspExtractor:
         return (
             "You are extracting a standing user profile from a chat log between an "
             "AI persona and its human. The log mixes ordinary conversation with "
-            "in-character roleplay banter (pet names, emote fills like "
-            "'mmwah'/'heheh', affectionate dialogue addressed at the persona).\n"
+            "in-character roleplay (erotic fiction, pet names, emote fills like "
+            "'mmwah'/'heheh', speech addressed at the persona).\n"
             "Extract biographical statements about the human: name, role/occupation, "
             "origin/residence, age, tastes, and standing preferences about how they "
             "want to be talked to or responded to. Extract genuine biography even if "
