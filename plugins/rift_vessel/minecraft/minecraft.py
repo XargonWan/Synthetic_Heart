@@ -383,6 +383,18 @@ class MinecraftConnector(VesselConnectorBase):
         self._last_target_result: str | None = None
         self._last_target_name: str | None = None
         self._last_target_kind: str | None = None
+        # --- Passive activity state (in-memory, no DB) ---------------------
+        # Lowest-priority embodiment layer (see docs/rift_vessel.rst —
+        # "Passive activity"): when ``motor_step`` is called with no goal at
+        # all, the reflex would otherwise leave the body doing nothing. This
+        # tracks the currently-pursued passive selection (a nearby benign
+        # affordance) so consecutive ticks keep working the *same* target
+        # instead of re-rolling one every tick, bounded by
+        # ``_passive_activity_lease_ticks`` so it can never commit to one
+        # target forever. Cleared the moment a real goal takes over. Purely
+        # structural — never goal text/keywords.
+        self._passive_activity: Dict[str, Any] | None = None
+        self._passive_activity_lease_ticks: int = self._PASSIVE_ACTIVITY_LEASE_TICKS
         # --- Self-preservation reflex state (in-memory, no DB) ------------
         # The survival guard runs at the very top of every motor tick and
         # pre-empts normal movement when the body is in danger (drowning, in
@@ -2800,6 +2812,15 @@ class MinecraftConnector(VesselConnectorBase):
     _STATIC_WARD_RADIUS = 2.0
     _STATIC_WARD_TICKS = 8
 
+    # How many consecutive motor ticks a *passive-activity* selection (see
+    # ``_run_passive_activity``) may be pursued before the reflex lets go and
+    # reselects, even if the target is still a live affordance. This is the
+    # "must have a short-lived lease" guarantee from the passive-activity
+    # design: without it the body could keep chasing one unreachable target
+    # forever whenever there is no goal to override it. Purely a tick counter,
+    # like every other watchdog in this reflex — no timers, no keywords.
+    _PASSIVE_ACTIVITY_LEASE_TICKS = 12
+
     # Turn applied to the exploration heading each time a stale destination is
     # reprojected, so successive self-directed reprojections fan out across the
     # world instead of retracing the same straight line. ~2.4 rad ≈ 137° (a
@@ -3178,6 +3199,15 @@ class MinecraftConnector(VesselConnectorBase):
             self._static_ward_radius = min(max(radius, 0.5), 32.0)
             limit = _intv("VESSEL_STATICITY_TICKS", int(self._STATIC_WARD_TICKS))
             self._static_ward_limit = min(max(limit, 2), 1000)
+            # Passive activity: how long one selection may be pursued (see
+            # ``_run_passive_activity``). Enablement itself is gated upstream
+            # by the interface scheduler's ``passive_activity_allowed`` kwarg
+            # (``core.vessel_beat.is_passive_activity_enabled``), not here.
+            lease_ticks = _intv(
+                "VESSEL_PASSIVE_ACTIVITY_LEASE_TICKS",
+                int(self._PASSIVE_ACTIVITY_LEASE_TICKS),
+            )
+            self._passive_activity_lease_ticks = min(max(lease_ticks, 2), 200)
         except Exception as exc:  # pragma: no cover - defensive
             log_debug(f"{LOG_PREFIX} self-preservation config load failed: {exc}")
 
@@ -4332,7 +4362,140 @@ class MinecraftConnector(VesselConnectorBase):
             log_debug(f"[minecraft] on_entity_killed failed: {exc}")
         return None
 
-    async def motor_step(self, goal: Dict[str, Any] | None) -> Dict[str, Any]:
+    async def _run_passive_activity(self, state: "WorldState") -> Dict[str, Any]:
+        """Lowest-priority embodiment layer: act when there is genuinely no goal.
+
+        Only ever called from :meth:`motor_step`'s ``no goal`` branch — i.e.
+        *after* the survival guard and ``deliberate_action_in_flight`` have
+        already had first refusal, so danger and deliberate cognition-driven
+        actions always pre-empt this by construction. Mirrors the
+        goal-directed reflex's benign-affordance interaction (mine/use nearby,
+        skip hostile targets and light/utility blocks via
+        ``_REFLEX_NO_MINE_BLOCKS``) so the body stays doing something low-risk
+        and structural instead of standing inert while cognition has not yet
+        authored a goal — exactly the "walk around / mine nearby resources"
+        behaviour the passive-activity design calls for.
+
+        A selection is pursued for up to ``_passive_activity_lease_ticks``
+        consecutive ticks (or until it stops being a live affordance),
+        whichever comes first, so it can never commit to one unreachable
+        target forever; once its lease expires that exact target is excluded
+        from the immediate reselection (a target that merely stopped being a
+        live affordance carries no such exclusion), so a perpetually-nearest
+        affordance cannot simply be re-picked on the spot and continued
+        forever. When nothing benign is nearby (or the only one is the
+        just-expired target), falls back to the same directional-march
+        exploration used elsewhere in this reflex, so passive wandering looks
+        identical to purposeful exploration rather than a separate mechanism.
+        Purely structural (affordance shape/distance) — never keyword/
+        goal-text driven.
+        """
+        affordances = (state.extra or {}).get("affordances") or []
+        benign = [
+            a
+            for a in affordances
+            if isinstance(a, dict)
+            and a.get("verb") in ("use", "mine")
+            and not (
+                a.get("kind") == "block"
+                and a.get("target") in self._REFLEX_NO_MINE_BLOCKS
+            )
+        ]
+
+        active: Dict[str, Any] | None = self._passive_activity
+        # Key of a target whose *lease* (not just its presence) just expired —
+        # excluded from reselection below so a perpetually-nearest affordance
+        # cannot simply be re-picked on the spot and continued forever, which
+        # would defeat the lease entirely. A target that merely stopped being
+        # a live affordance (walked away / consumed) carries no such exclusion.
+        expired_key: str | None = None
+        if active is not None:
+            still_present = any(
+                isinstance(a, dict)
+                and a.get("kind") == active.get("target_kind")
+                and a.get("target") == active.get("target")
+                for a in benign
+            )
+            lease_hit = active.get("ticks", 0) >= self._passive_activity_lease_ticks
+            if not still_present or lease_hit:
+                if lease_hit:
+                    expired_key = f"{active.get('target_kind')}:{active.get('target')}"
+                active = None
+
+        if active is None and benign:
+            candidates = [
+                a
+                for a in benign
+                if expired_key is None
+                or f"{a.get('kind')}:{a.get('target')}" != expired_key
+            ]
+            chosen = candidates[0] if candidates else None
+            if chosen is not None:
+                active = {
+                    "target": chosen.get("target"),
+                    "target_kind": chosen.get("kind"),
+                    "ticks": 0,
+                }
+
+        self._passive_activity = active
+
+        if active is not None:
+            active["ticks"] = active.get("ticks", 0) + 1
+            name = active["target"]
+            distance = next(
+                (
+                    a.get("distance")
+                    for a in benign
+                    if a.get("kind") == active["target_kind"]
+                    and a.get("target") == name
+                ),
+                None,
+            )
+            if isinstance(distance, (int, float)) and distance <= self._MOTOR_REACH:
+                # Blocks are always mined, never merely "used" — mirroring the
+                # goal-directed reflex, which acts on a block's *kind* rather
+                # than trusting the affordance's own ``verb`` (every block
+                # affordance from ``_build_affordances`` is tagged ``use``;
+                # ``mine`` is this reflex's own structural decision).
+                verb = "mine" if active["target_kind"] == "block" else "use"
+                await self.act(verb, {"target": name})
+                return {
+                    "acted": True,
+                    "action": verb,
+                    "target": name,
+                    "target_kind": active["target_kind"],
+                    "reason": "passive_activity",
+                }
+            await self.act("goto", {"target": name})
+            return {
+                "acted": True,
+                "action": "goto",
+                "target": name,
+                "target_kind": active["target_kind"],
+                "reason": "passive_activity",
+            }
+
+        # Nothing benign nearby: march a safe exploration heading, the same
+        # pattern the goal-directed reflex uses when it has nothing to work
+        # with either.
+        forward = self._reproject_forward(state.position, self._explore_heading)
+        if forward is not None:
+            await self.act("goto", {"x": forward["x"], "z": forward["z"]})
+            return {
+                "acted": True,
+                "action": "goto",
+                "destination": forward,
+                "reason": "passive_activity",
+            }
+        await self.act("wander", {})
+        return {"acted": True, "action": "wander", "reason": "passive_activity"}
+
+    async def motor_step(
+        self,
+        goal: Dict[str, Any] | None,
+        *,
+        passive_activity_allowed: bool = True,
+    ) -> Dict[str, Any]:
         """Fast reflexive step toward the active goal — **no LLM, no cognition**.
 
         Called on a short timer by the interface scheduler (see
@@ -4348,8 +4511,14 @@ class MinecraftConnector(VesselConnectorBase):
 
         Rules (no keywords — purely on affordance shape/distance and numeric
         coordinates):
-          * No connection or no goal → do nothing (idle until the will beat
-            gives the body something to pursue).
+          * No connection → do nothing.
+          * No goal at all → the lowest-priority **passive activity** layer
+            (see ``_run_passive_activity`` and docs/rift_vessel.rst) engages
+            instead of idling, when ``passive_activity_allowed`` is ``True``
+            and ``VESSEL_PASSIVE_ACTIVITY_ENABLED`` is on: work a nearby
+            low-risk affordance or explore, leased so it never commits to one
+            target forever. Otherwise idle until the will beat gives the body
+            something to pursue.
           * A benign affordance already **within reach** → interact with it via
             its structural ``verb`` (``use`` / ``mine``), regardless of any
             distant destination — grab what is right in front of you. Hostile
@@ -4390,10 +4559,11 @@ class MinecraftConnector(VesselConnectorBase):
                 return {"acted": False, "reason": "no_world_state"}
 
             # Highest-priority reflex: survive. Runs every tick, pre-empting all
-            # normal movement, and is the only branch allowed to act with no
-            # goal. Structural only (numeric health/oxygen/distance + game enum
-            # block/entity ids) — never keyword matching. Returns a completed
-            # result dict when it acted, else None to fall through.
+            # normal movement — including passive activity below, the only
+            # *other* branch allowed to act with no goal. Structural only
+            # (numeric health/oxygen/distance + game enum block/entity ids) —
+            # never keyword matching. Returns a completed result dict when it
+            # acted, else None to fall through.
             survival = await self._run_survival_guard(state)
             if survival is not None:
                 return survival
@@ -4439,7 +4609,25 @@ class MinecraftConnector(VesselConnectorBase):
                 return {"acted": True, "action": "wander", "reason": "staticity_ward"}
 
             if not goal:
+                # Lowest-priority embodiment layer: instead of standing inert
+                # while cognition has not yet authored a goal, opportunistically
+                # work a nearby low-risk affordance or explore.
+                # ``passive_activity_allowed`` is resolved upstream by the
+                # interface scheduler and already folds in both the
+                # ``VESSEL_PASSIVE_ACTIVITY_ENABLED`` master toggle
+                # (``core.vessel_beat.is_passive_activity_enabled``) and the
+                # player-quiet window, so a single flag here is enough to
+                # restore the plain no-op below when either disables it.
+                if passive_activity_allowed:
+                    return await self._run_passive_activity(state)
+                self._passive_activity = None
                 return {"acted": False, "reason": "no_goal"}
+
+            # A real goal has taken over — drop any pending passive-activity
+            # lease so a later goal-less tick starts fresh instead of resuming
+            # something stale. Immediate interruption by a conscious goal
+            # change, per the passive-activity design.
+            self._passive_activity = None
 
             affordances = (state.extra or {}).get("affordances") or []
             # Reflexes stay peaceful: skip hostile targets, act only on benign

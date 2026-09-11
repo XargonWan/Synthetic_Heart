@@ -345,6 +345,8 @@ Key                             Purpose
 ``VESSEL_ACTION_INTERVAL_SEC``  Seconds between action beats — LLM Fast-Lane turn (20, clamped 3–300)
 ``VESSEL_MOTOR_ENABLED``        Enable the fast motorics reflex (``True`` default)
 ``VESSEL_MOTOR_INTERVAL_SEC``   Seconds between fast motor ticks — no LLM (3, clamped 1–60)
+``VESSEL_PASSIVE_ACTIVITY_ENABLED``  Enable the lowest-priority passive-activity layer for a goal-less motor tick (``True`` default)
+``VESSEL_PASSIVE_ACTIVITY_LEASE_TICKS``  Consecutive motor ticks one passive selection may be pursued before it is let go (12, clamped 2–200)
 ``VESSEL_REFLECTION_ENABLED``   Enable the deliberate reflection pause (``True`` default)
 ``VESSEL_REFLECTION_DURATION_SEC``  Reflection window seconds — will/action beats held off, motor keeps moving (15, clamped 3–300)
 ``VESSEL_REFLECTION_MIN_INTERVAL_SEC``  Anti-thrash floor between two reflection pauses (60, clamped 10–3600)
@@ -578,6 +580,46 @@ Entities are never mined (mining is block-only). The reflex still **never reads
 the goal's free text**. The base ``VesselConnectorBase.motor_step`` is a no-op
 returning ``{"acted": False, "reason": "no_motorics"}``, so a world without
 motorics degrades gracefully.
+
+**Passive activity — staying embodied while cognition is busy (fast, no LLM,
+lowest priority).** Below the motor tick sits one more layer, added to close a
+specific gap: before the first will beat, or between a finished goal and the
+next one, ``goal`` is ``None`` and the motor tick had nothing to do — the body
+simply stood inert. Passive activity fills exactly that gap and *only* that
+gap; it reuses ``motor_step`` itself (no new prompt, cognition turn, Agent
+Lane task or Drone — see AGENTS.md §5c) and is deliberately the
+lowest-priority layer of all: the survival guard and the
+``deliberate_action_in_flight`` busy check both still run *before* the
+``no goal`` branch, so danger and an in-flight deliberate action pre-empt it
+by construction, and a fresh goal drops any pending selection immediately
+(``MinecraftConnector._passive_activity`` is cleared the moment ``goal`` is
+truthy again).
+
+Gated by ``VESSEL_PASSIVE_ACTIVITY_ENABLED`` (default True) and — before the
+connector is even called — by the interface scheduler's
+``passive_activity_allowed`` flag, resolved once per tick in
+``_maybe_run_motor_tick`` from the same player-quiet window
+(``VESSEL_WILL_QUIET_SEC``) that defers en-route sighting perceptions, so a
+player actively chatting suppresses passive selection too. When allowed, the
+Minecraft connector's ``_run_passive_activity`` mirrors the goal-directed
+reflex's benign-affordance handling: pick the nearest benign affordance (verb
+``use``/``mine``, hostile ``attack`` and light/utility blocks in
+``_REFLEX_NO_MINE_BLOCKS`` skipped), mine a block or use an entity within
+``_MOTOR_REACH``, else ``goto`` toward it; with nothing benign nearby it falls
+back to the same directional-march exploration the goal-directed reflex uses.
+A selection is a **lease**, not a commitment: it is pursued for at most
+``VESSEL_PASSIVE_ACTIVITY_LEASE_TICKS`` consecutive motor ticks (default 12,
+clamped ``[2, 200]``) or until it stops being a live affordance, whichever
+comes first; once its lease expires that exact target is excluded from the
+immediate reselection, so a perpetually-nearest affordance cannot simply be
+re-picked on the spot and pursued forever. Results carry
+``"reason": "passive_activity"`` so it is distinguishable in logs from
+ordinary goal-directed motorics. Purely structural (affordance shape/distance)
+— never keyword/goal-text driven, and never a new agentic loop. Connectors
+without a passive-activity implementation are unaffected: the base
+``VesselConnectorBase.motor_step`` accepts the same
+``passive_activity_allowed`` keyword and still degrades to the plain
+``no_motorics`` no-op.
 
 **Reflection pause — deliberate stop-and-think (LLM, elevated priority).** On
 top of the three speeds sits a *reflection pause*. Because the single message
