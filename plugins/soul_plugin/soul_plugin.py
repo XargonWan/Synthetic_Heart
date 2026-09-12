@@ -32,7 +32,10 @@ from core.soul.repository import (
     PostgresSoulRepository,
     SoulRepository,
 )
-from core.soul.strategies import RuleBasedDspExtractor, RuleBasedMemCellExtractor
+from core.soul.strategies import (
+    RuleBasedDspExtractor,
+    RuleBasedMemCellExtractor,
+)
 
 register_exposed_var(
     "SOUL_COMPILE_IDLE_SECONDS",
@@ -109,6 +112,54 @@ register_exposed_var(
     ),
     scope="plugins",
     component="soul_plugin",
+)
+
+register_exposed_var(
+    "SOUL_TEMPORAL_ENABLED",
+    label="Temporal situational context extraction",
+    default=1,
+    value_type=int,
+    ui_type="bool",
+    description=(
+        "Extract short-lived, time-bounded user circumstances (e.g. 'on vacation "
+        "next week', 'moving tomorrow') into the situational_notes store. "
+        "These are rendered as relative temporal context in prompts and expire "
+        "automatically. This is NOT a replacement for persistent MemCell memory "
+        "— stable facts still go through DSP extraction."
+    ),
+    scope="plugins",
+    component="soul_plugin",
+)
+
+register_exposed_var(
+    "SOUL_TEMPORAL_LOOKBACK_DAYS",
+    label="Temporal context lookback window (days)",
+    default=1,
+    value_type=int,
+    ui_type="number",
+    description=(
+        "How many days back a situational note must have been created to still be "
+        "injected into the prompt context."
+    ),
+    scope="plugins",
+    component="soul_plugin",
+)
+
+register_exposed_var(
+    "SOUL_TEMPORAL_CATEGORY_DEFAULT_TTL",
+    label="Default TTL per note type (hours)",
+    default='{"event": 168, "state": 24, "interval": 48, "instant": 1}',
+    value_type=str,
+    ui_type="text",
+    description=(
+        "JSON map of note_type → default validity window in hours, used when the "
+        "user's temporal language does not specify a precise end. "
+        "event=168 (1 week), state=24 (1 day), interval=48 (2 days), "
+        "instant=1 (1 hour)."
+    ),
+    scope="plugins",
+    component="soul_plugin",
+    advanced=True,
 )
 
 
@@ -206,6 +257,23 @@ class SoulPlugin(PluginBase):
                 f"[soul_plugin] LLM DSP builder unavailable ({exc}); using rule-based"
             )
             return RuleBasedDspBuilder()
+
+    @staticmethod
+    def _is_temporal_enabled() -> bool:
+        """Return whether temporal situational context is active.
+
+        ``SOUL_TEMPORAL_ENABLED`` defaults on. When disabled the stored notes
+        are no longer injected into the prompt. Extraction lives in the
+        ``debrief_situational_notes`` plugin and has its own toggle.
+        """
+        try:
+            from core.config_manager import config_registry
+
+            return bool(
+                config_registry.get_value("SOUL_TEMPORAL_ENABLED", 1, value_type=int)
+            )
+        except Exception:
+            return True
 
     def _build_embedder(self) -> Any:
         from importlib.util import find_spec
@@ -369,7 +437,64 @@ class SoulPlugin(PluginBase):
                 for signal in foresight[:8]
             ],
             "soul_recalled_memories": recalled_memories,
+            "soul_temporal_context": await self._get_temporal_context(now),
         }
+
+    async def _get_temporal_context(self, now: datetime) -> list[dict[str, Any]]:
+        """Return active situational notes as renderable dicts.
+
+        Gated on ``SOUL_TEMPORAL_ENABLED``; fail-safe on any error.
+        """
+        if not SoulPlugin._is_temporal_enabled():
+            return []
+        try:
+            from core.soul.time_resolution import TemporalRenderer
+
+            renderer = TemporalRenderer(now=now)
+            lookback = self._get_lookback_days()
+            cutoff = now - timedelta(days=lookback)
+            notes = await self._repo.list_active_situational_notes(now=now)
+            result: list[dict[str, Any]] = []
+            for note in notes:
+                if note.created_at and note.created_at < cutoff:
+                    continue
+                result.append(
+                    {
+                        "note_type": note.note_type,
+                        "subject": note.subject,
+                        "summary": note.summary,
+                        "priority": note.priority,
+                        "confidence": note.confidence,
+                        "valid_from_relative": renderer.render_relative(
+                            note.valid_from
+                        ),
+                        "valid_until_relative": renderer.render_relative(
+                            note.valid_until
+                        ),
+                        "source": note.source,
+                    }
+                )
+            return result
+        except Exception as exc:
+            log_debug(f"[soul_plugin] Temporal context injection failed: {exc}")
+            return []
+
+    @staticmethod
+    def _get_lookback_days() -> int:
+        try:
+            from core.config_manager import config_registry
+
+            return max(
+                1,
+                int(
+                    config_registry.get_value(
+                        "SOUL_TEMPORAL_LOOKBACK_DAYS", 1, value_type=int
+                    )
+                    or 1
+                ),
+            )
+        except Exception:
+            return 1
 
     async def _get_grillo_beat_context(self, message: Any) -> dict[str, object]:
         """Return passive SOUL context for Grillo beats.
@@ -428,6 +553,9 @@ class SoulPlugin(PluginBase):
                 for signal in foresight[:8]
             ],
             "soul_recalled_memories": recalled_memories,
+            "soul_temporal_context": await self._get_temporal_context(
+                datetime.now(timezone.utc)
+            ),
         }
 
     async def _scheduler_loop(self) -> None:
@@ -885,6 +1013,15 @@ class SoulPlugin(PluginBase):
             intensity=intensity,
             context=text[:120],
         )
+
+    def get_repository(self) -> SoulRepository:
+        """Return the SOUL store for other plugins that feed or read it.
+
+        The situational-notes debrief plugin extracts notes but does not own the
+        store; this is the sanctioned way in, so it never has to reach for a
+        private attribute.
+        """
+        return self._repo
 
     def _build_repository(self) -> SoulRepository:
         backend = self._get_repository_backend()
