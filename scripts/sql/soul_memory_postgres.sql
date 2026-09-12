@@ -119,3 +119,28 @@ CREATE TABLE IF NOT EXISTS soul_metrics (
     measured_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY(metric_key, measured_at)
 );
+
+CREATE TABLE IF NOT EXISTS situational_notes (
+    id TEXT PRIMARY KEY,
+    note_type VARCHAR(32) NOT NULL,
+    subject TEXT,
+    summary TEXT NOT NULL,
+    priority SMALLINT NOT NULL DEFAULT 0,
+    confidence REAL NOT NULL DEFAULT 0.5,
+    valid_from TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    valid_until TIMESTAMPTZ NOT NULL,
+    effective_at TIMESTAMPTZ,
+    expired_at TIMESTAMPTZ,
+    source TEXT NOT NULL DEFAULT 'debrief',
+    status VARCHAR(16) NOT NULL DEFAULT 'active',
+    session_id TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    resolved_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_situational_active
+    ON situational_notes(status, valid_until)
+    WHERE status='active';
+CREATE INDEX IF NOT EXISTS idx_situational_subject ON situational_notes(subject);
+CREATE INDEX IF NOT EXISTS idx_situational_valid_until ON situational_notes(valid_until);

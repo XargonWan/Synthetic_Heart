@@ -18,7 +18,10 @@ from .models import (
     MemCellRecall,
     MemCellSummary,
     MemScene,
+    SituationalNote,
     compute_memcell_salience,
+    now_utc,
+    situational_note_id,
 )
 
 
@@ -117,6 +120,14 @@ def _passes_recall_floor(match: MemCellRecall, session_id: str | None) -> bool:
     return match.score >= 0.22 and max(match.similarity, match.lexical_score) >= 0.10
 
 
+def _affected_rows(status: object, command: str) -> int:
+    """Return the row count from an asyncpg command tag such as ``UPDATE 3``."""
+    parts = str(status).split()
+    if len(parts) == 2 and parts[0].upper() == command:
+        return int(parts[1])
+    return 0
+
+
 class SoulRepository(Protocol):
     """Persistence contract for the soul subsystem."""
 
@@ -137,6 +148,21 @@ class SoulRepository(Protocol):
     async def upsert_foresight_signal(self, signal: ForesightSignal) -> None: ...
 
     async def archive_expired_foresight_signals(self, today: date) -> int: ...
+
+    async def upsert_situational_note(self, note: SituationalNote) -> str: ...
+
+    async def list_active_situational_notes(
+        self, now: datetime, subject: str | None = None
+    ) -> list[SituationalNote]: ...
+
+    async def resolve_situational_note(
+        self,
+        note_id: str,
+        new_status: str,
+        summary_delta: str | None = None,
+    ) -> None: ...
+
+    async def archive_expired_situational_notes(self, now: datetime) -> int: ...
 
     async def add_dsp_extraction(self, extraction: DspExtraction) -> None: ...
 
@@ -175,6 +201,7 @@ class InMemorySoulRepository:
     scenes: dict[str, MemScene] = field(default_factory=dict)
     kg_triples: list[KgTriple] = field(default_factory=list)
     foresight_signals: list[ForesightSignal] = field(default_factory=list)
+    situational_notes: dict[str, SituationalNote] = field(default_factory=dict)
     dsp_extractions: list[DspExtraction] = field(default_factory=list)
     active_dsp: DspVersion | None = None
 
@@ -218,6 +245,61 @@ class InMemorySoulRepository:
             s for s in self.foresight_signals if s.valid_until >= today
         ]
         return before - len(self.foresight_signals)
+
+    async def upsert_situational_note(self, note: SituationalNote) -> str:
+        note_id = note.id or situational_note_id(
+            note.note_type, note.subject, note.summary
+        )
+        note.id = note_id
+        now = now_utc()
+        note.updated_at = now
+        if note.created_at is None:
+            note.created_at = now
+        self.situational_notes[note_id] = note
+        return note_id
+
+    async def list_active_situational_notes(
+        self, now: datetime, subject: str | None = None
+    ) -> list[SituationalNote]:
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        result = [
+            note
+            for note in self.situational_notes.values()
+            if note.status == "active" and note.is_active(now)
+        ]
+        if subject:
+            result = [n for n in result if n.subject == subject]
+        result.sort(key=lambda n: (-n.priority, n.valid_until))
+        return result
+
+    async def resolve_situational_note(
+        self,
+        note_id: str,
+        new_status: str,
+        summary_delta: str | None = None,
+    ) -> None:
+        note = self.situational_notes.get(note_id)
+        if note is None:
+            return
+        note.status = new_status
+        if summary_delta:
+            note.summary = summary_delta
+        if new_status == "resolved":
+            note.resolved_at = now_utc()
+        note.updated_at = now_utc()
+
+    async def archive_expired_situational_notes(self, now: datetime) -> int:
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        expired_ids = [
+            note_id
+            for note_id, note in self.situational_notes.items()
+            if note.status == "active" and note.is_expired(now)
+        ]
+        for note_id in expired_ids:
+            self.situational_notes[note_id].status = "archived"
+        return len(expired_ids)
 
     async def add_dsp_extraction(self, extraction: DspExtraction) -> None:
         self.dsp_extractions.append(extraction)
@@ -480,6 +562,29 @@ class PostgresSoulRepository:
                 PRIMARY KEY(metric_key, measured_at)
             )
             """,
+            """
+            CREATE TABLE IF NOT EXISTS situational_notes (
+                id TEXT PRIMARY KEY,
+                note_type VARCHAR(32) NOT NULL,
+                subject TEXT,
+                summary TEXT NOT NULL,
+                priority SMALLINT NOT NULL DEFAULT 0,
+                confidence REAL NOT NULL DEFAULT 0.5,
+                valid_from TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                valid_until TIMESTAMPTZ NOT NULL,
+                effective_at TIMESTAMPTZ,
+                expired_at TIMESTAMPTZ,
+                source TEXT NOT NULL DEFAULT 'debrief',
+                status VARCHAR(16) NOT NULL DEFAULT 'active',
+                session_id TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                resolved_at TIMESTAMPTZ
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_situational_active ON situational_notes(status, valid_until) WHERE status='active'",
+            "CREATE INDEX IF NOT EXISTS idx_situational_subject ON situational_notes(subject)",
+            "CREATE INDEX IF NOT EXISTS idx_situational_valid_until ON situational_notes(valid_until)",
         ]
 
         async with pool.acquire() as conn:
@@ -722,11 +827,132 @@ class PostgresSoulRepository:
                 """,
                 today,
             )
-        # asyncpg returns command tags like "UPDATE 3".
-        parts = str(status).split()
-        if len(parts) == 2 and parts[0].upper() == "UPDATE":
-            return int(parts[1])
-        return 0
+        return _affected_rows(status, "UPDATE")
+
+    async def upsert_situational_note(self, note: SituationalNote) -> str:
+        if not note.id:
+            note.id = situational_note_id(note.note_type, note.subject, note.summary)
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO situational_notes (
+                    id, note_type, subject, summary, priority, confidence,
+                    valid_from, valid_until, effective_at, expired_at,
+                    source, status, session_id, created_at, updated_at
+                )
+                VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW()
+                )
+                ON CONFLICT (id)
+                DO UPDATE SET
+                    note_type = EXCLUDED.note_type,
+                    subject = EXCLUDED.subject,
+                    summary = EXCLUDED.summary,
+                    priority = EXCLUDED.priority,
+                    confidence = EXCLUDED.confidence,
+                    valid_from = EXCLUDED.valid_from,
+                    valid_until = EXCLUDED.valid_until,
+                    effective_at = EXCLUDED.effective_at,
+                    expired_at = EXCLUDED.expired_at,
+                    source = EXCLUDED.source,
+                    status = EXCLUDED.status,
+                    session_id = EXCLUDED.session_id,
+                    updated_at = NOW()
+                """,
+                note.id,
+                note.note_type,
+                note.subject,
+                note.summary,
+                note.priority,
+                note.confidence,
+                note.valid_from,
+                note.valid_until,
+                note.effective_at,
+                note.expired_at,
+                note.source,
+                note.status,
+                note.session_id,
+            )
+        return note.id
+
+    async def list_active_situational_notes(
+        self, now: datetime, subject: str | None = None
+    ) -> list[SituationalNote]:
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            if subject:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, note_type, subject, summary, priority, confidence,
+                           valid_from, valid_until, effective_at, expired_at,
+                           source, status, session_id, created_at, updated_at,
+                           resolved_at
+                    FROM situational_notes
+                    WHERE status = 'active'
+                      AND valid_until > $1
+                      AND valid_from <= $1
+                      AND subject = $2
+                    ORDER BY priority DESC, valid_until ASC
+                    """,
+                    now,
+                    subject,
+                )
+            else:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, note_type, subject, summary, priority, confidence,
+                           valid_from, valid_until, effective_at, expired_at,
+                           source, status, session_id, created_at, updated_at,
+                           resolved_at
+                    FROM situational_notes
+                    WHERE status = 'active'
+                      AND valid_until > $1
+                      AND valid_from <= $1
+                    ORDER BY priority DESC, valid_until ASC
+                    """,
+                    now,
+                )
+        return [self._row_to_situational_note(row) for row in rows]
+
+    async def resolve_situational_note(
+        self,
+        note_id: str,
+        new_status: str,
+        summary_delta: str | None = None,
+    ) -> None:
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE situational_notes
+                SET status = $2,
+                    summary = COALESCE($3, summary),
+                    resolved_at = CASE WHEN $2 = 'resolved' THEN NOW() ELSE resolved_at END,
+                    updated_at = NOW()
+                WHERE id = $1
+                """,
+                note_id,
+                new_status,
+                summary_delta or None,
+            )
+
+    async def archive_expired_situational_notes(self, now: datetime) -> int:
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            status = await conn.execute(
+                """
+                UPDATE situational_notes
+                SET status = 'archived', updated_at = NOW()
+                WHERE status = 'active' AND valid_until <= $1
+                """,
+                now,
+            )
+        return _affected_rows(status, "UPDATE")
 
     async def add_dsp_extraction(self, extraction: DspExtraction) -> None:
         pool = await self._get_pool()
@@ -1125,3 +1351,31 @@ class PostgresSoulRepository:
             except Exception:
                 return []
         return []
+
+    @staticmethod
+    def _row_to_situational_note(row: Any) -> SituationalNote:
+        def _to_dt(val: Any) -> datetime | None:
+            if val is None:
+                return None
+            if isinstance(val, str):
+                return datetime.fromisoformat(val)
+            return val
+
+        return SituationalNote(
+            id=str(row["id"]),
+            note_type=str(row["note_type"]),
+            subject=str(row["subject"]) if row["subject"] else "",
+            summary=str(row["summary"]),
+            priority=int(row["priority"]) if row["priority"] else 0,
+            confidence=float(row["confidence"]) if row["confidence"] else 0.5,
+            valid_from=_to_dt(row["valid_from"]),
+            valid_until=_to_dt(row["valid_until"]),
+            effective_at=_to_dt(row["effective_at"]),
+            expired_at=_to_dt(row["expired_at"]),
+            source=str(row["source"]) if row["source"] else "debrief",
+            status=str(row["status"]) if row["status"] else "active",
+            session_id=str(row["session_id"]) if row["session_id"] else None,
+            created_at=_to_dt(row["created_at"]),
+            updated_at=_to_dt(row["updated_at"]),
+            resolved_at=_to_dt(row["resolved_at"]),
+        )

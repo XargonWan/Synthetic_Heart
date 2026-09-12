@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 
 
@@ -25,6 +26,53 @@ class ForesightSignal:
     emotional_implication: dict[str, float] = field(default_factory=dict)
     source_cell_id: str | None = None
     priority: float = 0.5
+
+
+# Valid note types for SituationalNote.
+SITUATIONAL_NOTE_TYPES = ("EVENT", "STATE", "INTERVAL", "INSTANT")
+
+
+@dataclass(slots=True)
+class SituationalNote:
+    """Short-lived, time-sensitive user circumstance with a bounded validity window.
+
+    Unlike a MemCell (persistent memory) or a ForesightSignal (future-only,
+    date-level), a SituationalNote stores *absolute* timestamps for when a
+    circumstance was true (``valid_from``) and when it expires
+    (``valid_until``). Relative rendering ("today", "in 3 days") is a
+    presentation concern resolved at injection time via ``TemporalRenderer``.
+    """
+
+    id: str
+    note_type: str
+    subject: str
+    summary: str
+    valid_from: datetime | None
+    valid_until: datetime | None
+    priority: int = 0
+    confidence: float = 0.5
+    effective_at: datetime | None = None
+    expired_at: datetime | None = None
+    source: str = "debrief"
+    status: str = "active"
+    session_id: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    resolved_at: datetime | None = None
+
+    def is_active(self, now: datetime) -> bool:
+        """Return True when ``now`` falls within [valid_from, valid_until)."""
+        if self.valid_from and now < self.valid_from:
+            return False
+        if self.valid_until and now >= self.valid_until:
+            return False
+        return True
+
+    def is_expired(self, now: datetime) -> bool:
+        """Return True when the note has passed its validity window."""
+        if self.valid_until is None:
+            return False
+        return now >= self.valid_until
 
 
 @dataclass(slots=True)
@@ -255,6 +303,78 @@ def new_scene_id(anchor: datetime) -> str:
 
     ts = anchor.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     return f"scene:{ts}"
+
+
+def situational_note_from_extraction(
+    *,
+    note_type: str,
+    subject: str,
+    summary: str,
+    priority: int = 0,
+    confidence: float = 0.5,
+    valid_from: datetime | None = None,
+    valid_until: datetime | None = None,
+    effective_at: datetime | None = None,
+    expired_at: datetime | None = None,
+    source: str = "debrief",
+    session_id: str | None = None,
+    now: datetime | None = None,
+    default_ttl_hours: int = 24,
+) -> "SituationalNote":
+    """Build a persistable note from extracted fields, normalising the window.
+
+    Every datetime is forced to UTC-aware, and a missing validity window falls
+    back to ``default_ttl_hours`` from ``now``. The id is deliberately left
+    empty: the repository derives a stable one from the circumstance so the same
+    note seen twice updates a single row instead of accumulating duplicates.
+    """
+
+    anchor = now or now_utc()
+    if anchor.tzinfo is None:
+        anchor = anchor.replace(tzinfo=timezone.utc)
+
+    def _utc(value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+    resolved_until = _utc(valid_until) or anchor + timedelta(hours=default_ttl_hours)
+    resolved_from = _utc(valid_from) or anchor
+
+    return SituationalNote(
+        id="",
+        note_type=note_type,
+        subject=subject,
+        summary=summary,
+        priority=priority,
+        confidence=confidence,
+        valid_from=resolved_from,
+        valid_until=resolved_until,
+        effective_at=_utc(effective_at),
+        expired_at=_utc(expired_at),
+        source=source,
+        status="active",
+        session_id=session_id,
+        created_at=anchor,
+        updated_at=anchor,
+        resolved_at=None,
+    )
+
+
+def situational_note_id(note_type: str, subject: str, summary: str) -> str:
+    """Build a stable id identifying one situational circumstance.
+
+    The id has to come from the circumstance itself rather than being generated
+    fresh: the debrief re-reads the same recent transcript on every run, so a
+    random id left ``ON CONFLICT (id) DO UPDATE`` unreachable and each compile
+    inserted another copy of a note the store already held. With a derived id
+    the second mention refreshes the existing row's validity window instead.
+    """
+
+    raw = "|".join(
+        str(part or "").strip().casefold() for part in (note_type, subject, summary)
+    )
+    return f"tsc-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:16]}"
 
 
 def now_utc() -> datetime:
