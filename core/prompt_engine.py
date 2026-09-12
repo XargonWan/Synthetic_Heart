@@ -877,6 +877,19 @@ def _build_context_summary(
     )
     parts.append("\n".join(anchor_lines))
 
+    temporal_context = context_section.get("soul_temporal_context")
+    if temporal_context:
+        tc_lines = [
+            "- [TSC %s] %s"
+            % (
+                entry.get("note_type", "?"),
+                entry.get("summary", entry.get("subject", "")),
+            )
+            for entry in temporal_context[:8]
+        ]
+        if tc_lines:
+            parts.append("[Temporal context]\n" + "\n".join(tc_lines))
+
     persona_preferences = str(context_section.get("persona_preferences") or "").strip()
     if persona_preferences:
         parts.append("[Persona background]\n" + persona_preferences)

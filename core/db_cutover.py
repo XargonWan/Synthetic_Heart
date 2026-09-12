@@ -157,6 +157,28 @@ _SOUL_TABLE_SPECS: tuple[_SoulTableSpec, ...] = (
         columns=("metric_key", "metric_value", "measured_at"),
         conflict_keys=("metric_key", "measured_at"),
     ),
+    _SoulTableSpec(
+        name="situational_notes",
+        columns=(
+            "id",
+            "note_type",
+            "subject",
+            "summary",
+            "priority",
+            "confidence",
+            "valid_from",
+            "valid_until",
+            "effective_at",
+            "expired_at",
+            "source",
+            "status",
+            "session_id",
+            "created_at",
+            "updated_at",
+            "resolved_at",
+        ),
+        conflict_keys=("id",),
+    ),
 )
 
 

@@ -774,36 +774,41 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
                 )
 
             # Stale engine name in DB (e.g. removed engine from a previous branch).
-            # Fall back to the registry default rather than leaving the system broken.
+            # Only a value the operator actually configured may replace it.
             updates: list[tuple[str, str]] = []
             if use_override and override_key is not None and base in available:
                 fallback = base
                 updates.append((override_key, "Default"))
             else:
-                try:
-                    fallback = reg.get_default_engine()
-                except ValueError:
-                    raise ValueError(f"Cortex engine '{chosen}' is not registered")
-                if fallback == "anthropic":
-                    # get_default_engine() has no concept of credential
-                    # availability -- it just returns whichever built-in
-                    # engine module sorts first on disk, which is
-                    # "anthropic". If no key is configured this is a
-                    # guaranteed-broken pick. Reuse whichever engine is
-                    # already validly configured for the sibling
-                    # trainer/grillo scope on this same instance instead of
-                    # guessing at an arbitrary external endpoint.
-                    for sibling_key in ("TRAINER_CORTEX", "GRILLO_CORTEX"):
-                        sibling, _ = parse_cortex_scope_value(
-                            config_registry.get_value(sibling_key, "Default")
-                        )
-                        if (
-                            sibling
-                            and sibling not in ("Default", "None")
-                            and sibling in available
-                        ):
-                            fallback = sibling
-                            break
+                # Never substitute an engine nobody configured.
+                # ``CortexRegistry.get_default_engine()`` returns whichever
+                # engine module sorts first in registration order -- it has no
+                # relation to this instance's configuration, and persisting its
+                # pick is exactly what silently rewrote BASE_CORTEX to a keyless
+                # "anthropic" and kept it there for months (see FIXED_ISSUES.md
+                # and the incidents in AGENTS.md SS12). The only legitimate
+                # replacements are engines the operator set for a sibling scope.
+                fallback = ""
+                for sibling_key in ("TRAINER_CORTEX", "GRILLO_CORTEX"):
+                    sibling, _ = parse_cortex_scope_value(
+                        config_registry.get_value(sibling_key, "Default")
+                    )
+                    if (
+                        sibling
+                        and sibling not in ("Default", "None")
+                        and sibling in available
+                    ):
+                        fallback = sibling
+                        break
+                if not fallback:
+                    # Fail loudly instead of answering every turn with an engine
+                    # nobody chose: a visible error is diagnosable, a silent
+                    # substitution hides for months.
+                    raise ValueError(
+                        f"Cortex engine '{chosen}' is not available and no "
+                        "configured scope override can stand in for it. "
+                        "Set a usable engine for this scope in the WebUI."
+                    )
                 if use_override and override_key is not None:
                     updates.append((override_key, "Default"))
                 if base != fallback:
