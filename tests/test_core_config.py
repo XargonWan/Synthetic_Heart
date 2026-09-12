@@ -201,7 +201,16 @@ def test_log_chat_loader_is_reentrant_safe(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_get_active_cortex_engine_repairs_stale_base_for_scope(monkeypatch):
+async def test_get_active_cortex_engine_refuses_invented_fallback_for_stale_base(
+    monkeypatch,
+):
+    """A stale BASE_CORTEX with no configured stand-in must raise, not invent.
+
+    ``CortexRegistry.get_default_engine()`` returns whichever engine module
+    sorts first in registration order. Substituting that pick -- and persisting
+    it -- is what rewrote BASE_CORTEX to a keyless 'anthropic' and left it there
+    for months. The resolver may only use engines the operator configured.
+    """
     from core import config as conf
     import core.config_manager as cm
 
@@ -228,10 +237,61 @@ async def test_get_active_cortex_engine_repairs_stale_base_for_scope(monkeypatch
         "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
     )
 
-    engine = await conf.get_active_cortex_engine("grillo")
+    with pytest.raises(ValueError, match="not available"):
+        await conf.get_active_cortex_engine("grillo")
 
-    assert engine == "anthropic"
-    set_value.assert_awaited_once_with("BASE_CORTEX", "anthropic")
+    # The operator's (broken) choice must survive: nothing is overwritten.
+    set_value.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_active_cortex_engine_keyless_anthropic_without_sibling_raises(
+    monkeypatch,
+):
+    """BASE_CORTEX stuck at keyless 'anthropic' with no sibling override.
+
+    The 2026-07-01 fix recovers by copying a sibling scope's engine, but that
+    only works when TRAINER_CORTEX or GRILLO_CORTEX is set. With both at
+    'Default' the old code fell back to 'anthropic' again and -- since
+    ``base == fallback`` -- persisted nothing, so it silently returned a
+    guaranteed-broken engine on every turn and left no trace in the DB.
+    """
+    from core import config as conf
+    import core.config_manager as cm
+
+    class FakeRegistry:
+        def get_available_engines(self):
+            # A configured, enabled external endpoint is registered alongside
+            # the keyless built-in.
+            return ["anthropic", "my-endpoint"]
+
+        def get_default_engine(self):
+            return "anthropic"
+
+    values = {
+        "BASE_CORTEX": "anthropic",
+        "TRAINER_CORTEX": "Default",
+        "GRILLO_CORTEX": "Default",
+        "ANTHROPIC_API_KEY": "",
+    }
+    set_value = AsyncMock()
+
+    monkeypatch.setattr(
+        cm.config_registry,
+        "get_value",
+        lambda key, default=None: values.get(key, default),
+    )
+    monkeypatch.setattr(cm.config_registry, "set_value", set_value)
+    monkeypatch.setattr(
+        "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
+    )
+
+    with pytest.raises(ValueError, match="not available"):
+        await conf.get_active_cortex_engine(None)
+
+    # Must not silently answer with the keyless engine, and must not guess at
+    # 'my-endpoint' either -- picking for the operator is how this started.
+    set_value.assert_not_awaited()
 
 
 @pytest.mark.asyncio
