@@ -30,6 +30,7 @@ Fix failures before moving on.
 - **No `git add` or `git commit`** unless I explicitly ask.
 - Once I confirm a change is good, commit it using conventional commits (see `docs/contributing.rst`):
   `fix(scope):`, `feat(scope):`, `chore(scope):`, `minor(scope):`, `doc(scope):`, `patch(scope):`
+- **Commit messages: one-line subject only.** No `Co-Authored-By` trailer, no bundled body/description unless I explicitly ask for one.
 
 ## Hard Rules
 - **2-attempt limit.** Same error twice → stop → `"⚠️ Stuck on [Error]. Requesting human or advanced model intervention."`
