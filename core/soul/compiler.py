@@ -24,7 +24,11 @@ from .models import (
 )
 from .observability import maybe_langfuse_trace
 from .repository import SoulRepository
-from .schemas import DspExtractionModel, MemCellExtractionModel, SummaryResultModel
+from .schemas import (
+    DspExtractionModel,
+    MemCellExtractionModel,
+    SummaryResultModel,
+)
 from .time_resolution import AbsoluteTimeResolver
 
 
@@ -330,6 +334,10 @@ class SoulCompiler:
                 current_date
             )
 
+            tsc_archived = await self.repository.archive_expired_situational_notes(
+                now_utc()
+            )
+
             dsp_raw = await self.dsp_extractor.extract_dsp(
                 transcript=transcript,
                 current_date=current_date,
@@ -375,6 +383,7 @@ class SoulCompiler:
 
             result_dict = {
                 "expired_foresight_signals": expired,
+                "tsc_notes_archived": tsc_archived,
                 "dsp_updated": dsp_updated,
             }
             if trace is not None:
