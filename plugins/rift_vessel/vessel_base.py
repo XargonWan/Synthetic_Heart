@@ -426,7 +426,12 @@ class VesselConnectorBase(ABC):
                 matched.append(entry)
         return matched[: max(0, int(limit))]
 
-    async def motor_step(self, goal: Dict[str, Any] | None) -> Dict[str, Any]:
+    async def motor_step(
+        self,
+        goal: Dict[str, Any] | None,
+        *,
+        passive_activity_allowed: bool = True,
+    ) -> Dict[str, Any]:
         """Take **one** fast, reflexive step of the body toward ``goal``.
 
         This is the *motorics* half of autonomy (see ``core.vessel_beat`` and
@@ -442,9 +447,27 @@ class VesselConnectorBase(ABC):
         embodiment stays snappy and responsive. It must **never** create an
         Agent Lane task, a Drone, or a diary entry.
 
+        **Passive activity** (see docs/rift_vessel.rst): when ``goal`` is
+        ``None`` and ``passive_activity_allowed`` is ``True``, a connector may
+        — instead of returning the bare no-op below — opportunistically work a
+        nearby low-risk structural affordance or explore, so the body stays
+        embodied while cognition has not yet authored a goal. This is
+        deliberately the *lowest*-priority layer: it must reuse this same
+        ``motor_step`` call (never a separate agentic loop or reasoning turn),
+        must be leased/bounded rather than committed to indefinitely, and must
+        stop the instant a real goal, danger, an in-flight deliberate action,
+        or ``passive_activity_allowed=False`` (e.g. an actively chatting
+        player) says otherwise. See
+        ``plugins.rift_vessel.minecraft.MinecraftConnector._run_passive_activity``
+        for a concrete implementation.
+
         Args:
             goal: The current active goal dict (``{"description", "note", ...}``)
                   or ``None`` when Synth has not set one yet.
+            passive_activity_allowed: Whether a passive activity may engage
+                  this tick (session/player-quiet context resolved by the
+                  interface scheduler). Connectors without passive activity
+                  can ignore this.
 
         Returns:
             A small status dict, e.g. ``{"acted": True, "action": "wander"}`` or

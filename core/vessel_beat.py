@@ -1528,6 +1528,27 @@ def resolve_reflection_min_interval(config_get: Any, default: int = 60) -> float
     return max(10.0, min(3600.0, value))
 
 
+def is_passive_activity_enabled(config_get: Any) -> bool:
+    """Return whether the **passive activity** layer is enabled.
+
+    Passive activity is the lowest-priority embodiment layer, below the motor
+    tick: when the body has no goal to pursue (before the first will beat, or
+    between a finished goal and the next one) a connector may opportunistically
+    work a nearby low-risk affordance or explore, instead of the body going
+    inert. It is a lease-bounded fallback inside the connector's existing
+    ``motor_step`` — never a new prompt, cognition turn or agentic loop — and
+    always yields to a real goal, danger, an in-flight deliberate action, or an
+    actively chatting player (see ``interface.vessel_interface._maybe_run_motor_tick``
+    and ``plugins.rift_vessel.minecraft.MinecraftConnector._run_passive_activity``).
+    Reads ``VESSEL_PASSIVE_ACTIVITY_ENABLED``. Fail-safe: any error → ``True``
+    (on by default, matching the config registration).
+    """
+    try:
+        return bool(config_get("VESSEL_PASSIVE_ACTIVITY_ENABLED", True))
+    except Exception:
+        return True
+
+
 def is_goal_beat_enabled(config_get: Any) -> bool:
     """Return whether the dedicated **goal beat** is enabled.
 
