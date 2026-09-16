@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import cast
 
@@ -14,6 +15,7 @@ from starlette.requests import Request
 
 from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
 from core.external_endpoints.models import EndpointProtocol, ExternalEndpoint
+from core.external_endpoints.registry import ExternalEndpointRegistry
 from core.prompt_request import Attachment, PromptRequest, RuntimeContext, Turn
 from core.webui import SynthWebUIInterface
 
@@ -616,3 +618,133 @@ async def test_vision_test_empty_description_reports_failure() -> None:
     data = json.loads(bytes(response.body))
     assert data["ok"] is False
     assert "no description returned" in data["error"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Probe persistence must not erase usable state
+# ---------------------------------------------------------------------------
+
+
+class _CapturingCursor:
+    def __init__(self, captured: dict) -> None:
+        self._captured = captured
+
+    async def execute(self, query, params=None):
+        # Every statement is kept: the registry may run follow-up queries
+        # (auto-select of a default model, cortex auto-activation), so an
+        # assertion on "the last statement" is not stable.
+        self._captured.setdefault("statements", []).append((query, params))
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+def _statement_matching(captured: dict, needle: str) -> tuple[str, tuple]:
+    """Return the first captured (query, params) whose SQL contains *needle*."""
+    for query, params in captured.get("statements", []):
+        if needle in query:
+            return query, params
+    raise AssertionError(
+        f"no captured statement contains {needle!r}; got "
+        f"{[q for q, _ in captured.get('statements', [])]}"
+    )
+
+
+class _CapturingConn:
+    def __init__(self, captured: dict) -> None:
+        self._captured = captured
+
+    def cursor(self, *args, **kwargs):
+        return _CapturingCursor(self._captured)
+
+    async def commit(self):
+        self._captured["committed"] = True
+
+
+class _CapturingConnCtx:
+    def __init__(self, captured: dict) -> None:
+        self._captured = captured
+
+    async def __aenter__(self):
+        return _CapturingConn(self._captured)
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+@pytest.mark.asyncio
+async def test_set_probe_result_keeps_stored_models_when_probe_reports_none(
+    monkeypatch,
+) -> None:
+    """A probe that returned no models must not blank the stored catalogue.
+
+    The bounded probe steps return partial results, so an empty listing (a
+    provider that timed out) would otherwise overwrite a perfectly good model
+    list with ``[]`` and empty the WebUI's model selector.
+    """
+    captured: dict = {}
+    registry = ExternalEndpointRegistry()
+    stored = _make_endpoint()
+    stored.capabilities = {"cortex": True}
+    stored.available_models = ["model-a", "model-b"]
+
+    monkeypatch.setattr(
+        "core.external_endpoints.registry._ensure_table", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr("core.db.get_conn_ctx", lambda: _CapturingConnCtx(captured))
+    monkeypatch.setattr(registry, "get_endpoint", AsyncMock(return_value=stored))
+    monkeypatch.setattr(registry, "_sync_registries", AsyncMock(return_value=None))
+
+    await registry.set_probe_result(
+        endpoint_id=7,
+        status="failed",
+        capabilities={},
+        models=[],
+    )
+
+    query, params = _statement_matching(captured, "UPDATE external_endpoints")
+    assert "available_models" not in query
+    assert "models_metadata" not in query
+    assert params[0] == "failed"
+    # Stored capabilities survive an empty probe result.
+    assert params[1] == '{"cortex": true}'
+    assert isinstance(params[2], datetime)
+    assert params[2].tzinfo == timezone.utc
+    assert params[4] == 7
+    assert captured["committed"] is True
+
+
+@pytest.mark.asyncio
+async def test_set_probe_result_writes_models_when_probe_reports_them(
+    monkeypatch,
+) -> None:
+    captured: dict = {}
+    registry = ExternalEndpointRegistry()
+
+    monkeypatch.setattr(
+        "core.external_endpoints.registry._ensure_table", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr("core.db.get_conn_ctx", lambda: _CapturingConnCtx(captured))
+    # A default model is already set, so the post-probe auto-select UPDATE does
+    # not run and the captured statement stays the probe-result write.
+    monkeypatch.setattr(
+        registry,
+        "get_endpoint",
+        AsyncMock(return_value=_make_endpoint(default_model="model-a")),
+    )
+    monkeypatch.setattr(registry, "_sync_registries", AsyncMock(return_value=None))
+
+    await registry.set_probe_result(
+        endpoint_id=7,
+        status="success",
+        capabilities={"cortex": True},
+        models=["model-a"],
+    )
+
+    query, params = _statement_matching(captured, "UPDATE external_endpoints")
+    assert "available_models" in query
+    assert params[1] == '{"cortex": true}'
+    assert params[2] == '["model-a"]'

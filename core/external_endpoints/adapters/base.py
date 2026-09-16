@@ -141,11 +141,19 @@ class BaseProtocolAdapter(ABC):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    async def probe_capabilities(self) -> dict[str, bool]:
+    async def probe_capabilities(
+        self, models: list[ModelInfo] | None = None
+    ) -> dict[str, bool]:
         """Auto-detect which SyntH subsystems this endpoint supports.
 
         Returns a dict mapping subsystem names to ``True`` / ``False``:
         ``{"cortex": True, "vox": False, "auris": False, "live": False}``.
+
+        ``models`` is an optional pre-fetched model list supplied by the caller
+        (``probe_endpoint``).  When it is not ``None`` the adapter must use it
+        instead of querying the endpoint's model listing again — probing a slow
+        provider must not issue the same listing request once per sub-task.
+        Adapters that need no model metadata ignore the argument.
         """
 
     @abstractmethod
@@ -156,12 +164,16 @@ class BaseProtocolAdapter(ABC):
         self,
         model: str | None = None,
         timeout: float = 15.0,
+        models: list[ModelInfo] | None = None,
     ) -> tuple[bool, str]:
         """Send a minimal chat 'ping' to verify cortex connectivity.
 
         Returns ``(True, response_text)`` on success, ``(False, error_str)``
         on failure.  The default implementation returns ``(False, ...)``;
         concrete adapters should override this when possible.
+
+        ``models`` is an optional pre-fetched model list, so validating the
+        supplied ``model`` does not cost another model-listing round trip.
         """
         return False, "ping_test not implemented for this adapter"
 

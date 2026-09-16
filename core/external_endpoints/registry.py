@@ -339,31 +339,68 @@ class ExternalEndpointRegistry:
         models: list[str],
         models_metadata: list[dict] | None = None,
     ) -> None:
-        """Persist probe results and sync registries."""
+        """Persist probe results and sync registries.
+
+        A probe that collected nothing must not erase the last good state: an
+        empty model list would blank the WebUI's model selector, and an
+        all-false capability map would unregister the endpoint from the
+        subsystems it serves (``_sync_registries`` re-registers from that map,
+        so a transient provider error would silently drop e.g. a cortex engine).
+        Both are therefore only overwritten when the probe actually reported
+        something; ``probe_status`` always records the outcome.
+        """
         from core.db import get_conn_ctx
 
         await self._ensure()
 
         now = datetime.now(timezone.utc)
+        # A probe that reported nothing keeps the stored capabilities (an
+        # all-false map would unregister the endpoint from its subsystems).
+        keep_capabilities = not any(capabilities.values())
+        stored_capabilities: dict[str, bool] = {}
+        if keep_capabilities:
+            existing = await self.get_endpoint(endpoint_id)
+            stored_capabilities = existing.capabilities if existing else {}
+        capabilities_json = json.dumps(
+            stored_capabilities if keep_capabilities else capabilities
+        )
+
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(
-                    """
-                    UPDATE external_endpoints
-                    SET probe_status = %s, capabilities = %s, available_models = %s,
-                        models_metadata = %s, last_probe_at = %s, updated_at = %s
-                    WHERE id = %s
-                    """,
-                    (
-                        status,
-                        json.dumps(capabilities),
-                        json.dumps(models),
-                        json.dumps(models_metadata or []),
-                        now,
-                        now,
-                        endpoint_id,
-                    ),
-                )
+                if models:
+                    await cur.execute(
+                        """
+                        UPDATE external_endpoints
+                        SET probe_status = %s, capabilities = %s, available_models = %s,
+                            models_metadata = %s, last_probe_at = %s, updated_at = %s
+                        WHERE id = %s
+                        """,
+                        (
+                            status,
+                            capabilities_json,
+                            json.dumps(models),
+                            json.dumps(models_metadata or []),
+                            now,
+                            now,
+                            endpoint_id,
+                        ),
+                    )
+                else:
+                    await cur.execute(
+                        """
+                        UPDATE external_endpoints
+                        SET probe_status = %s, capabilities = %s,
+                            last_probe_at = %s, updated_at = %s
+                        WHERE id = %s
+                        """,
+                        (
+                            status,
+                            capabilities_json,
+                            now,
+                            now,
+                            endpoint_id,
+                        ),
+                    )
             try:
                 await conn.commit()
             except Exception:

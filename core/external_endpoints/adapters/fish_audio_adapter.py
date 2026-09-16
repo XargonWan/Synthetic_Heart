@@ -422,7 +422,9 @@ class FishAudioAdapter(BaseProtocolAdapter):
             )
         return speakers
 
-    async def probe_capabilities(self) -> dict[str, bool]:
+    async def probe_capabilities(
+        self, models: list[ModelInfo] | None = None
+    ) -> dict[str, bool]:
         # TTS-only provider; synthesis is billed, so no live probe request.
         return {"cortex": False, "vox": True, "auris": False, "live": False}
 
@@ -434,5 +436,6 @@ class FishAudioAdapter(BaseProtocolAdapter):
         self,
         model: str | None = None,
         timeout: float = 15.0,
+        models: list[ModelInfo] | None = None,
     ) -> tuple[bool, str]:
         return False, "Fish Audio is a TTS-only endpoint (no chat ping)"

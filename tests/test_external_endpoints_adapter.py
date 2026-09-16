@@ -298,6 +298,142 @@ async def test_openai_compat_probe_capabilities_tries_each_model_id(monkeypatch)
     assert called_models == ["text-only", "vision-model"]
 
 
+@pytest.mark.asyncio
+async def test_openai_compat_probe_capabilities_uses_supplied_models(monkeypatch):
+    """A pre-fetched listing must not trigger another /models request."""
+    adapter = OpenAICompatAdapter(base_url="http://localhost:14848", api_key="x")
+
+    session = FakeAiohttpSession()
+    # Only the audio probes may reach the network; the listing must not.
+    session.responses = [
+        FakeAiohttpResponse(status=404, payload={}, body=b""),
+        FakeAiohttpResponse(status=404, payload={}, body=b""),
+    ]
+
+    import aiohttp
+
+    monkeypatch.setattr(aiohttp, "ClientSession", lambda: session)
+
+    caps = await adapter.probe_capabilities(
+        models=[ModelInfo(id="m1", name="M1", capabilities={"vision": True})]
+    )
+
+    assert caps["vision"] is True
+    assert all("/models" not in url for url in session.calls)
+
+
+@pytest.mark.asyncio
+async def test_openai_compat_probe_capabilities_reads_nested_provider_spec(monkeypatch):
+    """Nested provider capability blocks and the model ``type`` are honoured."""
+    adapter = OpenAICompatAdapter(base_url="http://localhost:14848", api_key="x")
+
+    session = FakeAiohttpSession()
+    session.responses = [
+        FakeAiohttpResponse(
+            status=200,
+            payload={
+                "data": [
+                    {
+                        "id": "gemini-x",
+                        "type": "text",
+                        "model_spec": {
+                            "name": "Gemini X",
+                            "capabilities": {
+                                "supportsVision": True,
+                                # Non-boolean metadata sits in the same block and
+                                # must not become a capability flag.
+                                "quantization": "not-available",
+                                "maxImages": 3,
+                            },
+                        },
+                    }
+                ]
+            },
+        ),
+        FakeAiohttpResponse(status=404, payload={}, body=b""),
+        FakeAiohttpResponse(status=404, payload={}, body=b""),
+    ]
+
+    import aiohttp
+
+    monkeypatch.setattr(aiohttp, "ClientSession", lambda: session)
+
+    models = await adapter.list_models()
+    model = models[0]
+
+    assert model.name == "Gemini X"
+    assert model.model_type == "text"
+    assert model.capabilities["vision"] is True
+    assert "supportsvision" in model.capabilities
+    assert "quantization" not in model.capabilities
+    assert "maximages" not in model.capabilities
+
+    # Declared vision support means no image POST is needed at all.
+    monkeypatch.setattr(adapter, "_probe_vision_support", _fail_if_called)
+    caps = await adapter.probe_capabilities(models=models)
+    assert caps["vision"] is True
+
+
+async def _fail_if_called(model: str | None = None) -> bool:
+    raise AssertionError("vision probe must not run when models declare vision")
+
+
+@pytest.mark.asyncio
+async def test_openai_compat_ping_test_reuses_supplied_models(monkeypatch):
+    """Pinging with a pre-fetched listing costs exactly one chat request."""
+    adapter = OpenAICompatAdapter(base_url="http://localhost:14848", api_key="x")
+
+    session = FakeAiohttpSession()
+    session.responses = [
+        FakeAiohttpResponse(
+            status=200, payload={"choices": [{"message": {"content": "pong"}}]}
+        )
+    ]
+
+    import aiohttp
+
+    monkeypatch.setattr(aiohttp, "ClientSession", lambda: session)
+
+    models = [ModelInfo(id="m1", name="M1", capabilities={"cortex": True})]
+    ok, echo = await adapter.ping_test(model="m1", models=models)
+
+    assert ok is True
+    assert echo == "pong"
+    assert len(session.calls) == 1
+    assert "/models" not in session.calls[0]
+    assert session.request_kwargs[0]["json"]["model"] == "m1"
+
+
+@pytest.mark.asyncio
+async def test_openai_compat_ping_test_lists_once_without_supplied_models(monkeypatch):
+    """Without a pre-fetched listing the ping still lists at most once."""
+    adapter = OpenAICompatAdapter(base_url="http://localhost:14848", api_key="x")
+
+    list_calls: list[int] = []
+
+    async def fake_list_models():
+        list_calls.append(1)
+        return [ModelInfo(id="m1", name="M1", capabilities={"cortex": True})]
+
+    monkeypatch.setattr(adapter, "list_models", fake_list_models)
+
+    session = FakeAiohttpSession()
+    session.responses = [
+        FakeAiohttpResponse(
+            status=200, payload={"choices": [{"message": {"content": "pong"}}]}
+        )
+    ]
+
+    import aiohttp
+
+    monkeypatch.setattr(aiohttp, "ClientSession", lambda: session)
+
+    ok, _echo = await adapter.ping_test(model="m1")
+
+    assert ok is True
+    assert len(list_calls) == 1
+
+
 # ---------------------------------------------------------------------------
 # ping_test
 # ---------------------------------------------------------------------------

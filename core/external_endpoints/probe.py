@@ -3,20 +3,55 @@
 
 The probe:
 1. Selects the correct adapter for the endpoint's protocol.
-2. Calls ``adapter.probe_capabilities()`` to detect supported subsystems.
-3. Calls ``adapter.list_models()`` to collect available model names.
-4. Calls ``adapter.ping_test()`` to verify cortex connectivity and obtain a
-   reply echo.  The ping result sets ``capabilities["cortex"]`` and is
-   stored in ``ProbeResult.ping_echo``.
+2. Calls ``adapter.list_models()`` ONCE and shares that listing with the other
+   steps, so a slow provider is asked for its model catalogue a single time per
+   probe run instead of once per sub-task.
+3. Calls ``adapter.probe_capabilities(models=...)`` to detect supported
+   subsystems.
+4. Calls ``adapter.ping_test(..., models=...)`` to verify cortex connectivity
+   and obtain a reply echo.  The ping result sets ``capabilities["cortex"]`` and
+   is stored in ``ProbeResult.ping_echo``.
 5. Returns a :class:`ProbeResult` with the findings.
+
+Every step is bounded by its own budget (see the ``EXTERNAL_ENDPOINT_PROBE_*``
+env vars below).  This function therefore always returns a result — including
+the collected models — instead of being cancelled by the caller's outer
+timeout, which used to discard a fully successful model listing whenever one
+slow step overran.
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
+from typing import Any
 
 from core.external_endpoints.models import EndpointProtocol, ExternalEndpoint
 from core.logging_utils import log_debug, log_info, log_warning
+
+# Per-step budgets (seconds) for a single probe run.
+#
+# The whole run must finish well inside the WebUI's own
+# ``EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS`` guard (300 s): when that guard
+# fires, nothing is persisted and the endpoint keeps its stale model list, which
+# is exactly the failure mode these budgets remove.
+_PROBE_MODELS_TIMEOUT_ENV = "EXTERNAL_ENDPOINT_PROBE_MODELS_TIMEOUT_SECONDS"
+_PROBE_CAPABILITIES_TIMEOUT_ENV = "EXTERNAL_ENDPOINT_PROBE_CAPABILITIES_TIMEOUT_SECONDS"
+_PROBE_PING_TIMEOUT_ENV = "EXTERNAL_ENDPOINT_PROBE_PING_TIMEOUT_SECONDS"
+
+_DEFAULT_MODELS_TIMEOUT_SECONDS = 90.0
+_DEFAULT_CAPABILITIES_TIMEOUT_SECONDS = 90.0
+_DEFAULT_PING_TIMEOUT_SECONDS = 60.0
+
+
+def _probe_step_timeout(env_name: str, default: float) -> float:
+    """Return a positive per-step budget from *env_name*, else *default*."""
+    raw = os.getenv(env_name, "")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
 
 
 @dataclass
@@ -157,6 +192,10 @@ async def probe_endpoint(endpoint: ExternalEndpoint, api_key: str = "") -> Probe
     Returns a :class:`ProbeResult` regardless of success or failure.  Never
     raises — errors are captured in ``ProbeResult.error_message``.
     """
+    import asyncio
+    import time as _time
+
+    started = _time.monotonic()
     log_info(
         f"[probe] Probing endpoint '{endpoint.name}' "
         f"(protocol={endpoint.protocol}, base_url={endpoint.base_url!r})"
@@ -168,31 +207,25 @@ async def probe_endpoint(endpoint: ExternalEndpoint, api_key: str = "") -> Probe
         log_warning(f"[probe] Cannot build adapter for '{endpoint.name}': {exc}")
         return ProbeResult(status="failed", error_message=str(exc))
 
-    # --- Gather capabilities, models, and ping concurrently ---
-    import asyncio
-
-    cap_task = asyncio.create_task(adapter.probe_capabilities())
-    model_task = asyncio.create_task(adapter.list_models())
-    # Prefer the endpoint's configured default_model for the ping so capacity
-    # errors on a random first-in-list model don't block probing.
-    ping_task = asyncio.create_task(
-        adapter.ping_test(model=endpoint.default_model or None)
-    )
-
     capabilities: dict[str, bool] = {}
     models: list[str] = []
-    models_metadata: list[dict] = []
+    models_metadata: list[dict[str, Any]] = []
     ping_echo: str = ""
     errors: list[str] = []
 
+    # --- Step 1: the model listing, fetched once and shared ---------------
+    # Every later step used to call ``list_models()`` again, so a provider
+    # whose /models takes ~40 s paid that cost three to four times per probe
+    # and the whole run blew past the caller's timeout (nothing was then
+    # persisted, and the model list in the WebUI never updated).
+    model_infos: list[Any] = []
+    models_timeout = _probe_step_timeout(
+        _PROBE_MODELS_TIMEOUT_ENV, _DEFAULT_MODELS_TIMEOUT_SECONDS
+    )
     try:
-        capabilities = await cap_task
-    except Exception as exc:
-        errors.append(f"capabilities: {exc}")
-        log_warning(f"[probe] probe_capabilities failed for '{endpoint.name}': {exc}")
-
-    try:
-        model_infos = await model_task
+        model_infos = await asyncio.wait_for(
+            adapter.list_models(), timeout=models_timeout
+        )
         models = [m.id for m in model_infos]
         # Preserve per-model metadata (type, modalities, languages, caps) so it
         # can be persisted and used to filter engine selectors in the WebUI.
@@ -203,30 +236,68 @@ async def probe_endpoint(endpoint: ExternalEndpoint, api_key: str = "") -> Probe
             for cap_name, cap_val in (m.capabilities or {}).items():
                 if cap_val:
                     capabilities[cap_name] = True
+    except asyncio.TimeoutError:
+        message = f"models: timed out after {models_timeout:.0f}s"
+        errors.append(message)
+        log_warning(f"[probe] list_models timed out for '{endpoint.name}': {message}")
     except Exception as exc:
         errors.append(f"models: {exc}")
         log_warning(f"[probe] list_models failed for '{endpoint.name}': {exc}")
 
+    # --- Step 2: capabilities and ping, concurrently, reusing the listing ---
+    capabilities_timeout = _probe_step_timeout(
+        _PROBE_CAPABILITIES_TIMEOUT_ENV, _DEFAULT_CAPABILITIES_TIMEOUT_SECONDS
+    )
+    ping_timeout = _probe_step_timeout(
+        _PROBE_PING_TIMEOUT_ENV, _DEFAULT_PING_TIMEOUT_SECONDS
+    )
+
+    cap_task = asyncio.create_task(adapter.probe_capabilities(models=model_infos))
+    # Prefer the endpoint's configured default_model for the ping so capacity
+    # errors on a random first-in-list model don't block probing.
+    ping_task = asyncio.create_task(
+        adapter.ping_test(model=endpoint.default_model or None, models=model_infos)
+    )
+
     try:
-        ping_ok, ping_echo = await ping_task
+        capabilities.update(
+            await asyncio.wait_for(cap_task, timeout=capabilities_timeout)
+        )
+    except asyncio.TimeoutError:
+        message = f"capabilities: timed out after {capabilities_timeout:.0f}s"
+        errors.append(message)
+        log_warning(f"[probe] probe_capabilities timed out for '{endpoint.name}'")
+    except Exception as exc:
+        errors.append(f"capabilities: {exc}")
+        log_warning(f"[probe] probe_capabilities failed for '{endpoint.name}': {exc}")
+
+    try:
+        ping_ok, ping_echo = await asyncio.wait_for(ping_task, timeout=ping_timeout)
         capabilities["cortex"] = ping_ok
         log_debug(
             f"[probe] ping_test for '{endpoint.name}': ok={ping_ok} echo={ping_echo!r}"
         )
+    except asyncio.TimeoutError:
+        message = f"ping: timed out after {ping_timeout:.0f}s"
+        errors.append(message)
+        log_warning(f"[probe] ping_test timed out for '{endpoint.name}'")
+        capabilities["cortex"] = False
     except Exception as exc:
         errors.append(f"ping: {exc}")
         log_warning(f"[probe] ping_test failed for '{endpoint.name}': {exc}")
         capabilities["cortex"] = False
 
-    if not capabilities and not models:
+    if not models and not any(capabilities.values()):
+        # Nothing was gathered: every step failed or timed out.  Reporting
+        # "success" here would let an empty result overwrite usable stored data.
         return ProbeResult(
             status="failed",
             error_message="; ".join(errors) or "No data returned",
         )
 
-    log_debug(
-        f"[probe] '{endpoint.name}' → capabilities={capabilities}, "
-        f"models_count={len(models)}, ping_echo={ping_echo!r}"
+    log_info(
+        f"[probe] '{endpoint.name}' done in {_time.monotonic() - started:.1f}s — "
+        f"capabilities={capabilities}, models_count={len(models)}"
     )
     return ProbeResult(
         status="success",
