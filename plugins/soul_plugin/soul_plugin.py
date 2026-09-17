@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -175,6 +176,12 @@ class _SessionState:
 _SOUL_RECALL_LIMIT = 5
 _SOUL_RECALL_CANDIDATE_LIMIT = 24
 _SOUL_CONSOLIDATE_COOLDOWN_SECONDS = 900
+# A cell's retrieval count is evidence of usefulness, so it must not be inflated
+# by the several prompt builds a single turn performs (recon, main reply,
+# situational extractor, Grillo beats): live cells reached counts of 70 and 164
+# within hours. One bump per cell per window is enough signal.
+_SOUL_RETRIEVAL_BUMP_MIN_INTERVAL_SEC = 3600.0
+_SOUL_RETRIEVAL_BUMP_TRACK_MAX = 512
 
 
 class SoulPlugin(PluginBase):
@@ -202,6 +209,7 @@ class SoulPlugin(PluginBase):
         )
         self._buffers: dict[str, list[str]] = {}
         self._sessions: dict[str, _SessionState] = {}
+        self._retrieval_bump_at: dict[str, float] = {}
         self._scheduler_task: asyncio.Task[None] | None = None
         self._last_rollup_date: date | None = None
         self._last_consolidated_at: datetime | None = None
@@ -385,7 +393,14 @@ class SoulPlugin(PluginBase):
 
         incoming_text = self._extract_message_text(message)
         if incoming_text:
-            self._append_buffer(interface_path, incoming_text)
+            # Buffer the line WITH its speaker. The rule-based extractor stores
+            # the transcript verbatim as the cell's episodic trace, so an
+            # unattributed line made the user's own words come back later as an
+            # unattributed "recalled memory" — the synth read what the human said
+            # as something it recalled. The label survives into the cell.
+            self._append_buffer(
+                interface_path, self._labelled_buffer_line(message, incoming_text)
+            )
             event = self._infer_emotional_event(incoming_text)
             session.emotional_state = self._emotion_engine.apply_event(
                 session.emotional_state, event
@@ -759,6 +774,35 @@ class SoulPlugin(PluginBase):
             parts.extend(lines)
         return "\n".join(parts)
 
+    @staticmethod
+    def _buffer_speaker(message: Any) -> str:
+        """Best-effort name of the buffered line's author ('user' when unknown)."""
+        for attr in ("sender_name", "speaker", "author"):
+            value = getattr(message, attr, None)
+            if value and str(value).strip():
+                return str(value).strip()
+        try:
+            from core.user_utils import get_user_display_name
+
+            user = getattr(message, "from_user", None)
+            if user is not None:
+                label = str(get_user_display_name(user) or "").strip()
+                if label:
+                    return label
+        except Exception:
+            pass
+        return "user"
+
+    @classmethod
+    def _labelled_buffer_line(cls, message: Any, text: str) -> str:
+        """Prefix a buffered line with who said it.
+
+        The rule-based extractor stores the transcript verbatim as the memory
+        cell's episodic trace, so this label is what later tells the synth whose
+        words a recalled memory actually holds.
+        """
+        return f"{cls._buffer_speaker(message)}: {text.strip()}"
+
     def _append_buffer(self, interface_path: str, text: str) -> None:
         self._buffers.setdefault(interface_path, []).append(text.strip())
         # Keep bounded memory per interface.
@@ -832,8 +876,22 @@ class SoulPlugin(PluginBase):
         )
         selected = reranked[:_SOUL_RECALL_LIMIT]
 
+        now_monotonic = time.monotonic()
         for match in selected:
             try:
+                cell_id = str(match.cell.id)
+                last_bump = self._retrieval_bump_at.get(cell_id, 0.0)
+                if now_monotonic - last_bump < _SOUL_RETRIEVAL_BUMP_MIN_INTERVAL_SEC:
+                    # Already counted recently: a turn builds several prompts, so
+                    # an unthrottled bump counts one decision many times.
+                    continue
+                self._retrieval_bump_at[cell_id] = now_monotonic
+                if len(self._retrieval_bump_at) > _SOUL_RETRIEVAL_BUMP_TRACK_MAX:
+                    self._retrieval_bump_at = {
+                        cid: ts
+                        for cid, ts in self._retrieval_bump_at.items()
+                        if now_monotonic - ts < _SOUL_RETRIEVAL_BUMP_MIN_INTERVAL_SEC
+                    }
                 match.cell.retrieval_count += 1
                 await self._repo.upsert_memcell(match.cell)
             except Exception as exc:
@@ -897,6 +955,14 @@ class SoulPlugin(PluginBase):
         ]
         if cell.session_id == active_session_id:
             header_parts.append("same chat")
+        else:
+            # Recall is not scoped to the active conversation, so say which
+            # conversation a memory came from. Without it, lines from another
+            # chat (or from a Grillo beat) read as if they belonged to the current
+            # one — the cross-chat confusion the prompt's privacy rule warns about.
+            session_label = str(cell.session_id or "").strip()
+            if session_label:
+                header_parts.append(f"other chat: {session_label}")
 
         memory_emotion = self._normalize_memory_emotion(
             cell.emotional_tag.dominant_emotion

@@ -558,6 +558,7 @@ def _build_recall_row(
     episodic_trace: str,
     atomic_facts: list[str],
     vector_similarity: float,
+    retrieval_count: int = 0,
 ) -> dict:
     return {
         "id": cell_id,
@@ -572,7 +573,7 @@ def _build_recall_row(
         },
         "foresight_signals": [],
         "event_timestamp": datetime(2026, 4, 18, 12, 0, tzinfo=timezone.utc),
-        "retrieval_count": 0,
+        "retrieval_count": retrieval_count,
         "explicit_importance": 0.0,
         "consolidated": False,
         "scene_id": None,
@@ -799,3 +800,177 @@ def test_load_emotional_profile_falls_back_when_no_emotional_profile_key(
         profile = SoulPlugin._load_emotional_profile()
 
     assert profile.as_dict() == EmotionalProfile().as_dict()
+
+
+@pytest.mark.asyncio
+async def test_recall_ranking_does_not_reward_past_recalls() -> None:
+    """Recall must not reward its own history.
+
+    Identical cells (same similarity, emotion, recency) used to be ranked by
+    ``retrieval_count``, which saturates at ten retrievals; two live cells had
+    reached 70 and 164, so they were pinned into every prompt. The over-recalled
+    twin must now rank strictly BELOW the fresh one.
+    """
+    fresh = _build_recall_row(
+        cell_id="fresh",
+        session_id="telegram_bot_999",
+        episodic_trace="Alice mentioned jasmine tea in the rain.",
+        atomic_facts=["Alice|likes|jasmine tea"],
+        vector_similarity=0.8,
+        retrieval_count=0,
+    )
+    over_recalled = _build_recall_row(
+        cell_id="over-recalled",
+        session_id="telegram_bot_999",
+        episodic_trace="Alice mentioned jasmine tea in the rain.",
+        atomic_facts=["Alice|likes|jasmine tea"],
+        vector_similarity=0.8,
+        retrieval_count=100,
+    )
+    conn = _FakeRecallConn(vector_rows=[over_recalled, fresh], text_rows=[])
+    repo = PostgresSoulRepository(dsn="postgresql://unused")
+    repo._pool = _FakeRecallPool(conn)
+
+    matches = await repo.recall_memories(
+        query_text="jasmine tea",
+        query_embedding=[0.1, 0.2],
+        session_id="telegram_bot_999",
+        candidate_limit=5,
+    )
+
+    scores = {match.cell.id: match.score for match in matches}
+    assert set(scores) == {"fresh", "over-recalled"}
+    assert scores["fresh"] > scores["over-recalled"]
+
+
+@pytest.mark.asyncio
+async def test_retrieval_count_is_bumped_once_per_window() -> None:
+    """Several prompt builds in one turn must not inflate the count."""
+    plugin = SoulPlugin()
+    interface_path = "telegram_bot/777"
+
+    seed = SimpleNamespace(
+        interface_path=interface_path,
+        text="Alice mentioned jasmine tea in the rain.",
+        caption=None,
+    )
+    await plugin.get_static_injection(seed, {"interface_path": interface_path})
+    await plugin._compile_interface(interface_path)
+
+    recall = SimpleNamespace(
+        interface_path=interface_path,
+        text="What did Alice mention about tea?",
+        caption=None,
+    )
+    await plugin.get_static_injection(recall, {"interface_path": interface_path})
+    after_first = max(
+        (cell.retrieval_count for cell in plugin._repo.memcells.values()), default=0
+    )
+
+    await plugin.get_static_injection(recall, {"interface_path": interface_path})
+    after_second = max(
+        (cell.retrieval_count for cell in plugin._repo.memcells.values()), default=0
+    )
+
+    assert after_first == 1
+    assert after_second == 1, "a second prompt build re-bumped the same cell"
+
+
+def test_recalled_memory_names_the_conversation_it_came_from() -> None:
+    """Cross-chat recall must say which chat it came from, never silently blend in."""
+    plugin = SoulPlugin()
+    emotional_tag = EmotionalTag(
+        state_snapshot={"joy": 0.2, "fear": 0.0, "sad": 0.0, "anger": 0.0},
+        dominant_emotion="joy",
+        intensity=0.2,
+        valence=0.2,
+    )
+    cell = MemCell(
+        id="memory-elsewhere",
+        episodic_trace="Scar: Nah we socialising now.",
+        atomic_facts=[],
+        emotional_tag=emotional_tag,
+        foresight_signals=[],
+        event_timestamp=datetime.now(timezone.utc),
+        session_id="telegram_bot_5208932647",
+    )
+    match = MemCellRecall(cell=cell, similarity=0.9, lexical_score=0.8, score=0.9)
+
+    formatted = plugin._format_recalled_memory(
+        match, active_session_id="telegram_bot_999"
+    )
+
+    assert "other chat: telegram_bot_5208932647" in formatted
+    assert "same chat" not in formatted
+
+
+def test_recalled_memory_marks_same_chat_without_a_source_path() -> None:
+    plugin = SoulPlugin()
+    emotional_tag = EmotionalTag(
+        state_snapshot={"joy": 0.2, "fear": 0.0, "sad": 0.0, "anger": 0.0},
+        dominant_emotion="joy",
+        intensity=0.2,
+        valence=0.2,
+    )
+    cell = MemCell(
+        id="memory-here",
+        episodic_trace="Scar: how you doing love?",
+        atomic_facts=[],
+        emotional_tag=emotional_tag,
+        foresight_signals=[],
+        event_timestamp=datetime.now(timezone.utc),
+        session_id="telegram_bot_999",
+    )
+    match = MemCellRecall(cell=cell, similarity=0.9, lexical_score=0.8, score=0.9)
+
+    formatted = plugin._format_recalled_memory(
+        match, active_session_id="telegram_bot_999"
+    )
+
+    assert "same chat" in formatted
+    assert "other chat" not in formatted
+
+
+@pytest.mark.asyncio
+async def test_buffer_lines_are_attributed_to_their_speaker() -> None:
+    """A compiled cell must record who said the line it holds.
+
+    The rule-based extractor stores the transcript verbatim as the cell's
+    episodic trace, so an unattributed buffer made the human's own words come
+    back later as an unattributed "recalled memory" (the synth reading the user's
+    speech as its own recollection).
+    """
+    plugin = SoulPlugin()
+    interface_path = "telegram_bot/778"
+
+    message = SimpleNamespace(
+        interface_path=interface_path,
+        text="Alice loves jasmine tea and cozy rainy evenings.",
+        caption=None,
+        sender_name="Scar",
+    )
+    await plugin.get_static_injection(message, {"interface_path": interface_path})
+    await plugin._compile_interface(interface_path)
+
+    traces = [cell.episodic_trace for cell in plugin._repo.memcells.values()]
+    assert traces, "compile produced no cells"
+    assert all(trace.startswith("Scar: ") for trace in traces), traces
+    assert any("jasmine tea" in trace for trace in traces)
+
+
+@pytest.mark.asyncio
+async def test_buffer_lines_fall_back_to_user_when_the_sender_is_unknown() -> None:
+    plugin = SoulPlugin()
+    interface_path = "telegram_bot/779"
+
+    message = SimpleNamespace(
+        interface_path=interface_path,
+        text="Remember the event on 2026-04-20.",
+        caption=None,
+    )
+    await plugin.get_static_injection(message, {"interface_path": interface_path})
+    await plugin._compile_interface(interface_path)
+
+    traces = [cell.episodic_trace for cell in plugin._repo.memcells.values()]
+    assert traces
+    assert all(trace.startswith("user: ") for trace in traces), traces

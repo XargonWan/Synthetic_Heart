@@ -19,7 +19,7 @@ from .models import (
     MemCellSummary,
     MemScene,
     SituationalNote,
-    compute_memcell_salience,
+    compute_recall_salience,
     now_utc,
     situational_note_id,
 )
@@ -84,7 +84,10 @@ def _build_recall_match(
     now: datetime,
 ) -> MemCellRecall:
     recency = _recency_score(cell.event_timestamp, now)
-    salience = compute_memcell_salience(
+    # Recall ranking uses the fatigue-adjusted salience: a cell that has already
+    # been recalled many times must not keep winning on that history alone (see
+    # compute_recall_salience). Retention still uses compute_memcell_salience.
+    salience = compute_recall_salience(
         emotional_intensity=abs(float(cell.emotional_tag.intensity)),
         retrieval_count=cell.retrieval_count,
         recency_score=recency,

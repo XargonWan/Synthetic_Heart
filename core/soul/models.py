@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
@@ -289,6 +290,45 @@ def compute_memcell_salience(
         + max(0.0, min(1.0, recency_score)) * 0.2
         + max(0.0, min(1.0, explicit_importance)) * 0.1
     )
+
+
+# Recall fatigue: how hard a cell's retrieval history pushes it DOWN the recall
+# ranking. Per extra (log) retrieval the cell loses a little of its salience, up
+# to a hard cap, so a cell that keeps coming back has to win on similarity,
+# emotion or recency instead of on inertia.
+_RECALL_FATIGUE_PER_LOG = 0.05
+_RECALL_FATIGUE_MAX = 0.15
+
+
+def compute_recall_salience(
+    *,
+    emotional_intensity: float,
+    recency_score: float,
+    explicit_importance: float,
+    retrieval_count: int = 0,
+) -> float:
+    """Salience used to RANK what gets recalled into a prompt.
+
+    This deliberately drops the retrieval-count *bonus* of
+    :func:`compute_memcell_salience`. That bonus saturates at ten retrievals
+    while the count only ever grows, so recall rewarded its own past decisions
+    and a handful of cells were pinned into every prompt (two live cells had
+    been recalled 70 and 164 times), crowding out everything else. Being
+    recalled a lot is still evidence of usefulness for RETENTION, which is what
+    ``compute_memcell_salience`` keeps modelling for the curator; for recall it
+    is a reason to step back, so the term becomes a bounded fatigue penalty.
+    """
+
+    base = (
+        max(0.0, min(1.0, emotional_intensity)) * 0.4
+        + max(0.0, min(1.0, recency_score)) * 0.2
+        + max(0.0, min(1.0, explicit_importance)) * 0.1
+    )
+    fatigue = min(
+        _RECALL_FATIGUE_MAX,
+        _RECALL_FATIGUE_PER_LOG * math.log1p(max(int(retrieval_count), 0)),
+    )
+    return max(0.0, base - fatigue)
 
 
 def new_memcell_id(session_id: str, timestamp: datetime) -> str:
