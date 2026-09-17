@@ -764,12 +764,56 @@ def _attempt_auto_fix(actions: list) -> bool:
     return modified
 
 
-def _validate_payload(action_type: str, payload: dict, errors: List[str]) -> None:
+def _resolve_validation_destination(payload: dict, original_message=None) -> str | None:
+    """Interface name a ``send_message`` payload is addressed to, or ``None``.
+
+    Resolution mirrors ``_dispatch_send_message``: an explicit
+    ``payload.interface_path`` wins (the synth is free to address any interface,
+    even from a turn that arrived on another one), otherwise the origin
+    conversation of the message being answered is used.
+
+    ``None`` means "could not be determined": validation then applies every
+    registered rule, so an undetermined destination can never silently
+    under-validate.
+    """
+    candidates = [
+        (payload or {}).get("interface_path") if isinstance(payload, dict) else None,
+        getattr(original_message, "interface_path", None),
+    ]
+    for candidate in candidates:
+        if not isinstance(candidate, str) or not candidate.strip():
+            continue
+        path = candidate.strip()
+        iface: str | None = None
+        try:
+            from core.interface_path_utils import parse_interface_path
+
+            parsed, _levels = parse_interface_path(path)
+            iface = parsed or None
+        except Exception:
+            iface = None
+        if not iface:
+            # Fall back to the leading segment so an unregistered-but-routable
+            # path still scopes validation sensibly.
+            iface = path.split("/", 1)[0] or None
+        if iface:
+            return iface
+    return None
+
+
+def _validate_payload(
+    action_type: str, payload: dict, errors: List[str], destination: str | None = None
+) -> None:
     """Validate payload using centralized validation registry and legacy plugin/interface validation.
 
     This function implements the new Dynamic Component Validation System that removes
     hardcoded validation rules from the corrector. Components register their validation
     rules dynamically, and this function applies them automatically.
+
+    ``destination`` is the interface the payload is addressed to (see
+    ``_resolve_validation_destination``); interface-scoped rules belonging to
+    other interfaces are skipped, so one interface's constraints cannot gate
+    another interface's traffic.
 
     See docs/validation_system.rst for complete documentation.
     """
@@ -779,7 +823,7 @@ def _validate_payload(action_type: str, payload: dict, errors: List[str]) -> Non
     try:
         validation_registry = get_validation_registry()
         registry_errors = validation_registry.validate_action_payload(
-            action_type, payload
+            action_type, payload, destination_interface=destination
         )
         if registry_errors:
             errors.extend(registry_errors)
@@ -959,7 +1003,14 @@ def validate_action(
         # Normalize payload before validation (convert string numbers to int)
         if payload:
             _normalize_payload(action_type, payload)
-        _validate_payload(action_type, payload or {}, errors)
+        _validate_payload(
+            action_type,
+            payload or {},
+            errors,
+            destination=_resolve_validation_destination(
+                payload or {}, original_message
+            ),
+        )
 
         if _is_restricted_action(action_type):
             mode = str(RESTRICT_ACTIONS).lower()

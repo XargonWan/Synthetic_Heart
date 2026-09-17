@@ -2130,6 +2130,51 @@ async def start_bot() -> bool:
         log_debug("[telegram_bot] start_bot() finally block completed")
 
 
+async def _record_telegram_delivery_failure(
+    *,
+    chat_id: str | int | None,
+    thread_id: str | int | None,
+    interface_path: str | None,
+    reason: str,
+    payload: Optional[dict],
+) -> None:
+    """Persist a failed Telegram delivery so a lost reply is never silent.
+
+    Before this existed a rejected send (Telegram refusing a bogus ``reply_to``,
+    a Markdown parse error, an unexpected transport error, ...) left its only
+    trace in the container log: no ``chat_history_cache`` row, no failure entry,
+    nothing an operator looking at Langfuse or the DB could act on. Live
+    incident 2026-09-17 06:57Z: the model produced a valid ``send_message`` for
+    ``telegram_bot/5208932647`` and the reply never arrived, with no record
+    anywhere except that log line.
+
+    Best-effort by design — recording a failure must never turn into a second
+    failure.
+    """
+    try:
+        from core.llm_failure_log import build_failure_entry, record_failure_entry
+
+        text = payload.get("text") if isinstance(payload, dict) else None
+        keys = sorted(payload.keys()) if isinstance(payload, dict) else []
+        entry = build_failure_entry(
+            reason=f"Telegram delivery failed: {reason}",
+            stage="delivery",
+            failure_code="delivery_failed",
+            interface_path=(
+                interface_path
+                if isinstance(interface_path, str) and interface_path.strip()
+                else (f"telegram_bot/{chat_id}" if chat_id is not None else None)
+            ),
+            chat_id=chat_id,
+            thread_id=thread_id,
+            content_preview=(text[:300] if isinstance(text, str) else None),
+            metadata={"payload_keys": keys},
+        )
+        await record_failure_entry(entry)
+    except Exception as exc:  # pragma: no cover - diagnostics only
+        log_debug(f"[telegram_interface] Could not record delivery failure: {exc}")
+
+
 class TelegramInterface:
     """Interface wrapper providing a standard send_message method for Telegram."""
 
@@ -2447,6 +2492,10 @@ class TelegramInterface:
                 one_of_groups=[["text", "media"]],
                 custom_validator=validate_telegram_message,
                 component_name="telegram_bot",
+                # Telegram's checks apply to Telegram-bound payloads only; the
+                # synth is free to address another interface, and that
+                # interface's own rules then govern the payload.
+                applies_to_interface="telegram_bot",
             )
 
             registry = get_validation_registry()
@@ -2578,7 +2627,18 @@ class TelegramInterface:
             try:
                 explicit_reply = int(reply_to)
             except (ValueError, TypeError):
+                explicit_reply = None
                 log_warning(f"[telegram_interface] Bad reply_to {reply_to!r}")
+            else:
+                # A chat id is not a message id (see send_message): quoting a
+                # message that does not exist fails the whole media send, so
+                # fall back to quoting the incoming message instead.
+                if str(explicit_reply) == str(target):
+                    explicit_reply = None
+                    log_warning(
+                        "[telegram_interface] reply_to is the chat id, not a message "
+                        "id; ignoring it for the media send"
+                    )
         if (
             explicit_reply is None
             and original_message is not None
@@ -2828,14 +2888,36 @@ class TelegramInterface:
             await resolve_and_touch(interface_path, chat_id, thread_id, bot=self.bot)
 
         # Unified 'reply_to' overrides the automatic original-message reply.
+        # The value must be a *message id*. The model routinely fills it with
+        # the conversation's own chat id (observed live: reply_to="5208932647"
+        # inside telegram_bot/5208932647 — the payload of the undelivered reply
+        # at 2026-09-17 06:57Z), with an interface_path, or with a placeholder
+        # like "dm_message_id_placeholder". Telegram refuses the whole send when
+        # the quoted message does not exist, so a wrong quote used to cost the
+        # entire message: a missing quote is cheap, a lost reply is not. Refuse
+        # the obviously-wrong values here and let the automatic
+        # reply-to-the-incoming-message path below supply the correct id.
+        reply_message_id = None
         explicit_reply = payload.get("reply_to") or payload.get("reply_to_message_id")
         if explicit_reply is not None:
             try:
                 reply_message_id = int(explicit_reply)
             except (ValueError, TypeError):
+                # Also fixes a latent NameError: this branch used to leave
+                # reply_message_id unbound, so a non-numeric reply_to in a chat
+                # without a usable original message crashed the send entirely.
+                reply_message_id = None
                 log_warning(
                     f"[telegram_interface] Discarding non-numeric reply_to {explicit_reply!r}"
                 )
+            else:
+                if chat_id is not None and str(reply_message_id) == str(chat_id):
+                    reply_message_id = None
+                    explicit_reply = None
+                    log_warning(
+                        "[telegram_interface] reply_to is the chat id, not a message "
+                        "id; ignoring it and replying to the incoming message instead"
+                    )
         else:
             reply_message_id = None
         if (
@@ -2922,6 +3004,16 @@ class TelegramInterface:
                     )
 
         except BadRequest as e:
+            # A rejected send loses the text: record it so the failure is
+            # visible in the failure log (and the Logs tab) instead of only in
+            # the container log.
+            await _record_telegram_delivery_failure(
+                chat_id=chat_id,
+                thread_id=thread_id,
+                interface_path=interface_path,
+                reason=str(e),
+                payload=payload,
+            )
             if "chat not found" in str(e).lower():
                 # Use orchestrator instead of legacy corrector
                 from core.transport_layer import notify_corrector_of_system_message
@@ -2946,6 +3038,18 @@ class TelegramInterface:
                     interface="telegram",
                 )
                 return False
+        except Exception as e:
+            # Transport errors, timeouts and unexpected failures lose the text
+            # just as silently as a BadRequest: record the loss, then re-raise
+            # so the dispatcher's own error handling still runs.
+            await _record_telegram_delivery_failure(
+                chat_id=chat_id,
+                thread_id=thread_id,
+                interface_path=interface_path,
+                reason=f"{type(e).__name__}: {e}",
+                payload=payload,
+            )
+            raise
         await self._verify_delivery(sent_message, payload, original_message)
         return True
 

@@ -64,14 +64,25 @@ def _is_thread_or_chat_not_found(error_message: str) -> bool:
 
 
 def _is_stale_reply_target(error_message: str) -> bool:
-    """True when ``reply_to_message_id`` points at a message Telegram no longer has.
+    """True when ``reply_to_message_id`` points at a message Telegram cannot quote.
 
-    The original message may have been deleted (or purged by retention), making
-    the stored reply id permanently undeliverable. Like a stale thread id this is
-    a data problem, not a connectivity issue: no chat-wide cooldown must be set,
+    The original message may be missing/deleted (or the id may never have
+    existed — e.g. the model put the *chat* id in ``reply_to``), making the
+    reply reference permanently undeliverable. Like a stale thread id this is a
+    data problem, not a connectivity issue: no chat-wide cooldown must be set,
     and ``send_with_thread_fallback`` retries without the reply reference.
+
+    Telegram's canonical wording is "Message to be replied not found", but the
+    same condition reaches us with other wordings, and an unmatched wording
+    used to escalate: the text was handed to the corrector and the user's reply
+    was lost entirely (live incident 2026-09-17 06:57Z). Any "repl..." +
+    "not found" pair counts. Kept deliberately narrow — unrelated BadRequests
+    such as "Message is too long" must keep raising.
     """
-    return "message to be replied not found" in error_message.lower()
+    lowered = (error_message or "").lower()
+    if "message to be replied not found" in lowered:
+        return True
+    return "not found" in lowered and "repl" in lowered
 
 
 def _is_stale_identifier_error(error_message: str) -> bool:
@@ -689,7 +700,7 @@ async def send_with_thread_fallback(
 
             dropped: str | None = None
             if (
-                "message to be replied not found" in lowered
+                _is_stale_reply_target(error_message)
                 and "reply_to_message_id" in send_kwargs
             ):
                 send_kwargs.pop("reply_to_message_id")

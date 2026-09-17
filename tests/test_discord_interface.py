@@ -1151,3 +1151,145 @@ async def test_start_live_voice_loads_uninitialized_live_engine(monkeypatch):
     assert result["status"] == "success"
     assert load_calls == ["gemini_api"]
     assert manager_started, "manager.start_session must run after on-demand load"
+
+
+# ---------------------------------------------------------------------------
+# Long-message delivery — Discord's 2000-character cap is a TRANSPORT limit
+# ---------------------------------------------------------------------------
+
+
+def _squash(value: str) -> str:
+    """Whitespace-free view of a string, for loss-free join comparisons."""
+    return "".join((value or "").split())
+
+
+def test_split_discord_text_short_empty_and_none():
+    from interface.discord_interface import _split_discord_text
+
+    assert _split_discord_text(None) == []
+    assert _split_discord_text("") == []
+    assert _split_discord_text("   ") == []
+    assert _split_discord_text("hello there") == ["hello there"]
+
+
+def test_split_discord_text_splits_on_paragraphs_without_losing_text():
+    from interface.discord_interface import DISCORD_MESSAGE_LIMIT, _split_discord_text
+
+    paragraphs = ["word " * 120 + f"end {i}." for i in range(6)]
+    text = "\n\n".join(p.strip() for p in paragraphs)
+
+    chunks = _split_discord_text(text)
+
+    assert len(chunks) > 1
+    assert all(len(c) <= DISCORD_MESSAGE_LIMIT for c in chunks)
+    assert _squash("".join(chunks)) == _squash(text)
+
+
+def test_split_discord_text_hard_splits_when_no_boundary_exists():
+    from interface.discord_interface import DISCORD_MESSAGE_LIMIT, _split_discord_text
+
+    text = "x" * (DISCORD_MESSAGE_LIMIT * 2 + 5)
+
+    chunks = _split_discord_text(text)
+
+    assert len(chunks) == 3
+    assert all(len(c) <= DISCORD_MESSAGE_LIMIT for c in chunks)
+    assert "".join(chunks) == text
+
+
+@pytest.mark.asyncio
+async def test_long_channel_message_is_split_not_rejected():
+    """A >2000-character reply must be delivered as several Discord messages.
+
+    The cap used to live in the shared ``send_message`` validation rule, so it
+    also rejected long replies addressed to other interfaces (Telegram accepts
+    4096) and the corrector eventually dropped the whole turn — the user got
+    silence (live incident 2026-09-17 10:29Z).
+    """
+    from interface.discord_interface import DISCORD_MESSAGE_LIMIT
+
+    di = DiscordInterface(bot_token="")
+    sent: list[str] = []
+
+    class FakeChannel:
+        id = 555
+
+        async def send(self, content, file=None):
+            sent.append(content)
+
+    class FakeClient:
+        def get_channel(self, channel_id):
+            return FakeChannel()
+
+    di.client = FakeClient()
+
+    text = ("sentence one. " * 200).strip()
+    assert len(text) > DISCORD_MESSAGE_LIMIT
+
+    await di._discord_send("555", text)
+
+    assert len(sent) > 1
+    assert all(len(chunk) <= DISCORD_MESSAGE_LIMIT for chunk in sent)
+    assert _squash("".join(sent)) == _squash(text)
+
+
+@pytest.mark.asyncio
+async def test_short_channel_message_is_sent_once():
+    """Unchanged behaviour for ordinary replies: exactly one message."""
+    di = DiscordInterface(bot_token="")
+    sent: list[str] = []
+
+    class FakeChannel:
+        id = 556
+
+        async def send(self, content, file=None):
+            sent.append(content)
+
+    class FakeClient:
+        def get_channel(self, channel_id):
+            return FakeChannel()
+
+    di.client = FakeClient()
+
+    await di._discord_send("556", "short and sweet")
+
+    assert sent == ["short and sweet"]
+
+
+def test_long_text_is_accepted_by_the_shared_validation_rule():
+    """A >2000-character ``send_message`` payload must validate cleanly.
+
+    The 2000-character cap is Discord's *transport* limit, enforced by chunking
+    in ``_discord_send``. While it lived in the shared ``send_message`` validation
+    rule it also rejected long replies addressed to another interface (Telegram
+    accepts 4096), the corrector retried, the model wrote another long reply, and
+    the turn was dropped — the user got silence (live incident 2026-09-17 10:29Z).
+    """
+    from core.action_parser import _validate_payload
+    from interface.discord_interface import DISCORD_MESSAGE_LIMIT
+
+    DiscordInterface(bot_token="")  # construction registers the rule
+
+    errors: list[str] = []
+    _validate_payload(
+        "send_message",
+        {
+            "text": "x" * (DISCORD_MESSAGE_LIMIT + 500),
+            "interface_path": "telegram_bot/5208932647",
+        },
+        errors,
+    )
+
+    assert not any("2000" in error for error in errors), errors
+
+
+def test_empty_text_is_still_rejected_by_validation():
+    """The shape checks the rule keeps must still fire (no media, blank text)."""
+    from core.action_parser import _validate_payload
+
+    DiscordInterface(bot_token="")
+
+    errors: list[str] = []
+    _validate_payload("send_message", {"text": "   "}, errors)
+
+    assert errors, "an empty text with no media must still be rejected"

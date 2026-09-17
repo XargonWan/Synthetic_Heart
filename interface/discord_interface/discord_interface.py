@@ -268,6 +268,51 @@ async def _flush_live_diary(guild_id: int, buffer: list[tuple[str, str]]) -> Non
         )
 
 
+# Discord refuses any single message over 2000 characters. That limit belongs to
+# the transport, so it is enforced here by splitting long text into several
+# messages — never in payload validation. When it lived in the shared
+# `send_message` validation rule it applied to EVERY destination: a 2.4k-character
+# reply bound for Telegram (which accepts 4096 and chunks at 4000) was rejected
+# with "Message text cannot exceed 2000 characters", the corrector retried, the
+# model wrote another long reply, and after the retry budget the turn was dropped
+# entirely — the user got silence (live incident 2026-09-17 10:29Z, langfuse
+# `7982f5e2-55ef-44ea-867c-f074f74f5214`).
+DISCORD_MESSAGE_LIMIT = 2000
+
+
+def _split_discord_text(
+    text: str | None, limit: int = DISCORD_MESSAGE_LIMIT
+) -> list[str]:
+    """Split ``text`` into chunks of at most ``limit`` characters.
+
+    Prefers paragraph, then line, then sentence boundaries, and falls back to a
+    hard cut when a single run of text has no boundary inside the window (so a
+    pathological long line is still deliverable). Returns ``[]`` for empty text;
+    a short text comes back as a single chunk. Pure and side-effect free.
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    if len(text) <= limit:
+        return [text]
+
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > limit:
+        window = remaining[:limit]
+        cut = max(window.rfind("\n\n"), window.rfind("\n"), window.rfind(". "))
+        if cut < limit // 3:
+            # No usable boundary in range: hard-split rather than send >2000.
+            cut = limit
+        else:
+            cut += 1 if window[cut] == "\n" else 2
+        chunks.append(remaining[:cut].strip())
+        remaining = remaining[cut:].strip()
+    if remaining:
+        chunks.append(remaining)
+    return [c for c in chunks if c]
+
+
 class DiscordInterface:
     """Discord interface mirroring Telegram bot behaviour."""
 
@@ -2002,7 +2047,14 @@ class DiscordInterface:
                         file_obj = discord.File(attachment_path)
 
                     if text or file_obj:
-                        await user.send(text or "", file=file_obj)
+                        chunk_list: list[str] = _split_discord_text(text)
+                        if not chunk_list and file_obj is None:
+                            return
+                        await user.send(
+                            chunk_list[0] if chunk_list else "", file=file_obj
+                        )
+                        for extra in chunk_list[1:]:
+                            await user.send(extra)
                     return
             except Exception as e:  # pragma: no cover - network dependent
                 log_debug(
@@ -2024,18 +2076,38 @@ class DiscordInterface:
                     f"[discord_interface] Attachment file not found: {attachment_path}"
                 )
 
+        # Chunking calls send() several times, so resolve the capability once: a
+        # Category/Forum channel has no send() at all (previously a single
+        # unguarded call site, now reachable on every chunk).
+        channel_send = getattr(channel, "send", None)
+        if channel_send is None:
+            log_warning(
+                f"[discord_interface] Channel {channel_id} cannot receive messages"
+            )
+            return
+
         # If reply to a specific message was requested, try to fetch and reply
         if reply_to_message_id:
             try:
                 msg = await channel.fetch_message(int(reply_to_message_id))
-                await msg.reply(text or "", file=file_obj)
+                chunk_list = _split_discord_text(text)
+                if not chunk_list and file_obj is None:
+                    return
+                await msg.reply(chunk_list[0] if chunk_list else "", file=file_obj)
+                for extra in chunk_list[1:]:
+                    await channel_send(extra)
                 return
             except Exception as e:
                 log_debug(
                     f"[discord_interface] Could not reply to message id {reply_to_message_id}: {e}"
                 )
 
-        await channel.send(text or "", file=file_obj)
+        chunk_list = _split_discord_text(text)
+        if not chunk_list and file_obj is None:
+            return
+        await channel_send(chunk_list[0] if chunk_list else "", file=file_obj)
+        for extra in chunk_list[1:]:
+            await channel_send(extra)
 
     async def _process_message(self, message):
         """Handle incoming Discord messages."""
@@ -3229,8 +3301,11 @@ class DiscordInterface:
                 text = payload.get("text")
                 media = payload.get("media")
                 if not media and isinstance(text, str):
-                    if len(text) > 2000:  # Discord message limit
-                        errors.append("Message text cannot exceed 2000 characters")
+                    # No length check here on purpose: Discord's 2000-character
+                    # cap is a transport limit enforced by splitting the message
+                    # in ``_discord_send``. As a shared validation rule it also
+                    # rejected long replies destined for other interfaces (e.g.
+                    # Telegram, which accepts 4096) and the whole turn was lost.
                     if not text.strip():
                         errors.append("Message text cannot be empty or only whitespace")
 
@@ -3252,6 +3327,11 @@ class DiscordInterface:
                 one_of_groups=[["text", "media"]],
                 custom_validator=validate_discord_message,
                 component_name="discord_interface",
+                # Discord's checks are Discord's: they must not gate a payload
+                # addressed to another interface (the synth may deliberately
+                # answer on Telegram/webui instead). The registry skips this rule
+                # whenever ``interface_path`` points elsewhere.
+                applies_to_interface="discord_bot",
             )
 
             registry = get_validation_registry()

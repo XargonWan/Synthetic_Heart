@@ -15,6 +15,7 @@ class ValidationRule:
         custom_validator: callable = None,
         component_name: str = None,
         one_of_groups: List[List[str]] = None,
+        applies_to_interface: str | None = None,
     ):
         self.action_type = action_type
         self.required_fields = required_fields or []
@@ -23,6 +24,17 @@ class ValidationRule:
         # OR groups: within each group at least one field must be present;
         # every group must pass (AND across groups).
         self.one_of_groups = [list(g) for g in (one_of_groups or [])]
+        # Destination scoping for multi-interface actions (``send_message``):
+        # when set, the rule is only applied to payloads addressed to that
+        # interface (``payload.interface_path`` prefix, else the origin
+        # conversation). Unset means "applies everywhere" — the right choice for
+        # shape rules and for everything that is not interface-specific.
+        #
+        # Without this, one interface's constraint gated every destination:
+        # Discord's 2000-character cap rejected a 2.4k reply bound for Telegram
+        # (4096-capable) and the corrector eventually dropped the whole turn
+        # (live incident 2026-09-17 10:29Z).
+        self.applies_to_interface = applies_to_interface
 
     def validate(self, payload: Dict[str, Any]) -> List[str]:
         """Validate payload against this rule. Returns list of error messages."""
@@ -131,7 +143,13 @@ class ValidationRegistry:
     def register_component_rules(
         self, component_name: str, rules: List[ValidationRule]
     ):
-        """Register validation rules for a component."""
+        """Register validation rules for a component.
+
+        Re-registering an action type replaces that component's previous rule for
+        it, so a component that is initialised (or reloaded) more than once does
+        not accumulate duplicates — duplicates surfaced as the same error line
+        repeated in the correction prompt.
+        """
         log_debug(
             f"[ValidationRegistry] Registering {len(rules)} rules for component '{component_name}'"
         )
@@ -142,10 +160,16 @@ class ValidationRegistry:
             rule.component_name = component_name
             action_type = rule.action_type
 
-            if action_type not in self._rules:
-                self._rules[action_type] = []
+            existing = self._rules.get(action_type, [])
+            kept = [r for r in existing if r.component_name != component_name]
+            if len(kept) != len(existing):
+                log_debug(
+                    f"[ValidationRegistry] Replacing existing rule(s) for "
+                    f"'{action_type}' from component '{component_name}'"
+                )
 
-            self._rules[action_type].append(rule)
+            kept.append(rule)
+            self._rules[action_type] = kept
             log_debug(
                 f"[ValidationRegistry] Registered rule for action '{action_type}' from component '{component_name}'"
             )
@@ -180,13 +204,34 @@ class ValidationRegistry:
         return self._rules.get(action_type, [])
 
     def validate_action_payload(
-        self, action_type: str, payload: Dict[str, Any]
+        self,
+        action_type: str,
+        payload: Dict[str, Any],
+        destination_interface: str | None = None,
     ) -> List[str]:
-        """Validate payload against all registered rules for the action type."""
+        """Validate payload against the rules registered for the action type.
+
+        ``destination_interface`` is the interface the payload is addressed to
+        (for ``send_message``: the prefix of ``payload.interface_path``, or the
+        origin conversation). Rules that declare ``applies_to_interface`` are
+        skipped when the payload goes somewhere else, so an interface's own
+        constraints never gate another interface's traffic.
+
+        ``None`` means the destination could not be determined: every rule is
+        then applied, so an unknown destination can never silently under-validate.
+        """
         errors = []
         rules = self.get_validation_rules(action_type)
 
         for rule in rules:
+            scoped = getattr(rule, "applies_to_interface", None)
+            if scoped and destination_interface and scoped != destination_interface:
+                log_debug(
+                    f"[ValidationRegistry] Skipping rule for '{action_type}' from "
+                    f"'{rule.component_name}': addressed to '{destination_interface}', "
+                    f"rule belongs to '{scoped}'"
+                )
+                continue
             rule_errors = rule.validate(payload)
             errors.extend(rule_errors)
 
