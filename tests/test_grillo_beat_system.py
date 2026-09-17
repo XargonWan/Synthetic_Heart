@@ -167,7 +167,7 @@ async def test_grillo_observer_proactive_prompt_generation() -> None:
             "interface_path": "telegram_bot/123456",
             "last_sender": "alice",
             "age_seconds": 7200,
-            "cooldown_active": False,
+            "in_active_conversation": False,
         }
     ]
     prompt = plugin._build_observer_prompt(
@@ -198,7 +198,7 @@ async def test_grillo_observer_decay_prompt_when_network_quiet() -> None:
             "interface_path": "telegram_bot/999",
             "last_sender": "bob",
             "age_seconds": 90000,
-            "cooldown_active": False,
+            "in_active_conversation": False,
         }
     ]
     prompt = plugin._build_observer_prompt([], targets, decay_driven=True)
@@ -209,8 +209,11 @@ async def test_grillo_observer_decay_prompt_when_network_quiet() -> None:
 
 
 @pytest.mark.asyncio
-async def test_grillo_observer_cooldown_target_marked_off_limits() -> None:
-    """Targets on self-cooldown must be rendered as OFF-LIMITS in the prompt."""
+async def test_grillo_observer_live_target_marked_off_limits() -> None:
+    """A target in a live conversation must be rendered as OFF-LIMITS in the
+    prompt. Being live is the ONLY off-limits state left: the self-cooldown and
+    the 12 h awaiting-reply markers are gone, because together they excluded
+    every chat the synth had answered, i.e. all of them."""
     from plugins.grillo.grillo_chat_observer import GrilloChatObserverPlugin
 
     plugin = GrilloChatObserverPlugin()
@@ -219,13 +222,14 @@ async def test_grillo_observer_cooldown_target_marked_off_limits() -> None:
         {
             "interface_path": "telegram_bot/555",
             "last_sender": "self",
-            "age_seconds": 3600,
-            "cooldown_active": True,
+            "age_seconds": 300,
+            "in_active_conversation": True,
         }
     ]
     prompt = plugin._build_observer_prompt(["some snippet"], targets, False)
 
     assert "OFF-LIMITS" in prompt
+    assert "LIVE-CONVERSATION" in prompt
 
 
 @pytest.mark.asyncio

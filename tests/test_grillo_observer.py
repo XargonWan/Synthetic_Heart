@@ -169,62 +169,67 @@ async def test_collect_recent_snippets_excludes_vessel_paths(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_collect_recent_snippets_skips_recent_bot_messages(monkeypatch):
-    plugin = gco.GrilloChatObserverPlugin()
-    plugin.self_skip_window = 3600  # 1h
+async def test_collect_recent_snippets_keeps_human_lines_when_synth_spoke_last(
+    monkeypatch,
+):
+    """A chat the synth has just replied to still contributes the human's line
+    as context, and the synth's own line is never surfaced.
 
-    async def mock_get_last_active_chats_verbose(n):
-        return [(1, "Chat A")]
+    There is no chat-level "the synth spoke last, so skip the whole chat" rule
+    any more: for a synth that answers everything it matched every
+    conversation, which left the observer with no live context to reason
+    about. Self-reply spam stays impossible because self-authored lines are
+    filtered per message.
+    """
+    plugin = gco.GrilloChatObserverPlugin()
+    now = datetime.now(timezone.utc)
+
+    async def fake_recent_paths(limit):
+        return [{"interface_path": "telegram_bot/1"}]
 
     monkeypatch.setattr(
-        "core.recent_chats.get_last_active_chats_verbose",
-        mock_get_last_active_chats_verbose,
+        "core.interface_paths.get_recent_interface_paths", fake_recent_paths
     )
-    monkeypatch.setattr("core.recent_chats.get_chat_path", lambda cid: "telegram_bot/1")
-
-    async def fake_load_chat_history(path):
-        from collections import deque
-
-        return deque(
-            [
-                {
-                    "text": "Hello",
-                    "sender_name": "self",
-                    "timestamp": (
-                        datetime.now(timezone.utc) - timedelta(seconds=1800)
-                    ).isoformat(),
-                }
-            ]
-        )
+    monkeypatch.setattr(
+        "core.interface_path_utils.is_vessel_interface_path", lambda p: False
+    )
 
     import core.chat_history_cache as chat_history_cache
+
+    async def fake_load_chat_history(path):
+        return [
+            {
+                "text": "I'm home, heading to bed",
+                "sender_name": "Scar",
+                "timestamp": (now - timedelta(minutes=40)).isoformat(),
+            },
+            {
+                "text": "Sleep well, I'll be right here",
+                "sender_name": "self",
+                "timestamp": (now - timedelta(minutes=30)).isoformat(),
+            },
+        ]
 
     monkeypatch.setattr(chat_history_cache, "load_chat_history", fake_load_chat_history)
 
     snippets = await plugin._collect_recent_snippets(5)
-    assert snippets == []  # skipped because last message was from self within window
 
-    # if message is older than window we should include it
-    async def fake_load_chat_history2(path):
-        from collections import deque
+    assert len(snippets) == 1
+    assert "I'm home, heading to bed" in snippets[0]
+    assert "Sleep well" not in snippets[0]
 
-        return deque(
-            [
-                {
-                    "text": "Hello",
-                    "sender_name": "self",
-                    "timestamp": (
-                        datetime.now(timezone.utc) - timedelta(seconds=7200)
-                    ).isoformat(),
-                }
-            ]
-        )
+    # A chat holding nothing but the synth's own lines contributes no snippet.
+    async def fake_only_self(path):
+        return [
+            {
+                "text": "Sleep well, I'll be right here",
+                "sender_name": "self",
+                "timestamp": (now - timedelta(minutes=30)).isoformat(),
+            }
+        ]
 
-    monkeypatch.setattr(
-        chat_history_cache, "load_chat_history", fake_load_chat_history2
-    )
-    snippets2 = await plugin._collect_recent_snippets(5)
-    assert snippets2 != []
+    monkeypatch.setattr(chat_history_cache, "load_chat_history", fake_only_self)
+    assert await plugin._collect_recent_snippets(5) == []
 
 
 @pytest.mark.asyncio
@@ -554,21 +559,22 @@ def test_is_self_sender():
 
 
 @pytest.mark.asyncio
-async def test_eligible_targets_exclude_awaiting_reply_chats(monkeypatch):
-    """A chat where the synth spoke last and the human has not replied must NOT
-    be an outreach target — the person is not "gone", they simply have not
-    answered yet. Re-offering it after the 45-min self-cooldown made the beat
-    nag the same DM hourly ("still coming tonight?" -> "hurry home!" ->
-    "did you get home okay?"), observed in 5 consecutive observer beats
-    (langfuse 404f8b76 / 1331d0ee / b4d0490c / c8b5a672 / 416e8e23)."""
+async def test_eligible_targets_include_chat_where_synth_spoke_last(monkeypatch):
+    """A chat the synth answered an hour ago IS an outreach target.
+
+    The old 12 h awaiting-reply guard excluded every chat whose newest message
+    was the synth's own. For a synth that answers everything that is *every*
+    chat, so the hourly beat could never reach out (verified live: its only
+    eligible target was a bot-notification channel). Cadence belongs to the
+    beat schedule; only a live conversation defers outreach now.
+    """
     plugin = gco.GrilloChatObserverPlugin()
     now = datetime.now(timezone.utc)
 
     async def fake_recent_paths(limit):
         return [{"interface_path": "telegram_bot/5208932647"}]
 
-    # Synth spoke last ~1h ago; human's last real message is 1.5h ago and the
-    # human is present (no departure anywhere in the thread).
+    # Synth replied ~1h ago; the human's last real message is 2h old.
     messages = [
         {
             "sender_name": "Scar",
@@ -595,12 +601,56 @@ async def test_eligible_targets_exclude_awaiting_reply_chats(monkeypatch):
 
     targets = await plugin._collect_eligible_targets(limit=5)
 
-    # The awaiting-reply chat must be listed but marked ineligible.
     assert len(targets) == 1
     assert targets[0]["interface_path"] == "telegram_bot/5208932647"
-    assert targets[0]["eligible"] is False
     assert targets[0]["last_from_self"] is True
-    assert targets[0]["awaiting_reply"] is True
+    assert targets[0]["in_active_conversation"] is False
+    assert targets[0]["eligible"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("last_sender", ["self", "Scar"])
+async def test_eligible_targets_skip_live_conversation(monkeypatch, last_sender):
+    """A message inside the quiet window — from EITHER side — makes the chat
+    off-limits for that run. This is the only thing that holds outreach back:
+    the beat owns the cadence (one run per interval), the quiet window keeps it
+    from interrupting an exchange that is happening right now."""
+    plugin = gco.GrilloChatObserverPlugin()
+    plugin.quiet_minutes = 15
+    now = datetime.now(timezone.utc)
+
+    async def fake_recent_paths(limit):
+        return [{"interface_path": "telegram_bot/5208932647"}]
+
+    messages = [
+        {
+            "sender_name": "Scar",
+            "text": "brb making tea",
+            "timestamp": (now - timedelta(minutes=20)).isoformat(),
+        },
+        {
+            "sender_name": last_sender,
+            "text": "take your time",
+            "timestamp": (now - timedelta(minutes=5)).isoformat(),
+        },
+    ]
+
+    async def fake_load(path):
+        return list(messages)
+
+    monkeypatch.setattr(
+        "core.interface_paths.get_recent_interface_paths", fake_recent_paths
+    )
+    monkeypatch.setattr("core.chat_history_cache.load_chat_history", fake_load)
+    monkeypatch.setattr(
+        "core.interface_path_utils.is_vessel_interface_path", lambda p: False
+    )
+
+    targets = await plugin._collect_eligible_targets(limit=5)
+
+    assert len(targets) == 1
+    assert targets[0]["in_active_conversation"] is True
+    assert targets[0]["eligible"] is False
 
 
 @pytest.mark.asyncio
@@ -643,3 +693,71 @@ async def test_eligible_targets_include_chat_with_recent_human_reply(monkeypatch
     assert targets[0]["interface_path"] == "telegram_bot/5208932647"
     assert targets[0]["eligible"] is True
     assert targets[0]["last_from_self"] is False
+
+
+def test_observer_outreach_is_not_gated_by_speaking_last():
+    """The removed awaiting-reply gate must not survive in the instructions.
+
+    The 12h awaiting-reply guard was taken out of the code because a responsive
+    synth is the newest speaker in every chat, which made outreach structurally
+    impossible. The same rule was still written in prose ("someone who has not
+    answered you is not someone waiting for you ... or stay silent"), and live
+    observers kept declining on exactly that basis while a non-live target sat
+    idle at 1-3h. This pins the replacement wording.
+    """
+    from plugins.grillo.common_instructions import (
+        GRILLO_INSTRUCTIONS,
+        OBSERVER_PROACTIVE_INSTRUCTIONS,
+    )
+
+    text = OBSERVER_PROACTIVE_INSTRUCTIONS
+
+    # The removed gate, in its old prose form.
+    assert "is not someone waiting for you" not in text
+    assert "genuine void of initiative" not in text
+    assert "worth more than several shallow" not in text
+
+    # Speaking last is explicitly fine, and reaching out is the run's purpose.
+    assert "does NOT put it off-limits" in text
+    assert "reaching out to it is the purpose of the beat" in text
+    assert "silence is not" in text
+
+    # Guardrails that must survive the rewrite.
+    assert "Never invent physical-presence claims" in text
+    assert "never re-send a canned or near-duplicate opener" in text
+    assert "do not interrupt that conversation on this run" in text
+    assert "never fabricate a reply_message_id" in text
+    # Unified messaging: the example action is the one every interface exposes.
+    assert '"type": "send_message"' in GRILLO_INSTRUCTIONS
+    assert "'send_message'" in text
+
+
+def test_quiet_run_note_frames_outreach_as_the_job():
+    """A quiet network is the observer's cue to act, not a reason to stay silent."""
+    plugin = gco.GrilloChatObserverPlugin()
+    prompt = plugin._build_observer_prompt(
+        [],
+        targets=[
+            {
+                "interface_path": "telegram_bot/1",
+                "age_seconds": 3600,
+                "last_sender": "self",
+                "in_active_conversation": False,
+            },
+            {
+                "interface_path": "telegram_bot/2",
+                "age_seconds": 60,
+                "last_sender": "Scar",
+                "in_active_conversation": True,
+            },
+        ],
+        decay_driven=True,
+    )
+
+    assert "that is what this run is for" in prompt
+    assert "skipping any marked LIVE-CONVERSATION" in prompt
+    assert "Otherwise return" not in prompt
+    # The live target is still flagged off-limits, the idle one is not.
+    assert "LIVE-CONVERSATION" in prompt
+    assert "indulgence" not in prompt
+    assert "last_sender=self" in prompt

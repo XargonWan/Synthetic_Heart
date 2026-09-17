@@ -331,7 +331,7 @@ UI: These variables are exposed in the WebUI under **Configurations → Grillo**
 Observer configuration flags:
 
 - ``GRILLO_OBSERVER_STORE_MEMORIES`` (bool, default: ``True``) — when enabled, the observer persists sampled snippets as passive memories.
-- ``GRILLO_OBSERVER_SELF_WINDOW`` (float, default: ``43200``) — time window (seconds) during which a chat whose last message was sent by the synth is ignored when gathering snippets. Helps prevent loops when our own question has not been answered yet.
+- ``GRILLO_OBSERVER_SELF_WINDOW`` (float, default: ``43200``) — duplicate-suppression window (seconds): an identical outbound Grillo message to the same conversation within this window is dropped. It does **not** gate outreach eligibility; the live-conversation guard (``GRILLO_OUTREACH_QUIET_MINUTES``) is the only thing that holds proactive outreach back.
 - ``GRILLO_OBSERVER_LAST_RUN_TS`` (float, default: ``0.0``) — internal timestamp (UTC) of the last observer run. This value is persisted across restarts and usually does not need manual editing.
 
 Notes:

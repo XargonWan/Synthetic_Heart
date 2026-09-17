@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pytest
 
 from plugins.message_plugin import MessagePlugin
@@ -125,36 +125,52 @@ async def test_duplicate_similarity_blocks(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_observer_respects_cooldown(monkeypatch):
+async def test_observer_no_longer_suppresses_snippets_by_last_speaker(monkeypatch):
+    """Snippet collection no longer drops a chat because the synth spoke last.
+
+    That rule (a 12 h self-window) matched every conversation a responsive synth
+    takes part in, so the observer had no live context at all. The human's lines
+    are surfaced again; the synth's own lines are still never surfaced. Outreach
+    suppression now lives in the live-conversation guard (see
+    tests/test_grillo_observer.py), not in snippet collection.
+    """
     obs = GrilloChatObserverPlugin()
+    now = datetime.now(timezone.utc)
 
-    # Mock recent chats listing
-    async def fake_get_last_active_chats_verbose(n):
-        return [(123, "Test Chat")]
+    async def fake_recent_paths(limit):
+        return [{"interface_path": "telegram_bot/-100123/2"}]
 
     monkeypatch.setattr(
-        "core.recent_chats.get_last_active_chats_verbose",
-        fake_get_last_active_chats_verbose,
+        "core.interface_paths.get_recent_interface_paths", fake_recent_paths
     )
     monkeypatch.setattr(
-        "core.recent_chats.get_chat_path", lambda cid: "telegram_bot/-100123/2"
+        "core.interface_path_utils.is_vessel_interface_path", lambda p: False
     )
 
-    async def fake_get_last_message(path):
-        return {
-            "sender_id": "self",
-            "sender_name": "synth",
-            "text": "bot said something",
-            "timestamp": (datetime.utcnow() - timedelta(hours=2)).isoformat(),
-        }
+    async def fake_load_chat_history(path):
+        return [
+            {
+                "sender_name": "Alice",
+                "sender_id": "100",
+                "text": "are you around?",
+                "timestamp": (now - timedelta(hours=3)).isoformat(),
+            },
+            {
+                "sender_name": "self",
+                "text": "bot said something",
+                "timestamp": (now - timedelta(hours=2)).isoformat(),
+            },
+        ]
 
     monkeypatch.setattr(
-        "core.chat_history_cache.get_last_message", fake_get_last_message
+        "core.chat_history_cache.load_chat_history", fake_load_chat_history
     )
 
     snippets = await obs._collect_recent_snippets(3)
-    # Since cooldown default is 24h and last synth message was 2h ago, we should skip and get empty
-    assert snippets == []
+
+    assert len(snippets) == 1
+    assert "are you around?" in snippets[0]
+    assert "bot said something" not in snippets[0]
 
 
 def test_observer_prompt_avoids_duplicates():
