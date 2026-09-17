@@ -1,9 +1,14 @@
+import atexit
+import copy
 import logging
 import os
+import queue
 import sys
+import threading
+import time
 import traceback
 from datetime import datetime, timezone
-from logging.handlers import RotatingFileHandler
+from logging.handlers import RotatingFileHandler, QueueHandler
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -46,6 +51,261 @@ _LOGGING_LEVEL = os.getenv(
     "LOGGING_LEVEL", "INFO"
 ).upper()  # Default to INFO or env value
 _LOGGING_LOGCHAT_LEVEL = "ERROR"
+
+
+# ── Non-blocking file logging ────────────────────────────────────────────────
+# File handlers write synchronously on the thread that logs — which is the
+# asyncio event loop. A log destination that stalls (a full disk, a slow network
+# share) therefore freezes the WHOLE process: every component goes silent and an
+# in-flight turn is lost mid-way with no error anywhere (observed live: 6m46s of
+# zero output starting immediately after a prompt was built, the turn never
+# reaching the engine). The file handlers are consequently owned by a background
+# writer thread and fed through a bounded queue; a full queue DROPS records and
+# counts them instead of blocking the caller. Losing log lines is acceptable,
+# freezing the entity is not.
+#
+# Console output stays synchronous (cheap, and it must still work when the file
+# destination is broken). Set LOG_QUEUE_ENABLED=0 to restore direct writes when
+# debugging the logger itself.
+_LOG_QUEUE_MAXLEN_DEFAULT = 5000
+
+_log_queue: Optional["queue.Queue[logging.LogRecord]"] = None
+_log_listener_thread: Optional[threading.Thread] = None
+_log_listener_handlers: list[logging.Handler] = []
+_log_queue_stop = threading.Event()
+_log_queue_lock = threading.Lock()
+_drop_lock = threading.Lock()
+_dropped_records = 0
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    """Read a boolean environment flag ('0'/'false'/'no'/'off' disable)."""
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _queue_logging_enabled() -> bool:
+    """Whether file records are written through the background writer thread."""
+    return _env_flag("LOG_QUEUE_ENABLED", True)
+
+
+def _queue_maxlen() -> int:
+    """Bounded size of the log queue; beyond it records are dropped."""
+    try:
+        return max(
+            1, int(os.getenv("LOG_QUEUE_MAXLEN", str(_LOG_QUEUE_MAXLEN_DEFAULT)))
+        )
+    except Exception:
+        return _LOG_QUEUE_MAXLEN_DEFAULT
+
+
+def _note_dropped_records(count: int = 1) -> None:
+    """Count records dropped because the queue was full."""
+    global _dropped_records
+    with _drop_lock:
+        _dropped_records += count
+
+
+def _take_dropped_records() -> int:
+    """Consume and return the number of records dropped since the last call."""
+    global _dropped_records
+    with _drop_lock:
+        dropped = _dropped_records
+        _dropped_records = 0
+    return dropped
+
+
+class _DroppingQueueHandler(QueueHandler):
+    """Queue handler that never blocks: a full queue drops the record.
+
+    ``QueueHandler.enqueue`` raises ``queue.Full`` (via ``put_nowait``) rather
+    than blocking, which is exactly the behaviour we want; here the drop is
+    counted so the writer thread can report it once it catches up.
+    """
+
+    def prepare(self, record: logging.LogRecord) -> logging.LogRecord:
+        # Shallow copy, deliberately left UNFORMATTED: the real file handlers
+        # keep their own formatter, so a record is rendered exactly once, in the
+        # writer thread (and its traceback survives to be rendered there).
+        return copy.copy(record)
+
+    def enqueue(self, record: logging.LogRecord) -> None:
+        try:
+            self.queue.put_nowait(record)
+        except queue.Full:
+            _note_dropped_records()
+        except Exception:
+            # A logging failure must never surface into application code.
+            pass
+
+
+def _emit_through_listener_handlers(
+    record: logging.LogRecord, handlers: list[logging.Handler]
+) -> None:
+    """Dispatch one record to the owned handlers, preserving level filtering."""
+    for handler in handlers:
+        try:
+            # ``Handler.handle`` applies filters but NOT levels (that normally
+            # happens in ``Logger.callHandlers``), so the per-handler level check
+            # is replicated here to keep error-only handlers error-only.
+            if record.levelno >= handler.level:
+                handler.handle(record)
+        except Exception:
+            pass
+
+
+def _report_dropped_records() -> None:
+    """Write one warning about dropped records through the owned handlers."""
+    dropped = _take_dropped_records()
+    if not dropped:
+        return
+    _write_listener_notice(
+        f"[logging_utils] Dropped {dropped} log record(s): the log destination "
+        f"is slower than the process (queue full, "
+        f"LOG_QUEUE_MAXLEN={_queue_maxlen()})"
+    )
+
+
+# A single write taking longer than this is reported: it is the fingerprint of
+# the failure this module exists to survive (a stalled disk / network share).
+_SLOW_DESTINATION_WARN_SEC = 5.0
+_SLOW_DESTINATION_WARN_INTERVAL_SEC = 60.0
+_last_slow_warn_monotonic = 0.0
+
+
+def _write_listener_notice(message: str) -> None:
+    """Emit a synthetic WARNING through the owned handlers."""
+    try:
+        notice = logging.LogRecord(
+            name="synth.logging_utils",
+            level=logging.WARNING,
+            pathname=__file__,
+            lineno=0,
+            msg=message,
+            args=None,
+            exc_info=None,
+        )
+    except Exception:
+        return
+    _emit_through_listener_handlers(notice, list(_log_listener_handlers))
+
+
+def _report_slow_write(elapsed: float) -> None:
+    """Report a write that took abnormally long (rate-limited)."""
+    global _last_slow_warn_monotonic
+    if elapsed < _SLOW_DESTINATION_WARN_SEC:
+        return
+    now = time.monotonic()
+    if now - _last_slow_warn_monotonic < _SLOW_DESTINATION_WARN_INTERVAL_SEC:
+        return
+    _last_slow_warn_monotonic = now
+    _write_listener_notice(
+        f"[logging_utils] Slow log destination: one write took {elapsed:.1f}s "
+        f"(a stalled disk or network share; writes are off the event loop, so "
+        f"only log lines are affected)"
+    )
+
+
+def _log_listener_loop() -> None:
+    """Background writer: drain the queue into the owned file handlers."""
+    log_queue = _log_queue
+    if log_queue is None:
+        return
+    while True:
+        if _log_queue_stop.is_set() and log_queue.empty():
+            break
+        try:
+            record = log_queue.get(timeout=0.2)
+        except queue.Empty:
+            _report_dropped_records()
+            continue
+        started = time.monotonic()
+        _emit_through_listener_handlers(record, list(_log_listener_handlers))
+        _report_slow_write(time.monotonic() - started)
+    # Final drain so a graceful shutdown does not lose buffered records.
+    while True:
+        try:
+            record = log_queue.get_nowait()
+        except queue.Empty:
+            break
+        _emit_through_listener_handlers(record, list(_log_listener_handlers))
+    _report_dropped_records()
+
+
+def _ensure_log_listener() -> None:
+    """Create the queue and start the writer thread if needed."""
+    global _log_queue, _log_listener_thread
+    if _log_queue is None:
+        _log_queue = queue.Queue(maxsize=_queue_maxlen())
+    thread = _log_listener_thread
+    if thread is None or not thread.is_alive():
+        _log_queue_stop.clear()
+        thread = threading.Thread(
+            target=_log_listener_loop, name="synth-log-writer", daemon=True
+        )
+        _log_listener_thread = thread
+        thread.start()
+
+
+def _attach_queue_handler(
+    target_logger: logging.Logger,
+    file_handlers: list[logging.Handler],
+    formatter: logging.Formatter,
+) -> bool:
+    """Route ``target_logger``'s file handlers through the writer thread.
+
+    Returns True when the queue is in place, False when logging must stay
+    synchronous (queue logging disabled, or the writer thread could not start).
+    """
+    if not file_handlers or not _queue_logging_enabled():
+        return False
+    try:
+        _ensure_log_listener()
+        log_queue = _log_queue
+        if log_queue is None:
+            return False
+        with _log_queue_lock:
+            for handler in file_handlers:
+                if handler not in _log_listener_handlers:
+                    _log_listener_handlers.append(handler)
+        queue_handler = _DroppingQueueHandler(log_queue)
+        queue_handler.setFormatter(formatter)
+        # Never filter out a record a lower-level owned handler would keep.
+        try:
+            queue_handler.setLevel(min(h.level for h in file_handlers))
+        except Exception:
+            queue_handler.setLevel(logging.NOTSET)
+        target_logger.addHandler(queue_handler)
+        return True
+    except Exception:
+        return False
+
+
+def _shutdown_log_queue(timeout: float = 5.0) -> None:
+    """Flush and stop the writer thread (registered with ``atexit``)."""
+    global _log_listener_thread
+    thread = _log_listener_thread
+    log_queue = _log_queue
+    if thread is None or log_queue is None:
+        return
+    _log_queue_stop.set()
+    try:
+        thread.join(timeout=timeout)
+    except Exception:
+        pass
+    for handler in list(_log_listener_handlers):
+        try:
+            handler.flush()
+        except Exception:
+            pass
+    _log_listener_thread = None
+
+
+def _drop_count_for_tests() -> int:
+    """Expose the pending dropped-record count for tests."""
+    return _take_dropped_records()
 
 
 class TimeZoneFormatter(logging.Formatter):
@@ -396,7 +656,10 @@ def _write_to_separate_log(level: str, message: str, log_file: str) -> None:
                 encoding="utf-8",
             )
             fh.setFormatter(formatter)
-            separate_logger.addHandler(fh)
+            # Same non-blocking treatment as the main log: a stalled separate
+            # log file must not block the caller either.
+            if not _attach_queue_handler(separate_logger, [fh], formatter):
+                separate_logger.addHandler(fh)
 
         # Check if we need to replace legacy handlers (if strictly needed)
         pass
@@ -438,10 +701,11 @@ def setup_logging() -> logging.Logger:
         ch.setFormatter(formatter)
         logger.addHandler(ch)
 
-        # Try to add a file handler. If the file handler can't be created
-        # due to permission errors or other IO problems, fallback to stream
-        # logging so the application can still start and emit useful logs.
+        # Try to add file handlers. If they can't be created due to permission
+        # errors or other IO problems, fallback to stream logging so the
+        # application can still start and emit useful logs.
         # Daily rotation; retention/compression handled by log_archive.
+        file_handlers: list[logging.Handler] = []
         try:
             from core import log_archive
 
@@ -453,7 +717,7 @@ def setup_logging() -> logging.Logger:
                 encoding="utf-8",
             )
             fh.setFormatter(formatter)
-            logger.addHandler(fh)
+            file_handlers.append(fh)
         except Exception as e:  # pragma: no cover - environment dependent
             # If file handler fails, write a warning to stdout via stream handler
             try:
@@ -480,7 +744,7 @@ def setup_logging() -> logging.Logger:
             )
             error_fh.setLevel(logging.ERROR)
             error_fh.setFormatter(formatter)
-            logger.addHandler(error_fh)
+            file_handlers.append(error_fh)
         except Exception as e:  # pragma: no cover - environment dependent
             try:
                 ch.stream.write(
@@ -488,6 +752,17 @@ def setup_logging() -> logging.Logger:
                 )
             except Exception:
                 pass
+
+        # Hand the file handlers to the background writer thread so a stalled or
+        # full log destination (a network share, a full disk) can never block the
+        # calling thread — which in this application is the asyncio event loop.
+        # Direct attachment stays the fallback when queue logging is disabled or
+        # the writer thread cannot start.
+        if _attach_queue_handler(logger, file_handlers, formatter):
+            atexit.register(_shutdown_log_queue)
+        else:
+            for handler in file_handlers:
+                logger.addHandler(handler)
 
     # Compress old days + prune beyond the retention window at startup, so a
     # freshly-started process immediately reflects the retention policy even if
