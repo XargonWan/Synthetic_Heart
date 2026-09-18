@@ -22,6 +22,39 @@ from core.json_utils import extract_json_from_text
 # Local imports deferred to runtime to avoid circular import and expensive imports
 
 
+# The compaction prompt asks the model for `confidence: one of [low, medium, high]`,
+# but `archived_memories.confidence` is `double precision`. Passing the label
+# straight through made every insert fail with
+# "invalid input for query argument $6: 'high' (must be real number, not str)",
+# which aborted the whole cluster before the compacted memory was written — so
+# compaction produced nothing at all and the source diary entries were never
+# archived or folded into a memory. Small parser for our own declared vocabulary,
+# never intent detection.
+_CONFIDENCE_LABELS = {"low": 0.3, "medium": 0.6, "high": 0.9}
+_CONFIDENCE_DEFAULT = 0.5
+
+
+def _parse_confidence(value: object) -> float:
+    """Coerce a model-reported confidence into the numeric column's type.
+
+    Accepts a number (clamped to 0..1), the label vocabulary declared in the
+    prompt (low/medium/high), or anything else (falls back to the default).
+    """
+    if isinstance(value, bool) or value is None:
+        return _CONFIDENCE_DEFAULT
+    if isinstance(value, (int, float)):
+        return min(1.0, max(0.0, float(value)))
+    text = str(value).strip().lower()
+    if not text:
+        return _CONFIDENCE_DEFAULT
+    if text in _CONFIDENCE_LABELS:
+        return _CONFIDENCE_LABELS[text]
+    try:
+        return min(1.0, max(0.0, float(text)))
+    except (TypeError, ValueError):
+        return _CONFIDENCE_DEFAULT
+
+
 class GrilloCompactorPlugin:
     display_name = "G.R.I.L.L.O. Compactor"
 
@@ -659,7 +692,15 @@ class GrilloCompactorPlugin:
                     tags = cl.get("tags") or []
                     feeling = str(cl.get("feeling") or "")
                     source_ids = cl.get("source_ids") or []
-                    confidence = str(cl.get("confidence") or "low")
+                    # The prompt asks for confidence as a LABEL [low, medium, high]
+                    # but the column is double precision: passing the label through
+                    # made every archived_memories insert fail ("invalid input for
+                    # query argument $6: 'high' (must be real number, not str)"),
+                    # which aborted the whole cluster — so compaction never wrote a
+                    # memory at all (archived_memories had 0 rows) and the source
+                    # diary entries were never archived or folded. Coerce the label
+                    # to a number, accept a number as-is, default when unreadable.
+                    confidence = _parse_confidence(cl.get("confidence"))
                     justification = str(cl.get("justification") or "")
                     detailed = cl.get("detailed") or cl.get("detailed_summary") or None
                     if detailed:

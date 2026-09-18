@@ -196,3 +196,26 @@ async def test_tag_selection_fallback(monkeypatch):
 
     res = await p._run_one_compaction_cycle()
     assert res is True
+
+
+def test_confidence_label_is_coerced_to_a_number():
+    """The prompt asks for low/medium/high but the column is double precision.
+
+    Passing the label straight through made every `archived_memories` insert fail
+    ("invalid input for query argument $6: 'high' (must be real number, not
+    str)"), which aborted the cluster before the compacted memory was written, so
+    compaction produced nothing at all.
+    """
+    from plugins.grillo.grillo_compactor import _parse_confidence
+
+    assert _parse_confidence("high") == 0.9
+    assert _parse_confidence("MEDIUM") == 0.6
+    assert _parse_confidence("low") == 0.3
+    assert _parse_confidence(0.85) == 0.85
+    assert _parse_confidence("0.7") == 0.7
+    assert _parse_confidence(None) == 0.5
+    assert _parse_confidence("") == 0.5
+    assert _parse_confidence("banana") == 0.5
+    assert _parse_confidence(True) == 0.5
+    assert _parse_confidence(5) == 1.0
+    assert _parse_confidence(-3) == 0.0

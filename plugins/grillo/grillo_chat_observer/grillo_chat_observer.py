@@ -574,11 +574,42 @@ class GrilloChatObserverPlugin:
                 return True
         return False
 
+    @staticmethod
+    def _last_used_datetime(value: Any) -> Optional[datetime]:
+        """Parse an ``interface_paths.last_used`` value (datetime or ISO string)."""
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            text = str(value).strip()
+            if not text:
+                return None
+            try:
+                dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except Exception:
+                return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+
     async def _collect_recent_snippets(self, limit: int) -> List[str]:
         snippets = []
         try:
             from core.chat_history_cache import load_chat_history
             from core.interface_paths import get_recent_interface_paths
+
+            now = datetime.now(timezone.utc)
+            # Same anti-dead-chat gate the target list applies: a conversation
+            # nobody has touched within GRILLO_OBSERVER_ACTIVITY_WINDOW_DAYS
+            # contributes no context. Without it the snippet pool was "the N most
+            # recently used paths" with no cutoff at all, so whenever the live
+            # conversations did not fill the limit the observer's context was
+            # padded with lines from chats dead for weeks — 40-day-old WebUI
+            # entries and 77-day-old roleplay from a chat that no longer exists
+            # were observed in a live outreach prompt, which reads as a broken
+            # memory context (and invites the model to reply to ancient lines).
+            activity_cutoff = now - timedelta(days=self.activity_window_days)
 
             recent = await get_recent_interface_paths(limit * 2)
             for item in recent:
@@ -588,6 +619,11 @@ class GrilloChatObserverPlugin:
                 if not chat_path:
                     continue
                 chat_path = str(chat_path)
+                last_used = self._last_used_datetime(
+                    item.get("last_used") if isinstance(item, dict) else None
+                )
+                if last_used is not None and last_used < activity_cutoff:
+                    continue
                 # Never surface chats whose stored path is a placeholder —
                 # the model would copy the garbage path into an action.
                 if self._is_placeholder_path(chat_path):

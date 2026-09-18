@@ -761,3 +761,54 @@ def test_quiet_run_note_frames_outreach_as_the_job():
     assert "LIVE-CONVERSATION" in prompt
     assert "indulgence" not in prompt
     assert "last_sender=self" in prompt
+
+
+@pytest.mark.asyncio
+async def test_snippets_skip_chats_dead_past_the_activity_window(monkeypatch):
+    """A chat nobody has touched inside the window contributes no snippet.
+
+    The snippet pool used to be "the N most recently used paths" with no cutoff
+    at all, while the target list was gated by
+    GRILLO_OBSERVER_ACTIVITY_WINDOW_DAYS. Whenever the live conversations did not
+    fill the snippet limit, the observer's context was therefore padded with
+    lines from chats dead for weeks — a live outreach prompt carried 40-day-old
+    WebUI entries and 77-day-old roleplay from a chat that no longer exists.
+    """
+    plugin = gco.GrilloChatObserverPlugin()
+    plugin.activity_window_days = 14
+
+    now = datetime.now(timezone.utc)
+    fresh_used = now - timedelta(hours=2)
+    dead_used = now - timedelta(days=77)
+
+    async def fake_recent(limit):
+        return [
+            {"interface_path": "telegram_bot/1", "last_used": fresh_used},
+            {"interface_path": "telegram_bot/2", "last_used": dead_used},
+            {"interface_path": "telegram_bot/3", "last_used": dead_used.isoformat()},
+            {"interface_path": "telegram_bot/4", "last_used": None},
+        ]
+
+    async def fake_history(path):
+        return [
+            {
+                "text": f"message from {path}",
+                "sender_name": "Scar",
+                "timestamp": now.isoformat(),
+            }
+        ]
+
+    import core.interface_paths as interface_paths
+    import core.chat_history_cache as chat_history_cache
+
+    monkeypatch.setattr(interface_paths, "get_recent_interface_paths", fake_recent)
+    monkeypatch.setattr(chat_history_cache, "load_chat_history", fake_history)
+
+    snippets = await plugin._collect_recent_snippets(9)
+
+    assert snippets
+    assert any("telegram_bot/1" in s for s in snippets), snippets
+    assert not any("telegram_bot/2" in s for s in snippets), snippets
+    assert not any("telegram_bot/3" in s for s in snippets), snippets
+    # An unknown last_used stays fail-open rather than dropping the chat.
+    assert any("telegram_bot/4" in s for s in snippets), snippets
