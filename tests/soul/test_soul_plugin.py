@@ -577,6 +577,7 @@ def _build_recall_row(
         "explicit_importance": 0.0,
         "consolidated": False,
         "scene_id": None,
+        "distilled_at": None,
         "vector_similarity": vector_similarity,
     }
 

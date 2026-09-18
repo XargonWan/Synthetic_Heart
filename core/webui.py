@@ -933,6 +933,11 @@ class SynthWebUIInterface:
         self.app.delete("/api/dead-targets/{target_id}")(self.delete_dead_target)
         self.app.get("/api/reason-trail")(self.list_reason_trail)
         self.app.delete("/api/reason-trail/{reason_id}")(self.delete_reason_trail)
+        # Manual SOUL memory maintenance: the re-distil pass behind the button in
+        # Settings. GET reports progress and how much is still unstamped, POST
+        # starts the pass in the background.
+        self.app.get("/api/soul/redistil")(self.soul_redistil_status)
+        self.app.post("/api/soul/redistil")(self.start_soul_redistil)
 
         # Agent tasks endpoints (Agentic Runtime persistence)
         self.app.get("/api/agent/tasks")(self.list_agent_tasks)
@@ -10087,6 +10092,62 @@ class SynthWebUIInterface:
             raise
         except Exception as exc:
             log_error(f"{LOG_PREFIX} Failed to revive dead target {target_id}: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # ------------------------------------------------------------------
+    # SOUL memory maintenance (manual re-distil pass)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _soul_plugin():
+        """Return the loaded SOUL plugin, or raise 503 when it is not there."""
+        from core.core_initializer import PLUGIN_REGISTRY
+
+        plugin = (
+            PLUGIN_REGISTRY.get("soul_plugin")
+            if isinstance(PLUGIN_REGISTRY, dict)
+            else None
+        )
+        if plugin is None or not hasattr(plugin, "start_redistil"):
+            raise HTTPException(status_code=503, detail="SOUL plugin is not available")
+        return plugin
+
+    async def soul_redistil_status(self):
+        """Report on the memory re-distil pass: running, progress, pending cells."""
+        try:
+            plugin = self._soul_plugin()
+            return JSONResponse(
+                {"success": True, **(await plugin.redistil_status())}
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to read re-distil status: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def start_soul_redistil(self, request: Request):
+        """Start the memory re-distil pass in the background.
+
+        The pass costs one model call per legacy memory and runs for minutes to
+        hours, so this only starts it; the caller polls GET for progress. An
+        optional ``{"limit": N}`` body bounds how many memories one press handles.
+        """
+        plugin = self._soul_plugin()
+        limit: int | None = None
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        if isinstance(payload, dict) and payload.get("limit") is not None:
+            try:
+                limit = int(payload["limit"])
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="limit must be an integer")
+        try:
+            return JSONResponse({"success": True, **(await plugin.start_redistil(limit=limit))})
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to start the re-distil pass: {exc}")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     # ------------------------------------------------------------------

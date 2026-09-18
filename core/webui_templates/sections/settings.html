@@ -23,6 +23,14 @@
       </div>
     </article>
     <article class="card">
+      <h2>Memory Re-distillation</h2>
+      <p>Memories written before the distilling extractor existed hold the session transcript instead of distilled knowledge, which is what makes recall return raw conversation. This rewrites those memories in place, keeping their dates, retrieval counts and emotions. It costs one model call per memory and runs in the background, so the page stays usable and the counters below follow the progress.</p>
+      <div style="margin-top:0.6rem; display:flex; gap:0.75rem; align-items:center; flex-wrap:wrap;">
+        <button id="redistil-memcells" class="btn-ghost" type="button">Re-distil memories</button>
+        <span id="redistil-status" class="meta">Checking…</span>
+      </div>
+    </article>
+    <article class="card">
       <h2>Notifications</h2>
       <p>Enable desktop notifications and audio cues whenever new messages arrive.</p>
       <label class="toggle">

@@ -4,7 +4,7 @@ import hashlib
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any, Protocol, cast
+from typing import Any, Callable, Protocol, cast
 
 from core.logging_utils import log_debug, log_info, log_warning
 
@@ -35,6 +35,12 @@ from .time_resolution import AbsoluteTimeResolver
 
 
 class MemCellExtractor(Protocol):
+    # An extractor that distils content instead of copying the transcript may
+    # declare an optional ``distils_content = True`` class attribute; the compiler
+    # then stamps every cell it writes, and the operator re-distil pass targets
+    # the unstamped rows. It is read with ``getattr``, so the deterministic
+    # extractor legitimately does not have it.
+
     async def extract_memcells(
         self, *, transcript: str, current_date: date
     ) -> list[MemCellExtractionModel]: ...
@@ -243,6 +249,11 @@ class SoulCompiler:
                     event_timestamp=cell_timestamp,
                     session_id=session_id,
                     embedding=embedding,
+                    distilled_at=(
+                        now_utc()
+                        if getattr(self.memcell_extractor, "distils_content", False)
+                        else None
+                    ),
                 )
                 await self.repository.upsert_memcell(memcell)
 
@@ -308,6 +319,7 @@ class SoulCompiler:
         cell.episodic_trace = trace
         cell.atomic_facts = list(distilled.atomic_facts)
         cell.embedding = await self.embedder.embed(trace)
+        cell.distilled_at = now_utc()
         await self.repository.upsert_memcell(cell)
         return True
 
@@ -325,6 +337,37 @@ class SoulCompiler:
         cell, so this is a deliberate one-off, not a scheduled pass.
         """
         pending = await self.repository.list_memcells_before(before, limit=limit)
+        return await self.redistil_each(pending, current_date=current_date)
+
+    async def redistil_pending(
+        self,
+        *,
+        current_date: date,
+        limit: int = 500,
+        on_progress: Callable[[dict[str, int]], None] | None = None,
+    ) -> dict[str, int]:
+        """Re-distil every cell that carries no distillation stamp.
+
+        This is what the WebUI button runs. After an upgrade the cells written by
+        the deterministic extractor are exactly the unstamped ones, and a cell
+        gets stamped when it is rewritten, so pressing the button a second time
+        finds nothing to do instead of paraphrasing good memories again. No
+        timestamp has to be configured by the operator, which is what makes this
+        safe to hand to every deployment.
+        """
+        pending = await self.repository.list_memcells_needing_distillation(limit=limit)
+        return await self.redistil_each(
+            pending, current_date=current_date, on_progress=on_progress
+        )
+
+    async def redistil_each(
+        self,
+        pending: list[MemCell],
+        *,
+        current_date: date,
+        on_progress: Callable[[dict[str, int]], None] | None = None,
+    ) -> dict[str, int]:
+        """Run the rewrite over an explicit list of cells, reporting progress."""
         rewritten = 0
         skipped = 0
         failed = 0
@@ -338,6 +381,16 @@ class SoulCompiler:
             except Exception as exc:
                 failed += 1
                 log_warning(f"[soul] redistil failed for {cell.id}: {exc}")
+            if on_progress is not None:
+                on_progress(
+                    {
+                        "inspected": index,
+                        "total": total,
+                        "rewritten": rewritten,
+                        "skipped": skipped,
+                        "failed": failed,
+                    }
+                )
             if index % 25 == 0:
                 log_info(
                     f"[soul] redistil progress: {index}/{total} "
@@ -349,6 +402,8 @@ class SoulCompiler:
             "skipped": skipped,
             "failed": failed,
         }
+        if on_progress is not None:
+            on_progress(result)
         log_debug(
             "[soul] redistil pass: "
             f"inspected={result['inspected']} rewritten={rewritten} "

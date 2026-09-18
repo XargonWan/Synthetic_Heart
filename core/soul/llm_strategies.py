@@ -730,6 +730,10 @@ class LlmMemCellExtractor:
     # deliberate.
     MIN_VERBATIM_CHECK_CHARS = 40
     MAX_TRANSCRIPT_CHARS = 12000
+    # Marker read by ``SoulCompiler.post_session_compile``: cells this extractor
+    # writes carry a distillation stamp, and the WebUI re-distil pass targets the
+    # ones that do not. The deterministic extractor leaves the attribute absent.
+    distils_content = True
 
     def __init__(
         self,

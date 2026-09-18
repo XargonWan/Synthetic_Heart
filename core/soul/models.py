@@ -92,6 +92,10 @@ class MemCell:
     explicit_importance: float = 0.0
     consolidated: bool = False
     scene_id: str | None = None
+    # Set by the compiler when a distilling extractor wrote this cell's content.
+    # NULL means the row predates distillation (raw transcript as the trace), which
+    # is the set the operator re-distil pass has to catch up.
+    distilled_at: datetime | None = None
 
 
 @dataclass(slots=True)

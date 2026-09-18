@@ -16,6 +16,25 @@ performs periodic roll-ups. Persistence can be in-memory or PostgreSQL.
 
 Enabled/disabled via its global plugin toggle (`PLUGIN_ENABLED__soul_plugin`).
 
+## Memory re-distillation
+
+Memories written before the distilling extractor existed hold the session
+transcript as their content, so recall can return raw conversation however good
+the pipeline is. **Settings → Memory Re-Distillation → Re-distil memories**
+rewrites them in place from the WebUI: one model call per memory, run in the
+background with live counters, and the rest of the page stays usable.
+
+The pass targets memories that carry no distillation stamp (`mem_cells.distilled_at`,
+added automatically when the plugin starts). A memory gets stamped when a
+distilling extractor writes it and when the pass rewrites it, so pressing the
+button again does nothing rather than paraphrasing good memories a second time.
+The panel shows how many memories are still unstamped before anyone presses it.
+A memory the model will not paraphrase stays unstamped and can be retried later.
+
+| Key | Purpose |
+|-----|---------|
+| `SOUL_REDISTIL_LIMIT` | How many memories one press may rewrite (default 5000, hard ceiling 20000). Each one costs a model call, so a large store is caught up over several presses. |
+
 ## Configuration
 
 | Key | Purpose |

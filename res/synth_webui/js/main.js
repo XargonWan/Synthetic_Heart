@@ -6598,6 +6598,114 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             }
                         });
                     }
+
+                    // ── Memory re-distillation ────────────────────────────────
+                    // Memories written before the distilling extractor existed hold
+                    // the session transcript instead of distilled knowledge. The
+                    // pass costs one model call per memory, so it runs in the
+                    // background on the server and this polls for progress.
+                    const redistilBtn = document.getElementById('redistil-memcells');
+                    const redistilStatus = document.getElementById('redistil-status');
+                    if (redistilBtn && !window.__synth_redistil_wired) {
+                        window.__synth_redistil_wired = true;
+                        const existingTimer = window.__synth_redistil_timer;
+                        if (existingTimer) {
+                            window.clearTimeout(existingTimer);
+                            window.__synth_redistil_timer = null;
+                        }
+
+                        const stillToDistil = (state) => (
+                            state && typeof state.pending === 'number' ? state.pending : null
+                        );
+
+                        const paintRedistil = (state) => {
+                            if (!redistilStatus) return;
+                            const pending = stillToDistil(state);
+                            const running = !!(state && state.running);
+                            redistilBtn.disabled = running;
+                            if (running) {
+                                const total = (state && state.total) || 0;
+                                const done = (state && state.inspected) || 0;
+                                const rewritten = (state && state.rewritten) || 0;
+                                redistilStatus.textContent = total
+                                    ? `Working: ${done} of ${total} memories checked, ${rewritten} rewritten…`
+                                    : 'Working: starting the pass…';
+                                return;
+                            }
+                            if (state && state.error) {
+                                redistilStatus.textContent = `Pass failed: ${state.error}`;
+                                return;
+                            }
+                            if (state && state.finished_at) {
+                                const summary = `Last pass: ${state.rewritten || 0} rewritten, ${state.skipped || 0} left unchanged, ${state.failed || 0} failed.`;
+                                redistilStatus.textContent = pending
+                                    ? `${summary} ${pending} still to distil.`
+                                    : summary;
+                                if (pending === 0) redistilBtn.disabled = true;
+                                return;
+                            }
+                            if (pending === null) {
+                                redistilStatus.textContent = 'Ready.';
+                            } else if (pending === 0) {
+                                redistilStatus.textContent = 'Every memory is already distilled.';
+                                redistilBtn.disabled = true;
+                            } else {
+                                redistilStatus.textContent = `${pending} memories still hold raw transcript. Press to distil.`;
+                            }
+                        };
+
+                        const pollRedistil = async () => {
+                            let state = null;
+                            try {
+                                const response = await fetch('/api/soul/redistil');
+                                const payload = await response.json().catch(() => ({}));
+                                if (response.ok && payload.success) state = payload;
+                                else if (redistilStatus) {
+                                    redistilStatus.textContent = 'Memory maintenance unavailable.';
+                                    return;
+                                }
+                            } catch (error) {
+                                if (redistilStatus) redistilStatus.textContent = 'Memory maintenance unavailable.';
+                                return;
+                            }
+                            paintRedistil(state);
+                            if (state && state.running) {
+                                window.__synth_redistil_timer = window.setTimeout(pollRedistil, 5000);
+                            }
+                        };
+
+                        const existingState = window.__synth_redistil_state;
+                        if (existingState) paintRedistil(existingState);
+                        pollRedistil();
+
+                        redistilBtn.addEventListener('click', async () => {
+                            redistilBtn.disabled = true;
+                            if (redistilStatus) redistilStatus.textContent = 'Starting…';
+                            try {
+                                const response = await fetch('/api/soul/redistil', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({}),
+                                });
+                                const payload = await response.json().catch(() => ({}));
+                                if (!response.ok || !payload.success) {
+                                    throw new Error(payload.detail || payload.error || `HTTP ${response.status}`);
+                                }
+                                if (payload.started === false && payload.reason === 'already_running') {
+                                    try { if (window.showToast) window.showToast('A re-distil pass is already running.', false); } catch (e) { /* ignore */ }
+                                } else {
+                                    try { if (window.showToast) window.showToast('Re-distilling memories in the background.', false); } catch (e) { /* ignore */ }
+                                }
+                                paintRedistil(payload);
+                                window.__synth_redistil_timer = window.setTimeout(pollRedistil, 3000);
+                            } catch (error) {
+                                const message = error && error.message ? error.message : 'Could not start the pass';
+                                if (redistilStatus) redistilStatus.textContent = `Could not start: ${message}`;
+                                try { if (window.showToast) window.showToast(`Re-distil failed to start: ${message}`, true); } catch (e) { /* ignore */ }
+                                redistilBtn.disabled = false;
+                            }
+                        });
+                    }
                     initNotifications();
                     window.__synth_settings_initialized = true;
                 }

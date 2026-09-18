@@ -169,6 +169,21 @@ register_exposed_var(
 )
 
 register_exposed_var(
+    "SOUL_REDISTIL_LIMIT",
+    label="Memory re-distil batch size",
+    default=5000,
+    value_type=int,
+    ui_type="number",
+    description=(
+        "How many memories the manual re-distil button may rewrite in one press. "
+        "Each one costs a model call, so the pass is capped and can be pressed "
+        "again to continue with the rest."
+    ),
+    scope="plugins",
+    component="soul_plugin",
+)
+
+register_exposed_var(
     "SOUL_TEMPORAL_ENABLED",
     label="Temporal situational context extraction",
     default=1,
@@ -243,6 +258,21 @@ _SOUL_RETRIEVAL_BUMP_TRACK_MAX = 512
 # is shown is ranked and bounded here; the store keeps everything.
 _SOUL_TEMPORAL_INJECT_LIMIT = 8
 
+# Backstop for the manual re-distil pass: one model call per legacy cell, so a
+# single press is capped rather than allowed to grind through a huge store in one
+# go. ``SOUL_REDISTIL_LIMIT`` sets the batch size, this is the ceiling on it.
+_SOUL_REDISTIL_HARD_CAP = 20000
+
+
+def _soul_redistil_limit() -> int:
+    """Return how many cells one re-distil press may process."""
+    try:
+        from core.config_manager import config_registry
+
+        return int(config_registry.get_value("SOUL_REDISTIL_LIMIT", 5000, value_type=int))
+    except Exception:
+        return 5000
+
 
 class SoulPlugin(PluginBase):
     """Runtime integration plugin for SOUL architecture.
@@ -274,6 +304,9 @@ class SoulPlugin(PluginBase):
         self._scheduler_task: asyncio.Task[None] | None = None
         self._last_rollup_date: date | None = None
         self._last_consolidated_at: datetime | None = None
+        # Manual re-distil pass (WebUI button): the task and its live counters.
+        self._redistil_task: asyncio.Task[None] | None = None
+        self._redistil_state: dict[str, Any] = {}
 
     @staticmethod
     def _is_dsp_llm_enabled() -> bool:
@@ -1298,6 +1331,102 @@ class SoulPlugin(PluginBase):
             intensity=intensity,
             context=text[:120],
         )
+
+    # ------------------------------------------------------------------
+    # Memory re-distillation (the WebUI "Re-distil memories" button)
+    # ------------------------------------------------------------------
+    async def redistil_status(self) -> dict[str, Any]:
+        """Return the state of the memory re-distillation pass.
+
+        ``pending`` is the live count of cells that predate the distilling
+        extractor, so the panel can say how much work is left before anyone
+        presses the button. A finished run keeps its counters until the next run
+        starts, so the last result stays readable.
+        """
+        running = self._redistil_task is not None and not self._redistil_task.done()
+        state: dict[str, Any] = {
+            "running": running,
+            "limit": int(self._redistil_state.get("limit") or _soul_redistil_limit()),
+            "total": int(self._redistil_state.get("total") or 0),
+            "inspected": int(self._redistil_state.get("inspected") or 0),
+            "rewritten": int(self._redistil_state.get("rewritten") or 0),
+            "skipped": int(self._redistil_state.get("skipped") or 0),
+            "failed": int(self._redistil_state.get("failed") or 0),
+            "started_at": self._redistil_state.get("started_at"),
+            "finished_at": self._redistil_state.get("finished_at"),
+            "error": self._redistil_state.get("error"),
+            "distilling_extractor": bool(
+                getattr(self._compiler.memcell_extractor, "distils_content", False)
+            ),
+        }
+        try:
+            state["pending"] = await self._repo.count_memcells_needing_distillation()
+        except Exception as exc:
+            state["pending"] = None
+            state["error"] = state.get("error") or f"count failed: {exc}"
+        return state
+
+    async def start_redistil(self, *, limit: int | None = None) -> dict[str, Any]:
+        """Start the re-distil pass in the background and return immediately.
+
+        One model call per legacy cell means a full pass runs for minutes to
+        hours, far longer than a WebUI request, so the request only starts the
+        task: the caller polls :meth:`redistil_status` for progress. A press while
+        a pass is running is refused rather than queued, so two passes can never
+        work over the same rows at once, and the pass itself is idempotent (a cell
+        is stamped when it is rewritten, and only unstamped cells are offered).
+        """
+        if self._redistil_task is not None and not self._redistil_task.done():
+            return {"started": False, "reason": "already_running", **await self.redistil_status()}
+
+        batch_limit = _soul_redistil_limit() if limit is None else int(limit)
+        batch_limit = max(1, min(batch_limit, _SOUL_REDISTIL_HARD_CAP))
+        self._redistil_state = {
+            "limit": batch_limit,
+            "total": 0,
+            "inspected": 0,
+            "rewritten": 0,
+            "skipped": 0,
+            "failed": 0,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "finished_at": None,
+            "error": None,
+        }
+        log_info(f"[soul_plugin] re-distil pass started (limit={batch_limit})")
+        self._redistil_task = asyncio.create_task(self._redistil_worker(batch_limit))
+        return {"started": True, "reason": None, **await self.redistil_status()}
+
+    async def _redistil_worker(self, limit: int) -> None:
+        try:
+            result = await self._compiler.redistil_pending(
+                current_date=date.today(),
+                limit=limit,
+                on_progress=self._redistil_progress,
+            )
+            self._redistil_state.update(result)
+        except Exception as exc:
+            self._redistil_state["error"] = str(exc)
+            log_error(f"[soul_plugin] re-distil pass failed: {exc}")
+        finally:
+            self._redistil_state["finished_at"] = datetime.now(timezone.utc).isoformat()
+            log_info(
+                "[soul_plugin] re-distil pass finished: "
+                f"inspected={self._redistil_state.get('inspected')} "
+                f"rewritten={self._redistil_state.get('rewritten')} "
+                f"skipped={self._redistil_state.get('skipped')} "
+                f"failed={self._redistil_state.get('failed')}"
+                + (
+                    f" error={self._redistil_state['error']}"
+                    if self._redistil_state.get("error")
+                    else ""
+                )
+            )
+
+    def _redistil_progress(self, progress: dict[str, int]) -> None:
+        """Keep the counters the WebUI polls up to date between log lines."""
+        for key in ("total", "inspected", "rewritten", "skipped", "failed"):
+            if key in progress:
+                self._redistil_state[key] = int(progress[key])
 
     def get_repository(self) -> SoulRepository:
         """Return the SOUL store for other plugins that feed or read it.

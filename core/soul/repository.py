@@ -123,6 +123,19 @@ def _passes_recall_floor(match: MemCellRecall, session_id: str | None) -> bool:
     return match.score >= 0.22 and max(match.similarity, match.lexical_score) >= 0.10
 
 
+def _optional_column(row: Any, name: str) -> Any:
+    """Read a column that an older query's row shape may not carry.
+
+    ``distilled_at`` is additive: query paths that predate it (or a test double
+    that models an older row) must degrade to "not distilled" rather than break
+    recall with a ``KeyError``.
+    """
+    try:
+        return row[name]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
 def _affected_rows(status: object, command: str) -> int:
     """Return the row count from an asyncpg command tag such as ``UPDATE 3``."""
     parts = str(status).split()
@@ -178,6 +191,12 @@ class SoulRepository(Protocol):
     async def list_memcells_before(
         self, before: datetime, limit: int = 500
     ) -> list[MemCell]: ...
+
+    async def list_memcells_needing_distillation(
+        self, limit: int = 500
+    ) -> list[MemCell]: ...
+
+    async def count_memcells_needing_distillation(self) -> int: ...
 
     async def recall_memories(
         self,
@@ -319,6 +338,24 @@ class InMemorySoulRepository:
         missing = [c for c in self.memcells.values() if not c.embedding]
         missing.sort(key=lambda c: c.event_timestamp)
         return missing[:limit]
+
+    async def count_memcells_needing_distillation(self) -> int:
+        return sum(
+            1
+            for cell in self.memcells.values()
+            if cell.distilled_at is None and cell.episodic_trace.strip()
+        )
+
+    async def list_memcells_needing_distillation(
+        self, limit: int = 500
+    ) -> list[MemCell]:
+        pending = [
+            cell
+            for cell in self.memcells.values()
+            if cell.distilled_at is None and cell.episodic_trace.strip()
+        ]
+        pending.sort(key=lambda c: (-c.retrieval_count, c.event_timestamp))
+        return pending[:limit]
 
     async def list_memcells_before(
         self, before: datetime, limit: int = 500
@@ -472,10 +509,16 @@ class PostgresSoulRepository:
                 explicit_importance REAL NOT NULL DEFAULT 0,
                 consolidated BOOLEAN NOT NULL DEFAULT FALSE,
                 scene_id TEXT,
+                distilled_at TIMESTAMPTZ,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
             """,
+            # Additive column for deployments whose table predates distillation:
+            # NULL means "written before the distilling extractor existed", which
+            # is exactly the set the WebUI's re-distil button has to catch up.
+            "ALTER TABLE mem_cells ADD COLUMN IF NOT EXISTS distilled_at TIMESTAMPTZ",
+            "CREATE INDEX IF NOT EXISTS idx_mem_cells_distilled_at ON mem_cells (distilled_at)",
             """
             CREATE TABLE IF NOT EXISTS mem_cell_vectors (
                 mem_cell_id TEXT PRIMARY KEY REFERENCES mem_cells(id) ON DELETE CASCADE,
@@ -630,11 +673,11 @@ class PostgresSoulRepository:
                 INSERT INTO mem_cells (
                     id, session_id, episodic_trace, atomic_facts, emotional_tag,
                     foresight_signals, event_timestamp, retrieval_count, explicit_importance,
-                    consolidated, scene_id, updated_at
+                    consolidated, scene_id, distilled_at, updated_at
                 )
                 VALUES (
                     $1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7,
-                    $8, $9, $10, $11, NOW()
+                    $8, $9, $10, $11, $12, NOW()
                 )
                 ON CONFLICT (id)
                 DO UPDATE SET
@@ -648,6 +691,10 @@ class PostgresSoulRepository:
                     explicit_importance = EXCLUDED.explicit_importance,
                     consolidated = EXCLUDED.consolidated,
                     scene_id = EXCLUDED.scene_id,
+                    -- A cell that has been distilled stays distilled: a write that
+                    -- does not carry a stamp (a backfill, an embedding repair) must
+                    -- never clear one.
+                    distilled_at = COALESCE(EXCLUDED.distilled_at, mem_cells.distilled_at),
                     updated_at = NOW()
                 """,
                 cell.id,
@@ -680,6 +727,7 @@ class PostgresSoulRepository:
                 cell.explicit_importance,
                 cell.consolidated,
                 cell.scene_id,
+                cell.distilled_at,
             )
 
             if cell.embedding:
@@ -1036,7 +1084,7 @@ class PostgresSoulRepository:
                 SELECT
                     c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
                     c.foresight_signals, c.event_timestamp, c.retrieval_count, c.explicit_importance,
-                    c.consolidated, c.scene_id
+                    c.consolidated, c.scene_id, c.distilled_at
                 FROM mem_cells c
                 LEFT JOIN mem_cell_vectors v ON v.mem_cell_id = c.id
                 WHERE v.mem_cell_id IS NULL
@@ -1059,7 +1107,7 @@ class PostgresSoulRepository:
                 SELECT
                     c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
                     c.foresight_signals, c.event_timestamp, c.retrieval_count, c.explicit_importance,
-                    c.consolidated, c.scene_id
+                    c.consolidated, c.scene_id, c.distilled_at
                 FROM mem_cells c
                 WHERE c.event_timestamp < $1
                   AND c.episodic_trace IS NOT NULL
@@ -1068,6 +1116,42 @@ class PostgresSoulRepository:
                 LIMIT $2
                 """,
                 before,
+                limit,
+            )
+        return [self._row_to_memcell(row) for row in rows]
+
+    async def count_memcells_needing_distillation(self) -> int:
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            value = await conn.fetchval(
+                """
+                SELECT count(*)
+                FROM mem_cells
+                WHERE distilled_at IS NULL
+                  AND episodic_trace IS NOT NULL
+                  AND episodic_trace <> ''
+                """
+            )
+        return int(value or 0)
+
+    async def list_memcells_needing_distillation(
+        self, limit: int = 500
+    ) -> list[MemCell]:
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
+                    c.foresight_signals, c.event_timestamp, c.retrieval_count, c.explicit_importance,
+                    c.consolidated, c.scene_id, c.distilled_at
+                FROM mem_cells c
+                WHERE c.distilled_at IS NULL
+                  AND c.episodic_trace IS NOT NULL
+                  AND c.episodic_trace <> ''
+                ORDER BY c.retrieval_count DESC, c.event_timestamp ASC
+                LIMIT $1
+                """,
                 limit,
             )
         return [self._row_to_memcell(row) for row in rows]
@@ -1104,7 +1188,7 @@ class PostgresSoulRepository:
                 SELECT
                     c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
                     c.foresight_signals, c.event_timestamp, c.retrieval_count, c.explicit_importance,
-                    c.consolidated, c.scene_id,
+                    c.consolidated, c.scene_id, c.distilled_at,
                     vc.vector_similarity
                 FROM vector_candidates vc
                 JOIN mem_cells c ON c.id = vc.mem_cell_id
@@ -1127,7 +1211,7 @@ class PostgresSoulRepository:
                         SELECT
                             c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
                             c.foresight_signals, c.event_timestamp, c.retrieval_count, c.explicit_importance,
-                            c.consolidated, c.scene_id,
+                            c.consolidated, c.scene_id, c.distilled_at,
                             COALESCE((1 - (v.embedding <=> $2::vector)), 0.0) AS vector_similarity
                         FROM mem_cells c
                         LEFT JOIN mem_cell_vectors v ON v.mem_cell_id = c.id
@@ -1370,6 +1454,7 @@ class PostgresSoulRepository:
             explicit_importance=float(row["explicit_importance"]),
             consolidated=bool(row["consolidated"]),
             scene_id=cast(str | None, row["scene_id"]),
+            distilled_at=cast(datetime | None, _optional_column(row, "distilled_at")),
         )
 
     @staticmethod
