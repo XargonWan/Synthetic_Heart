@@ -874,7 +874,19 @@ class SoulPlugin(PluginBase):
             ),
             reverse=True,
         )
-        selected = reranked[:_SOUL_RECALL_LIMIT]
+        selected: list[MemCellRecall] = []
+        seen_traces: set[str] = set()
+        for match in reranked:
+            # Two cells can hold the same line (a turn compiled twice, a scene
+            # folded back in). Injecting it twice wastes prompt space and is what
+            # makes a memory block read as repetitive.
+            key = self._trace_key(match.cell.episodic_trace)
+            if key and key in seen_traces:
+                continue
+            seen_traces.add(key)
+            selected.append(match)
+            if len(selected) >= _SOUL_RECALL_LIMIT:
+                break
 
         now_monotonic = time.monotonic()
         for match in selected:
@@ -941,11 +953,22 @@ class SoulPlugin(PluginBase):
         if len(trace) > 220:
             trace = trace[:220].rstrip() + "..."
 
-        fact_text = "; ".join(
-            self._render_atomic_fact(fact)
-            for fact in cell.atomic_facts[:2]
-            if self._render_atomic_fact(fact)
-        )
+        trace_key = self._trace_key(cell.episodic_trace)
+
+        # The extractor currently stores the conversation line itself as the
+        # cell's only "fact" (``Conversation|summary|<the same text>``), so
+        # rendering it prints the trace twice and lengthens every prompt for no
+        # added information. Keep only facts that say something the trace does
+        # not already say.
+        fact_parts: list[str] = []
+        for fact in cell.atomic_facts[:2]:
+            rendered = self._render_atomic_fact(fact)
+            if not rendered:
+                continue
+            if self._fact_restates_trace(fact, trace_key):
+                continue
+            fact_parts.append(rendered)
+        fact_text = "; ".join(fact_parts)
         if fact_text:
             trace = f"{trace} Key facts: {fact_text}"
 
@@ -1019,6 +1042,24 @@ class SoulPlugin(PluginBase):
             "neutral": "neutral",
         }
         return emotion_map.get(normalized)
+
+    @staticmethod
+    def _trace_key(text: Any) -> str:
+        """Normalised comparison key for a memory's text."""
+        return " ".join(str(text or "").split()).strip().lower()[:160]
+
+    @classmethod
+    def _fact_restates_trace(cls, fact: str, trace_key: str) -> bool:
+        """True when an atomic fact only repeats the cell's own trace.
+
+        The compiler currently writes the conversation line into the fact list
+        verbatim, so this is the common case for every cell produced by it.
+        """
+        if not trace_key:
+            return False
+        parts = [part.strip() for part in str(fact or "").split("|") if part.strip()]
+        subject = parts[2] if len(parts) == 3 else str(fact or "")
+        return trace_key[:120] in " ".join(subject.split()).strip().lower()
 
     @staticmethod
     def _render_atomic_fact(fact: str) -> str:

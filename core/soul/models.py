@@ -296,8 +296,14 @@ def compute_memcell_salience(
 # ranking. Per extra (log) retrieval the cell loses a little of its salience, up
 # to a hard cap, so a cell that keeps coming back has to win on similarity,
 # emotion or recency instead of on inertia.
-_RECALL_FATIGUE_PER_LOG = 0.05
-_RECALL_FATIGUE_MAX = 0.15
+#
+# Note the effective weight: salience is 20% of the final recall score, so a
+# penalty of 0.6 moves a cell by ~0.12 of that score. The first version
+# (0.05/0.15) moved it by 0.03, which was not enough to rotate the recalled set:
+# the same five transcript lines were injected turn after turn for days (one live
+# cell reached 663 retrievals) while 396 of 423 cells were never recalled at all.
+_RECALL_FATIGUE_PER_LOG = 0.12
+_RECALL_FATIGUE_MAX = 0.6
 
 
 def compute_recall_salience(

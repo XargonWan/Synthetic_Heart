@@ -974,3 +974,158 @@ async def test_buffer_lines_fall_back_to_user_when_the_sender_is_unknown() -> No
     traces = [cell.episodic_trace for cell in plugin._repo.memcells.values()]
     assert traces
     assert all(trace.startswith("user: ") for trace in traces), traces
+
+
+def test_format_recalled_memory_omits_a_fact_that_repeats_the_trace() -> None:
+    """The compiler's only "fact" is the trace itself, so echoing it must stop.
+
+    Every live cell carries ``Conversation|summary|<the same line>`` as its sole
+    atomic fact, so the block printed the line twice and every prompt carried the
+    duplicate.
+    """
+    plugin = SoulPlugin()
+    now = datetime.now(timezone.utc)
+    line = "Scar: Damn are you kidding me, the memcell issue showed up again just then"
+    cell = MemCell(
+        id="dup",
+        episodic_trace=line,
+        atomic_facts=[f"Conversation|summary|{line}"],
+        emotional_tag=EmotionalTag(
+            state_snapshot={"joy": 0.2, "fear": 0.0, "sad": 0.0, "anger": 0.0},
+            dominant_emotion="joy",
+            intensity=0.2,
+            valence=0.2,
+        ),
+        foresight_signals=[],
+        event_timestamp=now,
+        session_id="telegram_bot_5208932647",
+    )
+
+    formatted = plugin._format_recalled_memory(
+        MemCellRecall(cell=cell, similarity=0.9, lexical_score=0.8, score=0.9),
+        active_session_id="telegram_bot_5208932647",
+    )
+
+    assert "Key facts:" not in formatted
+    assert "same chat" in formatted
+    assert formatted.count("memcell issue showed up") == 1
+
+
+def test_format_recalled_memory_keeps_a_fact_that_adds_information() -> None:
+    plugin = SoulPlugin()
+    now = datetime.now(timezone.utc)
+    cell = MemCell(
+        id="real",
+        episodic_trace="Alice mentioned her morning routine.",
+        atomic_facts=["Alice|likes|jasmine tea"],
+        emotional_tag=EmotionalTag(
+            state_snapshot={"joy": 0.2, "fear": 0.0, "sad": 0.0, "anger": 0.0},
+            dominant_emotion="joy",
+            intensity=0.2,
+            valence=0.2,
+        ),
+        foresight_signals=[],
+        event_timestamp=now,
+        session_id="telegram_bot_5208932647",
+    )
+
+    formatted = plugin._format_recalled_memory(
+        MemCellRecall(cell=cell, similarity=0.9, lexical_score=0.8, score=0.9),
+        active_session_id="telegram_bot_5208932647",
+    )
+
+    assert "Key facts: Alice likes jasmine tea" in formatted
+
+
+def test_recall_fatigue_is_strong_enough_to_rotate_the_recalled_set() -> None:
+    """A cell recalled hundreds of times must lose real ground to a fresh one.
+
+    The first fatigue version moved the final recall score by 0.03, which left the
+    same lines pinned in every prompt (one live cell reached 663 retrievals while
+    396 of 423 cells were never recalled).
+    """
+    from core.soul.models import compute_recall_salience
+
+    def salience(count: int) -> float:
+        return compute_recall_salience(
+            emotional_intensity=0.5,
+            recency_score=0.8,
+            explicit_importance=0.1,
+            retrieval_count=count,
+        )
+
+    fresh = salience(0)
+    assert fresh - salience(180) >= 0.1
+    assert fresh - salience(663) >= 0.1
+    assert salience(663) >= 0.0
+
+
+@pytest.mark.asyncio
+async def test_recall_injects_each_line_only_once() -> None:
+    """Two cells holding the same line must not be injected twice."""
+    plugin = SoulPlugin()
+    interface_path = "telegram_bot/321"
+    now = datetime.now(timezone.utc)
+    tag = EmotionalTag(
+        state_snapshot={"joy": 0.1, "fear": 0.0, "sad": 0.0, "anger": 0.0},
+        dominant_emotion="joy",
+        intensity=0.1,
+        valence=0.1,
+    )
+
+    def _cell(cell_id: str, text: str) -> MemCell:
+        return MemCell(
+            id=cell_id,
+            episodic_trace=text,
+            atomic_facts=[],
+            emotional_tag=tag,
+            foresight_signals=[],
+            event_timestamp=now,
+            session_id="telegram_bot:321",
+        )
+
+    plugin._compiler = SimpleNamespace(
+        embedder=SimpleNamespace(embed=AsyncMock(return_value=[0.25, 0.75]))
+    )
+    plugin._repo = SimpleNamespace(
+        get_active_dsp=AsyncMock(return_value=None),
+        list_active_foresight_signals=AsyncMock(return_value=[]),
+        recall_memories=AsyncMock(
+            return_value=[
+                MemCellRecall(
+                    cell=_cell("a", "Alice loves jasmine tea."),
+                    similarity=0.95,
+                    lexical_score=0.9,
+                    score=0.95,
+                ),
+                MemCellRecall(
+                    cell=_cell("b", "Alice loves jasmine   tea."),
+                    similarity=0.94,
+                    lexical_score=0.9,
+                    score=0.94,
+                ),
+                MemCellRecall(
+                    cell=_cell("c", "Alice also keeps a green teapot."),
+                    similarity=0.9,
+                    lexical_score=0.8,
+                    score=0.9,
+                ),
+            ]
+        ),
+        upsert_memcell=AsyncMock(return_value=None),
+    )
+
+    payload = await plugin.get_static_injection(
+        SimpleNamespace(
+            interface_path=interface_path,
+            text="What tea does Alice love?",
+            caption=None,
+        ),
+        {"interface_path": interface_path},
+    )
+
+    recalled = [str(entry) for entry in payload.get("soul_recalled_memories", [])]
+
+    assert len(recalled) == 2
+    assert sum("jasmine tea" in entry.lower() for entry in recalled) == 1
+    assert any("green teapot" in entry.lower() for entry in recalled)
