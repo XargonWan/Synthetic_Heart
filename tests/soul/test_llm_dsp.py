@@ -292,6 +292,9 @@ async def test_extract_prompt_carries_the_speaker_attribution_rules() -> None:
     assert "belongs to the PERSONA" in instructions
     assert "never describe the user as an android" in instructions
     assert "extract NOTHING rather than guessing" in instructions
+    # The rule must not cost the profile the human's own name (it did: the first
+    # live rewrite dropped "Scar" entirely).
+    assert "The human's own name IS a user fact" in instructions
 
 
 @pytest.mark.asyncio
