@@ -951,9 +951,9 @@ class PostgresSoulRepository:
             await conn.execute(
                 """
                 UPDATE situational_notes
-                SET status = $2,
+                SET status = $2::text,
                     summary = COALESCE($3, summary),
-                    resolved_at = CASE WHEN $2 = 'resolved' THEN NOW() ELSE resolved_at END,
+                    resolved_at = CASE WHEN $2::text = 'resolved' THEN NOW() ELSE resolved_at END,
                     updated_at = NOW()
                 WHERE id = $1
                 """,

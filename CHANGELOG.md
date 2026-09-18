@@ -1,3 +1,9 @@
+### fix(soul): resolve_situational_note could never run against PostgreSQL  <!-- 2026-09-18 -->
+**Symptom (live, 2026-09-18 22:52):** the first real use of the method (retiring the duplicate situational notes) failed on every call with `asyncpg.exceptions.AmbiguousParameterError: inconsistent types deduced for parameter $2` / `DETAIL: text versus character varying`, so not a single note was superseded and the store kept stacking accounts of one circumstance.
+**Root cause:** the UPDATE bound `$2` to the `status` column (a `varchar(16)`) and to a text literal in the same statement (`CASE WHEN $2 = 'resolved'`). PostgreSQL cannot deduce one type for a placeholder used in two incompatible positions. The method had only ever been exercised against the in-memory repository, so the fault had never surfaced in a live call.
+**Fix (`core/soul/repository.py`):** both uses are cast explicitly (`$2::text`), which is valid in both positions.
+**Notes:** verified against the live schema inside rolled-back transactions: the old statement reproduces the production error verbatim and the fixed one is accepted and rolls back cleanly. This also unblocks the note-supersede behaviour above, which without it degrades to a logged warning per note.
+
 ### fix(soul): an updated situational note now retires the older account it replaces  <!-- 2026-09-18 -->
 **Symptom (live, 2026-09-18):** twelve active notes described one evening gathering under twelve subjects, and two of them contradicted each other outright (`Gathering at Sandro's took place last night (2026-09-17) and went fine` next to `Human is attending a gathering at Sandro's tonight`). The operator read them in the prompt.
 **Root cause:** nothing ever retired a note. A note's id is derived from its own content (`note_type` + `subject` + `summary`), so re-describing the same circumstance in new words wrote a new row, and `repository.resolve_situational_note` had no production caller at all.
