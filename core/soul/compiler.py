@@ -75,6 +75,13 @@ class LangfuseTraceLike(Protocol):
 _FUTURE_DATE_RE = re.compile(r"\b(20\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))\b")
 _CURATOR_SALIENCE_KEEP_THRESHOLD = 0.4
 _CURATOR_HALF_LIFE_SECONDS = 14 * 24 * 3600
+# Grace period before a cell may be removed for low salience (7 days by default).
+# Reason: recency contributes at most 0.2 to the salience formula while the
+# removal threshold is 0.4, so a new cell that is calm and has not been recalled
+# yet can never clear the bar - it would be deleted the first time the curator
+# runs, and the day's ordinary memories would never accumulate. Wired to
+# ``SOUL_CURATOR_MIN_AGE_HOURS`` by the plugin.
+_CURATOR_MIN_AGE_SECONDS = 7 * 24 * 3600
 
 
 class RuleBasedMemCellCurator:
@@ -84,6 +91,15 @@ class RuleBasedMemCellCurator:
     KEEP_IMPORTANT — salience >= threshold or explicit_importance > 0.
     REMOVE       — everything else.
     """
+
+    def __init__(self, *, min_age_seconds: float = _CURATOR_MIN_AGE_SECONDS) -> None:
+        """Build the curator.
+
+        Args:
+            min_age_seconds: grace period during which a cell is never removed,
+                whatever its salience. See ``_CURATOR_MIN_AGE_SECONDS``.
+        """
+        self.min_age_seconds: float = max(0.0, float(min_age_seconds))
 
     async def classify(
         self,
@@ -98,8 +114,8 @@ class RuleBasedMemCellCurator:
         )
         return [(s.id, self._classify_one(s, current_date, now)) for s in summaries]
 
-    @staticmethod
     def _classify_one(
+        self,
         summary: MemCellSummary,
         current_date: date,
         now: datetime,
@@ -121,6 +137,17 @@ class RuleBasedMemCellCurator:
             ts = ts.replace(tzinfo=_tz.utc)
         age_seconds = max(0.0, (now - ts.astimezone(now.tzinfo)).total_seconds())
         recency = 0.5 ** (age_seconds / _CURATOR_HALF_LIFE_SECONDS)
+
+        # A fresh cell has not had a chance to be recalled yet: recall only
+        # considers the cells a query is similar to, so "never retrieved" says
+        # nothing about value on day one. Recency is also the weakest term in the
+        # salience formula (0.2) while the removal threshold is 0.4, so without
+        # this guard a calm, freshly compiled cell can NEVER survive a curation
+        # pass: measured on the live deployment, all 8 cells compiled during
+        # 2026-09-18 were deleted by the first nightly pass, leaving the synth
+        # remembering only emotional or forward-looking moments.
+        if age_seconds < self.min_age_seconds:
+            return CuratorDecision.KEEP_IMPORTANT
 
         salience = compute_memcell_salience(
             emotional_intensity=summary.emotional_intensity,
@@ -199,8 +226,6 @@ class SoulCompiler:
             for raw_cell in extracted:
                 episodic_trace = resolver.resolve_text(raw_cell.episodic_trace)
                 atomic_facts = [resolver.resolve_text(f) for f in raw_cell.atomic_facts]
-                if not atomic_facts:
-                    atomic_facts = self._fallback_atomic_facts(episodic_trace)
                 embedding = await self.embedder.embed(episodic_trace)
 
                 cell_timestamp = raw_cell.timestamp
@@ -519,13 +544,6 @@ class SoulCompiler:
                 )
             )
         return signals
-
-    @staticmethod
-    def _fallback_atomic_facts(episodic_trace: str) -> list[str]:
-        first_sentence = re.split(r"[\.\n!?]", episodic_trace, maxsplit=1)[0].strip()
-        if not first_sentence:
-            return []
-        return [f"Conversation|summary|{first_sentence[:160]}"]
 
 
 # Lightweight default strategy implementations for tests and local dry-runs.

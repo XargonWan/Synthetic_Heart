@@ -79,6 +79,8 @@ _EXTRACT_INSTRUCTIONS = (
     "condition), INTERVAL (time range), INSTANT (past occurrence with short "
     "relevance).\n"
     "priority: -3..3 (higher = more urgent). confidence: 0.0-1.0.\n"
+    "EVERY NOTE MUST BE ABOUT THE HUMAN'S CIRCUMSTANCES (or ones the human shares). Never write a note about the persona's own state, its moods or its plans, and never about a third party's state: those belong to the persona's diary, not to this store. A note whose subject is the persona or another character is wrong even when the exchange mentions them.\n"
+    "subject is a SHORT canonical noun phrase (2-4 words) naming the specific circumstance, and it must be written the SAME way every time you describe that circumstance ('gathering at Sandro's', not 'gathering tonight' then 'Human' then 'upcoming outing'): the same situation re-described must reuse the same subject so it reads as one ongoing situation instead of a new one. Never use a bare person's name ('Scar', 'Human', 'Scarlet') as the subject.\n"
     'Return ONLY a JSON object: {"notes": [{"note_type": ..., "subject": ..., '
     '"summary": ..., "priority": 0, "confidence": 0.5, '
     '"valid_from": "2026-05-05T00:00:00+00:00", '

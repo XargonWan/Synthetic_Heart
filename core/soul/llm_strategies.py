@@ -1,4 +1,5 @@
-"""LLM-compiled Digital Soul Profile (DSP) builder and extractor.
+"""LLM-compiled Digital Soul Profile (DSP) builder and extractor, plus the
+LLM-distilled MemCell extractor.
 
 This module implements :class:`LlmDspBuilder`, an LLM-backed implementation of the
 ``DspBuilder`` protocol (``core/soul/compiler.py``). It turns the daily DSP
@@ -10,6 +11,13 @@ It also implements :class:`LlmDspExtractor`, an LLM-backed implementation of the
 transcript and pulls stable biographical facts with the same DSP-scope engine and
 the same deterministic fallback guarantees. Because the transcript is judged by
 an LLM, the aggressive roleplay regex filter is not required on this path.
+
+And it implements :class:`LlmMemCellExtractor`, an LLM-backed implementation of
+the ``MemCellExtractor`` protocol. The deterministic extractor can only store the
+conversation text verbatim as a cell's ``episodic_trace``, so recall could only
+ever return raw transcript; this one distils the session into self-contained
+memory entries with ``subject|predicate|object`` facts, and falls back to the
+deterministic extractor whenever the model is unavailable.
 
 Design:
 
@@ -32,20 +40,31 @@ Design:
   rule-based builder, so the SOUL nightly rollup can never break. On quiet days
   with no stable signal the rule-based path sanitises (rather than wipes) the
   existing profile.
+* **Determinism stays where it earns its keep.** The MemCell extractor takes only
+  *content* from the model (the trace and the facts). Emotion and foresight are
+  still inferred by the deterministic rules, and a structurally unusable answer
+  (no engine, an exception, no JSON, nothing that survives the verbatim check)
+  defers to the deterministic extractor, so distillation can never lose a session
+  that the previous path would have stored.
 """
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from core.json_utils import extract_json_from_text
 from core.logging_utils import log_debug, log_warning
 
-from .models import DspExtraction
-from .schemas import DspExtractionModel
+from .models import (
+    DspExtraction,
+    emotional_intensity,
+    emotional_valence,
+    top_emotion,
+)
+from .schemas import DspExtractionModel, EmotionalTagModel, MemCellExtractionModel
 
-__all__ = ["LlmDspBuilder", "LlmDspExtractor"]
+__all__ = ["LlmDspBuilder", "LlmDspExtractor", "LlmMemCellExtractor"]
 
 
 async def resolve_dsp_engine(resolve_engine: Any | None = None) -> Any | None:
@@ -338,6 +357,13 @@ class LlmDspBuilder:
             "roleplay dialogue, verbatim speech, or conversational filler. Never "
             f"invent anything. Keep it under {self.max_words} words. Plain prose, no "
             "bullet lists, no XML tags. "
+            "ATTRIBUTION: this profile describes the HUMAN. Remove any statement "
+            "that describes the person as an android, AI, robot or machine, or "
+            "that gives the person a name or nickname that belongs to the persona "
+            "(a synthetic nickname is the persona's, not the person's), unless the "
+            "evidence shows the human saying it about himself. When in doubt, drop "
+            "the attribute: a missing nickname is harmless, a wrong identity is "
+            "not. "
             'Return ONLY a JSON object: {"biography": "<your biography>"}.'
         )
 
@@ -351,6 +377,13 @@ class LlmDspBuilder:
             "conversational filler. Merge genuinely new stable facts. Resolve "
             "contradictions in favour of the most recent evidence. Never invent "
             "anything. Output ONE clean, concise, natural third-person biography "
+            "ATTRIBUTION: this profile describes the HUMAN. Remove any statement "
+            "that describes the person as an android, AI, robot or machine, or "
+            "that gives the person a name or nickname that belongs to the persona "
+            "(a synthetic nickname is the persona's, not the person's), unless the "
+            "evidence shows the human saying it about himself. When in doubt, drop "
+            "the attribute: a missing nickname is harmless, a wrong identity is "
+            "not. "
             f"(plain prose, no bullet lists, no XML tags). Keep it under {self.max_words} "
             'words. Return ONLY a JSON object: {"biography": "<your biography>"}.'
         )
@@ -605,7 +638,395 @@ class LlmDspExtractor:
             "fact as a short third-person statement starting with 'User' (e.g. 'User "
             "works on SynthHeart', 'User lives in Berlin', 'User prefers concise "
             "technical responses').\n"
+            "SPEAKER ATTRIBUTION (critical, the speakers are named in the log): "
+            "decide which speaker is the HUMAN (the person this profile is about) "
+            "and which is the PERSONA, then attribute each line to its own speaker. "
+            "Only what the human says about himself can become a user fact. "
+            "A name or nickname the human GIVES the persona ('you are X', 'X is "
+            "you', 'I'll call you X') belongs to the PERSONA, never to the human, "
+            "and pet names the human uses for the persona are not the human's own "
+            "names. Attributes of the persona (being an android, an AI, a synth, a "
+            "machine, having a core or a body, being someone's wife) are the "
+            "PERSONA's, never the human's: never describe the user as an android, "
+            "AI, robot or machine, and never give the user the persona's name, "
+            "unless the human states that about himself in his own line. When the "
+            "transcript is in-character and the roles are ambiguous, extract "
+            "NOTHING rather than guessing.\n"
             'Return ONLY a JSON object: {"user_facts": [...], "user_preferences": '
             '[...], "ai_self_facts": [...]} — each a list of short strings; empty '
             "lists when nothing biographical was said."
+        )
+
+
+def _normalise_for_compare(text: Any) -> str:
+    """Whitespace-collapsed, lowercased, punctuation-trimmed comparison key."""
+    collapsed = " ".join(str(text or "").split()).strip().lower()
+    return collapsed.strip(" \t\"'“”„«»…,;:!?-–—.")
+
+
+def _text_of_item(item: Any) -> str:
+    """Coerce an extracted value (string, number or single-value dict) to text.
+
+    Models wrap values as ``{"fact": "..."}`` / ``{"text": "..."}`` objects
+    instead of plain strings often enough to normalise both shapes.
+    """
+    if isinstance(item, dict):
+        for key in ("fact", "text", "value", "statement", "memory"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        for value in item.values():
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            if isinstance(value, (int, float)):
+                return str(value)
+        return ""
+    if isinstance(item, (int, float)):
+        return str(item)
+    return str(item or "").strip()
+
+
+class LlmMemCellExtractor:
+    """LLM-distilled MemCell extractor with a deterministic fallback.
+
+    Implements the ``MemCellExtractor`` protocol (``core/soul/compiler.py``).
+    The deterministic extractor stores the conversation text verbatim as the
+    cell's ``episodic_trace``, so a recalled memory could only ever be raw
+    transcript, and two statements about the same subject — an old one and the
+    one that corrected it — surfaced as equally current entries that read as
+    contradictory. This extractor distils instead of copying:
+
+    * **One entry per memory-worthy event**, so a long session does not collapse
+      into a single truncated transcript chunk.
+    * **The trace is a self-contained paraphrase** of what happened and of what
+      changed, written so it never quotes the transcript. A trace that is
+      literally contained in the transcript is discarded: that structural check
+      is what makes "recall returns distilled knowledge" a property of the stored
+      row rather than a trick of the renderer.
+    * **Facts are ``subject|predicate|object`` triples**, the shape the
+      knowledge-graph fold (``SoulCompiler.async_consolidate``) and the recall
+      renderer already expect. A fact that only restates its own trace, and a
+      fact that quotes the transcript, are both dropped at the source — so raw
+      transcript cannot reach the memory block through the fact list either.
+    * **Emotion and foresight stay deterministic**, inferred by the same rules
+      the deterministic extractor uses, so distillation moves *content* only.
+
+    Any unusable answer (no engine, an exception, no JSON, or a list of entries
+    that are all quotes) defers to the deterministic extractor, so a session that
+    the previous path would have stored is never silently dropped. An explicit
+    empty answer is respected: if the model judged the session as holding nothing
+    durable, no cell is written.
+    """
+
+    MAX_CELLS = 4
+    MAX_TRACE_CHARS = 480
+    MAX_FACT_CHARS = 200
+    MAX_FACTS_PER_CELL = 4
+    # Below this length a containment match is ambiguous — a short distilled
+    # statement can share wording with the transcript by accident — so the
+    # verbatim check only applies to traces long enough for a copy to be
+    # deliberate.
+    MIN_VERBATIM_CHECK_CHARS = 40
+    MAX_TRANSCRIPT_CHARS = 12000
+
+    def __init__(
+        self,
+        *,
+        fallback: Any | None = None,
+        resolve_engine: Any | None = None,
+        max_transcript_chars: int = 12000,
+    ) -> None:
+        """Build the LLM MemCell extractor.
+
+        Args:
+            fallback: deterministic extractor used whenever the model cannot be
+                trusted. Defaults to a lazily-imported
+                ``RuleBasedMemCellExtractor``.
+            resolve_engine: injectable async callable ``() -> engine | None``
+                used for tests. ``None`` uses the DSP-scope Cortex resolver.
+            max_transcript_chars: tail-budget for the transcript fed to the LLM
+                (the most recent characters are kept).
+        """
+        from core.soul.strategies import RuleBasedMemCellExtractor
+
+        if fallback is None:
+            fallback = RuleBasedMemCellExtractor()
+        self._fallback: Any = fallback
+        # Tagging stays deterministic and identical to the rule-based path.
+        self._tagger = RuleBasedMemCellExtractor()
+        self.resolve_engine: Any | None = resolve_engine
+        self.max_transcript_chars: int = max_transcript_chars
+
+    async def extract_memcells(
+        self, *, transcript: str, current_date: date
+    ) -> list[MemCellExtractionModel]:
+        """Distil the session transcript into memory cells."""
+        text = str(transcript or "").strip()
+        if not text:
+            return []
+        engine = await resolve_dsp_engine(self.resolve_engine)
+        if engine is None:
+            return await self._fallback_cells(
+                transcript=transcript, current_date=current_date
+            )
+        model = await resolve_dsp_scope_model()
+        prompt = {
+            "input": {
+                "type": "memcell_extract",
+                "payload": {
+                    "current_date": str(current_date),
+                    "transcript": text[-self.max_transcript_chars :],
+                },
+            },
+            "context": {},
+            "instructions": self._build_extract_instructions(),
+        }
+        memories = await self._generate_cells(engine, model, prompt)
+        if memories is None:
+            return await self._fallback_cells(
+                transcript=transcript, current_date=current_date
+            )
+        cells = self._clean_cells(memories, transcript=text, current_date=current_date)
+        if not cells and memories:
+            # The model answered, but nothing it wrote was a distillation (it
+            # quoted the transcript, or every entry was empty). That is as
+            # unusable as a failed call: record the session deterministically
+            # rather than lose it.
+            log_warning(
+                "[soul_llm] memcell extraction returned no usable distillation "
+                f"({len(memories)} entries); using the deterministic extractor"
+            )
+            return await self._fallback_cells(
+                transcript=transcript, current_date=current_date
+            )
+        if not cells:
+            log_debug(
+                "[soul_llm] memcell extraction found nothing durable "
+                f"({len(text)} transcript chars)"
+            )
+        return cells
+
+    async def _fallback_cells(
+        self, *, transcript: str, current_date: date
+    ) -> list[MemCellExtractionModel]:
+        """Deterministic cells, used whenever the model cannot be trusted."""
+        try:
+            return await self._fallback.extract_memcells(
+                transcript=transcript, current_date=current_date
+            )
+        except Exception as exc:
+            log_warning(f"[soul_llm] deterministic memcell fallback failed: {exc}")
+            return []
+
+    async def _generate_cells(
+        self, engine: Any, model: str | None, prompt: dict[str, Any]
+    ) -> Any | None:
+        """Ask the engine for the session's memories; ``None`` when unusable."""
+        try:
+            from core.config import scope_model_override
+
+            with scope_model_override(engine, model):
+                raw = await engine.generate_response(prompt)
+        except Exception as exc:
+            log_warning(f"[soul_llm] memcell extract generate_response failed: {exc}")
+            return None
+        parsed = extract_json_from_text(raw)
+        if isinstance(parsed, list):
+            return parsed
+        if isinstance(parsed, dict):
+            for key in ("memories", "cells", "memcells", "entries"):
+                value = parsed.get(key)
+                if isinstance(value, list):
+                    return value
+        log_debug("[soul_llm] no usable JSON in memcell extract response")
+        return None
+
+    def _clean_cells(
+        self,
+        raw: list[Any],
+        *,
+        transcript: str,
+        current_date: date,
+    ) -> list[MemCellExtractionModel]:
+        """Turn the model's entries into validated cells, dropping quotes."""
+        transcript_key = _normalise_for_compare(transcript)
+        foresight = self._tagger.extract_foresight_signals(transcript, current_date)
+        now = datetime.now(timezone.utc)
+        cells: list[MemCellExtractionModel] = []
+        for index, item in enumerate(raw):
+            trace = self._clean_trace(item)
+            if not trace:
+                continue
+            trace_key = _normalise_for_compare(trace)
+            if self._is_verbatim(trace_key, transcript_key):
+                log_debug(
+                    "[soul_llm] dropped a memcell trace that quotes the transcript"
+                )
+                continue
+            cells.append(
+                MemCellExtractionModel(
+                    episodic_trace=trace,
+                    atomic_facts=self._clean_facts(item, trace_key, transcript_key),
+                    emotional_tag=self._emotional_tag(trace),
+                    # Session-level signals (they come from the transcript's own
+                    # dates and relative-time cues) ride on the first cell.
+                    foresight_signals=[] if cells else foresight,
+                    # Distinct microsecond timestamps: the cell id is derived from
+                    # the timestamp, so identical ones would collide and upsert
+                    # over each other.
+                    timestamp=now + timedelta(microseconds=index),
+                )
+            )
+            if len(cells) >= self.MAX_CELLS:
+                break
+        return cells
+
+    @classmethod
+    def _clean_trace(cls, item: Any) -> str:
+        """Extract and bound one memory's trace text (``""`` when unusable)."""
+        raw_trace = item if isinstance(item, str) else ""
+        if isinstance(item, dict):
+            for key in ("trace", "episodic_trace", "summary", "memory", "text"):
+                value = item.get(key)
+                if isinstance(value, str) and value.strip():
+                    raw_trace = value
+                    break
+        text = " ".join(str(raw_trace or "").split())
+        if len(text) < 8:
+            return ""
+        return cls._cap_trace(text)
+
+    @classmethod
+    def _cap_trace(cls, text: str) -> str:
+        """Truncate a trace at a sentence, else a word, boundary."""
+        if len(text) <= cls.MAX_TRACE_CHARS:
+            return text
+        cut = text[: cls.MAX_TRACE_CHARS]
+        for sep in (". ", "! ", "? "):
+            index = cut.rfind(sep)
+            if index >= cls.MAX_TRACE_CHARS // 2:
+                return cut[: index + 1].strip()
+        index = cut.rfind(" ")
+        return (cut[:index] if index > 0 else cut).strip()
+
+    @classmethod
+    def _clean_facts(cls, item: Any, trace_key: str, transcript_key: str) -> list[str]:
+        """Clean and dedupe a memory's facts, dropping restatements and quotes."""
+        if not isinstance(item, dict):
+            return []
+        raw_facts: Any = None
+        for key in ("facts", "atomic_facts", "key_facts"):
+            value = item.get(key)
+            if isinstance(value, list):
+                raw_facts = value
+                break
+        if not raw_facts:
+            return []
+        facts: list[str] = []
+        for entry in raw_facts:
+            fact = _text_of_item(entry)
+            if not fact:
+                continue
+            fact = fact[: cls.MAX_FACT_CHARS].strip()
+            if not fact or cls._fact_restates_trace(fact, trace_key):
+                continue
+            # A fact that quotes the transcript is raw transcript surfacing in
+            # the memory block, whatever shape the model delivers it in (the
+            # deterministic extractor's old ``Conversation|summary|<line>`` is
+            # exactly this).
+            payload_key = _normalise_for_compare(cls._fact_payload(fact))
+            if cls._is_verbatim(payload_key, transcript_key):
+                log_debug(
+                    "[soul_llm] dropped a memcell fact that quotes the transcript"
+                )
+                continue
+            if fact not in facts:
+                facts.append(fact)
+            if len(facts) >= cls.MAX_FACTS_PER_CELL:
+                break
+        return facts
+
+    @staticmethod
+    def _fact_payload(fact: str) -> str:
+        """The content part of a fact: ``object`` for a triple, else the whole."""
+        parts = [part.strip() for part in str(fact or "").split("|") if part.strip()]
+        return parts[2] if len(parts) == 3 else str(fact or "")
+
+    @classmethod
+    def _fact_restates_trace(cls, fact: str, trace_key: str) -> bool:
+        """True when a fact only repeats the trace it is stored beside.
+
+        The same rule the recall renderer applies
+        (``SoulPlugin._fact_restates_trace``), enforced at the source and over
+        the WHOLE trace — the renderer compares only its first 120 characters,
+        which is why a short opening line escaped it live.
+        """
+        if not trace_key:
+            return False
+        payload_key = _normalise_for_compare(cls._fact_payload(fact))
+        if not payload_key:
+            return False
+        return payload_key in trace_key or trace_key in payload_key
+
+    @classmethod
+    def _is_verbatim(cls, trace_key: str, transcript_key: str) -> bool:
+        """True when the trace is lifted out of the transcript verbatim."""
+        if len(trace_key) < cls.MIN_VERBATIM_CHECK_CHARS:
+            return False
+        return trace_key in transcript_key
+
+    def _emotional_tag(self, trace: str) -> EmotionalTagModel:
+        """Deterministic emotional tagging, identical to the rule-based path."""
+        snapshot = self._tagger.infer_emotion_snapshot(trace)
+        intensity = emotional_intensity(snapshot)
+        # top_emotion() returns the largest axis, so an all-zero snapshot would
+        # label the cell with whichever axis comes first (joy); with no signal at
+        # all the honest label is neutral.
+        dominant = top_emotion(snapshot) if intensity > 0 else "neutral"
+        return EmotionalTagModel(
+            state_snapshot=snapshot,
+            dominant_emotion=dominant,
+            intensity=intensity,
+            valence=emotional_valence(snapshot),
+        )
+
+    def _build_extract_instructions(self) -> str:
+        return (
+            "You are distilling what an AI persona must REMEMBER from one session "
+            "of chat. The transcript labels every line with its speaker.\n"
+            "Write DISTILLED KNOWLEDGE, never a quote: each memory's trace is a "
+            "self-contained paraphrase of what happened or was said, so a reader "
+            "who never saw the transcript understands it and can tell who did or "
+            "said what. Copying a line out of the transcript is a failure.\n"
+            "ONE ENTRY PER DISTINCT THING WORTH REMEMBERING: a decision, an "
+            "agreement, a correction, a change of state, a plan, a commitment, a "
+            "realisation about a person, or a durable preference. Never split one "
+            "event across entries and never merge unrelated ones; two entries that "
+            "say the same thing are a mistake.\n"
+            "WHEN THE SESSION CHANGES AN EARLIER BELIEF OR PLAN, say so in the "
+            "trace: state the current truth plainly and name what it replaces "
+            "(for example that something was understood one way before and is "
+            "understood differently now, or that a plan was cancelled or "
+            "superseded). A memory that repeats the old statement without noting "
+            "the change is worse than no memory at all.\n"
+            "NEVER INVENT: nothing that is not in the transcript, no speculation "
+            "about feelings or intentions, no continuation of in-character "
+            "roleplay, no decorative mood language.\n"
+            "FACTS: each memory carries its facts as triples "
+            "'subject|predicate|object', exactly three pipe-separated parts and no "
+            "pipes inside a part. subject is who or what the fact is about ('User', "
+            "'Synth', or a name as spelled in the transcript); predicate is a short "
+            "snake_case verb phrase ('prefers', 'corrected', 'lives_in', "
+            "'has_intention'); object is the distilled content, at most 200 "
+            "characters, in the same third-person voice as the trace. Every fact "
+            "must add something the trace does not already state — use an empty "
+            "list when the trace says it all.\n"
+            "Keep the persona's own statements and the human's separate; never "
+            "attribute one to the other.\n"
+            "Use the current_date in the payload to read relative time ('last "
+            "night', 'tomorrow') and state absolute dates when a date matters.\n"
+            'Return ONLY a JSON object: {"memories": [{"trace": "...", "facts": '
+            '["..."]}]} with at most 4 entries, most durable first. Return '
+            '{"memories": []} only when the session holds nothing that a later '
+            "conversation could need."
         )

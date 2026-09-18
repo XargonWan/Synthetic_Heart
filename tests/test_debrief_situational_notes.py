@@ -292,3 +292,21 @@ async def test_turn_content_reaches_the_model(
     assert context["llm_response_text"] in user_part
     # A bare JSON object is exactly what got swallowed before.
     assert not user_part.strip().startswith("{")
+
+
+def test_extract_instructions_scope_notes_to_the_human_and_canonical_subjects() -> None:
+    """The prompt must carry the rules the live store was missing.
+
+    Two live defects came from the prompt, not the code: notes about the
+    persona's own state and about third parties ("2D recovering from an intense
+    night of drinking") were stored as the human's situation, and one event was
+    re-described under a dozen different subjects ("Gathering at Sandro's",
+    "Gathering tonight", "Human", "upcoming outing"), so the store accumulated
+    twelve active notes for a single evening.
+    """
+    from plugins.debrief.debrief_situational_notes import _EXTRACT_INSTRUCTIONS
+
+    assert "EVERY NOTE MUST BE ABOUT THE HUMAN'S CIRCUMSTANCES" in _EXTRACT_INSTRUCTIONS
+    assert "SHORT canonical noun phrase" in _EXTRACT_INSTRUCTIONS
+    assert "Never use a bare person's name" in _EXTRACT_INSTRUCTIONS
+    assert "belong to the persona's diary" in _EXTRACT_INSTRUCTIONS

@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -175,7 +175,13 @@ async def test_nightly_rollup_bootstraps_dsp() -> None:
 
 
 @pytest.mark.asyncio
-async def test_post_session_compile_adds_fallback_atomic_fact() -> None:
+async def test_post_session_compile_does_not_fabricate_atomic_facts() -> None:
+    """A cell with nothing distilled carries NO fact, not the line itself.
+
+    The old fallback stored ``Conversation|summary|<the verbatim trace>``, which
+    is why recall could only ever return raw transcript (and why the renderer had
+    to suppress a "Key facts:" that repeated the sentence above it).
+    """
     repo = InMemorySoulRepository()
     compiler = SoulCompiler(
         repository=repo,
@@ -193,9 +199,7 @@ async def test_post_session_compile_adds_fallback_atomic_fact() -> None:
     )
 
     assert len(ids) == 1
-    facts = repo.memcells[ids[0]].atomic_facts
-    assert facts
-    assert facts[0].startswith("Conversation|summary|")
+    assert repo.memcells[ids[0]].atomic_facts == []
 
 
 @pytest.mark.asyncio
@@ -462,6 +466,64 @@ async def test_rule_based_curator_classify_future_date_in_trace() -> None:
     )
     decisions = await curator.classify([summary], current_date=date(2026, 5, 7))
     assert decisions[0][1] == CuratorDecision.KEEP_FUTURE
+
+
+@pytest.mark.asyncio
+async def test_curator_keeps_a_fresh_calm_cell_and_still_prunes_an_old_one() -> None:
+    """A new, unemotional, never-recalled cell must survive the curator.
+
+    Recency is 0.2 of the salience formula while the removal threshold is 0.4, so
+    without a grace period a calm new cell can never clear the bar: measured live,
+    all 8 cells compiled on 2026-09-18 were removed by the first nightly pass,
+    leaving only emotional or forward-looking memories. An old calm cell is still
+    pruned, so the grace period does not disable curation.
+    """
+    curator = RuleBasedMemCellCurator()
+    today = datetime.now(timezone.utc).date()
+
+    def _summary(cell_id: str, age: timedelta) -> MemCellSummary:
+        return MemCellSummary(
+            id=cell_id,
+            episodic_trace="User said the deploy went fine.",
+            event_timestamp=datetime.now(timezone.utc) - age,
+            retrieval_count=0,
+            explicit_importance=0.0,
+            emotional_intensity=0.0,
+            has_active_foresight=False,
+        )
+
+    decisions = dict(
+        await curator.classify(
+            [
+                _summary("fresh", timedelta(hours=2)),
+                _summary("stale", timedelta(days=30)),
+            ],
+            current_date=today,
+        )
+    )
+
+    assert decisions["fresh"] == CuratorDecision.KEEP_IMPORTANT
+    assert decisions["stale"] == CuratorDecision.REMOVE
+
+
+@pytest.mark.asyncio
+async def test_curator_grace_period_can_be_switched_off() -> None:
+    """An explicit zero grace period restores the old behaviour exactly."""
+    curator = RuleBasedMemCellCurator(min_age_seconds=0.0)
+    today = datetime.now(timezone.utc).date()
+    summary = MemCellSummary(
+        id="fresh-but-unprotected",
+        episodic_trace="User said the deploy went fine.",
+        event_timestamp=datetime.now(timezone.utc) - timedelta(hours=2),
+        retrieval_count=0,
+        explicit_importance=0.0,
+        emotional_intensity=0.0,
+        has_active_foresight=False,
+    )
+
+    decisions = await curator.classify([summary], current_date=today)
+
+    assert decisions[0][1] == CuratorDecision.REMOVE
 
 
 @pytest.mark.asyncio

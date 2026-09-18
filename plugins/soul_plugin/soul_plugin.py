@@ -16,6 +16,7 @@ from core.db import get_conn_ctx
 from core.soul.compiler import (
     NoopEmbedder,
     RuleBasedDspBuilder,
+    RuleBasedMemCellCurator,
     RuleBasedSummaryBuilder,
     SoulCompiler,
 )
@@ -116,6 +117,57 @@ register_exposed_var(
 )
 
 register_exposed_var(
+    "SOUL_MEMCELL_LLM_ENABLED",
+    label="LLM-distilled MemCells",
+    default=1,
+    value_type=int,
+    ui_type="bool",
+    description=(
+        "Distil each compiled MemCell with an LLM instead of storing the "
+        "conversation text verbatim as the cell's trace. Recall then returns "
+        "paraphrased knowledge with subject|predicate|object facts, and a "
+        "statement that was corrected later says so in its own trace. Uses the "
+        "DSP_CORTEX engine scope. Falls back to the rule-based extractor (the "
+        "transcript as the trace, no fabricated fact) on any failure."
+    ),
+    scope="plugins",
+    component="soul_plugin",
+)
+
+register_exposed_var(
+    "SOUL_CURATOR_MIN_AGE_HOURS",
+    label="Curator grace period (hours)",
+    default=168,
+    value_type=int,
+    ui_type="number",
+    description=(
+        "How long a freshly compiled memory is protected from the curator's "
+        "low-salience removal. Recency is only 0.2 of the salience formula against "
+        "a 0.4 removal threshold, so without a grace period a calm new memory can "
+        "never survive the nightly pass and the day's ordinary events are deleted "
+        "the night they are compiled. 168 = one week."
+    ),
+    scope="plugins",
+    component="soul_plugin",
+)
+
+register_exposed_var(
+    "SOUL_TEMPORAL_INJECT_LIMIT",
+    label="Situational notes injected per prompt",
+    default=8,
+    value_type=int,
+    ui_type="number",
+    description=(
+        "Maximum number of active situational notes rendered into one prompt "
+        "(ranked by priority, then confidence, and one per subject-token set so "
+        "near-duplicate notes about the same event do not crowd the block). The "
+        "store keeps every note; this only bounds what the model is shown."
+    ),
+    scope="plugins",
+    component="soul_plugin",
+)
+
+register_exposed_var(
     "SOUL_TEMPORAL_ENABLED",
     label="Temporal situational context extraction",
     default=1,
@@ -183,6 +235,60 @@ _SOUL_CONSOLIDATE_COOLDOWN_SECONDS = 900
 _SOUL_RETRIEVAL_BUMP_MIN_INTERVAL_SEC = 3600.0
 _SOUL_RETRIEVAL_BUMP_TRACK_MAX = 512
 
+# How many active situational notes may be rendered into ONE prompt. The debrief
+# writes a fresh note every time it re-describes a circumstance, so the active set
+# grows without bound (64 active notes on 2026-09-18, 28 of them in a single
+# prompt, several contradicting each other about the same evening). What the model
+# is shown is ranked and bounded here; the store keeps everything.
+_SOUL_TEMPORAL_INJECT_LIMIT = 8
+_SOUL_TEMPORAL_SUBJECT_STOPWORDS = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "at",
+        "of",
+        "for",
+        "and",
+        "in",
+        "on",
+        "to",
+        "with",
+        "from",
+        "is",
+        "are",
+        "today",
+        "tonight",
+        "tomorrow",
+        "evening",
+        "morning",
+        "afternoon",
+        "later",
+        "next",
+        "this",
+        "that",
+        "upcoming",
+        "planned",
+        "possible",
+        "possibly",
+    }
+)
+
+
+def _subject_tokens(subject: Any) -> set[str]:
+    """Meaningful tokens of a situational note's subject.
+
+    Used to recognise two notes that describe the same circumstance under
+    different wording ("Gathering at Sandro's" / "Gathering at Sandro's
+    tonight"). Time-of-day and hedging words are dropped so the pair collides.
+    """
+    words = re.findall(r"[a-z0-9]+", str(subject or "").lower())
+    return {
+        word
+        for word in words
+        if len(word) > 1 and word not in _SOUL_TEMPORAL_SUBJECT_STOPWORDS
+    }
+
 
 class SoulPlugin(PluginBase):
     """Runtime integration plugin for SOUL architecture.
@@ -201,11 +307,12 @@ class SoulPlugin(PluginBase):
         self._emotion_engine = self._build_emotion_engine()
         self._compiler = SoulCompiler(
             repository=self._repo,
-            memcell_extractor=RuleBasedMemCellExtractor(),
+            memcell_extractor=self._build_memcell_extractor(),
             dsp_extractor=self._build_dsp_extractor(),
             dsp_builder=self._build_dsp_builder(),
             summary_builder=RuleBasedSummaryBuilder(),
             embedder=self._build_embedder(),
+            curator=self._build_memcell_curator(),
         )
         self._buffers: dict[str, list[str]] = {}
         self._sessions: dict[str, _SessionState] = {}
@@ -245,6 +352,66 @@ class SoulPlugin(PluginBase):
                 f"[soul_plugin] LLM DSP extractor unavailable ({exc}); using rule-based"
             )
             return RuleBasedDspExtractor()
+
+    @staticmethod
+    def _is_memcell_llm_enabled() -> bool:
+        """Return whether memcell content is distilled by an LLM.
+
+        ``SOUL_MEMCELL_LLM_ENABLED`` defaults on. The extractor falls back to its
+        rule-based counterpart on any failure, so enabling the LLM path can never
+        break the compile.
+        """
+        try:
+            from core.config_manager import config_registry
+
+            return bool(
+                config_registry.get_value("SOUL_MEMCELL_LLM_ENABLED", 1, value_type=int)
+            )
+        except Exception:
+            return True
+
+    @staticmethod
+    def _build_memcell_extractor() -> Any:
+        """Return the memcell extractor: LLM-distilled when enabled, else rule-based.
+
+        The rule-based extractor stores the conversation text verbatim as the
+        cell's trace, which is what made recall return raw transcript instead of
+        distilled knowledge; the LLM path paraphrases each memory and writes real
+        ``subject|predicate|object`` facts.
+        """
+        if not SoulPlugin._is_memcell_llm_enabled():
+            return RuleBasedMemCellExtractor()
+        try:
+            from core.soul.llm_strategies import LlmMemCellExtractor
+
+            return LlmMemCellExtractor()
+        except Exception as exc:
+            log_warning(
+                "[soul_plugin] LLM memcell extractor unavailable "
+                f"({exc}); using rule-based"
+            )
+            return RuleBasedMemCellExtractor()
+
+    @staticmethod
+    def _build_memcell_curator() -> Any:
+        """Return the memory curator with its grace period from config.
+
+        ``SOUL_CURATOR_MIN_AGE_HOURS`` (default 168 = one week) protects freshly
+        compiled cells from the low-salience removal: without it a calm new cell
+        scores 0.2 against a 0.4 threshold and is deleted the first time the
+        curator runs, so the day's ordinary memories never survive the night.
+        """
+        try:
+            from core.config_manager import config_registry
+
+            hours = int(
+                config_registry.get_value(
+                    "SOUL_CURATOR_MIN_AGE_HOURS", 168, value_type=int
+                )
+            )
+        except Exception:
+            hours = 168
+        return RuleBasedMemCellCurator(min_age_seconds=max(0, hours) * 3600.0)
 
     @staticmethod
     def _build_dsp_builder() -> Any:
@@ -489,10 +656,67 @@ class SoulPlugin(PluginBase):
                         "source": note.source,
                     }
                 )
-            return result
+            return self.select_temporal_notes(
+                result, limit=SoulPlugin._get_temporal_inject_limit()
+            )
         except Exception as exc:
             log_debug(f"[soul_plugin] Temporal context injection failed: {exc}")
             return []
+
+    @staticmethod
+    def _get_temporal_inject_limit() -> int:
+        """How many active notes may be rendered into one prompt."""
+        try:
+            from core.config_manager import config_registry
+
+            value = int(
+                config_registry.get_value(
+                    "SOUL_TEMPORAL_INJECT_LIMIT", 8, value_type=int
+                )
+            )
+        except Exception:
+            return _SOUL_TEMPORAL_INJECT_LIMIT
+        return max(1, min(value, 40))
+
+    @staticmethod
+    def select_temporal_notes(
+        notes: list[dict[str, Any]], *, limit: int
+    ) -> list[dict[str, Any]]:
+        """Rank active notes and drop near-duplicates about the same thing.
+
+        The debrief writes a fresh note every time it re-describes a
+        circumstance, so the active set accumulates several accounts of one event
+        (measured live: 12 active notes about a single evening gathering, some
+        of them contradicting each other). The store keeps them all; what the
+        model is shown is bounded here, ranked by ``priority`` then
+        ``confidence`` (a stable sort, so the repository's soonest-expiry-first
+        order survives ties), skipping a note whose subject tokens are contained
+        in an already-selected subject. Single-token subjects ("Scar",
+        "Human") never take part in the containment test: they name a person,
+        not a circumstance, so they cannot stand in for another note.
+        """
+        ranked = sorted(
+            notes,
+            key=lambda note: (
+                -int(note.get("priority") or 0),
+                -float(note.get("confidence") or 0.0),
+            ),
+        )
+        selected: list[dict[str, Any]] = []
+        seen: list[set[str]] = []
+        for note in ranked:
+            tokens = _subject_tokens(note.get("subject"))
+            # Single-token subjects ("Scar", "Human", "gathering") name a person
+            # or a bare topic, so they neither take part in the containment test
+            # nor become a reference that could absorb a richer note.
+            if len(tokens) >= 2:
+                if any(tokens <= other or other <= tokens for other in seen):
+                    continue
+                seen.append(tokens)
+            selected.append(note)
+            if len(selected) >= max(1, limit):
+                break
+        return selected
 
     @staticmethod
     def _get_lookback_days() -> int:

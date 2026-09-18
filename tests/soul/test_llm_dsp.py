@@ -268,3 +268,49 @@ async def test_extract_empty_transcript_skips_engine() -> None:
     assert result.user_facts == []
     assert result.user_preferences == []
     assert not engine.prompts
+
+
+@pytest.mark.asyncio
+async def test_extract_prompt_carries_the_speaker_attribution_rules() -> None:
+    """The live profile said the HUMAN is "also called Bee" and an android.
+
+    Both belong to the persona: the transcript labels the speakers, so the
+    extractor is told which lines may become user facts and which may not.
+    """
+    engine = FakeEngine(
+        response='{"user_facts": [], "user_preferences": [], "ai_self_facts": []}'
+    )
+    extractor = LlmDspExtractor(resolve_engine=lambda: _resolve_to(engine))
+
+    await extractor.extract_dsp(
+        transcript="Scar: Bee is you, 2b my nickname for you is Bee",
+        current_date=date(2026, 9, 18),
+    )
+
+    instructions = engine.prompts[0]["instructions"]
+    assert "SPEAKER ATTRIBUTION" in instructions
+    assert "belongs to the PERSONA" in instructions
+    assert "never describe the user as an android" in instructions
+    assert "extract NOTHING rather than guessing" in instructions
+
+
+@pytest.mark.asyncio
+async def test_builder_prompts_remove_persona_attributes_from_the_profile() -> None:
+    engine = FakeEngine(response='{"biography": "Some biography."}')
+    builder = LlmDspBuilder(resolve_engine=lambda: _resolve_to(engine))
+
+    await builder.build_initial(extractions=_twice("User works on SynthHeart"))
+    assert (
+        "ATTRIBUTION: this profile describes the HUMAN"
+        in engine.prompts[0]["instructions"]
+    )
+
+    engine.prompts.clear()
+    await builder.build_update(
+        current_dsp="<user_profile>User is a male-identifying android called Bee.</user_profile>",
+        extractions=_twice("User works on SynthHeart"),
+    )
+    assert (
+        "ATTRIBUTION: this profile describes the HUMAN"
+        in engine.prompts[0]["instructions"]
+    )
