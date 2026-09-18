@@ -175,6 +175,10 @@ class SoulRepository(Protocol):
         self, limit: int = 200
     ) -> list[MemCell]: ...
 
+    async def list_memcells_before(
+        self, before: datetime, limit: int = 500
+    ) -> list[MemCell]: ...
+
     async def recall_memories(
         self,
         *,
@@ -315,6 +319,22 @@ class InMemorySoulRepository:
         missing = [c for c in self.memcells.values() if not c.embedding]
         missing.sort(key=lambda c: c.event_timestamp)
         return missing[:limit]
+
+    async def list_memcells_before(
+        self, before: datetime, limit: int = 500
+    ) -> list[MemCell]:
+        def _utc(value: datetime) -> datetime:
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc)
+
+        older = [
+            cell
+            for cell in self.memcells.values()
+            if _utc(cell.event_timestamp) < before
+        ]
+        older.sort(key=lambda c: c.event_timestamp)
+        return older[:limit]
 
     async def recall_memories(
         self,
@@ -1025,6 +1045,29 @@ class PostgresSoulRepository:
                 ORDER BY c.updated_at DESC
                 LIMIT $1
                 """,
+                limit,
+            )
+        return [self._row_to_memcell(row) for row in rows]
+
+    async def list_memcells_before(
+        self, before: datetime, limit: int = 500
+    ) -> list[MemCell]:
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
+                    c.foresight_signals, c.event_timestamp, c.retrieval_count, c.explicit_importance,
+                    c.consolidated, c.scene_id
+                FROM mem_cells c
+                WHERE c.event_timestamp < $1
+                  AND c.episodic_trace IS NOT NULL
+                  AND c.episodic_trace <> ''
+                ORDER BY c.event_timestamp ASC
+                LIMIT $2
+                """,
+                before,
                 limit,
             )
         return [self._row_to_memcell(row) for row in rows]

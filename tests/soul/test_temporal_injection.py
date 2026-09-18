@@ -10,7 +10,9 @@ shown, so it is ranked and bounded here.
 
 from __future__ import annotations
 
-from plugins.soul_plugin.soul_plugin import SoulPlugin, _subject_tokens
+from core.soul.situational import is_same_circumstance, subject_tokens
+
+from plugins.soul_plugin.soul_plugin import SoulPlugin
 
 
 def _note(subject: str, *, priority: int = 0, confidence: float = 0.5) -> dict:
@@ -27,13 +29,24 @@ def _note(subject: str, *, priority: int = 0, confidence: float = 0.5) -> dict:
 
 
 def test_subject_tokens_drop_time_words_and_bare_names() -> None:
-    assert _subject_tokens("Gathering at Sandro's") == {"gathering", "sandro"}
-    assert _subject_tokens("Gathering at Sandro's tonight") == {
+    assert subject_tokens("Gathering at Sandro's") == {"gathering", "sandro"}
+    assert subject_tokens("Gathering at Sandro's tonight") == {
         "gathering",
         "sandro",
     }
-    assert _subject_tokens("Scar") == {"scar"}
-    assert _subject_tokens(None) == set()
+    assert subject_tokens("Scar") == {"scar"}
+    assert subject_tokens(None) == set()
+
+
+def test_is_same_circumstance_ignores_bare_names() -> None:
+    gathering = subject_tokens("Gathering at Sandro's tonight")
+    assert is_same_circumstance(gathering, subject_tokens("Gathering at Sandro's"))
+    assert is_same_circumstance(
+        gathering, subject_tokens("Gathering at Sandro's place")
+    )
+    assert not is_same_circumstance(gathering, subject_tokens("Scar"))
+    assert not is_same_circumstance(gathering, subject_tokens("Anniversary today"))
+    assert not is_same_circumstance(subject_tokens("Scar"), subject_tokens("Scarlet"))
 
 
 def test_duplicate_accounts_of_one_event_collapse_to_one_note() -> None:

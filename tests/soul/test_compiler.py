@@ -678,3 +678,157 @@ async def test_dsp_builder_keeps_clean_profile_when_quiet() -> None:
     result = await builder.build_update(current_dsp=clean, extractions=[quiet])
 
     assert result == clean
+
+
+class _DistillingExtractor:
+    """Stands in for the LLM extractor: returns a paraphrase, not the transcript."""
+
+    def __init__(self) -> None:
+        self.transcripts: list[str] = []
+
+    async def extract_memcells(
+        self, *, transcript: str, current_date: date
+    ) -> list[MemCellExtractionModel]:
+        del current_date
+        self.transcripts.append(transcript)
+        return [
+            MemCellExtractionModel.model_validate(
+                {
+                    "episodic_trace": (
+                        "Scar confirmed the deploy worked and asked how it felt."
+                    ),
+                    "atomic_facts": ["User|confirmed|the deploy worked"],
+                    "emotional_tag": {
+                        "state_snapshot": {
+                            "joy": 0.0,
+                            "fear": 0.0,
+                            "sad": 0.0,
+                            "anger": 0.0,
+                        },
+                        "dominant_emotion": "neutral",
+                        "intensity": 0.0,
+                        "valence": 0.0,
+                    },
+                    "foresight_signals": [],
+                    "timestamp": datetime(2026, 4, 18, 13, 0, tzinfo=timezone.utc),
+                }
+            )
+        ]
+
+
+class _SilentExtractor:
+    """An extractor that finds nothing worth remembering."""
+
+    async def extract_memcells(
+        self, *, transcript: str, current_date: date
+    ) -> list[MemCellExtractionModel]:
+        del transcript, current_date
+        return []
+
+
+def _legacy_cell(cell_id: str, *, hours_ago: int) -> MemCell:
+    return MemCell(
+        id=cell_id,
+        episodic_trace=(
+            "Scar: okay it's finally deployed, the memcell issue should be mitigated now"
+        ),
+        atomic_facts=["Conversation|summary|Scar: okay it's finally deployed"],
+        emotional_tag=EmotionalTag(
+            state_snapshot={"joy": 0.0, "fear": 0.0, "sad": 0.0, "anger": 0.0},
+            dominant_emotion="neutral",
+            intensity=0.0,
+            valence=0.0,
+        ),
+        foresight_signals=[],
+        event_timestamp=datetime.now(timezone.utc) - timedelta(hours=hours_ago),
+        session_id="session-9",
+        embedding=[0.1] * 8,
+        retrieval_count=7,
+        explicit_importance=0.2,
+        consolidated=True,
+        scene_id="scene:1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_redistil_rewrites_a_legacy_cell_in_place() -> None:
+    """A legacy row keeps its identity; only the content becomes distilled."""
+    repo = InMemorySoulRepository()
+    legacy = _legacy_cell("session-9:1", hours_ago=40)
+    original_trace = legacy.episodic_trace
+    original_timestamp = legacy.event_timestamp
+    repo.memcells[legacy.id] = legacy
+    extractor = _DistillingExtractor()
+    compiler = SoulCompiler(
+        repository=repo,
+        memcell_extractor=extractor,
+        dsp_extractor=FakeDspExtractor(),
+        dsp_builder=RuleBasedDspBuilder(),
+        summary_builder=RuleBasedSummaryBuilder(),
+        embedder=NoopEmbedder(),
+    )
+
+    rewritten = await compiler.redistil_memcell(legacy, current_date=date(2026, 4, 18))
+
+    assert rewritten is True
+    stored = repo.memcells["session-9:1"]
+    assert stored.episodic_trace == (
+        "Scar confirmed the deploy worked and asked how it felt."
+    )
+    assert stored.atomic_facts == ["User|confirmed|the deploy worked"]
+    # Identity, history and emotion tagging are untouched.
+    assert stored.retrieval_count == 7
+    assert stored.scene_id == "scene:1"
+    assert stored.explicit_importance == 0.2
+    assert stored.consolidated is True
+    assert stored.event_timestamp == original_timestamp
+    assert stored.emotional_tag.dominant_emotion == "neutral"
+    # The cell's own text was what the extractor was asked to distil.
+    assert extractor.transcripts == [original_trace]
+
+
+@pytest.mark.asyncio
+async def test_redistil_leaves_a_cell_the_extractor_cannot_improve() -> None:
+    repo = InMemorySoulRepository()
+    legacy = _legacy_cell("session-9:2", hours_ago=40)
+    original_trace = legacy.episodic_trace
+    repo.memcells[legacy.id] = legacy
+    compiler = SoulCompiler(
+        repository=repo,
+        memcell_extractor=_SilentExtractor(),
+        dsp_extractor=FakeDspExtractor(),
+        dsp_builder=RuleBasedDspBuilder(),
+        summary_builder=RuleBasedSummaryBuilder(),
+        embedder=NoopEmbedder(),
+    )
+
+    rewritten = await compiler.redistil_memcell(legacy, current_date=date(2026, 4, 18))
+
+    assert rewritten is False
+    assert repo.memcells["session-9:2"].episodic_trace == original_trace
+
+
+@pytest.mark.asyncio
+async def test_redistil_pass_only_touches_cells_older_than_the_cutoff() -> None:
+    repo = InMemorySoulRepository()
+    old = _legacy_cell("session-9:old", hours_ago=40)
+    fresh = _legacy_cell("session-9:fresh", hours_ago=1)
+    repo.memcells[old.id] = old
+    repo.memcells[fresh.id] = fresh
+    compiler = SoulCompiler(
+        repository=repo,
+        memcell_extractor=_DistillingExtractor(),
+        dsp_extractor=FakeDspExtractor(),
+        dsp_builder=RuleBasedDspBuilder(),
+        summary_builder=RuleBasedSummaryBuilder(),
+        embedder=NoopEmbedder(),
+    )
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=5)
+
+    result = await compiler.redistil_memcells(
+        before=cutoff, current_date=date(2026, 4, 18)
+    )
+
+    assert result == {"inspected": 1, "rewritten": 1, "skipped": 0, "failed": 0}
+    assert repo.memcells["session-9:old"].episodic_trace.startswith("Scar confirmed")
+    assert repo.memcells["session-9:fresh"].episodic_trace.startswith("Scar: okay")

@@ -31,10 +31,24 @@ class _RecordingRepository:
 
     def __init__(self) -> None:
         self.notes: list[Any] = []
+        self.resolved: list[tuple[str, str]] = []
 
     async def upsert_situational_note(self, note: Any) -> str:
         self.notes.append(note)
         return note.id or "generated"
+
+    async def list_active_situational_notes(
+        self, now: Any, subject: Any = None
+    ) -> list[Any]:
+        return [n for n in self.notes if getattr(n, "status", "active") == "active"]
+
+    async def resolve_situational_note(
+        self, note_id: str, new_status: str, summary_delta: Any = None
+    ) -> None:
+        self.resolved.append((note_id, new_status))
+        for note in self.notes:
+            if note.id == note_id:
+                note.status = new_status
 
 
 def _install(
@@ -310,3 +324,97 @@ def test_extract_instructions_scope_notes_to_the_human_and_canonical_subjects() 
     assert "SHORT canonical noun phrase" in _EXTRACT_INSTRUCTIONS
     assert "Never use a bare person's name" in _EXTRACT_INSTRUCTIONS
     assert "belong to the persona's diary" in _EXTRACT_INSTRUCTIONS
+
+
+def _older_note(subject: str, summary: str) -> Any:
+    from datetime import datetime, timezone
+
+    from core.soul.models import situational_note_from_extraction
+
+    note = situational_note_from_extraction(
+        note_type="EVENT",
+        subject=subject,
+        summary=summary,
+        valid_until=datetime(2026, 9, 19, tzinfo=timezone.utc),
+        now=datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc),
+    )
+    note.id = "tsc-older-account"
+    return note
+
+
+@pytest.mark.asyncio
+async def test_a_re_description_supersedes_the_older_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One circumstance, many accounts: the newest wins, the older ones retire.
+
+    Live effect of the old behaviour (2026-09-18): twelve active notes for one
+    evening gathering, two of them contradicting each other outright ("took place
+    last night and went fine" next to "expected tonight").
+    """
+    repo = _RecordingRepository()
+    repo.notes.append(
+        _older_note(
+            "Gathering at Sandro's",
+            "A gathering at Sandro's is happening tonight.",
+        )
+    )
+    _install(
+        monkeypatch,
+        llm_text=(
+            '{"notes":[{"note_type":"EVENT","subject":"Gathering at Sandro\'s tonight",'
+            '"summary":"The gathering at Sandro\'s happened last night and went fine.",'
+            '"priority":1,"confidence":0.85,'
+            '"valid_until":"2026-09-19T06:00:00+00:00"}]}'
+        ),
+        repository=repo,
+    )
+
+    original_message, context = _turn()
+    await DebriefSituationalNotesPlugin().on_debrief(
+        processed_actions=[],
+        failed_actions=[],
+        results={},
+        context=context,
+        original_message=original_message,
+    )
+
+    assert repo.resolved == [("tsc-older-account", "superseded")]
+    assert repo.notes[0].status == "superseded"
+    # The note just stored stays active; it is never retired by its own write.
+    assert repo.notes[-1].status == "active"
+
+
+@pytest.mark.asyncio
+async def test_unrelated_notes_are_not_superseded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _RecordingRepository()
+    repo.notes.append(
+        _older_note(
+            "Scar takes twice-daily medication",
+            "Scar takes pills twice a day before sleeping.",
+        )
+    )
+    _install(
+        monkeypatch,
+        llm_text=(
+            '{"notes":[{"note_type":"EVENT","subject":"Gathering at Sandro\'s tonight",'
+            '"summary":"A gathering at Sandro\'s is happening tonight.",'
+            '"priority":1,"confidence":0.8,'
+            '"valid_until":"2026-09-19T06:00:00+00:00"}]}'
+        ),
+        repository=repo,
+    )
+
+    original_message, context = _turn()
+    await DebriefSituationalNotesPlugin().on_debrief(
+        processed_actions=[],
+        failed_actions=[],
+        results={},
+        context=context,
+        original_message=original_message,
+    )
+
+    assert repo.resolved == []
+    assert repo.notes[0].status == "active"

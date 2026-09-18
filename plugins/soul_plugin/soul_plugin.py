@@ -34,6 +34,7 @@ from core.soul.repository import (
     PostgresSoulRepository,
     SoulRepository,
 )
+from core.soul.situational import is_same_circumstance, subject_tokens
 from core.soul.strategies import (
     RuleBasedDspExtractor,
     RuleBasedMemCellExtractor,
@@ -241,53 +242,6 @@ _SOUL_RETRIEVAL_BUMP_TRACK_MAX = 512
 # prompt, several contradicting each other about the same evening). What the model
 # is shown is ranked and bounded here; the store keeps everything.
 _SOUL_TEMPORAL_INJECT_LIMIT = 8
-_SOUL_TEMPORAL_SUBJECT_STOPWORDS = frozenset(
-    {
-        "the",
-        "a",
-        "an",
-        "at",
-        "of",
-        "for",
-        "and",
-        "in",
-        "on",
-        "to",
-        "with",
-        "from",
-        "is",
-        "are",
-        "today",
-        "tonight",
-        "tomorrow",
-        "evening",
-        "morning",
-        "afternoon",
-        "later",
-        "next",
-        "this",
-        "that",
-        "upcoming",
-        "planned",
-        "possible",
-        "possibly",
-    }
-)
-
-
-def _subject_tokens(subject: Any) -> set[str]:
-    """Meaningful tokens of a situational note's subject.
-
-    Used to recognise two notes that describe the same circumstance under
-    different wording ("Gathering at Sandro's" / "Gathering at Sandro's
-    tonight"). Time-of-day and hedging words are dropped so the pair collides.
-    """
-    words = re.findall(r"[a-z0-9]+", str(subject or "").lower())
-    return {
-        word
-        for word in words
-        if len(word) > 1 and word not in _SOUL_TEMPORAL_SUBJECT_STOPWORDS
-    }
 
 
 class SoulPlugin(PluginBase):
@@ -705,13 +659,13 @@ class SoulPlugin(PluginBase):
         selected: list[dict[str, Any]] = []
         seen: list[set[str]] = []
         for note in ranked:
-            tokens = _subject_tokens(note.get("subject"))
+            tokens = subject_tokens(note.get("subject"))
             # Single-token subjects ("Scar", "Human", "gathering") name a person
             # or a bare topic, so they neither take part in the containment test
             # nor become a reference that could absorb a richer note.
+            if any(is_same_circumstance(tokens, other) for other in seen):
+                continue
             if len(tokens) >= 2:
-                if any(tokens <= other or other <= tokens for other in seen):
-                    continue
                 seen.append(tokens)
             selected.append(note)
             if len(selected) >= max(1, limit):

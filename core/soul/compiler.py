@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Protocol, cast
 
+from core.logging_utils import log_debug, log_info, log_warning
+
 from .models import (
     CurationResult,
     CuratorDecision,
@@ -274,6 +276,85 @@ class SoulCompiler:
             await self.repository.upsert_memcell(cell)
             updated += 1
         return updated
+
+    async def redistil_memcell(self, cell: MemCell, *, current_date: date) -> bool:
+        """Rewrite one legacy cell's content as distilled knowledge, in place.
+
+        Cells compiled before the distilling extractor went live hold the session
+        transcript as their ``episodic_trace`` and, before this change took the
+        fabrication away, the conversation line as their only fact. Recall keeps
+        serving that raw transcript until the row is rewritten, so this re-runs
+        the extraction over the cell's own text and replaces the CONTENT only:
+        id, session, timestamp, retrieval count, emotional tag, foresight signals
+        and scene stay exactly as they were, and the embedding is recomputed so
+        recall similarity follows the new text.
+
+        Returns True when the cell was rewritten; False when the extractor
+        returned nothing usable or produced the same text, in which case the row
+        is left untouched.
+        """
+        text = (cell.episodic_trace or "").strip()
+        if not text:
+            return False
+        extracted = await self.memcell_extractor.extract_memcells(
+            transcript=text, current_date=current_date
+        )
+        if not extracted:
+            return False
+        distilled = extracted[0]
+        trace = str(distilled.episodic_trace or "").strip()
+        if not trace or trace == text:
+            return False
+        cell.episodic_trace = trace
+        cell.atomic_facts = list(distilled.atomic_facts)
+        cell.embedding = await self.embedder.embed(trace)
+        await self.repository.upsert_memcell(cell)
+        return True
+
+    async def redistil_memcells(
+        self,
+        *,
+        before: datetime,
+        current_date: date,
+        limit: int = 500,
+    ) -> dict[str, int]:
+        """Re-distil every cell compiled before ``before``.
+
+        ``before`` is the moment the distilling extractor went live: everything
+        older than it was written by the deterministic extractor. One LLM call per
+        cell, so this is a deliberate one-off, not a scheduled pass.
+        """
+        pending = await self.repository.list_memcells_before(before, limit=limit)
+        rewritten = 0
+        skipped = 0
+        failed = 0
+        total = len(pending)
+        for index, cell in enumerate(pending, 1):
+            try:
+                if await self.redistil_memcell(cell, current_date=current_date):
+                    rewritten += 1
+                else:
+                    skipped += 1
+            except Exception as exc:
+                failed += 1
+                log_warning(f"[soul] redistil failed for {cell.id}: {exc}")
+            if index % 25 == 0:
+                log_info(
+                    f"[soul] redistil progress: {index}/{total} "
+                    f"(rewritten={rewritten} skipped={skipped} failed={failed})"
+                )
+        result = {
+            "inspected": total,
+            "rewritten": rewritten,
+            "skipped": skipped,
+            "failed": failed,
+        }
+        log_debug(
+            "[soul] redistil pass: "
+            f"inspected={result['inspected']} rewritten={rewritten} "
+            f"skipped={skipped} failed={failed}"
+        )
+        return result
 
     async def async_consolidate(self) -> list[str]:
         """Consolidate unconsolidated MemCells into MemScenes."""

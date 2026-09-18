@@ -769,7 +769,11 @@ class LlmMemCellExtractor:
             return await self._fallback_cells(
                 transcript=transcript, current_date=current_date
             )
-        model = await resolve_dsp_scope_model()
+        # An injected engine means the caller owns the model choice (a standalone
+        # pass, a test), so the scope lookup is skipped instead of failing loudly.
+        model = (
+            None if self.resolve_engine is not None else await resolve_dsp_scope_model()
+        )
         prompt = {
             "input": {
                 "type": "memcell_extract",
@@ -850,7 +854,17 @@ class LlmMemCellExtractor:
     ) -> list[MemCellExtractionModel]:
         """Turn the model's entries into validated cells, dropping quotes."""
         transcript_key = _normalise_for_compare(transcript)
-        foresight = self._tagger.extract_foresight_signals(transcript, current_date)
+        # Only the DATED signals carry content ("Upcoming user event around
+        # 2026-09-19"). The relative-time markers are boilerplate - "Potential
+        # follow-up implied by phrase 'tonight'" - which the prompt then showed
+        # verbatim in every block, so they are dropped here rather than injected.
+        foresight = [
+            signal
+            for signal in self._tagger.extract_foresight_signals(
+                transcript, current_date
+            )
+            if signal.trigger != "relative_time_mention"
+        ]
         now = datetime.now(timezone.utc)
         cells: list[MemCellExtractionModel] = []
         for index, item in enumerate(raw):

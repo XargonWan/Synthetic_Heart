@@ -83,8 +83,10 @@ async def test_distils_a_session_into_paraphrased_cells() -> None:
     ]
     # Distinct timestamps: the cell id is derived from them.
     assert cells[0].timestamp != cells[1].timestamp
-    # A cell carries the session's foresight signals ("next week").
-    assert cells[0].foresight_signals
+    # Foresight stays deterministic, and only DATED signals are carried over:
+    # the transcript's "next week" alone is boilerplate, so nothing is injected
+    # (see test_relative_time_boilerplate_is_not_injected_as_foresight).
+    assert cells[0].foresight_signals == []
     assert cells[1].foresight_signals == []
 
 
@@ -344,3 +346,28 @@ async def test_rule_based_extractor_keeps_real_pattern_facts() -> None:
     assert cells[0].atomic_facts == [
         "User|has_intention|finish the ghost protocol pipeline"
     ]
+
+
+@pytest.mark.asyncio
+async def test_relative_time_boilerplate_is_not_injected_as_foresight() -> None:
+    """Only dated foresight carries content; the phrase markers are noise.
+
+    "Potential follow-up implied by phrase 'tonight'" was rendered verbatim in the
+    follow-up block of every prompt, so it is dropped on the LLM path.
+    """
+    engine = FakeEngine(
+        response=(
+            '{"memories": [{"trace": "Scar said he would look into it the next day, '
+            'and mentioned an event on 2026-09-20.", "facts": []}]}'
+        )
+    )
+    extractor = _extractor(engine)
+
+    cells = await extractor.extract_memcells(
+        transcript="Scar: ill look into it tomorrow, the thing is on 2026-09-20\n",
+        current_date=date(2026, 9, 18),
+    )
+
+    triggers = [signal.trigger for signal in cells[0].foresight_signals]
+    assert "relative_time_mention" not in triggers
+    assert "date_mention" in triggers

@@ -249,13 +249,73 @@ class DebriefSituationalNotesPlugin:
                 session_id=session_id,
             )
             try:
-                await repository.upsert_situational_note(note)
+                keep_id = await repository.upsert_situational_note(note)
                 stored += 1
             except Exception as exc:
                 log_warning(
                     f"[debrief_situational_notes] could not store a note: {exc}"
                 )
+                continue
+            superseded = await self._supersede_older_accounts(
+                repository, note, keep_id=keep_id
+            )
+            if superseded:
+                log_info(
+                    f"[debrief_situational_notes] superseded {superseded} older "
+                    f"note(s) about '{note.subject}'"
+                )
         return stored
+
+    async def _supersede_older_accounts(
+        self, repository: Any, note: Any, *, keep_id: Any = None
+    ) -> int:
+        """Retire the active notes that this new account replaces.
+
+        Every debrief cycle re-describes the circumstances of the last turn, and a
+        note's id is derived from its own text (note_type + subject + summary), so
+        a rephrasing used to add a row and leave the older account active: the
+        store reached twelve active notes for one evening gathering, contradicting
+        each other ("happened last night and went fine" next to "expected
+        tonight"). The newest account of a circumstance wins; the older rows are
+        marked ``superseded`` (never deleted) and stop being injected, because both
+        the active-note query and the prompt block read ``status = 'active'`` only.
+
+        Fail-safe: a lookup or update error is logged and never breaks the store.
+        """
+        from core.soul.models import now_utc
+        from core.soul.situational import is_same_circumstance, subject_tokens
+
+        tokens = subject_tokens(note.subject)
+        if not tokens:
+            return 0
+        try:
+            active = await repository.list_active_situational_notes(now=now_utc())
+        except Exception as exc:
+            log_debug(f"[debrief_situational_notes] supersede lookup failed: {exc}")
+            return 0
+
+        superseded = 0
+        for other in active:
+            # Never retire the note we just stored: by identity in-process, and by
+            # the id the repository derived for it.
+            if other is note:
+                continue
+            if keep_id and other.id == keep_id:
+                continue
+            if note.id and other.id == note.id:
+                continue
+            if not is_same_circumstance(tokens, subject_tokens(other.subject)):
+                continue
+            try:
+                await repository.resolve_situational_note(
+                    other.id, new_status="superseded"
+                )
+                superseded += 1
+            except Exception as exc:
+                log_warning(
+                    f"[debrief_situational_notes] could not supersede {other.id}: {exc}"
+                )
+        return superseded
 
     async def on_debrief(
         self,
