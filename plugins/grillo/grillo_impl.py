@@ -545,7 +545,36 @@ class GrilloPlugin(AIPluginBase):
                         elif row:
                             inserted_id = row[0]
                     await conn.commit()
-                    return inserted_id
+                    if not inserted_id:
+                        log_warning(
+                            f"[grillo] create_activity_log: no id for beat '{beat_type}' — "
+                            "the beat runs without an activity row"
+                        )
+                        return None
+                    # Verify the row really is there before handing the id to the beat.
+                    # The beat writes its response back BY ID, so a stale or never
+                    # committed id makes it overwrite another beat's row instead of
+                    # logging its own. Observed live: the 06:23 beat updated row 8907
+                    # and the 07:23 beat updated row 8910, both belonging to earlier
+                    # beats, while their own beats left no row at all.
+                    await cur.execute(
+                        "SELECT id FROM grillo_activity_log WHERE id = %s",
+                        (inserted_id,),
+                    )
+                    verify_row = await cur.fetchone()
+                    verified_id: Optional[int] = None
+                    if isinstance(verify_row, dict):
+                        verified_id = verify_row.get("id")
+                    elif verify_row:
+                        verified_id = verify_row[0]
+                    if not verified_id:
+                        log_warning(
+                            f"[grillo] create_activity_log: id {inserted_id} for beat "
+                            f"'{beat_type}' was not persisted — discarding it so the beat "
+                            "cannot overwrite another beat's row"
+                        )
+                        return None
+                    return int(verified_id)
         except Exception as e:
             log_error(f"[grillo] create_activity_log failed: {e}")
             return None

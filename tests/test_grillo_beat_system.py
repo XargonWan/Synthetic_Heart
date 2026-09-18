@@ -290,6 +290,9 @@ async def test_grillo_response_extraction() -> None:
 async def test_grillo_activity_log_creation() -> None:
     """Test activity log creation."""
     mock_ctx, mock_cursor = _create_mock_db_context()
+    # The id is verified against the table before the beat gets it, so the same
+    # read that answers the insert also answers the verify SELECT.
+    mock_cursor.fetchone = AsyncMock(return_value={"id": 999})
 
     def mock_get_conn_ctx() -> MagicMock:
         return mock_ctx
