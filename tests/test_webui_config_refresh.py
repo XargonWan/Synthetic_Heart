@@ -26,7 +26,7 @@ def test_api_config_returns_db_values_after_reload():
 
     # Monkeypatch `load_all_from_db` so the endpoint's reload attempt will
     # populate the DB-backed value (tests don't have aiomysql available).
-    async def _fake_load_all_from_db():
+    async def _fake_load_all_from_db(force=False):
         # Simulate DB-loaded value
         defn.raw_value = "db-value"
         defn.value = "db-value"

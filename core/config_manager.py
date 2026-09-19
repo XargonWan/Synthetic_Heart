@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Union, cast
 
@@ -137,6 +138,17 @@ class ConfigDefinition:
     # component (or the whole core). Default is False to avoid unnecessary
     # reloads from routine config edits.
     needs_component_reload: bool = False
+
+
+# Coalescing guard for load_all_from_db(). A boot runs the full config sweep
+# from many startup paths (core_initializer twice, then every interface's
+# reload/apply-config handler), which re-logs every definition each time —
+# observed ~34 runs / ~20k DEBUG lines in the ~11s of one boot. We collapse
+# redundant re-scans that arrive within a short window: a call is skipped when
+# a load already completed recently AND there is no definition that still needs
+# loading. `force=True` (the WebUI refresh path) always runs.
+_LOAD_COALESCE_WINDOW_SEC = 5.0
+_last_full_load_monotonic: Optional[float] = None
 
 
 class ConfigRegistry:
@@ -1236,7 +1248,7 @@ class ConfigRegistry:
                         f"[config] Failed to persist bootstrap config '{definition.key}': {exc}"
                     )
 
-    async def load_all_from_db(self) -> None:
+    async def load_all_from_db(self, force: bool = False) -> None:
         """
         Load all non-bootstrap configurations from the database.
 
@@ -1246,7 +1258,36 @@ class ConfigRegistry:
         CRITICAL: This fixes the issue where removing env variables causes configs
         to be lost. When a variable is removed from ENV, this function ensures the
         DB value is loaded instead of using defaults.
+
+        ``force`` skips the short-window coalescing guard so a manual reload (the
+        WebUI refresh) always re-reads the DB even when a boot sweep just ran.
         """
+        global _last_full_load_monotonic
+
+        # Coalesce redundant re-runs. Several startup paths call this in the same
+        # second (core_initializer twice, then each interface's reload handler);
+        # a re-run that arrives shortly after a completed load and finds every
+        # definition already loaded is a pure no-op rescan (it only re-logs) and
+        # is skipped. A definition that still needs loading (loaded=False, not
+        # env_override/bootstrap) forces the real run so genuine loads are never
+        # lost.
+        if not force:
+            now = time.monotonic()
+            last = _last_full_load_monotonic
+            if last is not None and (now - last) < _LOAD_COALESCE_WINDOW_SEC:
+                pending = any(
+                    not getattr(d, "loaded", False)
+                    and not getattr(d, "env_override", False)
+                    and "bootstrap" not in getattr(d, "tags", ())
+                    for d in self._definitions.values()
+                )
+                if not pending:
+                    log_debug(
+                        "[config] load_all_from_db skipped: loaded recently, "
+                        "no pending definitions"
+                    )
+                    return
+
         loaded_count = 0
         skipped_count = 0
 
@@ -1267,6 +1308,12 @@ class ConfigRegistry:
                     }
         except Exception as exc:
             log_warning(f"[config] Failed to batch-load config from DB: {exc}")
+
+        # A successful DB read marks the sweep "recent", so redundant re-scans
+        # within the window are coalesced above. A failed read leaves it unset so
+        # a retry is never swallowed.
+        if config_rows:
+            _last_full_load_monotonic = time.monotonic()
 
         for definition in self._definitions.values():
             # Skip bootstrap configs (already loaded from env)

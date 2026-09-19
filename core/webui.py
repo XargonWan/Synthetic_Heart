@@ -6031,7 +6031,7 @@ class SynthWebUIInterface:
                 # Attempt to load DB-backed values for all definitions and
                 # regenerate the exported list.
                 try:
-                    await config_registry.load_all_from_db()
+                    await config_registry.load_all_from_db(force=True)
                     definitions = config_registry.export_definitions()
                 except Exception:
                     # Non-fatal: if DB is not available just continue with
