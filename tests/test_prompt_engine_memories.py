@@ -160,13 +160,18 @@ async def test_synth_core_search_memories_uses_postgres_tag_predicates(
 
     assert results == []
     queries = [sql for sql, _ in conn_instance.cursor_obj.queries]
-    assert len(queries) == 3
+    # 0: token-selectivity measurement, 1: memories, 2: ai_diary, 3: chat history.
+    assert len(queries) == 4
+    assert queries[0].startswith("SELECT SUM(CASE WHEN LOWER(message_text) LIKE %s")
+    assert "FROM chat_history_cache" in queries[0]
     assert all("JSON_CONTAINS" not in sql for sql in queries)
-    assert "COALESCE(NULLIF(BTRIM(tags), ''), '[]')::jsonb ? %s" in queries[0]
-    assert "COALESCE(NULLIF(BTRIM(context_tags), ''), '[]')::jsonb ? %s" in queries[1]
-    assert conn_instance.cursor_obj.queries[0][1] == ["food", 15]
+    assert "COALESCE(NULLIF(BTRIM(tags), ''), '[]')::jsonb ? %s" in queries[1]
+    assert "COALESCE(NULLIF(BTRIM(context_tags), ''), '[]')::jsonb ? %s" in queries[2]
     assert conn_instance.cursor_obj.queries[1][1] == ["food", 15]
-    assert conn_instance.cursor_obj.queries[2][1] == ["%food%", 15]
+    assert conn_instance.cursor_obj.queries[2][1] == ["food", 15]
+    # The chat tier binds the where token, then the same token for the relevance
+    # ordering, then the pool limit.
+    assert conn_instance.cursor_obj.queries[3][1] == ["%food%", "%food%", 15]
 
 
 @pytest.mark.asyncio
@@ -369,6 +374,7 @@ async def test_synth_core_search_memories_reserves_slots_for_long_term_memories(
             recent_base.replace(minute=i),
             f"Chi è Alonza? (turno {i})",
             None,
+            "telegram_bot/-5293915984",
         )
         for i in range(20)
     ]
@@ -559,6 +565,7 @@ async def test_search_memories_excludes_chat_history_of_current_chat(
                         "2026-08-15 06:26:34",
                         "Basically once its elevated i can reset it...",
                         None,
+                        "telegram_bot/5208932647",
                     ],
                     [
                         "chat_history",
@@ -566,6 +573,7 @@ async def test_search_memories_excludes_chat_history_of_current_chat(
                         "2026-08-14 06:00:00",
                         "older morning greeting from another chat",
                         None,
+                        "telegram_bot/-5293915984",
                     ],
                 ]
                 if excluded_path:
@@ -604,7 +612,14 @@ async def test_search_memories_excludes_chat_history_of_current_chat(
         exclude_interface_paths=["telegram_bot/5208932647"],
     )
 
-    # The chat-history query must carry the NOT IN exclusion for the current chat.
+    # The chat-history query must carry the NOT IN exclusion for the current
+    # chat, AND-ed onto a *grouped* keyword predicate. Asserting only that the
+    # string "interface_path NOT IN" appears is not enough: the original bug put
+    # that predicate in the same OR-chain as the keywords, which made the whole
+    # clause true for every row outside the excluded chats — so the current chat
+    # was not excluded at all and the keyword filter stopped filtering. That
+    # shipped because this test's fake cursor emulated the intended filtering in
+    # Python instead of exercising the SQL it asserted.
     chat_queries = [
         (sql, params)
         for sql, params in captured_queries
@@ -614,6 +629,17 @@ async def test_search_memories_excludes_chat_history_of_current_chat(
     chat_sql, chat_params = chat_queries[-1]
     assert "interface_path NOT IN" in chat_sql
     assert "telegram_bot/5208932647" in [str(p) for p in (chat_params or [])]
+
+    where = chat_sql.split("WHERE", 1)[1].rsplit("ORDER BY", 1)[0]
+    assert " AND interface_path NOT IN" in where, (
+        "the exclusion must be AND-ed onto the keyword group, not OR-ed with "
+        f"it: {where}"
+    )
+    keyword_part = where.split(" AND interface_path NOT IN", 1)[0].strip()
+    assert keyword_part.startswith("(") and keyword_part.endswith(")"), (
+        f"the keyword predicates must be grouped in one parenthesised OR-chain: {where}"
+    )
+    assert " OR " in keyword_part
 
     # The row from the excluded current chat must not be returned; the
     # other-chat row may surface.
@@ -692,3 +718,247 @@ async def test_build_json_prompt_merges_soul_recalled_memories(monkeypatch):
         "Legacy memory",
         "Recalled memory from 2026-04-18 (same chat): Alice loves jasmine tea.",
     ]
+
+
+def test_chat_history_exclusion_holds_under_real_sql() -> None:
+    """Evaluate the generated clause with a real SQL engine.
+
+    The cursor-level test above can only assert what the SQL *string* looks
+    like, and its fake cursor emulated the intended filtering in Python — which
+    is exactly how the OR-join bug shipped: the assertion covered the intent
+    while the generated clause filtered nothing. Running the real clause
+    against a real engine fails if the exclusion is OR-ed with the keywords.
+    """
+    import sqlite3
+
+    current = "telegram_bot/5208932647"
+    where, params = scm._build_chat_history_where(
+        ["elevated", "reset"], excluded_paths=[current]
+    )
+    assert where, "a keyword tier must produce a WHERE clause"
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE chat_history_cache "
+        "(id INTEGER, interface_path TEXT, message_text TEXT)"
+    )
+    conn.executemany(
+        "INSERT INTO chat_history_cache VALUES (?, ?, ?)",
+        [
+            (1, current, "Basically once its elevated i can reset it"),
+            (2, "telegram_bot/-5293915984", "an elevated core needs a reset"),
+            (3, "telegram_bot/-5293915984", "a line with no matching keyword"),
+        ],
+    )
+    rows = conn.execute(
+        f"SELECT id FROM chat_history_cache WHERE {where.replace('%s', '?')} "
+        "ORDER BY id",
+        list(params),
+    ).fetchall()
+    conn.close()
+
+    ids = [row[0] for row in rows]
+    assert 1 not in ids, f"the current chat's own line survived the exclusion: {ids}"
+    assert ids == [2], (
+        "only the other-chat row that actually matches a keyword may surface, "
+        f"got: {ids}"
+    )
+
+
+def test_chat_history_where_without_exclusion_still_groups_keywords() -> None:
+    """With nothing excluded, the keyword OR-chain must still be one group."""
+    where, params = scm._build_chat_history_where(["alpha", "beta"], None)
+
+    assert where == "(LOWER(message_text) LIKE %s OR LOWER(message_text) LIKE %s)"
+    assert params == ["%alpha%", "%beta%"]
+    assert "NOT IN" not in where
+
+    # No tokens and nothing excluded -> no clause at all, so the tier is skipped
+    # rather than issuing an unfiltered scan of the whole cache.
+    assert scm._build_chat_history_where([], None) == ("", [])
+
+
+def test_stored_memory_entries_carry_their_source_and_date() -> None:
+    """A dict hit from the memories/ai_diary/chat_history tiers keeps provenance.
+
+    Rendering only the entry's text dropped its source and its timestamp, so a
+    raw line lifted from another conversation reached the prompt looking like a
+    remembered fact: undated, unattributed, and indistinguishable from the
+    model's own recollection.
+    """
+    entry = {
+        "source": "chat_history",
+        "id": 14530,
+        "timestamp": "2026-09-19T11:34:32.123456+00:00",
+        "snippet": 'Well i did say "as long as you like it" did I not',
+        "tags": [],
+        "interface_path": "telegram_bot/-5293915984",
+    }
+
+    rendered = pe._humanize_context_entry(entry, kind="memories")
+
+    assert rendered == (
+        "Recalled memory from 2026-09-19 "
+        "(telegram_bot/-5293915984, chat history): "
+        'Well i did say "as long as you like it" did I not'
+    )
+
+
+def test_stored_memory_label_survives_a_missing_date_and_unknown_source() -> None:
+    """A hit with no timestamp and a new source still names what it is."""
+    assert (
+        pe._humanize_context_entry(
+            {"source": "some_new_tier", "snippet": "body text"}, kind="memories"
+        )
+        == "Recalled memory (some new tier): body text"
+    )
+    assert (
+        pe._humanize_context_entry({"snippet": "body text"}, kind="memories")
+        == "Recalled memory (stored memory): body text"
+    )
+
+
+def test_memory_merge_key_ignores_the_row_id() -> None:
+    """Two rows holding the same sentence are one memory, whatever their ids.
+
+    The store writes pairs of identical rows (`memories` ids 1690/1691,
+    1692/1693, 1694/1695 live), and a merge key built from the id kept both, so a
+    single sentence used two of the limited memory slots in every prompt.
+    """
+    first = {"source": "memories", "id": 1690, "snippet": "The moonlight is tracing."}
+    twin = {"source": "memories", "id": 1691, "snippet": "The  moonlight   is tracing."}
+
+    assert pe._memory_merge_key(first) == pe._memory_merge_key(twin)
+
+    merged = pe._merge_memory_entries([first], [twin])
+    assert merged == [first]
+
+
+class _AggregateCursor:
+    """Cursor that answers the token-selectivity aggregate with fixed counts."""
+
+    def __init__(self, row: list[int]) -> None:
+        self.row = row
+        self.queries: list[tuple[str, list[object] | None]] = []
+
+    async def execute(self, sql: str, params=None) -> None:
+        self.queries.append((sql, list(params) if params is not None else None))
+
+    async def fetchall(self) -> list[list[int]]:
+        return [self.row]
+
+
+@pytest.mark.asyncio
+async def test_selective_keywords_drop_tokens_that_match_most_of_the_store() -> None:
+    """A token that is in most rows says nothing about which row is wanted.
+
+    Live: 'you' was in 89% of rows and 'your' in 53%, so the keyword clause
+    matched 93% of the cache and filtered nothing.
+    """
+    # 2700/3000 = 90% "you" (dropped); 600/3000 = 20% "dee" (kept).
+    cursor = _AggregateCursor([2700, 600, 3000])
+
+    assert await scm._selective_keywords(cursor, ["you", "dee"]) == ["dee"]
+
+
+@pytest.mark.asyncio
+async def test_selective_keywords_never_drop_a_rare_token() -> None:
+    """The rare-token guarantee is what the tier is for, so it must survive."""
+    cursor = _AggregateCursor([0, 3000])
+
+    assert await scm._selective_keywords(cursor, ["alonza"]) == ["alonza"]
+
+
+@pytest.mark.asyncio
+async def test_selective_keywords_drop_tokens_too_short_to_discriminate() -> None:
+    cursor = _AggregateCursor([0, 3000])
+
+    assert await scm._selective_keywords(cursor, ["a", "of", "dee"]) == ["dee"]
+
+
+@pytest.mark.asyncio
+async def test_selective_keywords_fail_open_when_the_store_cannot_answer() -> None:
+    """A store that cannot be measured keeps every token, exactly as before."""
+
+    class _BrokenCursor:
+        async def execute(self, sql: str, params=None) -> None:
+            raise RuntimeError("no such table")
+
+    assert await scm._selective_keywords(_BrokenCursor(), ["you", "dee"]) == [
+        "you",
+        "dee",
+    ]
+
+
+def test_chat_history_order_ranks_by_matched_tokens_then_recency() -> None:
+    """The tier's fixed slot budget must go to the best match, not the newest row."""
+    sql, params = scm._chat_history_order(["dee", "jasmine"])
+
+    assert sql.count("CASE WHEN LOWER(message_text) LIKE %s") == 2
+    assert sql.endswith(") DESC, created_at DESC")
+    assert params == ["%dee%", "%jasmine%"]
+
+    # No tokens: plain recency, so the tier keeps a stable ordering.
+    assert scm._chat_history_order([]) == ("created_at DESC", [])
+
+
+@pytest.mark.asyncio
+async def test_identical_store_rows_occupy_one_slot(monkeypatch) -> None:
+    """Live duplicate rows must collapse to a single memory entry.
+
+    `memories` holds pairs of rows with identical content (1690/1691, 1692/1693,
+    1694/1695 on 2026-09-19). The dedupe key carried the row id, so both copies
+    survived and one sentence took two of the limited slots.
+    """
+    row = [
+        "memories",
+        1690,
+        datetime(2026, 4, 16, 12, 0, tzinfo=timezone.utc),
+        "(chat:telegram_bot/-5028544398 | sender:self) The moonlight is tracing sharp lines.",
+        '["observer"]',
+    ]
+    twin = list(row)
+    twin[1] = 1691
+
+    class DummyCursor:
+        def __init__(self) -> None:
+            self.queries: list[tuple[str, list[object] | None]] = []
+
+        async def execute(self, sql: str, params=None) -> None:
+            self.queries.append((sql, list(params) if params is not None else None))
+
+        async def fetchall(self):
+            last_sql = self.queries[-1][0]
+            if "FROM memories" in last_sql:
+                return [row, twin]
+            return []
+
+        async def __aenter__(self) -> "DummyCursor":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    class DummyConn:
+        def __init__(self) -> None:
+            self.cursor_obj = DummyCursor()
+
+        async def __aenter__(self) -> "DummyConn":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def cursor(self) -> DummyCursor:
+            return self.cursor_obj
+
+    conn_instance = DummyConn()
+    monkeypatch.setattr(scm, "get_conn_ctx", lambda: conn_instance)
+    monkeypatch.setattr(scm, "_get_db_type", lambda: "postgres")
+
+    results = await scm.search_memories(
+        keywords=["moonlight"], include_chat=False, limit=5
+    )
+
+    assert len(results) == 1, f"the identical twin row was kept: {results}"
+    assert results[0]["id"] == 1690

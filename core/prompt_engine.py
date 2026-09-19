@@ -243,14 +243,24 @@ def minify_actions_block(
 
 
 def _memory_merge_key(memory: Any) -> str:
+    """Merge identity of a memory entry: its TEXT, not its row id.
+
+    The store holds pairs of rows with identical content (live, 2026-09-19:
+    ``memories`` ids 1690/1691, 1692/1693 and 1694/1695 were written twice by the
+    same pass), and keying on the id kept both copies, so one sentence occupied
+    two of the limited memory slots in every prompt. Two rows holding the same
+    text are the same memory whatever their ids are.
+    """
+
     if isinstance(memory, dict):
-        source = memory.get("source")
-        item_id = memory.get("id")
         snippet = (
             memory.get("snippet") or memory.get("content") or memory.get("summary")
         )
-        return f"{source}::{item_id}::{snippet}"
-    return str(memory)
+        text = " ".join(str(snippet or "").split()).lower()
+        if text:
+            return text
+        return f"{memory.get('source')}::{memory.get('id')}"
+    return " ".join(str(memory).split()).lower()
 
 
 def _merge_memory_entries(existing: list[Any], incoming: list[Any]) -> list[Any]:
@@ -638,6 +648,49 @@ def _dedupe_context_segments(text: str) -> str:
     return " | ".join(kept)
 
 
+_MEMORY_SOURCE_LABELS = {
+    "memories": "long-term memory",
+    "ai_diary": "diary",
+    "chat_history": "chat history",
+}
+
+
+def _short_iso_date(value: Any) -> str:
+    """Return the ``YYYY-MM-DD`` part of an ISO timestamp, or ""."""
+
+    text = str(value or "").strip()
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        return text[:10]
+    return ""
+
+
+def _label_stored_memory(entry: dict, body: str) -> str:
+    """Prefix a stored-memory hit with where and when it came from.
+
+    Hits from the ``memories`` / ``ai_diary`` / ``chat_history`` tiers arrive as
+    dicts, and rendering only their text dropped the source and the timestamp, so
+    a raw line lifted from another conversation reached the prompt looking exactly
+    like a remembered fact: no date, no provenance, and nothing to say it was not
+    the model's own recollection. SOUL recall entries carry their own wrapper,
+    which is what made the unwrapped ones stand out.
+    """
+
+    source = str(entry.get("source") or "").strip()
+    label = (
+        _MEMORY_SOURCE_LABELS.get(source) or source.replace("_", " ") or "stored memory"
+    )
+    qualifiers = [label]
+    chat = str(entry.get("interface_path") or "").strip()
+    if chat:
+        qualifiers.insert(0, chat)
+
+    prefix = "Recalled memory"
+    when = _short_iso_date(entry.get("timestamp"))
+    if when:
+        prefix += f" from {when}"
+    return f"{prefix} ({', '.join(qualifiers)}): {body}"
+
+
 def _humanize_context_entry(entry: Any, *, kind: str) -> str | None:
     if isinstance(entry, dict) and kind == "memories":
         for key in ("snippet", "content", "summary", "text"):
@@ -646,7 +699,7 @@ def _humanize_context_entry(entry: Any, *, kind: str) -> str | None:
                 continue
             normalized_value = _dedupe_context_segments(str(value))
             if normalized_value:
-                return normalized_value
+                return _label_stored_memory(entry, normalized_value)
 
     text = str(entry or "").strip()
     if not text:

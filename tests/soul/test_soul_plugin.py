@@ -1130,3 +1130,135 @@ async def test_recall_injects_each_line_only_once() -> None:
     assert len(recalled) == 2
     assert sum("jasmine tea" in entry.lower() for entry in recalled) == 1
     assert any("green teapot" in entry.lower() for entry in recalled)
+
+
+def _recall_only_plugin(cells: list[MemCell], *, distils: bool) -> SoulPlugin:
+    """A plugin wired for recall only: no DB, no LLM, just a candidate list."""
+
+    plugin = SoulPlugin()
+    compiler_attrs: dict[str, Any] = {
+        "embedder": SimpleNamespace(embed=AsyncMock(return_value=[0.25, 0.75])),
+    }
+    if distils:
+        compiler_attrs["memcell_extractor"] = SimpleNamespace(distils_content=True)
+    plugin._compiler = SimpleNamespace(**compiler_attrs)
+
+    matches = [
+        MemCellRecall(
+            cell=cell,
+            similarity=0.95 - i * 0.01,
+            lexical_score=0.9,
+            score=0.95 - i * 0.01,
+        )
+        for i, cell in enumerate(cells)
+    ]
+    plugin._repo = SimpleNamespace(
+        get_active_dsp=AsyncMock(return_value=None),
+        list_active_foresight_signals=AsyncMock(return_value=[]),
+        recall_memories=AsyncMock(return_value=matches),
+        upsert_memcell=AsyncMock(return_value=None),
+    )
+    return plugin
+
+
+def _recall_cell(cell_id: str, text: str, *, distilled: bool) -> MemCell:
+    now = datetime.now(timezone.utc)
+    return MemCell(
+        id=cell_id,
+        episodic_trace=text,
+        atomic_facts=[],
+        emotional_tag=EmotionalTag(
+            state_snapshot={"joy": 0.1, "fear": 0.0, "sad": 0.0, "anger": 0.0},
+            dominant_emotion="joy",
+            intensity=0.1,
+            valence=0.1,
+        ),
+        foresight_signals=[],
+        event_timestamp=now,
+        session_id="telegram_bot:321",
+        distilled_at=now if distilled else None,
+    )
+
+
+async def _recall_once(plugin: SoulPlugin) -> list[str]:
+    return await plugin._recall_memories(
+        interface_path="telegram_bot/321",
+        incoming_text="what tea does alice love",
+        session=_SessionState(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_recall_skips_a_cell_that_still_holds_raw_transcript() -> None:
+    """An unstamped cell is a legacy raw-transcript row, so it is not recalled.
+
+    ``distilled_at IS NULL`` means the cell was written before the distilling
+    extractor existed, which makes its trace the verbatim session text. There is
+    nothing to inject until the re-distil pass rewrites it.
+    """
+
+    legacy = _recall_cell(
+        "legacy",
+        "Scar: I slowly slide my dick deep in your ass and moan your name",
+        distilled=False,
+    )
+    fresh = _recall_cell(
+        "fresh", "Alice loves jasmine tea on rainy nights.", distilled=True
+    )
+    plugin = _recall_only_plugin([legacy, fresh], distils=True)
+
+    recalled = await _recall_once(plugin)
+
+    assert len(recalled) == 1
+    assert "jasmine tea" in recalled[0].lower()
+    assert not any("slide my dick" in entry.lower() for entry in recalled)
+
+
+@pytest.mark.asyncio
+async def test_recall_ignores_the_stamp_when_the_extractor_does_not_distil() -> None:
+    """The rule-based extractor stamps nothing, so the stamp cannot gate recall.
+
+    Gating on it unconditionally would empty the memory block for any deployment
+    running that extractor, where every cell is unstamped.
+    """
+
+    cell = _recall_cell(
+        "only", "Alice loves jasmine tea on rainy nights.", distilled=False
+    )
+    plugin = _recall_only_plugin([cell], distils=False)
+
+    recalled = await _recall_once(plugin)
+
+    assert len(recalled) == 1
+    assert "jasmine tea" in recalled[0].lower()
+
+
+@pytest.mark.asyncio
+async def test_recall_rotates_the_recalled_set_within_a_session() -> None:
+    """A cell just injected steps aside so the next-most-similar ones are shown.
+
+    Semantic similarity is 58% of the recall score and it does not move while the
+    same person keeps talking about the same things, so without rotation the
+    identical handful of memories is injected turn after turn.
+    """
+
+    cells = [
+        _recall_cell(
+            f"cell-{i}", f"Alice keeps jasmine tea tin number {i}.", distilled=True
+        )
+        for i in range(8)
+    ]
+    plugin = _recall_only_plugin(cells, distils=True)
+
+    first = await _recall_once(plugin)
+    second = await _recall_once(plugin)
+
+    assert len(first) == 5
+    # Still a full block on the second turn: the held-back cells fall back in
+    # rather than leaving the model with nothing.
+    assert len(second) == 5
+    newly_shown = [entry for entry in second if entry not in first]
+    assert len(newly_shown) == 3, (
+        "the recalled set did not rotate, every entry had already been injected: "
+        f"{second}"
+    )

@@ -105,6 +105,116 @@ def register_injection_priority():
 register_injection_priority()
 
 
+def _build_chat_history_where(
+    chat_tokens: list[str],
+    excluded_paths: list[str] | None,
+) -> tuple[str, list]:
+    """Build the ``chat_history_cache`` tier's WHERE clause and its parameters.
+
+    The keyword predicates are OR-ed *inside* one parenthesised group, and the
+    exclude-list is AND-ed onto that group. The grouping is load-bearing: joining
+    every condition with a plain ``" OR "`` puts the ``NOT IN`` predicate in the
+    same OR chain as the keywords, which makes the clause true for every row
+    outside the excluded chats. The current chat then is not excluded at all,
+    the keyword filter stops filtering, and the tier returns the newest rows of
+    every *other* conversation together with the live one's own message (which
+    the cache already holds, since it is persisted before the prompt is built).
+
+    Returns:
+        ``(where_sql, params)``. ``where_sql`` is empty when there is nothing to
+        match on.
+    """
+
+    tokens = [str(tok) for tok in (chat_tokens or []) if str(tok).strip()]
+    params: list = [f"%{tok.lower()}%" for tok in tokens]
+    conditions: list[str] = []
+    if tokens:
+        keyword_group = " OR ".join(["LOWER(message_text) LIKE %s"] * len(tokens))
+        conditions.append(f"({keyword_group})")
+    excluded = [str(path) for path in (excluded_paths or []) if path]
+    if excluded:
+        conditions.append(
+            "interface_path NOT IN (%s)" % ",".join(["%s"] * len(excluded))
+        )
+        params.extend(excluded)
+    return " AND ".join(conditions), params
+
+
+# A query token that appears in this share of the conversation store tells you
+# almost nothing about which row you want. Measured on the live cache: 'you' was
+# in 89% of rows, 'your' 53%, 'for' 42% and 'that' 41%, so an OR clause built from
+# an ordinary conversational message matched 93% of the whole table: the keyword
+# filter filtered nothing and the tier returned the newest rows of every
+# conversation. Tokens above the ceiling are dropped; if none survive, the tier is
+# skipped rather than matching everything. Document frequency only, so no word
+# list and no language assumption, and a rare token is never dropped.
+_KEYWORD_MAX_DOCUMENT_RATIO = 0.30
+_MIN_KEYWORD_LENGTH = 3
+
+
+async def _selective_keywords(cur, tokens: list[str]) -> list[str]:
+    """Drop query tokens that match a large share of the conversation store.
+
+    Fails open: if the measurement cannot be taken (an empty store, a cursor that
+    cannot answer the aggregate), every candidate token is kept and the caller
+    behaves exactly as before rather than losing its memory block.
+    """
+
+    candidates = [
+        str(tok)
+        for tok in (tokens or [])
+        if len(str(tok).strip()) >= _MIN_KEYWORD_LENGTH
+    ]
+    if not candidates:
+        return []
+
+    try:
+        columns = ", ".join(
+            ["SUM(CASE WHEN LOWER(message_text) LIKE %s THEN 1 ELSE 0 END)"]
+            * len(candidates)
+        )
+        await cur.execute(
+            f"SELECT {columns}, count(*) FROM chat_history_cache",
+            [f"%{tok.lower()}%" for tok in candidates],
+        )
+        rows = await cur.fetchall()
+        if not rows:
+            return candidates
+        row = rows[0]
+        total = int(row[-1] or 0)
+        if total <= 0:
+            return candidates
+        kept: list[str] = []
+        for token, document_frequency in zip(candidates, row[:-1]):
+            ratio = int(document_frequency or 0) / total
+            if ratio <= _KEYWORD_MAX_DOCUMENT_RATIO:
+                kept.append(token)
+        return kept
+    except Exception as exc:  # pragma: no cover - defensive
+        log_debug(f"[search_memories] keyword selectivity check failed: {exc}")
+        return candidates
+
+
+def _chat_history_order(tokens: list[str]) -> tuple[str, list]:
+    """Rank the chat tier by how many query tokens a row actually matches.
+
+    The WHERE clause is an OR over the tokens, so a row containing one common word
+    qualifies exactly like a row containing six of them. Ordering by ``created_at``
+    alone therefore hands the tier's fixed slot budget to whatever was said most
+    recently rather than to whatever matches the message at hand. Counting the
+    matched tokens first is structural (a count, no word meaning) and keeps
+    recency as the tie-breaker.
+    """
+
+    tokens = [str(tok) for tok in (tokens or []) if str(tok).strip()]
+    if not tokens:
+        return "created_at DESC", []
+    matched = " + ".join(
+        ["CASE WHEN LOWER(message_text) LIKE %s THEN 1 ELSE 0 END"] * len(tokens)
+    )
+    return f"({matched}) DESC, created_at DESC", [f"%{tok.lower()}%" for tok in tokens]
+
+
 async def search_memories(
     *,
     tags: list[str] | None = None,
@@ -272,6 +382,15 @@ async def search_memories(
     try:
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
+                # Every tier below builds its WHERE clause out of these tokens, so
+                # discard the ones that match almost the whole store before any
+                # clause exists (see _selective_keywords). A token list that
+                # filters away to nothing skips the raw-chat tier entirely rather
+                # than matching every row.
+                keywords = await _selective_keywords(cur, keywords)
+                tags = await _selective_keywords(cur, tags)
+                both_present = bool(tags) and bool(keywords)
+
                 # Tier 1: precision (tag AND keyword).
                 await _run_tier(cur, "AND")
 
@@ -284,13 +403,6 @@ async def search_memories(
 
                 # --- Chat history cache ---
                 if include_chat and (keywords or tags):
-                    chat_tokens = keywords + tags
-                    chat_params: list = []
-                    chat_conditions = []
-                    for tok in chat_tokens:
-                        # Case-insensitive across backends (see _mem_where note).
-                        chat_conditions.append("LOWER(message_text) LIKE %s")
-                        chat_params.append(f"%{tok.lower()}%")
                     # Never re-inject the chat we are currently answering from.
                     # The current message is persisted to the cache before the
                     # prompt is built, so a keyword search extracted from it
@@ -298,28 +410,28 @@ async def search_memories(
                     # echoes the live conversation back as "memories" — the
                     # model then keeps "responding to the good morning message"
                     # because that greeting is re-injected every turn.
-                    if exclude_interface_paths:
-                        excluded = [str(p) for p in exclude_interface_paths if p]
-                        if excluded:
-                            chat_conditions.append(
-                                "interface_path NOT IN (%s)"
-                                % ",".join(["%s"] * len(excluded))
-                            )
-                            chat_params.extend(excluded)
-                    if chat_conditions:
-                        chat_where = " OR ".join(chat_conditions)
+                    # The keywords must be grouped and AND-ed with the exclusion,
+                    # not OR-ed alongside it: see _build_chat_history_where.
+                    chat_tokens = keywords + tags
+                    chat_where, chat_params = _build_chat_history_where(
+                        chat_tokens, exclude_interface_paths
+                    )
+                    if chat_where:
+                        order_sql, order_params = _chat_history_order(chat_tokens)
                         chat_query = (
-                            "SELECT 'chat_history' AS source, id, created_at, message_text, NULL AS context_tags "
+                            "SELECT 'chat_history' AS source, id, created_at, message_text, NULL AS context_tags, interface_path "
                             "FROM chat_history_cache WHERE "
                             + chat_where
-                            + " ORDER BY created_at DESC LIMIT %s"
+                            + " ORDER BY "
+                            + order_sql
+                            + " LIMIT %s"
                         )
-                        chat_params.append(pool_limit)
+                        chat_params = chat_params + order_params + [pool_limit]
                         try:
                             await cur.execute(chat_query, chat_params)
                             rows = await cur.fetchall()
                             for r in rows:
-                                src, _id, ts, content, _ = r
+                                src, _id, ts, content, _, chat_path = r
                                 snippet = (
                                     content
                                     if isinstance(content, str)
@@ -342,6 +454,10 @@ async def search_memories(
                                         "timestamp": ts_iso,
                                         "snippet": snippet,
                                         "tags": [],
+                                        # A raw chat line names no speaker, so the
+                                        # conversation it came from is the only
+                                        # provenance available for the prompt.
+                                        "interface_path": chat_path,
                                     }
                                 )
                         except Exception as e:
@@ -353,11 +469,15 @@ async def search_memories(
         return []
 
     # Deduplicate and order by timestamp desc
-    seen = set()
+    seen: set[str] = set()
     deduped: list[dict] = []
     for h in hits:
-        snippet_key = str(h.get("snippet") or "")[:80]
-        key = f"{h.get('source')}::{h.get('id')}::{snippet_key}"
+        # Identity by CONTENT, not by row id. The store holds pairs of rows with
+        # identical text (live, 2026-09-19: `memories` ids 1690/1691, 1692/1693 and
+        # 1694/1695 were written twice by the same pass), and keying on the id kept
+        # both copies, so a single sentence occupied two of the limited slots.
+        text = " ".join(str(h.get("snippet") or "").split()).lower()
+        key = text if text else f"{h.get('source')}::{h.get('id')}"
         if key in seen:
             continue
         seen.add(key)

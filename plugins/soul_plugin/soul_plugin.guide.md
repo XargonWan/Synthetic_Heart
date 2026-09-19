@@ -35,10 +35,35 @@ A memory the model will not paraphrase stays unstamped and can be retried later.
 |-----|---------|
 | `SOUL_REDISTIL_LIMIT` | How many memories one press may rewrite (default 5000, hard ceiling 20000). Each one costs a model call, so a large store is caught up over several presses. |
 
+## What recall shows
+
+Three structural rules decide which memories reach a prompt.
+
+- **Rotation.** A memory that was just injected steps aside for the recall
+  cooldown (`SOUL_RECALL_COOLDOWN_SEC`, default 15 minutes) so the
+  next-most-similar memories are shown instead. Semantic similarity is 58% of the
+  recall score and it does not move while the same person keeps talking about the
+  same things, so without this the identical handful of memories is injected turn
+  after turn for days. When nothing else is left to show, the held-back memories
+  fall back in, so the block is never empty. The store is untouched: only what is
+  shown rotates.
+- **Raw transcript is not recalled.** A memory carrying no distillation stamp was
+  written before the distilling extractor existed, so its trace is the verbatim
+  session text and it stays out of the recalled set until the re-distil pass
+  rewrites it. This rule is skipped when the active extractor does not distil at
+  all: the rule-based fallback stamps nothing, so the stamp would describe every
+  memory and the block would go empty.
+- **Everything says where it came from.** Each injected entry carries its date and
+  its origin: `Recalled memory from <date> (same chat)` or `(other chat: <path>)`
+  for a memory cell, and `(diary)`, `(long-term memory)`, `(<chat path>, chat
+  history)` for the other tiers. Without the label, a raw line lifted from another
+  conversation reads exactly like the model's own recollection.
+
 ## Configuration
 
 | Key | Purpose |
 |-----|---------|
+| `SOUL_RECALL_COOLDOWN_SEC` | How long a memory stays out of the recalled set after it has been injected into a prompt (default 900 = 15 minutes, `0` disables). Rotation only: it changes which memories are shown, never what is stored. |
 | `SOUL_COMPILE_IDLE_SECONDS` | Idle seconds before compiling buffered transcript. |
 | `SOUL_SCHEDULER_INTERVAL_SECONDS` | Scheduler tick interval. |
 | `SOUL_MEMCELL_LLM_ENABLED` | Distil each MemCell with an LLM (`DSP_CORTEX` scope) instead of storing the conversation text verbatim: recall returns paraphrased knowledge with `subject\|predicate\|object` facts, and a corrected statement says so in its own trace. Default on; the rule-based extractor is the fallback on any failure. |

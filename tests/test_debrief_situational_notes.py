@@ -418,3 +418,144 @@ async def test_unrelated_notes_are_not_superseded(
 
     assert repo.resolved == []
     assert repo.notes[0].status == "active"
+
+
+def _note(note_id: str, subject: str, summary: str) -> Any:
+    from datetime import datetime, timezone
+
+    from core.soul.models import situational_note_from_extraction
+
+    note = situational_note_from_extraction(
+        note_type="STATE",
+        subject=subject,
+        summary=summary,
+        valid_until=datetime(2026, 9, 20, tzinfo=timezone.utc),
+        now=datetime(2026, 9, 19, 0, 0, tzinfo=timezone.utc),
+    )
+    note.id = note_id
+    return note
+
+
+def test_ended_subjects_are_parsed_from_both_shapes() -> None:
+    """The ended channel accepts plain strings and objects, and ignores junk."""
+    plugin = DebriefSituationalNotesPlugin()
+
+    assert plugin._extract_ended_subjects({"ended": ["Sore cock"]}) == ["Sore cock"]
+    assert plugin._extract_ended_subjects({"ended": [{"subject": "Sore cock"}]}) == [
+        "Sore cock"
+    ]
+    assert plugin._extract_ended_subjects({"ended": "Sore cock"}) == ["Sore cock"]
+    assert plugin._extract_ended_subjects({"notes": []}) == []
+    assert plugin._extract_ended_subjects("nonsense") == []
+    assert plugin._extract_ended_subjects({"ended": ["  ", 7]}) == []
+
+
+def test_extract_instructions_ask_for_ended_circumstances() -> None:
+    """The prompt must carry the retirement obligation, or nothing resolves."""
+    from plugins.debrief.debrief_situational_notes import _EXTRACT_INSTRUCTIONS
+
+    assert "have ENDED or been CONTRADICTED" in _EXTRACT_INSTRUCTIONS
+    assert '"ended"' in _EXTRACT_INSTRUCTIONS
+    assert "I'm not sore any more" in _EXTRACT_INSTRUCTIONS
+    # The old contract promised only a notes list, which is what made a
+    # contradiction unexpressible.
+    assert "return an empty notes list when nothing time-bounded was said" not in (
+        _EXTRACT_INSTRUCTIONS
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_contradicted_circumstance_resolves_the_standing_note(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A note the turn contradicts must stop being injected.
+
+    Live (2026-09-19): the human said "I'm not sore" at 11:27 and again at 13:20,
+    the standing STATE note stayed active with ten hours of validity left, and the
+    soreness was asserted at 15:16 as present-tense fact ("you're sore, remember?
+    So it's hands and mouth only tonight"). Nothing retired a note unless a
+    replacement note was written about the same subject, and a correction is not a
+    new circumstance.
+    """
+    repo = _RecordingRepository()
+    repo.notes.append(_note("tsc-sore", "Sore cock", "The human's cock is sore."))
+    repo.notes.append(_note("tsc-weekend", "Weekend schedule", "The weekend is free."))
+    _install(
+        monkeypatch,
+        llm_text='{"notes":[],"ended":["Sore cock"]}',
+        repository=repo,
+    )
+
+    original_message, context = _turn()
+    await DebriefSituationalNotesPlugin().on_debrief(
+        processed_actions=[],
+        failed_actions=[],
+        results={},
+        context=context,
+        original_message=original_message,
+    )
+
+    assert repo.resolved == [("tsc-sore", "resolved")]
+    # A correction carries no new circumstance, so nothing was stored.
+    assert repo.notes[0].status == "resolved"
+    assert repo.notes[1].status == "active"
+
+
+@pytest.mark.asyncio
+async def test_an_ended_subject_leaves_unrelated_and_personal_notes_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retirement is scoped: an unmatched or too-thin subject resolves nothing."""
+    repo = _RecordingRepository()
+    repo.notes.append(_note("tsc-weekend", "Weekend schedule", "The weekend is free."))
+    _install(
+        monkeypatch,
+        llm_text='{"notes":[],"ended":["Sore cock","Scar"]}',
+        repository=repo,
+    )
+
+    original_message, context = _turn()
+    await DebriefSituationalNotesPlugin().on_debrief(
+        processed_actions=[],
+        failed_actions=[],
+        results={},
+        context=context,
+        original_message=original_message,
+    )
+
+    # "Sore cock" matches nothing here, and the bare name "Scar" is below the
+    # minimum meaningful tokens, so it can never stand in for a circumstance.
+    assert repo.resolved == []
+    assert repo.notes[0].status == "active"
+
+
+@pytest.mark.asyncio
+async def test_a_shorter_subject_retires_the_longer_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Containment, not equality: the human's shorter wording still matches."""
+    repo = _RecordingRepository()
+    repo.notes.append(
+        _note(
+            "tsc-long",
+            "Recovery soreness from yesterday",
+            "The human is recovering and sore.",
+        )
+    )
+    _install(
+        monkeypatch,
+        llm_text='{"notes":[],"ended":["Recovery soreness"]}',
+        repository=repo,
+    )
+
+    original_message, context = _turn()
+    await DebriefSituationalNotesPlugin().on_debrief(
+        processed_actions=[],
+        failed_actions=[],
+        results={},
+        context=context,
+        original_message=original_message,
+    )
+
+    assert repo.resolved == [("tsc-long", "resolved")]
+    assert repo.notes[0].status == "resolved"

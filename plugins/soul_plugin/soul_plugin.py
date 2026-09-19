@@ -231,6 +231,22 @@ register_exposed_var(
     advanced=True,
 )
 
+register_exposed_var(
+    "SOUL_RECALL_COOLDOWN_SEC",
+    label="Recall cooldown per memory (seconds)",
+    default=900,
+    value_type=int,
+    ui_type="number",
+    description=(
+        "How long a memory cell stays out of the recalled set after it has been "
+        "injected into a prompt. Rotation only: it changes which memories are "
+        "shown, never what is stored. 0 disables the cooldown."
+    ),
+    scope="plugins",
+    component="soul_plugin",
+    advanced=True,
+)
+
 
 @dataclass(slots=True)
 class _SessionState:
@@ -251,6 +267,35 @@ _SOUL_CONSOLIDATE_COOLDOWN_SECONDS = 900
 _SOUL_RETRIEVAL_BUMP_MIN_INTERVAL_SEC = 3600.0
 _SOUL_RETRIEVAL_BUMP_TRACK_MAX = 512
 
+# Recall rotation. Semantic similarity is 58% of the recall score and it does not
+# move while the same person keeps talking about the same things, so without a
+# cooldown the same handful of cells is injected turn after turn for days: live,
+# 26 cells tagged "joy" carried 77% of all recall traffic and 8 cells from June
+# to August carried 58%, while 436 neutral cells shared 9%. Stepping a
+# just-recalled cell aside for a while lets the next-most-similar cells through;
+# the store keeps everything, only what is SHOWN rotates.
+_SOUL_RECALL_COOLDOWN_SEC = 900
+_SOUL_RECALL_TRACK_MAX = 512
+
+
+def _soul_recall_cooldown_seconds() -> float:
+    """Return how long a recalled cell stays out of the set (0 disables it)."""
+
+    try:
+        from core.config_manager import config_registry
+
+        seconds = int(
+            config_registry.get_value(
+                "SOUL_RECALL_COOLDOWN_SEC",
+                _SOUL_RECALL_COOLDOWN_SEC,
+                value_type=int,
+            )
+        )
+    except Exception:
+        return float(_SOUL_RECALL_COOLDOWN_SEC)
+    return float(max(0, min(seconds, 86_400)))
+
+
 # How many active situational notes may be rendered into ONE prompt. The debrief
 # writes a fresh note every time it re-describes a circumstance, so the active set
 # grows without bound (64 active notes on 2026-09-18, 28 of them in a single
@@ -269,7 +314,9 @@ def _soul_redistil_limit() -> int:
     try:
         from core.config_manager import config_registry
 
-        return int(config_registry.get_value("SOUL_REDISTIL_LIMIT", 5000, value_type=int))
+        return int(
+            config_registry.get_value("SOUL_REDISTIL_LIMIT", 5000, value_type=int)
+        )
     except Exception:
         return 5000
 
@@ -301,6 +348,9 @@ class SoulPlugin(PluginBase):
         self._buffers: dict[str, list[str]] = {}
         self._sessions: dict[str, _SessionState] = {}
         self._retrieval_bump_at: dict[str, float] = {}
+        # When each cell was last injected into a prompt, used to rotate the
+        # recalled set. In-process only: an ordering hint, never state.
+        self._recall_cooldown_at: dict[str, float] = {}
         self._scheduler_task: asyncio.Task[None] | None = None
         self._last_rollup_date: date | None = None
         self._last_consolidated_at: datetime | None = None
@@ -1043,6 +1093,13 @@ class SoulPlugin(PluginBase):
         if not candidates:
             return []
 
+        # A cell the compiler wrote before the distilling extractor existed still
+        # holds the raw session transcript, and it cannot be paraphrased on read,
+        # so it is not recalled until the re-distil pass rewrites it. Gated on the
+        # active extractor: with the rule-based one nothing is ever stamped, so
+        # "unstamped" would describe every cell and the block would go empty.
+        skip_undistilled = self._memcell_distillation_active()
+
         reranked: list[MemCellRecall] = []
         seen_ids: set[str] = set()
         for match in candidates:
@@ -1050,6 +1107,8 @@ class SoulPlugin(PluginBase):
             if cell.id in seen_ids:
                 continue
             if self._should_exclude_recalled_memory(cell):
+                continue
+            if skip_undistilled and cell.distilled_at is None:
                 continue
             # Roleplay/explicit exchanges are in-character fiction, not a stable
             # record of the user or an event (the compile path already strips
@@ -1087,6 +1146,12 @@ class SoulPlugin(PluginBase):
         )
         selected: list[MemCellRecall] = []
         seen_traces: set[str] = set()
+        # Cells held back only because they were injected moments ago. They are
+        # kept as a fallback so a small or very repetitive store still fills the
+        # block rather than going empty.
+        cooling: list[MemCellRecall] = []
+        cooldown_seconds = _soul_recall_cooldown_seconds()
+        now_cooldown = time.monotonic()
         for match in reranked:
             # Two cells can hold the same line (a turn compiled twice, a scene
             # folded back in). Injecting it twice wastes prompt space and is what
@@ -1095,9 +1160,31 @@ class SoulPlugin(PluginBase):
             if key and key in seen_traces:
                 continue
             seen_traces.add(key)
+            if cooldown_seconds > 0.0:
+                last_recall = self._recall_cooldown_at.get(str(match.cell.id), 0.0)
+                if now_cooldown - last_recall < cooldown_seconds:
+                    cooling.append(match)
+                    continue
             selected.append(match)
             if len(selected) >= _SOUL_RECALL_LIMIT:
                 break
+
+        # Nothing (or too little) new to show: fall back to the freshest held-back
+        # cells instead of recalling nothing at all.
+        for match in cooling:
+            if len(selected) >= _SOUL_RECALL_LIMIT:
+                break
+            selected.append(match)
+
+        if cooldown_seconds > 0.0:
+            for match in selected:
+                self._recall_cooldown_at[str(match.cell.id)] = now_cooldown
+            if len(self._recall_cooldown_at) > _SOUL_RECALL_TRACK_MAX:
+                self._recall_cooldown_at = {
+                    cell_id: seen_at
+                    for cell_id, seen_at in self._recall_cooldown_at.items()
+                    if now_cooldown - seen_at < cooldown_seconds
+                }
 
         now_monotonic = time.monotonic()
         for match in selected:
@@ -1126,6 +1213,22 @@ class SoulPlugin(PluginBase):
             self._format_recalled_memory(match, active_session_id=safe_session_id)
             for match in selected
         ]
+
+    def _memcell_distillation_active(self) -> bool:
+        """True when the compiler stamps the cells it writes.
+
+        ``distilled_at IS NULL`` means "written before distillation existed" only
+        while the active extractor paraphrases what it stores. With the
+        rule-based extractor nothing is ever stamped, so the stamp carries no
+        information and gating recall on it would empty the memory block.
+        """
+
+        try:
+            return bool(
+                getattr(self._compiler.memcell_extractor, "distils_content", False)
+            )
+        except Exception:
+            return False
 
     @staticmethod
     def _should_exclude_recalled_memory(cell: MemCell) -> bool:
@@ -1377,7 +1480,11 @@ class SoulPlugin(PluginBase):
         is stamped when it is rewritten, and only unstamped cells are offered).
         """
         if self._redistil_task is not None and not self._redistil_task.done():
-            return {"started": False, "reason": "already_running", **await self.redistil_status()}
+            return {
+                "started": False,
+                "reason": "already_running",
+                **await self.redistil_status(),
+            }
 
         batch_limit = _soul_redistil_limit() if limit is None else int(limit)
         batch_limit = max(1, min(batch_limit, _SOUL_REDISTIL_HARD_CAP))
