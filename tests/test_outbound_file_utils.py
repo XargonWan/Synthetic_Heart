@@ -23,6 +23,27 @@ def test_allowed_file_roots_from_env(sandbox: Path) -> None:
     assert sandbox.resolve() in roots
 
 
+def test_agent_fs_roots_keeps_windows_drive_letters(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``C:/a:D:/b`` is two roots, not four fragments split on the drive colon."""
+    root_a = tmp_path / "root_a"
+    root_b = tmp_path / "root_b"
+    root_a.mkdir()
+    root_b.mkdir()
+    monkeypatch.setenv("AGENT_FS_ROOTS", f"{root_a}:{root_b}")
+
+    roots = ofu.allowed_file_roots()
+    assert root_a.resolve() in roots
+    assert root_b.resolve() in roots
+
+    f = root_b / "note.txt"
+    f.write_text("hi")
+    resolved, err = ofu.resolve_safe_outbound_path(str(f))
+    assert err is None
+    assert resolved == f.resolve()
+
+
 def test_allowed_file_roots_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AGENT_FS_ROOTS", raising=False)
     monkeypatch.setenv("AGENT_FS_ROOT", "/app")
@@ -30,6 +51,32 @@ def test_allowed_file_roots_default(monkeypatch: pytest.MonkeyPatch) -> None:
     roots = ofu.allowed_file_roots()
     assert Path("/app").resolve() in roots
     assert Path("/app/logs").resolve() in roots
+
+
+def test_allowed_file_roots_default_to_the_app_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no override the sandbox root is the application tree, not "/app".
+
+    In the container the app lives at /app, so the two are the same directory and
+    nothing changes. In a bare checkout "/app" does not exist and every outbound
+    attachment was rejected with "Path is outside allowed roots" — the text still
+    arrived, the media was silently dropped (broke every voice note on Telegram
+    from a Windows dev tree).
+    """
+    monkeypatch.delenv("AGENT_FS_ROOTS", raising=False)
+    monkeypatch.delenv("AGENT_FS_ROOT", raising=False)
+    monkeypatch.delenv("SYNTH_LOG_DIR", raising=False)
+
+    app_root = Path(ofu.__file__).resolve().parent.parent
+    roots = ofu.allowed_file_roots()
+    assert app_root in roots
+    assert (app_root / "logs") in roots
+
+    # An ordinary file inside the app tree must be deliverable.
+    resolved, err = ofu.resolve_safe_outbound_path(str(Path(ofu.__file__).resolve()))
+    assert err is None
+    assert resolved is not None
 
 
 def test_resolve_safe_outbound_path_absolute_inside(sandbox: Path) -> None:

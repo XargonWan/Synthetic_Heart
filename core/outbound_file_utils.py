@@ -66,15 +66,49 @@ _IMAGE_EXTS = {
 }
 
 
+def _split_roots(raw: str) -> list[str]:
+    """Split an ``AGENT_FS_ROOTS`` string into roots.
+
+    The documented separator is ``:``, but a plain ``raw.split(":")`` shreds a
+    Windows drive letter: ``C:/Users/x/sandbox`` becomes ``["C", "/Users/x/sandbox"]``
+    and the sandbox then resolves to ``<cwd>/C`` plus a drive-relative path — so
+    the real file is rejected as "outside allowed roots" (and the same call
+    PASSES when cwd happens to sit on the same drive, which is how it stayed
+    hidden). A one-letter segment is therefore re-joined to the segment after it.
+    """
+    merged: list[str] = []
+    pending: str | None = None
+    for part in (p.strip() for p in raw.split(":")):
+        if pending is not None:
+            part = f"{pending}:{part}"
+            pending = None
+        if not part:
+            continue
+        if len(part) == 1 and part.isalpha():
+            pending = part
+            continue
+        merged.append(part)
+    if pending:
+        merged.append(pending)
+    return merged
+
+
 def allowed_file_roots() -> list[Path]:
     """Return the resolved filesystem roots outbound files must live inside."""
     roots_raw = os.getenv("AGENT_FS_ROOTS")
     if roots_raw:
-        roots = [p.strip() for p in roots_raw.split(":") if p.strip()]
+        roots = _split_roots(roots_raw)
     else:
+        # Default to the APPLICATION ROOT rather than the literal "/app". In the
+        # container the app is at /app so the two are the same directory, but in
+        # a bare checkout (a Windows dev tree, a venv install) "/app" does not
+        # exist and every outbound attachment is rejected with "Path is outside
+        # allowed roots": the text still arrives, the media is silently dropped.
+        # An explicit AGENT_FS_ROOT / SYNTH_LOG_DIR still takes precedence.
+        app_root = Path(__file__).resolve().parent.parent
         roots = [
-            os.getenv("AGENT_FS_ROOT", "/app"),
-            os.getenv("SYNTH_LOG_DIR", "/app/logs"),
+            os.getenv("AGENT_FS_ROOT") or str(app_root),
+            os.getenv("SYNTH_LOG_DIR") or str(app_root / "logs"),
         ]
 
     out: list[Path] = []

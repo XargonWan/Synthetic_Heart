@@ -445,31 +445,24 @@ class TTSLipSyncPlugin(AIPluginBase):
                                 f"[tts_lipsync] Could not extract session_id from interface_path: {interface_path}"
                             )
 
-                    elif iface_name == "telegram_bot":
-                        # Use audio_telegram_bot which maps to send_voice
-                        if hasattr(target_iface, "execute_action"):
-                            # We need to parse chat_id from interface_path
-                            _, levels = parse_interface_path(interface_path)
-                            chat_id = levels[0] if levels else None
-
-                            if chat_id:
-                                # Use text as caption
-                                text_caption = payload.get(
-                                    "__merged_text"
-                                ) or payload.get("text")
-                                await target_iface.execute_action(
-                                    {
-                                        "type": "audio_telegram_bot",
-                                        "payload": {
-                                            "interface_path": interface_path,
-                                            "audio": str(local_path),
-                                            "caption": text_caption,
-                                        },
-                                    },
-                                    context,
-                                    bot,
-                                    original_message,
-                                )
+                    elif iface_name == "telegram_bot" and hasattr(
+                        target_iface, "send_message"
+                    ):
+                        # Unified delivery (AGENTS.md §6). The legacy
+                        # ``audio_telegram_bot`` action was deleted in the unified
+                        # send_message refactor, so dispatching it only produced
+                        # "[telegram_interface] execute_action called for unknown
+                        # action" and the voice note was dropped.
+                        text_caption = payload.get("__merged_text") or payload.get(
+                            "text"
+                        )
+                        await target_iface.send_message(
+                            {
+                                "interface_path": interface_path,
+                                "media": [str(local_path)],
+                                "text": text_caption,
+                            }
+                        )
             except Exception as e:
                 log_error(f"[tts_lipsync] Auto-dispatch failed callback: {e}")
         else:

@@ -2391,6 +2391,21 @@ async def handle_incoming_message(
                         except Exception:
                             current_message_action_types = []
 
+                    # The unified ``send_message`` action (AGENTS.md §6) is the
+                    # outbound reply action for telegram/discord/matrix/fluxer,
+                    # but its name does not start with ``message_`` — so neither
+                    # the MESSAGE_ACTION_TYPES registry (which carries only
+                    # legacy ``message_*`` names) nor the inference above ever
+                    # included it. Every consumer of this set then failed to
+                    # recognise the reply: the text+TTS merge below could not
+                    # find the message action to fold into the voice note, so the
+                    # standalone send_message was dispatched AND the tts_speak
+                    # ran, and when the TTS failed Vox's text-only fallback sent
+                    # the SAME text a second time (the duplicate bubble). The
+                    # voice-reply and voice-input paths had the same gap.
+                    if "send_message" not in current_message_action_types:
+                        current_message_action_types.append("send_message")
+
                     # Action types that deliver user-visible output on their own
                     # (self-replying plugin actions, e.g. a plugin that calls
                     # bot.send_message inside execute_action). They satisfy the
@@ -3216,7 +3231,11 @@ async def handle_incoming_message(
                                     )
                             else:
                                 log_info(
-                                    "[message_chain] ⚠️ TTS plugin not available - keeping separate message and TTS actions (text sent separately)"
+                                    "[message_chain] No mergeable text+TTS pair "
+                                    f"(message actions={len(message_actions_to_remove)}, "
+                                    f"tts actions={len(tts_actions)}) — keeping "
+                                    "separate message and TTS actions "
+                                    "(text sent separately)"
                                 )
 
                 # Execute actions regardless of whether response is included

@@ -47,6 +47,14 @@ _MODEL_TIERS: tuple[tuple[str, str], ...] = (
 
 _SUPPORTED_FORMATS = frozenset({"wav", "mp3", "pcm"})
 
+# Latency budget for one synthesis request. A 2-3k character reply on the free
+# tier measured 14s-44s upstream in this deployment, and the pre-existing 60s
+# cap timed out on the long ones: the adapter returned None, Vox logged
+# "Engine 'fish-audio' returned no audio" and fell back to sending the reply as
+# plain text, so the user got no voice note and (when the text had already been
+# delivered) a duplicate bubble.
+_REQUEST_TIMEOUT_SEC = 180
+
 
 class FishAudioAdapter(BaseProtocolAdapter):
     """Adapter for the Fish Audio ``/v1/tts`` endpoint."""
@@ -153,7 +161,7 @@ class FishAudioAdapter(BaseProtocolAdapter):
                     self._base_url,
                     json=payload,
                     headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=60),
+                    timeout=aiohttp.ClientTimeout(total=_REQUEST_TIMEOUT_SEC),
                 ) as resp:
                     if resp.status != 200:
                         body = (await resp.text())[:500]
@@ -182,13 +190,20 @@ class FishAudioAdapter(BaseProtocolAdapter):
                     return audio_data
         except Exception as exc:
             _elapsed = (_time.monotonic() - _req_start) * 1000
+            # asyncio/aiohttp timeouts stringify to "" — the old line logged
+            # "request failed: " with nothing after the colon, which hid the
+            # cause. Name the type when the message is empty.
+            _reason = str(exc) or f"{type(exc).__name__} (no message)"
             log_cortex_response(
                 engine_tag,
                 model=model,
-                error=str(exc),
+                error=_reason,
                 elapsed_ms=_elapsed,
             )
-            log_warning(f"[fish_audio] request failed: {exc}")
+            log_warning(
+                f"[fish_audio] request failed after {_elapsed / 1000:.1f}s "
+                f"(limit {_REQUEST_TIMEOUT_SEC}s): {_reason}"
+            )
             return None
 
     # ------------------------------------------------------------------
