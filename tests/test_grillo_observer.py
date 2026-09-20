@@ -809,6 +809,15 @@ def test_observer_outreach_is_not_gated_by_speaking_last():
     assert '"type": "send_message"' in GRILLO_INSTRUCTIONS
     assert "'send_message'" in text
 
+    # Default routing: the most recently active conversation, normally the direct
+    # message, with an explicit pick still allowed if it is explained. Live reason:
+    # an overnight run reached into a group chat while the DM was the conversation
+    # actually in use.
+    assert "DEFAULT TARGET" in text
+    assert "most-recently-active first" in text
+    assert "reach out THERE unless you have a specific reason" in text
+    assert "Do not drift to a group or a channel" in text
+
 
 def test_quiet_run_note_frames_outreach_as_the_job():
     """A quiet network is the observer's cue to act, not a reason to stay silent."""
