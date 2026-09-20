@@ -6637,20 +6637,32 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 return;
                             }
                             if (state && state.finished_at) {
+                                const unused = (state && state.skipped_unusable) || 0;
                                 const summary = `Last pass: ${state.rewritten || 0} rewritten, ${state.skipped || 0} left unchanged, ${state.failed || 0} failed.`;
+                                const saved = unused
+                                    ? ` ${unused} skipped as never recalled, so no model call was spent on them.`
+                                    : '';
                                 redistilStatus.textContent = pending
-                                    ? `${summary} ${pending} still to distil.`
-                                    : summary;
+                                    ? `${summary}${saved} ${pending} still to distil.`
+                                    : `${summary}${saved}`;
                                 if (pending === 0) redistilBtn.disabled = true;
                                 return;
                             }
+                            const workable = state && typeof state.workable === 'number'
+                                ? state.workable
+                                : null;
                             if (pending === null) {
                                 redistilStatus.textContent = 'Ready.';
                             } else if (pending === 0) {
                                 redistilStatus.textContent = 'Every memory is already distilled.';
                                 redistilBtn.disabled = true;
-                            } else {
+                            } else if (workable === 0) {
+                                redistilStatus.textContent = `${pending} memories are unstamped, but recall would never inject them, so there is nothing worth distilling.`;
+                                redistilBtn.disabled = true;
+                            } else if (workable === null) {
                                 redistilStatus.textContent = `${pending} memories still hold raw transcript. Press to distil.`;
+                            } else {
+                                redistilStatus.textContent = `${pending} memories still hold raw transcript. One press will distil ${workable} of them, one model call each.`;
                             }
                         };
 

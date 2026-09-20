@@ -172,6 +172,31 @@ class RuleBasedMemCellCurator:
         return CuratorDecision.REMOVE
 
 
+# The re-distil pass decides what to skip in Python (a cell whose content recall
+# will never inject must not cost a model call), but the store is only queried
+# with a row limit. Candidates are therefore over-fetched and then cut back to the
+# batch size, so a long run of skippable rows cannot leave the pass with nothing
+# to do while workable rows sit just past the limit. The factor is generous
+# because a skipped row costs a few microseconds where a processed one costs a
+# model call.
+_REDISTIL_CANDIDATE_FACTOR = 5
+_REDISTIL_CANDIDATE_MAX = 50_000
+
+
+def redistil_candidate_limit(batch_limit: int) -> int:
+    """How many unstamped rows to pull so ``batch_limit`` workable ones remain.
+
+    Shared by the pass and by the WebUI's cost preview, so the number the panel
+    reports before a press is measured the same way the press measures it.
+    """
+
+    try:
+        limit = max(1, int(batch_limit))
+    except (TypeError, ValueError):
+        limit = 1
+    return max(limit, min(limit * _REDISTIL_CANDIDATE_FACTOR, _REDISTIL_CANDIDATE_MAX))
+
+
 class NoopEmbedder:
     async def embed(self, text: str) -> list[float]:
         # Deterministic lightweight embedding that matches pgvector(768).
@@ -345,6 +370,7 @@ class SoulCompiler:
         current_date: date,
         limit: int = 500,
         on_progress: Callable[[dict[str, int]], None] | None = None,
+        skip: Callable[[MemCell], bool] | None = None,
     ) -> dict[str, int]:
         """Re-distil every cell that carries no distillation stamp.
 
@@ -354,11 +380,37 @@ class SoulCompiler:
         finds nothing to do instead of paraphrasing good memories again. No
         timestamp has to be configured by the operator, which is what makes this
         safe to hand to every deployment.
+
+        ``skip`` is consulted for each candidate BEFORE it reaches the extractor,
+        so a cell the caller knows is worthless costs no model call: the pass is
+        one model call per cell, and a cell whose content recall will never inject
+        can never earn that call back. ``skipped_unusable`` in the result counts
+        them, separately from ``skipped`` (which means "the extractor would not
+        paraphrase this one").
+
+        Because the filter runs in Python while the store is queried with a row
+        limit, candidates are over-fetched and then cut back to ``limit``: a long
+        run of skippable rows cannot leave the pass with nothing to do while
+        workable rows sit just past the limit.
         """
-        pending = await self.repository.list_memcells_needing_distillation(limit=limit)
-        return await self.redistil_each(
+        candidates = await self.repository.list_memcells_needing_distillation(
+            limit=redistil_candidate_limit(limit)
+        )
+        pending: list[MemCell] = []
+        skipped_unusable = 0
+        for cell in candidates:
+            if len(pending) >= limit:
+                break
+            if skip is not None and skip(cell):
+                skipped_unusable += 1
+                continue
+            pending.append(cell)
+
+        result = await self.redistil_each(
             pending, current_date=current_date, on_progress=on_progress
         )
+        result["skipped_unusable"] = skipped_unusable
+        return result
 
     async def redistil_each(
         self,

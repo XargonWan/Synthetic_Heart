@@ -105,9 +105,7 @@ class _DistillingExtractor:
         ]
 
 
-def _compiler(
-    repo: InMemorySoulRepository, extractor: Any
-) -> SoulCompiler:
+def _compiler(repo: InMemorySoulRepository, extractor: Any) -> SoulCompiler:
     return SoulCompiler(
         repository=repo,
         memcell_extractor=extractor,
@@ -174,7 +172,13 @@ async def test_redistil_pending_rewrites_only_unstamped_cells() -> None:
 
     result = await compiler.redistil_pending(current_date=date(2026, 4, 18))
 
-    assert result == {"inspected": 2, "rewritten": 2, "skipped": 0, "failed": 0}
+    assert result == {
+        "inspected": 2,
+        "rewritten": 2,
+        "skipped": 0,
+        "failed": 0,
+        "skipped_unusable": 0,
+    }
     assert repo.memcells["legacy-1"].episodic_trace == DISTILLED_TRACE
     assert repo.memcells["legacy-2"].episodic_trace == DISTILLED_TRACE
     # The stamped cell is left exactly as it was.
@@ -194,7 +198,13 @@ async def test_a_second_pass_finds_nothing_to_do() -> None:
     second = await compiler.redistil_pending(current_date=date(2026, 4, 18))
 
     assert first["rewritten"] == 1
-    assert second == {"inspected": 0, "rewritten": 0, "skipped": 0, "failed": 0}
+    assert second == {
+        "inspected": 0,
+        "rewritten": 0,
+        "skipped": 0,
+        "failed": 0,
+        "skipped_unusable": 0,
+    }
     # One model call in total: the second pass never reached the extractor.
     assert len(extractor.transcripts) == 1
 
@@ -227,7 +237,13 @@ async def test_a_cell_the_extractor_will_not_paraphrase_is_left_unstamped() -> N
 
     result = await compiler.redistil_pending(current_date=date(2026, 4, 18))
 
-    assert result == {"inspected": 1, "rewritten": 0, "skipped": 1, "failed": 0}
+    assert result == {
+        "inspected": 1,
+        "rewritten": 0,
+        "skipped": 1,
+        "failed": 0,
+        "skipped_unusable": 0,
+    }
     assert repo.memcells["legacy-1"].distilled_at is None
     assert repo.memcells["legacy-1"].episodic_trace == legacy.episodic_trace
 
@@ -272,11 +288,14 @@ async def test_the_store_lists_unstamped_cells_most_recalled_first() -> None:
 class _FakeCompiler:
     """Stands in for SoulCompiler so the plugin's own behaviour is what is tested."""
 
-    def __init__(self, *, result: dict[str, int], blocker: asyncio.Event | None = None) -> None:
+    def __init__(
+        self, *, result: dict[str, int], blocker: asyncio.Event | None = None
+    ) -> None:
         self.result = result
         self.blocker = blocker
         self.calls = 0
         self.limits: list[int] = []
+        self.skips: list[Any] = []
         self.memcell_extractor = SimpleNamespace(distils_content=True)
 
     async def redistil_pending(
@@ -285,10 +304,12 @@ class _FakeCompiler:
         current_date: date,
         limit: int,
         on_progress: Any | None = None,
+        skip: Any | None = None,
     ) -> dict[str, int]:
         del current_date
         self.calls += 1
         self.limits.append(limit)
+        self.skips.append(skip)
         if on_progress is not None:
             on_progress(
                 {"total": 3, "inspected": 1, "rewritten": 1, "skipped": 0, "failed": 0}
@@ -302,6 +323,160 @@ class _FakeCompiler:
         return dict(self.result)
 
 
+def test_redistil_candidate_limit_widens_the_window_but_stays_bounded() -> None:
+    """The over-fetch window is generous for a skip, bounded for a huge batch."""
+    from core.soul.compiler import redistil_candidate_limit
+
+    assert redistil_candidate_limit(10) == 50
+    assert redistil_candidate_limit(5000) == 25000
+    # Capped, so a large batch cannot turn into an unbounded fetch.
+    assert redistil_candidate_limit(20000) == 50000
+    # Nonsense input still yields a usable window rather than raising.
+    assert redistil_candidate_limit(0) == 5
+
+
+@pytest.mark.asyncio
+async def test_a_skipped_cell_costs_no_model_call() -> None:
+    """The point of the filter: a worthless cell must never reach the model."""
+    repo = InMemorySoulRepository()
+    await repo.upsert_memcell(_legacy_cell("waste-1"))
+    await repo.upsert_memcell(_legacy_cell("waste-2"))
+    await repo.upsert_memcell(_legacy_cell("keep-1"))
+    extractor = _DistillingExtractor()
+    compiler = _compiler(repo, extractor)
+
+    result = await compiler.redistil_pending(
+        current_date=date(2026, 4, 18),
+        skip=lambda cell: cell.id.startswith("waste"),
+    )
+
+    assert result["skipped_unusable"] == 2
+    assert result["inspected"] == 1
+    assert result["rewritten"] == 1
+    # Exactly one model call, for the one cell that was worth it.
+    assert len(extractor.transcripts) == 1
+    # The skipped cells are untouched and still unstamped, so nothing is lost.
+    assert repo.memcells["waste-1"].distilled_at is None
+    assert repo.memcells["waste-2"].distilled_at is None
+
+
+@pytest.mark.asyncio
+async def test_the_pass_still_fills_the_batch_when_skippable_rows_come_first() -> None:
+    """Skippable rows must not consume the batch and leave real work undone.
+
+    The store is queried with a row limit while the filter runs in Python, so
+    candidates are over-fetched: ten worthless rows sorted ahead of three workable
+    ones must not stop those three from being processed.
+    """
+    repo = InMemorySoulRepository()
+    for index in range(10):
+        await repo.upsert_memcell(_legacy_cell(f"waste-{index}", retrieval_count=100))
+    for index in range(3):
+        await repo.upsert_memcell(_legacy_cell(f"keep-{index}", retrieval_count=1))
+    extractor = _DistillingExtractor()
+    compiler = _compiler(repo, extractor)
+
+    result = await compiler.redistil_pending(
+        current_date=date(2026, 4, 18),
+        limit=3,
+        skip=lambda cell: cell.id.startswith("waste"),
+    )
+
+    assert result["skipped_unusable"] == 10
+    assert result["inspected"] == 3
+    assert result["rewritten"] == 3
+    assert len(extractor.transcripts) == 3
+
+
+# ---------------------------------------------------------------------------
+# The free skip, and the cost the panel quotes
+# ---------------------------------------------------------------------------
+
+_ROLEPLAY_TRACE = "I moan against your neck and thrust deeper, panting your name"
+
+
+def test_a_cell_recall_would_never_inject_is_not_worth_a_model_call() -> None:
+    """The pass asks what recall asks, so it never pays for an unusable memory."""
+    plugin = SoulPlugin()
+
+    roleplay = _legacy_cell("rp", trace=_ROLEPLAY_TRACE)
+    assert plugin._redistil_is_waste(roleplay) is True
+
+    # Housekeeping sessions are never recalled either.
+    housekeeping = _legacy_cell("hk", trace="nothing temporal here at all")
+    housekeeping.session_id = "nightly"
+    assert plugin._redistil_is_waste(housekeeping) is True
+
+    # An ordinary conversational cell is worth distilling.
+    assert plugin._redistil_is_waste(_legacy_cell("ok")) is False
+
+
+@pytest.mark.asyncio
+async def test_the_status_reports_what_one_press_would_actually_spend() -> None:
+    """The panel must quote the cost the pass pays, not the raw unstamped count."""
+    plugin = SoulPlugin()
+    repo = InMemorySoulRepository()
+    await repo.upsert_memcell(_legacy_cell("rp-1", trace=_ROLEPLAY_TRACE))
+    await repo.upsert_memcell(_legacy_cell("rp-2", trace=_ROLEPLAY_TRACE))
+    await repo.upsert_memcell(_legacy_cell("ok-1"))
+    plugin._repo = repo
+
+    status = await plugin.redistil_status()
+
+    assert status["pending"] == 3  # what the store says is unstamped
+    assert status["workable"] == 1  # what a press would actually pay for
+
+
+@pytest.mark.asyncio
+async def test_the_cost_preview_is_cached_between_polls() -> None:
+    """The panel polls this endpoint, so the preview must not re-measure each time."""
+
+    class _CountingRepo(InMemorySoulRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.listed: list[int] = []
+
+        async def list_memcells_needing_distillation(
+            self, limit: int = 500
+        ) -> list[MemCell]:
+            self.listed.append(limit)
+            return await super().list_memcells_needing_distillation(limit=limit)
+
+    plugin = SoulPlugin()
+    repo = _CountingRepo()
+    await repo.upsert_memcell(_legacy_cell("ok-1"))
+    plugin._repo = repo
+
+    first = await plugin.redistil_status()
+    second = await plugin.redistil_status()
+
+    assert first["workable"] == 1
+    assert second["workable"] == 1
+    assert len(repo.listed) == 1, (
+        f"the preview re-measured on every poll: {repo.listed}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_worker_hands_the_compiler_the_free_skip() -> None:
+    """The plugin owns the policy, so it must pass its predicate to the pass."""
+    plugin = SoulPlugin()
+    fake = _FakeCompiler(
+        result={"inspected": 0, "rewritten": 0, "skipped": 0, "failed": 0}
+    )
+    plugin._compiler = fake
+
+    await plugin.start_redistil()
+    task = plugin._redistil_task
+    assert task is not None
+    await task
+
+    assert fake.skips and fake.skips[0] is not None
+    # And the counters it reports include what was skipped for free.
+    status = await plugin.redistil_status()
+    assert "skipped_unusable" in status
+
+
 @pytest.fixture(autouse=True)
 def _memory_store(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SYNTH_PRIMARY_DB", raising=False)
@@ -312,7 +487,9 @@ def _memory_store(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.asyncio
 async def test_start_redistil_runs_in_the_background_and_keeps_counters() -> None:
     plugin = SoulPlugin()
-    fake = _FakeCompiler(result={"inspected": 3, "rewritten": 2, "skipped": 1, "failed": 0})
+    fake = _FakeCompiler(
+        result={"inspected": 3, "rewritten": 2, "skipped": 1, "failed": 0}
+    )
     plugin._compiler = fake
 
     started = await plugin.start_redistil()
@@ -377,7 +554,9 @@ async def test_redistil_status_counts_what_is_left_to_do() -> None:
 @pytest.mark.asyncio
 async def test_the_limit_is_bounded_by_the_hard_cap() -> None:
     plugin = SoulPlugin()
-    fake = _FakeCompiler(result={"inspected": 0, "rewritten": 0, "skipped": 0, "failed": 0})
+    fake = _FakeCompiler(
+        result={"inspected": 0, "rewritten": 0, "skipped": 0, "failed": 0}
+    )
     plugin._compiler = fake
 
     await plugin.start_redistil(limit=10**9)
