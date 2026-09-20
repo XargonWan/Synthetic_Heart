@@ -259,6 +259,13 @@ def test_instructions_prohibit_referencing_input_metadata_prefix():
     instructions = load_json_instructions()
     assert "INPUT METADATA" in instructions
     assert "the user did not write it" in instructions
+    # The square-bracket annotations on chat history are the same class of
+    # metadata, and the failure was live: the synth narrated "[20 minutes earlier]"
+    # as a person who had spoken and told the user "that woman from 20 minutes ago
+    # ... says hi", which the user could not place at all.
+    assert "ANNOTATIONS ARE NOT PEOPLE" in instructions
+    assert "[20 minutes earlier]" in instructions
+    assert "[from the group chat]" in instructions
 
 
 def test_instructions_require_chat_reply_action():
