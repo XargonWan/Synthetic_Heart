@@ -33,6 +33,14 @@ spoke last, stay away" rule would silence outreach permanently. Cadence belongs
 to `GRILLO_OBSERVER_INTERVAL`; the last run is tracked in
 `GRILLO_OBSERVER_LAST_RUN_TS`. Discovery is automatic via the plugin registry.
 
+Freshness is judged in wall-clock terms, not against the last-run cursor. A run
+that finds a message newer than its cursor but older than one full interval is
+treated as decay-driven, exactly as if there had been no message at all, so the
+synth is told the run exists to reach out instead of being left with only stale
+snippets it has been told not to answer. This is what keeps outreach happening
+after a restart: an outage longer than the interval would otherwise leave the
+cursor behind a message that is now hours old, and the run would go quiet.
+
 ## Configuration
 
 | Key | Purpose |

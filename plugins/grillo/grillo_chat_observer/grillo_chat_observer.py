@@ -378,17 +378,38 @@ class GrilloChatObserverPlugin:
                     except (TypeError, ValueError):
                         max_ts_epoch = None
 
-                if cnt == 0:
-                    # No fresh non-self traffic. Rather than going passive, this
+                # Freshness is a WALL-CLOCK question, not a cursor question.
+                # "Newer than last_run" stops meaning "live" the moment the
+                # process is away for longer than one cadence: the newest message
+                # can be hours old and still newer than the cursor, and calling
+                # that fresh traffic drops the proactive note further down (and
+                # leaves the header's "do not reply to a stale line" in force),
+                # so a run that comes back after an outage answers nothing and
+                # outreach silently stops happening.
+                now_ts = datetime.now(timezone.utc).timestamp()
+                freshness_window = float(max(60, int(self.interval)))
+                newest_is_recent = (
+                    max_ts_epoch is None or (now_ts - max_ts_epoch) <= freshness_window
+                )
+                if cnt == 0 or not newest_is_recent:
+                    # No live non-self traffic. Rather than going passive, this
                     # is precisely the "vacuum of initiative" the observer is
                     # meant to overcome: proceed on a decay-driven basis so the
                     # synth can be proactive. The anti-dead-chat and
                     # self-cooldown gates in _collect_eligible_targets keep this
                     # from spamming silent or synth-dominated conversations.
                     decay_driven = True
-                    log_debug(
-                        "[grillo_chat_observer] No new non-self messages since last_run; entering decay-driven proactive mode"
-                    )
+                    if max_ts_epoch is not None:
+                        log_debug(
+                            f"[grillo_chat_observer] {cnt} new non-self message(s) "
+                            f"since last_run but the newest is "
+                            f"{(now_ts - max_ts_epoch) / 3600.0:.1f}h old (older than one "
+                            "cadence); entering decay-driven proactive mode"
+                        )
+                    else:
+                        log_debug(
+                            "[grillo_chat_observer] No new non-self messages since last_run; entering decay-driven proactive mode"
+                        )
                 else:
                     decay_driven = False
                     log_debug(

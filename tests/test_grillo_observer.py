@@ -61,6 +61,84 @@ async def test_observer_builds_prompt_and_collects(monkeypatch):
     ]
 
 
+async def _run_observer_with_freshness_row(monkeypatch, plugin, cnt, max_ts):
+    """Drive _run_observer with a stubbed freshness query, returning its context."""
+
+    async def fake_execute_query(sql, params=None):
+        return [{"cnt": cnt, "max_ts": max_ts}]
+
+    monkeypatch.setattr("core.db.execute_query", fake_execute_query)
+
+    async def fake_collect(limit: int) -> list[str]:
+        return ["(chat:telegram_bot/1) a line from hours ago"]
+
+    monkeypatch.setattr(plugin, "_collect_recent_snippets", fake_collect)
+
+    class FakeGrillo:
+        @staticmethod
+        async def create_activity_log(beat_type, prompt_text=None):
+            return 12345
+
+    monkeypatch.setattr("plugins.grillo.grillo_impl.GrilloPlugin", FakeGrillo)
+
+    captured: dict = {}
+
+    async def fake_enqueue(
+        bot,
+        message,
+        context_memory=None,
+        interface_id=None,
+        original_message=None,
+        priority=None,
+    ):
+        captured["ctx"] = context_memory
+        captured["text"] = getattr(message, "text", None)
+
+    monkeypatch.setattr(message_queue, "enqueue_low_priority", fake_enqueue)
+
+    # Bypass the first-run guard; the cursor itself is deliberately ancient so
+    # the stub row is what decides freshness.
+    plugin._last_run_ts = 1.0
+    await plugin._run_observer()
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_a_message_older_than_one_cadence_is_not_fresh_traffic(monkeypatch):
+    """A message that predates a downtime must not suppress the proactive note.
+
+    The cursor only says "newer than the last run". After the process has been
+    away for hours that is not the same as "live": treating an hours-old message
+    as fresh traffic drops the decay note while the header still forbids replying
+    to a stale line, so the run answers nothing and outreach stops happening
+    after a restart.
+    """
+    plugin = gco.GrilloChatObserverPlugin()
+    seeded = datetime.now(timezone.utc) - timedelta(hours=7)
+
+    captured = await _run_observer_with_freshness_row(
+        monkeypatch, plugin, cnt=5, max_ts=seeded
+    )
+
+    assert captured["ctx"]["decay_driven"] is True
+    # The proactive note is what tells the model the run exists to reach out.
+    assert "no fresh incoming traffic" in captured["text"]
+
+
+@pytest.mark.asyncio
+async def test_a_message_inside_the_cadence_is_still_fresh_traffic(monkeypatch):
+    """The ordinary case is untouched: a recent message keeps the reply framing."""
+    plugin = gco.GrilloChatObserverPlugin()
+    seeded = datetime.now(timezone.utc) - timedelta(minutes=5)
+
+    captured = await _run_observer_with_freshness_row(
+        monkeypatch, plugin, cnt=1, max_ts=seeded
+    )
+
+    assert captured["ctx"]["decay_driven"] is False
+    assert "no fresh incoming traffic" not in captured["text"]
+
+
 def test_build_observer_prompt_returns_string():
     plugin = gco.GrilloChatObserverPlugin()
     prompt = plugin._build_observer_prompt(["sample snippet"])
