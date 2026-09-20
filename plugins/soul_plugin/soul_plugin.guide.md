@@ -29,7 +29,15 @@ added automatically when the plugin starts). A memory gets stamped when a
 distilling extractor writes it and when the pass rewrites it, so pressing the
 button again does nothing rather than paraphrasing good memories a second time.
 The panel shows how many memories are still unstamped before anyone presses it.
-A memory the model will not paraphrase stays unstamped and can be retried later.
+
+Because every memory costs a model call, the pass passes over the ones a call
+could never earn back. A memory that recall would never inject anyway (in-character
+roleplay, explicit exchanges, housekeeping sessions such as nightly or diary-merge
+work) is skipped without reaching the model and counted separately as
+`skipped_unusable`, so a store full of roleplay costs nothing to clear. The panel
+therefore reports two numbers: how many memories are unstamped, and how many a
+press would actually distil, so the cost is known before it is paid. A memory the
+model will not paraphrase stays unstamped and can be retried later.
 
 | Key | Purpose |
 |-----|---------|

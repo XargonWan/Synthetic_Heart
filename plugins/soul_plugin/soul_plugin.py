@@ -19,6 +19,7 @@ from core.soul.compiler import (
     RuleBasedMemCellCurator,
     RuleBasedSummaryBuilder,
     SoulCompiler,
+    redistil_candidate_limit,
 )
 from core.soul.fastembed_embedder import FastEmbedder
 from core.soul.emotion_engine import EmotionalEngine
@@ -308,6 +309,12 @@ _SOUL_TEMPORAL_INJECT_LIMIT = 8
 # go. ``SOUL_REDISTIL_LIMIT`` sets the batch size, this is the ceiling on it.
 _SOUL_REDISTIL_HARD_CAP = 20000
 
+# How long the "one press would spend this many model calls" preview is reused
+# before it is measured again. The Settings panel polls the status endpoint, and
+# the count has to examine the candidates to apply the same filter the pass
+# applies, so it is not free.
+_REDISTIL_WORKABLE_CACHE_SEC = 60.0
+
 
 def _soul_redistil_limit() -> int:
     """Return how many cells one re-distil press may process."""
@@ -357,6 +364,10 @@ class SoulPlugin(PluginBase):
         # Manual re-distil pass (WebUI button): the task and its live counters.
         self._redistil_task: asyncio.Task[None] | None = None
         self._redistil_state: dict[str, Any] = {}
+        # Brief cache for the "what would one press actually spend" preview, so
+        # the Settings panel can poll it without re-examining the candidates on
+        # every request.
+        self._redistil_workable_cache: tuple[float, int] | None = None
 
     @staticmethod
     def _is_dsp_llm_enabled() -> bool:
@@ -1230,6 +1241,35 @@ class SoulPlugin(PluginBase):
         except Exception:
             return False
 
+    def _redistil_is_waste(self, cell: MemCell) -> bool:
+        """True when distilling this cell could never pay off.
+
+        The pass costs one model call per cell, so a cell whose content recall
+        will never inject is a call that can never be earned back. Recall already
+        refuses two families outright, and this asks the same questions:
+
+        * ``_should_exclude_recalled_memory``: housekeeping sessions (``nightly``,
+          ``diary_merge:``) and traces that are a self-initiated routing preamble
+          rather than conversation;
+        * ``is_roleplay_turn``: in-character fiction and explicit exchanges, which
+          are not a stable record of the user or an event.
+
+        Measured on the live store on 2026-09-19: 31 of the 84 unstamped cells
+        were roleplay, so 37% of a press would have been spent on memories the
+        prompt can never carry. Fail-safe: if the roleplay detector cannot be
+        imported the cell is treated as worth distilling, because spending a call
+        is better than silently dropping work.
+        """
+
+        if self._should_exclude_recalled_memory(cell):
+            return True
+        try:
+            from core.soul.roleplay import is_roleplay_turn
+
+            return bool(is_roleplay_turn(cell.episodic_trace))
+        except Exception:
+            return False
+
     @staticmethod
     def _should_exclude_recalled_memory(cell: MemCell) -> bool:
         session_id = str(cell.session_id or "").strip().lower()
@@ -1454,6 +1494,7 @@ class SoulPlugin(PluginBase):
             "inspected": int(self._redistil_state.get("inspected") or 0),
             "rewritten": int(self._redistil_state.get("rewritten") or 0),
             "skipped": int(self._redistil_state.get("skipped") or 0),
+            "skipped_unusable": int(self._redistil_state.get("skipped_unusable") or 0),
             "failed": int(self._redistil_state.get("failed") or 0),
             "started_at": self._redistil_state.get("started_at"),
             "finished_at": self._redistil_state.get("finished_at"),
@@ -1467,7 +1508,42 @@ class SoulPlugin(PluginBase):
         except Exception as exc:
             state["pending"] = None
             state["error"] = state.get("error") or f"count failed: {exc}"
+        state["workable"] = await self._redistil_workable(state.get("limit"))
         return state
+
+    async def _redistil_workable(self, limit: int | None) -> int | None:
+        """How many model calls one press would actually spend right now.
+
+        ``pending`` is what the store says is unstamped; this is what the pass
+        would hand to the extractor after its free skips, which is the number the
+        operator is really paying for. Measured the same way the pass measures it
+        (same filter, same candidate window), so the panel cannot promise one
+        figure and then spend another.
+        """
+
+        now = time.monotonic()
+        cached = self._redistil_workable_cache
+        if cached is not None and now - cached[0] < _REDISTIL_WORKABLE_CACHE_SEC:
+            return cached[1]
+
+        batch_limit = int(limit or _soul_redistil_limit())
+        batch_limit = max(1, min(batch_limit, _SOUL_REDISTIL_HARD_CAP))
+        try:
+            candidates = await self._repo.list_memcells_needing_distillation(
+                limit=redistil_candidate_limit(batch_limit)
+            )
+        except Exception as exc:
+            log_debug(f"[soul_plugin] re-distil cost preview failed: {exc}")
+            return None
+
+        workable = 0
+        for cell in candidates:
+            if workable >= batch_limit:
+                break
+            if not self._redistil_is_waste(cell):
+                workable += 1
+        self._redistil_workable_cache = (now, workable)
+        return workable
 
     async def start_redistil(self, *, limit: int | None = None) -> dict[str, Any]:
         """Start the re-distil pass in the background and return immediately.
@@ -1488,12 +1564,14 @@ class SoulPlugin(PluginBase):
 
         batch_limit = _soul_redistil_limit() if limit is None else int(limit)
         batch_limit = max(1, min(batch_limit, _SOUL_REDISTIL_HARD_CAP))
+        self._redistil_workable_cache = None
         self._redistil_state = {
             "limit": batch_limit,
             "total": 0,
             "inspected": 0,
             "rewritten": 0,
             "skipped": 0,
+            "skipped_unusable": 0,
             "failed": 0,
             "started_at": datetime.now(timezone.utc).isoformat(),
             "finished_at": None,
@@ -1509,18 +1587,23 @@ class SoulPlugin(PluginBase):
                 current_date=date.today(),
                 limit=limit,
                 on_progress=self._redistil_progress,
+                skip=self._redistil_is_waste,
             )
             self._redistil_state.update(result)
         except Exception as exc:
             self._redistil_state["error"] = str(exc)
             log_error(f"[soul_plugin] re-distil pass failed: {exc}")
         finally:
+            # The pending set just changed, so the cost preview must be measured
+            # again rather than served from the cache.
+            self._redistil_workable_cache = None
             self._redistil_state["finished_at"] = datetime.now(timezone.utc).isoformat()
             log_info(
                 "[soul_plugin] re-distil pass finished: "
                 f"inspected={self._redistil_state.get('inspected')} "
                 f"rewritten={self._redistil_state.get('rewritten')} "
                 f"skipped={self._redistil_state.get('skipped')} "
+                f"skipped_unusable={self._redistil_state.get('skipped_unusable')} "
                 f"failed={self._redistil_state.get('failed')}"
                 + (
                     f" error={self._redistil_state['error']}"
@@ -1531,7 +1614,14 @@ class SoulPlugin(PluginBase):
 
     def _redistil_progress(self, progress: dict[str, int]) -> None:
         """Keep the counters the WebUI polls up to date between log lines."""
-        for key in ("total", "inspected", "rewritten", "skipped", "failed"):
+        for key in (
+            "total",
+            "inspected",
+            "rewritten",
+            "skipped",
+            "skipped_unusable",
+            "failed",
+        ):
             if key in progress:
                 self._redistil_state[key] = int(progress[key])
 
