@@ -17,6 +17,7 @@ single validation path without importing the plugin.
 
 from __future__ import annotations
 
+import fnmatch
 import mimetypes
 import os
 from pathlib import Path
@@ -66,6 +67,69 @@ _IMAGE_EXTS = {
 }
 
 
+# --- Credential material is never deliverable ------------------------------
+# Files that are never attached, even from inside an allowed root. This is
+# defence in depth BEHIND the roots, not a boundary of its own: it matches the
+# resolved name and the directory parts, so a copy under an unrelated name
+# passes. It exists because an outbound root is normally the application tree,
+# and a bare checkout of that tree contains the environment file (bot tokens,
+# database and service passwords) while the container image does not, because
+# `.dockerignore` excludes `.env`.
+_DENIED_FILE_NAMES: frozenset[str] = frozenset(
+    {
+        ".env",
+        ".netrc",
+        "_netrc",
+        ".pgpass",
+        ".my.cnf",
+        ".git-credentials",
+        ".htpasswd",
+        "id_rsa",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+        "credentials",
+        "secrets",
+    }
+)
+_DENIED_NAME_PATTERNS: tuple[str, ...] = (
+    "*.env",
+    ".env.*",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    "*.jks",
+    "*.keystore",
+    "*.ppk",
+    "id_rsa.*",
+    "id_dsa.*",
+    "id_ecdsa.*",
+    "id_ed25519.*",
+    "credentials.*",
+    "secrets.*",
+    "*credentials.json",
+    "*service-account*.json",
+)
+# Directories whose whole contents are credential material.
+_DENIED_DIR_PARTS: frozenset[str] = frozenset(
+    {".git", ".ssh", ".aws", ".gnupg", ".docker", ".kube"}
+)
+
+# Generated media the application itself writes, which the container keeps
+# OUTSIDE the application tree on purpose (Vox's output is a mounted volume at
+# /config/media/tts so clips survive a rebuild). Both halves must match: the
+# directory the producer is configured with AND that producer's own filename
+# pattern. A misconfigured directory therefore cannot be used to read unrelated
+# files out of it, and a new engine writing a different name is refused here
+# (visible in the interface log as "Path is outside allowed roots") rather than
+# silently widening the sandbox.
+_APP_GENERATED_MEDIA: tuple[tuple[str, str], ...] = (
+    ("VOX_OUTPUT_DIR", "vox_*.wav"),
+    ("TTS_OUTPUT_DIR", "tts_*.wav"),
+)
+
+
 def _split_roots(raw: str) -> list[str]:
     """Split an ``AGENT_FS_ROOTS`` string into roots.
 
@@ -91,6 +155,39 @@ def _split_roots(raw: str) -> list[str]:
     if pending:
         merged.append(pending)
     return merged
+
+
+def _is_denied_secret_path(resolved: Path) -> bool:
+    """Return True when ``resolved`` is credential material (see the lists above)."""
+    name = resolved.name.lower()
+    if name in _DENIED_FILE_NAMES:
+        return True
+    if any(fnmatch.fnmatchcase(name, pat) for pat in _DENIED_NAME_PATTERNS):
+        return True
+    return any(part.lower() in _DENIED_DIR_PARTS for part in resolved.parts[:-1])
+
+
+def _is_app_generated_media(resolved: Path) -> bool:
+    """Return True for a clip the application itself generated moments ago.
+
+    This is the only exemption from the sandbox roots. The file must sit
+    DIRECTLY in the directory its producer is configured with and carry that
+    producer's filename prefix (``vox_<epoch>.wav`` and ``vox_<turn>_<i>.wav``
+    for streamed replies, ``tts_<epoch>.wav`` for the tts_lipsync producer).
+    """
+    for env_var, pattern in _APP_GENERATED_MEDIA:
+        raw = (os.getenv(env_var) or "").strip()
+        if not raw:
+            continue
+        try:
+            media_dir = Path(raw).resolve()
+        except Exception:
+            continue
+        if resolved.parent != media_dir:
+            continue
+        if fnmatch.fnmatchcase(resolved.name.lower(), pattern):
+            return True
+    return False
 
 
 def allowed_file_roots() -> list[Path]:
@@ -152,13 +249,15 @@ def resolve_safe_outbound_path(raw_path: str) -> tuple[Path | None, str | None]:
         except ValueError:
             continue
 
-    if not inside_root:
+    if not inside_root and not _is_app_generated_media(resolved):
         return None, "Path is outside allowed roots"
 
     if not resolved.exists():
         return None, "File does not exist"
     if not resolved.is_file():
         return None, "Path is not a regular file"
+    if _is_denied_secret_path(resolved):
+        return None, "Refusing to attach a credential or key file"
 
     return resolved, None
 

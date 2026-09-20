@@ -124,6 +124,88 @@ def test_resolve_safe_outbound_path_directory_rejected(sandbox: Path) -> None:
     assert err == "Path is not a regular file"
 
 
+def test_app_generated_clip_outside_the_roots_is_deliverable(
+    sandbox: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The container keeps Vox's output on a volume outside the app tree.
+
+    `docker-compose.yml` sets ``VOX_OUTPUT_DIR=/config/media/tts`` (a mounted
+    volume, so clips survive a rebuild), which is outside the ``/app`` sandbox.
+    Without this exemption the clip is synthesised, plays on the avatar, and is
+    then refused by the outbound path check.
+    """
+    clips = tmp_path / "config_media_tts"
+    clips.mkdir()
+    monkeypatch.setenv("VOX_OUTPUT_DIR", str(clips))
+
+    clip = clips / "vox_1789849965.wav"
+    clip.write_bytes(b"RIFF" + b"\x00" * 36)
+    resolved, err = ofu.resolve_safe_outbound_path(str(clip))
+    assert err is None
+    assert resolved == clip.resolve()
+
+    # A streamed reply's chunk carries the same prefix and is equally deliverable.
+    chunk = clips / "vox_171_3.wav"
+    chunk.write_bytes(b"RIFF" + b"\x00" * 36)
+    assert ofu.resolve_safe_outbound_path(str(chunk))[1] is None
+
+
+def test_app_generated_media_exemption_is_not_a_free_pass(
+    sandbox: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the configured directory AND the producer's own name qualify."""
+    clips = tmp_path / "config_media_tts"
+    clips.mkdir()
+    monkeypatch.setenv("VOX_OUTPUT_DIR", str(clips))
+
+    # The right directory with an unrelated name is refused.
+    other = clips / "notes.txt"
+    other.write_text("hello")
+    resolved, err = ofu.resolve_safe_outbound_path(str(other))
+    assert resolved is None
+    assert err == "Path is outside allowed roots"
+
+    # The producer's name, but not directly in the configured directory: refused.
+    nested = clips / "sub"
+    nested.mkdir()
+    deep = nested / "vox_1.wav"
+    deep.write_bytes(b"RIFF" + b"\x00" * 36)
+    resolved, err = ofu.resolve_safe_outbound_path(str(deep))
+    assert resolved is None
+    assert err == "Path is outside allowed roots"
+
+
+def test_credential_files_are_refused_inside_the_sandbox(
+    sandbox: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bare checkout puts `.env` (tokens, DB and service passwords) in the root."""
+    monkeypatch.delenv("VOX_OUTPUT_DIR", raising=False)
+    monkeypatch.delenv("TTS_OUTPUT_DIR", raising=False)
+
+    for name in (".env", "server.pem", "private.key", "credentials", "id_rsa"):
+        f = sandbox / name
+        f.write_text("secret")
+        resolved, err = ofu.resolve_safe_outbound_path(str(f))
+        assert resolved is None, f"{name} must not be attachable"
+        assert err == "Refusing to attach a credential or key file"
+
+    # A credential store inside a dot-directory is refused too.
+    git_dir = sandbox / ".git"
+    git_dir.mkdir()
+    cfg = git_dir / "config"
+    cfg.write_text('[remote "origin"]')
+    resolved, err = ofu.resolve_safe_outbound_path(str(cfg))
+    assert resolved is None
+    assert err == "Refusing to attach a credential or key file"
+
+    # An ordinary attachment is unaffected.
+    ok = sandbox / "clip.wav"
+    ok.write_bytes(b"RIFF" + b"\x00" * 36)
+    resolved, err = ofu.resolve_safe_outbound_path(str(ok))
+    assert err is None
+    assert resolved == ok.resolve()
+
+
 @pytest.mark.parametrize(
     "name,expected",
     [
