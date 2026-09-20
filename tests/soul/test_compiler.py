@@ -829,6 +829,12 @@ async def test_redistil_pass_only_touches_cells_older_than_the_cutoff() -> None:
         before=cutoff, current_date=date(2026, 4, 18)
     )
 
-    assert result == {"inspected": 1, "rewritten": 1, "skipped": 0, "failed": 0}
+    assert result == {
+        "inspected": 1,
+        "rewritten": 1,
+        "skipped": 0,
+        "failed": 0,
+        "timed_out": 0,
+    }
     assert repo.memcells["session-9:old"].episodic_trace.startswith("Scar confirmed")
     assert repo.memcells["session-9:fresh"].episodic_trace.startswith("Scar: okay")

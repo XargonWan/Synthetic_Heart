@@ -39,9 +39,17 @@ therefore reports two numbers: how many memories are unstamped, and how many a
 press would actually distil, so the cost is known before it is paid. A memory the
 model will not paraphrase stays unstamped and can be retried later.
 
+Engines are not equally fast, so each memory's rewrite is also bounded by
+`SOUL_REDISTIL_TIMEOUT_SEC` (default 300 s, `0` removes the bound). A memory that
+exceeds it is counted as `timed_out` rather than `failed`, is left untouched and
+unstamped, and the panel says so in the status line. Raise the value for a slow
+engine (one driving a browser, or a large local model) and press again: the pass
+skips what it already rewrote, so only the timed-out ones are retried.
+
 | Key | Purpose |
 |-----|---------|
 | `SOUL_REDISTIL_LIMIT` | How many memories one press may rewrite (default 5000, hard ceiling 20000). Each one costs a model call, so a large store is caught up over several presses. |
+| `SOUL_REDISTIL_TIMEOUT_SEC` | How long one memory's rewrite may take before the pass counts it as timed out and moves on (default 300, `0` removes the bound). Raise it for a slow engine; a timed-out memory is left unstamped and is retried by the next press. |
 
 ## What recall shows
 

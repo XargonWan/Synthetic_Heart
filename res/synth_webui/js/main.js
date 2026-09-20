@@ -6618,8 +6618,31 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             state && typeof state.pending === 'number' ? state.pending : null
                         );
 
+                        // A pass that times out or fails has to SAY so. With a slow
+                        // engine (one driving a browser, or a large local model) the
+                        // counters can sit still for minutes, and silence there is
+                        // indistinguishable from a healthy run in progress.
+                        const REDISTIL_WARN = '#d08b2c';
+                        const redistilWarn = (state) => {
+                            const timedOut = (state && state.timed_out) || 0;
+                            const failed = (state && state.failed) || 0;
+                            if (!timedOut && !failed) return '';
+                            const seconds = (state && state.cell_timeout) || 0;
+                            const parts = [];
+                            if (timedOut) parts.push(`${timedOut} timed out after ${seconds}s each`);
+                            if (failed) parts.push(`${failed} failed`);
+                            const advice = timedOut
+                                ? ' Raise "Re-distil timeout per memory" for a slow engine, then press again: only the memories that were cut off are retried.'
+                                : ' Press again to retry just those.';
+                            return ` ${parts.join(' and ')}.${advice}`;
+                        };
+
                         const paintRedistil = (state) => {
                             if (!redistilStatus) return;
+                            const problems = ((state && state.timed_out) || 0)
+                                + ((state && state.failed) || 0);
+                            redistilStatus.style.color =
+                                (problems || (state && state.error)) ? REDISTIL_WARN : '';
                             const pending = stillToDistil(state);
                             const running = !!(state && state.running);
                             redistilBtn.disabled = running;
@@ -6627,9 +6650,10 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 const total = (state && state.total) || 0;
                                 const done = (state && state.inspected) || 0;
                                 const rewritten = (state && state.rewritten) || 0;
-                                redistilStatus.textContent = total
+                                const working = total
                                     ? `Working: ${done} of ${total} memories checked, ${rewritten} rewritten…`
                                     : 'Working: starting the pass…';
+                                redistilStatus.textContent = working + redistilWarn(state);
                                 return;
                             }
                             if (state && state.error) {
@@ -6638,13 +6662,15 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             }
                             if (state && state.finished_at) {
                                 const unused = (state && state.skipped_unusable) || 0;
-                                const summary = `Last pass: ${state.rewritten || 0} rewritten, ${state.skipped || 0} left unchanged, ${state.failed || 0} failed.`;
+                                const timedOut = (state && state.timed_out) || 0;
+                                const summary = `Last pass: ${state.rewritten || 0} rewritten, ${state.skipped || 0} left unchanged, ${state.failed || 0} failed${timedOut ? `, ${timedOut} timed out` : ''}.`;
                                 const saved = unused
                                     ? ` ${unused} skipped as never recalled, so no model call was spent on them.`
                                     : '';
-                                redistilStatus.textContent = pending
+                                const tail = pending
                                     ? `${summary}${saved} ${pending} still to distil.`
                                     : `${summary}${saved}`;
+                                redistilStatus.textContent = tail + redistilWarn(state);
                                 if (pending === 0) redistilBtn.disabled = true;
                                 return;
                             }

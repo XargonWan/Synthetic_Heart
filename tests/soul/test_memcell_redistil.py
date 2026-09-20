@@ -177,6 +177,7 @@ async def test_redistil_pending_rewrites_only_unstamped_cells() -> None:
         "rewritten": 2,
         "skipped": 0,
         "failed": 0,
+        "timed_out": 0,
         "skipped_unusable": 0,
     }
     assert repo.memcells["legacy-1"].episodic_trace == DISTILLED_TRACE
@@ -203,6 +204,7 @@ async def test_a_second_pass_finds_nothing_to_do() -> None:
         "rewritten": 0,
         "skipped": 0,
         "failed": 0,
+        "timed_out": 0,
         "skipped_unusable": 0,
     }
     # One model call in total: the second pass never reached the extractor.
@@ -242,6 +244,7 @@ async def test_a_cell_the_extractor_will_not_paraphrase_is_left_unstamped() -> N
         "rewritten": 0,
         "skipped": 1,
         "failed": 0,
+        "timed_out": 0,
         "skipped_unusable": 0,
     }
     assert repo.memcells["legacy-1"].distilled_at is None
@@ -285,6 +288,23 @@ async def test_the_store_lists_unstamped_cells_most_recalled_first() -> None:
 # ---------------------------------------------------------------------------
 
 
+class _SlowOnMarkerExtractor(_DistillingExtractor):
+    """Distils normally, but stalls on a marked transcript (a slow engine).
+
+    The stall lives in the extractor rather than on the compiler because
+    ``SoulCompiler`` is slotted, so a test cannot monkeypatch one of its methods.
+    """
+
+    async def extract_memcells(
+        self, *, transcript: str, current_date: date
+    ) -> list[MemCellExtractionModel]:
+        if "SLOW-MARKER" in transcript:
+            await asyncio.sleep(5)
+        return await super().extract_memcells(
+            transcript=transcript, current_date=current_date
+        )
+
+
 class _FakeCompiler:
     """Stands in for SoulCompiler so the plugin's own behaviour is what is tested."""
 
@@ -296,6 +316,7 @@ class _FakeCompiler:
         self.calls = 0
         self.limits: list[int] = []
         self.skips: list[Any] = []
+        self.timeouts: list[Any] = []
         self.memcell_extractor = SimpleNamespace(distils_content=True)
 
     async def redistil_pending(
@@ -305,11 +326,13 @@ class _FakeCompiler:
         limit: int,
         on_progress: Any | None = None,
         skip: Any | None = None,
+        cell_timeout: Any | None = None,
     ) -> dict[str, int]:
         del current_date
         self.calls += 1
         self.limits.append(limit)
         self.skips.append(skip)
+        self.timeouts.append(cell_timeout)
         if on_progress is not None:
             on_progress(
                 {"total": 3, "inspected": 1, "rewritten": 1, "skipped": 0, "failed": 0}
@@ -321,6 +344,37 @@ class _FakeCompiler:
                 {"total": 3, "inspected": 3, "rewritten": 2, "skipped": 1, "failed": 0}
             )
         return dict(self.result)
+
+
+@pytest.mark.asyncio
+async def test_a_slow_cell_times_out_and_the_pass_continues() -> None:
+    """A slow engine must not stall the pass, and the memory stays retryable.
+
+    Live reason this exists: with a browser-driving engine, or a large local model,
+    one rewrite can take minutes. Unbounded, a single such cell freezes the pass
+    and the panel shows the same counter forever, which reads exactly like a
+    healthy run. Bounded, the cell is counted as timed_out, the pass moves on, and
+    because the row was never rewritten it is picked up by the next press.
+    """
+    repo = InMemorySoulRepository()
+    await repo.upsert_memcell(
+        _legacy_cell("slow-1", trace="SLOW-MARKER raw session transcript")
+    )
+    await repo.upsert_memcell(_legacy_cell("fast-2"))
+    compiler = _compiler(repo, _SlowOnMarkerExtractor())
+
+    result = await compiler.redistil_each(
+        [repo.memcells["slow-1"], repo.memcells["fast-2"]],
+        current_date=date(2026, 4, 18),
+        cell_timeout=0.05,
+    )
+
+    assert result["timed_out"] == 1
+    assert result["inspected"] == 2
+    assert result["rewritten"] == 1
+    # The cell that timed out is untouched, so a later press retries it.
+    assert repo.memcells["slow-1"].distilled_at is None
+    assert repo.memcells["fast-2"].episodic_trace == DISTILLED_TRACE
 
 
 def test_redistil_candidate_limit_widens_the_window_but_stays_bounded() -> None:
@@ -472,6 +526,10 @@ async def test_the_worker_hands_the_compiler_the_free_skip() -> None:
     await task
 
     assert fake.skips and fake.skips[0] is not None
+    # The per-memory timeout is handed over as well, so a slow engine is bounded
+    # rather than being allowed to stall the pass.
+    assert fake.timeouts and isinstance(fake.timeouts[0], float)
+    assert fake.timeouts[0] > 0
     # And the counters it reports include what was skipped for free.
     status = await plugin.redistil_status()
     assert "skipped_unusable" in status

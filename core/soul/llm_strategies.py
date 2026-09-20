@@ -122,6 +122,44 @@ async def resolve_dsp_scope_model() -> str | None:
         return None
 
 
+def _speaker_identity_block(declared: str) -> str:
+    """Rules that stop one speaker's identity being carried onto another.
+
+    The memcell extractor was told only that "the transcript labels every line
+    with its speaker", and nothing about who those speakers ARE. Measured live on
+    2026-09-20: a session whose human is a man came back paraphrased with him as
+    "she/her" throughout (60 of the 260 cells carrying his name used feminine
+    pronouns), because the model guessed a gender instead of reading one. The
+    transcript that session handed over carried only the human's own lines, and
+    although it said "my wifey", nothing in the prompt stated that the person
+    being written about is a man, so the model invented a woman.
+
+    A declaration from the operator (``SOUL_SPEAKER_IDENTITIES``) is authoritative
+    and stated outright, which is the only way an extractor can be right about a
+    person the transcript never genders.
+    """
+    block = (
+        "SPEAKER IDENTITY (critical): every speaker in the transcript is a "
+        "SEPARATE person with their own name, gender and relationship to the "
+        "persona. A speaker's gender and pronouns are never the persona's and "
+        "never another speaker's: use 'he' only for a man and 'she' only for a "
+        "woman, and never guess which one a person is.\n"
+        "Take a person's pronouns from what the transcript or the participant "
+        "context actually establishes about them - the human's own line calling "
+        "someone 'my wife' or 'my husband', or the persona addressing them, is "
+        "evidence. Where nothing establishes a person's gender, refer to them by "
+        "name rather than inventing one, and never change a person's gender "
+        "between entries of the same session.\n"
+    )
+    cleaned = " ".join(str(declared or "").split())
+    if cleaned:
+        block += (
+            "The people involved, as declared by the deployment (authoritative; "
+            f"follow it exactly): {cleaned}.\n"
+        )
+    return block
+
+
 class LlmDspBuilder:
     """LLM-compiled DSP builder with a deterministic rule-based fallback.
 
@@ -472,6 +510,7 @@ class LlmDspExtractor:
         fallback: Any | None = None,
         resolve_engine: Any | None = None,
         max_transcript_chars: int = 12000,
+        speaker_identity: str = "",
     ) -> None:
         """Build the LLM DSP extractor.
 
@@ -482,6 +521,10 @@ class LlmDspExtractor:
                 used for tests. ``None`` uses the DSP-scope Cortex resolver.
             max_transcript_chars: tail-budget for the transcript fed to the LLM
                 (most recent characters are kept).
+            speaker_identity: who the people in the log are, as declared by the
+                deployment (``SOUL_SPEAKER_IDENTITIES``). This prompt already
+                writes the human as "he"; the declaration is what keeps that right
+                for a deployment whose human is not a man.
         """
         if fallback is None:
             from core.soul.strategies import RuleBasedDspExtractor
@@ -490,6 +533,7 @@ class LlmDspExtractor:
         self._fallback: Any = fallback
         self.resolve_engine: Any | None = resolve_engine
         self.max_transcript_chars: int = max_transcript_chars
+        self.speaker_identity: str = str(speaker_identity or "").strip()
 
     async def extract_dsp(
         self, *, transcript: str, current_date: date
@@ -656,7 +700,8 @@ class LlmDspExtractor:
             "ambiguous, extract NOTHING rather than guessing.\n"
             'Return ONLY a JSON object: {"user_facts": [...], "user_preferences": '
             '[...], "ai_self_facts": [...]} — each a list of short strings; empty '
-            "lists when nothing biographical was said."
+            "lists when nothing biographical was said.\n"
+            + _speaker_identity_block(self.speaker_identity)
         )
 
 
@@ -741,6 +786,7 @@ class LlmMemCellExtractor:
         fallback: Any | None = None,
         resolve_engine: Any | None = None,
         max_transcript_chars: int = 12000,
+        speaker_identity: str = "",
     ) -> None:
         """Build the LLM MemCell extractor.
 
@@ -752,6 +798,10 @@ class LlmMemCellExtractor:
                 used for tests. ``None`` uses the DSP-scope Cortex resolver.
             max_transcript_chars: tail-budget for the transcript fed to the LLM
                 (the most recent characters are kept).
+            speaker_identity: who the people in the transcript are, as declared
+                by the deployment (``SOUL_SPEAKER_IDENTITIES``). Stated to the
+                model outright so a person the transcript never genders cannot be
+                guessed at.
         """
         from core.soul.strategies import RuleBasedMemCellExtractor
 
@@ -762,6 +812,7 @@ class LlmMemCellExtractor:
         self._tagger = RuleBasedMemCellExtractor()
         self.resolve_engine: Any | None = resolve_engine
         self.max_transcript_chars: int = max_transcript_chars
+        self.speaker_identity: str = str(speaker_identity or "").strip()
 
     async def extract_memcells(
         self, *, transcript: str, current_date: date
@@ -1048,5 +1099,6 @@ class LlmMemCellExtractor:
             'Return ONLY a JSON object: {"memories": [{"trace": "...", "facts": '
             '["..."]}]} with at most 4 entries, most durable first. Return '
             '{"memories": []} only when the session holds nothing that a later '
-            "conversation could need."
+            "conversation could need.\n"
+            + _speaker_identity_block(self.speaker_identity)
         )

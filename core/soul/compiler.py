@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
 from dataclasses import dataclass
@@ -371,6 +372,7 @@ class SoulCompiler:
         limit: int = 500,
         on_progress: Callable[[dict[str, int]], None] | None = None,
         skip: Callable[[MemCell], bool] | None = None,
+        cell_timeout: float | None = None,
     ) -> dict[str, int]:
         """Re-distil every cell that carries no distillation stamp.
 
@@ -407,7 +409,10 @@ class SoulCompiler:
             pending.append(cell)
 
         result = await self.redistil_each(
-            pending, current_date=current_date, on_progress=on_progress
+            pending,
+            current_date=current_date,
+            on_progress=on_progress,
+            cell_timeout=cell_timeout,
         )
         result["skipped_unusable"] = skipped_unusable
         return result
@@ -418,18 +423,51 @@ class SoulCompiler:
         *,
         current_date: date,
         on_progress: Callable[[dict[str, int]], None] | None = None,
+        cell_timeout: float | None = None,
     ) -> dict[str, int]:
-        """Run the rewrite over an explicit list of cells, reporting progress."""
+        """Run the rewrite over an explicit list of cells, reporting progress.
+
+        ``cell_timeout`` bounds ONE cell's rewrite, in seconds. A slow engine (a
+        browser-driving one, or a large local model) can take minutes per memory,
+        and without a bound one pathological cell stalls the whole pass while the
+        panel sits on the same counter, so the operator cannot tell a slow engine
+        from a dead one. With a bound the cell is counted as ``timed_out``, the
+        pass moves on, and the panel says so. A timed-out cell is left unstamped,
+        so raising the value and pressing again retries exactly those (the pass
+        skips what it already rewrote). ``None`` or ``0`` leaves it unbounded.
+        """
         rewritten = 0
         skipped = 0
         failed = 0
+        timed_out = 0
         total = len(pending)
+        # Resolved once, guarded, so the timeout is a plain float everywhere it is
+        # used, including inside the except branch (where the optional cannot
+        # narrow and a bare float(cell_timeout) is not a legal call).
+        timeout_s = 0.0
+        if cell_timeout is not None and float(cell_timeout) > 0:
+            timeout_s = float(cell_timeout)
+        bounded = timeout_s > 0
         for index, cell in enumerate(pending, 1):
             try:
-                if await self.redistil_memcell(cell, current_date=current_date):
+                if bounded:
+                    done = await asyncio.wait_for(
+                        self.redistil_memcell(cell, current_date=current_date),
+                        timeout=timeout_s,
+                    )
+                else:
+                    done = await self.redistil_memcell(cell, current_date=current_date)
+                if done:
                     rewritten += 1
                 else:
                     skipped += 1
+            except (asyncio.TimeoutError, TimeoutError):
+                timed_out += 1
+                log_warning(
+                    f"[soul] redistil timed out for {cell.id} after "
+                    f"{timeout_s:.0f}s (raise SOUL_REDISTIL_TIMEOUT_SEC "
+                    "for a slow engine; the memory is left untouched and retryable)"
+                )
             except Exception as exc:
                 failed += 1
                 log_warning(f"[soul] redistil failed for {cell.id}: {exc}")
@@ -441,25 +479,28 @@ class SoulCompiler:
                         "rewritten": rewritten,
                         "skipped": skipped,
                         "failed": failed,
+                        "timed_out": timed_out,
                     }
                 )
             if index % 25 == 0:
                 log_info(
                     f"[soul] redistil progress: {index}/{total} "
-                    f"(rewritten={rewritten} skipped={skipped} failed={failed})"
+                    f"(rewritten={rewritten} skipped={skipped} "
+                    f"failed={failed} timed_out={timed_out})"
                 )
         result = {
             "inspected": total,
             "rewritten": rewritten,
             "skipped": skipped,
             "failed": failed,
+            "timed_out": timed_out,
         }
         if on_progress is not None:
             on_progress(result)
         log_debug(
             "[soul] redistil pass: "
             f"inspected={result['inspected']} rewritten={rewritten} "
-            f"skipped={skipped} failed={failed}"
+            f"skipped={skipped} failed={failed} timed_out={timed_out}"
         )
         return result
 

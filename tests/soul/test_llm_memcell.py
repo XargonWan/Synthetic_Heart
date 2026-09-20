@@ -46,6 +46,71 @@ def _extractor(engine: FakeEngine | None) -> LlmMemCellExtractor:
     return LlmMemCellExtractor(resolve_engine=lambda: _resolve_to(engine))
 
 
+DECLARED_IDENTITY = (
+    "Scar - he/him, the human, my husband; 2B - she/her, the persona, me"
+)
+
+
+def _extractor_with_identity(
+    engine: FakeEngine | None, identity: str
+) -> LlmMemCellExtractor:
+    return LlmMemCellExtractor(
+        resolve_engine=lambda: _resolve_to(engine), speaker_identity=identity
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_prompt_states_who_the_speakers_are() -> None:
+    """A person the transcript never genders must not be guessed at.
+
+    The live failure this pins: a session whose human is a man came back
+    paraphrased with him as "she/her" throughout (60 of the 260 cells carrying his
+    name used feminine pronouns), and recall then served that back as fact. The
+    transcript alone could not have settled it - the one that failed carried only
+    the human's own lines - so the deployment declares the speakers and the
+    extractor states the declaration outright.
+    """
+    engine = FakeEngine(response=DISTILLED_RESPONSE)
+
+    await _extractor_with_identity(engine, DECLARED_IDENTITY).extract_memcells(
+        transcript=TRANSCRIPT, current_date=date(2026, 9, 20)
+    )
+
+    instructions = str(engine.prompts[0].get("instructions") or "")
+    assert "SPEAKER IDENTITY" in instructions
+    assert DECLARED_IDENTITY in instructions
+    assert "never change a person's gender" in instructions
+
+
+@pytest.mark.asyncio
+async def test_an_undeclared_person_is_named_rather_than_guessed() -> None:
+    """With nothing declared, the rule still forbids inventing a gender."""
+    engine = FakeEngine(response=DISTILLED_RESPONSE)
+
+    await _extractor(engine).extract_memcells(
+        transcript=TRANSCRIPT, current_date=date(2026, 9, 20)
+    )
+
+    instructions = str(engine.prompts[0].get("instructions") or "")
+    assert "SPEAKER IDENTITY" in instructions
+    assert "never guess which one a person is" in instructions
+    assert "refer to them by name rather than inventing one" in instructions
+    assert DECLARED_IDENTITY not in instructions
+
+
+def test_the_dsp_extract_instructions_carry_the_same_rule() -> None:
+    """The profile extractor had the mirror-image defect, so it gets the rule too."""
+    from core.soul.llm_strategies import LlmDspExtractor
+
+    declared = LlmDspExtractor(speaker_identity=DECLARED_IDENTITY)
+    undeclared = LlmDspExtractor()
+
+    assert "SPEAKER IDENTITY" in declared._build_extract_instructions()
+    assert DECLARED_IDENTITY in declared._build_extract_instructions()
+    assert "SPEAKER IDENTITY" in undeclared._build_extract_instructions()
+    assert DECLARED_IDENTITY not in undeclared._build_extract_instructions()
+
+
 DISTILLED_RESPONSE = (
     '{"memories": ['
     '{"trace": "Scar corrected the earlier description of Dee: she is an adult '

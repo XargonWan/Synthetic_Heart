@@ -119,6 +119,41 @@ register_exposed_var(
 )
 
 register_exposed_var(
+    "SOUL_REDISTIL_TIMEOUT_SEC",
+    label="Re-distil timeout per memory (seconds)",
+    default=300,
+    value_type=int,
+    ui_type="number",
+    description=(
+        "How long one memory's rewrite may take before the pass counts it as "
+        "timed out and moves on to the next. Raise it for a slow engine (one that "
+        "drives a browser, or a large local model); 0 removes the bound entirely. "
+        "A timed-out memory is left untouched, so pressing again retries only those."
+    ),
+    scope="plugins",
+    component="soul_plugin",
+    advanced=True,
+)
+
+register_exposed_var(
+    "SOUL_SPEAKER_IDENTITIES",
+    label="People in the transcript (who is who)",
+    default="",
+    value_type=str,
+    ui_type="text",
+    description=(
+        "Free text naming each speaker and their pronouns, e.g. "
+        "'Scar - he/him, my husband; 2B - she/her, me'. The memory and profile "
+        "extractors are told this outright, so a person the transcript never "
+        "genders is never guessed at (leaving it empty keeps the previous "
+        "behaviour)."
+    ),
+    scope="plugins",
+    component="soul_plugin",
+    advanced=True,
+)
+
+register_exposed_var(
     "SOUL_MEMCELL_LLM_ENABLED",
     label="LLM-distilled MemCells",
     default=1,
@@ -316,6 +351,48 @@ _SOUL_REDISTIL_HARD_CAP = 20000
 _REDISTIL_WORKABLE_CACHE_SEC = 60.0
 
 
+def _soul_speaker_identities() -> str:
+    """Who the people in a session are, declared by the operator.
+
+    ``SOUL_SPEAKER_IDENTITIES`` (advanced) is free text naming each speaker and
+    their pronouns, for example ``Scar - he/him, the human; 2B - she/her, the
+    persona``. Both extractors state it to the model outright, because a
+    transcript that never genders a person leaves the model guessing: measured
+    live on 2026-09-20, a session whose human is a man was distilled with him as
+    "she/her" throughout, and recall then handed that back as fact.
+    """
+    try:
+        from core.config_manager import config_registry
+
+        return str(
+            config_registry.get_value("SOUL_SPEAKER_IDENTITIES", "", value_type=str)
+            or ""
+        ).strip()
+    except Exception:
+        return ""
+
+
+def _soul_redistil_timeout() -> float:
+    """Seconds to allow ONE memory's rewrite before it is counted as timed out.
+
+    ``SOUL_REDISTIL_TIMEOUT_SEC`` (default 300; ``0`` removes the bound) exists
+    because engines are not equally fast. One that drives a browser, or a large
+    local model, can take minutes per memory, and an unbounded pass gives the
+    operator no way to tell a slow engine from a stalled one: the counters simply
+    stop moving. A timed-out memory is left untouched and unstamped, so raising the
+    value and pressing again retries exactly the ones that were cut off.
+    """
+    try:
+        from core.config_manager import config_registry
+
+        raw = config_registry.get_value(
+            "SOUL_REDISTIL_TIMEOUT_SEC", 300, value_type=int
+        )
+        return max(0.0, min(float(raw), 3600.0))
+    except Exception:
+        return 300.0
+
+
 def _soul_redistil_limit() -> int:
     """Return how many cells one re-distil press may process."""
     try:
@@ -394,7 +471,7 @@ class SoulPlugin(PluginBase):
         try:
             from core.soul.llm_strategies import LlmDspExtractor
 
-            return LlmDspExtractor()
+            return LlmDspExtractor(speaker_identity=_soul_speaker_identities())
         except Exception as exc:
             log_warning(
                 f"[soul_plugin] LLM DSP extractor unavailable ({exc}); using rule-based"
@@ -432,7 +509,7 @@ class SoulPlugin(PluginBase):
         try:
             from core.soul.llm_strategies import LlmMemCellExtractor
 
-            return LlmMemCellExtractor()
+            return LlmMemCellExtractor(speaker_identity=_soul_speaker_identities())
         except Exception as exc:
             log_warning(
                 "[soul_plugin] LLM memcell extractor unavailable "
@@ -1496,6 +1573,8 @@ class SoulPlugin(PluginBase):
             "skipped": int(self._redistil_state.get("skipped") or 0),
             "skipped_unusable": int(self._redistil_state.get("skipped_unusable") or 0),
             "failed": int(self._redistil_state.get("failed") or 0),
+            "timed_out": int(self._redistil_state.get("timed_out") or 0),
+            "cell_timeout": _soul_redistil_timeout(),
             "started_at": self._redistil_state.get("started_at"),
             "finished_at": self._redistil_state.get("finished_at"),
             "error": self._redistil_state.get("error"),
@@ -1573,6 +1652,7 @@ class SoulPlugin(PluginBase):
             "skipped": 0,
             "skipped_unusable": 0,
             "failed": 0,
+            "timed_out": 0,
             "started_at": datetime.now(timezone.utc).isoformat(),
             "finished_at": None,
             "error": None,
@@ -1588,6 +1668,7 @@ class SoulPlugin(PluginBase):
                 limit=limit,
                 on_progress=self._redistil_progress,
                 skip=self._redistil_is_waste,
+                cell_timeout=_soul_redistil_timeout(),
             )
             self._redistil_state.update(result)
         except Exception as exc:
@@ -1604,7 +1685,8 @@ class SoulPlugin(PluginBase):
                 f"rewritten={self._redistil_state.get('rewritten')} "
                 f"skipped={self._redistil_state.get('skipped')} "
                 f"skipped_unusable={self._redistil_state.get('skipped_unusable')} "
-                f"failed={self._redistil_state.get('failed')}"
+                f"failed={self._redistil_state.get('failed')} "
+                f"timed_out={self._redistil_state.get('timed_out')}"
                 + (
                     f" error={self._redistil_state['error']}"
                     if self._redistil_state.get("error")
@@ -1621,6 +1703,7 @@ class SoulPlugin(PluginBase):
             "skipped",
             "skipped_unusable",
             "failed",
+            "timed_out",
         ):
             if key in progress:
                 self._redistil_state[key] = int(progress[key])
