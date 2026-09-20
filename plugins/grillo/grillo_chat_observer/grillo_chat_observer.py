@@ -446,6 +446,28 @@ class GrilloChatObserverPlugin:
             targets = await self._collect_eligible_targets(self.samples)
             eligible_targets = [t for t in targets if t.get("eligible")]
 
+            # The conversation that was active MOST RECENTLY is the natural place
+            # to speak. When it is live the person is right there, so reaching
+            # into a different chat is outreach drifting away from them rather
+            # than toward them (live 2026-09-20 11:07: the direct message was
+            # live, so the run reached into a group chat instead). Proactive mode
+            # only: the react path below still answers fresh traffic normally, and
+            # the next run re-evaluates. Structural only — the same recency
+            # ordering and live flag this metadata already carries, never text.
+            newest_target = min(
+                (t for t in targets if t.get("age_seconds") is not None),
+                key=lambda t: t.get("age_seconds") or 0.0,
+                default=None,
+            )
+            if decay_driven and newest_target is not None:
+                if newest_target.get("in_active_conversation"):
+                    log_info(
+                        "[grillo_chat_observer] Newest conversation "
+                        f"{newest_target.get('interface_path')} is live; staying "
+                        "silent instead of reaching out elsewhere"
+                    )
+                    eligible_targets = []
+
             # In decay-driven mode there is no fresh traffic to react to, so we
             # need at least one eligible target to speak into; otherwise the
             # whole network is either dead or on cooldown and we stay silent.

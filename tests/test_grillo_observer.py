@@ -74,6 +74,23 @@ async def _run_observer_with_freshness_row(monkeypatch, plugin, cnt, max_ts):
 
     monkeypatch.setattr(plugin, "_collect_recent_snippets", fake_collect)
 
+    async def fake_collect_targets(limit: int) -> list[dict]:
+        # Hermetic: the real builder reads the live database, and whether its
+        # newest conversation is live decides whether a decay-driven run speaks
+        # at all. Pin an idle target so the freshness logic under test, not the
+        # operator's recent chat activity, decides whether this run proceeds.
+        return [
+            {
+                "interface_path": "telegram_bot/1",
+                "last_sender": "Scar",
+                "eligible": True,
+                "age_seconds": 7200.0,
+                "in_active_conversation": False,
+            }
+        ]
+
+    monkeypatch.setattr(plugin, "_collect_eligible_targets", fake_collect_targets)
+
     class FakeGrillo:
         @staticmethod
         async def create_activity_log(beat_type, prompt_text=None):
@@ -447,6 +464,24 @@ async def test_observer_db_check_updates_and_advances_last_run_ts(monkeypatch):
 
     monkeypatch.setattr(plugin, "_collect_recent_snippets", fake_collect)
 
+    async def fake_collect_targets(limit: int) -> list[dict]:
+        # Hermetic: the real builder reads the live database, and whether its
+        # newest conversation is live is exactly what decides whether a
+        # decay-driven run speaks at all. Pin an idle target so the freshness
+        # logic under test, not the operator's recent chat activity, decides
+        # whether this run proceeds.
+        return [
+            {
+                "interface_path": "telegram_bot/1",
+                "last_sender": "Scar",
+                "eligible": True,
+                "age_seconds": 7200.0,
+                "in_active_conversation": False,
+            }
+        ]
+
+    monkeypatch.setattr(plugin, "_collect_eligible_targets", fake_collect_targets)
+
     async def fake_enqueue(
         bot,
         message,
@@ -526,6 +561,130 @@ async def test_observer_is_decay_driven_when_no_updates(monkeypatch):
 
     # Proactive design: targets are collected and a beat is enqueued.
     assert called.get("targets") is True
+
+
+def _patched_observer_for_decay_run(monkeypatch, plugin, targets):
+    """Drive a decay-driven observer run with the given eligible targets.
+
+    Returns the ``called`` dict the fake collaborators record into, so a test can
+    tell whether the run reached prompt building and enqueueing at all.
+    """
+    called = {}
+
+    async def fake_execute_query(*args, **kwargs):
+        raise RuntimeError("db unavailable")
+
+    monkeypatch.setattr("core.db.execute_query", fake_execute_query)
+
+    async def fake_check(consume=True):
+        return {
+            "updated": False,
+            "new_messages": [],
+            "last_checked": "2026-01-01T00:00:00Z",
+        }
+
+    monkeypatch.setattr("core.chat_update_checker.check_for_updates_once", fake_check)
+
+    async def fake_collect(limit: int) -> list[str]:
+        return ["test snippet"]
+
+    monkeypatch.setattr(plugin, "_collect_recent_snippets", fake_collect)
+
+    async def fake_collect_targets(limit: int) -> list[dict]:
+        return targets
+
+    monkeypatch.setattr(plugin, "_collect_eligible_targets", fake_collect_targets)
+
+    def fake_build(fragments, eligible_targets, decay_driven):
+        called["targets"] = eligible_targets
+        return ""
+
+    monkeypatch.setattr(plugin, "_build_observer_prompt", fake_build)
+
+    async def fake_enqueue(*args, **kwargs):
+        called["enqueued"] = True
+
+    from core import message_queue
+
+    monkeypatch.setattr(message_queue, "enqueue_low_priority", fake_enqueue)
+
+    return called
+
+
+@pytest.mark.asyncio
+async def test_newest_conversation_live_skips_outreach_instead_of_drifting(
+    monkeypatch,
+):
+    """A live newest conversation means the person is present right now, so a
+    proactive run must not reach into another chat instead.
+
+    Live 2026-09-20 11:07: the direct message had messages a minute either side,
+    which marks it LIVE-CONVERSATION and excludes it, and the run reached into a
+    group chat instead. Staying silent is the wanted behaviour here.
+    """
+    plugin = gco.GrilloChatObserverPlugin()
+    called = _patched_observer_for_decay_run(
+        monkeypatch,
+        plugin,
+        [
+            {
+                "interface_path": "telegram_bot/5208932647",
+                "last_sender": "Scar",
+                "eligible": True,
+                "age_seconds": 60.0,
+                "in_active_conversation": True,
+            },
+            {
+                "interface_path": "telegram_bot/-5293915984",
+                "last_sender": "self",
+                "eligible": True,
+                "age_seconds": 14400.0,
+                "in_active_conversation": False,
+            },
+        ],
+    )
+
+    plugin._last_run_ts = 1.0
+    await plugin._run_observer()
+
+    # The run never reached prompt building or enqueueing: it stayed silent.
+    assert "targets" not in called
+    assert called.get("enqueued") is not True
+
+
+@pytest.mark.asyncio
+async def test_newest_conversation_idle_still_offers_every_target(monkeypatch):
+    """The ordinary case is unchanged: nothing is live, so outreach proceeds and
+    every eligible target is still offered to the model."""
+    plugin = gco.GrilloChatObserverPlugin()
+    called = _patched_observer_for_decay_run(
+        monkeypatch,
+        plugin,
+        [
+            {
+                "interface_path": "telegram_bot/5208932647",
+                "last_sender": "Scar",
+                "eligible": True,
+                "age_seconds": 7200.0,
+                "in_active_conversation": False,
+            },
+            {
+                "interface_path": "telegram_bot/-5293915984",
+                "last_sender": "self",
+                "eligible": True,
+                "age_seconds": 14400.0,
+                "in_active_conversation": False,
+            },
+        ],
+    )
+
+    plugin._last_run_ts = 1.0
+    await plugin._run_observer()
+
+    assert [t["interface_path"] for t in called["targets"]] == [
+        "telegram_bot/5208932647",
+        "telegram_bot/-5293915984",
+    ]
 
 
 @pytest.mark.asyncio
