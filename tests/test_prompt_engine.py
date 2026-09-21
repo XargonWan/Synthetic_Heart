@@ -12,7 +12,6 @@ from core.prompt_engine import (
     build_live_prompt_request,
     build_live_system_instruction,
     load_json_instructions,
-    load_unminified_chat_instruction,
 )
 
 
@@ -271,8 +270,14 @@ def test_instructions_prohibit_referencing_input_metadata_prefix():
 def test_instructions_require_chat_reply_action():
     instructions = load_json_instructions()
     assert "CHAT REPLY REQUIRED" in instructions
-    assert "GRILLO INTERNAL MODE is NOT active" in instructions
     assert "hard failure" in instructions
+    # The rule used to carry its own "When GRILLO INTERNAL MODE is NOT active"
+    # preamble. That became redundant once the internal beat route stopped
+    # receiving the rule at all (see core/prompt_instructions/routes.py), so the
+    # preamble is gone from the shared text and the exclusions are asserted
+    # instead — in both directions — by
+    # tests/test_prompt_instruction_budget.py.
+    assert "GRILLO INTERNAL MODE is NOT active" not in instructions
 
 
 def test_instructions_enforce_first_person_identity():
@@ -289,22 +294,42 @@ def test_instructions_enforce_first_person_identity():
     )
 
 
-def test_unminified_chat_instruction_enforces_identity_rules():
-    instructions = load_unminified_chat_instruction("telegram_bot")
-    assert "Stay in the active persona in first person" in instructions
-    assert "Treat that as stale style noise" in instructions
-    assert "Keep pronouns consistent" in instructions
-    assert "prefer explicit honesty over confident reconstruction" in instructions
-    assert "potentially incomplete or reconstructed" in instructions
+def test_memory_honesty_is_obligatory_in_the_shared_instructions():
+    """The memory-honesty obligation lives in the shared rule set.
+
+    It used to be stated twice: as ``MEMORY HONESTY`` in the instructions and
+    again as a ``[Memory honesty notice]`` block next to the memories in
+    ``_build_context_summary``. The two are merged into the single rule, which
+    renders on every route — including turns with no memory block at all, where
+    the obligation matters most. Keeping it as a rule also means the unminified
+    variant's identity rules are covered here, because that variant is gone
+    (it had no production caller).
+    """
+    instructions = load_json_instructions()
+
+    # The obligation itself.
+    assert "MEMORY HONESTY" in instructions
+    assert "prefer honesty over confidence" in instructions
+    assert "never turn uncertainty into fiction" in instructions
+    assert "say so rather than inventing a recollection" in instructions
+    # The half that used to live only in the (now removed) context notice.
+    assert "incomplete, stale or reconstructed" in instructions
+
+    # Identity rules that the removed unminified variant used to cover.
+    assert "Stay inside the active persona in first person" in instructions
     assert (
-        "do not replace an established he/him or she/her person with singular they/them"
-        in instructions
+        "Do not neutralize an established he/him or she/her person into singular they/them"
+        in (instructions)
     )
+    assert "treat that as stale style noise" in instructions
 
 
-def test_build_context_summary_adds_memory_honesty_notice_when_memories_present() -> (
-    None
-):
+def test_build_context_summary_does_not_repeat_the_memory_honesty_notice() -> None:
+    """The notice block is gone: one rendering, in the shared rules.
+
+    The memories themselves must still render, and the notice must not come
+    back here, or the prompt carries the same obligation twice again.
+    """
     summary = _build_context_summary(
         {
             "memories": [
@@ -313,9 +338,8 @@ def test_build_context_summary_adds_memory_honesty_notice_when_memories_present(
         }
     )
 
-    assert "[Memory honesty notice]" in summary
-    assert "recalled internal records" in summary
-    assert "acknowledge uncertainty instead of inventing a recollection" in summary
+    assert "[Memory honesty notice]" not in summary
+    assert "acknowledge uncertainty instead of inventing a recollection" not in summary
     assert (
         "Recalled memory from 2026-04-20 (same chat): Alice loves jasmine tea."
         in summary

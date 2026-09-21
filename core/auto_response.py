@@ -107,7 +107,14 @@ class AutoResponseSystem:
             mock_message.chat.first_name = "AutoResponse"
             mock_message.chat.type = "private"
 
-            json_rules = load_json_instructions()
+            # Delivery route: this turn reports the results of an action back to
+            # the user. It sends a message but writes no diary entry and stirs
+            # no emotion, so its instruction set omits those obligations and the
+            # human-chat worked example (the DELIVERY TASK block below carries
+            # its own single-action example).
+            from core.prompt_instructions import ROUTE_DELIVERY
+
+            json_rules = load_json_instructions(ROUTE_DELIVERY)
             if action_outputs is not None:
                 message_block = json.dumps(
                     {"action_outputs": action_outputs}, ensure_ascii=False

@@ -99,8 +99,18 @@ Recon output may add:
 Instructions and chat mode
 --------------------------
 
-The prompt builder loads the standard JSON instructions using `load_json_instructions()`.
+The prompt builder loads the standard JSON instructions using `load_json_instructions(route)`.
 These instructions are kept deliberately compact and single-line for token efficiency.
+
+`route` is optional and additive. It selects WHICH rules render for the turn (a
+Grillo internal beat is not a user chat; an embodiment turn replies in-world; a
+spoken turn needs the spoken register) — see `docs/prompt_instruction_budget.rst`
+for the route table, the per-route character budgets, and the guard test. Called
+with no argument it renders the full shared set, which is what every pre-existing
+caller gets.
+
+The rule text itself lives in `core/prompt_instructions/rules.py`, one constant per
+rule, with route-specific clauses in `core/prompt_instructions/overlays.py`.
 
 For chat interfaces, the builder may also add `instructions_verbose`:
 

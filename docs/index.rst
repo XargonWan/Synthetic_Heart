@@ -50,6 +50,8 @@ getting started.
 
    architecture
    prompt_pipeline
+   prompt_instruction_budget
+   prompt_engine_time
    auto_response
    chat_instructions
    compose_env_vars

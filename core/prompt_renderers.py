@@ -90,6 +90,42 @@ def _build_runtime_prefix(ctx: RuntimeContext) -> str:
     return prefix
 
 
+def _build_current_turn_anchor(ctx: RuntimeContext) -> str:
+    """Compact Reality Anchor restated on its own line above the current turn.
+
+    ``PromptRequest.context_summary`` carries the full ``[SYSTEM: REALITY
+    ANCHOR]`` block, but every renderer merges that into the *system* message —
+    measured live at character 11 115 of a 15 406-character system message, i.e.
+    roughly 11 000 characters away from the text being generated. On a long
+    conversation the authoritative date/time/season therefore loses its grip
+    exactly where it is needed.
+
+    ``RuntimeContext.reality_anchor`` (built by ``core.prompt_engine``, from the
+    same helpers that build the system block, so the two cannot drift) is those
+    same facts compressed to one line. Rendering it directly above the current
+    user turn keeps the temporal grounding at the point of generation.
+
+    Returns the anchor line followed by a newline, so it stays a distinct line
+    from the routing bracket and the message text, or ``""`` when the request
+    carries no anchor.
+    """
+    anchor = str(ctx.reality_anchor or "").strip()
+    if not anchor:
+        return ""
+    return anchor + "\n"
+
+
+def _build_current_turn_header(ctx: RuntimeContext) -> str:
+    """Everything that sits above the current user turn's own text.
+
+    One composition point for the whole header — the Reality Anchor line first,
+    then the routing/tone bracket (and the addressee note, which renders inside
+    the bracket) — so a renderer cannot accidentally place one without the other,
+    and so a future line has an obvious home.
+    """
+    return _build_current_turn_anchor(ctx) + _build_runtime_prefix(ctx)
+
+
 def _build_multimodal_turn_text(
     ctx: RuntimeContext,
     current_text: str,
@@ -105,9 +141,9 @@ def _build_multimodal_turn_text(
 
     segments: list[str] = []
 
-    prefix = _build_runtime_prefix(ctx).strip()
-    if prefix:
-        segments.append(prefix)
+    header = _build_current_turn_header(ctx).strip()
+    if header:
+        segments.append(header)
 
     user_text = current_text.strip()
     image_count = sum(1 for part in multimodal_parts if part.get("type") == "image_url")
@@ -317,9 +353,11 @@ class OpenAIRenderer:
         for turn in req.conversation_history:
             messages.append({"role": turn.role, "content": turn.content})
 
-        # Current user turn with compact runtime context prefix
-        prefix = _build_runtime_prefix(req.runtime_ctx)
-        current_content = prefix + (req.current_text or "")
+        # Current user turn: the Reality Anchor line (when the turn carries
+        # temporal facts) on its own line, then the compact runtime prefix.
+        current_content = _build_current_turn_header(req.runtime_ctx) + (
+            req.current_text or ""
+        )
         messages.append({"role": "user", "content": current_content})
 
         return messages
@@ -498,8 +536,9 @@ class AnthropicRenderer:
             messages.append({"role": anthr_role, "content": turn.content})
 
         # Current user turn
-        prefix = _build_runtime_prefix(req.runtime_ctx)
-        current_text = prefix + (req.current_text or "")
+        current_text = _build_current_turn_header(req.runtime_ctx) + (
+            req.current_text or ""
+        )
         messages.append({"role": "user", "content": current_text})
 
         # ── Result ────────────────────────────────────────────────────
@@ -523,7 +562,7 @@ class AnthropicRenderer:
         if not image_parts or not result.get("messages"):
             return result
 
-        prefix = _build_runtime_prefix(self.req.runtime_ctx)
+        prefix = _build_current_turn_header(self.req.runtime_ctx)
         text = prefix + (self.req.current_text or "")
 
         content: list[dict[str, Any]] = []
@@ -624,8 +663,9 @@ class GeminiRenderer:
             contents.append({"role": gemini_role, "parts": [{"text": turn.content}]})
 
         # Current user turn
-        prefix = _build_runtime_prefix(req.runtime_ctx)
-        current_text = prefix + (req.current_text or "")
+        current_text = _build_current_turn_header(req.runtime_ctx) + (
+            req.current_text or ""
+        )
         contents.append({"role": "user", "parts": [{"text": current_text}]})
 
         result: dict[str, Any] = {
@@ -647,7 +687,7 @@ class GeminiRenderer:
         if not multimodal_parts or not result.get("contents"):
             return result
 
-        prefix = _build_runtime_prefix(self.req.runtime_ctx)
+        prefix = _build_current_turn_header(self.req.runtime_ctx)
         text = prefix + (self.req.current_text or "")
 
         parts: list[dict[str, Any]] = []
@@ -738,7 +778,7 @@ class TextRenderer:
                 tag = "assistant" if turn.role == "assistant" else "user"
                 lines.append(f"[{tag}] {turn.content}")
 
-        prefix = _build_runtime_prefix(req.runtime_ctx)
+        prefix = _build_current_turn_header(req.runtime_ctx)
         lines.append(f"\n[current] {prefix}{req.current_text or ''}")
 
         # Compact tool listing (brief only)

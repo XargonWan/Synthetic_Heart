@@ -699,7 +699,9 @@ async def test_build_json_prompt_merges_soul_recalled_memories(monkeypatch):
     monkeypatch.setattr("core.recon.resolve_tone", fake_resolve_tone)
     monkeypatch.setattr(
         "core.prompt_engine.load_json_instructions",
-        lambda: "RESPOND ONLY WITH VALID JSON",
+        # Accepts the optional route argument, mirroring the real signature:
+        # build_prompt_request passes the derived instruction route.
+        lambda *args, **kwargs: "RESPOND ONLY WITH VALID JSON",
     )
 
     message = SimpleNamespace(

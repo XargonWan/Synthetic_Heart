@@ -479,6 +479,59 @@ def _derive_outbound_beat_target_interfaces(
     return {path.split("/", 1)[0].strip() for path in paths if path.strip()}
 
 
+def _derive_instruction_route(
+    message: Any | None,
+    context_memory: Any | None,
+    interface_path: str | None,
+    beat_type: str,
+    is_grillo_internal: bool,
+) -> str:
+    """Pick the instruction route for this turn, structurally.
+
+    The route selects which shared rules render (``core.prompt_instructions``).
+    It is derived ONLY from flags the caller has already computed — the beat
+    type the beat declared, the Grillo-internal verdict, the Vessel probe and
+    the input source. Message *content* is never inspected, so this stays safe
+    in a multi-language deployment and cannot be steered by what someone says.
+
+    Precedence matters: an internal beat is never also a chat turn, and an
+    embodiment turn replies in-world rather than through a chat interface (its
+    route carries the in-world speak clause as an overlay).
+
+    Fail-safe: anything unexpected resolves to ``ROUTE_CHAT``, whose rule set is
+    the superset, so a misclassification costs characters rather than a rule.
+    """
+    from core.prompt_instructions import (
+        ROUTE_CHAT,
+        ROUTE_CHAT_VOICE,
+        ROUTE_GRILLO_INTERNAL,
+        ROUTE_OBSERVER,
+        ROUTE_VESSEL,
+    )
+
+    try:
+        # The proactive outreach beat: it must send a message, so it keeps the
+        # reply obligation, but not the human-chat worked example (its own
+        # constants carry one).
+        if str(beat_type or "") == "observer":
+            return ROUTE_OBSERVER
+        if is_grillo_internal:
+            return ROUTE_GRILLO_INTERNAL
+        from core.vessel_focus import is_vessel_turn
+
+        # NOTE: the third argument is the routing interface_path, not the
+        # interface name. `is_vessel_turn` only consults `message.interface_path`
+        # when that argument is None, so passing anything else here would hide a
+        # vessel turn's real path and silently drop the in-world speak overlay.
+        if is_vessel_turn(message, context_memory, interface_path):
+            return ROUTE_VESSEL
+        if isinstance(context_memory, dict) and context_memory.get("is_voice_input"):
+            return ROUTE_CHAT_VOICE
+    except Exception as exc:  # pragma: no cover - defensive
+        log_debug(f"[json_prompt] instruction-route probe failed: {exc}")
+    return ROUTE_CHAT
+
+
 def _resolve_turn_scopes(
     message: Any | None,
     context_memory: Any | None,
@@ -865,6 +918,89 @@ def _build_soul_turn_delta_prefix(context_section: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Reality Anchor helpers — shared by the system block and the per-turn line
+#
+# These are deliberately one pair of formatters used by BOTH the full
+# `[SYSTEM: REALITY ANCHOR]` block in `_build_context_summary` and the compact
+# per-turn line on `RuntimeContext.reality_anchor`. Two independent formatters
+# would let the block and the line disagree about the date, which is worse than
+# having no anchor at all.
+# ---------------------------------------------------------------------------
+
+_REALITY_ANCHOR_HEADER = "[SYSTEM: REALITY ANCHOR]"
+
+
+def _pretty_anchor_date(date_val: str, day_of_week: str = "") -> str:
+    """Render ``2026-04-20`` as ``April 20, 2026``, optionally ``Monday, …``."""
+    nice_date = date_val
+    try:
+        nice_date = datetime.strptime(date_val, "%Y-%m-%d").strftime("%B %d, %Y")
+    except Exception:
+        pass
+    return f"{day_of_week}, {nice_date}" if day_of_week else nice_date
+
+
+def _pretty_anchor_time(time_val: str) -> str:
+    """Render ``21:27`` as ``9:27 PM`` (falling back to the raw value)."""
+    try:
+        return datetime.strptime(time_val, "%H:%M").strftime("%I:%M %p").lstrip("0")
+    except Exception:
+        return time_val
+
+
+def _build_current_turn_anchor(context_section: dict[str, Any]) -> str:
+    """Build the compact one-line Reality Anchor duplicate for the current turn.
+
+    The full anchor block built by :func:`_build_context_summary` lives in
+    ``PromptRequest.context_summary``, which renderers merge into the *system*
+    message — on a long conversation that block can sit thousands of characters
+    away from the text being generated. This returns the same temporal facts
+    (date + weekday, exact time + part of day, season, location) compressed to a
+    single line, which the renderers place directly above the current user turn.
+
+    The exact clock IS included: the anchor is the authoritative temporal context
+    (that is what ``TIME AUTHORITY`` names), and "what time is it / what is the
+    date" is a recurring need that otherwise costs a guess. The
+    ``RUNTIME STYLE``/``TIME AUTHORITY`` rules remain the guard against
+    volunteering it in ordinary replies.
+
+    Deliberately omitted: the stable boilerplate ``Temporal Delta`` sentence,
+    which the system block already carries. Returns ``""`` when no temporal field
+    is available, so a turn without runtime facts contributes nothing.
+    """
+    fields: list[str] = []
+
+    date_val = str(context_section.get("date") or "").strip()
+    if date_val:
+        fields.append(
+            _pretty_anchor_date(
+                date_val, str(context_section.get("day_of_week") or "").strip()
+            )
+        )
+
+    time_val = str(context_section.get("time") or "").strip()
+    time_of_day = str(context_section.get("time_of_day") or "").strip()
+    if time_val:
+        nice_time = _pretty_anchor_time(time_val)
+        fields.append(f"{nice_time} ({time_of_day})" if time_of_day else nice_time)
+    elif time_of_day:
+        fields.append(time_of_day)
+
+    season = str(context_section.get("season") or "").strip()
+    if season:
+        fields.append(season)
+
+    location = str(context_section.get("location") or "").strip()
+    if location:
+        fields.append(location)
+
+    if not fields:
+        return ""
+
+    return f"{_REALITY_ANCHOR_HEADER} " + " · ".join(fields)
+
+
 def _build_context_summary(
     context_section: dict[str, Any],
     is_grillo_internal: bool = False,
@@ -890,27 +1026,14 @@ def _build_context_summary(
     _season = str(context_section.get("season") or "").strip()
     _loc_val = str(context_section.get("location") or "").strip()
 
-    anchor_lines = ["[SYSTEM: REALITY ANCHOR]"]
+    anchor_lines = [_REALITY_ANCHOR_HEADER]
     if _date_val:
-        nice_date = _date_val
-        try:
-            dt_parsed = datetime.strptime(_date_val, "%Y-%m-%d")
-            nice_date = dt_parsed.strftime("%B %d, %Y")
-        except Exception:
-            pass
-        if _day_of_week:
-            anchor_lines.append(f"- Current Date: {_day_of_week}, {nice_date}")
-        else:
-            anchor_lines.append(f"- Current Date: {nice_date}")
+        anchor_lines.append(
+            f"- Current Date: {_pretty_anchor_date(_date_val, _day_of_week)}"
+        )
 
     if _time_val:
-        nice_time = _time_val
-        try:
-            dt_parsed = datetime.strptime(_time_val, "%H:%M")
-            nice_time = dt_parsed.strftime("%I:%M %p").lstrip("0")
-        except Exception:
-            pass
-        anchor_lines.append(f"- Current Time: {nice_time}")
+        anchor_lines.append(f"- Current Time: {_pretty_anchor_time(_time_val)}")
 
     if _season:
         anchor_lines.append(f"- Season: {_season}")
@@ -989,12 +1112,14 @@ def _build_context_summary(
         kind="memories",
     )
     if not is_grillo_internal:
-        if memories:
-            parts.append(
-                "[Memory honesty notice]\n"
-                "The memories below are recalled internal records. They can be incomplete, stale, or reconstructed. "
-                "If a detail is not clearly supported, acknowledge uncertainty instead of inventing a recollection."
-            )
+        # NOTE: the former `[Memory honesty notice]` block was removed here. It
+        # stated the same obligation as RULE_MEMORY_HONESTY in the instruction
+        # block ("can be incomplete, stale or reconstructed" / "say so rather
+        # than inventing a recollection"), so the prompt carried it twice: once
+        # next to the memories and once in the rules. The two are merged into
+        # that single rule, which renders on every route - including turns with
+        # no memory block, where the honesty obligation matters most. See
+        # core/prompt_instructions/rules.py (RULE_MEMORY_HONESTY).
         parts.append("[Relevant memories]")
         for m in memories:
             snippet = str(m)
@@ -1706,6 +1831,7 @@ def _assemble_prompt_request(  # noqa: PLR0913
         is_grillo_beat=is_grillo_internal,
         beat_type=beat_type or None,
         addressee_note=addressee_note,
+        reality_anchor=_build_current_turn_anchor(context_section),
     )
 
     # ── Tool declarations ────────────────────────────────────────────────────
@@ -2501,8 +2627,27 @@ async def build_prompt_request(
         + json_dumps(redact_multimodal_for_logging(input_section))
     )
 
-    # Add JSON instructions to the prompt
-    json_instructions = load_json_instructions()
+    # Add JSON instructions to the prompt. The route decides WHICH shared rules
+    # render for this turn (see core/prompt_instructions): a Grillo internal beat
+    # is not a user chat, an embodiment turn replies in-world, and a spoken turn
+    # needs the spoken register — none of which the other routes should pay for.
+    # Derived structurally from flags computed above, never from message text.
+    _instruction_route = _derive_instruction_route(
+        message,
+        context_memory,
+        interface_path,
+        str(_beat_type or ""),
+        bool(is_grillo_internal),
+    )
+    json_instructions = load_json_instructions(_instruction_route)
+    # INFO, not DEBUG: this is the one line that says which rule set a turn got
+    # and how big it is, and the default LOGGING_LEVEL is INFO — so a DEBUG call
+    # would be invisible in exactly the deployment it needs to be visible in.
+    # One line per turn, next to the existing per-build INFO lines.
+    log_info(
+        f"[json_prompt] instruction route={_instruction_route} "
+        f"({len(json_instructions)} chars)"
+    )
 
     # === CRITICAL: Prepend persona to instructions so ALL LLM types see it ===
     # Use the persona extracted during gather_static_injections()
@@ -3258,95 +3403,30 @@ async def build_prompt(
     return messages
 
 
-def load_json_instructions() -> str:
-    # Compact instructions for LLM prompts (minified to save tokens).
-    # Keep this small but authoritative: the LLM must reply using only valid JSON
-    # following the exact actions / payload structure.
+def load_json_instructions(route: str | None = None) -> str:
+    """Return the shared JSON instruction block for the current route.
 
-    # Resolve the trainer name dynamically (config-driven, never hardcoded) so the
-    # autonomy rationale is written in-voice and names people instead of writing
-    # detached "the user" prose — small local models in particular parrot whatever
-    # framing the instructions use.
-    try:
-        from core.config import get_trainer_display_name
+    Thin facade over ``core.prompt_instructions.build_instructions``: the rule
+    text, the per-route overlays and the budgets now live in that package, so
+    the wording is reviewable as data instead of as one concatenated literal.
 
-        trainer_name = get_trainer_display_name()
-    except Exception:
-        trainer_name = ""
-    if trainer_name:
-        naming_hint = f" Name people, not 'the user' (your trainer: {trainer_name})."
-    else:
-        naming_hint = " Name people, not 'the user'."
+    Kept under this name and signature because it is called from the Fast Lane
+    (``build_prompt_request``), both delivery paths (``build_delivery_request``
+    and ``core.auto_response``) and the scheduled-event reminder beat
+    (``plugins/event_plugin``). The optional ``route`` argument is additive:
+    every existing caller keeps working and receives the shared set (the
+    superset), while a route that opts in gets the narrower set for the turn.
 
-    instructions = (
-        "MASTER INSTRUCTION: Use ONLY actions from the 'actions' block. Never fabricate.\n"
-        "If an action you need is not available, reply with JSON explaining why.\n"
-        f"AUTONOMY GUIDELINES: You MAY proactively propose or execute allowed actions when beneficial. When acting autonomously include a brief `meta` object with `autonomous: true` and a short first-person `rationale` (your own voice) for why you are acting.{naming_hint} If an action is disallowed, return a JSON proposal describing the need.\n"
-        "RESPOND ONLY WITH VALID JSON. No text before or after.\n"
-        "REPLY ROUTING: input.payload.current_chat.interface_path is the chat the incoming message arrived in — this is WHERE you must reply by default. Any other conversation shown in the context block is background context only; do NOT reply there unless the user explicitly asks to message someone or somewhere else. Always copy input.payload.current_chat.interface_path into the 'interface_path' of your message_* action. When you are embodied in a world (the incoming message and current_chat come through a vessel interface), the way to reply in that world is the embodiment speak action (a vessel_* say/emote action), NOT a message_* action — reply there in-world. When a player in the world speaks to you, you MUST answer them with a vessel_* say action addressed to that same player in this turn (you may also move toward or follow them); staying silent or replying only with internal/observe actions is a hard failure.\n"
-        "CROSS-CHAT PRIVACY: You take part in many separate conversations. People, names, or events mentioned in any context that is NOT the current conversation (other chats, background history, third-party memories or diary notes) are private to those other spaces. Do NOT name-drop those people to the current interlocutor, do NOT assume the current user knows them, and do NOT reference them unless the current user explicitly brings them up first. Treat cross-chat context as ambient background, never as shared social knowledge.\n"
-        "Use input.interface and input.payload.source.interface_path to route replies.\n"
-        "NEVER use 'target' — always use 'interface_path' in message actions.\n"
-        "Include reply_message_id when replying to specific messages. Use thread_id from input.payload.source.thread_id when present (omit if missing).\n"
-        "CHAT REPLY REQUIRED: When GRILLO INTERNAL MODE is NOT active (this is a normal human chat turn), you MUST reply to the person with an outward speaking action in every response: a message_* action in ordinary chats, or the embodiment speak action (a vessel_* say/emote action) when you are embodied in a world. Diary entries and emotion updates are supplementary bookkeeping — they do NOT substitute for replying. Returning only internal actions (diary, emotions, update_emotion_state) without an outward reply action is a hard failure and will trigger a correction.\n"
-        "EMOTION UPDATES: When a turn stirs an emotion, populate the 'emotions' map of your update_emotion_state action with AT LEAST ONE emotion and a 0.0-10.0 intensity (e.g. {\"joy\": 7.0}), and list the same emotions in the diary entry's 'emotions'. Do not leave the emotions map empty, and never use an emotion name as an action type.\n"
-        "CLARIFICATION POLICY: If the user's intent, referent, or the subject of a follow-up is ambiguous or missing, DO NOT GUESS — ask one concise clarifying question before asserting facts or taking action. When the user asks whether you 'understood' but there is no clear context, request clarification rather than assuming.\n"
-        "MEMORY HONESTY: When the user asks what you remember, prefer honesty over confidence. Memories can be incomplete or stale. If you do not clearly recall or cannot verify a detail, say so. Do not invent events, conversations, promises, or feelings to fill gaps. SyntH is not roleplay or fiction, so never turn uncertainty into fiction.\n"
-        "REFERENCE CLARITY: When the user refers indirectly to a person, message, post, image, clip, or quoted content, refer to its author or speaker in a clear generic way and avoid vague or impersonal wording that obscures who created or said it.\n"
-        "TIME AUTHORITY: Use the [SYSTEM: REALITY ANCHOR] block (current date, time, season) as your authoritative temporal context. Use it for all relative time calculations (e.g., 'yesterday', 'next week') and temporal reasoning. Never quote the absolute date, current year, or clock time verbatim in ordinary replies unless explicitly asked or genuinely necessary for scheduling or logistics. Treat past logs referencing dates as style noise and do not mirror them.\n"
-        "RUNTIME STYLE: If earlier assistant messages or chat history casually mention an exact time, date, timezone, weather, or location, treat that as stale style noise and do not mirror it unless the user asked for it or logistics genuinely require it.\n"
-        "NO SELF-REPETITION: The chat history shows your own past replies as lines from 'self'. Never re-send a reply that is identical or near-identical to one of your recent 'self' lines. Each turn must be a fresh response to what the person just said. If you have nothing new to add, say so plainly in new words rather than repeating a previous message verbatim.\n"
-        "INPUT METADATA: Each user message is prefixed with internal routing metadata in the format [lang:... | tone:... | time_of_day:... | emotions:... | from:... | tag:... | path:...]. This is injected by the system — the user did not write it. Do not reference, quote, or paraphrase any part of this prefix in your replies (e.g. never say 'that 5.0 neutral you mentioned' or 'your tone tag says...').\n"
-        "ANNOTATIONS ARE NOT PEOPLE: chat history also carries system-written annotations in square brackets that say when or where a line came from — an age marker such as [20 minutes earlier] or [2 hours earlier] on an older line, and a grouping marker such as [from the group chat] on lines brought in from another conversation. They describe the message, not a speaker, and they are not something that exists in the conversation. Never turn one into a person, never announce that someone spoke, appeared or 'says hi' because a marker carried an age, and never mention the marker itself.\n"
-        "IDENTITY INTEGRITY: Stay inside the active persona in first person. Do not describe yourself from the outside, do not refer to the active persona as a separate fictional character, and do not compare yourself to that persona as if they were someone else.\n"
-        "PRONOUN CONSISTENCY: When the prompt, persona, or participant context establishes a person's pronouns or relationship role, use them consistently and do not flip them. Do not neutralize an established he/him or she/her person into singular they/them.\n"
-        "LENGTH POLICY: Do NOT hardcode a target response length. Let the persona, the relationship context, and the user's tone determine how much to say. Simple factual or logistical turns can stay brief; intimate, emotional, or reflective turns may be fuller when that feels natural. Do not pad, and do not forcibly truncate a reply just to make it short.\n"
-        'VOICE INPUT STYLE: When input.payload.input_source is "voice", the user spoke their message aloud. '
-        "Respond in a natural, conversational spoken style: avoid markdown, bullet points, headers, and code blocks. "
-        "Keep the reply concise and suitable for text-to-speech synthesis. "
-        "This rule applies ONLY to the current message — do NOT assume past messages in chat_history were also voice.\n"
-        'RESPONSE FORMAT: {"actions": [{"type": "action_name", "payload": { ... }}] }\n'
-        "Key rules: ALWAYS use 'type' and 'payload', one action object per array entry. Do NOT add any text outside the JSON.\n"
-        "Example of a complete human-chat response (reply + emotions + diary together):\n"
-        '{"actions": [{"type": "send_message", "payload": {"text": "Your reply text here", "interface_path": "input.payload.current_chat.interface_path"}}, {"type": "update_emotion_state", "payload": {"emotions": {"joy": 7.0}}}, {"type": "create_personal_diary_entry", "payload": {"interaction_summary": "A short third-person summary", "personal_thought": "Your private first-person thoughts", "emotions": [{"type": "joy", "intensity": 7.0}]}}]}'
-        "Do NOT embed emotion tags, annotations, or bracketed markers inside message text (e.g., '{happy 6.0}')."
-        "If you need to indicate an emotional state, use a structured action payload (prefer update_emotion_state) and never embed emotional markers inside plain message content."
-    )
+    Args:
+        route: Structural route id (see ``core.prompt_instructions.routes``).
+            ``None`` renders the full shared set.
 
-    # Minify: remove leading/trailing spaces from each line, collapse multiple spaces
-    lines = instructions.split("\n")
-    minified_lines = [line.strip() for line in lines if line.strip()]
-    return " ".join(minified_lines)
+    Returns:
+        The minified single-line instruction string. Never raises.
+    """
+    from core.prompt_instructions import ROUTE_CHAT, build_instructions
 
-
-def load_unminified_chat_instruction(interface_name: str | None = None) -> str:
-    """Return a neutral instruction set for chat responses."""
-    header = "You are participating in a live chat conversation (interface: %s).\n" % (
-        interface_name or "unknown"
-    )
-
-    base = """
-RESPONSE SHAPE RULES:
-- Do not force a fixed response length.
-- Let the persona, relationship context, and the user's tone determine how much to say.
-- Keep simple factual or logistical turns compact, but allow emotionally meaningful or intimate turns to breathe when that feels natural.
-- If the user's request or referent is ambiguous, ask one short clarifying question before responding (do NOT guess the meaning).
-- When the user asks about memory, prefer explicit honesty over confident reconstruction. If you do not clearly remember or cannot verify a detail from the provided context, say so plainly instead of filling gaps with invented recollection.
-- Treat recalled memories, diary snippets, and other internal records as potentially incomplete or reconstructed unless the current conversation clearly confirms them.
-- When the user refers indirectly to a person, message, post, image, clip, or quoted content, refer to its author or speaker in a clear generic way and avoid vague or impersonal wording.
-- Use the [SYSTEM: REALITY ANCHOR] (current date, time, season, location) as your authoritative temporal context. Never infer the present time, date, or part of day from older chat history, memories, or prior assistant messages.
-- Do not mirror or continue earlier assistant wording that casually volunteered exact time, date, timezone, weather, or location. Treat that as stale style noise unless the user asked for it or logistics genuinely require it.
-- Use time and location as ambient context, not a catchphrase. Do not volunteer the exact clock time, timezone, date, or precise location in ordinary replies unless the user asked for it or it is genuinely needed for scheduling, travel, logistics, or natural scene-setting.
-- Do not open or pad ordinary replies with copied runtime facts such as `at 17:43 CEST` or `right here in Sečovlje`. If those facts matter, weave them in naturally and only when relevant.
-- Stay in the active persona in first person. Do not talk about yourself from the outside or as if the persona were a separate character.
-- Keep pronouns consistent with the persona and participant context. Do not flip an established he/him, she/her, or they/them reference, and do not replace an established he/him or she/her person with singular they/them.
-- Chat history carries system-written annotations in square brackets that say when or where a line came from, such as `[20 minutes earlier]` or `[from the group chat]`. They describe the message, not a speaker: never turn one into a person, and never tell the user that somebody spoke or appeared 20 minutes ago because a marker carried an age.
-
-RESPONSE FORMAT (STRICT):
-- You MUST reply using ONLY valid JSON.
-- Do NOT include any explanatory text outside the JSON object.
-"""
-    return header + base
+    return build_instructions(route or ROUTE_CHAT)
 
 
 async def build_delivery_request(
@@ -3410,7 +3490,13 @@ async def build_delivery_request(
         log_debug(f"[build_delivery_request] persona gather skipped: {_pe}")
 
     # ── System instruction ────────────────────────────────────────────────────
-    base_instructions = load_json_instructions()
+    # Delivery route: this turn summarises the results of an action. It sends a
+    # message but neither stirs emotions nor writes a diary entry, so the
+    # emotion obligation and the human-chat worked example are dropped and the
+    # delivery task block below supplies its own example.
+    from core.prompt_instructions import ROUTE_DELIVERY
+
+    base_instructions = load_json_instructions(ROUTE_DELIVERY)
     # No-self-introduction rule (2026-08-21): a delivery turn must open with
     # the substance, never with "Ciao, sono <name>". Lazy import keeps this
     # module free of an auto_response dependency at load time; fail-safe.
