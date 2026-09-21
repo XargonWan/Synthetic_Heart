@@ -1982,6 +1982,57 @@ def _apply_lite_context_stripping(prompt: dict) -> dict:
     return prompt
 
 
+def _resolve_message_interface_path(
+    message: Any | None, context_memory: Any | None
+) -> str:
+    """Return this turn's routing ``interface_path``, resolved once, at the top.
+
+    ``message.interface_path`` is the usual carrier, but internally enqueued
+    turns (delivery, beats, anything built from a context dict) arrive with the
+    path only in ``context_memory["interface_path"]``.
+
+    This has to happen *here*, before any consumer reads the value, because the
+    fallback used to live hundreds of lines further down the build. Everything
+    above that point silently saw an empty path — including the memory-recall
+    exclusion, which then could not keep the live conversation out of the
+    chat-history tier, so the message being answered was re-injected as a
+    "Recalled memory" and the model saw it twice. The Grillo-internal check and
+    the Vessel probe read the same value and were wrong in the same way.
+
+    Returns:
+        The path as a string, or ``""`` when the turn carries none.
+    """
+    path = getattr(message, "interface_path", None)
+    if not path and isinstance(context_memory, dict):
+        path = context_memory.get("interface_path")
+    return str(path).strip() if path else ""
+
+
+_warned_missing_memory_exclusion = False
+
+
+def _warn_missing_memory_exclusion_once() -> None:
+    """Report, once per process, that recall cannot exclude the live chat.
+
+    The guard that keeps the current conversation out of the ``chat_history``
+    recall tier needs the current chat's path. When it is missing the guard
+    switches off silently, and the symptom (the model answering a message that
+    is also quoted back to it as a memory) does not point at the cause. One
+    warning per process is enough to make it visible without flooding the log
+    on beats that legitimately carry no path.
+    """
+    global _warned_missing_memory_exclusion
+    if _warned_missing_memory_exclusion:
+        return
+    _warned_missing_memory_exclusion = True
+    log_warning(
+        "[json_prompt] memory recall: this turn carries no interface_path, so the "
+        "chat-history tier cannot exclude the current chat. The message being "
+        "answered is already persisted to chat_history_cache and can come back as "
+        "a 'Recalled memory'. Check how this turn carries its routing path."
+    )
+
+
 async def build_prompt_request(
     message,
     context_memory,
@@ -2015,7 +2066,7 @@ async def build_prompt_request(
     start_time = time.time()
     log_info(f"[json_prompt] ⏱️ BUILD PROMPT START for interface={interface_name}")
 
-    interface_path = getattr(message, "interface_path", None)
+    interface_path = _resolve_message_interface_path(message, context_memory) or None
     text = getattr(message, "text", "") or ""
     allowed_action_types_for_prompt: set[str] | None = None
 
@@ -2079,6 +2130,10 @@ async def build_prompt_request(
             # back as "memories". Durable facts still come from the
             # memories/ai_diary tiers.
             _excluded_paths = [str(interface_path)] if interface_path else None
+            if not _excluded_paths:
+                # The guard below is the only thing keeping the live conversation
+                # out of this tier; say so rather than silently switching it off.
+                _warn_missing_memory_exclusion_once()
             memories = await search_memories(
                 keywords=expanded_tags,
                 limit=max(1, mem_limit),
@@ -2403,8 +2458,9 @@ async def build_prompt_request(
         log_debug(f"[json_prompt] Peer context block skipped: {e}")
 
     # === 4. Input payload ===
-    # interface_path was already extracted at the beginning
-    # If still not found, check if context_memory is actually a context dict with interface_path
+    # interface_path was resolved once near the top of this function, including
+    # the context-dict fallback. This stays as a safety net for a caller that
+    # reaches here with the value still unset (it is a no-op in the normal path).
     if (
         not interface_path
         and isinstance(context_memory, dict)
