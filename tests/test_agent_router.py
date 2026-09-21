@@ -37,6 +37,50 @@ def test_agent_actions_executed_zero_for_no_tool_results() -> None:
     assert agent_router._agent_actions_executed(result) == 0
 
 
+def test_derive_goal_carries_the_recon_task_title() -> None:
+    """The recon title rides on the existing GOAL line.
+
+    The escalation is based on the recon call's own judgement, and that same
+    call names the task in one line, but the title previously only reached the
+    WebUI task name: a loop started from "have a look, it should be live" was
+    told to achieve exactly that, with no interpretation attached.
+    """
+    context: dict[str, Any] = {
+        "original_user_message": "I dunno, you'll have to find out, have a look",
+        "agent_task_title": "Check live Home Assistant data",
+    }
+    goal = agent_router._derive_goal([], context)
+    assert goal.startswith("I dunno, you'll have to find out, have a look")
+    assert "\nTask: Check live Home Assistant data" in goal
+
+
+def test_derive_goal_drops_a_redundant_or_missing_title() -> None:
+    """No title, or a title the user's own words already carry: unchanged goal."""
+    plain = agent_router._derive_goal(
+        [], {"original_user_message": "restart the radio"}
+    )
+    assert plain == "restart the radio"
+
+    redundant = agent_router._derive_goal(
+        [],
+        {
+            "original_user_message": "please check live home assistant data now",
+            "agent_task_title": "Check live Home Assistant data",
+        },
+    )
+    assert redundant == "please check live home assistant data now"
+
+
+def test_derive_goal_never_appends_a_title_to_the_action_fallback() -> None:
+    """The action-describing fallback has no user text to annotate."""
+    goal = agent_router._derive_goal(
+        [{"type": "mcp_fs_read", "payload": {"path": "/x"}}],
+        {"agent_task_title": "Read a file"},
+    )
+    assert goal.startswith("Execute: ")
+    assert "Task: " not in goal
+
+
 def _delivery_fixture(
     monkeypatch: pytest.MonkeyPatch,
     voiceover: str = "",

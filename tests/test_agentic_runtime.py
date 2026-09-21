@@ -62,6 +62,75 @@ async def test_executor_internal_dispatch(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_executor_reports_plugin_failure_as_not_ok(monkeypatch):
+    """A plugin failure dict must reach the loop as a failure.
+
+    Internal actions report failure through their own vocabulary
+    (``{"status": "error", "message": ...}``), not through an ``ok`` key, so
+    the loop rendered ``[tool:x] OK`` for tools that had just failed (observed
+    live: ``hass_snapshot`` on a camera that returned no image, after which the
+    loop kept re-issuing it and then searched the web instead).
+    """
+
+    async def fake_run_action(action, context, bot, original_message):
+        return {
+            "status": "error",
+            "message": "camera 'camera.outside_bajta' returned no image",
+        }
+
+    monkeypatch.setattr("core.action_parser.run_action", fake_run_action)
+
+    from core.tool_registry import tool_registry
+
+    tool_registry._tools.clear()
+    tool_registry.load_internal_actions(
+        {
+            "fake_snapshot": {
+                "schema": {"type": "object", "properties": {}},
+                "brief": "test",
+                "security_level": "low",
+                "external_effects": [],
+            }
+        }
+    )
+
+    try:
+        res = await agent_tool_executor.execute("fake_snapshot", {})
+        assert res["ok"] is False
+        assert "returned no image" in (res["error"] or "")
+        # The payload still reaches the model verbatim, so it can reason on it.
+        assert "returned no image" in res["result"]
+    finally:
+        tool_registry._tools.clear()
+
+
+@pytest.mark.parametrize(
+    ("result", "expected_ok"),
+    [
+        ({"ok": True, "result": "x"}, True),
+        ({"ok": False, "error": "denied"}, False),
+        ({"status": "ok", "count": 2}, True),
+        ({"status": "error", "message": "no image"}, False),
+        ({"error": "connection refused"}, False),
+        (None, True),
+        ("plain text", True),
+    ],
+)
+def test_executor_outcome_variants(result, expected_ok):
+    """``_outcome`` is the loop's only success signal: pin its vocabulary."""
+    ok, _error = agent_tool_executor._outcome(result)
+    assert ok is expected_ok
+
+
+def test_executor_outcome_carries_the_plugin_failure_message():
+    ok, error = agent_tool_executor._outcome(
+        {"status": "error", "message": "server_unreachable"}
+    )
+    assert ok is False
+    assert error == "server_unreachable"
+
+
+@pytest.mark.asyncio
 async def test_run_agentic_turn_completed(monkeypatch):
     """The loop ends when the model calls the attempt_completion sentinel."""
 

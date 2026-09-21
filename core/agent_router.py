@@ -644,6 +644,27 @@ def _resume_age_allowed(
     return age_seconds <= float(max_age_sec)
 
 
+def _with_task_title(goal: str, context: Dict[str, Any] | None) -> str:
+    """Carry the recon task title on the goal line, when it adds anything.
+
+    The preflight recon call already names the task in one line ("Check live
+    Home Assistant data") and the router escalates on that same judgement, but
+    the title only ever reached the WebUI task name — the loop's GOAL stayed the
+    raw user sentence, which on an ambiguous request ("have a look, it should be
+    live") leaves the model guessing what to work on. One short line on the
+    existing GOAL therefore costs a few tokens and gives the loop the same
+    interpretation the escalation was based on. Structural only: the title is
+    dropped when absent, and when the user's own words already carry it.
+    """
+    if not isinstance(context, dict):
+        return goal
+    raw_title = context.get("agent_task_title")
+    title = str(raw_title).strip()[:120] if raw_title else ""
+    if not title or title.lower() in goal.lower():
+        return goal
+    return f"{goal}\nTask: {title}"
+
+
 def _derive_goal(actions: List[Any], context: Dict[str, Any] | None) -> str:
     """Best-effort goal string for the agent loop from the parsed actions.
 
@@ -659,7 +680,7 @@ def _derive_goal(actions: List[Any], context: Dict[str, Any] | None) -> str:
         for key in ("original_user_message", "user_text"):
             value = context.get(key)
             if isinstance(value, str) and value.strip():
-                return value.strip()
+                return _with_task_title(value.strip(), context)
         # Secondary: goal/original_text, but only when they are NOT the
         # model's own JSON response.
         for key in ("goal", "original_text"):
@@ -669,7 +690,7 @@ def _derive_goal(actions: List[Any], context: Dict[str, Any] | None) -> str:
             candidate = value.strip()
             if _looks_like_llm_response_json(candidate):
                 continue
-            return candidate
+            return _with_task_title(candidate, context)
     # Fallback: describe the model's own planned actions, but ONLY when they
     # are genuine tool work — a message-only batch reaching this point means
     # the caller misrouted a conversational reply and the loop must not re-run
