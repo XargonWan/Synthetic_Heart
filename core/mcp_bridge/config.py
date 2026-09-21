@@ -17,6 +17,9 @@ empty registry rather than raising, so the rest of Synth boots normally.
 from __future__ import annotations
 
 import json
+import os
+import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -29,7 +32,7 @@ _DEFAULT_CONFIG_PATH = (
 )
 
 _CONFIG_PATH = Path(
-    __import__("os").getenv("SYNTH_MCP_CONFIG", str(_DEFAULT_CONFIG_PATH))
+    os.getenv("SYNTH_MCP_CONFIG", str(_DEFAULT_CONFIG_PATH))
 ).expanduser()
 
 # Top-level key inside the JSON document that holds the server map.
@@ -72,6 +75,143 @@ class SynthMcpServerConfig:
         return data
 
 
+# ---------------------------------------------------------------------------
+# Placeholder expansion
+# ---------------------------------------------------------------------------
+#
+# ``config/synth_mcp.json`` is ONE file shared by every deployment of this
+# repository, and they do not share a filesystem layout: the reference Docker
+# image runs from ``/app`` with its interpreter at ``/app/venv/bin/python``, while
+# a Windows checkout runs from e.g. ``D:\dev\B17\synthetic_heart`` with its
+# interpreter under ``.venv\Scripts``. A literal path can therefore only be right
+# in one of them, and in the other the server dies at spawn with a bare
+# ``[WinError 2] The system cannot find the file specified`` (observed at every
+# startup on Windows) — an error that never names the path that was wrong.
+#
+# These placeholders let one config be correct in both:
+
+#: ``{name}`` placeholders, resolved at load time.
+_TOKEN_RE = re.compile(r"\{([a-z][a-z0-9_]*)\}")
+
+#: ``${VAR}`` / ``${VAR:-default}`` environment references, resolved at load time.
+_ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?\}", re.DOTALL)
+
+
+def repo_root() -> Path:
+    """Return the repository root (the parent of ``core/``)."""
+    return Path(__file__).resolve().parent.parent.parent
+
+
+def _token_values() -> dict[str, str]:
+    """Build the values ``{name}`` placeholders expand to.
+
+    ``{python}`` is deliberately ``sys.executable`` — the interpreter that is
+    running Synth. That is the correct answer in both layouts with no
+    configuration, because the MCP server should run in the same environment as
+    the process that spawns it.
+    """
+    try:
+        from core.logging_utils import get_log_dir
+
+        log_dir = get_log_dir()
+    except Exception:  # pragma: no cover - logging_utils is always importable
+        log_dir = os.path.join(os.getcwd(), "logs")
+
+    return {
+        "python": sys.executable or "python",
+        "repo_root": str(repo_root()),
+        "log_dir": str(log_dir),
+    }
+
+
+def expand_placeholders(
+    value: str, *, where: str = "", unknown: set[str] | None = None
+) -> str:
+    """Expand ``{token}`` and ``${VAR}`` references in one config string.
+
+    Fail-safe by design: an unknown ``{token}`` is left in place (never raises)
+    and reported through ``unknown`` so the caller can warn once per server.
+    ``${VAR}`` with no default expands to an empty string when unset, matching
+    the plain shell convention for an omitted default.
+
+    Args:
+        value: The raw string from the config file.
+        where: Label used only in the warning text (e.g. ``command``).
+        unknown: Mutable set collecting unresolved ``{token}`` names.
+
+    Returns:
+        The expanded string.
+    """
+    if not isinstance(value, str) or not value:
+        return value
+
+    tokens = _token_values()
+
+    def _sub_token(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if name in tokens:
+            return tokens[name]
+        if unknown is not None:
+            unknown.add(name)
+        return match.group(0)
+
+    def _sub_env(match: re.Match[str]) -> str:
+        name, default = match.group(1), match.group(2)
+        return os.environ.get(name, default if default is not None else "")
+
+    expanded = _ENV_REF_RE.sub(_sub_env, value)
+    return _TOKEN_RE.sub(_sub_token, expanded)
+
+
+def _expand_server_fields(name: str, raw: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of one raw server entry with its paths expanded.
+
+    Only the fields that are actually executed or exported are touched —
+    ``command``, ``args``, ``env`` values, ``url`` — so prose fields such as
+    ``description`` keep whatever braces they contain.
+    """
+    unknown: set[str] = set()
+    out = dict(raw)
+
+    if isinstance(out.get("command"), str):
+        out["command"] = expand_placeholders(
+            out["command"], where="command", unknown=unknown
+        )
+
+    args = out.get("args")
+    if isinstance(args, list):
+        out["args"] = [
+            expand_placeholders(a, where="args", unknown=unknown)
+            if isinstance(a, str)
+            else a
+            for a in args
+        ]
+
+    env = out.get("env")
+    if isinstance(env, dict):
+        out["env"] = {
+            k: (
+                expand_placeholders(v, where="env", unknown=unknown)
+                if isinstance(v, str)
+                else v
+            )
+            for k, v in env.items()
+        }
+
+    if isinstance(out.get("url"), str):
+        out["url"] = expand_placeholders(out["url"], where="url", unknown=unknown)
+
+    if unknown:
+        log_warning(
+            f"[synth_mcp_config] Server '{name}' references unknown "
+            f"placeholder(s) {sorted(unknown)}; they were left as written. Known "
+            f"placeholders: {{python}}, {{repo_root}}, {{log_dir}}, and ${{VAR}} "
+            f"environment references."
+        )
+
+    return out
+
+
 def _coerce_server(name: str, raw: Any) -> SynthMcpServerConfig | None:
     """Validate and coerce one raw JSON entry into a config object."""
     if not isinstance(raw, dict):
@@ -79,6 +219,8 @@ def _coerce_server(name: str, raw: Any) -> SynthMcpServerConfig | None:
             f"[synth_mcp_config] Skipping server '{name}': entry is not an object."
         )
         return None
+
+    raw = _expand_server_fields(name, raw)
 
     transport = str(raw.get("transport", "stdio")).lower()
     if transport not in ("stdio", "sse", "http", "streamable_http"):

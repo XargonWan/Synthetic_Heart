@@ -34,6 +34,21 @@ _logger: Optional[logging.Logger] = None
 _DEFAULT_LOG_DIR = os.path.join(os.getcwd(), "logs")
 _LOG_DIR = os.getenv("LOG_DIR", _DEFAULT_LOG_DIR)
 _LOG_FILE = os.path.join(_LOG_DIR, "synth.log")
+
+
+def get_log_dir() -> str:
+    """Return the effective log directory for this process.
+
+    The single source of truth for "where do the logs live": the ``LOG_DIR``
+    environment variable when set, otherwise ``<cwd>/logs``. Exposed as a
+    function (rather than read as a module constant) so callers that need to
+    point another process at the same directory — the runtime MCP servers, which
+    read the logs the same way — do not have to re-derive it and get it subtly
+    wrong on a different platform.
+    """
+    return _LOG_DIR
+
+
 # Additional ERROR-only log: a short, low-rotation companion to synth.log so a
 # quick "what broke?" scan doesn't require wading through the full runtime log.
 # This is ADDITIVE — the main synth.log still records everything.
