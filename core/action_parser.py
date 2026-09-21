@@ -3530,10 +3530,19 @@ async def corrector_orchestrator(
                     )
                     return False
                 else:
-                    log_info(
-                        "[corrector_orchestrator] Corrected actions executed successfully - interrupting correction loop"
+                    # Neither processed nor errored: run_actions ran nothing (the
+                    # corrected actions were filtered out before dispatch). The
+                    # old branch reported SUCCESS here, which stopped the
+                    # correction loop and left the turn looking healthy with no
+                    # delivery at all (live 2026-09-21: the corrected
+                    # send_message never reached a run_action line, yet the chain
+                    # logged "3 successful, 0 failed" and the reply was lost).
+                    log_warning(
+                        "[corrector_orchestrator] corrected actions produced no "
+                        "processed result and no errors; not treating this as a "
+                        "successful delivery"
                     )
-                    return True
+                    return False
             except Exception as e:
                 log_warning(
                     f"[corrector_orchestrator] Failed to run actions after correction: {e}"

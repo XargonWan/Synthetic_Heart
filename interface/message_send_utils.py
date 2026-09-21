@@ -658,8 +658,14 @@ async def send_with_thread_fallback(
                     f" (thread: {thread_id}, reply_message_id: {reply_to_message_id})"
                 )
             else:
+                # ``None`` means "not sent": the message was either queued on a
+                # chat cooldown or handled/blocked by the corrector. The old
+                # wording blamed a cooldown unconditionally, which hid a lost
+                # reply behind a queueing message (live 2026-09-21: no cooldown
+                # line existed anywhere in the log for either loss).
                 log_warning(
-                    f"[telegram_utils] Message to {chat_id} queued/skipped due to cooldown or error"
+                    f"[telegram_utils] Message to {chat_id} not sent (queued on "
+                    f"cooldown, handled by the corrector, or a failed send)"
                     f" (thread: {thread_id}, reply_message_id: {reply_to_message_id})"
                 )
             log_debug(
@@ -758,6 +764,104 @@ async def send_with_thread_fallback(
         except Exception as fallback_error:
             log_error(f"[telegram_utils] Final fallback failed: {fallback_error}")
     return None
+
+
+# Legacy display labels must never reach the corrector's prompt builders: they
+# map the interface through ``message_chain._INTERFACE_TO_MESSAGE_ACTION``,
+# whose keys are REGISTERED ids (``telegram_bot``). A display label misses that
+# lookup and falls through to ``message_<label>``, so the required-format
+# example taught the model the unregistered ``message_telegram`` plus a
+# malformed ``telegram/<id>`` path; the model copied both verbatim, the
+# corrected action was rejected and the reply was never delivered (live
+# 2026-09-21, langfuse feca9072-0abe-46ef-90da-f1409723088e).
+_INTERFACE_DISPLAY_ALIASES: dict[str, str] = {"telegram": "telegram_bot"}
+
+# Field names from the action schema. A REAL action envelope keeps its keys even
+# when its punctuation is mangled, so their presence is what separates broken
+# JSON from ordinary prose that merely opens with ``{``.
+_ACTION_ENVELOPE_KEYS: tuple[str, ...] = (
+    '"actions"',
+    "'actions'",
+    "actions:",
+    '"type"',
+    "'type'",
+    "type:",
+    '"payload"',
+    "'payload'",
+    "payload:",
+    '"action"',
+    "'action'",
+    "action:",
+)
+
+
+def _looks_like_action_envelope(text: str) -> bool:
+    """Whether unparseable text is a broken ACTION payload rather than a message.
+
+    A reply that opens with ``{`` is not automatically malformed JSON: this
+    persona writes physical actions in braces, so ``{the crack lands hard and I
+    buck forward...}`` and ``{I bounce, quick and filthy}`` are ordinary message
+    text. Treating that as broken JSON diverted the whole reply into the
+    corrector, which answered with an action instead of the text, so the reply
+    never reached the chat while every log line looked healthy (live
+    2026-09-21: langfuse feca9072-0abe-46ef-90da-f1409723088e and
+    b822895b-b87d-43f8-b535-2bbe9c3d31c7; last delivery to that chat 11:24:34).
+
+    Structural test only: the head must carry a JSON key or one of the action
+    schema's own field names. No natural-language matching.
+    """
+    head = text.lstrip()[:400].lower()
+    if not head.startswith(("{", "[")):
+        return False
+    return any(key in head for key in _ACTION_ENVELOPE_KEYS)
+
+
+async def _record_delivery_failure(
+    reason: str,
+    *,
+    chat_id: int | str | None,
+    interface_path: str | None,
+    kwargs: dict,
+    text: str | None,
+) -> None:
+    """Best-effort delivery failure record. Never raises, never blocks a send.
+
+    A reply that vanishes with no row anywhere is undiagnosable, which is exactly
+    how the two 2026-09-21 losses had to be reconstructed from traces plus logs.
+    """
+    try:
+        from core.llm_failure_log import build_failure_entry, record_failure_entry
+
+        entry = build_failure_entry(
+            reason=reason,
+            stage="delivery",
+            failure_code="delivery_failed",
+            interface_path=interface_path,
+            chat_id=chat_id,
+            thread_id=kwargs.get("thread_id") if isinstance(kwargs, dict) else None,
+            content_preview=(text or "")[:280],
+            metadata={"sender": "cortex_response_send"},
+        )
+        await record_failure_entry(entry)
+    except Exception as exc:
+        log_debug(f"[telegram_utils] delivery failure record skipped: {exc}")
+
+
+def _resolve_sender_interface_id(kwargs: dict) -> str:
+    """Registered interface id for a corrector context built by this sender.
+
+    Structural: the ``interface_path`` prefix when the caller supplied one
+    (normalising a legacy display label to its registered id), otherwise this
+    module's own interface — this module *is* the Telegram sender, so its id is
+    a known constant rather than something to guess.
+    """
+    for key in ("interface_path", "path"):
+        raw = kwargs.get(key)
+        if isinstance(raw, str) and raw.strip():
+            prefix = raw.strip().split("/")[0].strip()
+            if prefix:
+                return _INTERFACE_DISPLAY_ALIASES.get(prefix, prefix)
+    return "telegram_bot"
 
 
 async def cortex_response_send(
@@ -865,13 +969,15 @@ async def cortex_response_send(
         json_data = extract_json_from_text(text)
         if json_data:
             log_debug(f"[cortex_response_send] JSON parsed successfully: {json_data}")
-        elif text.lstrip().startswith(("{", "[")):
-            # Text genuinely starts with a JSON-like structure but failed to
-            # parse — route through the corrector to attempt recovery.
-            # NOTE: We intentionally do NOT match on braces *anywhere* in the
-            # text (e.g. emotion tags like ``{happy 10}`` or markdown) — only
-            # text that *starts* with ``{`` or ``[`` is treated as potential
-            # malformed JSON.
+        elif _looks_like_action_envelope(text):
+            # Text genuinely starts with a JSON-like structure AND carries
+            # action-schema keys, so it is a broken action payload — route
+            # through the corrector to attempt recovery.
+            # NOTE: we intentionally do NOT match on braces *anywhere* in the
+            # text (e.g. emotion tags like ``{happy 10}`` or markdown); the
+            # envelope check keeps it to text that *starts* with ``{``/``[`` AND
+            # looks like an action, because this persona writes physical actions
+            # in braces and a leading ``{`` alone is ordinary prose.
             log_debug(
                 f"[cortex_response_send] Text starts with JSON-like content but failed to parse: {text[:200]}..."
             )
@@ -887,9 +993,14 @@ async def cortex_response_send(
                 message.date = datetime.utcnow()
                 message.from_cortex = True
 
-                current_interface = "telegram"
+                current_interface = _resolve_sender_interface_id(kwargs)
                 corrector_context = {
                     "interface": current_interface,
+                    # The structural path, so the corrector resolves the
+                    # interface from its prefix instead of trusting the label
+                    # above — which is what broke the routing example.
+                    "interface_path": kwargs.get("interface_path")
+                    or f"{current_interface}/{chat_id}",
                     "original_chat_id": chat_id,
                     "original_thread_id": kwargs.get("thread_id"),
                     "original_text": text[:500] if text else "",
@@ -906,10 +1017,30 @@ async def cortex_response_send(
                     log_debug(
                         "[cortex_response_send] corrector_orchestrator executed actions; not forwarding text"
                     )
+                    # The reply TEXT is not forwarded: delivery was delegated to
+                    # the corrected actions. Recorded so a missing "Message sent"
+                    # line is explainable instead of invisible.
+                    await _record_delivery_failure(
+                        "reply text not forwarded; delivery delegated to the "
+                        "corrector's corrected actions",
+                        chat_id=chat_id,
+                        interface_path=kwargs.get("interface_path")
+                        or f"{current_interface}/{chat_id}",
+                        kwargs=kwargs,
+                        text=text,
+                    )
                     return
                 elif orchestrator_result is False:
                     log_warning(
                         "[cortex_response_send] corrector_orchestrator blocked message"
+                    )
+                    await _record_delivery_failure(
+                        "corrector_orchestrator blocked the message",
+                        chat_id=chat_id,
+                        interface_path=kwargs.get("interface_path")
+                        or f"{current_interface}/{chat_id}",
+                        kwargs=kwargs,
+                        text=text,
                     )
                     return None
                 else:
@@ -918,10 +1049,27 @@ async def cortex_response_send(
                     log_warning(
                         "[cortex_response_send] corrector_orchestrator returned None on JSON-like text; blocking to prevent invalid send"
                     )
+                    await _record_delivery_failure(
+                        "corrector_orchestrator declined; blocked instead of "
+                        "sending unparseable JSON",
+                        chat_id=chat_id,
+                        interface_path=kwargs.get("interface_path")
+                        or f"{current_interface}/{chat_id}",
+                        kwargs=kwargs,
+                        text=text,
+                    )
                     return None
 
             except Exception as e:
                 log_debug(f"[cortex_response_send] corrector_orchestrator failed: {e}")
+                await _record_delivery_failure(
+                    f"corrector path raised {type(e).__name__}: {e}",
+                    chat_id=chat_id,
+                    interface_path=kwargs.get("interface_path")
+                    or f"{current_interface}/{chat_id}",
+                    kwargs=kwargs,
+                    text=text,
+                )
                 return None
         else:
             log_debug(
@@ -960,8 +1108,16 @@ async def cortex_response_send(
                     msg_obj.thread_id = kwargs.get("thread_id")
                     msg_obj.from_cortex = True
 
+                    # Same canonical-interface rule as the unparseable-JSON path
+                    # above: a legacy display label here made the correction's
+                    # routing example teach an unregistered action.
+                    _extra_keys_iface = _resolve_sender_interface_id(kwargs)
+                    _extra_keys_iface_path = kwargs.get("interface_path") or (
+                        f"{_extra_keys_iface}/{chat_id}"
+                    )
                     corr_ctx = {
-                        "interface": "telegram",
+                        "interface": _extra_keys_iface,
+                        "interface_path": _extra_keys_iface_path,
                         "original_chat_id": chat_id,
                         "original_thread_id": kwargs.get("thread_id"),
                         "original_text": text[:500] if text else "",
@@ -977,20 +1133,50 @@ async def cortex_response_send(
                             log_debug(
                                 "[cortex_response_send] corrector handled extra keys; not forwarding text"
                             )
+                            await _record_delivery_failure(
+                                "reply text not forwarded; delivery delegated to "
+                                "the corrector's corrected actions",
+                                chat_id=chat_id,
+                                interface_path=_extra_keys_iface_path,
+                                kwargs=kwargs,
+                                text=text,
+                            )
                             return
                         elif corr_res is False:
                             log_warning(
                                 "[cortex_response_send] corrector blocked message due to extra keys"
+                            )
+                            await _record_delivery_failure(
+                                "corrector_orchestrator blocked the message",
+                                chat_id=chat_id,
+                                interface_path=_extra_keys_iface_path,
+                                kwargs=kwargs,
+                                text=text,
                             )
                             return None
                         else:
                             log_warning(
                                 "[cortex_response_send] corrector declined; blocking message"
                             )
+                            await _record_delivery_failure(
+                                "corrector_orchestrator declined; blocked instead "
+                                "of sending unparseable JSON",
+                                chat_id=chat_id,
+                                interface_path=_extra_keys_iface_path,
+                                kwargs=kwargs,
+                                text=text,
+                            )
                             return None
                     except Exception as e:
                         log_warning(
                             f"[cortex_response_send] corrector invocation failed: {e}"
+                        )
+                        await _record_delivery_failure(
+                            f"corrector path raised {type(e).__name__}: {e}",
+                            chat_id=chat_id,
+                            interface_path=_extra_keys_iface_path,
+                            kwargs=kwargs,
+                            text=text,
                         )
                         return None
                 actions = json_data["actions"]
