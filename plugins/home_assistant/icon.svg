@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="House bridge">
+  <!-- Original glyph: two linked nodes on a bridge line (no third-party marks). -->
+  <g fill="none" stroke="#8ab4f8" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M10 44 L10 26 L32 12 L54 26 L54 44" />
+    <path d="M24 44 L24 34 L40 34 L40 44" />
+  </g>
+  <g fill="#f2c14e">
+    <circle cx="32" cy="24" r="3.5" />
+  </g>
+  <g fill="#8ab4f8">
+    <circle cx="24" cy="44" r="3.5" />
+    <circle cx="40" cy="44" r="3.5" />
+  </g>
+</svg>
