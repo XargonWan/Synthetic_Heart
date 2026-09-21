@@ -1001,6 +1001,110 @@ def _build_current_turn_anchor(context_section: dict[str, Any]) -> str:
     return f"{_REALITY_ANCHOR_HEADER} " + " · ".join(fields)
 
 
+# Plugin-injected context keys that this renderer knows how to render.
+#
+# ``get_static_injection()`` merges a plugin's dict into ``context_section``, but
+# a key is only visible to the model if a renderer consumes it: anything nothing
+# reads is dropped silently. A live Home Assistant block was built on every turn
+# and never reached the prompt that way, and the same is true today for
+# ``upcoming_events`` (plugins/event_plugin) and ``facial_expression_guidance``.
+# Add a plugin's key here when its block must appear in the ordinary chat and
+# beat prompt, and pin it in tests/test_plugin_context_blocks.py.
+_PLUGIN_CONTEXT_BLOCKS: tuple[tuple[str, str, str | None], ...] = (
+    ("home", "[Home]", None),
+    ("home_weather", "[Weather]", "weather"),
+    ("home_location", "[House]", "location"),
+)
+
+# Injected keys that some renderer already consumes. The drop detector in
+# ``build_prompt_request`` names the keys outside this set once per process, so a
+# plugin whose block never reaches a prompt stops being invisible. ``weather``
+# and ``participants`` are listed because the LIVE route renders them
+# (``build_live_prompt_request``); ordinary chat and beat turns do not carry
+# them.
+_RENDERED_CONTEXT_KEYS: frozenset[str] = frozenset(
+    {
+        "date",
+        "time",
+        "day_of_week",
+        "season",
+        "location",
+        "time_of_day",
+        "history_current_chat",
+        "history_scope",
+        "voice_channel_id",
+        "gasmask_protection",
+        "soul_temporal_context",
+        "persona_preferences",
+        "self_growth",
+        "history_recent",
+        "thoughts",
+        "memories",
+        "soul_active_foresight",
+        "soul_session_state",
+        "soul_user_profile",
+        "soul_turn_emotion_delta",
+        "persona",
+        "soul_recalled_memories",
+        "latest_diary_entries",
+        "emotion_state",
+        "available_emotions",
+        "current_emotions_nl",
+        "participants",
+        "weather",
+        "capability_drops",
+        "recon",
+        "recon_instructions",
+    }
+) | frozenset(key for key, _heading, _legacy in _PLUGIN_CONTEXT_BLOCKS)
+
+# Keys already reported by the drop detector, so it logs once per process.
+_WARNED_UNRENDERED_KEYS: set[str] = set()
+
+
+def _apply_plugin_block_supersedes(
+    section: dict[str, Any], present_keys: Any
+) -> list[str]:
+    """Drop legacy keys that a present plugin block supersedes.
+
+    A plugin block may carry the same information a built-in provider injects
+    under a different key (Home Assistant supplies the weather and the house's
+    location, while ``weather_plugin`` injects ``weather`` and the time plugin
+    injects ``location``). When the plugin's block is present its value wins and
+    the legacy key is dropped, so the model is never told two different stories;
+    when the block is absent nothing is touched and the built-in provider keeps
+    working exactly as before.
+
+    Returns the dropped legacy keys (for logging/tests).
+    """
+    if not isinstance(section, dict):
+        return []
+    try:
+        present = {str(key) for key in present_keys}
+    except TypeError:
+        return []
+    dropped: list[str] = []
+    for key, _heading, legacy in _PLUGIN_CONTEXT_BLOCKS:
+        if not legacy or key not in present:
+            continue
+        value = section.get(key)
+        if not (isinstance(value, str) and value.strip()):
+            continue
+        if legacy in section:
+            section.pop(legacy, None)
+            dropped.append(legacy)
+    return dropped
+
+
+def _unrendered_injection_keys(keys: Any) -> list[str]:
+    """Return injected keys that no renderer consumes (drop detector)."""
+    try:
+        candidates = {str(key) for key in keys}
+    except TypeError:
+        return []
+    return sorted(key for key in candidates if key not in _RENDERED_CONTEXT_KEYS)
+
+
 def _build_context_summary(
     context_section: dict[str, Any],
     is_grillo_internal: bool = False,
@@ -1078,6 +1182,14 @@ def _build_context_summary(
             "grown and who you are becoming over time. Treat it as part of your "
             "current sense of self.\n" + self_growth
         )
+
+    # Plugin-supplied blocks (see _PLUGIN_CONTEXT_BLOCKS): a plugin's injected
+    # string only reaches the model because it is rendered HERE, and a block that
+    # supersedes a built-in provider's key has already dropped it above.
+    for _plugin_key, _plugin_heading, _plugin_legacy in _PLUGIN_CONTEXT_BLOCKS:
+        _plugin_block = str(context_section.get(_plugin_key) or "").strip()
+        if _plugin_block:
+            parts.append(f"{_plugin_heading}\n{_plugin_block}")
 
     # Grillo internal beats skip cross-chat history and participants
     if not is_grillo_internal:
@@ -2415,6 +2527,36 @@ async def build_prompt_request(
                     list(context_section.get("memories") or []),
                     soul_recalled_memories,
                 )
+
+            # A plugin block that carries the same information as a built-in
+            # provider (weather, location) supersedes it: the model is never told
+            # two different stories, and with the plugin absent nothing changes.
+            _superseded = _apply_plugin_block_supersedes(
+                context_section, injections.keys()
+            )
+            if _superseded:
+                log_info(f"[json_prompt] plugin blocks superseded: {_superseded}")
+
+            # Drop detector: an injected key that no renderer consumes is
+            # invisible to the model. Name it once per process rather than
+            # losing it silently (see _RENDERED_CONTEXT_KEYS).
+            try:
+                _unrendered = _unrendered_injection_keys(injections.keys())
+                _fresh_unrendered = [
+                    key for key in _unrendered if key not in _WARNED_UNRENDERED_KEYS
+                ]
+                if _fresh_unrendered:
+                    _WARNED_UNRENDERED_KEYS.update(_fresh_unrendered)
+                    log_warning(
+                        "[json_prompt] injected context keys with no renderer, so they never "
+                        f"reach the prompt: {_fresh_unrendered} "
+                        "(add them to _PLUGIN_CONTEXT_BLOCKS or a renderer)"
+                    )
+            except Exception as _detector_exc:  # pragma: no cover - diagnostic only
+                log_debug(
+                    f"[json_prompt] unrendered-injection detector skipped: {_detector_exc}"
+                )
+
             log_info(
                 f"[json_prompt] ✅ Updated context_section with injections. Keys now: {list(context_section.keys())}"
             )
@@ -4140,6 +4282,17 @@ async def build_live_prompt_request(
                 "Keep the exact local date, time, and location in the background unless the conversation specifically needs them."
             )
         parts.append("Ambient runtime context:\n" + "\n".join(time_parts))
+
+    # Plugin blocks (same source of truth as the chat/beat renderer). Applied
+    # BEFORE the legacy weather/location pops so a plugin that supplies the
+    # house's own weather or location supersedes the built-in text here too.
+    _superseded = _apply_plugin_block_supersedes(injections, injections.keys())
+    if _superseded:
+        log_debug(f"[live_prompt] plugin blocks superseded: {_superseded}")
+    for _plugin_key, _plugin_heading, _plugin_legacy in _PLUGIN_CONTEXT_BLOCKS:
+        _plugin_block = injections.pop(_plugin_key, "")
+        if _plugin_block and isinstance(_plugin_block, str):
+            parts.append(f"{_plugin_heading}\n{_plugin_block}")
 
     # --- Weather ---
     weather = injections.pop("weather", "")

@@ -331,6 +331,46 @@ _expose(
 )
 
 
+_expose(
+    "HASS_WEATHER_ENABLED",
+    "Inject Weather From HA",
+    True,
+    bool,
+    "bool",
+    (
+        "Build the weather line from Home Assistant's own weather entity "
+        "(plus a short hourly forecast) instead of the local wttr.in block."
+    ),
+)
+_expose(
+    "HASS_WEATHER_ENTITY",
+    "Home Assistant Weather Entity",
+    "",
+    str,
+    "string",
+    "weather.* entity to read. Empty means the first weather entity HA reports.",
+)
+_expose(
+    "HASS_WEATHER_FORECAST_HOURS",
+    "Weather Forecast Hours",
+    6,
+    int,
+    "number",
+    "How many hours of hourly forecast to append (0 = none).",
+)
+_expose(
+    "HASS_LOCATION_ENABLED",
+    "Inject House Location From HA",
+    True,
+    bool,
+    "bool",
+    (
+        "Inject the house's real coordinates, timezone and today's sun times "
+        "from Home Assistant."
+    ),
+)
+
+
 # ---------------------------------------------------------------------------
 # Config readers (faithful to the agpeer plugin's helpers)
 # ---------------------------------------------------------------------------
@@ -401,6 +441,64 @@ def _beat_turn_info(message: Any, context_memory: Any) -> Tuple[bool, str]:
         is_beat = bool(getattr(message, "grillo_beat", False))
         beat_type = beat_type or str(getattr(message, "beat_type", "") or "")
     return is_beat, beat_type
+
+
+_COMPASS_POINTS = (
+    "N",
+    "NNE",
+    "NE",
+    "ENE",
+    "E",
+    "ESE",
+    "SE",
+    "SSE",
+    "S",
+    "SSW",
+    "SW",
+    "WSW",
+    "W",
+    "WNW",
+    "NW",
+    "NNW",
+)
+
+
+def _compass(bearing: Any) -> str:
+    """Convert a wind bearing in degrees to a compass point."""
+    try:
+        value = float(bearing) % 360.0
+    except (TypeError, ValueError):
+        return ""
+    return _COMPASS_POINTS[int((value + 11.25) % 360.0 // 22.5)]
+
+
+def _num(value: Any, digits: int = 1) -> Optional[str]:
+    """Format a numeric attribute, dropping a trailing ``.0``."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    text = f"{float(value):.{digits}f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or None
+
+
+def _local_hhmm(value: Any, tz_name: str) -> str:
+    """Render an ISO timestamp as local HH:MM in HA's own timezone."""
+    if not value:
+        return ""
+    text = str(value)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except Exception:
+        return text[:16]
+    if tz_name:
+        try:
+            from zoneinfo import ZoneInfo
+
+            parsed = parsed.astimezone(ZoneInfo(tz_name))
+        except Exception:
+            pass
+    return parsed.strftime("%H:%M")
 
 
 def _iapp(dt: datetime) -> str:
@@ -804,6 +902,10 @@ class HomeAssistantPlugin(PluginBase):
         self._watched: set[str] = set()
         self._last_injection: Dict[str, Any] = {}
         self._connect_task: Optional[asyncio.Task] = None
+        self._forecast_task: Optional[asyncio.Task] = None
+        self._forecast: List[Dict[str, Any]] = []
+        self._forecast_at = 0.0
+        self._core_config: Dict[str, Any] = {}
         try:
             from core.core_initializer import register_plugin
 
@@ -1183,7 +1285,7 @@ class HomeAssistantPlugin(PluginBase):
             return
         try:
             self._connect_task = asyncio.get_running_loop().create_task(
-                self._client.ensure_connected()
+                self._connect_and_prime()
             )
         except RuntimeError:  # pragma: no cover - no running loop
             self._connect_task = None
@@ -1199,15 +1301,224 @@ class HomeAssistantPlugin(PluginBase):
         name = str(beat_type or "").strip().lower()
         return any(fnmatch(name, pattern) for pattern in wanted)
 
+    # -- weather, location and the bootstrap that feeds them -----------------
+
+    def weather_enabled(self) -> bool:
+        return self.is_enabled() and _cfg_bool("HASS_WEATHER_ENABLED", True)
+
+    def location_enabled(self) -> bool:
+        return self.is_enabled() and _cfg_bool("HASS_LOCATION_ENABLED", True)
+
+    def _weather_entity(self) -> str:
+        configured = _cfg_str("HASS_WEATHER_ENTITY", "")
+        if configured:
+            return configured
+        for entity_id in sorted(self._client.states):
+            if entity_id.startswith("weather."):
+                return entity_id
+        return ""
+
+    def _time_zone(self) -> str:
+        return str(self._core_config.get("time_zone") or "")
+
+    def _render_forecast(self) -> str:
+        hours = max(0, _cfg_int("HASS_WEATHER_FORECAST_HOURS", 6))
+        if hours <= 0 or not self._forecast:
+            return ""
+        tz_name = self._time_zone()
+        chunks: List[str] = []
+        for entry in self._forecast[:hours]:
+            condition = str(entry.get("condition") or "").replace("_", " ")
+            temperature = _num(entry.get("temperature"))
+            when = _local_hhmm(entry.get("datetime"), tz_name)
+            bits = " ".join(
+                part
+                for part in (when, condition, f"{temperature}°" if temperature else "")
+                if part
+            )
+            if bits:
+                chunks.append(bits)
+        return ", ".join(chunks)
+
+    def _render_weather(self) -> str:
+        """Weather line from Home Assistant's own weather entity."""
+        if not self.weather_enabled():
+            return ""
+        entity_id = self._weather_entity()
+        if not entity_id:
+            return ""
+        state = self._client.states.get(entity_id) or {}
+        attributes = state.get("attributes") or {}
+        condition = str(state.get("state") or "").replace("_", " ").strip()
+        temperature = _num(attributes.get("temperature"))
+        unit = str(attributes.get("temperature_unit") or "").strip()
+        bits: List[str] = []
+        if condition or temperature:
+            head = condition or "unknown"
+            if temperature:
+                head += f", {temperature}{unit}"
+            bits.append(head)
+        for key, label, suffix in (
+            ("humidity", "humidity", "%"),
+            ("cloud_coverage", "cloud", "%"),
+            ("uv_index", "UV", ""),
+            ("pressure", "pressure", str(attributes.get("pressure_unit") or "")),
+        ):
+            value = _num(attributes.get(key))
+            if value:
+                bits.append(f"{label} {value}{suffix}".strip())
+        wind = _num(attributes.get("wind_speed"))
+        if wind:
+            wind_unit = str(attributes.get("wind_speed_unit") or "")
+            bearing = _compass(attributes.get("wind_bearing"))
+            bits.append(f"wind {wind}{wind_unit}" + (f" from {bearing}" if bearing else ""))
+        line = ", ".join(bit for bit in bits if bit)
+
+        sun_state = self._client.states.get("sun.sun") or {}
+        sun = sun_state.get("attributes") or {}
+        sun_bits: List[str] = []
+        horizon = str(sun_state.get("state") or "").replace("_", " ")
+        if horizon:
+            sun_bits.append(f"sun {horizon}")
+        for key, label in (("next_rising", "sunrise"), ("next_setting", "sunset")):
+            when = _local_hhmm(sun.get(key), self._time_zone())
+            if when:
+                sun_bits.append(f"{label} {when}")
+        if sun_bits:
+            line += ("\n" if line else "") + ", ".join(sun_bits)
+
+        forecast = self._render_forecast()
+        if forecast:
+            line += f"\nNext hours: {forecast}"
+        attribution = str(attributes.get("attribution") or "")
+        if "met.no" in attribution.lower():
+            line += "\n(source: met.no)"
+        return line.strip()
+
+    def _render_location(self) -> str:
+        """House coordinates and timezone, from HA's own configuration."""
+        if not self.location_enabled():
+            return ""
+        core = self._core_config or {}
+        zone_attributes = (self._client.states.get("zone.home") or {}).get(
+            "attributes"
+        ) or {}
+        place = str(core.get("location_name") or "").strip() or "home"
+        latitude = core.get("latitude", zone_attributes.get("latitude"))
+        longitude = core.get("longitude", zone_attributes.get("longitude"))
+        bits: List[str] = []
+        if isinstance(latitude, (int, float)) and isinstance(longitude, (int, float)):
+            bits.append(f"{place} at {float(latitude):.4f}, {float(longitude):.4f}")
+        else:
+            bits.append(place)
+        country = str(core.get("country") or "").strip()
+        if country:
+            bits.append(country)
+        tz_name = self._time_zone()
+        if tz_name:
+            bits.append(f"timezone {tz_name}")
+        elevation = core.get("elevation")
+        if isinstance(elevation, (int, float)) and float(elevation):
+            bits.append(f"elevation {_num(elevation, 0)} m")
+        return ", ".join(bits)
+
+    async def _refresh_forecast(self) -> None:
+        if not self.weather_enabled():
+            return
+        if max(0, _cfg_int("HASS_WEATHER_FORECAST_HOURS", 6)) <= 0:
+            return
+        entity_id = self._weather_entity()
+        if not entity_id:
+            return
+        result, error = await self._client.call_service(
+            "weather",
+            "get_forecasts",
+            service_data={"entity_id": entity_id, "type": "hourly"},
+            return_response=True,
+            timeout=self._call_timeout(),
+        )
+        if error:
+            log_debug(f"{LOG_PREFIX} forecast unavailable: {error}")
+            return
+        payload: Any = result.get("response") if isinstance(result, dict) else result
+        entry = payload.get(entity_id) if isinstance(payload, dict) else None
+        forecast = entry.get("forecast") if isinstance(entry, dict) else None
+        if isinstance(forecast, list):
+            self._forecast = [item for item in forecast if isinstance(item, dict)]
+            self._forecast_at = time.monotonic()
+            log_debug(f"{LOG_PREFIX} forecast cached: {len(self._forecast)} entries")
+
+    def _schedule_forecast_refresh(self) -> None:
+        if not self.weather_enabled():
+            return
+        if max(0, _cfg_int("HASS_WEATHER_FORECAST_HOURS", 6)) <= 0:
+            return
+        if self._forecast and time.monotonic() - self._forecast_at < 1800:
+            return
+        if self._forecast_task is not None and not self._forecast_task.done():
+            return
+        try:
+            self._forecast_task = asyncio.get_running_loop().create_task(
+                self._refresh_forecast()
+            )
+        except RuntimeError:  # pragma: no cover - no running loop
+            self._forecast_task = None
+
+    async def _fetch_core_config(self) -> None:
+        """One-shot read of HA's own configuration (house location, timezone)."""
+        if not self.is_enabled():
+            return
+        try:
+            import aiohttp
+        except Exception:  # pragma: no cover - dependency missing
+            return
+        headers = {"Authorization": f"Bearer {self.token()}"}
+        try:
+            timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_read=20)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(
+                    f"{self.base_url()}/api/config", headers=headers
+                ) as response:
+                    if response.status >= 400:
+                        log_debug(
+                            f"{LOG_PREFIX} core config fetch failed: HTTP {response.status}"
+                        )
+                        return
+                    self._core_config = await response.json()
+        except Exception as exc:
+            log_debug(f"{LOG_PREFIX} core config fetch failed: {type(exc).__name__} {exc}")
+
+    async def _connect_and_prime(self) -> None:
+        """Connect, then cache the pieces the environment blocks need."""
+        error = await self._client.ensure_connected()
+        if error:
+            log_debug(f"{LOG_PREFIX} prime skipped: {error}")
+            return
+        await self._fetch_core_config()
+        await self._refresh_forecast()
+
     async def get_static_injection(
         self, message: Any = None, context_memory: Any = None
     ) -> Dict[str, Any]:
-        """Inject a bounded house-state line into the prompt (best effort).
+        """Inject the house state, the weather and the house location.
 
-        Conversation turns are governed by ``HASS_AWARENESS_ENABLED``. Autonomous
-        beat turns are governed separately by ``HASS_BEAT_AWARENESS_ENABLED``
-        (off by default) plus the optional per-beat allowlist, so a beat only
-        sees the house when the operator asked for it.
+        Three independent blocks, each with its own switch:
+
+        * ``home`` — the entity snapshot, gated by ``HASS_AWARENESS_ENABLED``
+        * ``home_weather`` — HA's weather entity plus a short forecast,
+          gated by ``HASS_WEATHER_ENABLED``
+        * ``home_location`` — the house's real coordinates and timezone,
+          gated by ``HASS_LOCATION_ENABLED``
+
+        When the weather or location block is present, core drops the legacy
+        ``weather``/``location`` keys they supersede, so the old wttr.in text and
+        the configured location string cannot be told alongside them. With this
+        plugin disabled or the switches off, nothing is injected and the old
+        providers behave exactly as before.
+
+        Autonomous beat turns additionally require
+        ``HASS_BEAT_AWARENESS_ENABLED`` (off by default) plus the optional
+        per-beat allowlist.
         """
         if not self.is_enabled():
             return {}
@@ -1219,8 +1530,6 @@ class HomeAssistantPlugin(PluginBase):
             if not self._beat_allowed(beat_type):
                 return {}
             beat_cap = max(0, _cfg_int("HASS_BEAT_AWARENESS_MAX_CHARS", 600))
-        elif not _cfg_bool("HASS_AWARENESS_ENABLED", True):
-            return {}
         max_age = max(30, _cfg_int("HASS_AWARENESS_MAX_AGE_SEC", 900))
         if not self._client.connected:
             # Warm the link for the next turn; this prompt goes out without it.
@@ -1228,11 +1537,23 @@ class HomeAssistantPlugin(PluginBase):
             return {}
         if self._client.states_age_sec > max_age:
             return {}
-        text = self._render_house_state(max_chars=beat_cap)
-        if not text:
+
+        blocks: Dict[str, Any] = {}
+        if _cfg_bool("HASS_AWARENESS_ENABLED", True):
+            house = self._render_house_state(max_chars=beat_cap)
+            if house:
+                blocks["home"] = house
+        weather = self._render_weather()
+        if weather:
+            blocks["home_weather"] = weather
+            self._schedule_forecast_refresh()
+        location = self._render_location()
+        if location:
+            blocks["home_location"] = location
+        if not blocks:
             return {}
-        self._last_injection = {"home": text}
-        return {"home": text}
+        self._last_injection = dict(blocks)
+        return blocks
 
     # -- actions -------------------------------------------------------------
 

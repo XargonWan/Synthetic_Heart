@@ -59,6 +59,26 @@ every house-changing action is refused at execution time (`hass_call_service`, `
 prompt happens to offer her. So the worst case is that she notices something and mentions it; she
 cannot act on it until you tell her to.
 
+## Weather and the house location
+
+Synth's weather line and her idea of where the house is can now come from Home Assistant instead of the
+local wttr.in block and the configured location string. While these are on, the old sources are **dropped
+for that turn** rather than shown alongside, so she is never told two different things. Switch them off, or
+disable this plugin, and the old blocks come back exactly as they were.
+
+| Setting | Default | What it does |
+|---|---|---|
+| *Inject Weather From HA* | on | Weather line built from HA's own weather entity |
+| *Home Assistant Weather Entity* | empty | Which `weather.*` entity to read; empty means the first one HA reports |
+| *Weather Forecast Hours* | 6 | Hours of hourly forecast appended (0 = none) |
+| *Inject House Location From HA* | on | House coordinates, country, timezone and elevation |
+
+The weather line carries the condition, temperature, humidity, cloud cover, wind with direction, pressure
+and UV index, plus today's sunrise/sunset and the forecast. The forecast comes from HA's
+`weather.get_forecasts`, fetched in the background and cached for 30 minutes, so a turn never waits on it.
+The location block replaces the anchor's `Current Location` line, which is why the configured
+`PROMPT_LOCATION` string stops appearing while this is on.
+
 ## Actions
 
 | Action | What it does |
