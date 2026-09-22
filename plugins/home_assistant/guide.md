@@ -79,6 +79,17 @@ and UV index, plus today's sunrise/sunset and the forecast. The forecast comes f
 The location block replaces the anchor's `Current Location` line, which is why the configured
 `PROMPT_LOCATION` string stops appearing while this is on.
 
+Both ride **every** route - ordinary chat, autonomous beats and live sessions - because they replace blocks
+Synth already received on all of them. Only the house-state entity snapshot is behind *Inject House State On
+Beats*. With the weather switch off (or HA unreachable) the old wttr.in line comes back untouched; likewise
+the location string comes back if you switch *Inject House Location From HA* off. The log names the
+substitution on each turn:
+
+```
+[action_parser] plugin block 'home_weather' supersedes 'weather' at gather time
+[action_parser] plugin block 'home_location' supersedes 'location' at gather time
+```
+
 ## Actions
 
 | Action | What it does |

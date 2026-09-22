@@ -1523,13 +1523,21 @@ class HomeAssistantPlugin(PluginBase):
         if not self.is_enabled():
             return {}
         is_beat, beat_type = _beat_turn_info(message, context_memory)
-        beat_cap = 0
+        # The entity snapshot is house-state awareness, so on beats it stays
+        # behind the opt-in switch (and the optional per-beat allowlist).
+        # The weather and location blocks are NOT new information: they replace
+        # blocks Synth already receives on every route, so they must not be
+        # gated here - a beat that kept the old wttr.in line and the configured
+        # location string while the replacement sat behind a switch nobody
+        # turned on is exactly the bug this fixes.
         if is_beat:
-            if not _cfg_bool("HASS_BEAT_AWARENESS_ENABLED", False):
-                return {}
-            if not self._beat_allowed(beat_type):
-                return {}
+            house_allowed = _cfg_bool(
+                "HASS_BEAT_AWARENESS_ENABLED", False
+            ) and self._beat_allowed(beat_type)
             beat_cap = max(0, _cfg_int("HASS_BEAT_AWARENESS_MAX_CHARS", 600))
+        else:
+            house_allowed = _cfg_bool("HASS_AWARENESS_ENABLED", True)
+            beat_cap = 0
         max_age = max(30, _cfg_int("HASS_AWARENESS_MAX_AGE_SEC", 900))
         if not self._client.connected:
             # Warm the link for the next turn; this prompt goes out without it.
@@ -1539,7 +1547,7 @@ class HomeAssistantPlugin(PluginBase):
             return {}
 
         blocks: Dict[str, Any] = {}
-        if _cfg_bool("HASS_AWARENESS_ENABLED", True):
+        if house_allowed:
             house = self._render_house_state(max_chars=beat_cap)
             if house:
                 blocks["home"] = house

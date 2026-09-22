@@ -3104,6 +3104,25 @@ async def gather_static_injections(message=None, context_memory=None):
     except Exception as e:
         log_error(f"[action_parser] Error in asyncio.gather results: {e}")
 
+    # A plugin block that replaces a built-in provider (the legacy key is
+    # declared in core.prompt_engine._PLUGIN_CONTEXT_BLOCKS) drops that provider's
+    # key HERE, so the superseded text never enters the injection dict at all:
+    # no renderer can pick it up, and the key list below tells the truth about
+    # what this turn actually carries. Without the replacement present nothing is
+    # touched and the built-in provider behaves exactly as before.
+    try:
+        from core.prompt_engine import _PLUGIN_CONTEXT_BLOCKS
+
+        for _pkey, _pheading, _plegacy in _PLUGIN_CONTEXT_BLOCKS:
+            if _plegacy and _pkey in injections and _plegacy in injections:
+                injections.pop(_plegacy, None)
+                log_info(
+                    f"[action_parser] plugin block '{_pkey}' supersedes "
+                    f"'{_plegacy}' at gather time"
+                )
+    except Exception as _super_exc:  # pragma: no cover - diagnostic only
+        log_debug(f"[action_parser] plugin block supersede skipped: {_super_exc}")
+
     log_info(
         f"[action_parser] 📊 gather_static_injections() returning {len(injections)} keys: {list(injections.keys())}"
     )
