@@ -108,6 +108,61 @@ _counter = 0  # Monotonic counter to prevent dict comparison when priorities are
 # Watchdog: how often the supervisor checks the consumer is still alive.
 _SUPERVISOR_INTERVAL_SECONDS = 5.0
 
+# In-flight item tracking for that watchdog. A stalled LLM generation keeps the
+# consumer task ALIVE for as long as the generation budget allows, so
+# ``task.done()`` cannot see the freeze: the supervisor would report a perfectly
+# healthy consumer while every chat, event and beat sat unprocessed behind it
+# (observed live: one stalled provider request silently swallowed two of the
+# user's messages, with nothing in synth.log to say why). These globals let the
+# supervisor NAME the item that is stuck instead.
+#
+# Reported at most once per item, and never on a turn that finished: the label is
+# set immediately before the heavy handling block and cleared in that block's
+# ``finally``, so an early retry/rate-limit ``continue`` can never leave it set.
+_CONSUMER_STALL_WARN_SECONDS = 300.0
+_in_flight_label: str | None = None
+_in_flight_started_at: float = 0.0
+_in_flight_reported: bool = False
+
+
+def _item_label(item: dict[str, Any] | None) -> str:
+    """Return a short, log-safe description of a queue item."""
+    if not isinstance(item, dict):
+        return "an unknown item"
+    chat_id = item.get("chat_id")
+    interface = item.get("interface")
+    label = f"chat {chat_id}" if chat_id is not None else "an unknown item"
+    if interface:
+        label = f"{label} ({interface})"
+    return label
+
+
+def _note_item_in_flight(item: dict[str, Any] | None) -> None:
+    """Record the item the consumer is now working on."""
+    global _in_flight_label, _in_flight_started_at, _in_flight_reported
+    _in_flight_label = _item_label(item)
+    _in_flight_started_at = time.monotonic()
+    _in_flight_reported = False
+
+
+def _clear_item_in_flight() -> None:
+    """Clear the in-flight item once its handling block has finished."""
+    global _in_flight_label, _in_flight_reported
+    _in_flight_label = None
+    _in_flight_reported = False
+
+
+def _stalled_item_report() -> tuple[str, float] | None:
+    """Return ``(label, seconds)`` while the consumer looks stalled, else None."""
+    global _in_flight_reported
+    if not _in_flight_label or _in_flight_reported:
+        return None
+    elapsed = time.monotonic() - _in_flight_started_at
+    if elapsed < _CONSUMER_STALL_WARN_SECONDS:
+        return None
+    _in_flight_reported = True
+    return _in_flight_label, elapsed
+
 
 @dataclass(slots=True)
 class _BackgroundTaskEntry:
@@ -1449,6 +1504,10 @@ async def _consumer_loop() -> None:
                 asyncio.create_task(_delayed_put(final, delay))
                 continue
 
+            # Tell the supervisor watchdog which item is in flight: a stalled
+            # generation is otherwise invisible while it happens.
+            _note_item_in_flight(final)
+
             try:
                 # Get timeout configuration from message_chain module
                 from core.message_chain import RESPONSE_TIMEOUT
@@ -2197,6 +2256,7 @@ async def _consumer_loop() -> None:
                 except Exception as send_err:  # pragma: no cover - best effort
                     log_warning(f"[QUEUE] Failed to send fallback message: {send_err}")
             finally:
+                _clear_item_in_flight()
                 for _ in batch:
                     _get_queue().task_done()
         except asyncio.CancelledError:
@@ -2317,6 +2377,17 @@ async def _supervisor_loop() -> None:
                     # Should not happen (task.done() is True), guard anyway.
                     pass
             _start_consumer_task()
+
+        stalled = _stalled_item_report()
+        if stalled is not None:
+            stalled_label, stalled_seconds = stalled
+            log_warning(
+                f"[QUEUE] Consumer has been processing {stalled_label} for "
+                f"{stalled_seconds:.0f}s without completing it — an LLM "
+                "generation is stalled, and every queued chat, event and beat "
+                "waits behind it until the request returns or "
+                "LLM_GENERATION_TIMEOUT_SEC expires"
+            )
 
     log_info("[QUEUE] Consumer supervisor stopped")
 
