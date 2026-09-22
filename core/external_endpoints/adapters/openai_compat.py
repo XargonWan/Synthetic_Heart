@@ -11,6 +11,7 @@ retry logic, and streaming are all handled by the SDK.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time as _time
 from typing import Any, AsyncIterator
@@ -555,6 +556,33 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                 finish_reason=finish_reason,
                 usage=usage,
             )
+        except asyncio.CancelledError:
+            # Status 499 follows the Gemini adapter's convention: the request was
+            # abandoned before the provider answered (a per-message timeout, a
+            # superseded background beat, or a shutdown) and the call site must
+            # still close its record. Without this branch the abandoned call left
+            # a cortex-API REQUEST line with no RESPONSE and a Langfuse trace
+            # whose output was NULL with zero observations — indistinguishable
+            # from a request that was never made.
+            _elapsed = (_time.monotonic() - _req_start) * 1000
+            log_cortex_response(
+                engine_tag,
+                model=request_model,
+                status=499,
+                error="request cancelled",
+                elapsed_ms=_elapsed,
+            )
+            raise
+        except asyncio.TimeoutError:
+            _elapsed = (_time.monotonic() - _req_start) * 1000
+            log_cortex_response(
+                engine_tag,
+                model=request_model,
+                status=504,
+                error="request timed out",
+                elapsed_ms=_elapsed,
+            )
+            raise
         except Exception as exc:
             _elapsed = (_time.monotonic() - _req_start) * 1000
             log_cortex_response(
@@ -619,6 +647,28 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                 body="".join(_accumulated),
                 elapsed_ms=_elapsed,
             )
+        except asyncio.CancelledError:
+            # See chat_completion: an abandoned stream must still close its
+            # cortex-API / Langfuse record instead of leaving an empty trace.
+            _elapsed = (_time.monotonic() - _req_start) * 1000
+            log_cortex_response(
+                engine_tag,
+                model=request_model,
+                status=499,
+                error="request cancelled",
+                elapsed_ms=_elapsed,
+            )
+            raise
+        except asyncio.TimeoutError:
+            _elapsed = (_time.monotonic() - _req_start) * 1000
+            log_cortex_response(
+                engine_tag,
+                model=request_model,
+                status=504,
+                error="request timed out",
+                elapsed_ms=_elapsed,
+            )
+            raise
         except Exception as exc:
             _elapsed = (_time.monotonic() - _req_start) * 1000
             log_cortex_response(

@@ -452,3 +452,66 @@ async def test_drop_vessel_queue_for_world_removes_all_scope_items(monkeypatch):
     q._queue.clear()
     q._unfinished_tasks = 0
     q._finished.set()
+
+
+@pytest.mark.asyncio
+async def test_supervisor_reports_a_stalled_consumer(monkeypatch):
+    """A hung generation must be visible while it hangs, not only after a restart.
+
+    Regression (2026-09-22): the consumer task stays ALIVE for as long as a
+    stalled provider request allows, so the supervisor's ``task.done()`` check
+    saw a healthy consumer while every queued message sat behind it — the user's
+    messages were answered by nothing and synth.log said nothing at all. The
+    supervisor must now name the item that is stuck.
+    """
+    import asyncio
+
+    monkeypatch.setattr(message_queue, "_SUPERVISOR_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(message_queue, "_CONSUMER_STALL_WARN_SECONDS", 0.0)
+
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        message_queue,
+        "log_warning",
+        lambda message, *args, **kwargs: warnings.append(str(message)),
+    )
+
+    await message_queue.stop()
+    try:
+        await message_queue.run()
+
+        message_queue._note_item_in_flight(
+            {"chat_id": 4242, "interface": "telegram_bot"}
+        )
+
+        stalled: list[str] = []
+        for _ in range(40):
+            await asyncio.sleep(0.05)
+            stalled = [w for w in warnings if "4242" in w]
+            if stalled:
+                break
+
+        assert stalled, "a stalled consumer must be reported while it is stalled"
+        assert "stalled" in stalled[0]
+        assert "4242" in stalled[0]
+
+        # Once per item, not once per supervisor tick.
+        await asyncio.sleep(0.2)
+        assert len([w for w in warnings if "4242" in w]) == 1
+    finally:
+        message_queue._clear_item_in_flight()
+        await message_queue.stop()
+
+
+@pytest.mark.asyncio
+async def test_in_flight_clearing_silences_the_stall_report(monkeypatch):
+    """A turn that finished must never be reported as stalled."""
+
+    monkeypatch.setattr(message_queue, "_SUPERVISOR_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(message_queue, "_CONSUMER_STALL_WARN_SECONDS", 0.0)
+
+    message_queue._note_item_in_flight({"chat_id": 777, "interface": "grillo"})
+    assert message_queue._stalled_item_report() is not None
+
+    message_queue._clear_item_in_flight()
+    assert message_queue._stalled_item_report() is None
