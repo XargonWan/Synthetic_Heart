@@ -234,6 +234,28 @@ LLM_GENERATION_TIMEOUT_SEC = config_registry.get_var(
     component="cortex",
 )
 
+# Hard ceiling for a caller-supplied LLM request timeout. A call site may pass
+# its own budget (the debrief asks for 120 s, recon passes RECON_TIMEOUT, the
+# agent loop passes its per-call budget). The bridge honours that value up to
+# this ceiling - so a call site that needs longer than the endpoint's default is
+# no longer silently cut at the endpoint's value - while a caller cannot
+# re-introduce a multi-minute wedge. Raise it for a deliberately slow local
+# engine; keep it near the slowest legitimate generation for the endpoint.
+LLM_MAX_REQUEST_TIMEOUT_SEC = config_registry.get_var(
+    "LLM_MAX_REQUEST_TIMEOUT_SEC",
+    120,
+    label="LLM Max Request Timeout (s)",
+    description=(
+        "Ceiling in seconds for a caller-supplied LLM request timeout. A call "
+        "site asking for its own budget (e.g. the debrief's 120 s) is honoured "
+        "up to this value, and anything larger is clamped to it. Raise this on "
+        "deliberately slow local hardware."
+    ),
+    value_type=int,
+    group="core",
+    component="cortex",
+)
+
 # Staged cortex fallback chain (primary -> local -> cached/safe), implemented
 # in core/cortex_fallback.py and wired at the single chat-turn generation choke
 # point in core/plugin_instance.py. All keys are fail-open: an unset/empty
