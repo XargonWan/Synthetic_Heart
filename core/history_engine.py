@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from core.config_manager import config_registry
 from core.interface_path_utils import is_vessel_history_entry, is_vessel_interface_path
-from core.logging_utils import log_debug
+from core.logging_utils import log_debug, log_warning
 from core.variables_engine import register_exposed_var
 
 from core.history_types import HistoryContribution, HistoryEntry
@@ -970,8 +970,17 @@ class HistoryEngine:
 
                         if isinstance(q, (list, tuple)) or hasattr(q, "__iter__"):
                             for m in list(q):
+                                # A value that is not a mapping is not a history
+                                # row. ``context_memory`` is not only a chat map:
+                                # it also carries per-turn routing/plugin flags,
+                                # and some of those are plain LISTS OF STRINGS
+                                # (``grillo_snippets`` on every observer beat,
+                                # ``attachment_paths`` on any turn with media).
+                                # Appending those made ``_is_internal_noise``
+                                # raise ('str' object has no attribute 'get'),
+                                # which aborted this whole unified block and
+                                # silently dropped the cross-chat history.
                                 if not isinstance(m, dict):
-                                    unified_candidates.append(m)
                                     continue
 
                                 if (
@@ -1017,6 +1026,11 @@ class HistoryEngine:
                     # Filter out internal system messages (e.g. Grillo tags, Pattern Analysis)
                     # Queste tipicamente appaiono su '.../-1' come monologhi di sistema.
                     def _is_internal_noise(m: dict) -> bool:
+                        if not isinstance(m, dict):
+                            # Defensive: a non-mapping candidate is not a chat
+                            # line, and calling ``.get`` on it here is what used
+                            # to take the whole cross-chat block down.
+                            return True
                         if _is_ignored_prompt_history_entry(m):
                             return True
 
@@ -1049,7 +1063,9 @@ class HistoryEngine:
                         return False
 
                     unified_candidates = [
-                        m for m in unified_candidates if not _is_internal_noise(m)
+                        m
+                        for m in unified_candidates
+                        if isinstance(m, dict) and not _is_internal_noise(m)
                     ]
 
                 # Build separate lists for local vs other chat entries while preserving
@@ -1121,7 +1137,16 @@ class HistoryEngine:
                 # Ensure `history_recent` (global) contains ONLY other chats
                 history_recent = other_lines
             except Exception as e:
-                log_debug(f"[history_engine] Failed building UNIFIED history: {e}")
+                # WARNING, not DEBUG: this block is what fills the cross-chat
+                # ``history_recent`` block, so a failure here silently strips
+                # every "what was said in my other chats" line from the prompt
+                # while the turn still looks healthy. At DEBUG (the default
+                # deployment level is INFO) the drop was invisible for as long
+                # as the crash existed.
+                log_warning(
+                    f"[history_engine] Failed building UNIFIED history: "
+                    f"{type(e).__name__}: {e}"
+                )
 
         if enable_recent and isinstance(chat_map, dict) and not unified_mode:
             try:

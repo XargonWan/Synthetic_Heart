@@ -336,6 +336,98 @@ async def test_empty_text_entries_do_not_render_blank_lines(monkeypatch) -> None
     assert 'Scar: ""' not in joined
 
 
+@pytest.mark.asyncio
+async def test_cross_chat_history_survives_non_dict_context_values(monkeypatch) -> None:
+    """A context carrying plain-string lists must not kill the cross-chat block.
+
+    ``context_memory`` is not only a chat map: it also carries per-turn routing
+    and plugin flags, and some of those are LISTS OF STRINGS — ``grillo_snippets``
+    on every observer beat, ``attachment_paths`` on any turn with media. The
+    unified builder used to append those to its candidate list, and
+    ``_is_internal_noise`` then called ``.get`` on a str, raising
+    ``AttributeError: 'str' object has no attribute 'get'`` and aborting the
+    whole unified block — so ``history_recent`` came back EMPTY and the model
+    was never told what had just been said in its other conversations.
+
+    Live symptom (2026-09-21): the hourly observer beat's prompt carried no
+    ``[Recent context from other conversations]`` block at all — the DM
+    conversation the beat was about to reply to was simply absent — while
+    ordinary chat turns on the same deployment carried it. The failure was
+    logged at DEBUG, so nothing appeared in the log at the deployment's
+    INFO level.
+    """
+    from core.history_engine import HistoryEngine
+
+    other_chat = "telegram_bot/5208932647"
+
+    monkeypatch.setattr(
+        "core.chat_history_cache.load_chat_history",
+        AsyncMock(return_value=deque()),
+    )
+    monkeypatch.setattr(
+        "core.chat_history_cache.load_global_chat_history",
+        AsyncMock(
+            return_value=deque(
+                [
+                    {
+                        "sender_name": "Scar",
+                        "text": "the harness is ready, she woke up clean",
+                        "timestamp": "2026-09-21T20:16:00+00:00",
+                        "interface_path": other_chat,
+                    }
+                ]
+            )
+        ),
+    )
+    monkeypatch.setattr("core.core_initializer.PLUGIN_REGISTRY", {})
+
+    # Observer-beat shape: the beat's own context dict on ``context_memory``,
+    # with the snippet/target lists the beat enqueues and the synthetic
+    # ``grillo/-1`` path the queue consumer writes onto it.
+    context_memory = {
+        "grillo_beat": True,
+        "beat_type": "observer",
+        "grillo_snippets": [f"(chat:{other_chat} | sender:Scar | 45m) snippet text"],
+        "grillo_targets": [{"interface_path": other_chat}],
+        "decay_driven": True,
+        "interface_path": "grillo/-1",
+    }
+
+    context = await HistoryEngine().build_context(
+        message=SimpleNamespace(chat_id=-1, text="observer prompt"),
+        context_memory=context_memory,
+        interface_name="grillo",
+        text="observer prompt",
+    )
+
+    joined_recent = "\n".join(context["history_recent"])
+    assert "the harness is ready, she woke up clean" in joined_recent
+
+    # Same defect on an ordinary chat turn: attachment_paths is a list of
+    # strings on the per-turn context.
+    context_memory = {
+        "telegram_bot/999": deque(
+            [
+                {
+                    "sender_name": "Scar",
+                    "text": "look at this",
+                    "timestamp": "2026-09-21T20:17:00+00:00",
+                    "interface_path": "telegram_bot/999",
+                }
+            ]
+        ),
+        "attachment_paths": ["res/attachments/20260921_pic.png"],
+    }
+    context = await HistoryEngine().build_context(
+        message=SimpleNamespace(interface_path="telegram_bot/999"),
+        context_memory=context_memory,
+        interface_name="telegram_bot",
+        text="look at this",
+    )
+    joined_recent = "\n".join(context["history_recent"])
+    assert "the harness is ready, she woke up clean" in joined_recent
+
+
 def test_diary_entry_renders_created_at_timestamp() -> None:
     """ai_diary entries carry ``created_at`` (not ``timestamp``/``date``). The
     recent-context block was rendering them as ``[diary ]`` with an empty
