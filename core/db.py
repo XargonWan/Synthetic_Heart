@@ -2139,21 +2139,31 @@ async def insert_memory(
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
 
-    async def _run(connection) -> None:
+    async def _run(connection) -> bool:
         async with connection.cursor() as cur:
+            # ponytail: exact-dupe guard — one SELECT in the shared choke
+            # point beats per-caller dedupe (observer/compactor re-insert
+            # the same snippets every beat). No migration needed.
+            await cur.execute(
+                "SELECT 1 FROM memories WHERE content = %s AND author = %s AND source = %s LIMIT 1",
+                (content, author, source),
+            )
+            if await cur.fetchone() is not None:
+                return False
             await cur.execute(sql, params)
+            return True
 
     try:
         if conn is not None:
             # Join the caller's connection: ordering against the caller's other writes is then explicit.
-            await _run(conn)
+            wrote = await _run(conn)
         else:
             async with get_conn_ctx() as own_conn:
-                await _run(own_conn)
+                wrote = await _run(own_conn)
     except Exception as e:
         log_error(f"[insert_memory] write failed ({type(e).__name__}: {e}); no memory row was stored")
         raise
-    return True
+    return wrote
 
 
 # 💥 Insert a new emotional event
