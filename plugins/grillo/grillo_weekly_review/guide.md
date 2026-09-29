@@ -40,7 +40,6 @@ scheduler.
 | `GRILLO_WEEKLY_REVIEW_DAY` | Day of the week the review runs (Mon..Sun, default `Sunday`). |
 | `GRILLO_WEEKLY_REVIEW_TIME` | Local time (HH:MM) the review runs (default `02:00`). |
 | `GRILLO_WEEKLY_REVIEW_DIARY_DAYS` | How many days of diary entries to reflect on (default `7`). |
-| `GRILLO_WEEKLY_REVIEW_MEMORY_LIMIT` | Max long-term memories recalled (default `20`, reserved). |
 
 Plus the shared Grillo settings (`GRILLO_CORTEX`, …). See the
 [G.R.I.L.L.O. guide](../guide.md).

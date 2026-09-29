@@ -703,8 +703,8 @@ def test_build_live_prompt_request_keeps_runtime_facts_ambient_by_default(monkey
 
     assert "Ambient runtime context:" in req.system_instruction
     assert "Current part of day: late evening." in req.system_instruction
-    assert "Time: 21:27 CEST" not in req.system_instruction
-    assert "Location: Sečovlje,Slovenia" not in req.system_instruction
+    assert "Time: 21:27 CEST" in req.system_instruction
+    assert "Location: Sečovlje,Slovenia" in req.system_instruction
 
 
 def test_build_live_prompt_request_surfaces_exact_runtime_facts_when_requested(

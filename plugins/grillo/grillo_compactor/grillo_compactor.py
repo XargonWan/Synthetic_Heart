@@ -394,17 +394,6 @@ class GrilloCompactorPlugin:
                 component="grillo_compactor",
             )
         )
-        self.allow_recompact = bool(
-            config_registry.get_value(
-                "GRILLO_COMPACT_ALLOW_RECOMPACT",
-                True,
-                label="Allow Recompaction of Archived Memories",
-                description="Allow archived_memories to be considered in future compaction runs",
-                value_type=bool,
-                group="grillo",
-                component="grillo_compactor",
-            )
-        )
         self.retry_shorten = int(
             config_registry.get_value(
                 "GRILLO_COMPACT_RETRY_SHORTEN",
@@ -1709,27 +1698,12 @@ class GrilloCompactorPlugin:
                             # If in future we need it for debugging, add it conditionally and only when useful.
                             pass
 
-                            notes_value = json.dumps(notes_obj) if notes_obj else None
                             log_info(
-                                f"[grillo_compactor] notes_obj for cluster {cid}: {notes_obj} -> notes_value={notes_value}"
+                                f"[grillo_compactor] notes_obj for cluster {cid}: {notes_obj} -> notes_value={json.dumps(notes_obj) if notes_obj else None}"
                             )
-
-                            await cur.execute(
-                                "INSERT INTO archived_memories (tag, summary, source_ids, source_count, llm_model, confidence, notes, compaction_level, total_source_chars, summary_chars, created_by) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                                (
-                                    json.dumps(tags) if tags else None,
-                                    summary,
-                                    json.dumps(source_ids),
-                                    len(source_ids),
-                                    active_cortex,
-                                    confidence,
-                                    notes_value,
-                                    1,
-                                    total_source_chars,
-                                    summary_chars,
-                                    "grillo_compactor",
-                                ),
-                            )
+                            # NOTE: no archived_memories write — nothing reads that
+                            # table, so it was unbounded dead weight. Provenance
+                            # is preserved via ai_diary_archive below.
                             # Move source ai_diary entries into ai_diary_archive (preserve provenance) and delete originals
                             if source_ids:
                                 # Insert into archive (select relevant columns)
