@@ -271,16 +271,19 @@ def _memory_merge_key(memory: Any) -> str:
     two of the limited memory slots in every prompt. Two rows holding the same
     text are the same memory whatever their ids are.
     """
-
+    # ponytail: key on normalized body text — source::id keys can never match
+    # a soul string, so the same fact shipped twice (cross-tier dupe).
     if isinstance(memory, dict):
         snippet = (
             memory.get("snippet") or memory.get("content") or memory.get("summary")
         )
-        text = " ".join(str(snippet or "").split()).lower()
-        if text:
-            return text
-        return f"{memory.get('source')}::{memory.get('id')}"
-    return " ".join(str(memory).split()).lower()
+        return _dedupe_context_segments(str(snippet or "")).casefold()
+    text = str(memory)
+    soul_match = _SOUL_RECALLED_MEMORY_RE.match(text)
+    if soul_match:
+        body = _dedupe_context_segments(soul_match.group("body"))
+        return body.casefold() if body else text.casefold()
+    return text.casefold()
 
 
 def _merge_memory_entries(existing: list[Any], incoming: list[Any]) -> list[Any]:
@@ -3481,6 +3484,21 @@ async def build_prompt_request(
             prompt_with_instructions = reduce_prompt_for_llm_limit(
                 prompt_with_instructions, max_prompt_chars
             )
+            # ponytail: reduce deep-copies, so sync the trimmed context back —
+            # _assemble_prompt_request builds context_summary from
+            # context_section, otherwise the trim never reaches the model.
+            if isinstance(prompt_with_instructions, dict):
+                if "context" not in prompt_with_instructions:
+                    # Emergency path deleted the whole context.
+                    context_section.clear()
+                else:
+                    _reduced_ctx = prompt_with_instructions.get("context")
+                    if (
+                        isinstance(_reduced_ctx, dict)
+                        and _reduced_ctx is not context_section
+                    ):
+                        context_section.clear()
+                        context_section.update(_reduced_ctx)
 
     except Exception as e:
         log_warning(f"[json_prompt] Failed to apply prompt reduction: {e}")

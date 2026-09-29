@@ -1166,3 +1166,85 @@ async def test_identical_store_rows_occupy_one_slot(monkeypatch) -> None:
 
     assert len(results) == 1, f"the identical twin row was kept: {results}"
     assert results[0]["id"] == 1690
+
+
+@pytest.mark.asyncio
+async def test_reduction_trim_reaches_context_summary(monkeypatch):
+    """Reducer deep-copies: the trimmed context must be synced back so
+    __prompt_request.context_summary (built from context_section) also loses
+    the trimmed memories. Covers the STEP-3-lie path via emergency (max_chars=1)."""
+
+    async def fake_build_context(
+        self,
+        *,
+        message,
+        context_memory,
+        interface_name,
+        text,
+        memories,
+        history_scope=None,
+    ):
+        del self, message, context_memory, interface_name, text, memories, history_scope
+        return {"memories": ["Legacy memory"]}
+
+    async def fake_gather_static_injections(message, context_memory):
+        del message, context_memory
+        return {"soul_recalled_memories": ["[SOUL recalled memory | 2026-04-18] hello"]}
+
+    async def fake_gather_recon_contributions(**kwargs):
+        del kwargs
+        return []
+
+    async def fake_resolve_language(**kwargs):
+        del kwargs
+        return None
+
+    async def fake_resolve_tone(**kwargs):
+        del kwargs
+        return None, None
+
+    monkeypatch.setattr("core.prompt_engine.extract_tags", lambda _text: [])
+    monkeypatch.setattr("core.prompt_engine.expand_tags", lambda tags: tags)
+    monkeypatch.setattr(
+        "core.history_engine.HistoryEngine.build_context", fake_build_context
+    )
+    monkeypatch.setattr(
+        "core.action_parser.gather_static_injections", fake_gather_static_injections
+    )
+    monkeypatch.setattr(
+        "core.recon.gather_recon_contributions", fake_gather_recon_contributions
+    )
+    monkeypatch.setattr("core.recon.resolve_language", fake_resolve_language)
+    monkeypatch.setattr("core.recon.resolve_tone", fake_resolve_tone)
+    monkeypatch.setattr(
+        "core.prompt_engine.load_json_instructions",
+        lambda *_, **__: "RESPOND ONLY WITH VALID JSON",
+    )
+
+    message = SimpleNamespace(
+        interface_path="telegram_bot/123",
+        text="hello",
+        caption=None,
+        message_id=1,
+        date=datetime.now(timezone.utc),
+        from_user=None,
+        reply_to_message=None,
+    )
+
+    result = await build_json_prompt(
+        message, {}, interface_name="telegram_bot", max_chars=1
+    )
+
+    assert result.get("context") is None
+    summary = result["__prompt_request"].context_summary
+    assert "Legacy memory" not in summary
+    # NOTE: the "[Relevant memories]" header itself is now unconditional on the
+    # non-grillo path (upstream renders it even with zero memories; the honesty
+    # obligation moved to RULE_MEMORY_HONESTY) — so only the trimmed *content*
+    # is asserted absent here.
+
+
+def test_memory_merge_key_collapses_cross_tier_dupe():
+    core = [{"source": "memories", "id": 7, "snippet": "Alice loves jasmine tea."}]
+    soul = ["[SOUL recalled memory | 2026-04-18 | same chat] Alice loves jasmine tea."]
+    assert len(pe._merge_memory_entries(core, soul)) == 1
