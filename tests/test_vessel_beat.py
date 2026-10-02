@@ -29,6 +29,7 @@ from core.vessel_beat import (
     is_autonomy_enabled,
     is_goal_beat_enabled,
     is_motor_enabled,
+    is_passive_activity_enabled,
     is_reflection_enabled,
     resolve_action_interval,
     resolve_beat_interval,
@@ -526,6 +527,23 @@ def test_is_motor_enabled_failsafe_on_error() -> None:
         raise RuntimeError("config down")
 
     assert is_motor_enabled(_boom) is False
+
+
+def test_is_passive_activity_enabled_defaults_true_and_reads_flag() -> None:
+    # Default on when the key is absent.
+    assert is_passive_activity_enabled(lambda k, d: d) is True
+    assert is_passive_activity_enabled(lambda k, d: False) is False
+    assert is_passive_activity_enabled(lambda k, d: True) is True
+
+
+def test_is_passive_activity_enabled_failsafe_on_error() -> None:
+    def _boom(key: str, default: Any) -> Any:
+        raise RuntimeError("config down")
+
+    # Fail-safe defaults to True (matching the config registration default),
+    # unlike is_motor_enabled's fail-safe False — a config read failure must
+    # not silently kill the lowest-priority embodiment layer.
+    assert is_passive_activity_enabled(_boom) is True
 
 
 def test_resolve_will_quiet_sec_default_and_clamp() -> None:

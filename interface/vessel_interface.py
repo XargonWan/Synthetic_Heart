@@ -2904,6 +2904,13 @@ class VesselInterface:
         (2) ``VESSEL_MOTOR_ENABLED`` must be on; (3) a Vessel session must be
         active; (4) at least ``VESSEL_MOTOR_INTERVAL_SEC`` must have elapsed.
         Never creates an Agent Lane task, Drone or diary entry.
+
+        Also resolves and forwards ``passive_activity_allowed`` — whether the
+        connector's lowest-priority passive-activity fallback (no goal at all)
+        may engage this tick, per ``VESSEL_PASSIVE_ACTIVITY_ENABLED`` and the
+        player-quiet window — so a connector can stay embodied instead of
+        idle while cognition has not yet authored a goal. See
+        docs/rift_vessel.rst.
         """
         try:
             from core import vessel_beat
@@ -2938,8 +2945,41 @@ class VesselInterface:
         # element collection, so the fast tick never double-polls the connector.
         world, world_state = await self._read_active_world_state()
         goal = self._goal_from_world_state(world_state)
+
+        # Whether the connector's lowest-priority passive-activity fallback
+        # (see docs/rift_vessel.rst) may engage this tick. Computed here,
+        # *before* motor_step, so a connector can suppress passive selection
+        # while a player is actively chatting — the same quiet window used
+        # below to defer en-route sighting perceptions, and structural
+        # (actor-based via ``_last_player_activity_at``), never keyword
+        # matching.
         try:
-            result = await connector.motor_step(goal)
+            from core import vessel_beat as _vb
+
+            quiet_sec = _vb.resolve_will_quiet_sec(_cfg)
+            passive_enabled = _vb.is_passive_activity_enabled(_cfg)
+        except Exception:  # pragma: no cover - defensive
+            quiet_sec = 0
+            passive_enabled = True
+        player_active = (
+            quiet_sec > 0 and now - self._last_player_activity_at < quiet_sec
+        )
+        passive_allowed = passive_enabled and not player_active
+
+        try:
+            result = await connector.motor_step(
+                goal, passive_activity_allowed=passive_allowed
+            )
+        except TypeError:
+            # Older connector override without the passive-activity kwarg —
+            # degrade gracefully rather than skipping motor_step for it
+            # entirely (Vessel connectors are additive plugins; removing/not
+            # updating one must never break the scheduler).
+            try:
+                result = await connector.motor_step(goal)
+            except Exception as exc:
+                log_debug(f"[vessel_interface] motor_step failed: {exc}")
+                return
         except Exception as exc:
             log_debug(f"[vessel_interface] motor_step failed: {exc}")
             return
@@ -2964,13 +3004,9 @@ class VesselInterface:
         # window keeps the consumer free to pick up the player chat promptly.
         # Mirrors the will/action-beat deferral; structural (actor-based via
         # ``_last_player_activity_at``), never keyword matching; ``0`` disables it.
-        try:
-            from core import vessel_beat as _vb
-
-            quiet_sec = _vb.resolve_will_quiet_sec(_cfg)
-        except Exception:  # pragma: no cover - defensive
-            quiet_sec = 0
-        if quiet_sec > 0 and now - self._last_player_activity_at < quiet_sec:
+        # ``player_active`` was already computed above (shared with the
+        # passive-activity gate).
+        if player_active:
             log_debug(
                 "[vessel_interface] En-route sightings deferred: player active "
                 f"{now - self._last_player_activity_at:.0f}s ago "
