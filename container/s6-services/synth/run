@@ -17,6 +17,15 @@ mkdir -p \
 
 chmod a+rwx -R /config
 
+# Seed the default skin into a fresh skins volume (the named volume shadows the
+# image copy, so first start would 500 /api/skins and stall the WebUI).
+if [ ! -f /app/skins/Rei/model.vrm ] && [ -f /app/.skins-seed/Rei/model.vrm ]; then
+  echo "[S6 synth] Seeding default skin 'Rei' into empty skins volume..."
+  mkdir -p /app/skins
+  cp -a /app/.skins-seed/Rei /app/skins/
+  chmod -R a+rX /app/skins/Rei
+fi
+
 echo "[S6 synth] Avvio Synthetic Heart..."
 cd /app
 exec /app/synth.sh run
