@@ -69,6 +69,29 @@ Debrief action-intent recovery
   canonical action parser with the original interface/chat context preserved,
   so validation, safety policy, and selective correction still apply.
 
+Debrief situational notes
+-------------------------
+- The situational-notes Debrief plugin extracts short-lived circumstances of
+  the human ("dentist tomorrow", "moving house this week") into the SOUL
+  ``situational_notes`` store, and retires the ones a turn shows have ended.
+- The plugin's pane in the WebUI (Components → Debrief Situational Notes)
+  shows the notes standing right now as editable text, one per line::
+
+    EVENT | dentist visit | 2026-10-03T08:00:00+00:00 -> 2026-10-03T12:00:00+00:00 | dentist at 10 on 2026-10-03
+
+  ``TYPE`` is ``EVENT``, ``STATE``, ``INTERVAL`` or ``INSTANT``; dates are
+  ISO 8601 (UTC when no offset is given), a blank start means now and a blank
+  end means 24 hours later. Lines starting with ``#`` are ignored.
+- **Save** makes the store match the text: an unchanged line keeps its note,
+  a changed window moves it, a new or reworded line is stored as a new note
+  (``source = 'webui'``), and a deleted line resolves its note (rows are never
+  deleted). A line that does not parse rejects the whole save and changes
+  nothing.
+- Only notes whose window has already started are listed; a note added with a
+  future start is stored but appears in the editor once it begins.
+- The editor talks to ``GET``/``PUT /api/soul/situational-notes`` and needs
+  the SOUL plugin; without it the pane reports the notes as unavailable.
+
 How Recon affects the main prompt
 ---------------------------------
 - Recon contributions are attached to ``context.recon`` during

@@ -56,6 +56,23 @@ try:
         advanced=True,
         needs_component_reload=False,
     )
+    # Not a setting: the key only places the notes editor in this component's
+    # pane. The WebUI reads and writes the notes through
+    # /api/soul/situational-notes and never saves a value under this key.
+    register_exposed_var(
+        "SITUATIONAL_NOTES_EDITOR",
+        label="Current Situational Notes",
+        default="",
+        value_type=str,
+        ui_type="situational-notes",
+        description=(
+            "The notes standing for the human right now, one per line. Edit, add "
+            "or delete lines and press Save; a deleted line retires its note."
+        ),
+        scope="agent",
+        component="debrief_situational_notes",
+        needs_component_reload=False,
+    )
 except Exception:
     pass
 

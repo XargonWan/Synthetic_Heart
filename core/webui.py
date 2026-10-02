@@ -1009,6 +1009,10 @@ class SynthWebUIInterface:
         # starts the pass in the background.
         self.app.get("/api/soul/redistil")(self.soul_redistil_status)
         self.app.post("/api/soul/redistil")(self.start_soul_redistil)
+        # Standing situational notes as editable text (Debrief Situational Notes
+        # component pane). GET renders them, PUT replaces them with the text.
+        self.app.get("/api/soul/situational-notes")(self.get_situational_notes)
+        self.app.put("/api/soul/situational-notes")(self.put_situational_notes)
         # On-demand run of the nightly memory compaction (Settings → Memory Compaction).
         self.app.get("/api/grillo/compaction")(self.grillo_compaction_status)
         self.app.post("/api/grillo/compaction")(self.start_grillo_compaction)
@@ -10528,6 +10532,59 @@ class SynthWebUIInterface:
         except Exception as exc:
             log_error(f"{LOG_PREFIX} Failed to start the re-distil pass: {exc}")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # ------------------------------------------------------------------
+    # Situational notes, as editable text
+    # ------------------------------------------------------------------
+    async def _situational_notes_text(self, repository: Any) -> str:
+        from core.soul.models import now_utc
+        from core.soul.situational import render_notes_text
+
+        notes = await repository.list_active_situational_notes(now=now_utc())
+        return render_notes_text(notes)
+
+    async def get_situational_notes(self) -> JSONResponse:
+        """Render the notes currently standing for the human, one per line."""
+        repository = self._soul_plugin().get_repository()
+        try:
+            text = await self._situational_notes_text(repository)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to read situational notes: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return JSONResponse({"success": True, "text": text})
+
+    async def put_situational_notes(self, request: Request) -> JSONResponse:
+        """Make the standing notes match ``{"text": ...}``.
+
+        A line that does not parse rejects the whole text with 400 and changes
+        nothing; notes missing from the text are resolved, never deleted.
+        """
+        from core.soul.models import now_utc
+        from core.soul.situational import apply_notes_text
+
+        repository = self._soul_plugin().get_repository()
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        text = payload.get("text") if isinstance(payload, dict) else None
+        if not isinstance(text, str):
+            raise HTTPException(status_code=400, detail="text must be a string")
+        try:
+            counts = await apply_notes_text(repository, text, now=now_utc())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to save situational notes: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        log_info(f"{LOG_PREFIX} Situational notes edited from the WebUI: {counts}")
+        return JSONResponse(
+            {
+                "success": True,
+                "text": await self._situational_notes_text(repository),
+                **counts,
+            }
+        )
 
     # ------------------------------------------------------------------
     # Nightly compaction, on demand (Settings → Memory Compaction)

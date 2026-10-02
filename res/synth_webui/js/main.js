@@ -1332,6 +1332,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         return;
                     }
                     list.forEach((item) => {
+                        // Edited in its component pane, not a stored setting.
+                        if (item.ui_type === 'situational-notes') return;
                         const row = document.createElement('div');
                         row.className = 'config-row';
 
@@ -3515,6 +3517,76 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             sel.disabled = !editable;
                             sel.addEventListener('change', () => saveCfg(sel.value, sel));
                             inputEl = sel;
+                        } else if (ci.ui_type === 'situational-notes') {
+                            // Live SOUL notes, not a config value: loaded from and
+                            // saved to /api/soul/situational-notes, never /api/config.
+                            const wrap = document.createElement('div');
+                            wrap.style.cssText = 'display:flex; flex-direction:column; gap:6px; max-width:900px; width:100%;';
+                            const ta = document.createElement('textarea');
+                            ta.rows = 10;
+                            ta.spellcheck = false;
+                            ta.style.cssText = 'width:100%; padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:6px; font-family:monospace; font-size:0.82rem; resize:vertical; white-space:pre; overflow-x:auto;';
+                            ta.value = 'Loading…';
+                            ta.disabled = true;
+                            const bar = document.createElement('div');
+                            bar.style.cssText = 'display:flex; align-items:center; gap:8px;';
+                            const saveBtn = document.createElement('button');
+                            saveBtn.type = 'button';
+                            saveBtn.textContent = 'Save';
+                            saveBtn.disabled = true;
+                            const reloadBtn = document.createElement('button');
+                            reloadBtn.type = 'button';
+                            reloadBtn.className = 'btn-ghost';
+                            reloadBtn.textContent = 'Reload';
+                            const status = document.createElement('span');
+                            status.className = 'meta';
+                            bar.appendChild(saveBtn);
+                            bar.appendChild(reloadBtn);
+                            bar.appendChild(status);
+                            wrap.appendChild(ta);
+                            wrap.appendChild(bar);
+
+                            const notesUrl = (window.__getApiBase ? window.__getApiBase() : '') + '/api/soul/situational-notes';
+                            const readError = async (r) => {
+                                try { const j = await r.json(); return j.detail || ('HTTP ' + r.status); } catch (e) { return 'HTTP ' + r.status; }
+                            };
+                            const loadNotes = async () => {
+                                ta.disabled = true; saveBtn.disabled = true;
+                                status.textContent = '';
+                                try {
+                                    const r = await fetch(notesUrl);
+                                    if (!r.ok) throw new Error(await readError(r));
+                                    const out = await r.json();
+                                    ta.value = out.text || '';
+                                    ta.disabled = false; saveBtn.disabled = false;
+                                } catch (e) {
+                                    ta.value = '';
+                                    status.textContent = 'Notes unavailable: ' + e.message;
+                                }
+                            };
+                            saveBtn.addEventListener('click', async () => {
+                                ta.disabled = true; saveBtn.disabled = true;
+                                try {
+                                    const r = await fetch(notesUrl, {
+                                        method: 'PUT',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ text: ta.value })
+                                    });
+                                    if (!r.ok) throw new Error(await readError(r));
+                                    const out = await r.json();
+                                    ta.value = out.text || '';
+                                    status.textContent = `Saved: ${out.added} added, ${out.updated} updated, ${out.removed} retired.`;
+                                    window.showToast && window.showToast('Situational notes saved', false);
+                                } catch (e) {
+                                    status.textContent = 'Not saved: ' + e.message;
+                                    window.showToast && window.showToast('Save failed: ' + e.message, true);
+                                } finally {
+                                    ta.disabled = false; saveBtn.disabled = false;
+                                }
+                            });
+                            reloadBtn.addEventListener('click', loadNotes);
+                            loadNotes();
+                            inputEl = wrap;
                         } else if (ci.ui_type === 'textarea' || (ci.value_type === 'json' && ci.ui_type !== 'tags')) {
                             const ta = document.createElement('textarea');
                             ta.rows = 3;
