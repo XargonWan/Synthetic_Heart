@@ -985,6 +985,9 @@ class SynthWebUIInterface:
         self.app.delete("/api/goals/{goal_id}")(self.delete_goal)
         self.app.post("/api/goals/clear-abandoned")(self.clear_abandoned_goals)
         self.app.delete("/api/goals")(self.clear_all_goals)
+        # Operator surface for the memories tier: list/search + per-item delete.
+        self.app.get("/api/memories")(self.list_memories)
+        self.app.delete("/api/memories/{memory_id}")(self.delete_memory)
         self.app.post("/api/growth/current")(self.update_growth_current)
         self.app.post("/api/growth/revert")(self.revert_growth_state)
         # Per-item delete for History sub-tabs
@@ -9141,6 +9144,115 @@ class SynthWebUIInterface:
         return JSONResponse(
             {"success": True, "deleted_count": result.get("deleted_count", 0)}
         )
+
+    async def list_memories(self, request: Request):
+        """Paginated memories list with optional content search.
+
+        Operator surface for the memories tier (see / forget one memory
+        instead of flipping ENABLE_MEMORIES). Envelope mirrors history_diary.
+        """
+        params = request.query_params
+
+        def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return default
+            return max(minimum, min(maximum, parsed))
+
+        page = _bounded_int(params.get("page"), default=1, minimum=1, maximum=1000)
+        per_page = _bounded_int(
+            params.get("per_page"), default=30, minimum=1, maximum=100
+        )
+        search = params.get("search", "").strip()
+        sort = params.get("sort", "desc")
+
+        try:
+            from core.db import get_conn_ctx
+
+            offset = (page - 1) * per_page
+            order = "DESC" if sort == "desc" else "ASC"
+            if search:
+                # Escape LIKE wildcards so the term matches literally.
+                escaped = (
+                    search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                )
+                where_clause = "WHERE content LIKE %s ESCAPE '\\'"
+                search_params: list = [f"%{escaped}%"]
+            else:
+                where_clause = ""
+                search_params = []
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        f"SELECT COUNT(*) FROM memories {where_clause}",
+                        search_params,
+                    )
+                    count_row = await cur.fetchone()
+                    total_count = count_row[0] if count_row else 0
+                    await cur.execute(
+                        f"SELECT id, created_at, content, author, source, tags, scope "
+                        f"FROM memories {where_clause} "
+                        f"ORDER BY created_at {order} LIMIT %s OFFSET %s",
+                        search_params + [per_page, offset],
+                    )
+                    rows = await cur.fetchall()
+
+            entries = []
+            for row in rows:
+                entries.append(
+                    {
+                        "id": row[0],
+                        "timestamp": self._dt_to_utc_iso(row[1]),
+                        "content": row[2],
+                        "author": row[3],
+                        "source": row[4],
+                        "tags": row[5],
+                        "scope": row[6],
+                    }
+                )
+
+            total_pages = (
+                (total_count + per_page - 1) // per_page if total_count > 0 else 1
+            )
+            return JSONResponse(
+                {
+                    "success": True,
+                    "entries": entries,
+                    "page": page,
+                    "per_page": per_page,
+                    "total_count": total_count,
+                    "total_pages": total_pages,
+                }
+            )
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to fetch memories: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def delete_memory(self, request: Request):
+        """Delete a single memories row by id."""
+        memory_id_raw = request.path_params.get("memory_id")
+        try:
+            memory_id = int(memory_id_raw)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"success": False, "error": "Invalid memory id"}, status_code=400
+            )
+        try:
+            from core.db import get_conn_ctx
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "DELETE FROM memories WHERE id = %s",
+                        (memory_id,),
+                    )
+                    deleted = getattr(cur, "rowcount", 0) or 0
+            return JSONResponse({"success": True, "deleted_count": deleted})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to delete memory: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
     async def clear_abandoned_goals(self, request: Request):
         """Delete every abandoned goal across all scopes (generic Goals view)."""
