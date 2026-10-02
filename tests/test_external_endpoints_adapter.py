@@ -2663,3 +2663,28 @@ def test_openai_compat_shrink_image_converts_webp_to_jpeg():
     assert result_mime == "image/jpeg"
     assert result_bytes != webp_bytes
     assert result_bytes.startswith(b"\xff\xd8\xff")
+
+
+def test_openai_compat_openrouter_attribution_headers(monkeypatch: Any) -> None:
+    """OpenRouter hosts get app-attribution headers; other hosts get none."""
+    import openai as openai_pkg
+
+    captured: dict[str, Any] = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(openai_pkg, "AsyncOpenAI", FakeClient)
+
+    OpenAICompatAdapter(
+        base_url="https://openrouter.ai/api/v1", api_key="x"
+    )._get_client()
+    assert captured["default_headers"] == {
+        "HTTP-Referer": "https://github.com/XargonWan/Synthetic_Heart",
+        "X-Title": "Synthetic Heart",
+    }
+
+    captured.clear()
+    OpenAICompatAdapter(base_url="http://fake-host", api_key="x")._get_client()
+    assert captured["default_headers"] == {}

@@ -97,11 +97,22 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                 http_client = httpx.AsyncClient(
                     timeout=httpx.Timeout(self._timeout or 300.0),
                 )
+                # OpenRouter attributes usage by app from these headers;
+                # without them the dashboard shows "unknown application".
+                # Other OpenAI-compatible servers ignore unknown headers.
+                default_headers: dict[str, str] = {}
+                host = (urlparse(self._base_url).hostname or "").lower()
+                if "openrouter" in host:
+                    default_headers = {
+                        "HTTP-Referer": "https://github.com/XargonWan/Synthetic_Heart",
+                        "X-Title": "Synthetic Heart",
+                    }
                 self._client = AsyncOpenAI(
                     base_url=self._sdk_base_url(),
                     api_key=self._api_key,
                     timeout=self._timeout,
                     http_client=http_client,
+                    default_headers=default_headers,
                 )
             except ImportError as exc:
                 raise RuntimeError(
