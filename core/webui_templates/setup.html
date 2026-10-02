@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>%%BRAND_NAME%% setup</title>
+<link rel="icon" type="image/png" href="%%LOGO_URL%%" />
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0d0d16;
+    --surface: rgba(24, 24, 36, 0.92);
+    --surface-alt: rgba(18, 18, 28, 0.7);
+    --border: rgba(255, 255, 255, 0.09);
+    --border-strong: rgba(255, 255, 255, 0.2);
+    --accent: %%ACCENT%%;
+    --text: #f5f5ff;
+    --text-soft: #b9badc;
+    --text-dim: #85879f;
+    --success: #18c98c;
+    --warn: #f3c04d;
+    --error: #ff7b93;
+    --radius: 14px;
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background:
+      radial-gradient(circle at 15% 0%, color-mix(in srgb, var(--accent) 12%, transparent), transparent 55%),
+      radial-gradient(circle at 85% 100%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 55%),
+      var(--bg);
+    color: var(--text);
+    display: flex;
+    justify-content: center;
+    padding: 2.5rem 1.25rem 6rem;
+  }
+  main { width: 100%; max-width: 780px; }
+
+  header.hero { display: flex; align-items: center; gap: 1rem; margin-bottom: 0.4rem; }
+  header.hero img { width: 56px; height: 56px; border-radius: 14px; }
+  h1 { font-size: 1.55rem; margin: 0; letter-spacing: -0.01em; }
+  .lede { color: var(--text-soft); line-height: 1.6; margin: 0.75rem 0 2rem; font-size: 0.95rem; }
+
+  section.card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1.5rem 1.5rem 1.35rem;
+    margin-bottom: 1rem;
+    backdrop-filter: blur(6px);
+  }
+  section.card > h2 {
+    font-size: 1.05rem; margin: 0 0 0.35rem; display: flex; align-items: center; gap: 0.6rem;
+  }
+  .step-num {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 26px; height: 26px; border-radius: 50%; flex: 0 0 26px;
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+    color: var(--accent); font-size: 0.8rem; font-weight: 600;
+  }
+  .hint { color: var(--text-dim); font-size: 0.85rem; line-height: 1.5; margin: 0 0 1.1rem 2.35rem; }
+
+  .field { margin-bottom: 1rem; }
+  .field:last-child { margin-bottom: 0; }
+  label { display: block; font-size: 0.82rem; color: var(--text-soft); margin-bottom: 0.35rem; font-weight: 500; }
+  input[type="text"], textarea, select {
+    width: 100%; padding: 0.65rem 0.8rem; border-radius: 9px;
+    border: 1px solid var(--border-strong); background: var(--surface-alt); color: var(--text);
+    font: inherit; font-size: 0.92rem;
+  }
+  textarea { min-height: 92px; resize: vertical; line-height: 1.5; }
+  input:focus, textarea:focus, select:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+  }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width: 620px) { .row { grid-template-columns: 1fr; } }
+
+  .presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 0.6rem; margin-bottom: 1.1rem; }
+  .preset {
+    text-align: left; cursor: pointer; padding: 0.7rem 0.8rem; border-radius: 10px;
+    border: 1px solid var(--border-strong); background: var(--surface-alt); color: var(--text);
+    font: inherit; font-size: 0.88rem; transition: border-color .12s, background .12s;
+  }
+  .preset:hover { border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+  .preset[aria-pressed="true"] {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+  }
+  .preset small { display: block; color: var(--text-dim); font-size: 0.76rem; margin-top: 0.2rem; line-height: 1.35; }
+
+  button.primary {
+    padding: 0.7rem 1.4rem; border-radius: 10px; border: 1px solid transparent; cursor: pointer;
+    background: var(--accent); color: #07070c; font: inherit; font-weight: 600; font-size: 0.92rem;
+  }
+  button.primary:hover { filter: brightness(1.08); }
+  button.primary:disabled { opacity: 0.5; cursor: default; filter: none; }
+  button.ghost {
+    padding: 0.7rem 1.1rem; border-radius: 10px; cursor: pointer;
+    border: 1px solid var(--border-strong); background: transparent; color: var(--text-soft);
+    font: inherit; font-size: 0.92rem;
+  }
+  button.ghost:hover { color: var(--text); border-color: var(--accent); }
+
+  .status { margin-top: 0.9rem; font-size: 0.88rem; line-height: 1.5; display: none; padding: 0.7rem 0.85rem; border-radius: 9px; }
+  .status.show { display: block; }
+  .status.ok { background: color-mix(in srgb, var(--success) 14%, transparent); color: var(--success); }
+  .status.warn { background: color-mix(in srgb, var(--warn) 14%, transparent); color: var(--warn); }
+  .status.err { background: color-mix(in srgb, var(--error) 14%, transparent); color: var(--error); }
+
+  footer.bar {
+    position: fixed; left: 0; right: 0; bottom: 0; padding: 0.9rem 1.25rem;
+    background: linear-gradient(to top, var(--bg) 65%, transparent);
+    display: flex; justify-content: center; gap: 0.75rem;
+  }
+  footer.bar .inner { width: 100%; max-width: 780px; display: flex; align-items: center; gap: 0.75rem; }
+  footer.bar .spacer { flex: 1; }
+  .fineprint { color: var(--text-dim); font-size: 0.78rem; }
+  code { background: var(--surface-alt); padding: 0.1rem 0.35rem; border-radius: 5px; font-size: 0.85em; }
+</style>
+</head>
+<body>
+<main>
+  <header class="hero">
+    <img src="%%LOGO_URL%%" alt="" />
+    <div>
+      <h1>%%BRAND_NAME%% is installed</h1>
+    </div>
+  </header>
+  <p class="lede">
+    Everything technical is already done: your own database, your own Python, no
+    administrator rights needed. Four short questions and you can talk to it. Your
+    answers are saved as you go, and you can change all of them later in Settings.
+  </p>
+
+  <section class="card">
+    <h2><span class="step-num">1</span> Who is who</h2>
+    <p class="hint">The name it answers to, what kind of person it should be, and what to call you.</p>
+    <div class="row">
+      <div class="field">
+        <label for="synth_name">Its name</label>
+        <input type="text" id="synth_name" value="%%SYNTH_NAME%%" placeholder="SyntH" />
+      </div>
+      <div class="field">
+        <label for="trainer_name">Your name</label>
+        <input type="text" id="trainer_name" value="%%TRAINER_NAME%%" placeholder="What should it call you?" />
+      </div>
+    </div>
+    <div class="field">
+      <label for="synth_profile">Its personality</label>
+      <textarea id="synth_profile" placeholder="A few sentences describing how it thinks, speaks and what it cares about.">%%SYNTH_PROFILE%%</textarea>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2><span class="step-num">2</span> Where and when you are</h2>
+    <p class="hint">So its clock and its sense of place match yours instead of a server's.</p>
+    <div class="row">
+      <div class="field">
+        <label for="tz">Timezone</label>
+        <select id="tz">%%TZ_OPTIONS%%</select>
+      </div>
+      <div class="field">
+        <label for="language">Language it speaks</label>
+        <select id="language">%%LANGUAGE_OPTIONS%%</select>
+      </div>
+    </div>
+    <div class="field">
+      <label for="location">Place (optional)</label>
+      <input type="text" id="location" list="location-options" value="%%LOCATION%%" placeholder="City,Country" />
+      <datalist id="location-options">%%LOCATION_OPTIONS%%</datalist>
+    </div>
+    <div class="field">
+      <label for="scene_note">How you talk to it (optional)</label>
+      <textarea id="scene_note" placeholder="For example: we are in the same room and speak out loud, or: this is a chat on my phone while I am out.">%%SCENE_NOTE%%</textarea>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2><span class="step-num">3</span> Which mind it uses</h2>
+    <p class="hint">
+      Pick a provider and paste its API key. This is the only thing %%BRAND_NAME%% cannot
+      do for itself: it needs somewhere to think. You can add more later.
+    </p>
+    <div class="presets" id="presets"></div>
+    <div class="field">
+      <label for="ep_base_url">Address</label>
+      <input type="text" id="ep_base_url" placeholder="https://api.openai.com/v1" />
+    </div>
+    <div class="field">
+      <label for="ep_api_key">API key</label>
+      <input type="text" id="ep_api_key" placeholder="" autocomplete="off" spellcheck="false" />
+    </div>
+    <div class="field">
+      <label for="ep_name">Name for this connection</label>
+      <input type="text" id="ep_name" placeholder="openai" />
+    </div>
+    <button class="primary" id="test-provider">Test and use it</button>
+    <div class="status" id="provider-status"></div>
+  </section>
+
+  <section class="card">
+    <h2><span class="step-num">4</span> Done</h2>
+    <p class="hint">Save everything and go to the interface.</p>
+    <button class="primary" id="finish">Finish setup</button>
+    <button class="ghost" id="skip">Skip for now</button>
+    <div class="status" id="finish-status"></div>
+  </section>
+</main>
+
+<footer class="bar">
+  <div class="inner">
+    <span class="fineprint" id="saved-note"></span>
+    <span class="spacer"></span>
+    <span class="fineprint">Settings live in <code>Settings</code> afterwards.</span>
+  </div>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+
+  var state = { provider: null, providerSaved: false };
+
+  function note(text, kind) {
+    var el = document.getElementById("saved-note");
+    el.textContent = text || "";
+    el.style.color = kind === "err" ? "var(--error)" : (kind === "ok" ? "var(--success)" : "var(--text-dim)");
+  }
+
+  function showStatus(id, text, kind) {
+    var el = document.getElementById(id);
+    el.textContent = text;
+    el.className = "status show " + (kind || "ok");
+  }
+
+  function hideStatus(id) {
+    var el = document.getElementById(id);
+    el.className = "status";
+  }
+
+  function val(id) { return (document.getElementById(id).value || "").trim(); }
+
+  function saveConfig(key, value) {
+    return fetch("/api/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: key, value: value })
+    }).then(function (r) {
+      if (!r.ok) { throw new Error(key + ": HTTP " + r.status); }
+      return r.json().catch(function () { return {}; });
+    });
+  }
+
+  function saveIdentity() {
+    var jobs = [];
+    if (val("synth_name")) { jobs.push(saveConfig("SYNTH_NAME", val("synth_name"))); }
+    if (val("trainer_name")) { jobs.push(saveConfig("TRAINER_NAME", val("trainer_name"))); }
+    if (val("synth_profile")) { jobs.push(saveConfig("SYNTH_PROFILE", val("synth_profile"))); }
+    return Promise.all(jobs);
+  }
+
+  function savePlace() {
+    var jobs = [];
+    if (val("tz")) { jobs.push(saveConfig("TZ", val("tz"))); }
+    if (val("language")) { jobs.push(saveConfig("PROJECT_DEFAULT_LANGUAGE", val("language"))); }
+    jobs.push(saveConfig("PROMPT_LOCATION", val("location")));
+    jobs.push(saveConfig("SCENE_NOTE", val("scene_note")));
+    return Promise.all(jobs);
+  }
+
+  /* ---- provider presets ---- */
+  fetch("/api/external-endpoints/presets")
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      var presets = (data && data.presets) || [];
+      presets.sort(function (a, b) { return (a.sort_order || 0) - (b.sort_order || 0); });
+      var box = document.getElementById("presets");
+      presets.forEach(function (p) {
+        var b = document.createElement("button");
+        b.type = "button";
+        b.className = "preset";
+        b.setAttribute("aria-pressed", "false");
+        b.innerHTML = "<strong></strong><small></small>";
+        b.querySelector("strong").textContent = p.display_name || p.provider_id;
+        b.querySelector("small").textContent = p.description || "";
+        b.addEventListener("click", function () { choosePreset(p, b); });
+        box.appendChild(b);
+      });
+    })
+    .catch(function () {
+      document.getElementById("presets").innerHTML =
+        '<small style="color:var(--text-dim)">Provider presets could not be loaded. Fill the address in by hand.</small>';
+    });
+
+  function choosePreset(p, button) {
+    state.provider = p;
+    Array.prototype.forEach.call(document.querySelectorAll(".preset"), function (el) {
+      el.setAttribute("aria-pressed", el === button ? "true" : "false");
+    });
+    document.getElementById("ep_base_url").value = p.base_url || "";
+    document.getElementById("ep_base_url").readOnly = !!p.base_url_locked;
+    document.getElementById("ep_name").value = p.suggested_name || p.provider_id || "";
+    var key = document.getElementById("ep_api_key");
+    key.placeholder = p.api_key_placeholder || (p.requires_api_key ? "paste your API key" : "not required");
+    hideStatus("provider-status");
+    var hint = p.api_key_hint || "";
+    if (hint) { showStatus("provider-status", hint, "warn"); }
+  }
+
+  document.getElementById("test-provider").addEventListener("click", function () {
+    var button = this;
+    var baseUrl = val("ep_base_url");
+    var name = val("ep_name") || (state.provider && (state.provider.suggested_name || state.provider.provider_id));
+    var apiKey = document.getElementById("ep_api_key").value || "";
+    var protocol = (state.provider && state.provider.protocol) || "openai";
+
+    if (!baseUrl || !name) {
+      showStatus("provider-status", "Pick a provider above, or fill in the address and a name.", "err");
+      return;
+    }
+    button.disabled = true;
+    showStatus("provider-status", "Testing the connection...", "warn");
+
+    fetch("/api/external-endpoints", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: name,
+        base_url: baseUrl,
+        protocol: protocol,
+        api_key: apiKey,
+        display_label: (state.provider && state.provider.display_name) || name,
+        extra_config: (state.provider && state.provider.extra_config) || {},
+        subsystem_map: (state.provider && state.provider.default_capabilities) || null
+      })
+    })
+      .then(function (r) {
+        return r.json().then(function (body) { return { ok: r.ok, body: body }; });
+      })
+      .then(function (result) {
+        if (!result.ok) {
+          throw new Error((result.body && (result.body.detail || result.body.error)) || "the provider refused the connection");
+        }
+        var ep = (result.body && result.body.endpoint) || {};
+        var probe = (result.body && result.body.probe) || {};
+        var caps = probe.capabilities || ep.capabilities || {};
+        var model = probe.default_model || probe.model || ep.default_model || "";
+
+        var enable = caps.cortex === false
+          ? Promise.resolve()
+          : fetch("/api/external-endpoints/" + ep.id + "/enable", { method: "POST" });
+
+        return enable.then(function () {
+          return saveConfig("BASE_CORTEX", { engine: ep.name || name, model: model });
+        }).then(function () {
+          state.providerSaved = true;
+          var detail = [];
+          if (model) { detail.push("model " + model); }
+          var on = Object.keys(caps).filter(function (k) { return caps[k]; });
+          if (on.length) { detail.push(on.join(", ")); }
+          showStatus("provider-status",
+            "Connected and in use." + (detail.length ? " (" + detail.join(" · ") + ")" : ""), "ok");
+          note("Saved.", "ok");
+        });
+      })
+      .catch(function (err) {
+        showStatus("provider-status",
+          "Could not use that: " + (err && err.message ? err.message : err) +
+          ". Check the key and the address, then try again.", "err");
+      })
+      .then(function () { button.disabled = false; });
+  });
+
+  /* ---- finish ---- */
+  function complete(goToApp) {
+    return saveConfig("SETUP_COMPLETED", true).then(function () {
+      window.location.href = goToApp ? "/" : "/";
+    });
+  }
+
+  document.getElementById("finish").addEventListener("click", function () {
+    var button = this;
+    button.disabled = true;
+    showStatus("finish-status", "Saving...", "warn");
+    saveIdentity()
+      .then(savePlace)
+      .then(function () {
+        if (!state.providerSaved) {
+          showStatus("finish-status",
+            "Saved. Note: no AI provider is connected yet, so it has nothing to think with. " +
+            "Add one in Engines when you are ready.", "warn");
+        } else {
+          showStatus("finish-status", "All set. Opening the interface...", "ok");
+        }
+        return complete(true);
+      })
+      .catch(function (err) {
+        button.disabled = false;
+        showStatus("finish-status", "Something was not saved: " + (err && err.message ? err.message : err), "err");
+      });
+  });
+
+  document.getElementById("skip").addEventListener("click", function () {
+    complete(false).catch(function () { window.location.href = "/"; });
+  });
+
+  /* ---- prefill from the current configuration ---- */
+  fetch("/api/config")
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      var items = (data && (data.config || data.items || data)) || [];
+      if (!Array.isArray(items)) { return; }
+      var byKey = {};
+      items.forEach(function (item) {
+        if (item && item.key) { byKey[item.key] = item.value; }
+      });
+      var map = {
+        SYNTH_NAME: "synth_name", TRAINER_NAME: "trainer_name", SYNTH_PROFILE: "synth_profile",
+        PROMPT_LOCATION: "location", SCENE_NOTE: "scene_note", TZ: "tz", PROJECT_DEFAULT_LANGUAGE: "language"
+      };
+      Object.keys(map).forEach(function (key) {
+        var el = document.getElementById(map[key]);
+        if (!el || byKey[key] === undefined || byKey[key] === null) { return; }
+        if (!el.value) { el.value = String(byKey[key]); }
+      });
+    })
+    .catch(function () { /* the server-rendered values are already in place */ });
+
+  /* The browser knows the visitor's IANA zone; the server only knows the
+     machine's. If nothing has been chosen yet, trust the browser. */
+  (function () {
+    var select = document.getElementById("tz");
+    if (!select || select.value !== "UTC") { return; }
+    try {
+      var guess = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (guess && select.querySelector('option[value="' + guess + '"]')) { select.value = guess; }
+    } catch (e) { /* keep UTC */ }
+  })();
+})();
+</script>
+</body>
+</html>

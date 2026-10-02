@@ -638,7 +638,9 @@ class GeminiAdapter(BaseProtocolAdapter):
         except Exception as exc:
             return False, repr(exc)
 
-    async def probe_capabilities(self) -> dict[str, bool]:
+    async def probe_capabilities(
+        self, models: list[ModelInfo] | None = None
+    ) -> dict[str, bool]:
         caps: dict[str, bool] = {
             "cortex": False,
             "vox": False,
@@ -647,7 +649,8 @@ class GeminiAdapter(BaseProtocolAdapter):
             "vision": False,
         }
         try:
-            models = await self.list_models()
+            if models is None:
+                models = await self.list_models()
             if models:
                 caps["cortex"] = True
             for m in models:

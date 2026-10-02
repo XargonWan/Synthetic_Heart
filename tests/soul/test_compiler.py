@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -175,7 +175,13 @@ async def test_nightly_rollup_bootstraps_dsp() -> None:
 
 
 @pytest.mark.asyncio
-async def test_post_session_compile_adds_fallback_atomic_fact() -> None:
+async def test_post_session_compile_does_not_fabricate_atomic_facts() -> None:
+    """A cell with nothing distilled carries NO fact, not the line itself.
+
+    The old fallback stored ``Conversation|summary|<the verbatim trace>``, which
+    is why recall could only ever return raw transcript (and why the renderer had
+    to suppress a "Key facts:" that repeated the sentence above it).
+    """
     repo = InMemorySoulRepository()
     compiler = SoulCompiler(
         repository=repo,
@@ -193,9 +199,7 @@ async def test_post_session_compile_adds_fallback_atomic_fact() -> None:
     )
 
     assert len(ids) == 1
-    facts = repo.memcells[ids[0]].atomic_facts
-    assert facts
-    assert facts[0].startswith("Conversation|summary|")
+    assert repo.memcells[ids[0]].atomic_facts == []
 
 
 @pytest.mark.asyncio
@@ -449,6 +453,103 @@ async def test_run_curator_enforces_max_memories() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_curator_cap_evicts_old_cells_before_the_days_own() -> None:
+    """The over-cap eviction must not spend the newest cells first.
+
+    The grace window guards the low-salience REMOVE branch, but the cap sorted
+    by salience alone, and a calm cell written today scores about 0.2 there
+    (recency is capped at 0.2) against 0.28-0.37 for older emotional cells.
+    Measured live on 2026-09-22: every compile in the morning was followed
+    within minutes by a curator pass that deleted exactly the cells just
+    written, while the store sat pinned at the 500 cap.
+    """
+
+    repo = InMemorySoulRepository()
+    now = datetime.now(timezone.utc)
+
+    def _add(cell_id: str, *, age: timedelta, intensity: float, recalls: int) -> None:
+        repo.memcells[cell_id] = MemCell(
+            id=cell_id,
+            episodic_trace=f"Something happened: {cell_id}.",
+            atomic_facts=[],
+            emotional_tag=EmotionalTag(
+                state_snapshot={"joy": 0.9, "fear": 0.0, "sad": 0.0, "anger": 0.0},
+                dominant_emotion="joy",
+                intensity=intensity,
+                valence=0.9,
+            ),
+            foresight_signals=[],
+            event_timestamp=now - age,
+            session_id="telegram_bot:-5293915984",
+            explicit_importance=0.0,
+            retrieval_count=recalls,
+        )
+
+    for i in range(2):
+        _add(f"old-{i}", age=timedelta(days=60), intensity=0.9, recalls=3)
+    _add("this-morning", age=timedelta(hours=2), intensity=0.0, recalls=0)
+
+    compiler = SoulCompiler(
+        repository=repo,
+        memcell_extractor=FakeMemCellExtractor(),
+        dsp_extractor=FakeDspExtractor(),
+        dsp_builder=RuleBasedDspBuilder(),
+        summary_builder=RuleBasedSummaryBuilder(),
+        embedder=NoopEmbedder(),
+    )
+
+    result = await compiler.run_curator(current_date=now.date(), max_memories=2)
+
+    assert result.removed == 1
+    assert "this-morning" in repo.memcells, (
+        "the cap evicted the day's own memory in place of an older one: "
+        f"{sorted(repo.memcells)}"
+    )
+    assert len(repo.memcells) == 2
+
+
+@pytest.mark.asyncio
+async def test_run_curator_cap_still_evicts_when_everything_is_fresh() -> None:
+    """The grace window orders the eviction, it does not disable the cap."""
+
+    repo = InMemorySoulRepository()
+    now = datetime.now(timezone.utc)
+
+    for i in range(3):
+        repo.memcells[f"fresh-{i}"] = MemCell(
+            id=f"fresh-{i}",
+            episodic_trace=f"A calm thing happened {i}.",
+            atomic_facts=[],
+            emotional_tag=EmotionalTag(
+                state_snapshot={"joy": 0.1, "fear": 0.0, "sad": 0.0, "anger": 0.0},
+                dominant_emotion="joy",
+                intensity=0.1,
+                valence=0.1,
+            ),
+            foresight_signals=[],
+            event_timestamp=now - timedelta(hours=1 + i),
+            session_id="telegram_bot:-5293915984",
+            explicit_importance=0.0,
+            retrieval_count=0,
+        )
+
+    compiler = SoulCompiler(
+        repository=repo,
+        memcell_extractor=FakeMemCellExtractor(),
+        dsp_extractor=FakeDspExtractor(),
+        dsp_builder=RuleBasedDspBuilder(),
+        summary_builder=RuleBasedSummaryBuilder(),
+        embedder=NoopEmbedder(),
+    )
+
+    result = await compiler.run_curator(current_date=now.date(), max_memories=2)
+
+    assert result.removed == 1
+    assert result.retained == 2
+    assert len(repo.memcells) == 2
+
+
+@pytest.mark.asyncio
 async def test_rule_based_curator_classify_future_date_in_trace() -> None:
     curator = RuleBasedMemCellCurator()
     summary = MemCellSummary(
@@ -462,6 +563,64 @@ async def test_rule_based_curator_classify_future_date_in_trace() -> None:
     )
     decisions = await curator.classify([summary], current_date=date(2026, 5, 7))
     assert decisions[0][1] == CuratorDecision.KEEP_FUTURE
+
+
+@pytest.mark.asyncio
+async def test_curator_keeps_a_fresh_calm_cell_and_still_prunes_an_old_one() -> None:
+    """A new, unemotional, never-recalled cell must survive the curator.
+
+    Recency is 0.2 of the salience formula while the removal threshold is 0.4, so
+    without a grace period a calm new cell can never clear the bar: measured live,
+    all 8 cells compiled on 2026-09-18 were removed by the first nightly pass,
+    leaving only emotional or forward-looking memories. An old calm cell is still
+    pruned, so the grace period does not disable curation.
+    """
+    curator = RuleBasedMemCellCurator()
+    today = datetime.now(timezone.utc).date()
+
+    def _summary(cell_id: str, age: timedelta) -> MemCellSummary:
+        return MemCellSummary(
+            id=cell_id,
+            episodic_trace="User said the deploy went fine.",
+            event_timestamp=datetime.now(timezone.utc) - age,
+            retrieval_count=0,
+            explicit_importance=0.0,
+            emotional_intensity=0.0,
+            has_active_foresight=False,
+        )
+
+    decisions = dict(
+        await curator.classify(
+            [
+                _summary("fresh", timedelta(hours=2)),
+                _summary("stale", timedelta(days=30)),
+            ],
+            current_date=today,
+        )
+    )
+
+    assert decisions["fresh"] == CuratorDecision.KEEP_IMPORTANT
+    assert decisions["stale"] == CuratorDecision.REMOVE
+
+
+@pytest.mark.asyncio
+async def test_curator_grace_period_can_be_switched_off() -> None:
+    """An explicit zero grace period restores the old behaviour exactly."""
+    curator = RuleBasedMemCellCurator(min_age_seconds=0.0)
+    today = datetime.now(timezone.utc).date()
+    summary = MemCellSummary(
+        id="fresh-but-unprotected",
+        episodic_trace="User said the deploy went fine.",
+        event_timestamp=datetime.now(timezone.utc) - timedelta(hours=2),
+        retrieval_count=0,
+        explicit_importance=0.0,
+        emotional_intensity=0.0,
+        has_active_foresight=False,
+    )
+
+    decisions = await curator.classify([summary], current_date=today)
+
+    assert decisions[0][1] == CuratorDecision.REMOVE
 
 
 @pytest.mark.asyncio
@@ -616,3 +775,163 @@ async def test_dsp_builder_keeps_clean_profile_when_quiet() -> None:
     result = await builder.build_update(current_dsp=clean, extractions=[quiet])
 
     assert result == clean
+
+
+class _DistillingExtractor:
+    """Stands in for the LLM extractor: returns a paraphrase, not the transcript."""
+
+    def __init__(self) -> None:
+        self.transcripts: list[str] = []
+
+    async def extract_memcells(
+        self, *, transcript: str, current_date: date
+    ) -> list[MemCellExtractionModel]:
+        del current_date
+        self.transcripts.append(transcript)
+        return [
+            MemCellExtractionModel.model_validate(
+                {
+                    "episodic_trace": (
+                        "Scar confirmed the deploy worked and asked how it felt."
+                    ),
+                    "atomic_facts": ["User|confirmed|the deploy worked"],
+                    "emotional_tag": {
+                        "state_snapshot": {
+                            "joy": 0.0,
+                            "fear": 0.0,
+                            "sad": 0.0,
+                            "anger": 0.0,
+                        },
+                        "dominant_emotion": "neutral",
+                        "intensity": 0.0,
+                        "valence": 0.0,
+                    },
+                    "foresight_signals": [],
+                    "timestamp": datetime(2026, 4, 18, 13, 0, tzinfo=timezone.utc),
+                }
+            )
+        ]
+
+
+class _SilentExtractor:
+    """An extractor that finds nothing worth remembering."""
+
+    async def extract_memcells(
+        self, *, transcript: str, current_date: date
+    ) -> list[MemCellExtractionModel]:
+        del transcript, current_date
+        return []
+
+
+def _legacy_cell(cell_id: str, *, hours_ago: int) -> MemCell:
+    return MemCell(
+        id=cell_id,
+        episodic_trace=(
+            "Scar: okay it's finally deployed, the memcell issue should be mitigated now"
+        ),
+        atomic_facts=["Conversation|summary|Scar: okay it's finally deployed"],
+        emotional_tag=EmotionalTag(
+            state_snapshot={"joy": 0.0, "fear": 0.0, "sad": 0.0, "anger": 0.0},
+            dominant_emotion="neutral",
+            intensity=0.0,
+            valence=0.0,
+        ),
+        foresight_signals=[],
+        event_timestamp=datetime.now(timezone.utc) - timedelta(hours=hours_ago),
+        session_id="session-9",
+        embedding=[0.1] * 8,
+        retrieval_count=7,
+        explicit_importance=0.2,
+        consolidated=True,
+        scene_id="scene:1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_redistil_rewrites_a_legacy_cell_in_place() -> None:
+    """A legacy row keeps its identity; only the content becomes distilled."""
+    repo = InMemorySoulRepository()
+    legacy = _legacy_cell("session-9:1", hours_ago=40)
+    original_trace = legacy.episodic_trace
+    original_timestamp = legacy.event_timestamp
+    repo.memcells[legacy.id] = legacy
+    extractor = _DistillingExtractor()
+    compiler = SoulCompiler(
+        repository=repo,
+        memcell_extractor=extractor,
+        dsp_extractor=FakeDspExtractor(),
+        dsp_builder=RuleBasedDspBuilder(),
+        summary_builder=RuleBasedSummaryBuilder(),
+        embedder=NoopEmbedder(),
+    )
+
+    rewritten = await compiler.redistil_memcell(legacy, current_date=date(2026, 4, 18))
+
+    assert rewritten is True
+    stored = repo.memcells["session-9:1"]
+    assert stored.episodic_trace == (
+        "Scar confirmed the deploy worked and asked how it felt."
+    )
+    assert stored.atomic_facts == ["User|confirmed|the deploy worked"]
+    # Identity, history and emotion tagging are untouched.
+    assert stored.retrieval_count == 7
+    assert stored.scene_id == "scene:1"
+    assert stored.explicit_importance == 0.2
+    assert stored.consolidated is True
+    assert stored.event_timestamp == original_timestamp
+    assert stored.emotional_tag.dominant_emotion == "neutral"
+    # The cell's own text was what the extractor was asked to distil.
+    assert extractor.transcripts == [original_trace]
+
+
+@pytest.mark.asyncio
+async def test_redistil_leaves_a_cell_the_extractor_cannot_improve() -> None:
+    repo = InMemorySoulRepository()
+    legacy = _legacy_cell("session-9:2", hours_ago=40)
+    original_trace = legacy.episodic_trace
+    repo.memcells[legacy.id] = legacy
+    compiler = SoulCompiler(
+        repository=repo,
+        memcell_extractor=_SilentExtractor(),
+        dsp_extractor=FakeDspExtractor(),
+        dsp_builder=RuleBasedDspBuilder(),
+        summary_builder=RuleBasedSummaryBuilder(),
+        embedder=NoopEmbedder(),
+    )
+
+    rewritten = await compiler.redistil_memcell(legacy, current_date=date(2026, 4, 18))
+
+    assert rewritten is False
+    assert repo.memcells["session-9:2"].episodic_trace == original_trace
+
+
+@pytest.mark.asyncio
+async def test_redistil_pass_only_touches_cells_older_than_the_cutoff() -> None:
+    repo = InMemorySoulRepository()
+    old = _legacy_cell("session-9:old", hours_ago=40)
+    fresh = _legacy_cell("session-9:fresh", hours_ago=1)
+    repo.memcells[old.id] = old
+    repo.memcells[fresh.id] = fresh
+    compiler = SoulCompiler(
+        repository=repo,
+        memcell_extractor=_DistillingExtractor(),
+        dsp_extractor=FakeDspExtractor(),
+        dsp_builder=RuleBasedDspBuilder(),
+        summary_builder=RuleBasedSummaryBuilder(),
+        embedder=NoopEmbedder(),
+    )
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=5)
+
+    result = await compiler.redistil_memcells(
+        before=cutoff, current_date=date(2026, 4, 18)
+    )
+
+    assert result == {
+        "inspected": 1,
+        "rewritten": 1,
+        "skipped": 0,
+        "failed": 0,
+        "timed_out": 0,
+    }
+    assert repo.memcells["session-9:old"].episodic_trace.startswith("Scar confirmed")
+    assert repo.memcells["session-9:fresh"].episodic_trace.startswith("Scar: okay")

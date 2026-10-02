@@ -126,3 +126,39 @@ async def test_corrector_example_uses_canonical_interface_id_from_path(monkeypat
     assert example["type"] == "send_message"
     assert example["payload"]["interface_path"] == "telegram_bot/5208932647"
     assert 'message_telegram"' not in prompt
+
+
+@pytest.mark.asyncio
+async def test_corrector_example_canonical_without_any_interface_path(monkeypatch):
+    """Regression (langfuse feca9072-0abe-46ef-90da-f1409723088e): the Telegram
+    sender built the corrector context with the legacy display name
+    ``interface="telegram"`` and NO ``interface_path`` at all, so the
+    path-prefix override above had nothing to resolve and the example taught
+    ``message_telegram`` + ``telegram/5208932647`` again. The model copied both
+    verbatim, the action was unregistered, and the reply was never delivered.
+
+    The label ALONE must therefore be enough to reach the registered id — the
+    test above cannot catch this because it supplies the canonical path.
+    """
+    fake_plugin = _FakePlugin()
+
+    import core.plugin_instance as plugin_instance
+
+    monkeypatch.setattr(
+        plugin_instance, "get_plugin", lambda: fake_plugin, raising=False
+    )
+
+    await transport_layer.run_corrector_middleware(
+        text="not valid json",
+        bot=None,
+        # Exactly what the sender passed: a display label, no path.
+        context={"interface": "telegram"},
+        chat_id=5208932647,
+        thread_id=None,
+    )
+    prompt = fake_plugin.captured_prompt or ""
+    example = json.loads(prompt)["system_message"]["required_format"]["actions"][0]
+    assert example["type"] == "send_message"
+    assert example["payload"]["interface_path"] == "telegram_bot/5208932647"
+    assert "message_telegram" not in prompt
+    assert '"interface_path": "telegram/' not in prompt

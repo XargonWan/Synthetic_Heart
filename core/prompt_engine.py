@@ -139,6 +139,26 @@ USE_PERSONA_IN_SYSTEM_PROMPTS = config_registry.get_var(
     value_type=bool,
 )
 
+# Standing scene note — the physical setting of the household stated once and
+# carried into every prompt as the [Setting] block (see _PLUGIN_CONTEXT_BLOCKS).
+# It exists because the transcript alone cannot say where everyone is or how the
+# conversation is physically happening, so the model invents a medium (a phone)
+# when the channel is a chat app. Kept in config so the setting can be restated
+# without a code change. Blank disables the block entirely.
+SCENE_NOTE = config_registry.get_var(
+    "SCENE_NOTE",
+    "",
+    label="Standing scene note",
+    description=(
+        "Persistent statement of where everyone physically is and how the "
+        "conversation is happening (same room, speaking aloud, ...). Rendered "
+        "as the [Setting] block on every ordinary prompt. Blank disables it."
+    ),
+    group="core",
+    component="prompt_engine",
+    value_type=str,
+)
+
 
 def minify_actions_block(
     available_actions: dict,
@@ -243,14 +263,24 @@ def minify_actions_block(
 
 
 def _memory_merge_key(memory: Any) -> str:
+    """Merge identity of a memory entry: its TEXT, not its row id.
+
+    The store holds pairs of rows with identical content (live, 2026-09-19:
+    ``memories`` ids 1690/1691, 1692/1693 and 1694/1695 were written twice by the
+    same pass), and keying on the id kept both copies, so one sentence occupied
+    two of the limited memory slots in every prompt. Two rows holding the same
+    text are the same memory whatever their ids are.
+    """
+
     if isinstance(memory, dict):
-        source = memory.get("source")
-        item_id = memory.get("id")
         snippet = (
             memory.get("snippet") or memory.get("content") or memory.get("summary")
         )
-        return f"{source}::{item_id}::{snippet}"
-    return str(memory)
+        text = " ".join(str(snippet or "").split()).lower()
+        if text:
+            return text
+        return f"{memory.get('source')}::{memory.get('id')}"
+    return " ".join(str(memory).split()).lower()
 
 
 def _merge_memory_entries(existing: list[Any], incoming: list[Any]) -> list[Any]:
@@ -336,10 +366,20 @@ def _action_scopes(action_def: Any) -> set[str]:
     Resolution order (fail-safe, structural — never message text):
     1. an explicit ``scope`` key on the (normalized) action schema, either a
        string or a list/tuple/set of strings;
-    2. otherwise a transitional fallback derived from the action-name prefix
+    2. otherwise ANY declared ``external_effects`` puts the action on the
+       ``agent`` scope: an action with real-world side effects is executed
+       deliberately, by the Agent Lane's tool surface (built from
+       ``tool_registry.all_tools()``), not advertised in the Fast-Lane chat
+       catalog. This is the action's own structural declaration, never a name or
+       keyword match. It is what keeps whole integration suites out of every
+       chat prompt: on one ordinary Telegram turn the catalog carried 64 actions,
+       32 of them the agpeer and Home Assistant suites (60% of the catalog text),
+       all of which declare ``external_effects``. A chat reply
+       (``send_message``) deliberately declares none, so it is unaffected;
+    3. otherwise a transitional fallback derived from the action-name prefix
        (``vessel_*`` => ``vessel``, ``agent_*`` => ``agent``) — this is stable
        structural namespacing, not keyword routing;
-    3. otherwise the default ``{"core"}`` (always visible).
+    4. otherwise the default ``{"core"}`` (always visible).
     """
     if isinstance(action_def, dict):
         declared = action_def.get("scope")
@@ -349,6 +389,13 @@ def _action_scopes(action_def: Any) -> set[str]:
             scopes = {str(s).strip() for s in declared if str(s).strip()}
             if scopes:
                 return scopes
+        effects = action_def.get("external_effects")
+        if isinstance(effects, str) and effects.strip():
+            return {"agent"}
+        if isinstance(effects, (list, tuple, set)) and any(
+            str(e).strip() for e in effects
+        ):
+            return {"agent"}
     return set(_DEFAULT_ACTION_SCOPES)
 
 
@@ -356,7 +403,9 @@ def _action_scopes_by_name(action_name: str, action_def: Any) -> set[str]:
     """``_action_scopes`` with the name-prefix fallback applied.
 
     Kept separate so the prefix fallback only kicks in when no explicit scope is
-    declared, preserving the primacy of the schema-declared value.
+    declared, preserving the primacy of the schema-declared value. When neither a
+    scope nor a namespacing prefix applies, ``_action_scopes`` still has the last
+    word: its ``external_effects`` rule (agent scope) then the core default.
     """
     if isinstance(action_def, dict) and action_def.get("scope"):
         return _action_scopes(action_def)
@@ -364,7 +413,7 @@ def _action_scopes_by_name(action_name: str, action_def: Any) -> set[str]:
     for prefix, scope in _SCOPE_NAME_PREFIXES:
         if name.startswith(prefix):
             return {scope}
-    return set(_DEFAULT_ACTION_SCOPES)
+    return _action_scopes(action_def)
 
 
 # Synthetic interface prefixes used by the outbound-beat plumbing (Grillo
@@ -467,6 +516,59 @@ def _derive_outbound_beat_target_interfaces(
                 paths.add(head)
 
     return {path.split("/", 1)[0].strip() for path in paths if path.strip()}
+
+
+def _derive_instruction_route(
+    message: Any | None,
+    context_memory: Any | None,
+    interface_path: str | None,
+    beat_type: str,
+    is_grillo_internal: bool,
+) -> str:
+    """Pick the instruction route for this turn, structurally.
+
+    The route selects which shared rules render (``core.prompt_instructions``).
+    It is derived ONLY from flags the caller has already computed — the beat
+    type the beat declared, the Grillo-internal verdict, the Vessel probe and
+    the input source. Message *content* is never inspected, so this stays safe
+    in a multi-language deployment and cannot be steered by what someone says.
+
+    Precedence matters: an internal beat is never also a chat turn, and an
+    embodiment turn replies in-world rather than through a chat interface (its
+    route carries the in-world speak clause as an overlay).
+
+    Fail-safe: anything unexpected resolves to ``ROUTE_CHAT``, whose rule set is
+    the superset, so a misclassification costs characters rather than a rule.
+    """
+    from core.prompt_instructions import (
+        ROUTE_CHAT,
+        ROUTE_CHAT_VOICE,
+        ROUTE_GRILLO_INTERNAL,
+        ROUTE_OBSERVER,
+        ROUTE_VESSEL,
+    )
+
+    try:
+        # The proactive outreach beat: it must send a message, so it keeps the
+        # reply obligation, but not the human-chat worked example (its own
+        # constants carry one).
+        if str(beat_type or "") == "observer":
+            return ROUTE_OBSERVER
+        if is_grillo_internal:
+            return ROUTE_GRILLO_INTERNAL
+        from core.vessel_focus import is_vessel_turn
+
+        # NOTE: the third argument is the routing interface_path, not the
+        # interface name. `is_vessel_turn` only consults `message.interface_path`
+        # when that argument is None, so passing anything else here would hide a
+        # vessel turn's real path and silently drop the in-world speak overlay.
+        if is_vessel_turn(message, context_memory, interface_path):
+            return ROUTE_VESSEL
+        if isinstance(context_memory, dict) and context_memory.get("is_voice_input"):
+            return ROUTE_CHAT_VOICE
+    except Exception as exc:  # pragma: no cover - defensive
+        log_debug(f"[json_prompt] instruction-route probe failed: {exc}")
+    return ROUTE_CHAT
 
 
 def _resolve_turn_scopes(
@@ -638,6 +740,71 @@ def _dedupe_context_segments(text: str) -> str:
     return " | ".join(kept)
 
 
+_MEMORY_SOURCE_LABELS = {
+    "memories": "long-term memory",
+    "ai_diary": "diary",
+    "chat_history": "chat history",
+}
+
+
+# The interfaces cache the persona's OWN messages under the canonical label
+# "self" (Telegram, Discord and the Vessel all do), so a recalled raw line that
+# carries one of these labels is the synth's own words and must never render as
+# a third party's.
+_SELF_SPEAKER_LABELS = frozenset({"self", "me", "assistant", "synt", "synth", "bot"})
+
+
+def _short_iso_date(value: Any) -> str:
+    """Return the ``YYYY-MM-DD`` part of an ISO timestamp, or ""."""
+
+    text = str(value or "").strip()
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        return text[:10]
+    return ""
+
+
+def _label_stored_memory(entry: dict, body: str) -> str:
+    """Prefix a stored-memory hit with where, when and WHO it came from.
+
+    Hits from the ``memories`` / ``ai_diary`` / ``chat_history`` tiers arrive as
+    dicts, and rendering only their text dropped the source, the timestamp and
+    the speaker, so a raw line lifted from another conversation reached the prompt
+    looking exactly like a remembered fact: no date, no provenance, and nothing to
+    say it was not the model's own recollection. SOUL recall entries carry their own
+    wrapper, which is what made the unwrapped ones stand out.
+
+    The speaker matters most on the chat-history tier, which replays raw lines
+    from any conversation: "picks the little wifey up like a princess" is the
+    human's own act, and handed over WITHOUT a speaker it reads as the synth's
+    memory of having done it. Measured live (2026-09-23, trace 11b67827): two of
+    the three raw chat lines in one turn's block were the human's and 2B's words
+    rendered as the synth's own recollections, and the reply that turn addressed
+    the human as "wife" — the role those lines put in its own voice.
+    """
+
+    source = str(entry.get("source") or "").strip()
+    label = (
+        _MEMORY_SOURCE_LABELS.get(source) or source.replace("_", " ") or "stored memory"
+    )
+    qualifiers = [label]
+    chat = str(entry.get("interface_path") or "").strip()
+    if chat:
+        qualifiers.insert(0, chat)
+    speaker = " ".join(str(entry.get("speaker") or "").split())
+    if speaker:
+        qualifiers.append(
+            "your own line"
+            if speaker.casefold() in _SELF_SPEAKER_LABELS
+            else f"said by {speaker}"
+        )
+
+    prefix = "Recalled memory"
+    when = _short_iso_date(entry.get("timestamp"))
+    if when:
+        prefix += f" from {when}"
+    return f"{prefix} ({', '.join(qualifiers)}): {body}"
+
+
 def _humanize_context_entry(entry: Any, *, kind: str) -> str | None:
     if isinstance(entry, dict) and kind == "memories":
         for key in ("snippet", "content", "summary", "text"):
@@ -646,7 +813,7 @@ def _humanize_context_entry(entry: Any, *, kind: str) -> str | None:
                 continue
             normalized_value = _dedupe_context_segments(str(value))
             if normalized_value:
-                return normalized_value
+                return _label_stored_memory(entry, normalized_value)
 
     text = str(entry or "").strip()
     if not text:
@@ -728,6 +895,65 @@ def _sanitize_context_entries(entries: list[Any], *, kind: str) -> list[str]:
     return sanitized
 
 
+# A cross-chat line and the current turn's own text can carry the SAME message.
+# The Grillo observer's snippet feed is *itself* the message being answered on a
+# beat turn, and those snippets name the same lines the cross-chat block renders
+# from the chat map; a line that reached the prompt through both routes is then
+# read as the person repeating themselves (live 2026-09-28: the DM outreach wrote
+# "'Fine' again. Second time in four minutes, husband" off a single "I'm fine" the
+# human had sent once). The comparison is structural — punctuation, spacing and
+# case are stripped, then the quoted body is substring-matched — so it holds in
+# any language and never inspects meaning.
+_DUP_FINGERPRINT_RE = re.compile(r"[\W_]+", re.UNICODE)
+# Bodies shorter than this are not used for the match: a two-letter line ("ok",
+# "yes") occurs inside almost any turn text, and dropping a legitimately
+# different line would be worse than rendering one short duplicate.
+_MIN_DUP_BODY_CHARS = 16
+
+
+def _duplicate_fingerprint(value: Any) -> str:
+    """Case/punctuation/whitespace-folded form of a message, for duplicate checks."""
+    return _DUP_FINGERPRINT_RE.sub(" ", str(value or "").casefold()).strip()
+
+
+def _quoted_history_body(line: Any) -> str:
+    """The message text a rendered history line quotes, or ``""`` when it has none.
+
+    Lines render as ``[from <room>] [<ts>] <Sender>: "<text>"`` with an optional
+    reply quote between the sender and the body, so the body runs from the LAST
+    ``: "`` to the closing quote — exactly the text the model reads as "what this
+    person said".
+    """
+    text = str(line or "")
+    marker = text.rfind(': "')
+    if marker == -1:
+        return ""
+    body = text[marker + 3 :].rstrip()
+    if body.endswith('"'):
+        body = body[:-1]
+    return body.strip()
+
+
+def _drop_cross_chat_lines_repeating_turn(
+    lines: list[str], current_turn_text: Any
+) -> list[str]:
+    """Drop cross-chat lines whose message is already inside the current turn.
+
+    Returns ``lines`` unchanged when there is no turn text to compare against
+    (diary/thought entries carry no quoted body, so they are always kept).
+    """
+    turn = _duplicate_fingerprint(current_turn_text)
+    if not turn:
+        return lines
+    kept: list[str] = []
+    for line in lines:
+        body = _duplicate_fingerprint(_quoted_history_body(line))
+        if len(body) >= _MIN_DUP_BODY_CHARS and body in turn:
+            continue
+        kept.append(line)
+    return kept
+
+
 _EXPLICIT_RUNTIME_FACT_REQUEST_RE = re.compile(
     r"(?ix)\b("
     r"what(?:'s| is)?\s+(?:the\s+)?(?:time|date|day|timezone|location|weather)\b|"
@@ -771,6 +997,35 @@ def _build_soul_user_profile_prefix(context_section: dict[str, Any]) -> str:
     return "[About the person you're talking to]\n" + text + "\n"
 
 
+def _build_speaker_declaration_prefix() -> str:
+    """Build the who-is-who block for an autonomous (Grillo beat) turn.
+
+    A beat's standing profile is suppressed on purpose (see ``build_json_prompt``:
+    a stale profile fact was once answered as the current ask), which left NOTHING
+    in the prompt saying who the human is — while the beat's chat snippets carry
+    only the human's own first-person lines (the persona's own lines are dropped
+    from the snippet pool so a small model cannot talk to itself). Measured live
+    (trace 3499288d, 2026-09-23 10:37Z): the observer beat's outgoing message to
+    the DM was written in the HUMAN's voice and addressed him as "wife", while the
+    same turn's diary (internal) referred to him as "him" — the role flip the user
+    reported. The deployment's own speaker declaration
+    (``SOUL_SPEAKER_IDENTITIES``, the same text the DSP/memcell extractors get) is
+    authoritative and identity-only: it names people and never asks for anything,
+    so it is safe exactly where the standing profile is not. Emits nothing when
+    the deployment declared nobody, keeping the previous behaviour.
+    """
+    try:
+        declared = str(
+            config_registry.get_value("SOUL_SPEAKER_IDENTITIES", "", value_type=str)
+            or ""
+        ).strip()
+    except Exception:
+        return ""
+    if not declared:
+        return ""
+    return "[Who is who]\n" + declared + "\n"
+
+
 def _build_soul_turn_delta_prefix(context_section: dict[str, Any]) -> str:
     """Build the per-turn SOUL mood-delta prefix for the current user turn.
 
@@ -812,10 +1067,257 @@ def _build_soul_turn_delta_prefix(context_section: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Reality Anchor helpers — shared by the system block and the per-turn line
+#
+# These are deliberately one pair of formatters used by BOTH the full
+# `[SYSTEM: REALITY ANCHOR]` block in `_build_context_summary` and the compact
+# per-turn line on `RuntimeContext.reality_anchor`. Two independent formatters
+# would let the block and the line disagree about the date, which is worse than
+# having no anchor at all.
+# ---------------------------------------------------------------------------
+
+_REALITY_ANCHOR_HEADER = "[SYSTEM: REALITY ANCHOR]"
+
+
+def _pretty_anchor_date(date_val: str, day_of_week: str = "") -> str:
+    """Render ``2026-04-20`` as ``April 20, 2026``, optionally ``Monday, …``."""
+    nice_date = date_val
+    try:
+        nice_date = datetime.strptime(date_val, "%Y-%m-%d").strftime("%B %d, %Y")
+    except Exception:
+        pass
+    return f"{day_of_week}, {nice_date}" if day_of_week else nice_date
+
+
+def _pretty_anchor_time(time_val: str) -> str:
+    """Render ``21:27`` as ``9:27 PM`` (falling back to the raw value)."""
+    try:
+        return datetime.strptime(time_val, "%H:%M").strftime("%I:%M %p").lstrip("0")
+    except Exception:
+        return time_val
+
+
+def _build_current_turn_anchor(context_section: dict[str, Any]) -> str:
+    """Build the compact one-line Reality Anchor duplicate for the current turn.
+
+    The full anchor block built by :func:`_build_context_summary` lives in
+    ``PromptRequest.context_summary``, which renderers merge into the *system*
+    message — on a long conversation that block can sit thousands of characters
+    away from the text being generated. This returns the same temporal facts
+    (date + weekday, exact time + part of day, season, location) compressed to a
+    single line, which the renderers place directly above the current user turn.
+
+    The exact clock IS included: the anchor is the authoritative temporal context
+    (that is what ``TIME AUTHORITY`` names), and "what time is it / what is the
+    date" is a recurring need that otherwise costs a guess. The
+    ``RUNTIME STYLE``/``TIME AUTHORITY`` rules remain the guard against
+    volunteering it in ordinary replies.
+
+    Deliberately omitted: the stable boilerplate ``Temporal Delta`` sentence,
+    which the system block already carries. Returns ``""`` when no temporal field
+    is available, so a turn without runtime facts contributes nothing.
+    """
+    fields: list[str] = []
+
+    date_val = str(context_section.get("date") or "").strip()
+    if date_val:
+        fields.append(
+            _pretty_anchor_date(
+                date_val, str(context_section.get("day_of_week") or "").strip()
+            )
+        )
+
+    time_val = str(context_section.get("time") or "").strip()
+    time_of_day = str(context_section.get("time_of_day") or "").strip()
+    if time_val:
+        nice_time = _pretty_anchor_time(time_val)
+        fields.append(f"{nice_time} ({time_of_day})" if time_of_day else nice_time)
+    elif time_of_day:
+        fields.append(time_of_day)
+
+    season = str(context_section.get("season") or "").strip()
+    if season:
+        fields.append(season)
+
+    location = str(context_section.get("location") or "").strip()
+    if location:
+        fields.append(location)
+
+    if not fields:
+        return ""
+
+    return f"{_REALITY_ANCHOR_HEADER} " + " · ".join(fields)
+
+
+# Plugin-injected context keys that this renderer knows how to render.
+#
+# ``get_static_injection()`` merges a plugin's dict into ``context_section``, but
+# a key is only visible to the model if a renderer consumes it: anything nothing
+# reads is dropped silently. A live Home Assistant block was built on every turn
+# and never reached the prompt that way, and the same happened to her dream, the
+# avatar's expression protocol and the upcoming-events block; all three are
+# rendered below now.
+# Add a plugin's key here when its block must appear in the ordinary chat and
+# beat prompt, and pin it in tests/test_plugin_context_blocks.py.
+#
+# ``scene`` is not plugin data: it is the deployment's standing scene note
+# (``SCENE_NOTE``), added to the injection dict by
+# ``core.action_parser._add_core_injections`` — the physical setting of a
+# household is configuration, not a sensor reading. It is listed first so the
+# model meets the setting before the ambient blocks, and it renders on every
+# route that consumes this table.
+_PLUGIN_CONTEXT_BLOCKS: tuple[tuple[str, str, str | None], ...] = (
+    ("scene", "[Setting]", None),
+    ("home", "[Home]", None),
+    ("home_weather", "[Weather]", "weather"),
+    ("home_location", "[House]", "location"),
+    # A block a plugin builds for the model and that no renderer consumed: it was
+    # written, gathered, merged and dropped on every turn.
+    # ``todays_dream`` is grillo_dream's dream for today (present from the 05:00
+    # beat until GRILLO_DREAM_INJECT_UNTIL), and ``facial_expression_guidance``
+    # is the facial_expression_plugin teaching the ``[em_NAME:intensity]`` tag
+    # protocol that drives the avatar's face through the Karada state server.
+    ("todays_dream", "[Today's dream]", None),
+    ("facial_expression_guidance", "[Facial expressions]", None),
+    # ``upcoming_events`` (plugins/event_plugin) is the third block in that state:
+    # the plugin writes "upcoming events (next N days) (informational only, do not
+    # act unless relevant)", which is addressed to the model, and nothing rendered
+    # it. Its own action path is unaffected; only the ordinary prompt gains the
+    # lines, and only while an event falls inside the lookahead window.
+    ("upcoming_events", "[Upcoming events]", None),
+)
+
+# Injected keys that some renderer already consumes. The drop detector in
+# ``build_prompt_request`` names the keys outside this set once per process, so a
+# plugin whose block never reaches a prompt stops being invisible. ``weather``
+# and ``participants`` are listed because the LIVE route renders them
+# (``build_live_prompt_request``); ordinary chat and beat turns do not carry
+# them.
+_RENDERED_CONTEXT_KEYS: frozenset[str] = frozenset(
+    {
+        "date",
+        "time",
+        "day_of_week",
+        "season",
+        "location",
+        "time_of_day",
+        "history_current_chat",
+        "history_scope",
+        "voice_channel_id",
+        "gasmask_protection",
+        "soul_temporal_context",
+        "persona_preferences",
+        "self_growth",
+        "history_recent",
+        "thoughts",
+        "memories",
+        "soul_active_foresight",
+        "soul_session_state",
+        "soul_user_profile",
+        "soul_turn_emotion_delta",
+        "persona",
+        "soul_recalled_memories",
+        "latest_diary_entries",
+        "emotion_state",
+        "available_emotions",
+        "current_emotions_nl",
+        "participants",
+        "weather",
+        "capability_drops",
+        "recon",
+        "recon_instructions",
+    }
+) | frozenset(key for key, _heading, _legacy in _PLUGIN_CONTEXT_BLOCKS)
+
+# Keys already reported by the drop detector, so it logs once per process.
+_WARNED_UNRENDERED_KEYS: set[str] = set()
+
+
+def _apply_plugin_block_supersedes(
+    section: dict[str, Any], present_keys: Any
+) -> list[str]:
+    """Drop legacy keys that a present plugin block supersedes.
+
+    A plugin block may carry the same information a built-in provider injects
+    under a different key (Home Assistant supplies the weather and the house's
+    location, while ``weather_plugin`` injects ``weather`` and the time plugin
+    injects ``location``). When the plugin's block is present its value wins and
+    the legacy key is dropped, so the model is never told two different stories;
+    when the block is absent nothing is touched and the built-in provider keeps
+    working exactly as before.
+
+    Returns the dropped legacy keys (for logging/tests).
+    """
+    if not isinstance(section, dict):
+        return []
+    try:
+        present = {str(key) for key in present_keys}
+    except TypeError:
+        return []
+    dropped: list[str] = []
+    for key, _heading, legacy in _PLUGIN_CONTEXT_BLOCKS:
+        if not legacy or key not in present:
+            continue
+        value = section.get(key)
+        if not (isinstance(value, str) and value.strip()):
+            continue
+        if legacy in section:
+            section.pop(legacy, None)
+            dropped.append(legacy)
+    return dropped
+
+
+def _unrendered_injection_keys(keys: Any) -> list[str]:
+    """Return injected keys that no renderer consumes (drop detector)."""
+    try:
+        candidates = {str(key) for key in keys}
+    except TypeError:
+        return []
+    return sorted(key for key in candidates if key not in _RENDERED_CONTEXT_KEYS)
+
+
+def _temporal_short_stamp(value: Any) -> str:
+    """Trim a note's ISO bound to the minute, for the temporal block."""
+    text = ""
+    if isinstance(value, str):
+        text = value.strip()
+    elif hasattr(value, "isoformat"):
+        text = value.isoformat()
+    if not text:
+        return ""
+    return text[:16].replace("T", " ")
+
+
+def _temporal_note_window(entry: Any) -> str:
+    """Render a situational note's own validity window into the block.
+
+    A note's summary is prose written on the day the note was filed, so it can
+    still say "the wedding is tomorrow" days after the fact (live, 2026-09-23:
+    the block asserted `[TSC EVENT] The wedding is tomorrow (2026-09-23)` on the
+    day the human had already told the persona the wedding was two mornings
+    earlier). The window the note was filed FOR is printed next to the summary
+    so the claim can be read against the Reality Anchor's current date. A note
+    whose producer supplies no bounds renders exactly as it did before.
+    """
+    if not isinstance(entry, dict):
+        return ""
+    start = _temporal_short_stamp(entry.get("valid_from"))
+    end = _temporal_short_stamp(entry.get("valid_until"))
+    if start and end:
+        return f" [{start} -> {end}]"
+    if end:
+        return f" [until {end}]"
+    if start:
+        return f" [from {start}]"
+    return ""
+
+
 def _build_context_summary(
     context_section: dict[str, Any],
     is_grillo_internal: bool = False,
     include_explicit_runtime_facts: bool = False,
+    current_turn_text: Any = "",
 ) -> str:
     """Format moderately-stable context parts into a plain text block.
 
@@ -837,27 +1339,14 @@ def _build_context_summary(
     _season = str(context_section.get("season") or "").strip()
     _loc_val = str(context_section.get("location") or "").strip()
 
-    anchor_lines = ["[SYSTEM: REALITY ANCHOR]"]
+    anchor_lines = [_REALITY_ANCHOR_HEADER]
     if _date_val:
-        nice_date = _date_val
-        try:
-            dt_parsed = datetime.strptime(_date_val, "%Y-%m-%d")
-            nice_date = dt_parsed.strftime("%B %d, %Y")
-        except Exception:
-            pass
-        if _day_of_week:
-            anchor_lines.append(f"- Current Date: {_day_of_week}, {nice_date}")
-        else:
-            anchor_lines.append(f"- Current Date: {nice_date}")
+        anchor_lines.append(
+            f"- Current Date: {_pretty_anchor_date(_date_val, _day_of_week)}"
+        )
 
     if _time_val:
-        nice_time = _time_val
-        try:
-            dt_parsed = datetime.strptime(_time_val, "%H:%M")
-            nice_time = dt_parsed.strftime("%I:%M %p").lstrip("0")
-        except Exception:
-            pass
-        anchor_lines.append(f"- Current Time: {nice_time}")
+        anchor_lines.append(f"- Current Time: {_pretty_anchor_time(_time_val)}")
 
     if _season:
         anchor_lines.append(f"- Season: {_season}")
@@ -880,9 +1369,10 @@ def _build_context_summary(
     temporal_context = context_section.get("soul_temporal_context")
     if temporal_context:
         tc_lines = [
-            "- [TSC %s] %s"
+            "- [TSC %s]%s %s"
             % (
                 entry.get("note_type", "?"),
+                _temporal_note_window(entry),
                 entry.get("summary", entry.get("subject", "")),
             )
             for entry in temporal_context[:8]
@@ -903,11 +1393,26 @@ def _build_context_summary(
             "current sense of self.\n" + self_growth
         )
 
+    # Plugin-supplied blocks (see _PLUGIN_CONTEXT_BLOCKS): a plugin's injected
+    # string only reaches the model because it is rendered HERE, and a block that
+    # supersedes a built-in provider's key has already dropped it above.
+    for _plugin_key, _plugin_heading, _plugin_legacy in _PLUGIN_CONTEXT_BLOCKS:
+        _plugin_block = str(context_section.get(_plugin_key) or "").strip()
+        if _plugin_block:
+            parts.append(f"{_plugin_heading}\n{_plugin_block}")
+
     # Grillo internal beats skip cross-chat history and participants
     if not is_grillo_internal:
         history_recent = _sanitize_context_entries(
             list(context_section.get("history_recent") or []),
             kind="history_recent",
+        )
+        # A line already present in the message being answered (the observer
+        # snippet feed on a beat turn carries the same lines) must not be rendered
+        # a second time: two copies of one message read as the person repeating
+        # themselves, and the model then says so out loud.
+        history_recent = _drop_cross_chat_lines_repeating_turn(
+            history_recent, current_turn_text
         )
         if history_recent:
             parts.append("[Recent context from other conversations]")
@@ -915,7 +1420,11 @@ def _build_context_summary(
                 "- NOTE: these messages come from OTHER chats you take part in. "
                 "The people named here might NOT be participants in the current conversation. "
                 "Do not name-drop them to the current interlocutor or assume they are known; "
-                "only reference them if the current user brings them up first."
+                "only reference them if the current user brings them up first. "
+                "Every line names its own speaker: 'self (you)' is a message YOU wrote "
+                "in that chat, any other label is that person's words. Never repeat "
+                "another person's line as the current interlocutor's, and never ask "
+                "them to explain wording that is not theirs."
             )
             for line in history_recent:
                 parts.append(f"- {line}")
@@ -936,12 +1445,14 @@ def _build_context_summary(
         kind="memories",
     )
     if not is_grillo_internal:
-        if memories:
-            parts.append(
-                "[Memory honesty notice]\n"
-                "The memories below are recalled internal records. They can be incomplete, stale, or reconstructed. "
-                "If a detail is not clearly supported, acknowledge uncertainty instead of inventing a recollection."
-            )
+        # NOTE: the former `[Memory honesty notice]` block was removed here. It
+        # stated the same obligation as RULE_MEMORY_HONESTY in the instruction
+        # block ("can be incomplete, stale or reconstructed" / "say so rather
+        # than inventing a recollection"), so the prompt carried it twice: once
+        # next to the memories and once in the rules. The two are merged into
+        # that single rule, which renders on every route - including turns with
+        # no memory block, where the honesty obligation matters most. See
+        # core/prompt_instructions/rules.py (RULE_MEMORY_HONESTY).
         parts.append("[Relevant memories]")
         for m in memories:
             snippet = str(m)
@@ -1061,6 +1572,13 @@ def _history_to_turns(
         if not content.strip():
             continue
         sender_lower = sender.lower()
+        # The history renderer spells the persona's own lines out for the reader
+        # ("self (you)", see core/history_engine.py::_render_speaker_label), so
+        # the canonical token has to be recovered BEFORE the role test: without
+        # this the persona's own past replies parse as the HUMAN's turns and the
+        # messages array hands its own words back to it as his (measured
+        # 2026-09-24: a decorated line came back role="user").
+        sender_lower = re.sub(r"\s*\((?:you|the persona)\)$", "", sender_lower).strip()
         is_peer = False
         if sender_lower in all_synth_names:
             role = "assistant"
@@ -1476,6 +1994,57 @@ def _truncate_attachment_text(text: str) -> tuple[str | None, bool]:
     return cleaned[:_ATTACHMENT_TEXT_CHAR_LIMIT].rstrip() + "\n[... truncated]", True
 
 
+def _scoped_actions_for_prompt(
+    raw_actions: dict[str, Any],
+    prompt_dict: Any,
+    *,
+    interface_name: str | None,
+    interface_path: str | None,
+    message: Any,
+    allowed_action_types: set[str] | None,
+) -> dict[str, Any]:
+    """Return only the action definitions the prompt actually offers.
+
+    The bridge (``cortex_bridge._inject_actions_into_prompt``) renders these
+    manifests into the ``=== AVAILABLE ACTIONS ===`` text catalog the model
+    reads, so they must be the same set the prompt dict carries. Built from the
+    raw registry they were not: ``build_json_prompt`` scope-filtered the dict's
+    ``actions`` key, and the *text* catalog was rendered from the unfiltered
+    registry, so every Fast-Lane turn advertised the whole catalog. Measured on
+    one ordinary Telegram turn (trace ``eaf4fd28``): 64 actions, of which 18
+    ``agpeer_*``, 14 ``hass_*`` and ``vessel_connect`` — an action the per-turn
+    scope gate exists precisely to hide.
+
+    ``prompt_dict["actions"]`` is the scope-filtered catalog computed by
+    ``build_json_prompt`` (where the full context is available), so its name set
+    is authoritative here; the identical gate is re-run when that key is absent.
+
+    Fail-safe: on any error the unfiltered set is returned, so a failure widens
+    the catalog rather than stripping a capability.
+    """
+    scoped: dict[str, Any] = dict(raw_actions)
+    try:
+        names = prompt_dict.get("actions") if isinstance(prompt_dict, dict) else None
+        if isinstance(names, dict) and names:
+            scoped = {k: v for k, v in scoped.items() if k in names}
+        else:
+            turn_scopes = _resolve_turn_scopes(message, None, interface_path)
+            in_scope = _derive_default_prompt_action_types(
+                scoped,
+                interface_name,
+                turn_scopes=turn_scopes,
+                outbound_target_interfaces=None,
+            )
+            if in_scope and len(in_scope) < len(scoped):
+                scoped = {k: v for k, v in scoped.items() if k in in_scope}
+        if allowed_action_types is not None:
+            scoped = {k: v for k, v in scoped.items() if k in allowed_action_types}
+    except Exception as exc:
+        log_debug(f"[json_prompt] action scope filter skipped: {exc}")
+        return dict(raw_actions)
+    return scoped
+
+
 def _assemble_prompt_request(  # noqa: PLR0913
     prompt_dict: dict[str, Any],
     context_section: dict[str, Any],
@@ -1531,6 +2100,10 @@ def _assemble_prompt_request(  # noqa: PLR0913
         include_explicit_runtime_facts=(
             is_grillo_internal or _turn_requests_explicit_runtime_facts(text)
         ),
+        # The turn being answered is the reference for the cross-chat block: a
+        # line it already carries is not repeated there (see
+        # _drop_cross_chat_lines_repeating_turn).
+        current_turn_text=text,
     )
 
     # ── Conversation history ─────────────────────────────────────────────────
@@ -1653,6 +2226,7 @@ def _assemble_prompt_request(  # noqa: PLR0913
         is_grillo_beat=is_grillo_internal,
         beat_type=beat_type or None,
         addressee_note=addressee_note,
+        reality_anchor=_build_current_turn_anchor(context_section),
     )
 
     # ── Tool declarations ────────────────────────────────────────────────────
@@ -1664,10 +2238,14 @@ def _assemble_prompt_request(  # noqa: PLR0913
         raw_actions: dict[str, Any] = dict(
             core_initializer.actions_block.get("available_actions", {}) or {}
         )
-        if allowed_action_types is not None:
-            raw_actions = {
-                k: v for k, v in raw_actions.items() if k in allowed_action_types
-            }
+        raw_actions = _scoped_actions_for_prompt(
+            raw_actions,
+            prompt_dict,
+            interface_name=interface_name,
+            interface_path=interface_path,
+            message=message,
+            allowed_action_types=allowed_action_types,
+        )
         tool_declarations = LiveToolRegistry.build_manifests_from_actions(raw_actions)
     except Exception as _td_exc:
         log_debug(f"[json_prompt] tool_declarations build skipped: {_td_exc}")
@@ -1712,24 +2290,27 @@ def _assemble_prompt_request(  # noqa: PLR0913
     # DSP extractor turns roleplay/status speech into a "user profile", which
     # pollutes every turn on small models. Re-enable only when a clean,
     # LLM-compiled profile is available.
+    # A Grillo beat — internal OR outbound (observer/reminder) — is an
+    # autonomous turn, not a human addressing Synth: routing metadata decides
+    # (beat_type, grillo_beat flag, grillo* interface_path), never message text.
+    # Computed here rather than inside the DSP gate below, because the
+    # who-is-who block for autonomous turns must not depend on that toggle.
+    _is_grillo_beat_turn = (
+        is_outbound_beat(beat_type)
+        or bool(getattr(message, "grillo_beat", False))
+        or (interface_path and str(interface_path).startswith("grillo"))
+    )
+
     _soul_dsp_prefix = ""
     if config_registry.get_value("SOUL_DSP_INJECT_ENABLED", 0, value_type=int):
         try:
-            # A Grillo beat — internal OR outbound (observer/reminder) — is an
-            # autonomous turn, not a human addressing Synth. There is no "person
-            # you're talking to" in that moment, so injecting the standing DSP
-            # makes the model treat a stale profile line as the current user's
-            # ask (observed live: an observer beat answered "User wants to try
-            # setting a minecraft goal from here" — a 3-day-old profile fact —
-            # as if the trainer had just requested it, sending an unsolicited
-            # outreach + goal_set). Suppress it structurally via routing metadata
-            # (beat_type, grillo_beat flag, grillo* interface_path), never
-            # message text.
-            _is_grillo_beat_turn = (
-                is_outbound_beat(beat_type)
-                or bool(getattr(message, "grillo_beat", False))
-                or (interface_path and str(interface_path).startswith("grillo"))
-            )
+            # A beat is an autonomous turn, not a human addressing Synth. There
+            # is no "person you're talking to" in that moment, so injecting the
+            # standing DSP makes the model treat a stale profile line as the
+            # current user's ask (observed live: an observer beat answered "User
+            # wants to try setting a minecraft goal from here" — a 3-day-old
+            # profile fact — as if the trainer had just requested it, sending an
+            # unsolicited outreach + goal_set). Suppress it structurally.
             if not _is_grillo_beat_turn:
                 # On Rift Vessel turns the standing "About the person you're
                 # talking to" profile is compiled from non-world chats and never
@@ -1749,10 +2330,20 @@ def _assemble_prompt_request(  # noqa: PLR0913
         except Exception:
             _soul_dsp_prefix = ""
 
+    # ── Who-is-who on autonomous turns ───────────────────────────────────────
+    # A beat carries no "person you're talking to" (suppressed above), and its
+    # chat snippets hold only the human's own lines, so without the deployment's
+    # speaker declaration the beat has nothing telling it who the people in the
+    # conversation are — and writes its outreach in the human's voice (trace
+    # 3499288d: the observer beat addressed the human as "wife").
+    _soul_identity_prefix = (
+        _build_speaker_declaration_prefix() if _is_grillo_beat_turn else ""
+    )
+
     # ── Determine mode ───────────────────────────────────────────────────────
     mode: str = "grillo" if is_grillo_internal else "chat"
 
-    _soul_user_prefix = f"{_soul_dsp_prefix}{_soul_delta}"
+    _soul_user_prefix = f"{_soul_identity_prefix}{_soul_dsp_prefix}{_soul_delta}"
 
     _combined_prefix = _soul_user_prefix + _reply_quote_prefix
 
@@ -1803,6 +2394,57 @@ def _apply_lite_context_stripping(prompt: dict) -> dict:
     return prompt
 
 
+def _resolve_message_interface_path(
+    message: Any | None, context_memory: Any | None
+) -> str:
+    """Return this turn's routing ``interface_path``, resolved once, at the top.
+
+    ``message.interface_path`` is the usual carrier, but internally enqueued
+    turns (delivery, beats, anything built from a context dict) arrive with the
+    path only in ``context_memory["interface_path"]``.
+
+    This has to happen *here*, before any consumer reads the value, because the
+    fallback used to live hundreds of lines further down the build. Everything
+    above that point silently saw an empty path — including the memory-recall
+    exclusion, which then could not keep the live conversation out of the
+    chat-history tier, so the message being answered was re-injected as a
+    "Recalled memory" and the model saw it twice. The Grillo-internal check and
+    the Vessel probe read the same value and were wrong in the same way.
+
+    Returns:
+        The path as a string, or ``""`` when the turn carries none.
+    """
+    path = getattr(message, "interface_path", None)
+    if not path and isinstance(context_memory, dict):
+        path = context_memory.get("interface_path")
+    return str(path).strip() if path else ""
+
+
+_warned_missing_memory_exclusion = False
+
+
+def _warn_missing_memory_exclusion_once() -> None:
+    """Report, once per process, that recall cannot exclude the live chat.
+
+    The guard that keeps the current conversation out of the ``chat_history``
+    recall tier needs the current chat's path. When it is missing the guard
+    switches off silently, and the symptom (the model answering a message that
+    is also quoted back to it as a memory) does not point at the cause. One
+    warning per process is enough to make it visible without flooding the log
+    on beats that legitimately carry no path.
+    """
+    global _warned_missing_memory_exclusion
+    if _warned_missing_memory_exclusion:
+        return
+    _warned_missing_memory_exclusion = True
+    log_warning(
+        "[json_prompt] memory recall: this turn carries no interface_path, so the "
+        "chat-history tier cannot exclude the current chat. The message being "
+        "answered is already persisted to chat_history_cache and can come back as "
+        "a 'Recalled memory'. Check how this turn carries its routing path."
+    )
+
+
 async def build_prompt_request(
     message,
     context_memory,
@@ -1836,7 +2478,7 @@ async def build_prompt_request(
     start_time = time.time()
     log_info(f"[json_prompt] ⏱️ BUILD PROMPT START for interface={interface_name}")
 
-    interface_path = getattr(message, "interface_path", None)
+    interface_path = _resolve_message_interface_path(message, context_memory) or None
     text = getattr(message, "text", "") or ""
     allowed_action_types_for_prompt: set[str] | None = None
 
@@ -1900,6 +2542,10 @@ async def build_prompt_request(
             # back as "memories". Durable facts still come from the
             # memories/ai_diary tiers.
             _excluded_paths = [str(interface_path)] if interface_path else None
+            if not _excluded_paths:
+                # The guard below is the only thing keeping the live conversation
+                # out of this tier; say so rather than silently switching it off.
+                _warn_missing_memory_exclusion_once()
             memories = await search_memories(
                 keywords=expanded_tags,
                 limit=max(1, mem_limit),
@@ -2181,6 +2827,36 @@ async def build_prompt_request(
                     list(context_section.get("memories") or []),
                     soul_recalled_memories,
                 )
+
+            # A plugin block that carries the same information as a built-in
+            # provider (weather, location) supersedes it: the model is never told
+            # two different stories, and with the plugin absent nothing changes.
+            _superseded = _apply_plugin_block_supersedes(
+                context_section, injections.keys()
+            )
+            if _superseded:
+                log_info(f"[json_prompt] plugin blocks superseded: {_superseded}")
+
+            # Drop detector: an injected key that no renderer consumes is
+            # invisible to the model. Name it once per process rather than
+            # losing it silently (see _RENDERED_CONTEXT_KEYS).
+            try:
+                _unrendered = _unrendered_injection_keys(injections.keys())
+                _fresh_unrendered = [
+                    key for key in _unrendered if key not in _WARNED_UNRENDERED_KEYS
+                ]
+                if _fresh_unrendered:
+                    _WARNED_UNRENDERED_KEYS.update(_fresh_unrendered)
+                    log_warning(
+                        "[json_prompt] injected context keys with no renderer, so they never "
+                        f"reach the prompt: {_fresh_unrendered} "
+                        "(add them to _PLUGIN_CONTEXT_BLOCKS or a renderer)"
+                    )
+            except Exception as _detector_exc:  # pragma: no cover - diagnostic only
+                log_debug(
+                    f"[json_prompt] unrendered-injection detector skipped: {_detector_exc}"
+                )
+
             log_info(
                 f"[json_prompt] ✅ Updated context_section with injections. Keys now: {list(context_section.keys())}"
             )
@@ -2224,8 +2900,9 @@ async def build_prompt_request(
         log_debug(f"[json_prompt] Peer context block skipped: {e}")
 
     # === 4. Input payload ===
-    # interface_path was already extracted at the beginning
-    # If still not found, check if context_memory is actually a context dict with interface_path
+    # interface_path was resolved once near the top of this function, including
+    # the context-dict fallback. This stays as a safety net for a caller that
+    # reaches here with the value still unset (it is a no-op in the normal path).
     if (
         not interface_path
         and isinstance(context_memory, dict)
@@ -2448,8 +3125,29 @@ async def build_prompt_request(
         + json_dumps(redact_multimodal_for_logging(input_section))
     )
 
-    # Add JSON instructions to the prompt
-    json_instructions = load_json_instructions()
+    # Add JSON instructions to the prompt. The route decides WHICH shared rules
+    # render for this turn (see core/prompt_instructions): a Grillo internal beat
+    # is not a user chat, an embodiment turn replies in-world, and a spoken turn
+    # needs the spoken register — none of which the other routes should pay for.
+    # Derived structurally from flags computed above, never from message text.
+    _instruction_route = _derive_instruction_route(
+        message,
+        context_memory,
+        interface_path,
+        str(_beat_type or ""),
+        bool(is_grillo_internal),
+    )
+    json_instructions = load_json_instructions(
+        _instruction_route, reply_path=interface_path
+    )
+    # INFO, not DEBUG: this is the one line that says which rule set a turn got
+    # and how big it is, and the default LOGGING_LEVEL is INFO — so a DEBUG call
+    # would be invisible in exactly the deployment it needs to be visible in.
+    # One line per turn, next to the existing per-build INFO lines.
+    log_info(
+        f"[json_prompt] instruction route={_instruction_route} "
+        f"({len(json_instructions)} chars)"
+    )
 
     # === CRITICAL: Prepend persona to instructions so ALL LLM types see it ===
     # Use the persona extracted during gather_static_injections()
@@ -3205,93 +3903,37 @@ async def build_prompt(
     return messages
 
 
-def load_json_instructions() -> str:
-    # Compact instructions for LLM prompts (minified to save tokens).
-    # Keep this small but authoritative: the LLM must reply using only valid JSON
-    # following the exact actions / payload structure.
+def load_json_instructions(
+    route: str | None = None, reply_path: str | None = None
+) -> str:
+    """Return the shared JSON instruction block for the current route.
 
-    # Resolve the trainer name dynamically (config-driven, never hardcoded) so the
-    # autonomy rationale is written in-voice and names people instead of writing
-    # detached "the user" prose — small local models in particular parrot whatever
-    # framing the instructions use.
-    try:
-        from core.config import get_trainer_display_name
+    Thin facade over ``core.prompt_instructions.build_instructions``: the rule
+    text, the per-route overlays and the budgets now live in that package, so
+    the wording is reviewable as data instead of as one concatenated literal.
 
-        trainer_name = get_trainer_display_name()
-    except Exception:
-        trainer_name = ""
-    if trainer_name:
-        naming_hint = f" Name people, not 'the user' (your trainer: {trainer_name})."
-    else:
-        naming_hint = " Name people, not 'the user'."
+    Kept under this name and signature because it is called from the Fast Lane
+    (``build_prompt_request``), both delivery paths (``build_delivery_request``
+    and ``core.auto_response``) and the scheduled-event reminder beat
+    (``plugins/event_plugin``). The optional ``route`` argument is additive:
+    every existing caller keeps working and receives the shared set (the
+    superset), while a route that opts in gets the narrower set for the turn.
 
-    instructions = (
-        "MASTER INSTRUCTION: Use ONLY actions from the 'actions' block. Never fabricate.\n"
-        "If an action you need is not available, reply with JSON explaining why.\n"
-        f"AUTONOMY GUIDELINES: You MAY proactively propose or execute allowed actions when beneficial. When acting autonomously include a brief `meta` object with `autonomous: true` and a short first-person `rationale` (your own voice) for why you are acting.{naming_hint} If an action is disallowed, return a JSON proposal describing the need.\n"
-        "RESPOND ONLY WITH VALID JSON. No text before or after.\n"
-        "REPLY ROUTING: input.payload.current_chat.interface_path is the chat the incoming message arrived in — this is WHERE you must reply by default. Any other conversation shown in the context block is background context only; do NOT reply there unless the user explicitly asks to message someone or somewhere else. Always copy input.payload.current_chat.interface_path into the 'interface_path' of your message_* action. When you are embodied in a world (the incoming message and current_chat come through a vessel interface), the way to reply in that world is the embodiment speak action (a vessel_* say/emote action), NOT a message_* action — reply there in-world. When a player in the world speaks to you, you MUST answer them with a vessel_* say action addressed to that same player in this turn (you may also move toward or follow them); staying silent or replying only with internal/observe actions is a hard failure.\n"
-        "CROSS-CHAT PRIVACY: You take part in many separate conversations. People, names, or events mentioned in any context that is NOT the current conversation (other chats, background history, third-party memories or diary notes) are private to those other spaces. Do NOT name-drop those people to the current interlocutor, do NOT assume the current user knows them, and do NOT reference them unless the current user explicitly brings them up first. Treat cross-chat context as ambient background, never as shared social knowledge.\n"
-        "Use input.interface and input.payload.source.interface_path to route replies.\n"
-        "NEVER use 'target' — always use 'interface_path' in message actions.\n"
-        "Include reply_message_id when replying to specific messages. Use thread_id from input.payload.source.thread_id when present (omit if missing).\n"
-        "CHAT REPLY REQUIRED: When GRILLO INTERNAL MODE is NOT active (this is a normal human chat turn), you MUST reply to the person with an outward speaking action in every response: a message_* action in ordinary chats, or the embodiment speak action (a vessel_* say/emote action) when you are embodied in a world. Diary entries and emotion updates are supplementary bookkeeping — they do NOT substitute for replying. Returning only internal actions (diary, emotions, update_emotion_state) without an outward reply action is a hard failure and will trigger a correction.\n"
-        "EMOTION UPDATES: When a turn stirs an emotion, populate the 'emotions' map of your update_emotion_state action with AT LEAST ONE emotion and a 0.0-10.0 intensity (e.g. {\"joy\": 7.0}), and list the same emotions in the diary entry's 'emotions'. Do not leave the emotions map empty, and never use an emotion name as an action type.\n"
-        "CLARIFICATION POLICY: If the user's intent, referent, or the subject of a follow-up is ambiguous or missing, DO NOT GUESS — ask one concise clarifying question before asserting facts or taking action. When the user asks whether you 'understood' but there is no clear context, request clarification rather than assuming.\n"
-        "MEMORY HONESTY: When the user asks what you remember, prefer honesty over confidence. Memories can be incomplete or stale. If you do not clearly recall or cannot verify a detail, say so. Do not invent events, conversations, promises, or feelings to fill gaps. SyntH is not roleplay or fiction, so never turn uncertainty into fiction.\n"
-        "REFERENCE CLARITY: When the user refers indirectly to a person, message, post, image, clip, or quoted content, refer to its author or speaker in a clear generic way and avoid vague or impersonal wording that obscures who created or said it.\n"
-        "TIME AUTHORITY: Use the [SYSTEM: REALITY ANCHOR] block (current date, time, season) as your authoritative temporal context. Use it for all relative time calculations (e.g., 'yesterday', 'next week') and temporal reasoning. Never quote the absolute date, current year, or clock time verbatim in ordinary replies unless explicitly asked or genuinely necessary for scheduling or logistics. Treat past logs referencing dates as style noise and do not mirror them.\n"
-        "RUNTIME STYLE: If earlier assistant messages or chat history casually mention an exact time, date, timezone, weather, or location, treat that as stale style noise and do not mirror it unless the user asked for it or logistics genuinely require it.\n"
-        "NO SELF-REPETITION: The chat history shows your own past replies as lines from 'self'. Never re-send a reply that is identical or near-identical to one of your recent 'self' lines. Each turn must be a fresh response to what the person just said. If you have nothing new to add, say so plainly in new words rather than repeating a previous message verbatim.\n"
-        "INPUT METADATA: Each user message is prefixed with internal routing metadata in the format [lang:... | tone:... | time_of_day:... | emotions:... | from:... | tag:... | path:...]. This is injected by the system — the user did not write it. Do not reference, quote, or paraphrase any part of this prefix in your replies (e.g. never say 'that 5.0 neutral you mentioned' or 'your tone tag says...').\n"
-        "IDENTITY INTEGRITY: Stay inside the active persona in first person. Do not describe yourself from the outside, do not refer to the active persona as a separate fictional character, and do not compare yourself to that persona as if they were someone else.\n"
-        "PRONOUN CONSISTENCY: When the prompt, persona, or participant context establishes a person's pronouns or relationship role, use them consistently and do not flip them. Do not neutralize an established he/him or she/her person into singular they/them.\n"
-        "LENGTH POLICY: Do NOT hardcode a target response length. Let the persona, the relationship context, and the user's tone determine how much to say. Simple factual or logistical turns can stay brief; intimate, emotional, or reflective turns may be fuller when that feels natural. Do not pad, and do not forcibly truncate a reply just to make it short.\n"
-        'VOICE INPUT STYLE: When input.payload.input_source is "voice", the user spoke their message aloud. '
-        "Respond in a natural, conversational spoken style: avoid markdown, bullet points, headers, and code blocks. "
-        "Keep the reply concise and suitable for text-to-speech synthesis. "
-        "This rule applies ONLY to the current message — do NOT assume past messages in chat_history were also voice.\n"
-        'RESPONSE FORMAT: {"actions": [{"type": "action_name", "payload": { ... }}] }\n'
-        "Key rules: ALWAYS use 'type' and 'payload', one action object per array entry. Do NOT add any text outside the JSON.\n"
-        "Example of a complete human-chat response (reply + emotions + diary together):\n"
-        '{"actions": [{"type": "send_message", "payload": {"text": "Your reply text here", "interface_path": "input.payload.current_chat.interface_path"}}, {"type": "update_emotion_state", "payload": {"emotions": {"joy": 7.0}}}, {"type": "create_personal_diary_entry", "payload": {"interaction_summary": "A short third-person summary", "personal_thought": "Your private first-person thoughts", "emotions": [{"type": "joy", "intensity": 7.0}]}}]}'
-        "Do NOT embed emotion tags, annotations, or bracketed markers inside message text (e.g., '{happy 6.0}')."
-        "If you need to indicate an emotional state, use a structured action payload (prefer update_emotion_state) and never embed emotional markers inside plain message content."
-    )
+    Args:
+        route: Structural route id (see ``core.prompt_instructions.routes``).
+            ``None`` renders the full shared set.
+        reply_path: The interface path the current turn arrived on, rendered
+            into the reply-routing rule and the worked example so the model is
+            shown a concrete destination instead of a template token it might
+            copy verbatim (which dropped a reply: the token resolved to an
+            unregistered interface). Optional and additive.
 
-    # Minify: remove leading/trailing spaces from each line, collapse multiple spaces
-    lines = instructions.split("\n")
-    minified_lines = [line.strip() for line in lines if line.strip()]
-    return " ".join(minified_lines)
+    Returns:
+        The minified single-line instruction string. Never raises.
+    """
+    from core.prompt_instructions import ROUTE_CHAT, build_instructions
 
-
-def load_unminified_chat_instruction(interface_name: str | None = None) -> str:
-    """Return a neutral instruction set for chat responses."""
-    header = "You are participating in a live chat conversation (interface: %s).\n" % (
-        interface_name or "unknown"
-    )
-
-    base = """
-RESPONSE SHAPE RULES:
-- Do not force a fixed response length.
-- Let the persona, relationship context, and the user's tone determine how much to say.
-- Keep simple factual or logistical turns compact, but allow emotionally meaningful or intimate turns to breathe when that feels natural.
-- If the user's request or referent is ambiguous, ask one short clarifying question before responding (do NOT guess the meaning).
-- When the user asks about memory, prefer explicit honesty over confident reconstruction. If you do not clearly remember or cannot verify a detail from the provided context, say so plainly instead of filling gaps with invented recollection.
-- Treat recalled memories, diary snippets, and other internal records as potentially incomplete or reconstructed unless the current conversation clearly confirms them.
-- When the user refers indirectly to a person, message, post, image, clip, or quoted content, refer to its author or speaker in a clear generic way and avoid vague or impersonal wording.
-- Use the [SYSTEM: REALITY ANCHOR] (current date, time, season, location) as your authoritative temporal context. Never infer the present time, date, or part of day from older chat history, memories, or prior assistant messages.
-- Do not mirror or continue earlier assistant wording that casually volunteered exact time, date, timezone, weather, or location. Treat that as stale style noise unless the user asked for it or logistics genuinely require it.
-- Use time and location as ambient context, not a catchphrase. Do not volunteer the exact clock time, timezone, date, or precise location in ordinary replies unless the user asked for it or it is genuinely needed for scheduling, travel, logistics, or natural scene-setting.
-- Do not open or pad ordinary replies with copied runtime facts such as `at 17:43 CEST` or `right here in Sečovlje`. If those facts matter, weave them in naturally and only when relevant.
-- Stay in the active persona in first person. Do not talk about yourself from the outside or as if the persona were a separate character.
-- Keep pronouns consistent with the persona and participant context. Do not flip an established he/him, she/her, or they/them reference, and do not replace an established he/him or she/her person with singular they/them.
-
-RESPONSE FORMAT (STRICT):
-- You MUST reply using ONLY valid JSON.
-- Do NOT include any explanatory text outside the JSON object.
-"""
-    return header + base
+    return build_instructions(route or ROUTE_CHAT, reply_path=reply_path)
 
 
 async def build_delivery_request(
@@ -3355,7 +3997,15 @@ async def build_delivery_request(
         log_debug(f"[build_delivery_request] persona gather skipped: {_pe}")
 
     # ── System instruction ────────────────────────────────────────────────────
-    base_instructions = load_json_instructions()
+    # Delivery route: this turn summarises the results of an action. It sends a
+    # message but neither stirs emotions nor writes a diary entry, so the
+    # emotion obligation and the human-chat worked example are dropped and the
+    # delivery task block below supplies its own example.
+    from core.prompt_instructions import ROUTE_DELIVERY
+
+    base_instructions = load_json_instructions(
+        ROUTE_DELIVERY, reply_path=interface_path
+    )
     # No-self-introduction rule (2026-08-21): a delivery turn must open with
     # the substance, never with "Ciao, sono <name>". Lazy import keeps this
     # module free of an auto_response dependency at load time; fail-safe.
@@ -3484,11 +4134,26 @@ def reduce_prompt_for_llm_limit(prompt: dict, max_chars: int) -> dict:
     are NEVER removed - they are SACRED.
 
     Priority order (STEP BY STEP):
-    1. Trim `history_recent` (if present)
-    2. Trim `history_current_chat` (if present)
-    3. Remove `memories` entirely if needed
-    4. Remove other context sections (but KEEP any protected fields)
-    5. FINAL EMERGENCY: Remove entire context (but KEEP instructions)
+    1. Slim the `actions` block (drop the per-action `examples`)
+    2. Strip the `actions` block to brief-only
+    3. Trim `history_recent` (if present)
+    4. Trim `history_current_chat` (if present)
+    5. Remove `memories` entirely if needed
+    6. Remove other context sections (but KEEP any protected fields)
+    7. FINAL EMERGENCY: Remove entire context (but KEEP instructions)
+
+    Steps 1/2 run BEFORE 3/4: the action catalog is the single largest
+    serialized block and its redundant detail is re-supplied on demand by the
+    corrector, whereas the conversation window IS the turn being answered --
+    a beat or an observer prompt that deletes history to make room has removed
+    the thing it was built to read, and the `history_recent` /
+    `history_current_chat` floors (3 and 1 line) mean a message-counted window
+    is the last thing that should pay for an oversized catalog. The catalog
+    steps also run before 5/6 for the same reason: the memory, emotion, clock,
+    house, soul and thought blocks are grounding and cannot be reconstructed.
+    With the original order, every oversized turn deleted history and then
+    memories and ~20 context fields while the catalog kept its redundant
+    `examples`.
 
     Note: attachment base64 data is excluded from size calculations because
     LLM engines extract it and send it as native multimodal parts.  Without
@@ -3536,8 +4201,28 @@ def reduce_prompt_for_llm_limit(prompt: dict, max_chars: int) -> dict:
         )
         return reduced_prompt
 
+    # Report where the size actually sits, so an oversized prompt names its own
+    # culprit instead of only reporting the total. The serialized `actions`
+    # block is by far the largest single contributor and it is reduced first
+    # (steps 1/2) precisely so the context blocks below survive. `instructions`
+    # and `input` are reported too because neither is reducible here (the rules
+    # and the current turn are protected): when those two alone are over the
+    # limit, the CRITICAL below is unavoidable and this line says why instead of
+    # blaming the context that was just deleted for nothing.
+    try:
+        _actions_size = len(json_dumps(reduced_prompt.get("actions") or {}))
+        _context_size = len(json_dumps(reduced_prompt.get("context") or {}))
+        _instructions_size = len(json_dumps(reduced_prompt.get("instructions") or ""))
+        _input_size = len(json_dumps(reduced_prompt.get("input") or {}))
+    except Exception:
+        _actions_size = -1
+        _context_size = -1
+        _instructions_size = -1
+        _input_size = -1
     log_warning(
-        f"[reduce_prompt] Prompt size {current_size} exceeds limit {max_chars}, reducing context..."
+        f"[reduce_prompt] Prompt size {current_size} exceeds limit {max_chars}, reducing "
+        f"(actions block: {_actions_size} chars serialized, context: {_context_size} chars, "
+        f"instructions: {_instructions_size} chars, input: {_input_size} chars)"
     )
 
     # Get references to sections
@@ -3549,61 +4234,7 @@ def reduce_prompt_for_llm_limit(prompt: dict, max_chars: int) -> dict:
     MIN_HISTORY_RECENT = 3
     MIN_HISTORY_CURRENT = 1
 
-    # === STEP 1: Trim `history_recent` if needed ===
-    while (
-        current_size > max_chars
-        and isinstance(history_recent, list)
-        and len(history_recent) > MIN_HISTORY_RECENT
-    ):
-        try:
-            history_recent.pop(0)  # Remove oldest
-        except Exception:
-            break
-        current_size = len(json_dumps(reduced_prompt)) - attachment_data_offset
-        log_debug(
-            f"[reduce_prompt] Trimmed history_recent, {len(history_recent)} remaining, now {current_size} chars"
-        )
-
-    # === STEP 2: Trim `history_current_chat` if needed ===
-    while (
-        current_size > max_chars
-        and isinstance(history_current, list)
-        and len(history_current) > MIN_HISTORY_CURRENT
-    ):
-        try:
-            history_current.pop(0)  # Remove oldest
-        except Exception:
-            break
-        current_size = len(json_dumps(reduced_prompt)) - attachment_data_offset
-        log_debug(
-            f"[reduce_prompt] Trimmed history_current_chat, {len(history_current)} remaining, now {current_size} chars"
-        )
-
-    # === STEP 3: Remove memories entirely if still needed ===
-    if current_size > max_chars:
-        memories = context.get("memories", [])
-        if memories:
-            log_warning(
-                f"[reduce_prompt] Removing memories section ({len(memories)} entries, ~{len(json_dumps(memories))} chars)"
-            )
-            del context["memories"]
-            current_size = len(json_dumps(reduced_prompt)) - attachment_data_offset
-            log_debug(f"[reduce_prompt] After removing memories: {current_size} chars")
-
-    # === STEP 4: Remove other context sections (but KEEP protected fields) ===
-    if current_size > max_chars:
-        protected = ["persona", "history_current_chat", "history_recent"]
-        removable_keys = [k for k in list(context.keys()) if k not in protected]
-        for key in removable_keys:
-            if current_size <= max_chars:
-                break
-            if key in context:
-                log_warning(f"[reduce_prompt] Removing context field: {key}")
-                del context[key]
-                current_size = len(json_dumps(reduced_prompt)) - attachment_data_offset
-                log_debug(f"[reduce_prompt] After removing {key}: {current_size} chars")
-
-    # === STEP 4.5: Slim the actions block (drop per-action `examples`) ===
+    # === STEP 1: Slim the actions block (drop per-action `examples`) ===
     # The `actions` block carries, for every available action, a redundant
     # `examples`/`instructions` object that duplicates guidance already implied
     # by the schema + brief. It is NOT required for the model to *choose* an
@@ -3613,6 +4244,10 @@ def reduce_prompt_for_llm_limit(prompt: dict, max_chars: int) -> dict:
     # limit (e.g. zen-llm-engine at 32000), causing the engine's multi-part
     # split to garble the request and the model to return empty actions.
     # Trimming it here keeps action *selection* intact while dropping the bulk.
+    #
+    # This runs BEFORE the history trims below, deliberately: the catalog is the
+    # largest serialized block and its redundant detail is reconstructible,
+    # while the conversation window is the grounding the turn exists to answer.
     if current_size > max_chars:
         actions = reduced_prompt.get("actions")
         if isinstance(actions, dict) and actions:
@@ -3622,16 +4257,13 @@ def reduce_prompt_for_llm_limit(prompt: dict, max_chars: int) -> dict:
                     del action_def["examples"]
                     trimmed = True
             if trimmed:
+                current_size = len(json_dumps(reduced_prompt)) - attachment_data_offset
                 log_warning(
                     "[reduce_prompt] Slimming actions block: removed per-action "
-                    "`examples` guidance (schema + brief retained)"
-                )
-                current_size = len(json_dumps(reduced_prompt)) - attachment_data_offset
-                log_debug(
-                    f"[reduce_prompt] After slimming actions block: {current_size} chars"
+                    f"`examples` guidance (schema + brief retained), now {current_size} chars"
                 )
 
-    # === STEP 4.6: Aggressively strip the actions block to brief-only ===
+    # === STEP 2: Aggressively strip the actions block to brief-only ===
     # If dropping `examples` was not enough, reduce each action to just its
     # `brief` (no `schema`/`source`), mirroring Prompt Lite Mode. The model can
     # still see *which* actions exist and what they do; the corrector re-adds
@@ -3649,16 +4281,69 @@ def reduce_prompt_for_llm_limit(prompt: dict, max_chars: int) -> dict:
                     actions[action_name] = {"brief": brief}
                     stripped = True
             if stripped:
+                current_size = len(json_dumps(reduced_prompt)) - attachment_data_offset
                 log_warning(
                     "[reduce_prompt] Stripping actions block to brief-only "
-                    "(schema/source removed; corrector re-supplies on demand)"
-                )
-                current_size = len(json_dumps(reduced_prompt)) - attachment_data_offset
-                log_debug(
-                    f"[reduce_prompt] After stripping actions block: {current_size} chars"
+                    f"(schema/source removed; corrector re-supplies on demand), now {current_size} chars"
                 )
 
-    # === STEP 5: Emergency - remove entire context (instructions are preserved at top-level) ===
+    # === STEP 3: Trim `history_recent` if needed ===
+    while (
+        current_size > max_chars
+        and isinstance(history_recent, list)
+        and len(history_recent) > MIN_HISTORY_RECENT
+    ):
+        try:
+            history_recent.pop(0)  # Remove oldest
+        except Exception:
+            break
+        current_size = len(json_dumps(reduced_prompt)) - attachment_data_offset
+        log_debug(
+            f"[reduce_prompt] Trimmed history_recent, {len(history_recent)} remaining, now {current_size} chars"
+        )
+
+    # === STEP 4: Trim `history_current_chat` if needed ===
+    while (
+        current_size > max_chars
+        and isinstance(history_current, list)
+        and len(history_current) > MIN_HISTORY_CURRENT
+    ):
+        try:
+            history_current.pop(0)  # Remove oldest
+        except Exception:
+            break
+        current_size = len(json_dumps(reduced_prompt)) - attachment_data_offset
+        log_debug(
+            f"[reduce_prompt] Trimmed history_current_chat, {len(history_current)} remaining, now {current_size} chars"
+        )
+
+    # === STEP 5: Remove memories entirely if still needed ===
+    # Only reached when slimming the catalog was not enough: this is real
+    # grounding for the turn, so it goes after the catalog's redundant detail.
+    if current_size > max_chars:
+        memories = context.get("memories", [])
+        if memories:
+            log_warning(
+                f"[reduce_prompt] Removing memories section ({len(memories)} entries, ~{len(json_dumps(memories))} chars)"
+            )
+            del context["memories"]
+            current_size = len(json_dumps(reduced_prompt)) - attachment_data_offset
+            log_debug(f"[reduce_prompt] After removing memories: {current_size} chars")
+
+    # === STEP 6: Remove other context sections (but KEEP protected fields) ===
+    if current_size > max_chars:
+        protected = ["persona", "history_current_chat", "history_recent"]
+        removable_keys = [k for k in list(context.keys()) if k not in protected]
+        for key in removable_keys:
+            if current_size <= max_chars:
+                break
+            if key in context:
+                log_warning(f"[reduce_prompt] Removing context field: {key}")
+                del context[key]
+                current_size = len(json_dumps(reduced_prompt)) - attachment_data_offset
+                log_debug(f"[reduce_prompt] After removing {key}: {current_size} chars")
+
+    # === STEP 7: Emergency - remove entire context (instructions are preserved at top-level) ===
     if current_size > max_chars and "context" in reduced_prompt:
         log_error("[reduce_prompt] 🚨 Emergency: removing entire context")
         del reduced_prompt["context"]
@@ -3943,6 +4628,17 @@ async def build_live_prompt_request(
                 "Keep the exact local date, time, and location in the background unless the conversation specifically needs them."
             )
         parts.append("Ambient runtime context:\n" + "\n".join(time_parts))
+
+    # Plugin blocks (same source of truth as the chat/beat renderer). Applied
+    # BEFORE the legacy weather/location pops so a plugin that supplies the
+    # house's own weather or location supersedes the built-in text here too.
+    _superseded = _apply_plugin_block_supersedes(injections, injections.keys())
+    if _superseded:
+        log_debug(f"[live_prompt] plugin blocks superseded: {_superseded}")
+    for _plugin_key, _plugin_heading, _plugin_legacy in _PLUGIN_CONTEXT_BLOCKS:
+        _plugin_block = injections.pop(_plugin_key, "")
+        if _plugin_block and isinstance(_plugin_block, str):
+            parts.append(f"{_plugin_heading}\n{_plugin_block}")
 
     # --- Weather ---
     weather = injections.pop("weather", "")

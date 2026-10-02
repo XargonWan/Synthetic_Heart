@@ -1194,6 +1194,7 @@ async def handle_incoming_message(
         run_actions,
         CORRECTOR_RETRIES,
         _is_delivered_auto_tts_failure,
+        _is_reply_delivery_type,
     )
     from types import SimpleNamespace
     from datetime import datetime, timezone
@@ -2181,11 +2182,6 @@ async def handle_incoming_message(
                         "response",
                     )
                     if ctx_interface_path:
-                        interface_prefix = (
-                            ctx_interface_path.split("/")[0]
-                            if "/" in ctx_interface_path
-                            else ctx_interface_path
-                        )
                         # A generic message action emitted during a Vessel
                         # embodiment turn must be spoken IN-WORLD, not routed to
                         # the WebUI fallback. The resolver returns
@@ -2194,9 +2190,18 @@ async def handle_incoming_message(
                         # Without this, a generic "message_send" is misrouted to
                         # message_synth_webui and the in-world player never hears
                         # the reply.
-                        resolved_message_type = (
+                        #
+                        # The action type resolves per action: from the path THAT
+                        # action targets, then from the turn's own path. A generic
+                        # action that already carries an explicit
+                        # ``interface_path`` in its payload must be typed after it
+                        # (an observer beat targets a chat that is not its own
+                        # origin), and a turn whose origin resolves to no chat
+                        # interface keeps the unified ``send_message`` instead of
+                        # being relabelled as a WebUI action it never was.
+                        default_message_type = (
                             _resolve_message_action_for_path(ctx_interface_path)
-                            or "message_synth_webui"
+                            or "send_message"
                         )
                         rewrote_generic_message_action = False
                         for act in actions:
@@ -2204,6 +2209,16 @@ async def handle_incoming_message(
                                 isinstance(act, dict)
                                 and act.get("type") in _GENERIC_MSG_TYPES
                             ):
+                                act_payload = act.get("payload")
+                                act_path = (
+                                    act_payload.get("interface_path")
+                                    if isinstance(act_payload, dict)
+                                    else None
+                                )
+                                resolved_message_type = (
+                                    _resolve_message_action_for_path(act_path)
+                                    or default_message_type
+                                )
                                 act["type"] = resolved_message_type
                                 rewrote_generic_message_action = True
 
@@ -2390,6 +2405,21 @@ async def handle_incoming_message(
                             ]
                         except Exception:
                             current_message_action_types = []
+
+                    # The unified ``send_message`` action (AGENTS.md §6) is the
+                    # outbound reply action for telegram/discord/matrix/fluxer,
+                    # but its name does not start with ``message_`` — so neither
+                    # the MESSAGE_ACTION_TYPES registry (which carries only
+                    # legacy ``message_*`` names) nor the inference above ever
+                    # included it. Every consumer of this set then failed to
+                    # recognise the reply: the text+TTS merge below could not
+                    # find the message action to fold into the voice note, so the
+                    # standalone send_message was dispatched AND the tts_speak
+                    # ran, and when the TTS failed Vox's text-only fallback sent
+                    # the SAME text a second time (the duplicate bubble). The
+                    # voice-reply and voice-input paths had the same gap.
+                    if "send_message" not in current_message_action_types:
+                        current_message_action_types.append("send_message")
 
                     # Action types that deliver user-visible output on their own
                     # (self-replying plugin actions, e.g. a plugin that calls
@@ -3216,7 +3246,11 @@ async def handle_incoming_message(
                                     )
                             else:
                                 log_info(
-                                    "[message_chain] ⚠️ TTS plugin not available - keeping separate message and TTS actions (text sent separately)"
+                                    "[message_chain] No mergeable text+TTS pair "
+                                    f"(message actions={len(message_actions_to_remove)}, "
+                                    f"tts actions={len(tts_actions)}) — keeping "
+                                    "separate message and TTS actions "
+                                    "(text sent separately)"
                                 )
 
                 # Execute actions regardless of whether response is included
@@ -3247,17 +3281,36 @@ async def handle_incoming_message(
                             if isinstance(successful_types, (list, tuple, set)):
                                 successful_types = list(successful_types)
                             if successful_types and isinstance(actions, list):
-                                # If a message action already delivered on an
-                                # earlier pass, suppress ALL message types on
-                                # the retry — a duplicate delivery to the user
-                                # is the worst failure mode, and the model
-                                # re-emitting the reply is the CHANGELOG
-                                # 2026-06-26 duplicate. Structural type-prefix
+                                # If a reply was already delivered on an earlier
+                                # pass, suppress message actions on the retry — a
+                                # duplicate delivery to the person is the worst
+                                # failure mode, and the model re-emitting its whole
+                                # reply is how it happens (CHANGELOG 2026-06-26
+                                # duplicate; the unified action is `send_message`,
+                                # so a `message_`-only test missed it).
+                                # A reply counts as delivered when a message
+                                # action succeeded OR when an auto-injected
+                                # tts_speak carried the merged reply text: the
+                                # merge drops the standalone send_message, the
+                                # model sees an action that never ran in the
+                                # correction context, and re-emits it — which is
+                                # the 2026-09-28 double-send. Structural type
                                 # match; never keyword logic.
                                 delivered_message = any(
-                                    str(t).startswith("message_")
-                                    for t in successful_types
+                                    _is_reply_delivery_type(t) for t in successful_types
                                 )
+                                if not delivered_message:
+                                    for _succ in cc.get("successful_actions") or []:
+                                        _succ_payload = (
+                                            _succ.get("payload")
+                                            if isinstance(_succ, dict)
+                                            else None
+                                        )
+                                        if isinstance(
+                                            _succ_payload, dict
+                                        ) and _succ_payload.get("__merged_text"):
+                                            delivered_message = True
+                                            break
                                 filtered = []
                                 for act in actions:
                                     atype = None
@@ -3267,11 +3320,11 @@ async def handle_incoming_message(
                                         log_debug(
                                             f"[message_chain] Removing previously successful action type '{atype}' from retry payload"
                                         )
-                                    elif delivered_message and str(
-                                        atype or ""
-                                    ).startswith("message_"):
-                                        log_debug(
-                                            f"[message_chain] Suppressing re-emitted message action '{atype}' on retry (already delivered)"
+                                    elif delivered_message and _is_reply_delivery_type(
+                                        atype
+                                    ):
+                                        log_info(
+                                            f"[message_chain] Suppressing re-emitted message action '{atype}' on retry (the reply was already delivered)"
                                         )
                                     else:
                                         filtered.append(act)

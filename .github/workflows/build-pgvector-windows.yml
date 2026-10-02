@@ -1,0 +1,96 @@
+name: pgvector for Windows
+
+# Builds the pgvector extension for the Windows PostgreSQL that the native
+# installer ships, and uploads the three files it needs (vector.dll,
+# vector.control, vector--*.sql).
+#
+# Why this exists: pgvector has tags but no GitHub releases, so there is no
+# prebuilt Windows binary to download. The extension must be compiled with
+# nmake against the same PostgreSQL build the installer unpacks, otherwise the
+# DLL is linked against a different postgres.lib.
+#
+# The release workflow downloads these artifacts into installer/vendor/pgvector/
+# before building the Inno Setup installer (see installer/vendor/README.md).
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    paths:
+      - '.github/workflows/build-pgvector-windows.yml'
+
+permissions:
+  contents: read
+
+env:
+  PGVECTOR_TAG: v0.8.6
+
+jobs:
+  build:
+    name: pg${{ matrix.pg_major }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The PostgreSQL binary releases the installer is pinned to.
+          - pg_major: '16'
+            pg_release: '16.10-1'
+          - pg_major: '17'
+            pg_release: '17.6-1'
+
+    steps:
+      - name: Download the PostgreSQL ${{ matrix.pg_major }} binaries
+        shell: pwsh
+        run: |
+          # The same archive scripts/install_prereqs.ps1 unpacks on the user's
+          # machine: building against it guarantees ABI compatibility.
+          $url = "https://get.enterprisedb.com/postgresql/postgresql-${{ matrix.pg_release }}-windows-x64-binaries.zip"
+          $zip = Join-Path $env:RUNNER_TEMP 'pg-binaries.zip'
+          Write-Host "downloading $url"
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $dest = Join-Path $env:RUNNER_TEMP 'pg'
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          $pgRoot = Join-Path $dest 'pgsql'
+          if (-not (Test-Path (Join-Path $pgRoot 'include\server\postgres.h'))) {
+            throw "the archive does not contain server headers; cannot build against it"
+          }
+          "PGROOT=$pgRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build pgvector ${{ env.PGVECTOR_TAG }}
+        shell: cmd
+        run: |
+          git clone --branch %PGVECTOR_TAG% --depth 1 https://github.com/pgvector/pgvector.git
+          cd pgvector
+          nmake /F Makefile.win
+          nmake /F Makefile.win install
+
+      - name: Stage the extension files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path stage | Out-Null
+          Copy-Item (Join-Path $env:PGROOT 'lib\vector.dll') stage\
+          Copy-Item (Join-Path $env:PGROOT 'share\extension\vector.control') stage\
+          Copy-Item (Join-Path $env:PGROOT 'share\extension\vector--*.sql') stage\
+
+          $dll = Get-Item 'stage\vector.dll'
+          if ($dll.Length -lt 100kb) { throw "vector.dll is only $($dll.Length) bytes; the build did not link properly" }
+          $sql = @(Get-ChildItem 'stage\vector--*.sql')
+          if ($sql.Count -lt 1) { throw 'no vector--*.sql was produced' }
+          Get-ChildItem stage | Select-Object Name, Length | Format-Table -AutoSize
+
+      - name: Upload the extension
+        uses: actions/upload-artifact@v4
+        with:
+          name: pgvector-pg${{ matrix.pg_major }}-windows-x64
+          path: stage/*
+          if-no-files-found: error
+          retention-days: 90

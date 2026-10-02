@@ -27,8 +27,8 @@ class RuleBasedMemCellExtractor:
             return []
 
         facts = self._extract_atomic_facts(text)
-        emotion_snapshot = self._infer_emotion_snapshot(text)
-        foresight = self._extract_foresight_signals(text, current_date)
+        emotion_snapshot = self.infer_emotion_snapshot(text)
+        foresight = self.extract_foresight_signals(text, current_date)
         tag = EmotionalTagModel(
             state_snapshot=emotion_snapshot,
             dominant_emotion=top_emotion(emotion_snapshot),
@@ -65,17 +65,24 @@ class RuleBasedMemCellExtractor:
                 if intent:
                     facts.append(f"User|has_intention|{intent}")
 
-        # Fallback: keep one short deterministic summary fact so memcells
-        # are not structurally empty when no explicit pattern is matched.
-        if not facts:
-            first_sentence = re.split(r"[\.\n!?]", transcript, maxsplit=1)[0].strip()
-            if first_sentence:
-                summary = first_sentence[:160]
-                facts.append(f"Conversation|summary|{summary}")
-
+        # No fallback fact. A cell whose only "fact" was the conversation line
+        # (``Conversation|summary|<the same text as the trace>``) added nothing
+        # to the trace it was stored beside: recall rendered the trace and then
+        # the identical sentence again as "Key facts:", and the stored row read
+        # as raw transcript with a fabricated summary attached. An empty fact
+        # list is the honest record of "nothing distilled yet" — the recall
+        # renderer already handles it, and the LLM extractor
+        # (``core/soul/llm_strategies.py::LlmMemCellExtractor``) is what fills
+        # this with real distilled facts.
         return list(dict.fromkeys(facts))
 
-    def _infer_emotion_snapshot(self, transcript: str) -> dict[str, float]:
+    def infer_emotion_snapshot(self, transcript: str) -> dict[str, float]:
+        """Deterministic emotion snapshot for a piece of text.
+
+        Public so the LLM extractor (``core/soul/llm_strategies.py``) can tag
+        its distilled cells the same way this extractor tags its verbatim ones:
+        distilling content must not change how a cell is tagged.
+        """
         text = transcript.lower()
 
         joy_words = ("happy", "excited", "great", "love", "glad")
@@ -94,9 +101,14 @@ class RuleBasedMemCellExtractor:
             "anger": _score(anger_words),
         }
 
-    def _extract_foresight_signals(
+    def extract_foresight_signals(
         self, transcript: str, current_date: date
     ) -> list[ForesightSignalModel]:
+        """Deterministic foresight signals for a piece of text.
+
+        Public so the LLM extractor can reuse it: foresight stays deterministic
+        even when the cell's content comes from the model.
+        """
         foresight: list[ForesightSignalModel] = []
         lower = transcript.lower()
 

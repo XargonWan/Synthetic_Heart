@@ -31,6 +31,18 @@ from core.ai_plugin_base import AIPluginBase
 from core.config_manager import config_registry
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 
+# One recovery loop per process. ``GrilloPlugin`` (grillo_impl) is instantiated
+# more than once at boot - the plugin manager plus each Grillo beat registration -
+# and every instance builds its own copy of this plugin and starts it. ``start()``
+# only guarded against a second start on the SAME instance, so four loops scanned
+# the same failures at the same moment, each recovered them, and a single failed
+# turn produced up to four recovery messages (observed live at boot: four
+# "recovery loop started" and four "recovery delivered" for one chat). The
+# sibling beat scheduler in ``grillo_impl`` has had a process-wide guard since it
+# was written; this loop did not. Module level, so it holds no matter which
+# instance starts first.
+_ACTIVE_RECOVERY: Optional["GrilloLLMFailureRecoveryPlugin"] = None
+
 
 class GrilloLLMFailureRecoveryPlugin(AIPluginBase):
     display_name = "G.R.I.L.L.O. LLM-Failure Recovery"
@@ -55,21 +67,41 @@ class GrilloLLMFailureRecoveryPlugin(AIPluginBase):
         return {}
 
     async def start(self) -> None:
+        global _ACTIVE_RECOVERY
         if self._running:
             log_debug("[grillo_failure_recovery] already running")
             return
+        owner = _ACTIVE_RECOVERY
+        if owner is not None and owner is not self and owner._running:
+            log_info(
+                "[grillo_failure_recovery] a recovery loop is already running in "
+                "this process; this instance stays idle (one loop per process)"
+            )
+            return
         self._running = True
+        _ACTIVE_RECOVERY = self
         self._task = asyncio.create_task(self._recovery_loop())
         log_info("[grillo_failure_recovery] 🦗 recovery loop started")
 
     async def stop(self) -> None:
+        global _ACTIVE_RECOVERY
         self._running = False
+        if _ACTIVE_RECOVERY is self:
+            _ACTIVE_RECOVERY = None
         if self._task is not None and not self._task.done():
             self._task.cancel()
             try:
                 await self._task
+            except asyncio.CancelledError:
+                # Our own cancel, expected. ``CancelledError`` is a
+                # ``BaseException`` since 3.8, so the ``except Exception`` that
+                # used to sit here never caught it and ``stop()`` raised out of
+                # shutdown instead of returning. radio_host/track_monitor.py
+                # already stops its loop this way.
+                pass
             except Exception:
                 pass
+        self._task = None
         log_info("[grillo_failure_recovery] recovery loop stopped")
 
     # ------------------------------------------------------------------

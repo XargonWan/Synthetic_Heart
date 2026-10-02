@@ -12,7 +12,6 @@ from core.prompt_engine import (
     build_live_prompt_request,
     build_live_system_instruction,
     load_json_instructions,
-    load_unminified_chat_instruction,
 )
 
 
@@ -259,13 +258,26 @@ def test_instructions_prohibit_referencing_input_metadata_prefix():
     instructions = load_json_instructions()
     assert "INPUT METADATA" in instructions
     assert "the user did not write it" in instructions
+    # The square-bracket annotations on chat history are the same class of
+    # metadata, and the failure was live: the synth narrated "[20 minutes earlier]"
+    # as a person who had spoken and told the user "that woman from 20 minutes ago
+    # ... says hi", which the user could not place at all.
+    assert "ANNOTATIONS ARE NOT PEOPLE" in instructions
+    assert "[20 minutes earlier]" in instructions
+    assert "[from the group chat]" in instructions
 
 
 def test_instructions_require_chat_reply_action():
     instructions = load_json_instructions()
     assert "CHAT REPLY REQUIRED" in instructions
-    assert "GRILLO INTERNAL MODE is NOT active" in instructions
     assert "hard failure" in instructions
+    # The rule used to carry its own "When GRILLO INTERNAL MODE is NOT active"
+    # preamble. That became redundant once the internal beat route stopped
+    # receiving the rule at all (see core/prompt_instructions/routes.py), so the
+    # preamble is gone from the shared text and the exclusions are asserted
+    # instead — in both directions — by
+    # tests/test_prompt_instruction_budget.py.
+    assert "GRILLO INTERNAL MODE is NOT active" not in instructions
 
 
 def test_instructions_enforce_first_person_identity():
@@ -282,22 +294,42 @@ def test_instructions_enforce_first_person_identity():
     )
 
 
-def test_unminified_chat_instruction_enforces_identity_rules():
-    instructions = load_unminified_chat_instruction("telegram_bot")
-    assert "Stay in the active persona in first person" in instructions
-    assert "Treat that as stale style noise" in instructions
-    assert "Keep pronouns consistent" in instructions
-    assert "prefer explicit honesty over confident reconstruction" in instructions
-    assert "potentially incomplete or reconstructed" in instructions
+def test_memory_honesty_is_obligatory_in_the_shared_instructions():
+    """The memory-honesty obligation lives in the shared rule set.
+
+    It used to be stated twice: as ``MEMORY HONESTY`` in the instructions and
+    again as a ``[Memory honesty notice]`` block next to the memories in
+    ``_build_context_summary``. The two are merged into the single rule, which
+    renders on every route — including turns with no memory block at all, where
+    the obligation matters most. Keeping it as a rule also means the unminified
+    variant's identity rules are covered here, because that variant is gone
+    (it had no production caller).
+    """
+    instructions = load_json_instructions()
+
+    # The obligation itself.
+    assert "MEMORY HONESTY" in instructions
+    assert "prefer honesty over confidence" in instructions
+    assert "never turn uncertainty into fiction" in instructions
+    assert "say so rather than inventing a recollection" in instructions
+    # The half that used to live only in the (now removed) context notice.
+    assert "incomplete, stale or reconstructed" in instructions
+
+    # Identity rules that the removed unminified variant used to cover.
+    assert "Stay inside the active persona in first person" in instructions
     assert (
-        "do not replace an established he/him or she/her person with singular they/them"
-        in instructions
+        "Do not neutralize an established he/him or she/her person into singular they/them"
+        in (instructions)
     )
+    assert "treat that as stale style noise" in instructions
 
 
-def test_build_context_summary_adds_memory_honesty_notice_when_memories_present() -> (
-    None
-):
+def test_build_context_summary_does_not_repeat_the_memory_honesty_notice() -> None:
+    """The notice block is gone: one rendering, in the shared rules.
+
+    The memories themselves must still render, and the notice must not come
+    back here, or the prompt carries the same obligation twice again.
+    """
     summary = _build_context_summary(
         {
             "memories": [
@@ -306,9 +338,8 @@ def test_build_context_summary_adds_memory_honesty_notice_when_memories_present(
         }
     )
 
-    assert "[Memory honesty notice]" in summary
-    assert "recalled internal records" in summary
-    assert "acknowledge uncertainty instead of inventing a recollection" in summary
+    assert "[Memory honesty notice]" not in summary
+    assert "acknowledge uncertainty instead of inventing a recollection" not in summary
     assert (
         "Recalled memory from 2026-04-20 (same chat): Alice loves jasmine tea."
         in summary
@@ -1215,7 +1246,11 @@ def test_prompt_request_attaches_for_grillo_observer_with_string_message_id(
 
     assert "__prompt_request" in result
     pr = result["__prompt_request"]
-    assert pr.current_text == "[G.R.I.L.L.O. CHAT OBSERVER] check in"
+    # The observer's own text is the LAST thing in the user turn. The route may
+    # prepend the deployment's who-is-who declaration ahead of it (this checkout
+    # has one configured), so the block itself is asserted in
+    # test_grillo_beat_carries_the_who_is_who_declaration, not by exact match here.
+    assert pr.current_text.endswith("[G.R.I.L.L.O. CHAT OBSERVER] check in")
     assert pr.runtime_ctx.interface_path == "telegram_bot/123456"
     assert pr.runtime_ctx.message_id is None
 
@@ -1390,6 +1425,33 @@ class TestHistoryToTurns:
         turns = self._call(lines, {"syntha"})
         assert len(turns) == 1
         assert turns[0].role == "assistant"
+
+    def test_spelled_out_self_label_still_becomes_assistant(self) -> None:
+        """The history renderer writes the persona's own line as `self (you)`.
+
+        The canonical token must survive the role test: parsed as a plain name
+        it is not in the synth name set, so the persona's own past reply lands
+        in the messages array as the HUMAN's turn (measured 2026-09-24: the
+        decorated line came back role="user").
+        """
+        lines = [
+            '[24/09/26:0650] Scar: "morning"',
+            '[24/09/26:0653] self (you): "my own line, decorated"',
+            '[24/09/26:0655] Scar: "back again"',
+        ]
+        turns = self._call(lines, {"2d"})
+        assert [t.role for t in turns] == ["user", "assistant", "user"]
+        assert "my own line, decorated" in turns[1].content
+
+    def test_decorated_label_does_not_leak_into_content(self) -> None:
+        """Only the role test is normalised: the content is passed through."""
+        lines = [
+            '[24/09/26:0650] Scar: "morning"',
+            '[24/09/26:0653] self (you): "kept verbatim"',
+        ]
+        turns = self._call(lines, {"2d"})
+        assert turns[1].role == "assistant"
+        assert turns[1].content == "kept verbatim"
 
     def test_user_sender_becomes_user(self) -> None:
         lines = ['[13/04/26:0924] Alice: "Hey there"']
@@ -1615,3 +1677,123 @@ class TestHistoryToTurns:
         assert turns[0].role == "user"
         assert turns[0].content == "First part"
         assert turns[1].content == "Second part"
+
+
+def test_grillo_beat_carries_the_who_is_who_declaration(monkeypatch) -> None:
+    """An autonomous beat must be told who the people in the chat are.
+
+    A beat's standing profile is suppressed on purpose (a stale profile fact was
+    once answered as the current ask) and its snippet pool keeps only the human's
+    own lines, so nothing in the prompt said who the human was. Live trace
+    3499288d (2026-09-23 10:37Z): the observer beat's outgoing message to the DM
+    was written in the HUMAN's voice and addressed him as "wife", while the same
+    turn's diary referred to him as "him". The deployment's speaker declaration
+    is identity-only, so it is safe where the standing profile is not.
+    """
+
+    async def dummy_gather(message, ctx):
+        return {}
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+
+    declared = (
+        "Scar (also called Scarlet) - he/him, the human, my husband, his lines "
+        "are labelled 'Scar'; 2D (called Dee) - she/her, the persona, me, my own "
+        "lines are labelled 'self'"
+    )
+
+    class _FakeRegistry:
+        def get_value(self, key, default=None, **kwargs):
+            if key == "SOUL_SPEAKER_IDENTITIES":
+                return declared
+            return default
+
+    monkeypatch.setattr("core.prompt_engine.config_registry", _FakeRegistry())
+
+    base = dict(
+        chat_id=-1,
+        text="[G.R.I.L.L.O. CHAT OBSERVER] snippets...",
+        message_id=0,
+        from_user=SimpleNamespace(id=-1, username="grillo", full_name="G.R.I.L.L.O."),
+        date=datetime.now(timezone.utc),
+    )
+    observer_msg = SimpleNamespace(
+        **base,
+        interface_path="grillo/-1",
+        chat=SimpleNamespace(id=-1, type="internal", title="t"),
+        grillo_beat=True,
+        beat_type="observer",
+    )
+
+    result = asyncio.run(
+        build_json_prompt(
+            observer_msg,
+            {"grillo_beat": True, "beat_type": "observer"},
+            interface_name="grillo",
+        )
+    )
+
+    pr = result.get("__prompt_request")
+    current = getattr(pr, "current_text", "")
+    assert current.startswith("[Who is who]\n" + declared + "\n")
+
+    # A human turn needs no decoration: it carries the standing profile instead.
+    chat_msg = SimpleNamespace(
+        chat_id=1,
+        text="hello",
+        message_id=1,
+        from_user=SimpleNamespace(full_name="user", username="user"),
+        date=datetime.now(timezone.utc),
+        interface_path="telegram/chat/12345",
+        chat=SimpleNamespace(
+            id="telegram/chat/12345",
+            type="telegram",
+            title="t",
+            username=None,
+            first_name=None,
+            human_count=1,
+        ),
+    )
+    chat_result = asyncio.run(
+        build_json_prompt(chat_msg, {}, interface_name="telegram_bot")
+    )
+    chat_pr = chat_result.get("__prompt_request")
+    assert "[Who is who]" not in getattr(chat_pr, "current_text", "")
+
+
+def test_grillo_beat_without_a_declaration_is_unchanged(monkeypatch) -> None:
+    """No declaration, no block: a deployment that declared nobody sees no change."""
+
+    async def dummy_gather(message, ctx):
+        return {}
+
+    monkeypatch.setattr("core.action_parser.gather_static_injections", dummy_gather)
+
+    class _FakeRegistry:
+        def get_value(self, key, default=None, **kwargs):
+            return default
+
+    monkeypatch.setattr("core.prompt_engine.config_registry", _FakeRegistry())
+
+    observer_msg = SimpleNamespace(
+        chat_id=-1,
+        text="[G.R.I.L.L.O. CHAT OBSERVER] snippets...",
+        message_id=0,
+        from_user=SimpleNamespace(id=-1, username="grillo", full_name="G.R.I.L.L.O."),
+        date=datetime.now(timezone.utc),
+        interface_path="grillo/-1",
+        chat=SimpleNamespace(id=-1, type="internal", title="t"),
+        grillo_beat=True,
+        beat_type="observer",
+    )
+
+    result = asyncio.run(
+        build_json_prompt(
+            observer_msg,
+            {"grillo_beat": True, "beat_type": "observer"},
+            interface_name="grillo",
+        )
+    )
+
+    pr = result.get("__prompt_request")
+    assert "[Who is who]" not in getattr(pr, "current_text", "")

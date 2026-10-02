@@ -348,7 +348,7 @@ class MatrixInterface:
                     },
                     "media": {
                         "type": "array",
-                        "example": ["/app/data/report.pdf"],
+                        "example": ["data/report.pdf"],
                         "description": (
                             "Optional list of sandbox file paths (image/video/audio/"
                             "document, auto-detected)."

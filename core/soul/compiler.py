@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any, Protocol, cast
+from typing import Any, Callable, Protocol, cast
+
+from core.logging_utils import log_debug, log_info, log_warning
 
 from .models import (
     CurationResult,
@@ -33,6 +36,12 @@ from .time_resolution import AbsoluteTimeResolver
 
 
 class MemCellExtractor(Protocol):
+    # An extractor that distils content instead of copying the transcript may
+    # declare an optional ``distils_content = True`` class attribute; the compiler
+    # then stamps every cell it writes, and the operator re-distil pass targets
+    # the unstamped rows. It is read with ``getattr``, so the deterministic
+    # extractor legitimately does not have it.
+
     async def extract_memcells(
         self, *, transcript: str, current_date: date
     ) -> list[MemCellExtractionModel]: ...
@@ -75,6 +84,13 @@ class LangfuseTraceLike(Protocol):
 _FUTURE_DATE_RE = re.compile(r"\b(20\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))\b")
 _CURATOR_SALIENCE_KEEP_THRESHOLD = 0.4
 _CURATOR_HALF_LIFE_SECONDS = 14 * 24 * 3600
+# Grace period before a cell may be removed for low salience (7 days by default).
+# Reason: recency contributes at most 0.2 to the salience formula while the
+# removal threshold is 0.4, so a new cell that is calm and has not been recalled
+# yet can never clear the bar - it would be deleted the first time the curator
+# runs, and the day's ordinary memories would never accumulate. Wired to
+# ``SOUL_CURATOR_MIN_AGE_HOURS`` by the plugin.
+_CURATOR_MIN_AGE_SECONDS = 7 * 24 * 3600
 
 
 class RuleBasedMemCellCurator:
@@ -84,6 +100,15 @@ class RuleBasedMemCellCurator:
     KEEP_IMPORTANT — salience >= threshold or explicit_importance > 0.
     REMOVE       — everything else.
     """
+
+    def __init__(self, *, min_age_seconds: float = _CURATOR_MIN_AGE_SECONDS) -> None:
+        """Build the curator.
+
+        Args:
+            min_age_seconds: grace period during which a cell is never removed,
+                whatever its salience. See ``_CURATOR_MIN_AGE_SECONDS``.
+        """
+        self.min_age_seconds: float = max(0.0, float(min_age_seconds))
 
     async def classify(
         self,
@@ -98,8 +123,8 @@ class RuleBasedMemCellCurator:
         )
         return [(s.id, self._classify_one(s, current_date, now)) for s in summaries]
 
-    @staticmethod
     def _classify_one(
+        self,
         summary: MemCellSummary,
         current_date: date,
         now: datetime,
@@ -122,6 +147,17 @@ class RuleBasedMemCellCurator:
         age_seconds = max(0.0, (now - ts.astimezone(now.tzinfo)).total_seconds())
         recency = 0.5 ** (age_seconds / _CURATOR_HALF_LIFE_SECONDS)
 
+        # A fresh cell has not had a chance to be recalled yet: recall only
+        # considers the cells a query is similar to, so "never retrieved" says
+        # nothing about value on day one. Recency is also the weakest term in the
+        # salience formula (0.2) while the removal threshold is 0.4, so without
+        # this guard a calm, freshly compiled cell can NEVER survive a curation
+        # pass: measured on the live deployment, all 8 cells compiled during
+        # 2026-09-18 were deleted by the first nightly pass, leaving the synth
+        # remembering only emotional or forward-looking moments.
+        if age_seconds < self.min_age_seconds:
+            return CuratorDecision.KEEP_IMPORTANT
+
         salience = compute_memcell_salience(
             emotional_intensity=summary.emotional_intensity,
             retrieval_count=summary.retrieval_count,
@@ -135,6 +171,31 @@ class RuleBasedMemCellCurator:
             return CuratorDecision.KEEP_IMPORTANT
 
         return CuratorDecision.REMOVE
+
+
+# The re-distil pass decides what to skip in Python (a cell whose content recall
+# will never inject must not cost a model call), but the store is only queried
+# with a row limit. Candidates are therefore over-fetched and then cut back to the
+# batch size, so a long run of skippable rows cannot leave the pass with nothing
+# to do while workable rows sit just past the limit. The factor is generous
+# because a skipped row costs a few microseconds where a processed one costs a
+# model call.
+_REDISTIL_CANDIDATE_FACTOR = 5
+_REDISTIL_CANDIDATE_MAX = 50_000
+
+
+def redistil_candidate_limit(batch_limit: int) -> int:
+    """How many unstamped rows to pull so ``batch_limit`` workable ones remain.
+
+    Shared by the pass and by the WebUI's cost preview, so the number the panel
+    reports before a press is measured the same way the press measures it.
+    """
+
+    try:
+        limit = max(1, int(batch_limit))
+    except (TypeError, ValueError):
+        limit = 1
+    return max(limit, min(limit * _REDISTIL_CANDIDATE_FACTOR, _REDISTIL_CANDIDATE_MAX))
 
 
 class NoopEmbedder:
@@ -199,8 +260,6 @@ class SoulCompiler:
             for raw_cell in extracted:
                 episodic_trace = resolver.resolve_text(raw_cell.episodic_trace)
                 atomic_facts = [resolver.resolve_text(f) for f in raw_cell.atomic_facts]
-                if not atomic_facts:
-                    atomic_facts = self._fallback_atomic_facts(episodic_trace)
                 embedding = await self.embedder.embed(episodic_trace)
 
                 cell_timestamp = raw_cell.timestamp
@@ -216,6 +275,11 @@ class SoulCompiler:
                     event_timestamp=cell_timestamp,
                     session_id=session_id,
                     embedding=embedding,
+                    distilled_at=(
+                        now_utc()
+                        if getattr(self.memcell_extractor, "distils_content", False)
+                        else None
+                    ),
                 )
                 await self.repository.upsert_memcell(memcell)
 
@@ -249,6 +313,196 @@ class SoulCompiler:
             await self.repository.upsert_memcell(cell)
             updated += 1
         return updated
+
+    async def redistil_memcell(self, cell: MemCell, *, current_date: date) -> bool:
+        """Rewrite one legacy cell's content as distilled knowledge, in place.
+
+        Cells compiled before the distilling extractor went live hold the session
+        transcript as their ``episodic_trace`` and, before this change took the
+        fabrication away, the conversation line as their only fact. Recall keeps
+        serving that raw transcript until the row is rewritten, so this re-runs
+        the extraction over the cell's own text and replaces the CONTENT only:
+        id, session, timestamp, retrieval count, emotional tag, foresight signals
+        and scene stay exactly as they were, and the embedding is recomputed so
+        recall similarity follows the new text.
+
+        Returns True when the cell was rewritten; False when the extractor
+        returned nothing usable or produced the same text, in which case the row
+        is left untouched.
+        """
+        text = (cell.episodic_trace or "").strip()
+        if not text:
+            return False
+        extracted = await self.memcell_extractor.extract_memcells(
+            transcript=text, current_date=current_date
+        )
+        if not extracted:
+            return False
+        distilled = extracted[0]
+        trace = str(distilled.episodic_trace or "").strip()
+        if not trace or trace == text:
+            return False
+        cell.episodic_trace = trace
+        cell.atomic_facts = list(distilled.atomic_facts)
+        cell.embedding = await self.embedder.embed(trace)
+        cell.distilled_at = now_utc()
+        await self.repository.upsert_memcell(cell)
+        return True
+
+    async def redistil_memcells(
+        self,
+        *,
+        before: datetime,
+        current_date: date,
+        limit: int = 500,
+    ) -> dict[str, int]:
+        """Re-distil every cell compiled before ``before``.
+
+        ``before`` is the moment the distilling extractor went live: everything
+        older than it was written by the deterministic extractor. One LLM call per
+        cell, so this is a deliberate one-off, not a scheduled pass.
+        """
+        pending = await self.repository.list_memcells_before(before, limit=limit)
+        return await self.redistil_each(pending, current_date=current_date)
+
+    async def redistil_pending(
+        self,
+        *,
+        current_date: date,
+        limit: int = 500,
+        on_progress: Callable[[dict[str, int]], None] | None = None,
+        skip: Callable[[MemCell], bool] | None = None,
+        cell_timeout: float | None = None,
+    ) -> dict[str, int]:
+        """Re-distil every cell that carries no distillation stamp.
+
+        This is what the WebUI button runs. After an upgrade the cells written by
+        the deterministic extractor are exactly the unstamped ones, and a cell
+        gets stamped when it is rewritten, so pressing the button a second time
+        finds nothing to do instead of paraphrasing good memories again. No
+        timestamp has to be configured by the operator, which is what makes this
+        safe to hand to every deployment.
+
+        ``skip`` is consulted for each candidate BEFORE it reaches the extractor,
+        so a cell the caller knows is worthless costs no model call: the pass is
+        one model call per cell, and a cell whose content recall will never inject
+        can never earn that call back. ``skipped_unusable`` in the result counts
+        them, separately from ``skipped`` (which means "the extractor would not
+        paraphrase this one").
+
+        Because the filter runs in Python while the store is queried with a row
+        limit, candidates are over-fetched and then cut back to ``limit``: a long
+        run of skippable rows cannot leave the pass with nothing to do while
+        workable rows sit just past the limit.
+        """
+        candidates = await self.repository.list_memcells_needing_distillation(
+            limit=redistil_candidate_limit(limit)
+        )
+        pending: list[MemCell] = []
+        skipped_unusable = 0
+        for cell in candidates:
+            if len(pending) >= limit:
+                break
+            if skip is not None and skip(cell):
+                skipped_unusable += 1
+                continue
+            pending.append(cell)
+
+        result = await self.redistil_each(
+            pending,
+            current_date=current_date,
+            on_progress=on_progress,
+            cell_timeout=cell_timeout,
+        )
+        result["skipped_unusable"] = skipped_unusable
+        return result
+
+    async def redistil_each(
+        self,
+        pending: list[MemCell],
+        *,
+        current_date: date,
+        on_progress: Callable[[dict[str, int]], None] | None = None,
+        cell_timeout: float | None = None,
+    ) -> dict[str, int]:
+        """Run the rewrite over an explicit list of cells, reporting progress.
+
+        ``cell_timeout`` bounds ONE cell's rewrite, in seconds. A slow engine (a
+        browser-driving one, or a large local model) can take minutes per memory,
+        and without a bound one pathological cell stalls the whole pass while the
+        panel sits on the same counter, so the operator cannot tell a slow engine
+        from a dead one. With a bound the cell is counted as ``timed_out``, the
+        pass moves on, and the panel says so. A timed-out cell is left unstamped,
+        so raising the value and pressing again retries exactly those (the pass
+        skips what it already rewrote). ``None`` or ``0`` leaves it unbounded.
+        """
+        rewritten = 0
+        skipped = 0
+        failed = 0
+        timed_out = 0
+        total = len(pending)
+        # Resolved once, guarded, so the timeout is a plain float everywhere it is
+        # used, including inside the except branch (where the optional cannot
+        # narrow and a bare float(cell_timeout) is not a legal call).
+        timeout_s = 0.0
+        if cell_timeout is not None and float(cell_timeout) > 0:
+            timeout_s = float(cell_timeout)
+        bounded = timeout_s > 0
+        for index, cell in enumerate(pending, 1):
+            try:
+                if bounded:
+                    done = await asyncio.wait_for(
+                        self.redistil_memcell(cell, current_date=current_date),
+                        timeout=timeout_s,
+                    )
+                else:
+                    done = await self.redistil_memcell(cell, current_date=current_date)
+                if done:
+                    rewritten += 1
+                else:
+                    skipped += 1
+            except (asyncio.TimeoutError, TimeoutError):
+                timed_out += 1
+                log_warning(
+                    f"[soul] redistil timed out for {cell.id} after "
+                    f"{timeout_s:.0f}s (raise SOUL_REDISTIL_TIMEOUT_SEC "
+                    "for a slow engine; the memory is left untouched and retryable)"
+                )
+            except Exception as exc:
+                failed += 1
+                log_warning(f"[soul] redistil failed for {cell.id}: {exc}")
+            if on_progress is not None:
+                on_progress(
+                    {
+                        "inspected": index,
+                        "total": total,
+                        "rewritten": rewritten,
+                        "skipped": skipped,
+                        "failed": failed,
+                        "timed_out": timed_out,
+                    }
+                )
+            if index % 25 == 0:
+                log_info(
+                    f"[soul] redistil progress: {index}/{total} "
+                    f"(rewritten={rewritten} skipped={skipped} "
+                    f"failed={failed} timed_out={timed_out})"
+                )
+        result = {
+            "inspected": total,
+            "rewritten": rewritten,
+            "skipped": skipped,
+            "failed": failed,
+            "timed_out": timed_out,
+        }
+        if on_progress is not None:
+            on_progress(result)
+        log_debug(
+            "[soul] redistil pass: "
+            f"inspected={result['inspected']} rewritten={rewritten} "
+            f"skipped={skipped} failed={failed} timed_out={timed_out}"
+        )
+        return result
 
     async def async_consolidate(self) -> list[str]:
         """Consolidate unconsolidated MemCells into MemScenes."""
@@ -449,13 +703,24 @@ class SoulCompiler:
                     current_date.day,
                     tzinfo=_tz.utc,
                 )
+                grace_seconds = float(
+                    getattr(
+                        effective_curator,
+                        "min_age_seconds",
+                        _CURATOR_MIN_AGE_SECONDS,
+                    )
+                )
 
-                def _salience(s: MemCellSummary) -> float:
+                def _event_age_seconds(s: MemCellSummary) -> float:
                     ts = s.event_timestamp
                     if ts.tzinfo is None:
                         ts = ts.replace(tzinfo=_tz.utc)
-                    age_s = max(0.0, (now - ts.astimezone(_tz.utc)).total_seconds())
-                    recency = 0.5 ** (age_s / _CURATOR_HALF_LIFE_SECONDS)
+                    return max(0.0, (now - ts.astimezone(_tz.utc)).total_seconds())
+
+                def _salience(s: MemCellSummary) -> float:
+                    recency = 0.5 ** (
+                        _event_age_seconds(s) / _CURATOR_HALF_LIFE_SECONDS
+                    )
                     return compute_memcell_salience(
                         emotional_intensity=s.emotional_intensity,
                         retrieval_count=s.retrieval_count,
@@ -463,7 +728,17 @@ class SoulCompiler:
                         explicit_importance=s.explicit_importance,
                     )
 
-                kept_important.sort(key=lambda t: _salience(t[1]))
+                def _in_grace(s: MemCellSummary) -> bool:
+                    return grace_seconds > 0.0 and _event_age_seconds(s) < grace_seconds
+
+                # The grace window guards the REMOVE branch above; without the
+                # same guard here the CAP deletes those same fresh cells for
+                # being the calmest in the store (recency alone is 0.2 of a 0.4
+                # scale), which is how a whole morning's memories disappear
+                # minutes after they are compiled while the store sits pinned at
+                # the cap. Inside the window a cell is evicted only once nothing
+                # outside it is left to evict.
+                kept_important.sort(key=lambda t: (_in_grace(t[1]), _salience(t[1])))
                 overage = retained_count - max_memories
                 evicted = kept_important[:overage]
                 kept_important = kept_important[overage:]
@@ -519,13 +794,6 @@ class SoulCompiler:
                 )
             )
         return signals
-
-    @staticmethod
-    def _fallback_atomic_facts(episodic_trace: str) -> list[str]:
-        first_sentence = re.split(r"[\.\n!?]", episodic_trace, maxsplit=1)[0].strip()
-        if not first_sentence:
-            return []
-        return [f"Conversation|summary|{first_sentence[:160]}"]
 
 
 # Lightweight default strategy implementations for tests and local dry-runs.

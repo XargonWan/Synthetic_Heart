@@ -23,6 +23,7 @@ from core.db_backup import (
     create_source_database_backup,
 )
 from core.logging_utils import log_error, log_info, log_warning
+from core.app_paths import app_root, state_path
 from core.main_db_migration import MainDbMigrator, build_default_migration_config
 from core.soul.repository import PostgresSoulRepository
 
@@ -183,11 +184,21 @@ _SOUL_TABLE_SPECS: tuple[_SoulTableSpec, ...] = (
 
 
 def _state_path() -> Path:
-    raw_path = os.environ.get(
-        "SYNTH_DB_CUTOVER_STATE_PATH", "/config/db-cutover-state.json"
+    """Return the cutover state file path.
+
+    Defaults to the resolved data root instead of the container-only
+    ``/config``, which on Windows resolves to ``C:\\config`` and raises while
+    creating the parent directory.
+    """
+    override = os.environ.get("SYNTH_DB_CUTOVER_STATE_PATH", "").strip()
+    path = (
+        Path(override).expanduser() if override else state_path("db-cutover-state.json")
     )
-    path = Path(raw_path).expanduser()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        path = app_root() / "data" / path.name
+        path.parent.mkdir(parents=True, exist_ok=True)
     return path
 
 

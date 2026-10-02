@@ -1315,7 +1315,9 @@ async def test_reactive_vessel_chat_inworld_say_suppresses_corrector(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_reactive_vessel_disconnect_suppresses_missing_reply_corrector(monkeypatch):
+async def test_reactive_vessel_disconnect_suppresses_missing_reply_corrector(
+    monkeypatch,
+):
     # Disconnect is a successful terminal lifecycle action. It removes the
     # world-specific say verb immediately, so demanding a spoken reply after it
     # would manufacture an action that is no longer valid.
@@ -1346,3 +1348,166 @@ async def test_reactive_vessel_disconnect_suppresses_missing_reply_corrector(mon
     assert not corrector_calls, (
         "a successful vessel_disconnect must not trigger a missing-reply correction"
     )
+
+
+def _retry_harness(monkeypatch, *, reply_delivered_by_tts: bool):
+    """Drive one correction retry and record the action types each pass dispatches.
+
+    Reproduces the 2026-09-28 double-send: the LLM answered with ``send_message``
+    plus a ``goal_update``; message_chain merged the send into the auto-injected
+    ``tts_speak`` (so the reply text went out with the voice note) and the
+    ``goal_update`` failed with ``no_active_goal``. The corrector then re-emitted
+    the whole reply, and the retry dispatched the ``send_message`` a second time.
+    """
+    dispatched: list[list[str]] = []
+    calls = {"n": 0}
+
+    first_pass = {
+        "actions": [
+            {
+                "type": "send_message",
+                "payload": {"text": "hello", "interface_path": "telegram_bot/123"},
+            },
+            {"type": "goal_update", "payload": {"note": "going well"}},
+        ]
+    }
+    # The model, asked to fix only the failed action, re-emits its whole reply.
+    corrected_pass = {
+        "actions": [
+            {
+                "type": "send_message",
+                "payload": {"text": "hello", "interface_path": "telegram_bot/123"},
+            },
+            {"type": "goal_update", "payload": {"goal_id": "g1", "note": "going well"}},
+        ]
+    }
+
+    def fake_extract_json(text, return_metadata=False):
+        calls["n"] += 1
+        return (first_pass if calls["n"] == 1 else corrected_pass, {})
+
+    successful = [
+        {"type": "update_emotion_state", "payload": {"emotions": {"love": 6.0}}},
+        {
+            "type": "create_personal_diary_entry",
+            "payload": {"interaction_summary": "x"},
+        },
+        {
+            "type": "tts_speak",
+            "payload": (
+                {"text": "hello", "__merged_text": "hello", "__auto_injected": True}
+                if reply_delivered_by_tts
+                else {"text": "hello", "__auto_injected": True}
+            ),
+        },
+    ]
+
+    async def fake_run_actions(actions, context, bot, original_message):
+        dispatched.append([a.get("type") for a in (actions or [])])
+        if len(dispatched) == 1:
+            # What action_parser._request_selective_correction records on the
+            # original message before it asks the model to repair the failures.
+            original_message.correction_context = {
+                "successful_types": [a["type"] for a in successful],
+                "successful_actions": successful,
+                "failed_actions": [
+                    {
+                        "action": {
+                            "type": "goal_update",
+                            "payload": {"note": "going well"},
+                        },
+                        "errors": ["no_active_goal"],
+                    }
+                ],
+            }
+            return {
+                "processed": list(successful),
+                "failed_actions": [
+                    {
+                        "action": {
+                            "type": "goal_update",
+                            "payload": {"note": "going well"},
+                        },
+                        "errors": ["no_active_goal"],
+                    }
+                ],
+                "errors": ["no_active_goal"],
+            }
+        return {
+            "processed": list(actions or []),
+            "failed_actions": [],
+            "errors": [],
+        }
+
+    async def fake_corrector(
+        text, bot=None, context=None, chat_id=None, thread_id=None
+    ):
+        return '{"actions":[{"type":"goal_update","payload":{"goal_id":"g1"}}]}'
+
+    monkeypatch.setattr(
+        action_parser,
+        "get_supported_action_types",
+        lambda: {"send_message", "goal_update", "tts_speak"},
+    )
+    monkeypatch.setattr(
+        "core.transport_layer.extract_json_from_text", fake_extract_json
+    )
+    monkeypatch.setattr("core.transport_layer.run_corrector_middleware", fake_corrector)
+    monkeypatch.setattr("core.action_parser.run_actions", fake_run_actions)
+    monkeypatch.setattr("core.persona_manager.get_persona_manager", lambda: None)
+    return dispatched
+
+
+@pytest.mark.asyncio
+async def test_a_reply_already_sent_with_the_voice_note_is_not_sent_again_on_retry(
+    monkeypatch,
+):
+    """The merged tts_speak delivered the reply, so the retry may not re-send it.
+
+    Live 2026-09-28 22:13-22:14: the human received the same 849-character reply
+    twice, 16 seconds apart, because the correction pass re-emitted the reply
+    text the merged voice note had already carried.
+    """
+    dispatched = _retry_harness(monkeypatch, reply_delivered_by_tts=True)
+
+    msg = SimpleNamespace(
+        chat_id=123, interface_path="telegram_bot/123", from_cortex=True
+    )
+    await message_chain.handle_incoming_message(
+        bot=None,
+        message=msg,
+        text='{"actions":[{"type":"send_message","payload":{"text":"hello"}}]}',
+        source="llm",
+        context={"chat_id": 123, "interface_path": "telegram_bot/123"},
+    )
+
+    assert len(dispatched) == 2, dispatched
+    assert "send_message" not in dispatched[1], (
+        "the reply was already delivered with the voice note; re-sending it is the duplicate"
+    )
+    assert dispatched[1] == ["goal_update"], dispatched
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_never_went_out_is_still_allowed_on_retry(monkeypatch):
+    """The suppression keys on a delivery that actually happened.
+
+    When nothing carried the reply (no message action succeeded and the
+    tts_speak holds no merged text), the re-emitted reply is the person's only
+    chance to hear anything, so it must go through.
+    """
+    dispatched = _retry_harness(monkeypatch, reply_delivered_by_tts=False)
+
+    msg = SimpleNamespace(
+        chat_id=123, interface_path="telegram_bot/123", from_cortex=True
+    )
+    await message_chain.handle_incoming_message(
+        bot=None,
+        message=msg,
+        text='{"actions":[{"type":"send_message","payload":{"text":"hello"}}]}',
+        source="llm",
+        context={"chat_id": 123, "interface_path": "telegram_bot/123"},
+    )
+
+    assert len(dispatched) == 2, dispatched
+    assert "send_message" in dispatched[1], dispatched

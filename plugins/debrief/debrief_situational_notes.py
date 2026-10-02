@@ -79,16 +79,44 @@ _EXTRACT_INSTRUCTIONS = (
     "condition), INTERVAL (time range), INSTANT (past occurrence with short "
     "relevance).\n"
     "priority: -3..3 (higher = more urgent). confidence: 0.0-1.0.\n"
+    "EVERY NOTE MUST BE ABOUT THE HUMAN'S CIRCUMSTANCES (or ones the human shares). Never write a note about the persona's own state, its moods or its plans, and never about a third party's state: those belong to the persona's diary, not to this store. A note whose subject is the persona or another character is wrong even when the exchange mentions them.\n"
+    "subject is a SHORT canonical noun phrase (2-4 words) naming the specific circumstance, and it must be written the SAME way every time you describe that circumstance ('gathering at Sandro's', not 'gathering tonight' then 'Human' then 'upcoming outing'): the same situation re-described must reuse the same subject so it reads as one ongoing situation instead of a new one. Never use a bare person's name ('Scar', 'Human', 'Scarlet') as the subject.\n"
+    "SEPARATELY, report the circumstances this exchange shows have ENDED or been "
+    "CONTRADICTED, and every filed note this exchange shows is now STALE. When "
+    "the human says a standing circumstance is over, has passed, or is no longer "
+    "true ('I'm not sore any more', 'the appointment was yesterday', 'that got "
+    "cancelled'), list that circumstance's subject under 'ended', worded exactly "
+    "as it was filed before, so the standing note for it can be retired. The same "
+    "channel is what drops a note that is simply OUT OF DATE: the notes "
+    "currently filed are listed for you under 'filed notes', and any of them the "
+    "exchange shows is wrong or already past (the event it describes has "
+    "happened, the day it calls 'tomorrow' is over, the human corrects it: 'the "
+    "wedding was two days ago, that note is stale') must be listed under "
+    "'ended' with its subject copied from that list character for character. A "
+    "note whose validity window has not run out yet is retired by NOTHING else, "
+    "so a stale filed note that goes unreported keeps being told to you as "
+    "current fact. Report it even when the turn has no new circumstance to note.\n"
+    "A summary outlives the turn that wrote it and is read again on later days, "
+    "so it must carry the ABSOLUTE date or time it refers to ('the wedding took "
+    "place on 2026-09-21'), and never a bare relative word ('today', 'tomorrow', "
+    "'tonight', 'this morning', 'yesterday'): 'tomorrow' written today is a false "
+    "claim tomorrow.\n"
     'Return ONLY a JSON object: {"notes": [{"note_type": ..., "subject": ..., '
     '"summary": ..., "priority": 0, "confidence": 0.5, '
     '"valid_from": "2026-05-05T00:00:00+00:00", '
-    '"valid_until": "2026-05-12T00:00:00+00:00"}]} — return an empty notes list '
+    '"valid_until": "2026-05-12T00:00:00+00:00"}], "ended": ["<subject that is now '
+    'over>"]} — return an empty notes list and an empty ended list '
     "when nothing time-bounded was said."
 )
 
 
 class DebriefSituationalNotesPlugin:
     display_name = display_name
+
+    # How many filed notes the extraction prompt is shown. The list exists so a
+    # correction can name a standing note by its own wording; it is bounded
+    # because it rides on every debrief turn.
+    _FILED_NOTES_IN_PROMPT = 12
 
     def get_supported_actions(self) -> dict:
         return {}
@@ -142,14 +170,42 @@ class DebriefSituationalNotesPlugin:
             return [parsed]
         return []
 
+    @staticmethod
+    def _extract_ended_subjects(parsed: Any) -> List[str]:
+        """Pull the subjects this exchange shows have ended.
+
+        A separate channel from ``notes`` on purpose: an ended circumstance needs
+        no new note, and expressing it as one would leave a row to store and a
+        degenerate validity window to invent. The subject is matched against the
+        active notes in the store, and that match is what retires them.
+        """
+        if not isinstance(parsed, dict):
+            return []
+        raw = parsed.get("ended")
+        if raw is None:
+            raw = parsed.get("resolved")
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            return []
+        subjects: List[str] = []
+        for item in raw:
+            if isinstance(item, str) and item.strip():
+                subjects.append(item.strip())
+            elif isinstance(item, dict):
+                subject = item.get("subject")
+                if isinstance(subject, str) and subject.strip():
+                    subjects.append(subject.strip())
+        return subjects
+
     async def _parse_notes_output(
         self,
         *,
         llm_text: str,
         context: Dict[str, Any],
         original_message: Any,
-    ) -> List[Dict[str, Any]]:
-        """Extract note dicts, asking the corrector once when the JSON is broken."""
+    ) -> tuple[List[Dict[str, Any]], List[str]]:
+        """Extract note dicts and ended subjects, correcting broken JSON once."""
         try:
             parsed, metadata = extract_json_from_text(llm_text, return_metadata=True)
         except Exception as exc:
@@ -160,14 +216,15 @@ class DebriefSituationalNotesPlugin:
             parsed, metadata = None, {}
 
         candidates = self._extract_note_candidates(parsed)
-        if candidates:
-            return candidates
+        ended = self._extract_ended_subjects(parsed)
+        if candidates or ended:
+            return candidates, ended
         # An empty but well-formed answer is the normal "nothing temporal was
         # said" case; only bother the corrector when the payload looked broken.
         if isinstance(parsed, (dict, list)) and not (
             metadata.get("had_errors") or metadata.get("had_extra_text")
         ):
-            return []
+            return [], []
 
         corrected_text = await run_corrector_middleware(
             text=llm_text,
@@ -177,15 +234,17 @@ class DebriefSituationalNotesPlugin:
             thread_id=getattr(original_message, "thread_id", None),
         )
         if not isinstance(corrected_text, str) or not corrected_text.strip():
-            return []
+            return [], []
         try:
             corrected = extract_json_from_text(corrected_text, return_metadata=False)
         except Exception as exc:
             log_warning(
                 f"[debrief_situational_notes] corrected output still not JSON: {exc}"
             )
-            return []
-        return self._extract_note_candidates(corrected)
+            return [], []
+        return self._extract_note_candidates(corrected), self._extract_ended_subjects(
+            corrected
+        )
 
     @staticmethod
     def _get_soul_repository() -> Any | None:
@@ -214,6 +273,66 @@ class DebriefSituationalNotesPlugin:
         except Exception as exc:
             log_warning(f"[debrief_situational_notes] repository lookup failed: {exc}")
             return None
+
+    @staticmethod
+    def _short_summary(summary: Any, limit: int = 200) -> str:
+        """One line, bounded: the filed list is prompt budget, not an archive."""
+        text = " ".join(str(summary or "").split())
+        if len(text) <= limit:
+            return text
+        return text[: limit - 3].rstrip() + "..."
+
+    @staticmethod
+    def _filed_window(note: Any) -> str:
+        """The note's own validity window, absolute, as the extractor reads it."""
+        start = (
+            note.valid_from.isoformat() if getattr(note, "valid_from", None) else "?"
+        )
+        end = (
+            note.valid_until.isoformat()
+            if getattr(note, "valid_until", None)
+            else "open"
+        )
+        return f"{start} -> {end}"
+
+    async def _filed_notes_block(self) -> str:
+        """Render the notes standing for the human, for the extraction prompt.
+
+        The prompt asked the model to report a circumstance that has ended
+        "worded exactly as it was filed before" while never showing it the filed
+        wording, so a correction could only ever be a guess. Live (2026-09-23):
+        the human said the wedding had happened two days earlier, the debrief
+        filed the correction under "wedding ceremony in the kitchen", and the
+        standing rows "wedding day" and "wedding tomorrow" ("The wedding is
+        tomorrow (2026-09-23)") stayed active and were injected on the very day
+        they still called tomorrow, because nothing in the store could connect
+        the correction to them.
+
+        Fail-safe: no repository, or a failing lookup, renders no block and the
+        extraction carries on exactly as it did before.
+        """
+        repository = self._get_soul_repository()
+        if repository is None:
+            return ""
+        from core.soul.models import now_utc
+
+        try:
+            active = await repository.list_active_situational_notes(now=now_utc())
+        except Exception as exc:
+            log_debug(f"[debrief_situational_notes] filed-note lookup failed: {exc}")
+            return ""
+        if not active:
+            return ""
+        lines = [
+            f"- {note.subject} | {self._filed_window(note)} | "
+            f"{self._short_summary(note.summary)}"
+            for note in active[: self._FILED_NOTES_IN_PROMPT]
+        ]
+        return (
+            "filed notes (what is currently standing for the human; a note this "
+            "exchange shows is out of date must be retired by copying its subject "
+            "exactly into 'ended'):\n" + "\n".join(lines)
+        )
 
     async def _store_notes(
         self, candidates: List[Dict[str, Any]], session_id: str | None
@@ -247,13 +366,120 @@ class DebriefSituationalNotesPlugin:
                 session_id=session_id,
             )
             try:
-                await repository.upsert_situational_note(note)
+                keep_id = await repository.upsert_situational_note(note)
                 stored += 1
             except Exception as exc:
                 log_warning(
                     f"[debrief_situational_notes] could not store a note: {exc}"
                 )
+                continue
+            superseded = await self._supersede_older_accounts(
+                repository, note, keep_id=keep_id
+            )
+            if superseded:
+                log_info(
+                    f"[debrief_situational_notes] superseded {superseded} older "
+                    f"note(s) about '{note.subject}'"
+                )
         return stored
+
+    async def _supersede_older_accounts(
+        self, repository: Any, note: Any, *, keep_id: Any = None
+    ) -> int:
+        """Retire the active notes that this new account replaces.
+
+        Every debrief cycle re-describes the circumstances of the last turn, and a
+        note's id is derived from its own text (note_type + subject + summary), so
+        a rephrasing used to add a row and leave the older account active: the
+        store reached twelve active notes for one evening gathering, contradicting
+        each other ("happened last night and went fine" next to "expected
+        tonight"). The newest account of a circumstance wins; the older rows are
+        marked ``superseded`` (never deleted) and stop being injected, because both
+        the active-note query and the prompt block read ``status = 'active'`` only.
+
+        Fail-safe: a lookup or update error is logged and never breaks the store.
+        """
+        from core.soul.models import now_utc
+        from core.soul.situational import is_same_circumstance, subject_tokens
+
+        tokens = subject_tokens(note.subject)
+        if not tokens:
+            return 0
+        try:
+            active = await repository.list_active_situational_notes(now=now_utc())
+        except Exception as exc:
+            log_debug(f"[debrief_situational_notes] supersede lookup failed: {exc}")
+            return 0
+
+        superseded = 0
+        for other in active:
+            # Never retire the note we just stored: by identity in-process, and by
+            # the id the repository derived for it.
+            if other is note:
+                continue
+            if keep_id and other.id == keep_id:
+                continue
+            if note.id and other.id == note.id:
+                continue
+            if not is_same_circumstance(tokens, subject_tokens(other.subject)):
+                continue
+            try:
+                await repository.resolve_situational_note(
+                    other.id, new_status="superseded"
+                )
+                superseded += 1
+            except Exception as exc:
+                log_warning(
+                    f"[debrief_situational_notes] could not supersede {other.id}: {exc}"
+                )
+        return superseded
+
+    async def _retire_ended(self, repository: Any, subjects: List[str]) -> int:
+        """Resolve the active notes whose circumstance this turn shows has ended.
+
+        Nothing retired a note when the human contradicted it: a note's id is
+        derived from its own text, so re-describing a circumstance writes a new
+        row, and ``resolve_situational_note`` only ran when a replacement note
+        happened to be written about the same subject. Live consequence
+        (2026-09-19): a soreness STATE note was contradicted twice, at 11:27 and
+        again at 13:20, stayed ``active`` with ten hours of validity left, and was
+        asserted at 15:16 as present-tense fact ("you're sore, remember? So it's
+        hands and mouth only tonight").
+
+        Matching uses the same blunt subject-token containment as superseding, so
+        a subject naming a person can never resolve a real circumstance. The store
+        keeps every row; only the status changes, so nothing is deleted. Fail-safe:
+        a lookup or update error is logged and never raised.
+        """
+        from core.soul.models import now_utc
+        from core.soul.situational import is_same_circumstance, subject_tokens
+
+        wanted = [subject_tokens(subject) for subject in subjects]
+        wanted = [tokens for tokens in wanted if tokens]
+        if not wanted:
+            return 0
+
+        try:
+            active = await repository.list_active_situational_notes(now=now_utc())
+        except Exception as exc:
+            log_debug(f"[debrief_situational_notes] retire lookup failed: {exc}")
+            return 0
+
+        retired = 0
+        for note in active:
+            note_tokens = subject_tokens(note.subject)
+            if not any(is_same_circumstance(tokens, note_tokens) for tokens in wanted):
+                continue
+            try:
+                await repository.resolve_situational_note(
+                    note.id, new_status="resolved"
+                )
+                retired += 1
+            except Exception as exc:
+                log_warning(
+                    f"[debrief_situational_notes] could not resolve {note.id}: {exc}"
+                )
+        return retired
 
     async def on_debrief(
         self,
@@ -292,6 +518,7 @@ class DebriefSituationalNotesPlugin:
             return None
 
         now = datetime.now(timezone.utc)
+        filed_block = await self._filed_notes_block()
         # Plain labelled text, deliberately not a JSON blob. An OpenAI-compatible
         # backend may try to read a JSON string as structured content and keep
         # only the keys it recognises (text/content/parts), silently dropping
@@ -303,6 +530,8 @@ class DebriefSituationalNotesPlugin:
             f"The human said:\n{user_message.strip()}\n\n"
             f"The persona replied:\n{llm_response}"
         )
+        if filed_block:
+            user_prompt = f"{user_prompt}\n\n{filed_block}"
 
         try:
             from core.config import derive_cortex_scope, get_active_cortex_engine
@@ -339,17 +568,28 @@ class DebriefSituationalNotesPlugin:
             log_warning(f"[debrief_situational_notes] LLM generation failed: {exc!r}")
             return None
 
-        candidates = await self._parse_notes_output(
+        candidates, ended_subjects = await self._parse_notes_output(
             llm_text=llm_text,
             context=context,
             original_message=original_message,
         )
-        if not candidates:
+        if not candidates and not ended_subjects:
             return None
 
         session_id = context.get("session_id") or getattr(
             original_message, "session_id", None
         )
+        # Retire before storing: a circumstance the turn showed has ended must not
+        # survive as an active note, even if storing the new notes then fails.
+        if ended_subjects:
+            repository = self._get_soul_repository()
+            if repository is not None:
+                retired = await self._retire_ended(repository, ended_subjects)
+                if retired:
+                    log_info(
+                        f"[debrief_situational_notes] retired {retired} note(s) this "
+                        "turn showed have ended"
+                    )
         stored = await self._store_notes(candidates, session_id)
         if stored:
             log_info(f"[debrief_situational_notes] Stored {stored} situational note(s)")

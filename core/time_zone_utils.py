@@ -1,7 +1,8 @@
 from zoneinfo import ZoneInfo, available_timezones
 from datetime import datetime
+from typing import Any
 
-from core.logging_utils import log_warning
+from core.logging_utils import log_debug, log_info, log_warning
 from core.config_manager import config_registry
 
 # Get list of available timezones for dropdown
@@ -36,13 +37,66 @@ _PROMPT_LOCATION = config_registry.get_var(
 )
 
 
-def get_local_timezone() -> ZoneInfo:
-    """Return the local timezone defined by the TZ config variable or UTC.
+# The house's own timezone, published by an environment plugin that reads it
+# from the home itself (Home Assistant's core config carries ``time_zone``).
+#
+# While it is set it outranks the ``TZ`` config var: the household's clock is a
+# property of the house, not of this process, so a deployment whose ``TZ`` row
+# was never moved off its ``UTC`` default still reads the family's local time.
+# Empty means "nothing published" and the ``TZ`` config applies exactly as
+# before, which is also the state of any deployment without that plugin.
+_HOUSE_TZ_NAME: str = ""
 
-    Logs a warning and falls back to UTC if the variable is missing or
-    points to an invalid timezone.
+
+def set_house_timezone(name: Any) -> str:
+    """Publish (or clear) the house timezone learned from the home itself.
+
+    Returns the timezone in force afterwards. An unknown name is refused and the
+    previous value kept, so a bad publish can never move the clock.
     """
-    tz_name = str(_TZ) or "UTC"
+    global _HOUSE_TZ_NAME
+    candidate = str(name or "").strip()
+    if candidate:
+        try:
+            ZoneInfo(candidate)
+        except Exception:
+            log_warning(
+                f"Ignoring unknown house timezone '{candidate}'; keeping "
+                f"'{_HOUSE_TZ_NAME or str(_TZ) or 'UTC'}'"
+            )
+            return _HOUSE_TZ_NAME
+    if candidate != _HOUSE_TZ_NAME:
+        _HOUSE_TZ_NAME = candidate
+        if candidate:
+            log_info(
+                f"House timezone '{candidate}' now drives the clock "
+                f"(TZ config '{str(_TZ) or 'UTC'}' is the fallback)"
+            )
+        else:
+            log_info("House timezone cleared; the TZ config drives the clock")
+        # The clock moved, so the reactions registered on the TZ config (the
+        # scheduled-event recompute for events with no timezone of their own)
+        # must run exactly as they would after a TZ edit.
+        try:
+            config_registry.notify_listeners("TZ")
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"House timezone listener notify skipped: {exc}")
+    return _HOUSE_TZ_NAME
+
+
+def get_house_timezone() -> str:
+    """Return the published house timezone, or ``""`` when none is known."""
+    return _HOUSE_TZ_NAME
+
+
+def get_local_timezone() -> ZoneInfo:
+    """Return the timezone the clock is read in.
+
+    Precedence: the house timezone published by an environment plugin (the home
+    itself, when it knows it), then the ``TZ`` config variable, then UTC. Logs a
+    warning and falls back to UTC when the chosen name is not a real zone.
+    """
+    tz_name = get_house_timezone() or str(_TZ) or "UTC"
     try:
         return ZoneInfo(tz_name)
     except Exception:
@@ -64,10 +118,43 @@ def parse_local_to_utc(date_str: str, time_str: str) -> datetime:
     return dt_local.replace(tzinfo=local_tz).astimezone(ZoneInfo("UTC"))
 
 
+def format_day_month(dt: datetime) -> str:
+    """Format a datetime as ``Sep 29`` — no leading zero, on every platform.
+
+    ``strftime("%b %-d")`` is a glibc extension: on Windows it raises
+    ``ValueError: Invalid format string``. The callers here format lines inside a
+    per-item guard that swallows the error, so on Windows every event line quietly
+    disappeared instead of failing loudly. Build the component-wise string rather
+    than rely on the extension.
+    """
+    return f"{dt.strftime('%b')} {dt.day}"
+
+
 def format_dual_time(dt_utc: datetime) -> str:
     """Return formatted time in local timezone with UTC in parentheses."""
     dt_local = utc_to_local(dt_utc)
     return f"{dt_local.strftime('%H:%M %Z')} ({dt_utc.strftime('%H:%M UTC')})"
+
+
+# Zones that name no place: their abbreviation IS the absence of a location.
+_NON_PLACE_ZONE_NAMES = frozenset({"utc", "gmt", "zulu", "universal", "ut"})
+
+
+def _zone_names_no_place(tz_name: str) -> bool:
+    """Whether a timezone name carries no place (``UTC``, ``Etc/GMT+2``, ...).
+
+    A zone is not a location: printing ``UTC`` where a place name belongs reads
+    as the household's whereabouts in a prompt and in every block that borrows
+    this helper. Zones that name a city (``Europe/Ljubljana``) are unaffected.
+    """
+    name = tz_name.strip().lower().replace(" ", "_")
+    if not name:
+        return True
+    return (
+        name.startswith("etc/")
+        or name.startswith("etc_")
+        or name in _NON_PLACE_ZONE_NAMES
+    )
 
 
 def get_local_location() -> str:
@@ -84,6 +171,12 @@ def get_local_location() -> str:
         return location
 
     tz_name = str(_TZ) or "UTC"
+    # A zone is not a place. "UTC" and its family are the ABSENCE of a location,
+    # and printing them where a place name belongs is worse than printing
+    # nothing (it reads as "UTC: Overcast ..." in a weather line and as a
+    # whereabouts in a prompt).
+    if _zone_names_no_place(tz_name):
+        return ""
     # Typically in the form Region/City; use the last part as location
     if "/" in tz_name:
         location = tz_name.split("/")[-1]

@@ -12,12 +12,26 @@ from typing import Any
 # ``aiomysql`` is an optional dependency.  Import it lazily and provide a
 # minimal stub when it's not installed so modules depending on ``core.db`` can
 # still be imported during tests.
+#
+# The guard catches every exception, not only ImportError, so a driver that is
+# installed but broken, shadowed or otherwise unimportable is reported as
+# absent.  The real cause is therefore kept and printed, and appended to the
+# RuntimeError: a log line saying "aiomysql is not installed" has to be
+# distinguishable from a MariaDB call site reached by mistake in a Postgres
+# deployment, which is exactly what this message was hiding.
 try:  # pragma: no cover - import guard
     import aiomysql
-except Exception:  # pragma: no cover - executed when aiomysql missing
+
+    _AIOMYSQL_IMPORT_ERROR: Any = None
+except Exception as _aiomysql_import_error:  # pragma: no cover - aiomysql missing
+    _AIOMYSQL_IMPORT_ERROR = _aiomysql_import_error
+    print(
+        f"[db] aiomysql import failed: {_aiomysql_import_error!r}",
+        flush=True,
+    )
 
     async def _missing_connect(*args, **kwargs):
-        raise RuntimeError("aiomysql is not installed")
+        raise RuntimeError(f"aiomysql is not installed ({_AIOMYSQL_IMPORT_ERROR!r})")
 
     # Provide a minimal stub exposing the async connect/create_pool API so
     # calling sites receive a clear RuntimeError instead of an AttributeError
@@ -128,6 +142,41 @@ def _get_source_db_type() -> str:
     if normalized in {"postgres", "postgresql"}:
         return "postgres"
     return "mariadb"
+
+
+def _mariadb_fallback_context() -> str:
+    """Describe the inputs that made the code pick the MariaDB backend.
+
+    A Postgres deployment only reaches the MariaDB branch when the target
+    resolved differently than the operator expects, and the environment is the
+    only input: ``SYNTH_PRIMARY_DB`` is read from the process environment, which
+    is populated by ``core.logging_utils``'s ``load_dotenv()`` at import, so a
+    read that happens before that resolves against a different (often stale)
+    target.  Naming the inputs in the log is what turns "aiomysql is not
+    installed" into a diagnosis.
+    """
+    return (
+        f"SYNTH_PRIMARY_DB={os.getenv('SYNTH_PRIMARY_DB')!r}, "
+        f"SYNTH_DB_TYPE={os.getenv('SYNTH_DB_TYPE')!r}, "
+        f"DB_TYPE={os.getenv('DB_TYPE')!r}, "
+        f"SOURCE_DB_TYPE={os.getenv('SOURCE_DB_TYPE')!r}, "
+        f"resolved_target={_get_primary_db_target()!r}"
+    )
+
+
+def _describe_caller() -> str:
+    """Call chain of the frames that reached the fallback, innermost first."""
+    try:
+        import traceback
+
+        stack = traceback.extract_stack(limit=6)
+        # stack[-1] is this function, so [-4:-1] is caller, caller's caller, ...
+        return " <- ".join(
+            f"{Path(frame.filename).name}:{frame.lineno} in {frame.name}()"
+            for frame in stack[-4:-1]
+        )
+    except Exception:
+        return "unknown"
 
 
 def _read_db_config():
@@ -375,6 +424,12 @@ async def connect_source_db() -> Any:
             password=passwd,
             database=dbname,
             dsn=build_source_postgres_dsn() or None,
+        )
+    if _get_primary_db_target() == "soul":
+        log_warning(
+            "[db] Legacy MariaDB source store requested while the primary "
+            f"database is Postgres: {_mariadb_fallback_context()}; "
+            f"caller={_describe_caller()}"
         )
     return await aiomysql.connect(
         host=host,
@@ -637,6 +692,10 @@ async def get_pool():
                         dsn=_get_db_dsn(),
                     )
                 else:
+                    log_warning(
+                        "[db] MariaDB backend selected for the connection pool: "
+                        f"{_mariadb_fallback_context()}; caller={_describe_caller()}"
+                    )
                     new_pool = await aiomysql.create_pool(
                         host=host,
                         port=port,
@@ -805,15 +864,6 @@ async def get_conn() -> Any:
         _active_conn_count += 1
         try:
             _conn_acquired_times[id(wrapped_conn)] = time.time()
-            # Capture a short stack trace at acquisition time to help diagnose
-            # where connections are being held without release.
-            try:
-                import traceback
-
-                stack = traceback.format_stack(limit=8)
-                _conn_acquired_stacks[id(wrapped_conn)] = "".join(stack)
-            except Exception:
-                pass
         except Exception:
             pass
         # Warn when we're close to pool capacity
@@ -831,6 +881,22 @@ async def get_conn() -> Any:
                 warning_threshold is not None
                 and _active_conn_count >= warning_threshold
             ):
+                # Capture a short stack trace for THIS acquisition only once the
+                # pool is at/over the warning threshold. `_conn_acquired_stacks`
+                # is read solely by the pool-capacity warning below, and running
+                # `traceback.format_stack` on every single acquire is wasteful
+                # event-loop CPU (measured ~19us each, tens of thousands a day).
+                # Under persistent pressure every acquire keeps writing a fresh
+                # stack, which is exactly the leak scenario the warning exists to
+                # expose.
+                try:
+                    import traceback
+
+                    _conn_acquired_stacks[id(wrapped_conn)] = "".join(
+                        traceback.format_stack(limit=8)
+                    )
+                except Exception:
+                    pass
                 # Compute the oldest-held connection age and include a stack
                 oldest_age = 0
                 oldest_id = None
@@ -1989,6 +2055,46 @@ async def ensure_plugin_tables() -> None:
 
 
 # 🧠 Insert a new memory into the database
+def _coerce_memory_timestamp(value: object) -> datetime:
+    """Return a timezone-aware datetime for `memories.created_at`.
+
+    This exists because the Postgres backend forwards parameters to asyncpg unchanged
+    (core/db_backends.py), and asyncpg refuses a `str` for TIMESTAMPTZ client-side: the statement is
+    never sent, so the row silently never appears. A `str` here is therefore a data-loss bug, not a
+    formatting preference. Anything unparseable raises instead of falling back to "now".
+    """
+    from datetime import date  # local import: keeps this module's import block untouched
+
+    if value is None:
+        return datetime.now(timezone.utc)
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(float(value), tz=timezone.utc)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return datetime.now(timezone.utc)
+        parsed: datetime | None = None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d", "%Y/%m/%d %H:%M:%S", "%d.%m.%Y %H:%M:%S"):
+                try:
+                    parsed = datetime.strptime(text, fmt)
+                    break
+                except ValueError:
+                    continue
+        if parsed is None:
+            raise ValueError(f"insert_memory: cannot read timestamp {value!r} as a datetime")
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+    raise TypeError(
+        f"insert_memory: timestamp must be datetime, date, str, int or None, got {type(value).__name__}"
+    )
+
+
 async def insert_memory(
     content: str,
     author: str,
@@ -1998,35 +2104,56 @@ async def insert_memory(
     emotion: str | None = None,
     intensity: int | None = None,
     emotion_state: str | None = None,
-    timestamp: str | None = None,
-) -> None:
-    if not timestamp:
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    timestamp: str | datetime | None = None,
+    conn=None,
+) -> bool:
+    """Write one memory row. Returns True when the row was written.
+
+    Raises on failure instead of printing and returning: a swallowed failure here used to leave the
+    caller believing the memory existed (the compactor archived and deleted the source rows after a
+    write that never happened). Pass `conn` to write inside a caller's connection and transaction.
+
+    `timestamp` accepts a datetime (preferred), a date, an ISO-ish string, a UNIX timestamp or None
+    for "now in UTC"; the coercion lives in `_coerce_memory_timestamp`.
+    """
+    if content is None or not str(content).strip():
+        raise ValueError("insert_memory: refusing to write an empty memory")
+
+    when = _coerce_memory_timestamp(timestamp)
 
     await ensure_core_tables()
 
-    async with get_conn_ctx() as conn:
-        try:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    """
-                    INSERT INTO memories (created_at, content, author, source, tags, scope, emotion, intensity, emotion_state)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        timestamp,
-                        content,
-                        author,
-                        source,
-                        tags,
-                        scope,
-                        emotion,
-                        intensity,
-                        emotion_state,
-                    ),
-                )
-        except Exception as e:
-            print(f"[insert_memory] Error: {e}")
+    params = (
+        when,
+        content,
+        author,
+        source,
+        tags,
+        scope,
+        emotion,
+        intensity,
+        emotion_state,
+    )
+    sql = """
+        INSERT INTO memories (created_at, content, author, source, tags, scope, emotion, intensity, emotion_state)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """
+
+    async def _run(connection) -> None:
+        async with connection.cursor() as cur:
+            await cur.execute(sql, params)
+
+    try:
+        if conn is not None:
+            # Join the caller's connection: ordering against the caller's other writes is then explicit.
+            await _run(conn)
+        else:
+            async with get_conn_ctx() as own_conn:
+                await _run(own_conn)
+    except Exception as e:
+        log_error(f"[insert_memory] write failed ({type(e).__name__}: {e}); no memory row was stored")
+        raise
+    return True
 
 
 # 💥 Insert a new emotional event

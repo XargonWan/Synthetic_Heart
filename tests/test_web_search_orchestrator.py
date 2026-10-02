@@ -817,6 +817,91 @@ async def test_execute_action_is_pure_tool_when_agent_tool(
 
 
 @pytest.mark.asyncio
+async def test_executor_provides_the_agent_tool_marker_the_guard_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The purity guard must fire on the context the EXECUTOR supplies.
+
+    The guard above is keyed on ``context["agent_tool"]``. Every agent-lane
+    call hands over a populated turn context, so the ``context or {default}``
+    fallback in the executor never applied and the marker was absent in
+    production: the guard's INFO line never appeared in the live log while
+    agent-lane searches kept sending the user a separate message. This drives
+    the real executor with a realistic agent context and then hands the SAME
+    context to the plugin, so a caller-side regression cannot stay green.
+    """
+    import json
+
+    import core.auto_response as auto_response
+    import plugins.web_search_plugin as ws_module
+    from core.agent_tool_executor import agent_tool_executor
+    from core.tool_registry import tool_registry
+    from plugins.web_search_plugin.web_search_plugin import WebSearchPlugin
+
+    async def _fake_run_search(query: str, max_results: int = 5) -> list[dict]:
+        return [{"title": "T1", "snippet": "S1", "url": "https://example.com/1"}]
+
+    monkeypatch.setattr(ws_module, "run_search", _fake_run_search)
+
+    async def _fail_if_delivery(*args, **kwargs):
+        raise AssertionError(
+            "request_llm_delivery must not be called for an executor-dispatched "
+            "agent tool call"
+        )
+
+    monkeypatch.setattr(auto_response, "request_llm_delivery", _fail_if_delivery)
+
+    plugin = WebSearchPlugin()
+    seen: dict = {}
+
+    async def _dispatch(action, context, bot, original_message):
+        # Stands in for the real dispatch: same context object the executor
+        # built reaches the plugin (action_parser passes it through unchanged).
+        seen["context"] = context
+        return await plugin.execute_action(action, context, bot, original_message)
+
+    monkeypatch.setattr("core.action_parser.run_action", _dispatch)
+
+    tool_registry._tools.clear()
+    tool_registry.load_internal_actions(
+        {
+            "search_current_knowledge": {
+                "schema": {"type": "object", "properties": {}},
+                "brief": "test",
+                "security_level": "low",
+                "external_effects": [],
+            }
+        }
+    )
+
+    # The keys the live Agent Lane actually passes (agent_needed /
+    # agent_task_title / chat_id / interface_path / from_cortex).
+    agent_context = {
+        "agent_needed": True,
+        "agent_task_title": "Check live Home Assistant data",
+        "chat_id": 5208932647,
+        "interface_path": "telegram_bot/5208932647",
+        "from_cortex": True,
+        "action_scope": {"telegram_bot": ["send_message"]},
+    }
+    try:
+        res = await agent_tool_executor.execute(
+            "search_current_knowledge", {"query": "q"}, context=agent_context
+        )
+    finally:
+        tool_registry._tools.clear()
+
+    assert seen["context"].get("agent_tool") is True
+    # Marked in place, so any key written back onto the context stays visible
+    # to the caller that supplied it.
+    assert agent_context.get("agent_tool") is True
+    assert res["ok"] is True
+    payload = json.loads(res["result"])
+    assert payload[0]["result"]["title"] == "T1"
+    assert payload[0]["type"] == "web_search_result"
+
+
+@pytest.mark.asyncio
 async def test_search_wikipedia_maps_opensearch_shape(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

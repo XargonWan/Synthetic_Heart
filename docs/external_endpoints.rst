@@ -60,6 +60,30 @@ Getting started
 After saving, Synthetic Heart performs a probe to detect capabilities, available
 models, and register the endpoint with the chosen subsystems.
 
+How the probe works
+-------------------
+
+- The model catalogue (``GET /models``) is fetched **once** per probe run and
+  shared with the capability and connectivity steps, so a provider whose
+  catalogue endpoint is slow is not queried several times over.
+- Each step has its own budget; the run therefore always finishes and stores
+  what it collected instead of being cancelled by the overall probe timeout. The
+  budgets are configurable through ``EXTERNAL_ENDPOINT_PROBE_MODELS_TIMEOUT_SECONDS``
+  (default 90), ``EXTERNAL_ENDPOINT_PROBE_CAPABILITIES_TIMEOUT_SECONDS``
+  (default 90) and ``EXTERNAL_ENDPOINT_PROBE_PING_TIMEOUT_SECONDS`` (default
+  60). ``EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS`` (default 300) remains the
+  outer guard.
+- Capability detection prefers metadata the provider declares — both a flat
+  ``capabilities`` map and provider-specific blocks such as
+  ``model_spec.capabilities`` (Venice, for example, declares
+  ``supportsVision``). Posting an image to a handful of candidate models is only
+  a fallback for endpoints that declare nothing, and it is bounded by both an
+  attempt count and a wall-clock budget.
+- A probe that returns nothing usable (every step failed or timed out) is
+  reported as ``failed`` and **does not** erase the stored model list or
+  capability map. Without that rule a transient provider error would blank the
+  model selector and unregister the endpoint from the subsystems it serves.
+
 Provider presets
 ----------------
 
@@ -293,6 +317,15 @@ Troubleshooting
   - use container DNS such as ``host.docker.internal`` when needed
   - verify the endpoint exposes ``/.well-known/openai-configuration`` and
     ``/v1/models``
+- If *every* probe fails or times out at once, suspect the host rather than the
+  endpoints. A machine whose DNS returns IPv6 (``AAAA``) records while its IPv6
+  route goes nowhere hangs each request: the HTTP client takes the first resolved
+  address and does not fall back to IPv4 on its own. Confirm with
+  ``curl -6 https://api.venice.ai/api/v1/models`` (times out) against ``curl -4``
+  (answers), then prefer IPv4 on that host by uncommenting
+  ``precedence ::ffff:0:0/96  100`` in ``/etc/gai.conf``. Restart Synthetic Heart
+  afterwards: the setting is read once per process, so a running instance keeps
+  the old order.
 - If the model list is missing:
   - ensure the provider returns valid ``data[]`` objects with ``id`` fields
   - check whether an API key or provider-specific permission is required

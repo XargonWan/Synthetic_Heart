@@ -205,11 +205,10 @@ class GrilloDreamPlugin:
                 async with conn.cursor() as cur:
                     await cur.execute(
                         """
-                        SELECT g.response_text, d.content, g.executed_at
-                        FROM grillo_activity_log g
-                        LEFT JOIN ai_diary d ON g.diary_entry_id = d.id
-                        WHERE g.beat_type = 'dream'
-                        ORDER BY g.id DESC
+                        SELECT response_text, executed_at
+                        FROM grillo_activity_log
+                        WHERE beat_type = 'dream'
+                        ORDER BY id DESC
                         LIMIT 1
                         """
                     )
@@ -218,11 +217,15 @@ class GrilloDreamPlugin:
             if not row:
                 return None, None
 
-            response_text, diary_content, executed_at = row
-            # The dream text lives inside response_text (JSON action payload);
-            # the linked diary entry is an unrelated interaction diary, so it is
-            # only a last-resort fallback.
-            dream_text = self._extract_dream_text(response_text) or diary_content
+            response_text, executed_at = row
+            # The dream text lives inside response_text (the JSON action
+            # envelope the beat's turn produced); that envelope IS the dream
+            # record. The row's diary_entry_id is audit linkage, not a source:
+            # it points at whatever diary row existed when the beat's action was
+            # dispatched (observed live: a 35,535-character interaction diary
+            # written eight hours after the dream), so it must never be read as
+            # the dream.
+            dream_text = self._extract_dream_text(response_text)
             return (dream_text or None), executed_at
         except Exception as e:
             log_error(f"[grillo_dream] Failed to fetch last dream: {e}")
@@ -283,11 +286,10 @@ class GrilloDreamPlugin:
                 async with conn.cursor() as cur:
                     await cur.execute(
                         """
-                        SELECT g.response_text, d.content, g.executed_at
-                        FROM grillo_activity_log g
-                        LEFT JOIN ai_diary d ON g.diary_entry_id = d.id
-                        WHERE g.beat_type = 'dream'
-                        ORDER BY g.id DESC
+                        SELECT response_text, executed_at
+                        FROM grillo_activity_log
+                        WHERE beat_type = 'dream'
+                        ORDER BY id DESC
                         LIMIT 1
                         """
                     )
@@ -296,7 +298,7 @@ class GrilloDreamPlugin:
             if not row:
                 return None
 
-            response_text, diary_content, executed_at = row
+            response_text, executed_at = row
             if executed_at is None:
                 return None
 
@@ -307,11 +309,10 @@ class GrilloDreamPlugin:
             if executed_date != today:
                 return None
 
-            # The readable dream lives inside response_text (JSON action
-            # payload); the linked diary entry is unrelated, so it is only a
-            # last-resort fallback.
-            content = self._extract_dream_text(response_text) or diary_content
-            return content or None
+            # The readable dream lives inside response_text (the JSON action
+            # envelope). The linked diary row is not read: see _fetch_last_dream.
+            # No readable dream means no dream today, never a substitute.
+            return self._extract_dream_text(response_text) or None
         except Exception as e:
             log_error(f"[grillo_dream] Failed to fetch today's dream: {e}")
             return None

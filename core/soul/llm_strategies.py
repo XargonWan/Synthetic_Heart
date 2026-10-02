@@ -1,4 +1,5 @@
-"""LLM-compiled Digital Soul Profile (DSP) builder and extractor.
+"""LLM-compiled Digital Soul Profile (DSP) builder and extractor, plus the
+LLM-distilled MemCell extractor.
 
 This module implements :class:`LlmDspBuilder`, an LLM-backed implementation of the
 ``DspBuilder`` protocol (``core/soul/compiler.py``). It turns the daily DSP
@@ -10,6 +11,13 @@ It also implements :class:`LlmDspExtractor`, an LLM-backed implementation of the
 transcript and pulls stable biographical facts with the same DSP-scope engine and
 the same deterministic fallback guarantees. Because the transcript is judged by
 an LLM, the aggressive roleplay regex filter is not required on this path.
+
+And it implements :class:`LlmMemCellExtractor`, an LLM-backed implementation of
+the ``MemCellExtractor`` protocol. The deterministic extractor can only store the
+conversation text verbatim as a cell's ``episodic_trace``, so recall could only
+ever return raw transcript; this one distils the session into self-contained
+memory entries with ``subject|predicate|object`` facts, and falls back to the
+deterministic extractor whenever the model is unavailable.
 
 Design:
 
@@ -32,20 +40,31 @@ Design:
   rule-based builder, so the SOUL nightly rollup can never break. On quiet days
   with no stable signal the rule-based path sanitises (rather than wipes) the
   existing profile.
+* **Determinism stays where it earns its keep.** The MemCell extractor takes only
+  *content* from the model (the trace and the facts). Emotion and foresight are
+  still inferred by the deterministic rules, and a structurally unusable answer
+  (no engine, an exception, no JSON, nothing that survives the verbatim check)
+  defers to the deterministic extractor, so distillation can never lose a session
+  that the previous path would have stored.
 """
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from core.json_utils import extract_json_from_text
 from core.logging_utils import log_debug, log_warning
 
-from .models import DspExtraction
-from .schemas import DspExtractionModel
+from .models import (
+    DspExtraction,
+    emotional_intensity,
+    emotional_valence,
+    top_emotion,
+)
+from .schemas import DspExtractionModel, EmotionalTagModel, MemCellExtractionModel
 
-__all__ = ["LlmDspBuilder", "LlmDspExtractor"]
+__all__ = ["LlmDspBuilder", "LlmDspExtractor", "LlmMemCellExtractor"]
 
 
 async def resolve_dsp_engine(resolve_engine: Any | None = None) -> Any | None:
@@ -103,6 +122,74 @@ async def resolve_dsp_scope_model() -> str | None:
         return None
 
 
+def _speaker_identity_block(declared: str) -> str:
+    """Rules that stop one speaker's identity being carried onto another.
+
+    The memcell extractor was told only that "the transcript labels every line
+    with its speaker", and nothing about who those speakers ARE. Measured live on
+    2026-09-20: a session whose human is a man came back paraphrased with him as
+    "she/her" throughout (60 of the 260 cells carrying his name used feminine
+    pronouns), because the model guessed a gender instead of reading one. The
+    transcript that session handed over carried only the human's own lines, and
+    although it said "my wifey", nothing in the prompt stated that the person
+    being written about is a man, so the model invented a woman.
+
+    A declaration from the operator (``SOUL_SPEAKER_IDENTITIES``) is authoritative
+    and stated outright, which is the only way an extractor can be right about a
+    person the transcript never genders.
+    """
+    block = (
+        "SPEAKER IDENTITY (critical): every speaker in the transcript is a "
+        "SEPARATE person with their own name, gender and relationship to the "
+        "persona. A speaker's gender and pronouns are never the persona's and "
+        "never another speaker's: use 'he' only for a man and 'she' only for a "
+        "woman, and never guess which one a person is.\n"
+        "Take a person's pronouns from what the transcript or the participant "
+        "context actually establishes about them - the human's own line calling "
+        "someone 'my wife' or 'my husband', or the persona addressing them, is "
+        "evidence. Where nothing establishes a person's gender, refer to them by "
+        "name rather than inventing one, and never change a person's gender "
+        "between entries of the same session.\n"
+    )
+    cleaned = " ".join(str(declared or "").split())
+    if cleaned:
+        block += (
+            "The people involved, as declared by the deployment (authoritative; "
+            f"follow it exactly): {cleaned}.\n"
+        )
+    return block
+
+
+# The persona's own lines are labelled so a reader never has to guess whose side
+# of the conversation they are on. The interfaces cache them under a canonical
+# "self" label, which `_build_daily_transcript` renders as "<name> (the persona)".
+# Measured live on 2026-09-22: the 2D deployment's transcript carried exactly
+# `self:`, `Scar:` and `2B:`, nothing said who "self" was, the DSP extractor took
+# the persona's own lines for the human's, and the profile it compiled described
+# the PERSONA (a woman) as the person being talked to.
+_PERSONA_LINE_RULE = (
+    "A line labelled '<name> (the persona)' - or with a bare 'self' or "
+    "'assistant' label - is the PERSONA's own speech, never the human's; every "
+    "other name belongs to a separate person. A conversation can hold more than "
+    "two people (another synth, a family member): only the human's own lines can "
+    "become user facts.\n"
+)
+
+# The compiler is the stage that decides which name and gender the standing
+# profile carries, so it needs the same declaration the extractors get: without
+# it, a single day whose extraction swapped the two roles is the newest evidence
+# and wins the contradiction.
+_DECLARATION_PRECEDENCE_RULE = (
+    "WHO IS WHO IS DECLARED, NOT GUESSED: the deployment's declaration of the "
+    "people involved is stated below and is AUTHORITATIVE. Where a supplied fact "
+    "contradicts it - a fact that gives the human the persona's name, gender, "
+    "family, body or android nature is that day's misattribution - follow the "
+    "declaration and drop the contradicting fact instead of carrying it into the "
+    "profile. One day of misattributed facts never outranks a standing "
+    "declaration.\n"
+)
+
+
 class LlmDspBuilder:
     """LLM-compiled DSP builder with a deterministic rule-based fallback.
 
@@ -119,6 +206,7 @@ class LlmDspBuilder:
         fallback: Any | None = None,
         max_words: int = 150,
         resolve_engine: Any | None = None,
+        speaker_identity: str = "",
     ) -> None:
         """Build the LLM DSP builder.
 
@@ -129,6 +217,16 @@ class LlmDspBuilder:
             max_words: word budget capping the LLM biography.
             resolve_engine: injectable async callable ``() -> engine | None``
                 used for tests. ``None`` uses the DSP-scope Cortex resolver.
+            speaker_identity: who the people in the logs are, as declared by the
+                deployment (``SOUL_SPEAKER_IDENTITIES``). The extractors were
+                already told this; the COMPILER needs it too, because it is the
+                only stage that decides which name and gender the biography
+                carries. Measured live on 2026-09-22: one day's extraction
+                attributed the persona's speech and identity to the human, that
+                extraction was the newest evidence, and the compiler resolved the
+                contradiction the wrong way, rewriting the human as the persona
+                (a woman) until the next pass. A declaration the compiler can
+                check the evidence against is what makes that day lose instead.
         """
         if fallback is None:
             from core.soul.compiler import RuleBasedDspBuilder
@@ -137,6 +235,7 @@ class LlmDspBuilder:
         self._fallback: Any = fallback
         self.max_words: int = max_words
         self.resolve_engine: Any | None = resolve_engine
+        self.speaker_identity: str = str(speaker_identity or "").strip()
 
     async def _resolve_engine(self) -> Any | None:
         """Resolve the DSP-scope Cortex engine (fail-safe).
@@ -338,7 +437,15 @@ class LlmDspBuilder:
             "roleplay dialogue, verbatim speech, or conversational filler. Never "
             f"invent anything. Keep it under {self.max_words} words. Plain prose, no "
             "bullet lists, no XML tags. "
-            'Return ONLY a JSON object: {"biography": "<your biography>"}.'
+            "ATTRIBUTION: this profile describes the HUMAN. Keep the name the human "
+            "goes by. Remove any statement that describes the person as an android, "
+            "AI, robot or machine, and any name or nickname that belongs to the "
+            "persona (a synthetic nickname is the persona's, not the person's), "
+            "unless the evidence shows the human saying it about himself. When in "
+            "doubt about an attribute, drop it: a missing nickname is harmless, a "
+            "wrong identity is not. "
+            + self._declaration_block()
+            + 'Return ONLY a JSON object: {"biography": "<your biography>"}.'
         )
 
     def _build_update_instructions(self) -> str:
@@ -351,8 +458,30 @@ class LlmDspBuilder:
             "conversational filler. Merge genuinely new stable facts. Resolve "
             "contradictions in favour of the most recent evidence. Never invent "
             "anything. Output ONE clean, concise, natural third-person biography "
-            f"(plain prose, no bullet lists, no XML tags). Keep it under {self.max_words} "
+            "ATTRIBUTION: this profile describes the HUMAN. Keep the name the human "
+            "goes by. Remove any statement that describes the person as an android, "
+            "AI, robot or machine, and any name or nickname that belongs to the "
+            "persona (a synthetic nickname is the persona's, not the person's), "
+            "unless the evidence shows the human saying it about himself. When in "
+            "doubt about an attribute, drop it: a missing nickname is harmless, a "
+            "wrong identity is not. "
+            + self._declaration_block()
+            + f"(plain prose, no bullet lists, no XML tags). Keep it under {self.max_words} "
             'words. Return ONLY a JSON object: {"biography": "<your biography>"}.'
+        )
+
+    def _declaration_block(self) -> str:
+        """Who is who, for the COMPILER — empty when the deployment declared none.
+
+        The extractors always get :func:`_speaker_identity_block` (its general
+        separateness rules stand on their own); the compiler only needs the
+        authority rule when there is a declaration for it to enforce, so an
+        undeclared deployment's prompt is unchanged.
+        """
+        if not self.speaker_identity:
+            return ""
+        return _DECLARATION_PRECEDENCE_RULE + _speaker_identity_block(
+            self.speaker_identity
         )
 
     @classmethod
@@ -439,6 +568,7 @@ class LlmDspExtractor:
         fallback: Any | None = None,
         resolve_engine: Any | None = None,
         max_transcript_chars: int = 12000,
+        speaker_identity: str = "",
     ) -> None:
         """Build the LLM DSP extractor.
 
@@ -449,6 +579,10 @@ class LlmDspExtractor:
                 used for tests. ``None`` uses the DSP-scope Cortex resolver.
             max_transcript_chars: tail-budget for the transcript fed to the LLM
                 (most recent characters are kept).
+            speaker_identity: who the people in the log are, as declared by the
+                deployment (``SOUL_SPEAKER_IDENTITIES``). This prompt already
+                writes the human as "he"; the declaration is what keeps that right
+                for a deployment whose human is not a man.
         """
         if fallback is None:
             from core.soul.strategies import RuleBasedDspExtractor
@@ -457,6 +591,7 @@ class LlmDspExtractor:
         self._fallback: Any = fallback
         self.resolve_engine: Any | None = resolve_engine
         self.max_transcript_chars: int = max_transcript_chars
+        self.speaker_identity: str = str(speaker_identity or "").strip()
 
     async def extract_dsp(
         self, *, transcript: str, current_date: date
@@ -605,7 +740,425 @@ class LlmDspExtractor:
             "fact as a short third-person statement starting with 'User' (e.g. 'User "
             "works on SynthHeart', 'User lives in Berlin', 'User prefers concise "
             "technical responses').\n"
+            "SPEAKER ATTRIBUTION (critical, the speakers are named in the log): "
+            "decide which speaker is the HUMAN (the person this profile is about) "
+            "and which is the PERSONA, then attribute each line to its own speaker. "
+            + _PERSONA_LINE_RULE
+            + "Only what the human says about himself can become a user fact. "
+            "The human's own name IS a user fact: record the name he goes by (the "
+            "label his own lines carry, or a name used for him by others). "
+            "A name or nickname the human GIVES the persona ('you are X', 'X is "
+            "you', 'I'll call you X') belongs to the PERSONA, never to the human, "
+            "and pet names the human uses for the persona are not the human's own "
+            "names. Attributes of the persona (being an android, an AI, a synth, a "
+            "machine, having a core or a body, being someone's wife) are the "
+            "PERSONA's, never the human's: never describe the user as an android, "
+            "AI, robot or machine, and never give the user a name or nickname that "
+            "belongs to the persona, unless the human states that about himself in "
+            "his own line. When the transcript is in-character and the roles are "
+            "ambiguous, extract NOTHING rather than guessing.\n"
             'Return ONLY a JSON object: {"user_facts": [...], "user_preferences": '
             '[...], "ai_self_facts": [...]} — each a list of short strings; empty '
-            "lists when nothing biographical was said."
+            "lists when nothing biographical was said.\n"
+            + _speaker_identity_block(self.speaker_identity)
+        )
+
+
+def _normalise_for_compare(text: Any) -> str:
+    """Whitespace-collapsed, lowercased, punctuation-trimmed comparison key."""
+    collapsed = " ".join(str(text or "").split()).strip().lower()
+    return collapsed.strip(" \t\"'“”„«»…,;:!?-–—.")
+
+
+def _text_of_item(item: Any) -> str:
+    """Coerce an extracted value (string, number or single-value dict) to text.
+
+    Models wrap values as ``{"fact": "..."}`` / ``{"text": "..."}`` objects
+    instead of plain strings often enough to normalise both shapes.
+    """
+    if isinstance(item, dict):
+        for key in ("fact", "text", "value", "statement", "memory"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        for value in item.values():
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            if isinstance(value, (int, float)):
+                return str(value)
+        return ""
+    if isinstance(item, (int, float)):
+        return str(item)
+    return str(item or "").strip()
+
+
+class LlmMemCellExtractor:
+    """LLM-distilled MemCell extractor with a deterministic fallback.
+
+    Implements the ``MemCellExtractor`` protocol (``core/soul/compiler.py``).
+    The deterministic extractor stores the conversation text verbatim as the
+    cell's ``episodic_trace``, so a recalled memory could only ever be raw
+    transcript, and two statements about the same subject — an old one and the
+    one that corrected it — surfaced as equally current entries that read as
+    contradictory. This extractor distils instead of copying:
+
+    * **One entry per memory-worthy event**, so a long session does not collapse
+      into a single truncated transcript chunk.
+    * **The trace is a self-contained paraphrase** of what happened and of what
+      changed, written so it never quotes the transcript. A trace that is
+      literally contained in the transcript is discarded: that structural check
+      is what makes "recall returns distilled knowledge" a property of the stored
+      row rather than a trick of the renderer.
+    * **Facts are ``subject|predicate|object`` triples**, the shape the
+      knowledge-graph fold (``SoulCompiler.async_consolidate``) and the recall
+      renderer already expect. A fact that only restates its own trace, and a
+      fact that quotes the transcript, are both dropped at the source — so raw
+      transcript cannot reach the memory block through the fact list either.
+    * **Emotion and foresight stay deterministic**, inferred by the same rules
+      the deterministic extractor uses, so distillation moves *content* only.
+
+    Any unusable answer (no engine, an exception, no JSON, or a list of entries
+    that are all quotes) defers to the deterministic extractor, so a session that
+    the previous path would have stored is never silently dropped. An explicit
+    empty answer is respected: if the model judged the session as holding nothing
+    durable, no cell is written.
+    """
+
+    MAX_CELLS = 4
+    MAX_TRACE_CHARS = 480
+    MAX_FACT_CHARS = 200
+    MAX_FACTS_PER_CELL = 4
+    # Below this length a containment match is ambiguous — a short distilled
+    # statement can share wording with the transcript by accident — so the
+    # verbatim check only applies to traces long enough for a copy to be
+    # deliberate.
+    MIN_VERBATIM_CHECK_CHARS = 40
+    MAX_TRANSCRIPT_CHARS = 12000
+    # Marker read by ``SoulCompiler.post_session_compile``: cells this extractor
+    # writes carry a distillation stamp, and the WebUI re-distil pass targets the
+    # ones that do not. The deterministic extractor leaves the attribute absent.
+    distils_content = True
+
+    def __init__(
+        self,
+        *,
+        fallback: Any | None = None,
+        resolve_engine: Any | None = None,
+        max_transcript_chars: int = 12000,
+        speaker_identity: str = "",
+    ) -> None:
+        """Build the LLM MemCell extractor.
+
+        Args:
+            fallback: deterministic extractor used whenever the model cannot be
+                trusted. Defaults to a lazily-imported
+                ``RuleBasedMemCellExtractor``.
+            resolve_engine: injectable async callable ``() -> engine | None``
+                used for tests. ``None`` uses the DSP-scope Cortex resolver.
+            max_transcript_chars: tail-budget for the transcript fed to the LLM
+                (the most recent characters are kept).
+            speaker_identity: who the people in the transcript are, as declared
+                by the deployment (``SOUL_SPEAKER_IDENTITIES``). Stated to the
+                model outright so a person the transcript never genders cannot be
+                guessed at.
+        """
+        from core.soul.strategies import RuleBasedMemCellExtractor
+
+        if fallback is None:
+            fallback = RuleBasedMemCellExtractor()
+        self._fallback: Any = fallback
+        # Tagging stays deterministic and identical to the rule-based path.
+        self._tagger = RuleBasedMemCellExtractor()
+        self.resolve_engine: Any | None = resolve_engine
+        self.max_transcript_chars: int = max_transcript_chars
+        self.speaker_identity: str = str(speaker_identity or "").strip()
+
+    async def extract_memcells(
+        self, *, transcript: str, current_date: date
+    ) -> list[MemCellExtractionModel]:
+        """Distil the session transcript into memory cells."""
+        text = str(transcript or "").strip()
+        if not text:
+            return []
+        engine = await resolve_dsp_engine(self.resolve_engine)
+        if engine is None:
+            return await self._fallback_cells(
+                transcript=transcript, current_date=current_date
+            )
+        # An injected engine means the caller owns the model choice (a standalone
+        # pass, a test), so the scope lookup is skipped instead of failing loudly.
+        model = (
+            None if self.resolve_engine is not None else await resolve_dsp_scope_model()
+        )
+        prompt = {
+            "input": {
+                "type": "memcell_extract",
+                "payload": {
+                    "current_date": str(current_date),
+                    "transcript": text[-self.max_transcript_chars :],
+                },
+            },
+            "context": {},
+            "instructions": self._build_extract_instructions(),
+        }
+        memories = await self._generate_cells(engine, model, prompt)
+        if memories is None:
+            return await self._fallback_cells(
+                transcript=transcript, current_date=current_date
+            )
+        cells = self._clean_cells(memories, transcript=text, current_date=current_date)
+        if not cells and memories:
+            # The model answered, but nothing it wrote was a distillation (it
+            # quoted the transcript, or every entry was empty). That is as
+            # unusable as a failed call: record the session deterministically
+            # rather than lose it.
+            log_warning(
+                "[soul_llm] memcell extraction returned no usable distillation "
+                f"({len(memories)} entries); using the deterministic extractor"
+            )
+            return await self._fallback_cells(
+                transcript=transcript, current_date=current_date
+            )
+        if not cells:
+            log_debug(
+                "[soul_llm] memcell extraction found nothing durable "
+                f"({len(text)} transcript chars)"
+            )
+        return cells
+
+    async def _fallback_cells(
+        self, *, transcript: str, current_date: date
+    ) -> list[MemCellExtractionModel]:
+        """Deterministic cells, used whenever the model cannot be trusted."""
+        try:
+            return await self._fallback.extract_memcells(
+                transcript=transcript, current_date=current_date
+            )
+        except Exception as exc:
+            log_warning(f"[soul_llm] deterministic memcell fallback failed: {exc}")
+            return []
+
+    async def _generate_cells(
+        self, engine: Any, model: str | None, prompt: dict[str, Any]
+    ) -> Any | None:
+        """Ask the engine for the session's memories; ``None`` when unusable."""
+        try:
+            from core.config import scope_model_override
+
+            with scope_model_override(engine, model):
+                raw = await engine.generate_response(prompt)
+        except Exception as exc:
+            log_warning(f"[soul_llm] memcell extract generate_response failed: {exc}")
+            return None
+        parsed = extract_json_from_text(raw)
+        if isinstance(parsed, list):
+            return parsed
+        if isinstance(parsed, dict):
+            for key in ("memories", "cells", "memcells", "entries"):
+                value = parsed.get(key)
+                if isinstance(value, list):
+                    return value
+        log_debug("[soul_llm] no usable JSON in memcell extract response")
+        return None
+
+    def _clean_cells(
+        self,
+        raw: list[Any],
+        *,
+        transcript: str,
+        current_date: date,
+    ) -> list[MemCellExtractionModel]:
+        """Turn the model's entries into validated cells, dropping quotes."""
+        transcript_key = _normalise_for_compare(transcript)
+        # Only the DATED signals carry content ("Upcoming user event around
+        # 2026-09-19"). The relative-time markers are boilerplate - "Potential
+        # follow-up implied by phrase 'tonight'" - which the prompt then showed
+        # verbatim in every block, so they are dropped here rather than injected.
+        foresight = [
+            signal
+            for signal in self._tagger.extract_foresight_signals(
+                transcript, current_date
+            )
+            if signal.trigger != "relative_time_mention"
+        ]
+        now = datetime.now(timezone.utc)
+        cells: list[MemCellExtractionModel] = []
+        for index, item in enumerate(raw):
+            trace = self._clean_trace(item)
+            if not trace:
+                continue
+            trace_key = _normalise_for_compare(trace)
+            if self._is_verbatim(trace_key, transcript_key):
+                log_debug(
+                    "[soul_llm] dropped a memcell trace that quotes the transcript"
+                )
+                continue
+            cells.append(
+                MemCellExtractionModel(
+                    episodic_trace=trace,
+                    atomic_facts=self._clean_facts(item, trace_key, transcript_key),
+                    emotional_tag=self._emotional_tag(trace),
+                    # Session-level signals (they come from the transcript's own
+                    # dates and relative-time cues) ride on the first cell.
+                    foresight_signals=[] if cells else foresight,
+                    # Distinct microsecond timestamps: the cell id is derived from
+                    # the timestamp, so identical ones would collide and upsert
+                    # over each other.
+                    timestamp=now + timedelta(microseconds=index),
+                )
+            )
+            if len(cells) >= self.MAX_CELLS:
+                break
+        return cells
+
+    @classmethod
+    def _clean_trace(cls, item: Any) -> str:
+        """Extract and bound one memory's trace text (``""`` when unusable)."""
+        raw_trace = item if isinstance(item, str) else ""
+        if isinstance(item, dict):
+            for key in ("trace", "episodic_trace", "summary", "memory", "text"):
+                value = item.get(key)
+                if isinstance(value, str) and value.strip():
+                    raw_trace = value
+                    break
+        text = " ".join(str(raw_trace or "").split())
+        if len(text) < 8:
+            return ""
+        return cls._cap_trace(text)
+
+    @classmethod
+    def _cap_trace(cls, text: str) -> str:
+        """Truncate a trace at a sentence, else a word, boundary."""
+        if len(text) <= cls.MAX_TRACE_CHARS:
+            return text
+        cut = text[: cls.MAX_TRACE_CHARS]
+        for sep in (". ", "! ", "? "):
+            index = cut.rfind(sep)
+            if index >= cls.MAX_TRACE_CHARS // 2:
+                return cut[: index + 1].strip()
+        index = cut.rfind(" ")
+        return (cut[:index] if index > 0 else cut).strip()
+
+    @classmethod
+    def _clean_facts(cls, item: Any, trace_key: str, transcript_key: str) -> list[str]:
+        """Clean and dedupe a memory's facts, dropping restatements and quotes."""
+        if not isinstance(item, dict):
+            return []
+        raw_facts: Any = None
+        for key in ("facts", "atomic_facts", "key_facts"):
+            value = item.get(key)
+            if isinstance(value, list):
+                raw_facts = value
+                break
+        if not raw_facts:
+            return []
+        facts: list[str] = []
+        for entry in raw_facts:
+            fact = _text_of_item(entry)
+            if not fact:
+                continue
+            fact = fact[: cls.MAX_FACT_CHARS].strip()
+            if not fact or cls._fact_restates_trace(fact, trace_key):
+                continue
+            # A fact that quotes the transcript is raw transcript surfacing in
+            # the memory block, whatever shape the model delivers it in (the
+            # deterministic extractor's old ``Conversation|summary|<line>`` is
+            # exactly this).
+            payload_key = _normalise_for_compare(cls._fact_payload(fact))
+            if cls._is_verbatim(payload_key, transcript_key):
+                log_debug(
+                    "[soul_llm] dropped a memcell fact that quotes the transcript"
+                )
+                continue
+            if fact not in facts:
+                facts.append(fact)
+            if len(facts) >= cls.MAX_FACTS_PER_CELL:
+                break
+        return facts
+
+    @staticmethod
+    def _fact_payload(fact: str) -> str:
+        """The content part of a fact: ``object`` for a triple, else the whole."""
+        parts = [part.strip() for part in str(fact or "").split("|") if part.strip()]
+        return parts[2] if len(parts) == 3 else str(fact or "")
+
+    @classmethod
+    def _fact_restates_trace(cls, fact: str, trace_key: str) -> bool:
+        """True when a fact only repeats the trace it is stored beside.
+
+        The same rule the recall renderer applies
+        (``SoulPlugin._fact_restates_trace``), enforced at the source and over
+        the WHOLE trace — the renderer compares only its first 120 characters,
+        which is why a short opening line escaped it live.
+        """
+        if not trace_key:
+            return False
+        payload_key = _normalise_for_compare(cls._fact_payload(fact))
+        if not payload_key:
+            return False
+        return payload_key in trace_key or trace_key in payload_key
+
+    @classmethod
+    def _is_verbatim(cls, trace_key: str, transcript_key: str) -> bool:
+        """True when the trace is lifted out of the transcript verbatim."""
+        if len(trace_key) < cls.MIN_VERBATIM_CHECK_CHARS:
+            return False
+        return trace_key in transcript_key
+
+    def _emotional_tag(self, trace: str) -> EmotionalTagModel:
+        """Deterministic emotional tagging, identical to the rule-based path."""
+        snapshot = self._tagger.infer_emotion_snapshot(trace)
+        intensity = emotional_intensity(snapshot)
+        # top_emotion() returns the largest axis, so an all-zero snapshot would
+        # label the cell with whichever axis comes first (joy); with no signal at
+        # all the honest label is neutral.
+        dominant = top_emotion(snapshot) if intensity > 0 else "neutral"
+        return EmotionalTagModel(
+            state_snapshot=snapshot,
+            dominant_emotion=dominant,
+            intensity=intensity,
+            valence=emotional_valence(snapshot),
+        )
+
+    def _build_extract_instructions(self) -> str:
+        return (
+            "You are distilling what an AI persona must REMEMBER from one session "
+            "of chat. The transcript labels every line with its speaker.\n"
+            + _PERSONA_LINE_RULE
+            + "Write DISTILLED KNOWLEDGE, never a quote: each memory's trace is a "
+            "self-contained paraphrase of what happened or was said, so a reader "
+            "who never saw the transcript understands it and can tell who did or "
+            "said what. Copying a line out of the transcript is a failure.\n"
+            "ONE ENTRY PER DISTINCT THING WORTH REMEMBERING: a decision, an "
+            "agreement, a correction, a change of state, a plan, a commitment, a "
+            "realisation about a person, or a durable preference. Never split one "
+            "event across entries and never merge unrelated ones; two entries that "
+            "say the same thing are a mistake.\n"
+            "WHEN THE SESSION CHANGES AN EARLIER BELIEF OR PLAN, say so in the "
+            "trace: state the current truth plainly and name what it replaces "
+            "(for example that something was understood one way before and is "
+            "understood differently now, or that a plan was cancelled or "
+            "superseded). A memory that repeats the old statement without noting "
+            "the change is worse than no memory at all.\n"
+            "NEVER INVENT: nothing that is not in the transcript, no speculation "
+            "about feelings or intentions, no continuation of in-character "
+            "roleplay, no decorative mood language.\n"
+            "FACTS: each memory carries its facts as triples "
+            "'subject|predicate|object', exactly three pipe-separated parts and no "
+            "pipes inside a part. subject is who or what the fact is about ('User', "
+            "'Synth', or a name as spelled in the transcript); predicate is a short "
+            "snake_case verb phrase ('prefers', 'corrected', 'lives_in', "
+            "'has_intention'); object is the distilled content, at most 200 "
+            "characters, in the same third-person voice as the trace. Every fact "
+            "must add something the trace does not already state — use an empty "
+            "list when the trace says it all.\n"
+            "Keep the persona's own statements and the human's separate; never "
+            "attribute one to the other.\n"
+            "Use the current_date in the payload to read relative time ('last "
+            "night', 'tomorrow') and state absolute dates when a date matters.\n"
+            'Return ONLY a JSON object: {"memories": [{"trace": "...", "facts": '
+            '["..."]}]} with at most 4 entries, most durable first. Return '
+            '{"memories": []} only when the session holds nothing that a later '
+            "conversation could need.\n"
+            + _speaker_identity_block(self.speaker_identity)
         )

@@ -239,7 +239,9 @@ class AnthropicAdapter(BaseProtocolAdapter):
         except Exception:
             return False
 
-    async def probe_capabilities(self) -> dict[str, bool]:
+    async def probe_capabilities(
+        self, models: list[ModelInfo] | None = None
+    ) -> dict[str, bool]:
         alive = await self.health_check()
         return {
             "cortex": alive,

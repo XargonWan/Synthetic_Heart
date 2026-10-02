@@ -122,6 +122,59 @@ async def test_openai_compat_list_models_prefers_v1_path(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_openai_compat_list_models_is_empty_when_the_endpoint_never_answers(
+    monkeypatch,
+):
+    """An unreachable endpoint must not come back with a model.
+
+    The probe treats a non-empty listing as evidence that an endpoint is alive, so
+    the placeholder this method used to hatch on a connection error made a host
+    that does not even resolve report as a successfully probed engine, while every
+    real request to it failed.
+    """
+
+    class UnreachableSession(FakeAiohttpSession):
+        def get(self, url: str, *args, **kwargs):
+            self.calls.append(url)
+            raise OSError("Name or service not known")
+
+    adapter = OpenAICompatAdapter(base_url="http://nowhere.invalid", api_key="x")
+    session = UnreachableSession()
+
+    import aiohttp
+
+    monkeypatch.setattr(aiohttp, "ClientSession", lambda: session)
+
+    models = await adapter.list_models()
+
+    assert models == []
+    assert not any(m.id == "default" for m in models)
+
+
+@pytest.mark.asyncio
+async def test_openai_compat_list_models_still_defaults_when_the_endpoint_answers_empty(
+    monkeypatch,
+):
+    """The reachable-but-empty case keeps its placeholder (Zen-style proxies).
+
+    This is the other half of the distinction: the endpoint answered, it simply has
+    no usable model list, so the probe may still try to reach it with ping_test.
+    """
+    adapter = OpenAICompatAdapter(base_url="http://localhost:14848", api_key="x")
+
+    session = FakeAiohttpSession()
+    session.responses = [FakeAiohttpResponse(status=200, payload={"data": []})]
+
+    import aiohttp
+
+    monkeypatch.setattr(aiohttp, "ClientSession", lambda: session)
+
+    models = await adapter.list_models()
+
+    assert [m.id for m in models] == ["default"]
+
+
+@pytest.mark.asyncio
 async def test_openai_compat_http_chat_urls_include_api_v1_paths():
     adapter = OpenAICompatAdapter(base_url="http://localhost:14848")
     urls = adapter._http_chat_urls()
@@ -296,6 +349,142 @@ async def test_openai_compat_probe_capabilities_tries_each_model_id(monkeypatch)
 
     assert caps["vision"] is True
     assert called_models == ["text-only", "vision-model"]
+
+
+@pytest.mark.asyncio
+async def test_openai_compat_probe_capabilities_uses_supplied_models(monkeypatch):
+    """A pre-fetched listing must not trigger another /models request."""
+    adapter = OpenAICompatAdapter(base_url="http://localhost:14848", api_key="x")
+
+    session = FakeAiohttpSession()
+    # Only the audio probes may reach the network; the listing must not.
+    session.responses = [
+        FakeAiohttpResponse(status=404, payload={}, body=b""),
+        FakeAiohttpResponse(status=404, payload={}, body=b""),
+    ]
+
+    import aiohttp
+
+    monkeypatch.setattr(aiohttp, "ClientSession", lambda: session)
+
+    caps = await adapter.probe_capabilities(
+        models=[ModelInfo(id="m1", name="M1", capabilities={"vision": True})]
+    )
+
+    assert caps["vision"] is True
+    assert all("/models" not in url for url in session.calls)
+
+
+@pytest.mark.asyncio
+async def test_openai_compat_probe_capabilities_reads_nested_provider_spec(monkeypatch):
+    """Nested provider capability blocks and the model ``type`` are honoured."""
+    adapter = OpenAICompatAdapter(base_url="http://localhost:14848", api_key="x")
+
+    session = FakeAiohttpSession()
+    session.responses = [
+        FakeAiohttpResponse(
+            status=200,
+            payload={
+                "data": [
+                    {
+                        "id": "gemini-x",
+                        "type": "text",
+                        "model_spec": {
+                            "name": "Gemini X",
+                            "capabilities": {
+                                "supportsVision": True,
+                                # Non-boolean metadata sits in the same block and
+                                # must not become a capability flag.
+                                "quantization": "not-available",
+                                "maxImages": 3,
+                            },
+                        },
+                    }
+                ]
+            },
+        ),
+        FakeAiohttpResponse(status=404, payload={}, body=b""),
+        FakeAiohttpResponse(status=404, payload={}, body=b""),
+    ]
+
+    import aiohttp
+
+    monkeypatch.setattr(aiohttp, "ClientSession", lambda: session)
+
+    models = await adapter.list_models()
+    model = models[0]
+
+    assert model.name == "Gemini X"
+    assert model.model_type == "text"
+    assert model.capabilities["vision"] is True
+    assert "supportsvision" in model.capabilities
+    assert "quantization" not in model.capabilities
+    assert "maximages" not in model.capabilities
+
+    # Declared vision support means no image POST is needed at all.
+    monkeypatch.setattr(adapter, "_probe_vision_support", _fail_if_called)
+    caps = await adapter.probe_capabilities(models=models)
+    assert caps["vision"] is True
+
+
+async def _fail_if_called(model: str | None = None) -> bool:
+    raise AssertionError("vision probe must not run when models declare vision")
+
+
+@pytest.mark.asyncio
+async def test_openai_compat_ping_test_reuses_supplied_models(monkeypatch):
+    """Pinging with a pre-fetched listing costs exactly one chat request."""
+    adapter = OpenAICompatAdapter(base_url="http://localhost:14848", api_key="x")
+
+    session = FakeAiohttpSession()
+    session.responses = [
+        FakeAiohttpResponse(
+            status=200, payload={"choices": [{"message": {"content": "pong"}}]}
+        )
+    ]
+
+    import aiohttp
+
+    monkeypatch.setattr(aiohttp, "ClientSession", lambda: session)
+
+    models = [ModelInfo(id="m1", name="M1", capabilities={"cortex": True})]
+    ok, echo = await adapter.ping_test(model="m1", models=models)
+
+    assert ok is True
+    assert echo == "pong"
+    assert len(session.calls) == 1
+    assert "/models" not in session.calls[0]
+    assert session.request_kwargs[0]["json"]["model"] == "m1"
+
+
+@pytest.mark.asyncio
+async def test_openai_compat_ping_test_lists_once_without_supplied_models(monkeypatch):
+    """Without a pre-fetched listing the ping still lists at most once."""
+    adapter = OpenAICompatAdapter(base_url="http://localhost:14848", api_key="x")
+
+    list_calls: list[int] = []
+
+    async def fake_list_models():
+        list_calls.append(1)
+        return [ModelInfo(id="m1", name="M1", capabilities={"cortex": True})]
+
+    monkeypatch.setattr(adapter, "list_models", fake_list_models)
+
+    session = FakeAiohttpSession()
+    session.responses = [
+        FakeAiohttpResponse(
+            status=200, payload={"choices": [{"message": {"content": "pong"}}]}
+        )
+    ]
+
+    import aiohttp
+
+    monkeypatch.setattr(aiohttp, "ClientSession", lambda: session)
+
+    ok, _echo = await adapter.ping_test(model="m1")
+
+    assert ok is True
+    assert len(list_calls) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1986,6 +2175,69 @@ def test_json_format_reminder_skipped_for_native_tool_turns():
     last = messages[-1]
     assert last["role"] == "user"
     assert "Respond with ONLY valid JSON" not in last["content"]
+
+
+def test_json_format_reminder_appended_to_multimodal_turn():
+    """A picture turn must carry the same format reminder as a text turn.
+
+    Multimodal turns render the current turn as a content-part list rather than
+    a plain string. The reminder used to be applied only to ``str`` content, so
+    an image turn silently lost the format anchor that sits next to the text
+    being answered and the model replied in prose — a correction round-trip on
+    every attached picture.
+    """
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+    from core.prompt_request import Attachment, PromptRequest, RuntimeContext
+
+    engine = ExternalCortexEngine(_openai_endpoint({}), cast(Any, SimpleNamespace()))
+    prompt = PromptRequest(
+        system_instruction="Use JSON.",
+        current_text="look at this one",
+        tool_declarations=[],
+        attachments=[Attachment(mime_type="image/jpeg", data="AAAA")],
+        runtime_ctx=RuntimeContext(
+            interface_name="telegram_bot", interface_path="telegram_bot/123"
+        ),
+        supports_tool_calling=False,
+    )
+    messages = engine._build_messages(prompt)
+    last = messages[-1]
+    assert last["role"] == "user"
+    assert isinstance(last["content"], list)
+
+    parts: list[dict[str, Any]] = last["content"]
+    assert parts[0]["type"] == "image_url"
+    text_part = next(p for p in parts if p["type"] == "text")
+    assert "Respond with ONLY valid JSON" in text_part["text"]
+    assert "your ENTIRE reply must be the JSON" in text_part["text"]
+    # The reminder must be the LAST thing in the turn, after the vision frame.
+    assert text_part["text"].rstrip().endswith("}}]}")
+    assert text_part["text"].index("[VISION:") < text_part["text"].index(
+        "Respond with ONLY valid JSON"
+    )
+
+
+def test_json_format_reminder_adds_text_part_when_multimodal_list_has_none():
+    """A part-list turn with no text part still gets the reminder, not nothing."""
+    from core.external_endpoints.bridges.cortex_bridge import ExternalCortexEngine
+
+    messages: list[dict[str, Any]] = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/jpeg;base64,AAAA"},
+                }
+            ],
+        }
+    ]
+    ExternalCortexEngine._append_json_format_reminder(
+        messages, SimpleNamespace(supports_tool_calling=False)
+    )
+    parts: list[dict[str, Any]] = messages[-1]["content"]
+    assert [p["type"] for p in parts] == ["image_url", "text"]
+    assert "Respond with ONLY valid JSON" in parts[-1]["text"]
 
 
 @pytest.mark.asyncio

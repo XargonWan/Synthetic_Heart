@@ -26,6 +26,7 @@ from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.mcp_bridge.config import (
     SynthMcpServerConfig,
     load_enabled_synth_mcp_servers,
+    repo_root,
 )
 
 # Lazy imports of the mcp client API — kept inside functions so that a missing
@@ -226,9 +227,14 @@ class McpClientBridge:
                     )
                 from mcp.client.stdio import StdioServerParameters, stdio_client
 
+                # cwd is pinned to the repository root so a relative arg (the
+                # usual shape here: 'mcp_servers/<server>.py') resolves the same
+                # way no matter which directory Synth itself was launched from.
+                # Absolute args and commands are unaffected.
                 server_params = StdioServerParameters(
                     command=command,
                     args=list(cfg.args),
+                    cwd=str(repo_root()),
                     env={**os.environ, **cfg.env} if cfg.env else None,
                 )
                 read, write = await stack.enter_async_context(

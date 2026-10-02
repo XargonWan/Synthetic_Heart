@@ -114,7 +114,9 @@ async def test_multiple_clusters_and_preserve_non_sources(monkeypatch):
 
     # Run one cycle
     res = await p._run_one_compaction_cycle(dry_run=False)
-    assert res is True
+    # The day-unit pass reports a counted summary (the WebUI panel reads it); the
+    # clustering path still returns True. Either way, a failed cycle returns False.
+    assert res is True or (isinstance(res, dict) and res.get("dry_run") is False)
 
 
 @pytest.mark.asyncio

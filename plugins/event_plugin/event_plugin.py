@@ -8,7 +8,10 @@ from datetime import datetime, timezone
 from core.ai_plugin_base import AIPluginBase
 from core.db import insert_scheduled_event, get_due_events, mark_event_delivered
 from core.logging_utils import log_debug, log_info, log_error, log_warning
-from interface.message_send_utils import send_with_thread_fallback
+from interface.message_send_utils import (
+    send_with_thread_fallback,
+    telegram_parse_mode_for,
+)
 from core.auto_response import request_llm_delivery
 import traceback
 import asyncio
@@ -486,7 +489,7 @@ class EventPlugin(AIPluginBase):
             import recurring_ical_events
 
             from core.calendar_utils import build_calendar
-            from core.time_zone_utils import get_local_timezone
+            from core.time_zone_utils import format_day_month, get_local_timezone
 
             system_tz = get_local_timezone()
             window_start = _dt.now(tz=system_tz)
@@ -532,11 +535,11 @@ class EventPlugin(AIPluginBase):
                         continue
 
                     if all_day:
-                        when = f"{local_dt.strftime('%b %-d')} (all day)"
+                        when = f"{format_day_month(local_dt)} (all day)"
                     else:
                         tz_abbr = local_dt.strftime("%Z") or "local"
                         when = (
-                            f"{local_dt.strftime('%b %-d')}, "
+                            f"{format_day_month(local_dt)}, "
                             f"{local_dt.hour}:{local_dt.strftime('%M')} ({tz_abbr})"
                         )
 
@@ -1846,7 +1849,7 @@ class EventPlugin(AIPluginBase):
                 chat_id,
                 text,
                 thread_id=thread_id,  # fixed: correct param is thread_id
-                parse_mode="Markdown",
+                parse_mode=telegram_parse_mode_for(chat_id),
             )
 
             log_info(
@@ -1889,7 +1892,7 @@ class EventPlugin(AIPluginBase):
                     chat_id,
                     text,
                     thread_id=thread_id,  # fixed: correct param is thread_id
-                    parse_mode="Markdown",
+                    parse_mode=telegram_parse_mode_for(chat_id),
                 )
                 log_info(
                     f"[event_plugin] ✅ Fallback Telegram send successful for event {event_id}"

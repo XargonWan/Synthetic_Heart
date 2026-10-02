@@ -6,7 +6,7 @@ import plugins.grillo.grillo_dream as gd
 
 
 @pytest.mark.asyncio
-async def test_observer_logs_activity(caplog, monkeypatch):
+async def test_observer_logs_activity(caplog, monkeypatch, idle_eligible_target):
     caplog.set_level("INFO")
 
     logged_messages = []
@@ -22,7 +22,10 @@ async def test_observer_logs_activity(caplog, monkeypatch):
         return [{"cnt": 1, "max_ts": int(datetime.utcnow().timestamp())}]
 
     async def fake_collect(limit):
-        return ["(chat:telegram_bot/1 | sender:someone | 2026-01-01) Test message"]
+        return (
+            ["(chat:telegram_bot/1 | sender:someone | 2026-01-01) Test message"],
+            [],
+        )
 
     async def fake_create_activity_log(*args, **kwargs):
         return 999
@@ -46,6 +49,7 @@ async def test_observer_logs_activity(caplog, monkeypatch):
     monkeypatch.setattr(
         "core.message_queue.enqueue_low_priority", fake_enqueue_low_priority
     )
+    idle_eligible_target(observer)
 
     # Run observer once
     await observer._run_observer()
@@ -68,7 +72,10 @@ async def test_dream_logs_activity(caplog, monkeypatch):
     dream = gd.GrilloDreamPlugin()
 
     async def fake_collect(limit):
-        return ["(chat:telegram_bot/1 | sender:someone | 2026-01-01) Dreamy message"]
+        return (
+            ["(chat:telegram_bot/1 | sender:someone | 2026-01-01) Dreamy message"],
+            [],
+        )
 
     async def fake_create_activity_log(*args, **kwargs):
         return 4242

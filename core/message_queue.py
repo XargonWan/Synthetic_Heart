@@ -108,6 +108,61 @@ _counter = 0  # Monotonic counter to prevent dict comparison when priorities are
 # Watchdog: how often the supervisor checks the consumer is still alive.
 _SUPERVISOR_INTERVAL_SECONDS = 5.0
 
+# In-flight item tracking for that watchdog. A stalled LLM generation keeps the
+# consumer task ALIVE for as long as the generation budget allows, so
+# ``task.done()`` cannot see the freeze: the supervisor would report a perfectly
+# healthy consumer while every chat, event and beat sat unprocessed behind it
+# (observed live: one stalled provider request silently swallowed two of the
+# user's messages, with nothing in synth.log to say why). These globals let the
+# supervisor NAME the item that is stuck instead.
+#
+# Reported at most once per item, and never on a turn that finished: the label is
+# set immediately before the heavy handling block and cleared in that block's
+# ``finally``, so an early retry/rate-limit ``continue`` can never leave it set.
+_CONSUMER_STALL_WARN_SECONDS = 300.0
+_in_flight_label: str | None = None
+_in_flight_started_at: float = 0.0
+_in_flight_reported: bool = False
+
+
+def _item_label(item: dict[str, Any] | None) -> str:
+    """Return a short, log-safe description of a queue item."""
+    if not isinstance(item, dict):
+        return "an unknown item"
+    chat_id = item.get("chat_id")
+    interface = item.get("interface")
+    label = f"chat {chat_id}" if chat_id is not None else "an unknown item"
+    if interface:
+        label = f"{label} ({interface})"
+    return label
+
+
+def _note_item_in_flight(item: dict[str, Any] | None) -> None:
+    """Record the item the consumer is now working on."""
+    global _in_flight_label, _in_flight_started_at, _in_flight_reported
+    _in_flight_label = _item_label(item)
+    _in_flight_started_at = time.monotonic()
+    _in_flight_reported = False
+
+
+def _clear_item_in_flight() -> None:
+    """Clear the in-flight item once its handling block has finished."""
+    global _in_flight_label, _in_flight_reported
+    _in_flight_label = None
+    _in_flight_reported = False
+
+
+def _stalled_item_report() -> tuple[str, float] | None:
+    """Return ``(label, seconds)`` while the consumer looks stalled, else None."""
+    global _in_flight_reported
+    if not _in_flight_label or _in_flight_reported:
+        return None
+    elapsed = time.monotonic() - _in_flight_started_at
+    if elapsed < _CONSUMER_STALL_WARN_SECONDS:
+        return None
+    _in_flight_reported = True
+    return _in_flight_label, elapsed
+
 
 @dataclass(slots=True)
 class _BackgroundTaskEntry:
@@ -132,6 +187,43 @@ def _should_cancel_low_priority_on_user_message(context: object) -> bool:
         bool(context_dict.get("grillo_beat"))
         and is_outbound_beat(context_dict.get("beat_type"))
     )
+
+
+def _is_beat_message(context: object) -> bool:
+    """Return True when a queued message is a Grillo beat, not a user message.
+
+    A beat must never pre-empt another beat. The diary consolidator and the
+    observer beat both run on ``grillo/-1`` seconds apart, and the observer's
+    arrival used to cancel the consolidator mid model call: observed live, the
+    consolidation was cancelled ~12s in on every run, so the day was never
+    merged and its ``update_diary_entry`` never ran. Only a real user message
+    pre-empts a running background beat.
+    """
+    if not isinstance(context, dict):
+        return False
+    context_dict = cast(dict[str, object], context)
+    return bool(context_dict.get("grillo_beat"))
+
+
+def _should_cancel_background_task(
+    entry: object,
+    *,
+    context: object,
+) -> bool:
+    """Whether an incoming item should cancel a running background task.
+
+    Three conditions, all structural: the task must be flagged cancellable, it
+    must still be running, and the incoming item must be a real user message —
+    a Grillo beat never pre-empts another Grillo beat (see ``_is_beat_message``).
+    """
+    if entry is None:
+        return False
+    task = getattr(entry, "task", None)
+    if task is None or getattr(task, "done", lambda: True)():
+        return False
+    if not bool(getattr(entry, "cancel_on_user_message", False)):
+        return False
+    return not _is_beat_message(context)
 
 
 def _extract_grillo_activity_log_id(message: object) -> int | None:
@@ -567,6 +659,67 @@ async def _delayed_put(item: dict, delay: float) -> None:
     await _get_queue().put((_heap_key(priority), _counter, item))
 
 
+async def ensure_active_plugin(reason: str) -> Any:
+    """Return the active engine plugin, loading the configured engine if none is.
+
+    The engine is loaded once during startup, so a machine that chooses its engine
+    afterwards has no engine at all - and that is exactly what the first-run setup
+    page asks the user to do. In that state the queue answered every message with a
+    log line and nothing else: no reply, no error on screen, nothing the user would
+    find. Beats already self-healed this way on a timer; a person talking to Synth
+    is at least as deserving, so the one-time load now happens for any message.
+    """
+    plugin = plugin_instance.get_plugin()
+    if plugin:
+        return plugin
+    try:
+        from core.config import get_active_cortex_engine
+
+        engine_name = await get_active_cortex_engine(scope="base")
+        await plugin_instance.load_plugin(engine_name, ensure_started=True)
+        plugin = plugin_instance.get_plugin()
+        if plugin:
+            log_info(f"[QUEUE] Loaded engine '{engine_name}' on demand ({reason})")
+        else:
+            log_warning(
+                f"[QUEUE] Engine '{engine_name}' was loaded but no plugin is active"
+            )
+        return plugin
+    except Exception as exc:
+        log_warning(f"[QUEUE] Could not load an engine on demand ({reason}): {exc}")
+        return None
+
+
+UNANSWERED_NOTICE = (
+    "I cannot answer yet: no AI engine is loaded. Pick one in the Engines tab (or "
+    "re-run the setup page) and say that again."
+)
+
+
+async def notify_unanswerable(bot, message, interface_id: str | None) -> None:
+    """Say that nothing can answer, instead of leaving the user with silence.
+
+    A dropped message is invisible from the outside: an ERROR in a log nobody reads,
+    and no bubble at all in the WebUI. Best-effort - an interface that cannot deliver
+    this must never break the queue.
+    """
+    if bot is None or not interface_id:
+        return
+    chat_id = getattr(message, "chat_id", None) or getattr(
+        getattr(message, "chat", None), "id", None
+    )
+    if not chat_id:
+        return
+    try:
+        await bot.send_message(
+            {"text": UNANSWERED_NOTICE, "interface_path": f"{interface_id}/{chat_id}"},
+            original_message=message,
+        )
+        log_info(f"[QUEUE] Reported the missing engine to {interface_id}/{chat_id}")
+    except Exception as exc:
+        log_warning(f"[QUEUE] Could not report the missing engine: {exc}")
+
+
 async def enqueue(
     bot,
     message,
@@ -785,9 +938,13 @@ async def enqueue(
         f"[QUEUE] DEBUG: User {user_id} is not blocked or is trainer, continuing processing"
     )
 
-    plugin = plugin_instance.get_plugin()
+    plugin = await ensure_active_plugin("incoming message")
     if not plugin:
-        log_error("[QUEUE] No active plugin")
+        log_error(
+            "[QUEUE] No active plugin: nothing can answer this message. "
+            "No usable engine is configured, or the configured one could not load."
+        )
+        await notify_unanswerable(bot, message, interface_id)
         if response_future is not None and not response_future.done():
             response_future.set_result(None)
         return
@@ -1383,32 +1540,13 @@ async def _consumer_loop() -> None:
                     f"[QUEUE] Processing message from chat {final.get('chat_id')}"
                 )
 
-            plugin = plugin_instance.get_plugin()
+            plugin = await ensure_active_plugin("queued message")
             if not plugin:
-                # For grillo internal beats, attempt a one-time auto-load from config
-                # before giving up — beats fire on a timer and must not be silently dropped.
-                _is_grillo = final.get("interface") == "grillo" or (
-                    isinstance(final.get("context"), dict)
-                    and final["context"].get("grillo_beat")
+                log_error(
+                    "[QUEUE] No active plugin when dispatching: nothing can answer "
+                    "this message, because no usable engine is configured"
                 )
-                if _is_grillo:
-                    try:
-                        from core.config import get_active_cortex_engine as _gace
-
-                        _engine_name = await _gace(scope="base")
-                        await plugin_instance.load_plugin(
-                            _engine_name, ensure_started=True
-                        )
-                        plugin = plugin_instance.get_plugin()
-                        if plugin:
-                            log_info(
-                                f"[QUEUE] Auto-loaded engine '{_engine_name}' for grillo beat"
-                            )
-                    except Exception as _e:
-                        log_warning(f"[QUEUE] Auto-load for grillo beat failed: {_e}")
-                if not plugin:
-                    log_error("[QUEUE] No active plugin when dispatching")
-                    continue
+                continue
 
             try:
                 max_messages, window_seconds, trainer_fraction = plugin.get_rate_limit()
@@ -1448,6 +1586,10 @@ async def _consumer_loop() -> None:
                 )
                 asyncio.create_task(_delayed_put(final, delay))
                 continue
+
+            # Tell the supervisor watchdog which item is in flight: a stalled
+            # generation is otherwise invisible while it happens.
+            _note_item_in_flight(final)
 
             try:
                 # Get timeout configuration from message_chain module
@@ -1818,6 +1960,14 @@ async def _consumer_loop() -> None:
                             )
 
                     try:
+                        # A Grillo beat must never pre-empt another Grillo beat:
+                        # they share the ``grillo/-1`` path, and cancelling the
+                        # in-flight one silently discards its model call (the
+                        # diary consolidator was cancelled by the observer beat
+                        # on every run, so its day was never merged). Only a real
+                        # user message pre-empts a running background beat.
+                        _incoming_is_beat = _is_beat_message(context)
+
                         # Cancel any running LOW_PRIORITY background task for the
                         # same interface_path IMMEDIATELY — before any event-loop
                         # yields — so the Grillo task cannot make further progress
@@ -1828,9 +1978,10 @@ async def _consumer_loop() -> None:
                             _bg_tasks.pop(interface_path, None)
                             _existing_bg = None
                         if (
-                            _existing_bg is not None
-                            and _existing_bg.cancel_on_user_message
-                            and not _existing_bg.task.done()
+                            _should_cancel_background_task(
+                                _existing_bg, context=context
+                            )
+                            and _existing_bg is not None
                         ):
                             _bg_tasks.pop(interface_path, None)
                             _existing_bg.task.cancel()
@@ -1846,7 +1997,9 @@ async def _consumer_loop() -> None:
                         # handle_incoming_message. Direct user requests always
                         # take priority over background Grillo beats.
                         for _gk in [
-                            k for k in list(_bg_tasks) if k.startswith("grillo/")
+                            k
+                            for k in list(_bg_tasks)
+                            if k.startswith("grillo/") and not _incoming_is_beat
                         ]:
                             _gt = _bg_tasks.get(_gk)
                             if _gt is not None and _gt.task.done():
@@ -2197,6 +2350,7 @@ async def _consumer_loop() -> None:
                 except Exception as send_err:  # pragma: no cover - best effort
                     log_warning(f"[QUEUE] Failed to send fallback message: {send_err}")
             finally:
+                _clear_item_in_flight()
                 for _ in batch:
                     _get_queue().task_done()
         except asyncio.CancelledError:
@@ -2317,6 +2471,17 @@ async def _supervisor_loop() -> None:
                     # Should not happen (task.done() is True), guard anyway.
                     pass
             _start_consumer_task()
+
+        stalled = _stalled_item_report()
+        if stalled is not None:
+            stalled_label, stalled_seconds = stalled
+            log_warning(
+                f"[QUEUE] Consumer has been processing {stalled_label} for "
+                f"{stalled_seconds:.0f}s without completing it — an LLM "
+                "generation is stalled, and every queued chat, event and beat "
+                "waits behind it until the request returns or "
+                "LLM_GENERATION_TIMEOUT_SEC expires"
+            )
 
     log_info("[QUEUE] Consumer supervisor stopped")
 

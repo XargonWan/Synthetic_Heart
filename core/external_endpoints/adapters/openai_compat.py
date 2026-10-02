@@ -11,6 +11,7 @@ retry logic, and streaming are all handled by the SDK.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time as _time
 from typing import Any, AsyncIterator
@@ -32,6 +33,25 @@ from core.external_endpoints.adapters.base import (
 # Endpoints that are known to support audio/speech (best-effort heuristic)
 _KNOWN_TTS_PATHS = ["/audio/speech", "/v1/audio/speech"]
 _KNOWN_STT_PATHS = ["/audio/transcriptions", "/v1/audio/transcriptions"]
+
+# Vision probing is a FALLBACK for endpoints that declare no capability
+# metadata: each attempt posts an image to a chat model.  Bound it by both an
+# attempt count and a wall-clock budget so a large model catalogue cannot make
+# one probe run cost 15 s per model.
+_VISION_PROBE_LIMIT = 10
+_VISION_PROBE_BUDGET_SECONDS = 30.0
+
+# Declared provider capability flags -> SyntH subsystem flags.  Providers name
+# the same fact differently (a flat ``vision`` vs ``supportsVision``); this is a
+# field-name alias table over declared metadata, never a guess from model names.
+_CAPABILITY_ALIASES: dict[str, str] = {
+    "supportsvision": "vision",
+    "supportsimageinput": "vision",
+    "supportsimage": "vision",
+    "supportsimages": "vision",
+    "supportsmultipleimages": "vision",
+    "supportsvideoinput": "vision",
+}
 
 # Matches <think>…</think>, <thinking>…</thinking>, and <thought>…</thought>
 # blocks produced by reasoning models (Qwen3.5, DeepSeek-R1, etc.) when thinking
@@ -536,6 +556,33 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                 finish_reason=finish_reason,
                 usage=usage,
             )
+        except asyncio.CancelledError:
+            # Status 499 follows the Gemini adapter's convention: the request was
+            # abandoned before the provider answered (a per-message timeout, a
+            # superseded background beat, or a shutdown) and the call site must
+            # still close its record. Without this branch the abandoned call left
+            # a cortex-API REQUEST line with no RESPONSE and a Langfuse trace
+            # whose output was NULL with zero observations — indistinguishable
+            # from a request that was never made.
+            _elapsed = (_time.monotonic() - _req_start) * 1000
+            log_cortex_response(
+                engine_tag,
+                model=request_model,
+                status=499,
+                error="request cancelled",
+                elapsed_ms=_elapsed,
+            )
+            raise
+        except asyncio.TimeoutError:
+            _elapsed = (_time.monotonic() - _req_start) * 1000
+            log_cortex_response(
+                engine_tag,
+                model=request_model,
+                status=504,
+                error="request timed out",
+                elapsed_ms=_elapsed,
+            )
+            raise
         except Exception as exc:
             _elapsed = (_time.monotonic() - _req_start) * 1000
             log_cortex_response(
@@ -600,6 +647,28 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                 body="".join(_accumulated),
                 elapsed_ms=_elapsed,
             )
+        except asyncio.CancelledError:
+            # See chat_completion: an abandoned stream must still close its
+            # cortex-API / Langfuse record instead of leaving an empty trace.
+            _elapsed = (_time.monotonic() - _req_start) * 1000
+            log_cortex_response(
+                engine_tag,
+                model=request_model,
+                status=499,
+                error="request cancelled",
+                elapsed_ms=_elapsed,
+            )
+            raise
+        except asyncio.TimeoutError:
+            _elapsed = (_time.monotonic() - _req_start) * 1000
+            log_cortex_response(
+                engine_tag,
+                model=request_model,
+                status=504,
+                error="request timed out",
+                elapsed_ms=_elapsed,
+            )
+            raise
         except Exception as exc:
             _elapsed = (_time.monotonic() - _req_start) * 1000
             log_cortex_response(
@@ -614,12 +683,22 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
     # Models
     # ------------------------------------------------------------------
 
-    def _normalize_capabilities(self, capabilities: Any) -> dict[str, bool]:
+    def _as_capability_flags(self, capabilities: Any) -> dict[str, bool]:
+        """Normalise a declared capability payload to lowercase ``{name: bool}``.
+
+        Only declared BOOLEANS become flags.  Provider capability maps are
+        boolean by definition, but the surrounding block they arrive in also
+        carries non-boolean metadata (``"quantization": "not-available"``,
+        ``"maxImages": 1``); coercing those with ``bool()`` invented flags that
+        no consumer understands.  Non-boolean entries are ignored, and a
+        capability a provider only describes in prose is left to the
+        (bounded) probing fallback.
+        """
         if isinstance(capabilities, dict):
             return {
-                str(key).lower(): bool(value)
+                str(key).lower(): value
                 for key, value in capabilities.items()
-                if isinstance(key, (str, int, float))
+                if isinstance(key, (str, int, float)) and isinstance(value, bool)
             }
         if isinstance(capabilities, (list, tuple, set)):
             return {
@@ -639,37 +718,83 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             return [value.lower()]
         return []
 
+    def _normalize_capabilities(self, *sources: Any) -> dict[str, bool]:
+        """Union every declared capability source and fold known aliases.
+
+        Providers nest the same facts in different places (a flat
+        ``capabilities`` map on the model entry, or a provider-specific block
+        such as ``model_spec.capabilities``).  Every source is normalised and
+        merged with true-wins semantics, the vendor's own flag names are kept
+        verbatim, and any flag the alias table maps onto a SyntH subsystem also
+        sets that subsystem flag.
+        """
+        flags: dict[str, bool] = {}
+        for source in sources:
+            for name, declared in self._as_capability_flags(source).items():
+                flags[name] = flags.get(name, False) or declared
+
+        for declared, subsystem in _CAPABILITY_ALIASES.items():
+            if flags.get(declared):
+                flags[subsystem] = True
+        return flags
+
     def _parse_model_entry(self, entry: Any) -> ModelInfo:
         # Some OpenAI-compatible endpoints return dict-like entries, others
         # return SDK model objects. Support both.
         if isinstance(entry, dict):
             entry_id = str(entry.get("id", "") or "")
-            capabilities = self._normalize_capabilities(entry.get("capabilities", {}))
+            spec = entry.get("model_spec")
+            spec = spec if isinstance(spec, dict) else {}
             return ModelInfo(
                 id=entry_id,
-                name=str(entry.get("name", entry_id) or entry_id),
+                name=str(entry.get("name") or spec.get("name") or entry_id or ""),
                 owned_by=str(entry.get("owned_by", "")),
-                capabilities=capabilities,
+                capabilities=self._normalize_capabilities(
+                    entry.get("capabilities"), spec.get("capabilities")
+                ),
+                model_type=str(
+                    entry.get("type")
+                    or entry.get("model_type")
+                    or spec.get("model_type")
+                    or ""
+                ),
+                input_modalities=self._as_str_list(
+                    entry.get("input_modalities") or spec.get("input_modalities")
+                ),
+                output_modalities=self._as_str_list(
+                    entry.get("output_modalities") or spec.get("output_modalities")
+                ),
             )
         entry_id = getattr(entry, "id", "") or ""
-        capabilities = self._normalize_capabilities(getattr(entry, "capabilities", {}))
         return ModelInfo(
             id=str(entry_id),
-            name=str(getattr(entry, "name", entry_id) or entry_id),
+            name=str(getattr(entry, "name", entry_id) or entry_id or ""),
             owned_by=str(getattr(entry, "owned_by", "") or ""),
-            capabilities=capabilities,
+            capabilities=self._normalize_capabilities(
+                getattr(entry, "capabilities", None)
+            ),
+            model_type=str(getattr(entry, "model_type", "") or ""),
+            input_modalities=self._as_str_list(
+                getattr(entry, "input_modalities", None)
+            ),
+            output_modalities=self._as_str_list(
+                getattr(entry, "output_modalities", None)
+            ),
         )
 
     def _supports_vision_capability(self, model: ModelInfo) -> bool:
-        if not model.capabilities:
+        # Duck-typed on purpose: SDK model objects reach this helper too, so the
+        # optional fields are read defensively.
+        capabilities = getattr(model, "capabilities", None) or {}
+        if not capabilities:
             return False
-        keys = {key.lower() for key in model.capabilities.keys()}
+        keys = {key.lower() for key in capabilities.keys()}
         if any(
             keyword in keys
             for keyword in ("vision", "image", "images", "multimodal", "visual")
         ):
             return True
-        if model.capabilities.get("vision") or model.capabilities.get("image"):
+        if capabilities.get("vision") or capabilities.get("image"):
             return True
         return False
 
@@ -682,12 +807,17 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         so it stays correct across providers and languages. Endpoints that emit
         no such metadata (plain OpenAI ``/models``) leave everything falsy, in
         which case the caller falls back to the first available model.
+
+        Duck-typed: SDK model objects that expose only ``id`` must not raise.
         """
-        if model.capabilities.get("cortex"):
+        capabilities = getattr(model, "capabilities", None) or {}
+        if capabilities.get("cortex"):
             return True
-        if (model.model_type or "").lower() == "llm":
+        if (getattr(model, "model_type", "") or "").lower() == "llm":
             return True
-        if "text" in {m.lower() for m in (model.output_modalities or [])}:
+        if "text" in {
+            m.lower() for m in (getattr(model, "output_modalities", None) or [])
+        }:
             return True
         return False
 
@@ -776,10 +906,19 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
             return ["/audio/transcriptions"]
         return ["/v1/audio/transcriptions", "/audio/transcriptions"]
 
-    async def _list_models_via_http(self) -> list[ModelInfo]:
+    async def _list_models_via_http(self) -> list[ModelInfo] | None:
+        """Fetch the model listing over HTTP.
+
+        Returns ``None`` when the endpoint never answered at all (DNS failure,
+        connection refused, timeout) and ``[]`` when it answered but offers no
+        usable listing. Callers must keep the two apart: the probe decides whether
+        an endpoint is healthy from this result, so collapsing them lets a host
+        that cannot be reached look like a working engine.
+        """
         import aiohttp
 
         effective_timeout = float(self._timeout or 300.0)
+        answered = False
 
         def _parse_list(data: Any) -> list[ModelInfo]:
             if data is None:
@@ -809,6 +948,10 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                             sock_read=effective_timeout,
                         ),
                     ) as resp:
+                        # Reaching this point means an HTTP response arrived, however
+                        # unusable it turns out to be: the endpoint is reachable. Only
+                        # an exception below means it never answered at all.
+                        answered = True
                         if resp.status != 200:
                             log_warning(
                                 f"[openai_compat] GET {url} returned HTTP {resp.status}"
@@ -824,10 +967,16 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                 log_warning(
                     f"[openai_compat] list_models HTTP fallback failed (url={url}): {repr(exc)}"
                 )
-        return []
+        return [] if answered else None
 
     async def list_models(self) -> list[ModelInfo]:
         models = await self._list_models_via_http()
+        if models is None:
+            # The endpoint never answered. Do not invent a model here: the probe reads
+            # a non-empty listing as evidence that the endpoint is alive, so a
+            # placeholder hatched on a connection error made an unreachable host
+            # report as a successfully probed engine while every real call failed.
+            return []
         # Fallback for endpoints that don't expose a /models list (or return empty):
         # return a sensible default so the probe can still test connectivity via ping_test.
         # This allows Zen LLM Engine and similar proxies to be probed successfully even
@@ -977,7 +1126,10 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         type. Falls back to the original bytes if the image is already small
         enough or if Pillow is unavailable / decoding fails.
         """
-        if len(image_bytes) <= cls._VISION_MAX_RAW_IMAGE_BYTES and mime_type != "image/webp":
+        if (
+            len(image_bytes) <= cls._VISION_MAX_RAW_IMAGE_BYTES
+            and mime_type != "image/webp"
+        ):
             return image_bytes, mime_type
 
         try:
@@ -1275,12 +1427,17 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         self,
         model: str | None = None,
         timeout: float | None = None,
+        models: list[ModelInfo] | None = None,
     ) -> tuple[bool, str]:
         """Send a minimal chat 'ping' to verify cortex connectivity.
 
         Posts a single ``ping`` user message directly via aiohttp (no SDK
         auth flow, no SyntH prompt).  Returns ``(True, reply_text)`` on
         success, ``(False, error_str)`` on failure.
+
+        ``models`` is an optional pre-fetched model list (supplied by
+        ``probe_endpoint``) so validating the requested model does not cost
+        another model-listing round trip on a slow provider.
 
         Two-phase timeout strategy:
                 - TCP connect uses the effective probe timeout (explicit ``timeout``
@@ -1304,20 +1461,26 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         # cortex-capable, resolve a chat-capable one instead so the cortex probe
         # reflects real chat connectivity rather than an unrelated model error.
         request_model = model
-        if request_model:
+        model_infos: list[ModelInfo] | None = models
+        if request_model and model_infos is None:
+            # One listing, reused for both the capability check and the
+            # cortex-capable fallback below: asking /models twice per ping
+            # doubled the cost on providers whose catalogue endpoint is slow.
             try:
                 model_infos = await self.list_models()
             except Exception:
                 model_infos = []
+        if request_model:
             supplied = next(
-                (m for m in model_infos if m.id == request_model),
+                (m for m in (model_infos or []) if m.id == request_model),
                 None,
             )
             if supplied is not None and not self._supports_cortex_capability(supplied):
                 request_model = None
         if not request_model:
             request_model = (
-                await self._resolve_probe_model(prefer_cortex=True) or "default"
+                await self._resolve_probe_model(models=model_infos, prefer_cortex=True)
+                or "default"
             )
         payload: dict[str, Any] = {
             "model": request_model,
@@ -1418,13 +1581,19 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         log_warning(f"[openai_compat] ping_test failed: {err}")
         return False, err
 
-    async def probe_capabilities(self) -> dict[str, bool]:
+    async def probe_capabilities(
+        self, models: list[ModelInfo] | None = None
+    ) -> dict[str, bool]:
         """Detect Vox / Auris / vision support.
 
         Note: ``cortex`` is intentionally left ``False`` here.  The caller
         (``probe_endpoint``) sets it based on the result of
         ``adapter.ping_test()``, which provides a more reliable signal than
         the ``/models`` listing.
+
+        ``models`` is an optional pre-fetched model list: when supplied (the
+        probe path always supplies it) the endpoint's model listing is not
+        queried again.
         """
         capabilities: dict[str, bool] = {
             "cortex": False,
@@ -1437,11 +1606,11 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
         import aiohttp
 
         # --- Vision: read declared model capability metadata first ---
-        models: list[ModelInfo] = []
-        try:
-            models = await self.list_models()
-        except Exception:
-            models = []
+        if models is None:
+            try:
+                models = await self.list_models()
+            except Exception:
+                models = []
 
         for m in models:
             if self._supports_vision_capability(m):
@@ -1449,10 +1618,21 @@ class OpenAICompatAdapter(BaseProtocolAdapter):
                 break
 
         if not capabilities["vision"]:
+            # Fallback for endpoints that declare nothing: post an image to a
+            # few candidate models. Bounded by BOTH the attempt count and a
+            # wall-clock budget — a large catalogue must not turn one probe run
+            # into minutes of sequential 15 s requests.
             probed_model_ids: set[str] = set()
-            _vision_probe_limit = 10
+            budget_deadline = _time.monotonic() + _VISION_PROBE_BUDGET_SECONDS
             for m in models:
-                if len(probed_model_ids) >= _vision_probe_limit:
+                if len(probed_model_ids) >= _VISION_PROBE_LIMIT:
+                    break
+                if _time.monotonic() >= budget_deadline:
+                    log_info(
+                        "[probe] vision probe budget "
+                        f"({_VISION_PROBE_BUDGET_SECONDS:.0f}s) exhausted after "
+                        f"{len(probed_model_ids)} model(s) — stopping"
+                    )
                     break
                 if not m.id or m.id in probed_model_ids:
                     continue

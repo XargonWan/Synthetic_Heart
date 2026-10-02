@@ -90,6 +90,57 @@ tools into the unified registry. :meth:`call_tool` resolves a namespaced tool
 name, strips the ``mcp_<server>_`` prefix, and invokes the underlying
 ``ClientSession.call_tool``.
 
+For ``stdio`` servers the child process is started with its working directory
+pinned to the repository root, so a relative ``args`` entry such as
+``mcp_servers/<server>.py`` resolves the same way regardless of the directory
+Synth itself was launched from. Absolute commands and arguments are unaffected.
+
+Portable paths in the registry
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``config/synth_mcp.json`` is one file shared by every deployment of this
+repository, and those deployments do not share a filesystem layout: the
+reference Docker image runs from ``/app`` with its interpreter at
+``/app/venv/bin/python``, while a Windows checkout has
+``.venv\Scripts\python.exe``. A literal path is therefore correct in at most one
+of them, and in the other the server dies at spawn with a bare
+``[WinError 2] The system cannot find the file specified`` that never names the
+path it could not find.
+
+These placeholders are expanded at load time in ``command``, ``args``, ``env``
+values and ``url`` (prose fields such as ``description`` are left alone):
+
+.. list-table::
+   :header-rows: 1
+
+   * - Placeholder
+     - Expands to
+   * - ``{python}``
+     - ``sys.executable`` — the interpreter running Synth. Correct in every
+       layout with no configuration, because an MCP server should run in the
+       same environment as the process that spawns it.
+   * - ``{repo_root}``
+     - The root of the running checkout (the parent of ``core/``).
+   * - ``{log_dir}``
+     - The effective ``LOG_DIR`` of this process
+       (``core.logging_utils.get_log_dir()``).
+   * - ``${VAR}``
+     - Environment variable ``VAR`` (empty string when unset).
+   * - ``${VAR:-default}``
+     - Environment variable ``VAR``, or ``default`` when unset. ``default`` may
+       itself contain a placeholder.
+
+A literal path is still used exactly as written, so a deployment that wants one
+can keep it. An **unknown** ``{placeholder}`` is left in the value verbatim and
+reported as a warning at load time rather than silently dropped, because the
+failure it would otherwise cause (a process that never starts, reported as a
+bare file-not-found) gives no clue which path was wrong.
+
+Joining a token with ``/`` in the file (``{repo_root}/mcp_servers/x.py``)
+produces forward slashes on every platform. On Windows that yields a path with
+mixed separators, which Windows accepts for both the command and the arguments;
+the tests spawn the real servers to keep that honest rather than assuming it.
+
 The agent tool executor (Phase D)
 ---------------------------------
 

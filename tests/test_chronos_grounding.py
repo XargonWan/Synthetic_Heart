@@ -322,7 +322,7 @@ async def test_auto_response_legacy_delivery_propagates_result_and_builds_prompt
     monkeypatch.setattr(
         "core.core_initializer.INTERFACE_REGISTRY", {"telegram_bot": object()}
     )
-    monkeypatch.setattr(ar, "load_json_instructions", lambda: "JSON RULES")
+    monkeypatch.setattr(ar, "load_json_instructions", lambda *a, **kw: "JSON RULES")
 
     async def _fake_gather_static_injections(message, context: dict) -> dict:
         return {

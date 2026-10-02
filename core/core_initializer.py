@@ -114,6 +114,37 @@ def derive_plugin_category(
     return "Various"
 
 
+def _instantiate_plugin_once(
+    plugin_class: Any, instances_by_class: dict[Any, Any], module_name: str
+) -> tuple[Any, bool]:
+    """Instantiate a plugin class once per discovery pass.
+
+    Discovery walks every file under ``plugins/``, so a shim module that
+    re-exports another plugin's class - ``plugins/grillo_plugin.py`` exports the
+    ``GrilloPlugin`` defined in ``plugins/grillo/grillo_impl.py`` - reaches the
+    same class twice. Building a second instance is not harmless: it is a second
+    object with its own state on which ``start()`` runs a second time. Observed
+    live: the Grillo core started four times at boot and built four LLM-failure
+    recovery loops, so one failed turn was recovered four times.
+
+    Returns ``(instance, created)``; the caller reuses the first instance and
+    registers it under the second module's name, which keeps every
+    ``PLUGIN_REGISTRY.get(<either name>)`` caller working against the one object.
+    """
+    existing = instances_by_class.get(plugin_class)
+    if existing is not None:
+        log_debug(
+            f"[core_initializer] {module_name} exports a plugin class already "
+            "instantiated by an earlier module; reusing that instance instead of "
+            "building a second one"
+        )
+        return existing, False
+
+    instance = plugin_class()
+    instances_by_class[plugin_class] = instance
+    return instance, True
+
+
 class CoreInitializer:
     """Centralizes the initialization of all synth components."""
 
@@ -1171,6 +1202,11 @@ class CoreInitializer:
         # the load (Golden rule: removing any component must not break the rest).
         declared_dependencies: dict[str, list[str]] = {}
 
+        # One instance per plugin CLASS per pass: a shim module re-exports the
+        # class another module defines, so without this the same plugin is built
+        # (and started) twice. See _instantiate_plugin_once.
+        _instances_by_class: dict[Any, Any] = {}
+
         # If dev components are enabled, also scan dev directories
         if self._enable_dev_components:
             search_dirs.extend(["plugins_dev", "interface_dev"])
@@ -1294,7 +1330,9 @@ class CoreInitializer:
                         )
                         continue
 
-                    instance = plugin_class()
+                    instance, created = _instantiate_plugin_once(
+                        plugin_class, _instances_by_class, module_name
+                    )
 
                     # Some plugins self-register under their own preferred name
                     # via a `core_initializer.register_plugin(<name>, self)`
@@ -1313,6 +1351,7 @@ class CoreInitializer:
                     # under any key — an identity check, not a name comparison,
                     # so it holds for every plugin using this self-registration
                     # pattern (grep found ~28), not just WeatherPlugin.
+                    #
                     if any(
                         existing is instance for existing in PLUGIN_REGISTRY.values()
                     ):
@@ -1338,13 +1377,27 @@ class CoreInitializer:
                                 if not any(
                                     pending_name == module_name
                                     for pending_name, _ in self._pending_async_plugins
+                                ) and not any(
+                                    pending is instance
+                                    for _, pending in self._pending_async_plugins
                                 ):
                                     self._pending_async_plugins.append(
                                         (module_name, instance)
                                     )
-                                log_info(
-                                    f"[core_initializer] Queued async plugin for startup: {module_name}"
-                                )
+                                    log_info(
+                                        f"[core_initializer] Queued async plugin for startup: {module_name}"
+                                    )
+                                else:
+                                    # Say so: the log used to claim "queued" for
+                                    # every module whether or not it was, so a
+                                    # plugin re-exported by two module files
+                                    # looked like two queued plugins when only
+                                    # one was.
+                                    log_debug(
+                                        f"[core_initializer] {module_name} is the same "
+                                        "plugin instance as one already queued for "
+                                        "startup; not queuing it twice"
+                                    )
                             else:
                                 instance.start()
                                 log_info(
@@ -2522,7 +2575,12 @@ class CoreInitializer:
         # so its start() (which launches the beat scheduler + recovery loop) must
         # be invoked explicitly here.
         try:
-            grillo = PLUGIN_REGISTRY.get("grillo_plugin")
+            # Try both names: the plugin's class is exported by two module files
+            # (`plugins/grillo/grillo_impl.py` and the `plugins/grillo_plugin.py`
+            # shim), and the loader registers whichever it reaches first.
+            grillo = PLUGIN_REGISTRY.get("grillo_plugin") or PLUGIN_REGISTRY.get(
+                "grillo_impl"
+            )
             if grillo is not None and hasattr(grillo, "start"):
                 # Guard against double-start (idempotent): GrilloPlugin exposes
                 # _running once its beat loop is active.

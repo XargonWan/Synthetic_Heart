@@ -50,3 +50,32 @@ async def test_grillo_discovers_beat_plugin(monkeypatch):
         del PLUGIN_REGISTRY["fake_beat"]
     else:
         PLUGIN_REGISTRY["fake_beat"] = prev
+
+
+@pytest.mark.asyncio
+async def test_second_start_is_a_no_op(monkeypatch):
+    """The loader starts this plugin several times; only the first does work.
+
+    The beat discovery, the recovery loop and the scheduler task are all
+    once-per-process jobs. Guarding only the scheduler let every extra call log
+    "starting lightweight scheduler" and build another recovery plugin, which is
+    how four recovery loops came to run at boot and recover one failure four
+    times.
+    """
+    from plugins.grillo.grillo_impl import GrilloPlugin
+
+    class _PendingTask:
+        def done(self) -> bool:
+            return False
+
+    monkeypatch.setattr(GrilloPlugin, "_scheduler_task", _PendingTask(), raising=False)
+    monkeypatch.setattr(GrilloPlugin, "_scheduler_running", True, raising=False)
+
+    grillo = GrilloPlugin()
+    await grillo.start()
+
+    # Nothing below the guard ran: no beat discovery, no recovery plugin, and the
+    # caller's scheduler task was left exactly as it was.
+    assert grillo.beat_plugins == {}
+    assert getattr(grillo, "recovery_plugin", None) is None
+    assert isinstance(GrilloPlugin._scheduler_task, _PendingTask)

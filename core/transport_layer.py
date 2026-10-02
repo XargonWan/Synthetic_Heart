@@ -2866,7 +2866,29 @@ async def run_corrector_middleware(
             # therefore produced ``message_vessel``, which is not registered;
             # a correction response was silently dropped even after the game
             # actions themselves had succeeded.
-            iface_label = originating_interface or "<interface>"
+            # Legacy display labels (whatever a caller put in
+            # context["interface"]) mapped to their REGISTERED interface ids.
+            # Mirrored inline, like the map in action_parser, to keep this path
+            # import-free. A display label would miss the canonical table below
+            # and fall through to ``message_<label>`` — an unregistered type the
+            # model then copies into its correction, so the reply is never
+            # delivered (live 2026-09-21, langfuse
+            # feca9072-0abe-46ef-90da-f1409723088e: the sender passed
+            # ``interface="telegram"`` and no interface_path, so the path-prefix
+            # override above had nothing to resolve and the legacy label
+            # survived).
+            _legacy_iface_labels = {
+                "telegram": "telegram_bot",
+                "discord": "discord_bot",
+                "matrix": "matrix_chat",
+                "fluxer": "fluxer_bot",
+                "webui": "synth_webui",
+            }
+            iface_label = (
+                _legacy_iface_labels.get(str(originating_interface or "").strip())
+                or originating_interface
+                or "<interface>"
+            )
             # Map the interface id to its registered message action type via the
             # canonical table (telegram_bot -> message_telegram_bot, ...). Blind
             # ``message_{iface_label}`` taught the model unregistered types (e.g.
@@ -2877,11 +2899,14 @@ async def run_corrector_middleware(
                 from core.message_chain import _INTERFACE_TO_MESSAGE_ACTION
 
                 correction_action_type = (
-                    _INTERFACE_TO_MESSAGE_ACTION.get(iface_label)
-                    or f"message_{iface_label}"
+                    _INTERFACE_TO_MESSAGE_ACTION.get(iface_label) or "send_message"
                 )
             except Exception:
-                correction_action_type = f"message_{iface_label}"
+                # Never invent a per-interface name: the unified action is
+                # registered for every chat interface (and for the WebUI/radio
+                # the canonical table above covers them), so an unregistered
+                # ``message_<label>`` is strictly worse than the shared verb.
+                correction_action_type = "send_message"
             # Build the example interface_path WITHOUT a trailing slash. The old
             # unconditional ``.../{thread or ''}`` produced e.g.
             # ``telegram_bot/5208932647/`` when ``thread_id`` was None, which the

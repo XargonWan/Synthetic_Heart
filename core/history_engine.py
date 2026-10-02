@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import os
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
 from core.config_manager import config_registry
 from core.interface_path_utils import is_vessel_history_entry, is_vessel_interface_path
-from core.logging_utils import log_debug
+from core.logging_utils import log_debug, log_warning
 from core.variables_engine import register_exposed_var
 
 from core.history_types import HistoryContribution, HistoryEntry
@@ -23,6 +24,37 @@ register_exposed_var(
     description="Global max number of items for history-like context lists.",
     scope="core",
     component="history_engine",
+)
+
+register_exposed_var(
+    "CONTEXT_EXCHANGE_WINDOW",
+    label="Context Window (exchanges)",
+    default=0,
+    value_type=int,
+    ui_type="number",
+    description=(
+        "Keep this many exchanges (one turn by someone else plus everything that "
+        "follows it) of the ACTIVE chat, instead of counting raw messages. 0 = "
+        "count messages (see Context Verbosity). The environment variable of the "
+        "same name overrides this dial for a single checkout."
+    ),
+    scope="core",
+    component="history_engine",
+)
+
+register_exposed_var(
+    "CONTEXT_EXCHANGE_CHAR_CAP",
+    label="Context Window Character Cap",
+    default=8000,
+    value_type=int,
+    ui_type="number",
+    description=(
+        "Character budget for the exchange window; whole oldest exchanges are "
+        "dropped while over it, and the newest exchange is always kept."
+    ),
+    scope="core",
+    component="history_engine",
+    advanced=True,
 )
 
 register_exposed_var(
@@ -216,6 +248,122 @@ def _get_bool(key: str, default: bool) -> bool:
     return bool(val)
 
 
+def _get_int_env_first(key: str, default: int) -> int:
+    """Read an int from the process environment first, then the config registry.
+
+    The exchange window is read on every prompt build. A config definition whose
+    first read happens inside a running event loop can stay pinned to its
+    registered default for the life of the process (see the deployment notes on
+    SOUL_SPEAKER_IDENTITIES), and the process environment is the channel that
+    always works, so it wins here while the registry keeps the WebUI dial live.
+    """
+    raw = os.environ.get(key)
+    if raw is not None and str(raw).strip():
+        try:
+            return int(str(raw).strip())
+        except (TypeError, ValueError):
+            log_warning(f"[history_engine] Ignoring non-numeric {key}={raw!r}")
+    return _get_int(key, default)
+
+
+# Enough raw messages to hold the requested exchanges: a chat can be a run of the
+# persona's own long replies with one short human turn between them (measured
+# 2026-09-24 in the 2D DM: six message slots held a single exchange on 3,496
+# chars). Bounded so the cache query stays small; the CHARACTER cap is the real
+# guard.
+_EXCHANGE_SCAN_MESSAGES = 60
+
+# A rendered history line: optional "[from ...]" prefix, "[ts]", sender,
+# optional "[replied to ...]" annotation, then the quoted text. Mirrors what
+# ``_entry_to_text`` writes and ``core/prompt_engine.py::_TURN_PARSE_RE`` reads.
+_RENDERED_LINE_SENDER_RE = re.compile(
+    r"^(?:\[from\s[^\]]*\]\s+)?\[[^\s\]]+\]\s+([^:\[\"]+?)"
+    r"(?:\s+\[replied to [^\]]+\])?:\s+\"",
+)
+
+
+def _rendered_line_sender(line: Any) -> str:
+    """Normalised sender label of a rendered history line; '' if unparseable."""
+    m = _RENDERED_LINE_SENDER_RE.match(str(line or ""))
+    if not m:
+        return ""
+    sender = m.group(1).strip().casefold()
+    # The renderer spells the persona's own line out ("self (you)"); the
+    # decoration comes off before any comparison.
+    return re.sub(r"\s*\((?:you|the persona)\)$", "", sender).strip()
+
+
+def _is_other_speaker_line(line: Any) -> bool:
+    """True when the line is a named person's turn (not the persona's own).
+
+    An unparseable line (a diary line, a game-world perception contributed by a
+    plugin) is NOT a turn by anybody, so it never starts an exchange: it rides
+    along with the exchange it falls into, and the character cap bounds the
+    result. Treating those as speakers made a burst of plugin lines able to push
+    the human's own turn out of the window.
+    """
+    sender = _rendered_line_sender(line)
+    return bool(sender) and sender not in _SELF_SPEAKER_LABELS
+
+
+def _chars(lines: Sequence[Any]) -> int:
+    return sum(len(str(line)) for line in lines)
+
+
+def _tail_within_char_cap(lines: List[Any], char_cap: int) -> List[Any]:
+    if char_cap <= 0:
+        return list(lines)
+    kept: List[Any] = []
+    total = 0
+    for line in reversed(lines):
+        size = len(str(line))
+        if kept and total + size > char_cap:
+            break
+        kept.append(line)
+        total += size
+    kept.reverse()
+    return kept
+
+
+def _select_exchange_window(
+    lines: List[Any], exchange_limit: int, char_cap: int = 0
+) -> List[Any]:
+    """Keep the last ``exchange_limit`` exchanges of the ACTIVE chat.
+
+    An exchange is one turn by somebody other than the persona plus every line
+    after it, which is what a reader needs to follow a thread and is immune to
+    the failure mode of counting messages: a run of the persona's own replies
+    eats a message-counted window, and the orphan-turn rule in
+    ``core/prompt_engine.py::_history_to_turns`` then deletes what is left.
+
+    ``char_cap`` bounds the result: while the selection is over the cap the
+    OLDEST whole exchange is dropped and the newest one is never dropped (a
+    truncated exchange is worse than a long one, and the prompt reducer has its
+    own say). ``exchange_limit <= 0`` returns the lines untouched so the
+    caller's message-count behaviour stays available.
+    """
+    if exchange_limit <= 0 or not lines:
+        return list(lines)
+
+    # Newest first: where somebody other than the persona last spoke.
+    starts: List[int] = []
+    for idx in range(len(lines) - 1, -1, -1):
+        if _is_other_speaker_line(lines[idx]):
+            starts.append(idx)
+            if len(starts) >= exchange_limit:
+                break
+
+    if not starts:
+        # Only the persona spoke in this window: no exchange to anchor on, so
+        # fall back to a character-bounded tail.
+        return _tail_within_char_cap(list(lines), char_cap)
+
+    while len(starts) > 1 and char_cap > 0 and _chars(lines[starts[-1] :]) > char_cap:
+        starts.pop()
+
+    return list(lines[starts[-1] :])
+
+
 def _format_ts(ts: Any) -> str:
     """Format a timestamp for display in chat history.
 
@@ -293,6 +441,31 @@ def _relative_age_marker(ts: Any, now: datetime | None = None) -> str:
 # Max chars of a quoted message rendered in the history reply annotation.
 _REPLY_QUOTE_MAX_CHARS = 200
 
+# The interfaces cache the persona's OWN messages under the canonical label
+# "self" (Telegram, Discord and the Vessel all do), and this block renders the
+# stored label verbatim. In a block that also carries named people, a bare
+# "self" names nobody: measured live (2026-09-24, the 2D deployment) the model
+# read its own group-chat lines as the human's, asked him to explain a sentence
+# it had written itself, and the two lines it quoted ("the middle of the bed",
+# "no deadline") existed only under its own and its mother's labels. So the
+# label is spelled out for the reader, keeping the stored token in front of it
+# because the instruction block still refers to the persona's own lines as
+# 'self' (RULE_NO_SELF_REPETITION).
+_SELF_SPEAKER_LABELS = frozenset({"self", "me", "assistant", "synt", "synth", "bot"})
+
+
+def _render_speaker_label(sender: Any) -> str:
+    """Render one stored sender label so the persona's own lines say so.
+
+    The persona's own line becomes ``self (you)``; every other label is left
+    exactly as the interface stored it, because a name is evidence about
+    whoever carries it and rewriting one would be worse than leaving it.
+    """
+    label = " ".join(str(sender or "").split()) or "Unknown"
+    if label.casefold() in _SELF_SPEAKER_LABELS:
+        return f"{label} (you)"
+    return label
+
 
 def _entry_to_text(entry: HistoryEntry) -> str:
     if isinstance(entry, str):
@@ -303,7 +476,7 @@ def _entry_to_text(entry: HistoryEntry) -> str:
 
     # Chat-like message dicts
     text = entry.get("text") or entry.get("message_text") or entry.get("content") or ""
-    sender = (
+    sender = _render_speaker_label(
         entry.get("sender_name")
         or entry.get("username")
         or entry.get("sender_id")
@@ -621,6 +794,22 @@ class HistoryEngine:
             verbosity = max(0, _get_int("LITE_MODE_HISTORY_LIMIT", 3))
             thoughts_limit = min(thoughts_limit, 2)
 
+        # Window for the ACTIVE chat, counted in exchanges instead of messages.
+        # 0 keeps the message-count behaviour above. Lite mode is the "make the
+        # prompt small" switch, so it keeps its own dial and ignores this.
+        exchange_limit = (
+            0 if lite_mode else max(0, _get_int_env_first("CONTEXT_EXCHANGE_WINDOW", 0))
+        )
+        exchange_char_cap = max(
+            0, _get_int_env_first("CONTEXT_EXCHANGE_CHAR_CAP", 8000)
+        )
+        # How many raw messages the exchange selection may look at. The character
+        # cap does the real bounding; this only has to be generous enough to
+        # contain the requested exchanges.
+        scan_messages = (
+            max(verbosity, _EXCHANGE_SCAN_MESSAGES) if exchange_limit > 0 else verbosity
+        )
+
         enable_current = _get_bool("ENABLE_HISTORY_CURRENT_CHAT", True)
         enable_recent = _get_bool("ENABLE_HISTORY_RECENT", True)
         enable_diary = _get_bool("ENABLE_AI_DIARY", True)
@@ -750,22 +939,48 @@ class HistoryEngine:
                     except Exception:
                         msgs = []
 
-                # Fall back to persisted cache if not enough
-                if verbosity > 0 and len(msgs) < verbosity:
+                # Fall back to persisted cache if not enough.
+                #
+                # The in-memory buffer's own maxlen is CONTEXT_VERBOSITY (see
+                # chat_context_manager.get_context), so it can never carry a
+                # window that reaches further back than that many messages. In
+                # exchange mode the cache is therefore merged in whenever the
+                # buffer is shorter than the scan, not merely when it is shorter
+                # than the message count, or the window silently shrinks back to
+                # whatever the buffer happens to hold. The legacy condition is
+                # kept byte-identical when the knob is off.
+                buffer_target = scan_messages if exchange_limit > 0 else verbosity
+                if buffer_target > 0 and len(msgs) < buffer_target:
                     try:
                         from core.chat_history_cache import (
                             load_chat_history as cache_load,
                         )
 
-                        cached = await cache_load(
-                            interface_path,
-                            match_chat_level=(
-                                not vessel_focus
-                                and not is_vessel_interface_path(interface_path)
-                            ),
-                        )
+                        # The `limit` kwarg is passed ONLY when the exchange
+                        # window is on: with it off the call stays
+                        # byte-identical to what it always was, so doubles and
+                        # older callers that do not take the parameter keep
+                        # working (a TypeError here is swallowed by the
+                        # surrounding except and silently empties the chat).
+                        if exchange_limit > 0:
+                            cached = await cache_load(
+                                interface_path,
+                                limit=scan_messages,
+                                match_chat_level=(
+                                    not vessel_focus
+                                    and not is_vessel_interface_path(interface_path)
+                                ),
+                            )
+                        else:
+                            cached = await cache_load(
+                                interface_path,
+                                match_chat_level=(
+                                    not vessel_focus
+                                    and not is_vessel_interface_path(interface_path)
+                                ),
+                            )
                         combined = list(msgs) + list(cached)
-                        msgs = combined[-verbosity:]
+                        msgs = combined[-scan_messages:] if scan_messages > 0 else []
                     except Exception as e:
                         log_debug(
                             f"[history_engine] Could not load cached messages for current chat: {e}"
@@ -808,7 +1023,7 @@ class HistoryEngine:
                     except Exception as _e:
                         log_debug(f"[history_engine] live merge skipped: {_e}")
 
-                window = msgs[-verbosity:] if verbosity > 0 else []
+                window = msgs[-scan_messages:] if scan_messages > 0 else []
 
                 # Vessel focus: merge conversation with a *bounded* number of
                 # Synth's own autonomous perceptions. Perceptions live in a
@@ -970,8 +1185,17 @@ class HistoryEngine:
 
                         if isinstance(q, (list, tuple)) or hasattr(q, "__iter__"):
                             for m in list(q):
+                                # A value that is not a mapping is not a history
+                                # row. ``context_memory`` is not only a chat map:
+                                # it also carries per-turn routing/plugin flags,
+                                # and some of those are plain LISTS OF STRINGS
+                                # (``grillo_snippets`` on every observer beat,
+                                # ``attachment_paths`` on any turn with media).
+                                # Appending those made ``_is_internal_noise``
+                                # raise ('str' object has no attribute 'get'),
+                                # which aborted this whole unified block and
+                                # silently dropped the cross-chat history.
                                 if not isinstance(m, dict):
-                                    unified_candidates.append(m)
                                     continue
 
                                 if (
@@ -1017,6 +1241,11 @@ class HistoryEngine:
                     # Filter out internal system messages (e.g. Grillo tags, Pattern Analysis)
                     # Queste tipicamente appaiono su '.../-1' come monologhi di sistema.
                     def _is_internal_noise(m: dict) -> bool:
+                        if not isinstance(m, dict):
+                            # Defensive: a non-mapping candidate is not a chat
+                            # line, and calling ``.get`` on it here is what used
+                            # to take the whole cross-chat block down.
+                            return True
                         if _is_ignored_prompt_history_entry(m):
                             return True
 
@@ -1049,7 +1278,9 @@ class HistoryEngine:
                         return False
 
                     unified_candidates = [
-                        m for m in unified_candidates if not _is_internal_noise(m)
+                        m
+                        for m in unified_candidates
+                        if isinstance(m, dict) and not _is_internal_noise(m)
                     ]
 
                 # Build separate lists for local vs other chat entries while preserving
@@ -1105,8 +1336,11 @@ class HistoryEngine:
                     _note_path(m)
                     seen_history.add(k)
 
+                if scan_messages > 0:
+                    local_lines = local_lines[-scan_messages:]
                 if verbosity > 0:
-                    local_lines = local_lines[-verbosity:]
+                    # The cross-chat block keeps its own message count: the
+                    # exchange window is about the chat being answered.
                     other_lines = other_lines[-verbosity:]
 
                 log_debug(
@@ -1121,7 +1355,16 @@ class HistoryEngine:
                 # Ensure `history_recent` (global) contains ONLY other chats
                 history_recent = other_lines
             except Exception as e:
-                log_debug(f"[history_engine] Failed building UNIFIED history: {e}")
+                # WARNING, not DEBUG: this block is what fills the cross-chat
+                # ``history_recent`` block, so a failure here silently strips
+                # every "what was said in my other chats" line from the prompt
+                # while the turn still looks healthy. At DEBUG (the default
+                # deployment level is INFO) the drop was invisible for as long
+                # as the crash existed.
+                log_warning(
+                    f"[history_engine] Failed building UNIFIED history: "
+                    f"{type(e).__name__}: {e}"
+                )
 
         if enable_recent and isinstance(chat_map, dict) and not unified_mode:
             try:
@@ -1296,8 +1539,20 @@ class HistoryEngine:
             out_memories = list(memories)[:mem_limit] if mem_limit > 0 else []
 
         # Final per-target limits
-        if verbosity > 0:
+        if exchange_limit > 0:
+            _before = len(history_current_chat)
+            history_current_chat = _select_exchange_window(
+                history_current_chat, exchange_limit, exchange_char_cap
+            )
+            log_debug(
+                f"[history_engine] Exchange window {exchange_limit} exchanges "
+                f"(cap {exchange_char_cap} chars): {_before} -> "
+                f"{len(history_current_chat)} lines, "
+                f"{_chars(history_current_chat)} chars"
+            )
+        elif verbosity > 0:
             history_current_chat = history_current_chat[-verbosity:]
+        if verbosity > 0:
             history_recent = history_recent[-verbosity:]
         if thoughts_limit > 0:
             thoughts = thoughts[-thoughts_limit:]

@@ -566,6 +566,78 @@ def _isoformat_timestamp(value: Any) -> Any:
     return value.isoformat() if hasattr(value, "isoformat") else value
 
 
+# Diary fields that may hold a whole day's appended text. A single `ai_diary`
+# row accumulates every write of the day (`---`-separated), and rows of ~168k
+# chars are on record (e.g. content 70,804 + personal_thought 49,532 +
+# interaction_summary 47,459 in one row), so a two-day window can reach ~238k.
+_DIARY_INJECTION_TEXT_FIELDS = (
+    "content",
+    "personal_thought",
+    "interaction_summary",
+    "user_message",
+)
+
+
+def _cap_diary_entries_for_injection(entries: list | None) -> list:
+    """Bound the diary rows handed to the prompt-injection path.
+
+    The history-contribution path already budgets itself
+    (`DIARY_CONTEXT_MAX_CHARS` total, plus a per-field limit); this mirrors that
+    for `get_static_injection`, which returned the whole 2-day window untrimmed.
+    Newest first (the SQL is ordered `created_at DESC`), keeping keys present so
+    callers do not have to handle their absence.
+
+    Fail-safe: any error returns the entries untouched.
+    """
+    if not entries:
+        return entries or []
+    try:
+        from core.config_manager import config_registry
+
+        try:
+            budget = int(
+                config_registry.get_value(
+                    "DIARY_CONTEXT_MAX_CHARS", 8000, value_type=int
+                )
+            )
+        except Exception:
+            budget = 8000
+        if budget <= 0:
+            return entries
+
+        per_field = max(300, budget // 4)
+        remaining = budget
+        capped: list = []
+        truncated = 0
+        for entry in entries:
+            if remaining <= 0 or not isinstance(entry, dict):
+                break
+            row = dict(entry)
+            for field in _DIARY_INJECTION_TEXT_FIELDS:
+                value = row.get(field)
+                if not isinstance(value, str) or not value:
+                    continue
+                limit = min(per_field, remaining)
+                if len(value) > limit:
+                    row[field] = value[: max(0, limit - 1)] + "\u2026"
+                    truncated += 1
+                remaining -= len(row[field])
+                if remaining <= 0:
+                    break
+            capped.append(row)
+
+        if truncated or len(capped) != len(entries):
+            log_info(
+                f"[ai_diary] Capped diary injection: {len(entries)} -> {len(capped)} "
+                f"entries, {truncated} field(s) truncated to fit "
+                f"DIARY_CONTEXT_MAX_CHARS={budget}"
+            )
+        return capped
+    except Exception as e:  # pragma: no cover - defensive
+        log_debug(f"[ai_diary] Diary injection cap skipped: {e}")
+        return entries
+
+
 def _merge_json_list(existing_json: str | None, new_items: list) -> list:
     """Merge a JSON-encoded list with new_items, preserving order and deduplicating strings."""
     try:
@@ -1725,6 +1797,11 @@ class DiaryPlugin:
                 entry["emotions"] = _parse_json_list(entry.get("emotions"))
                 entry["created_at"] = _isoformat_timestamp(entry.get("created_at"))
 
+            # Bound what this injection can add to a prompt: diary rows
+            # accumulate a whole day and reach ~168k chars each, so the raw
+            # 2-day window was ~238k in a single context key.
+            recent_entries = _cap_diary_entries_for_injection(recent_entries)
+
             duration = time.time() - start
             if duration > 0.1:
                 log_info(f"[ai_diary] get_static_injection took {duration:.3f}s")
@@ -1911,6 +1988,51 @@ class DiaryPlugin:
             if not entry_id or not new_content:
                 return {"success": False, "error": "id and content are required"}
             try:
+                # A part-merge: the consolidator sent only the earliest fragments
+                # of this day and told us where they ended, so the merged prose
+                # is written back with everything after that offset kept intact.
+                # Without this the rest of the day would be destroyed by the
+                # merge of its beginning. Fail closed: if the day's text cannot
+                # be rebuilt or the offset is outside it, write nothing.
+                preserve_from = (
+                    context.get("diary_merge_preserve_from") if context else None
+                )
+                if preserve_from is not None:
+                    try:
+                        cut = int(preserve_from)
+                    except Exception:
+                        return {
+                            "success": False,
+                            "error": "diary_merge_preserve_from must be an integer offset",
+                        }
+                    combined = await _day_combined_text(int(entry_id))
+                    if combined is None:
+                        return {
+                            "success": False,
+                            "error": (
+                                "cannot rebuild the day's fragments, refusing to "
+                                "write a partial merge"
+                            ),
+                        }
+                    if cut <= 0 or cut > len(combined):
+                        return {
+                            "success": False,
+                            "error": (
+                                f"diary_merge_preserve_from {cut} is outside the "
+                                f"day's {len(combined)} characters"
+                            ),
+                        }
+                    remainder = combined[cut:]
+                    if remainder.strip():
+                        new_content = (
+                            f"{new_content}{_DIARY_FRAGMENT_SEPARATOR}{remainder}"
+                        )
+                        log_info(
+                            f"[ai_diary] Entry {entry_id}: part-merge of "
+                            f"{cut}/{len(combined)} characters, kept "
+                            f"{len(remainder)} for a later run"
+                        )
+
                 merge_timestamp = (
                     context.get("diary_merge_timestamp") if context else None
                 )
@@ -1954,6 +2076,15 @@ class DiaryPlugin:
                 # Auto-discover additional stale rows for the same calendar day
                 # (they are not referenced in merge_source_ids but linger as
                 # separate fragments from the upsert-or-dedupe era).
+                #
+                # Only rows OLDER than the merge target are stale. The target is
+                # the row the merged prose lands in, so a row written after it
+                # must survive: that is what lets a long day be consolidated in
+                # parts, where each part's action targets the last row of that
+                # part and the fragments after it are merged by a later run.
+                # For the classic whole-day merge the target is the day's newest
+                # row, so every other row is still older and nothing changes.
+                kept_later = 0
                 try:
                     extra_stale = await _fetchall(
                         """
@@ -1962,12 +2093,18 @@ class DiaryPlugin:
                             SELECT DATE(created_at) FROM ai_diary WHERE id = %s
                         )
                         AND id != %s
+                        ORDER BY id ASC
                         """,
                         (int(entry_id), int(entry_id)),
                     )
                     for row in extra_stale:
                         rid = row.get("id")
-                        if rid is not None and rid not in seen_ids:
+                        if rid is None:
+                            continue
+                        if int(rid) > int(entry_id):
+                            kept_later += 1
+                            continue
+                        if rid not in seen_ids:
                             seen_ids.add(rid)
                             stale_entry_ids.append(rid)
                 except Exception as e:
@@ -1985,7 +2122,13 @@ class DiaryPlugin:
 
                 log_info(
                     f"[ai_diary] Diary entry {entry_id} consolidated to clean prose"
-                    f" (archived {len(stale_entry_ids)} stale rows)"
+                    f" (archived {len(stale_entry_ids)} stale rows"
+                    + (
+                        f", kept {kept_later} later fragment(s) for a later merge"
+                        if kept_later
+                        else ""
+                    )
+                    + ")"
                 )
                 return {"success": True, "message": f"Diary entry {entry_id} updated"}
             except Exception as e:
@@ -2011,6 +2154,38 @@ class DiaryPlugin:
         """
         if (context or {}).get("diary_merge_beat"):
             return
+
+
+# The separator the diary uses between the fragments of one day, and the offset
+# key a part-merge passes to say how much of the day it covers. Both sides (this
+# write and the Grillo consolidator that builds the prompt) must agree on them.
+_DIARY_FRAGMENT_SEPARATOR = "\n\n---\n\n"
+
+
+async def _day_combined_text(entry_id: int) -> str | None:
+    """The day's fragments in row order, exactly as the consolidator sees them.
+
+    Returns ``None`` when the day cannot be read, so a caller that was asked to
+    preserve part of it can fail closed instead of writing a merge that would
+    silently drop the rest of the day.
+    """
+    try:
+        rows = await _fetchall(
+            """
+            SELECT content FROM ai_diary
+            WHERE DATE(created_at) = (
+                SELECT DATE(created_at) FROM ai_diary WHERE id = %s
+            )
+            ORDER BY id ASC
+            """,
+            (int(entry_id),),
+        )
+    except Exception as e:
+        log_error(f"[ai_diary] Could not rebuild the day's fragments: {e}")
+        return None
+    if not rows:
+        return None
+    return _DIARY_FRAGMENT_SEPARATOR.join((row.get("content") or "") for row in rows)
 
 
 def archive_diary_entries(entry_ids: List[int]) -> Dict[str, Any]:

@@ -171,6 +171,12 @@ async def test_record_failure_entry_serializes_non_json_metadata(monkeypatch) ->
 async def test_record_failure_entry_falls_back_to_memory_when_db_unavailable(
     monkeypatch,
 ) -> None:
+    # The in-memory store is the subject here, not the test-data marker: a write
+    # made under pytest is flagged is_test and excluded from list_failure_entries
+    # (INCLUDE_TEST_FAILURES is off), so clear the marker to exercise the runtime
+    # path this test is about.
+    monkeypatch.setattr("core.llm_failure_log._is_test_process", lambda: False)
+
     async def failing_ensure() -> None:
         raise RuntimeError("aiomysql is not installed")
 

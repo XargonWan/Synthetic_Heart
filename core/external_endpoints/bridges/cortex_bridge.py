@@ -13,7 +13,7 @@ import base64
 import contextlib
 import copy
 import json
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from core.ai_plugin_base import AIPluginBase
 from core.external_endpoints.models import EndpointProtocol
@@ -1051,6 +1051,51 @@ class ExternalCortexEngine(AIPluginBase):
         except Exception:
             return 1800.0
 
+    def _get_max_request_timeout(self) -> float:
+        """Hard ceiling for a caller-supplied request timeout.
+
+        A caller may pass its own budget (the debrief asks for 120 s, the agent
+        loop passes its per-call budget). Unbounded, such a budget re-introduces
+        the multi-minute wedge the per-endpoint cap exists to bound, so every
+        caller value is clamped to this. Raise ``LLM_MAX_REQUEST_TIMEOUT_SEC``
+        for a deliberately slow local engine.
+        """
+        try:
+            from core.config_manager import config_registry
+
+            return float(
+                config_registry.get_value(
+                    "LLM_MAX_REQUEST_TIMEOUT_SEC", 120, value_type=int
+                )
+            )
+        except Exception:
+            return 120.0
+
+    def _resolve_request_timeout(self, caller_timeout: Any = None) -> float:
+        """Resolve the timeout used for ONE request, guard included.
+
+        Precedence: the caller's own budget → per-endpoint
+        ``extra_config["timeout"]`` → ``LLM_GENERATION_TIMEOUT_SEC``. A caller
+        value is clamped to ``LLM_MAX_REQUEST_TIMEOUT_SEC``, and an unusable one
+        (zero, negative, non-numeric) falls back to the endpoint default.
+
+        Both the adapter kwarg and the ``asyncio.wait_for`` guard use the
+        returned value. Until this existed the guard always used the endpoint
+        default, so a caller that asked for MORE than the endpoint allowed was
+        silently cut at the endpoint's value (the debrief's 120 s became the
+        endpoint's cap).
+        """
+        fallback = self._get_request_timeout()
+        if caller_timeout is None:
+            return fallback
+        try:
+            value = float(caller_timeout)
+        except (TypeError, ValueError):
+            return fallback
+        if value <= 0:
+            return fallback
+        return max(1.0, min(value, self._get_max_request_timeout()))
+
     def _tool_api_kwargs(self, prompt: Any) -> dict[str, Any]:
         """Build adapter kwargs derived from a typed PromptRequest.
 
@@ -1287,7 +1332,14 @@ class ExternalCortexEngine(AIPluginBase):
         self._last_response_metadata = {}
         self._last_attempt_error = None
         max_retries, backoff = self._get_retry_settings()
-        request_timeout = self._get_request_timeout()
+        # A caller may bring its own budget (the debrief asks for 120 s, recon
+        # passes RECON_TIMEOUT). It is honoured up to the ceiling so the
+        # endpoint's default can no longer silently cut a caller that needs
+        # longer, while no caller can wedge a turn for minutes.
+        caller_timeout = extra_request_kwargs.get("timeout")
+        if caller_timeout is None:
+            caller_timeout = prompt_extra_kwargs.get("timeout")
+        request_timeout = self._resolve_request_timeout(caller_timeout)
         retry_on_timeout = self._retry_on_timeout()
         retry_on_empty = self._retry_on_empty()
         attempt = 0
@@ -1311,7 +1363,7 @@ class ExternalCortexEngine(AIPluginBase):
                 _eb = extra_kwargs.get("extra_body")
                 if isinstance(_eb, dict) and _eb.get("grammar"):
                     extra_kwargs.pop("response_format", None)
-                extra_kwargs.setdefault("timeout", request_timeout)
+                extra_kwargs["timeout"] = request_timeout
                 chat_resp = await asyncio.wait_for(
                     self._adapter.chat_completion(
                         msg_list, model=model, **extra_kwargs
@@ -1723,6 +1775,12 @@ class ExternalCortexEngine(AIPluginBase):
         that salience for ordinary JSON-protocol turns. Native-tool turns
         declare the contract via tools (``supports_tool_calling`` True) and are
         skipped.
+
+        A multimodal turn carries its current turn as a content-part list
+        (``image_url`` / ``input_audio`` / ``text``) rather than a plain string,
+        so the reminder goes on the trailing text part of that list — otherwise
+        an image turn loses the format anchor the text path gets and answers in
+        prose, forcing a correction round-trip on every picture.
         """
         try:
             if getattr(prompt, "supports_tool_calling", True):
@@ -1732,9 +1790,19 @@ class ExternalCortexEngine(AIPluginBase):
             last = messages[-1]
             if not isinstance(last, dict) or last.get("role") != "user":
                 return
-            content = last.get("content")
+            content: Any = last.get("content")
             if isinstance(content, str):
                 last["content"] = content + _JSON_FORMAT_REMINDER
+            elif isinstance(content, list):
+                parts: list[Any] = content
+                for raw_part in reversed(parts):
+                    if not isinstance(raw_part, dict):
+                        continue
+                    part = cast("dict[str, Any]", raw_part)
+                    if part.get("type") == "text" and isinstance(part.get("text"), str):
+                        part["text"] = part["text"] + _JSON_FORMAT_REMINDER
+                        return
+                parts.append({"type": "text", "text": _JSON_FORMAT_REMINDER.lstrip()})
         except Exception as exc:
             log_debug(f"[cortex_bridge] format reminder skip: {exc}")
 

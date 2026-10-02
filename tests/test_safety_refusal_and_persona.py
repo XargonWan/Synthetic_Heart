@@ -15,7 +15,10 @@ async def test_build_prompt_request_includes_persona_by_default(monkeypatch):
         "core.action_parser.gather_static_injections", mock_gather_static_injections
     )
     monkeypatch.setattr(
-        "core.prompt_engine.load_json_instructions", lambda: "RESPONSE INSTRUCTIONS"
+        "core.prompt_engine.load_json_instructions",
+        # Accepts the optional route argument, mirroring the real signature:
+        # build_prompt_request passes the derived instruction route.
+        lambda *args, **kwargs: "RESPONSE INSTRUCTIONS",
     )
 
     # 1. External interface -> persona should be prepended

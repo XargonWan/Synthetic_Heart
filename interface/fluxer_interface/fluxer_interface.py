@@ -597,7 +597,7 @@ class FluxerInterface:
                     },
                     "media": {
                         "type": "array",
-                        "example": ["/app/data/report.pdf"],
+                        "example": ["data/report.pdf"],
                         "description": (
                             "Optional list of sandbox file paths to attach."
                         ),

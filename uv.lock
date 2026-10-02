@@ -4623,7 +4623,6 @@ dependencies = [
     { name = "icalendar" },
     { name = "jinja2" },
     { name = "json-repair" },
-    { name = "kittentts" },
     { name = "langfuse" },
     { name = "lingua-language-detector", version = "2.1.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "lingua-language-detector", version = "2.2.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
@@ -4651,20 +4650,30 @@ dependencies = [
     { name = "setuptools" },
     { name = "telethon" },
     { name = "tenacity" },
-    { name = "torch", version = "2.10.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
-    { name = "torch", version = "2.10.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
-    { name = "torchaudio", version = "2.10.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
-    { name = "torchaudio", version = "2.10.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
     { name = "tqdm" },
     { name = "tzdata" },
     { name = "uvicorn" },
-    { name = "vosk" },
     { name = "watchfiles" },
     { name = "websockets" },
     { name = "yt-dlp" },
 ]
 
 [package.optional-dependencies]
+local-voice = [
+    { name = "kittentts" },
+    { name = "torch", version = "2.10.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
+    { name = "torch", version = "2.10.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
+    { name = "torchaudio", version = "2.10.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
+    { name = "torchaudio", version = "2.10.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
+    { name = "vosk" },
+]
+tts-local = [
+    { name = "kittentts" },
+    { name = "torch", version = "2.10.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
+    { name = "torch", version = "2.10.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
+    { name = "torchaudio", version = "2.10.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
+    { name = "torchaudio", version = "2.10.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
+]
 vosk = [
     { name = "vosk" },
 ]
@@ -4707,7 +4716,8 @@ requires-dist = [
     { name = "icalendar", specifier = ">=7.2.0" },
     { name = "jinja2", specifier = ">=3.1.6" },
     { name = "json-repair", specifier = ">=0.61.0" },
-    { name = "kittentts", url = "https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl" },
+    { name = "kittentts", marker = "extra == 'local-voice'", url = "https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl" },
+    { name = "kittentts", marker = "extra == 'tts-local'", url = "https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl" },
     { name = "langfuse", specifier = ">=2.60.10" },
     { name = "lingua-language-detector", specifier = ">=2.0.2" },
     { name = "lxml", specifier = ">=6.0.2" },
@@ -4733,18 +4743,20 @@ requires-dist = [
     { name = "setuptools", specifier = ">=70.0.0" },
     { name = "telethon", specifier = ">=1.42.0" },
     { name = "tenacity", specifier = ">=9.1.2" },
-    { name = "torch", index = "https://download.pytorch.org/whl/cpu" },
-    { name = "torchaudio", index = "https://download.pytorch.org/whl/cpu" },
+    { name = "torch", marker = "extra == 'local-voice'", index = "https://download.pytorch.org/whl/cpu" },
+    { name = "torch", marker = "extra == 'tts-local'", index = "https://download.pytorch.org/whl/cpu" },
+    { name = "torchaudio", marker = "extra == 'local-voice'", index = "https://download.pytorch.org/whl/cpu" },
+    { name = "torchaudio", marker = "extra == 'tts-local'", index = "https://download.pytorch.org/whl/cpu" },
     { name = "tqdm", specifier = ">=4.67.2" },
     { name = "tzdata", specifier = ">=2025.3" },
     { name = "uvicorn", specifier = ">=0.40.0" },
-    { name = "vosk", specifier = ">=0.3.45" },
+    { name = "vosk", marker = "extra == 'local-voice'", specifier = ">=0.3.45" },
     { name = "vosk", marker = "extra == 'vosk'", specifier = ">=0.3.45" },
     { name = "watchfiles", specifier = ">=1.1.1" },
     { name = "websockets", specifier = ">=15.0.1" },
     { name = "yt-dlp", specifier = ">=2026.7.4" },
 ]
-provides-extras = ["vosk", "whisper"]
+provides-extras = ["local-voice", "vosk", "whisper", "tts-local"]
 
 [package.metadata.requires-dev]
 dev = [

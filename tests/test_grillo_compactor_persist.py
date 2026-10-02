@@ -113,10 +113,16 @@ async def test_persist_compaction_moves_to_archive_and_inserts_memory(monkeypatc
         emotion_state,
         timestamp=None,
         scope=None,
+        conn=None,
     ):
         called["content"] = content
         called["author"] = author
         called["tags"] = tags
+        called["conn"] = conn
+        # How many statements the persist block had already executed when the memory was written.
+        # The write must come first: the source days used to be archived and deleted before it, so a
+        # failed write lost them. Zero means nothing destructive had run yet.
+        called["statements_before_write"] = len(conn_instance.cursor().queries)
 
     monkeypatch.setattr("core.db.insert_memory", fake_insert_memory)
 
@@ -145,6 +151,15 @@ async def test_persist_compaction_moves_to_archive_and_inserts_memory(monkeypatc
     )
     assert any("DELETE FROM ai_diary" in sql for sql, params in queries), (
         f"Delete from ai_diary not found in: {queries}"
+    )
+
+    # The memory row must be written on the caller's connection and before anything destructive.
+    assert called.get("conn") is conn_instance, (
+        "the memory write must join the caller's connection so the ordering is explicit"
+    )
+    assert called.get("statements_before_write") == 0, (
+        "the memory row must be written before the archive/delete statements; saw "
+        f"{called.get('statements_before_write')} statement(s) first"
     )
 
     # Ensure insert_memory was called with summary content

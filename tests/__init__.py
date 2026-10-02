@@ -57,7 +57,27 @@ _ensure_module(
 )
 
 # dotenv stub --------------------------------------------------------------
-_ensure_module("dotenv", {"load_dotenv": lambda *args, **kwargs: False})
+# Only when python-dotenv is genuinely absent. The stub replaces the package for
+# the whole process, and an incomplete stub breaks anything importing more than
+# ``load_dotenv``: inside pytest the MCP client's ``mcp``/``pydantic_settings``
+# import of ``dotenv_values`` fails, every stdio server then looks unreachable
+# ("cannot import name 'dotenv_values' from 'dotenv' (unknown location)") and the
+# runtime logs an ERROR per server per connect attempt (2026-09-28). With the
+# package installed, ``load_dotenv`` stays a no-op so a real ``.env`` still cannot
+# leak into test configuration, and every other attribute is the real one.
+try:
+    import dotenv as _dotenv_real
+except Exception:  # pragma: no cover - only when the dependency is missing
+    _ensure_module(
+        "dotenv",
+        {
+            "load_dotenv": lambda *args, **kwargs: False,
+            "dotenv_values": lambda *args, **kwargs: {},
+            "find_dotenv": lambda *args, **kwargs: "",
+        },
+    )
+else:
+    _dotenv_real.load_dotenv = lambda *args, **kwargs: False
 
 
 # aiomysql stub ------------------------------------------------------------

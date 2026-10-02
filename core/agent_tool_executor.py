@@ -111,33 +111,37 @@ class AgentToolExecutor:
         from core.action_parser import run_action
 
         action = {"type": tool.name, "payload": arguments}
+        # The agent-tool marker is what tells a SELF-DELIVERING action (e.g.
+        # ``search_current_knowledge``) that it is being called as a pure tool
+        # inside the bounded loop: return the results to the loop and do NOT
+        # enqueue a separate user-facing delivery turn. It is set HERE, on the
+        # single choke point every agent tool call passes through, because the
+        # callers always hand over a populated turn context — a
+        # ``context or {default}`` expression never applies, so the marker was
+        # absent in practice and the guard that reads it could never fire
+        # (observed live: every agent-lane web search also sent the user a
+        # message). Marked in place so any key a downstream handler writes back
+        # onto the context stays visible to the caller.
+        if isinstance(context, dict):
+            context.setdefault("from_cortex", True)
+            context["agent_tool"] = True
+        else:
+            context = {"from_cortex": True, "agent_tool": True}
         try:
             log_info(f"[agent_tool_executor] Executing internal tool '{tool.name}'")
-            result = await run_action(
-                action,
-                context or {"from_cortex": True, "agent_tool": True},
-                None,
-                original_message,
-            )
-            # run_action now returns {"ok": bool, ...} for message-delivery
-            # actions dispatched through interfaces.  Propagate the real
-            # outcome instead of always claiming success.
-            if isinstance(result, dict) and "ok" in result:
-                ok = bool(result["ok"])
-                error = result.get("error")
-                return {
-                    "ok": ok,
-                    "tool": tool.name,
-                    "source": tool.source,
-                    "result": self._stringify_internal_result(result),
-                    "error": error,
-                }
+            result = await run_action(action, context, None, original_message)
+            # run_action returns {"ok": bool, ...} for message-delivery actions
+            # dispatched through interfaces; every other action returns its
+            # plugin's own result dict, which reports failure through its own
+            # vocabulary ({"status": "error", ...}). Both are read here so the
+            # loop's outcome is real instead of always claiming success.
+            ok, error = self._outcome(result)
             return {
-                "ok": True,
+                "ok": ok,
                 "tool": tool.name,
                 "source": tool.source,
                 "result": self._stringify_internal_result(result),
-                "error": None,
+                "error": error,
             }
         except Exception as exc:
             log_error(
@@ -179,6 +183,37 @@ class AgentToolExecutor:
                 "result": "",
                 "error": str(exc),
             }
+
+    @staticmethod
+    def _outcome(result: Any) -> tuple[bool, str | None]:
+        """Read the success/failure outcome of one dispatched internal action.
+
+        An explicit ``{"ok": bool}`` (returned by the message-delivery path) is
+        authoritative. Otherwise the action returned its plugin's own result
+        dict, which reports failure in its own vocabulary — ``{"status":
+        "error", "message": ...}`` or a non-empty ``error`` — and that must NOT
+        be reported as success: the loop renders this outcome to the model as
+        ``[tool:x] OK`` / ``[tool:x] ERROR: ...``, so treating "did not raise"
+        as success silently tells the model a failed tool worked (observed
+        live: ``hass_snapshot`` answering ``status: error`` on a camera that
+        returned no image, logged as ``ok=True``, after which the loop kept
+        re-issuing it and then went off to search the web instead). Anything
+        else counts as success.
+        """
+        if not isinstance(result, dict):
+            return True, None
+        if "ok" in result:
+            return bool(result["ok"]), result.get("error")
+        status = str(result.get("status") or "").strip().lower()
+        if status in {"error", "failed", "failure"}:
+            detail = (
+                result.get("message") or result.get("error") or result.get("reason")
+            )
+            return False, str(detail) if detail else None
+        error = result.get("error")
+        if isinstance(error, str) and error.strip():
+            return False, error.strip()
+        return True, None
 
     @staticmethod
     def _stringify_internal_result(result: Any) -> str:

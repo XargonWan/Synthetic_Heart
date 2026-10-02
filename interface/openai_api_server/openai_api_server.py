@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from core.core_initializer import register_interface
+from core.app_paths import default_bind_host
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 
 
@@ -1112,7 +1113,10 @@ class OpenAIApiServer:
     async def _run_http_server(self) -> None:
         import uvicorn
 
-        host = os.getenv("OLLAMA_HOST", "0.0.0.0")
+        # Loopback natively (a 0.0.0.0 bind triggers the Windows firewall prompt
+        # and exposes the API to the LAN); 0.0.0.0 inside the container, where
+        # the port is published deliberately.
+        host = default_bind_host("OLLAMA_HOST")
         port = int(os.getenv("OPENAI_API_SERVER_PORT", "11435"))
         config = uvicorn.Config(self.app, host=host, port=port, log_level="info")
         server = uvicorn.Server(config)

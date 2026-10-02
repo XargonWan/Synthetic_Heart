@@ -17,15 +17,29 @@ def test_aiomysql_import_fails(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
-    # Ensure a fresh import of core.config (remove cached module)
-    if "core.config" in sys.modules:
-        del sys.modules["core.config"]
+    # A fresh import of core.config (without the cached module) proves the import
+    # survives a missing aiomysql. The cached module object is PUT BACK before
+    # returning: dropping it for good orphans the object every already-imported
+    # module holds a reference to, so a later test that patches ``core.config``
+    # patches a module that live imports no longer resolve. That leak made
+    # tests/test_prompt_instruction_budget.py read the live trainer name instead
+    # of its own patched one in a full-suite run (and only there).
+    cached_config = sys.modules.get("core.config")
+    sys.modules.pop("core.config", None)
+    try:
+        import core.config as conf
 
-    import core.config as conf
-
-    # aiomysql should be set but None (or at least import didn't raise)
-    assert hasattr(conf, "aiomysql")
-    assert conf.aiomysql is None
+        # aiomysql should be set but None (or at least import didn't raise)
+        assert hasattr(conf, "aiomysql")
+        assert conf.aiomysql is None
+    finally:
+        if cached_config is not None:
+            sys.modules["core.config"] = cached_config
+            _pkg = sys.modules.get("core")
+            if _pkg is not None:
+                # The submodule import rebound this attribute to the fresh
+                # module; point it back at the canonical object too.
+                setattr(_pkg, "config", cached_config)
 
 
 def test_list_available_cortexs_uses_registry(monkeypatch):

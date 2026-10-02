@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any, Protocol, cast
@@ -19,13 +20,21 @@ from .models import (
     MemCellSummary,
     MemScene,
     SituationalNote,
-    compute_memcell_salience,
+    compute_recall_salience,
     now_utc,
     situational_note_id,
 )
 
 
 _WORD_RE = re.compile(r"[a-z0-9']+")
+
+# A scene summary folds the consolidated memory cells of one episode. It is not
+# a prompt block on its own (the DSP compiler reads `dsp_versions`, itself capped
+# around 4.9k), but nothing bounded it either, and one row is on record at
+# 1,195,057 chars while `mem_scenes` totals ~2.1M across 773 rows. Bound it at
+# the storage boundary so no present or future reader can pull a megabyte blob
+# into a prompt.
+MAX_SCENE_SUMMARY_CHARS = 8000
 
 
 def _clamp_score(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
@@ -75,22 +84,55 @@ def _recency_score(timestamp: datetime, now: datetime) -> float:
     return _clamp_score(0.5 ** (age_seconds / half_life_seconds))
 
 
+def _same_recall_scope(
+    cell_session_id: str | None,
+    session_id: str | None,
+    linked_session_ids: Collection[str] | None,
+) -> bool:
+    """Whether a cell belongs to the conversation being answered.
+
+    True for the turn's own session, and for any session the deployment has
+    linked to it (``SOUL_RECALL_LINKED_SESSIONS``). A group and the DM of the
+    same household can then be one memory scope, so a memory written in one is
+    not judged by the stricter cross-chat bar when it is recalled in the other.
+
+    ``linked_session_ids`` is the whole scope, ``session_id`` included. A scope
+    that does not contain the session being answered is ignored, so a set
+    computed for another conversation can never widen this one.
+    """
+    if not session_id:
+        return False
+    if cell_session_id == session_id:
+        return True
+    if not linked_session_ids or session_id not in linked_session_ids:
+        return False
+    return cell_session_id in linked_session_ids
+
+
 def _build_recall_match(
     *,
     cell: MemCell,
     similarity: float,
     lexical_score: float,
     session_id: str | None,
+    linked_session_ids: Collection[str] | None = None,
     now: datetime,
 ) -> MemCellRecall:
     recency = _recency_score(cell.event_timestamp, now)
-    salience = compute_memcell_salience(
+    # Recall ranking uses the fatigue-adjusted salience: a cell that has already
+    # been recalled many times must not keep winning on that history alone (see
+    # compute_recall_salience). Retention still uses compute_memcell_salience.
+    salience = compute_recall_salience(
         emotional_intensity=abs(float(cell.emotional_tag.intensity)),
         retrieval_count=cell.retrieval_count,
         recency_score=recency,
         explicit_importance=cell.explicit_importance,
     )
-    same_session_boost = 0.08 if session_id and cell.session_id == session_id else 0.0
+    same_session_boost = (
+        0.08
+        if _same_recall_scope(cell.session_id, session_id, linked_session_ids)
+        else 0.0
+    )
     active_foresight = [
         signal for signal in cell.foresight_signals if signal.valid_until >= now.date()
     ]
@@ -114,10 +156,27 @@ def _build_recall_match(
     )
 
 
-def _passes_recall_floor(match: MemCellRecall, session_id: str | None) -> bool:
-    if session_id and match.cell.session_id == session_id:
+def _passes_recall_floor(
+    match: MemCellRecall,
+    session_id: str | None,
+    linked_session_ids: Collection[str] | None = None,
+) -> bool:
+    if _same_recall_scope(match.cell.session_id, session_id, linked_session_ids):
         return match.score >= 0.16 or max(match.similarity, match.lexical_score) >= 0.08
     return match.score >= 0.22 and max(match.similarity, match.lexical_score) >= 0.10
+
+
+def _optional_column(row: Any, name: str) -> Any:
+    """Read a column that an older query's row shape may not carry.
+
+    ``distilled_at`` is additive: query paths that predate it (or a test double
+    that models an older row) must degrade to "not distilled" rather than break
+    recall with a ``KeyError``.
+    """
+    try:
+        return row[name]
+    except (KeyError, IndexError, TypeError):
+        return None
 
 
 def _affected_rows(status: object, command: str) -> int:
@@ -172,12 +231,23 @@ class SoulRepository(Protocol):
         self, limit: int = 200
     ) -> list[MemCell]: ...
 
+    async def list_memcells_before(
+        self, before: datetime, limit: int = 500
+    ) -> list[MemCell]: ...
+
+    async def list_memcells_needing_distillation(
+        self, limit: int = 500
+    ) -> list[MemCell]: ...
+
+    async def count_memcells_needing_distillation(self) -> int: ...
+
     async def recall_memories(
         self,
         *,
         query_text: str,
         query_embedding: list[float],
         session_id: str | None = None,
+        linked_session_ids: Collection[str] | None = None,
         limit: int = 5,
         candidate_limit: int | None = None,
     ) -> list[MemCellRecall]: ...
@@ -313,12 +383,47 @@ class InMemorySoulRepository:
         missing.sort(key=lambda c: c.event_timestamp)
         return missing[:limit]
 
+    async def count_memcells_needing_distillation(self) -> int:
+        return sum(
+            1
+            for cell in self.memcells.values()
+            if cell.distilled_at is None and cell.episodic_trace.strip()
+        )
+
+    async def list_memcells_needing_distillation(
+        self, limit: int = 500
+    ) -> list[MemCell]:
+        pending = [
+            cell
+            for cell in self.memcells.values()
+            if cell.distilled_at is None and cell.episodic_trace.strip()
+        ]
+        pending.sort(key=lambda c: (-c.retrieval_count, c.event_timestamp))
+        return pending[:limit]
+
+    async def list_memcells_before(
+        self, before: datetime, limit: int = 500
+    ) -> list[MemCell]:
+        def _utc(value: datetime) -> datetime:
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc)
+
+        older = [
+            cell
+            for cell in self.memcells.values()
+            if _utc(cell.event_timestamp) < before
+        ]
+        older.sort(key=lambda c: c.event_timestamp)
+        return older[:limit]
+
     async def recall_memories(
         self,
         *,
         query_text: str,
         query_embedding: list[float],
         session_id: str | None = None,
+        linked_session_ids: Collection[str] | None = None,
         limit: int = 5,
         candidate_limit: int | None = None,
     ) -> list[MemCellRecall]:
@@ -338,9 +443,10 @@ class InMemorySoulRepository:
                 similarity=similarity,
                 lexical_score=lexical_score,
                 session_id=session_id,
+                linked_session_ids=linked_session_ids,
                 now=now,
             )
-            if _passes_recall_floor(match, session_id):
+            if _passes_recall_floor(match, session_id, linked_session_ids):
                 matches.append(match)
 
         matches.sort(
@@ -449,10 +555,16 @@ class PostgresSoulRepository:
                 explicit_importance REAL NOT NULL DEFAULT 0,
                 consolidated BOOLEAN NOT NULL DEFAULT FALSE,
                 scene_id TEXT,
+                distilled_at TIMESTAMPTZ,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
             """,
+            # Additive column for deployments whose table predates distillation:
+            # NULL means "written before the distilling extractor existed", which
+            # is exactly the set the WebUI's re-distil button has to catch up.
+            "ALTER TABLE mem_cells ADD COLUMN IF NOT EXISTS distilled_at TIMESTAMPTZ",
+            "CREATE INDEX IF NOT EXISTS idx_mem_cells_distilled_at ON mem_cells (distilled_at)",
             """
             CREATE TABLE IF NOT EXISTS mem_cell_vectors (
                 mem_cell_id TEXT PRIMARY KEY REFERENCES mem_cells(id) ON DELETE CASCADE,
@@ -607,11 +719,11 @@ class PostgresSoulRepository:
                 INSERT INTO mem_cells (
                     id, session_id, episodic_trace, atomic_facts, emotional_tag,
                     foresight_signals, event_timestamp, retrieval_count, explicit_importance,
-                    consolidated, scene_id, updated_at
+                    consolidated, scene_id, distilled_at, updated_at
                 )
                 VALUES (
                     $1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7,
-                    $8, $9, $10, $11, NOW()
+                    $8, $9, $10, $11, $12, NOW()
                 )
                 ON CONFLICT (id)
                 DO UPDATE SET
@@ -625,6 +737,10 @@ class PostgresSoulRepository:
                     explicit_importance = EXCLUDED.explicit_importance,
                     consolidated = EXCLUDED.consolidated,
                     scene_id = EXCLUDED.scene_id,
+                    -- A cell that has been distilled stays distilled: a write that
+                    -- does not carry a stamp (a backfill, an embedding repair) must
+                    -- never clear one.
+                    distilled_at = COALESCE(EXCLUDED.distilled_at, mem_cells.distilled_at),
                     updated_at = NOW()
                 """,
                 cell.id,
@@ -657,6 +773,7 @@ class PostgresSoulRepository:
                 cell.explicit_importance,
                 cell.consolidated,
                 cell.scene_id,
+                cell.distilled_at,
             )
 
             if cell.embedding:
@@ -705,6 +822,7 @@ class PostgresSoulRepository:
 
     async def upsert_scene(self, scene: MemScene) -> None:
         pool = await self._get_pool()
+        summary = self._bounded_scene_summary(scene.summary)
         async with pool.acquire() as conn:
             await conn.execute(
                 """
@@ -719,11 +837,28 @@ class PostgresSoulRepository:
                 """,
                 scene.id,
                 scene.title,
-                scene.summary,
+                summary,
                 json.dumps(scene.cell_ids),
                 scene.created_at,
                 scene.updated_at,
             )
+
+    @staticmethod
+    def _bounded_scene_summary(summary: Any) -> Any:
+        """Truncate an oversized scene summary before it is stored.
+
+        Fail-safe: non-string or in-budget values pass through untouched.
+        """
+        try:
+            if isinstance(summary, str) and len(summary) > MAX_SCENE_SUMMARY_CHARS:
+                log_info(
+                    f"[soul] Truncating scene summary {len(summary)} -> "
+                    f"{MAX_SCENE_SUMMARY_CHARS} chars before storing"
+                )
+                return summary[: MAX_SCENE_SUMMARY_CHARS - 1] + "\u2026"
+        except Exception:
+            pass
+        return summary
 
     async def upsert_kg_triple(self, triple: KgTriple) -> None:
         pool = await self._get_pool()
@@ -928,9 +1063,9 @@ class PostgresSoulRepository:
             await conn.execute(
                 """
                 UPDATE situational_notes
-                SET status = $2,
+                SET status = $2::text,
                     summary = COALESCE($3, summary),
-                    resolved_at = CASE WHEN $2 = 'resolved' THEN NOW() ELSE resolved_at END,
+                    resolved_at = CASE WHEN $2::text = 'resolved' THEN NOW() ELSE resolved_at END,
                     updated_at = NOW()
                 WHERE id = $1
                 """,
@@ -1013,7 +1148,7 @@ class PostgresSoulRepository:
                 SELECT
                     c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
                     c.foresight_signals, c.event_timestamp, c.retrieval_count, c.explicit_importance,
-                    c.consolidated, c.scene_id
+                    c.consolidated, c.scene_id, c.distilled_at
                 FROM mem_cells c
                 LEFT JOIN mem_cell_vectors v ON v.mem_cell_id = c.id
                 WHERE v.mem_cell_id IS NULL
@@ -1026,12 +1161,72 @@ class PostgresSoulRepository:
             )
         return [self._row_to_memcell(row) for row in rows]
 
+    async def list_memcells_before(
+        self, before: datetime, limit: int = 500
+    ) -> list[MemCell]:
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
+                    c.foresight_signals, c.event_timestamp, c.retrieval_count, c.explicit_importance,
+                    c.consolidated, c.scene_id, c.distilled_at
+                FROM mem_cells c
+                WHERE c.event_timestamp < $1
+                  AND c.episodic_trace IS NOT NULL
+                  AND c.episodic_trace <> ''
+                ORDER BY c.event_timestamp ASC
+                LIMIT $2
+                """,
+                before,
+                limit,
+            )
+        return [self._row_to_memcell(row) for row in rows]
+
+    async def count_memcells_needing_distillation(self) -> int:
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            value = await conn.fetchval(
+                """
+                SELECT count(*)
+                FROM mem_cells
+                WHERE distilled_at IS NULL
+                  AND episodic_trace IS NOT NULL
+                  AND episodic_trace <> ''
+                """
+            )
+        return int(value or 0)
+
+    async def list_memcells_needing_distillation(
+        self, limit: int = 500
+    ) -> list[MemCell]:
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
+                    c.foresight_signals, c.event_timestamp, c.retrieval_count, c.explicit_importance,
+                    c.consolidated, c.scene_id, c.distilled_at
+                FROM mem_cells c
+                WHERE c.distilled_at IS NULL
+                  AND c.episodic_trace IS NOT NULL
+                  AND c.episodic_trace <> ''
+                ORDER BY c.retrieval_count DESC, c.event_timestamp ASC
+                LIMIT $1
+                """,
+                limit,
+            )
+        return [self._row_to_memcell(row) for row in rows]
+
     async def recall_memories(
         self,
         *,
         query_text: str,
         query_embedding: list[float],
         session_id: str | None = None,
+        linked_session_ids: Collection[str] | None = None,
         limit: int = 5,
         candidate_limit: int | None = None,
     ) -> list[MemCellRecall]:
@@ -1058,7 +1253,7 @@ class PostgresSoulRepository:
                 SELECT
                     c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
                     c.foresight_signals, c.event_timestamp, c.retrieval_count, c.explicit_importance,
-                    c.consolidated, c.scene_id,
+                    c.consolidated, c.scene_id, c.distilled_at,
                     vc.vector_similarity
                 FROM vector_candidates vc
                 JOIN mem_cells c ON c.id = vc.mem_cell_id
@@ -1081,7 +1276,7 @@ class PostgresSoulRepository:
                         SELECT
                             c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
                             c.foresight_signals, c.event_timestamp, c.retrieval_count, c.explicit_importance,
-                            c.consolidated, c.scene_id,
+                            c.consolidated, c.scene_id, c.distilled_at,
                             COALESCE((1 - (v.embedding <=> $2::vector)), 0.0) AS vector_similarity
                         FROM mem_cells c
                         LEFT JOIN mem_cell_vectors v ON v.mem_cell_id = c.id
@@ -1130,9 +1325,10 @@ class PostgresSoulRepository:
                 similarity=float(row.get("vector_similarity") or 0.0),
                 lexical_score=lexical_score,
                 session_id=session_id,
+                linked_session_ids=linked_session_ids,
                 now=now,
             )
-            if _passes_recall_floor(match, session_id):
+            if _passes_recall_floor(match, session_id, linked_session_ids):
                 matches.append(match)
 
         matches.sort(
@@ -1324,6 +1520,7 @@ class PostgresSoulRepository:
             explicit_importance=float(row["explicit_importance"]),
             consolidated=bool(row["consolidated"]),
             scene_id=cast(str | None, row["scene_id"]),
+            distilled_at=cast(datetime | None, _optional_column(row, "distilled_at")),
         )
 
     @staticmethod

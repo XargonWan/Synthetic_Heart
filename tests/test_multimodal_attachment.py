@@ -143,6 +143,12 @@ class TestTelegramExtraction:
         mock_message.video = mock_video
         mock_message.video_note = None
         mock_message.sticker = None
+        # A message carrying only a video has none of the fields the reply
+        # fallback tests for, so the extractor looks at reply_to_message. A bare
+        # MagicMock is truthy and answers every attribute with another mock, so
+        # it contributes phantom photo/document attachments (three instead of
+        # one). Say explicitly that nothing is being replied to.
+        mock_message.reply_to_message = None
         mock_message.chat = MagicMock(id=123, type="private")
 
         attachments = await extract_multimodal_from_telegram(mock_bot, mock_message)

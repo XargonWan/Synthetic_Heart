@@ -4,17 +4,23 @@
         "synth_logs": {
             "enabled": true,
             "transport": "stdio",
-            "command": "/app/venv/bin/python",
-            "args": ["mcp_servers/synth_logs.py"],
-            "env": {"LOG_DIR": "/app/logs"},
+            "command": "{python}",
+            "args": [
+                "{repo_root}/mcp_servers/synth_logs.py"
+            ],
+            "env": {
+                "LOG_DIR": "{log_dir}"
+            },
             "security_level": "low",
             "description": "Runtime log analysis MCP server shipped with Synth."
         },
         "synth_llm_failures": {
             "enabled": true,
             "transport": "stdio",
-            "command": "/app/venv/bin/python",
-            "args": ["mcp_servers/synth_llm_failures.py"],
+            "command": "{python}",
+            "args": [
+                "{repo_root}/mcp_servers/synth_llm_failures.py"
+            ],
             "env": {},
             "security_level": "low",
             "description": "Structured access to the persisted llm_failure_log table (same data as the WebUI Logs page). Pair with synth_logs to cross-reference structured failures against raw runtime logs."
@@ -26,12 +32,13 @@
             "args": [
                 "-y",
                 "@modelcontextprotocol/server-filesystem",
-                "/videodrome/videodrome-deployment/Synthetic_Heart",
-                "/videodrome/videodrome-deployment/Synthetic_Heart/logs"
+                "${SYNTH_MCP_FS_ROOT:-/app}",
+                "${SYNTH_MCP_FS_ROOT:-/app}/logs"
             ],
             "env": {},
             "security_level": "medium",
-            "description": "Local filesystem access for Synth (repo + logs roots). DISABLED: the runtime image (python:3.12-slim) has NO node/npx (node exists only in the Dockerfile 'stage_builder' build stage), so 'npx @modelcontextprotocol/server-filesystem' cannot start in-container. Also the paths above are HOST paths, not container paths (/app, /app/logs). For sandboxed file writing, Synth uses the native 'agent_write_file' action in plugins/agent_plugin.py instead (no node dependency). Re-enable only after adding a node runtime to the image AND fixing these paths to container-internal roots."
+            "description": "Local filesystem access for Synth (repo + logs roots). DISABLED: the runtime image (python:3.12-slim) has NO node/npx (node exists only in the Dockerfile 'stage_builder' build stage), so 'npx @modelcontextprotocol/server-filesystem' cannot start in-container. The roots are ${SYNTH_MCP_FS_ROOT:-/app} based so a non-container deployment can point them at its own checkout with one env var instead of editing this file. Re-enable only after adding a node runtime to the image. For sandboxed file writing, Synth uses the native 'agent_write_file' action in plugins/agent_plugin.py instead (no node dependency)."
         }
-    }
+    },
+    "_placeholder_help": "Paths here MUST work in every deployment of this repo, and they do not share a layout: the Docker image runs from /app with its interpreter at /app/venv/bin/python, a Windows checkout has .venv\\Scripts\\python.exe. So use placeholders instead of literal paths, in 'command', 'args', 'env' values and 'url': {python} = the interpreter running Synth (sys.executable); {repo_root} = the root of this checkout; {log_dir} = the effective LOG_DIR of this process; ${VAR} and ${VAR:-default} = environment references. A literal path is still allowed and is used as written; an unknown {placeholder} is left in place and logged as a warning at load time."
 }

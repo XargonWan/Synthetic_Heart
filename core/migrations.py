@@ -495,6 +495,119 @@ async def _migrate_goals_table() -> None:
                 pass
 
 
+async def _column_definition(
+    cur: Any, table: str, column: str, db_type: str
+) -> tuple[int | None, bool, bool]:
+    """Measure a column: (declared max length, nullable, has a default).
+
+    ``(None, …)`` for the length means "unbounded or unmeasurable", so a caller
+    only ever widens a column it positively measured as bounded.
+    """
+    if db_type == "postgres":
+        query = (
+            "SELECT character_maximum_length, is_nullable, column_default "
+            "FROM information_schema.columns "
+            "WHERE table_name = %s AND column_name = %s"
+        )
+    else:
+        query = (
+            "SELECT CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE, COLUMN_DEFAULT "
+            "FROM information_schema.columns "
+            "WHERE table_schema = DATABASE() AND table_name = %s AND column_name = %s"
+        )
+    try:
+        await cur.execute(query, (table, column))
+        row = await cur.fetchone()
+    except Exception:
+        return (None, True, False)
+    if not row:
+        return (None, True, False)
+    if isinstance(row, dict):
+        length_raw = row.get("character_maximum_length")
+        nullable_raw = row.get("is_nullable")
+        default_raw = row.get("column_default")
+    else:
+        length_raw, nullable_raw, default_raw = row[0], row[1], row[2]
+    try:
+        length = int(length_raw) if length_raw is not None else None
+    except (TypeError, ValueError):
+        length = None
+    nullable = str(nullable_raw).upper() != "NO"
+    return (length, nullable, default_raw is not None)
+
+
+# ``memories`` columns the declared schema (``scripts/sql/app_main_postgres.sql``)
+# types as TEXT but long-lived stores still carry as varchar(50)/varchar(100).
+_MEMORIES_TEXT_COLUMNS: tuple[str, ...] = (
+    "emotion",
+    "emotion_state",
+    "scope",
+    "author",
+    "source",
+)
+
+
+async def _widen_memories_text_columns() -> None:
+    """Align the ``memories`` text columns with the declared schema.
+
+    ``emotion`` (and the sibling label columns) drifted narrower than the
+    declared ``TEXT`` on long-lived stores. The compactor writes the model's
+    free-text ``feeling`` into ``emotion``; anything past the old 50 characters
+    failed the insert and left the day uncompacted (observed: 57 failed writes
+    and only 4 of 12 eligible days stored in one nightly run).
+
+    Only columns positively measured as bounded are widened, so this is a no-op
+    once a store matches the declared schema. Fail-open: a failed ALTER never
+    blocks startup.
+    """
+    from core.db import _get_db_type, get_conn_ctx
+
+    db_type = _get_db_type()
+    widened: list[str] = []
+    skipped: list[str] = []
+    async with get_conn_ctx() as conn:
+        async with conn.cursor() as cur:
+            if not await _table_exists(cur, "memories", db_type):
+                return
+            for column in _MEMORIES_TEXT_COLUMNS:
+                if not await _column_exists(cur, "memories", column, db_type):
+                    continue
+                length, nullable, has_default = await _column_definition(
+                    cur, "memories", column, db_type
+                )
+                if length is None:
+                    continue
+                if db_type == "postgres":
+                    ddl = f'ALTER TABLE "memories" ALTER COLUMN "{column}" TYPE text'
+                elif has_default:
+                    # Restating (or dropping) a backend-specific default from a
+                    # MODIFY is riskier than leaving the width alone.
+                    skipped.append(column)
+                    continue
+                else:
+                    null_clause = "" if nullable else " NOT NULL"
+                    ddl = f"ALTER TABLE `memories` MODIFY `{column}` TEXT{null_clause}"
+                try:
+                    await cur.execute(ddl)
+                    widened.append(f"{column}({length})")
+                except Exception as exc:
+                    log_warning(f"[migrations] memories.{column} widen skipped: {exc}")
+            if widened:
+                log_info(
+                    "[migrations] Widened memories text column(s): "
+                    + ", ".join(widened)
+                )
+            if skipped:
+                log_warning(
+                    "[migrations] memories text column(s) left as-is (store default): "
+                    + ", ".join(skipped)
+                )
+            try:
+                await conn.commit()
+            except Exception:
+                pass
+
+
 async def _migrate_llm_failure_log_is_test() -> None:
     """Add the ``is_test`` column to ``llm_failure_log`` for test isolation.
 
@@ -589,6 +702,63 @@ async def _migrate_selenium_config_keys() -> None:
                 log_info(f"[migrations] Renamed {migrated} SELENIUM_* config key(s) → ZEN_*")
 
 
+# Interface paths that only ever come from the test suite: the ``fake``
+# component and the fake chat ids a test uses to stand in for a Telegram or
+# WebUI conversation. None of these can be a live chat - Telegram user ids are
+# large, channel ids are negative, and the WebUI's single session is
+# ``webui_default``, never a bare number. Used once, to flag rows written before
+# the failure store started flagging test writes itself.
+_HISTORIC_TEST_FAILURE_PATHS: tuple[str, ...] = (
+    "telegram_bot/1",
+    "telegram_bot/123",
+    "telegram_bot/5551234567",
+    "synth_webui/42",
+    "synth_webui/sid",
+)
+
+
+async def _flag_historic_test_failure_rows() -> None:
+    """Flag the failure rows the test suite wrote before the store did it.
+
+    ``is_test`` was added to ``llm_failure_log`` after the fact and never
+    backfilled, so test writes that predate it still read as runtime failures:
+    the recovery loop finds them on every scan, spends a full turn on a chat that
+    does not exist, and the failure views count them. Rows are flagged, never
+    deleted. Idempotent (only ``is_test = 0`` rows are touched) and fail-open.
+    """
+    from core.db import _get_db_type, get_conn_ctx
+
+    db_type = _get_db_type()
+    async with get_conn_ctx() as conn:
+        async with conn.cursor() as cur:
+            if not await _table_exists(cur, "llm_failure_log", db_type):
+                return
+            if not await _column_exists(cur, "llm_failure_log", "is_test", db_type):
+                return
+
+            placeholders = ", ".join(["%s"] * len(_HISTORIC_TEST_FAILURE_PATHS))
+            sql = (
+                "UPDATE llm_failure_log SET is_test = 1 "
+                "WHERE is_test = 0 AND "
+                f"(interface_path LIKE 'fake%' OR interface_path IN ({placeholders}))"
+            )
+            try:
+                await cur.execute(sql, _HISTORIC_TEST_FAILURE_PATHS)
+                flagged = getattr(cur, "rowcount", None)
+                log_info(
+                    "[migrations] Flagged historic test failure row(s) as is_test"
+                    + (f": {flagged}" if isinstance(flagged, int) else "")
+                )
+            except Exception as exc:
+                log_warning(f"[migrations] test failure row flag skipped: {exc}")
+                return
+
+            try:
+                await conn.commit()
+            except Exception:
+                pass
+
+
 # Registry of startup migrations, applied in order. Each entry is
 # (name, coroutine-callable). Add new one-shot migrations here.
 _STARTUP_MIGRATIONS: list[tuple[str, Any]] = [
@@ -598,6 +768,10 @@ _STARTUP_MIGRATIONS: list[tuple[str, Any]] = [
     ("migrate_goals_table", _migrate_goals_table),
     ("migrate_llm_failure_log_is_test", _migrate_llm_failure_log_is_test),
     ("migrate_selenium_config_keys", _migrate_selenium_config_keys),
+
+
+    ("widen_memories_text_columns", _widen_memories_text_columns),
+    ("flag_historic_test_failure_rows", _flag_historic_test_failure_rows),
 ]
 
 

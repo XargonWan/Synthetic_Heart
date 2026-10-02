@@ -254,3 +254,57 @@ class TestOrphanedActionLevelKeys(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBeatMessageTypeResolution(unittest.IsolatedAsyncioTestCase):
+    """A generic ``send_message`` is typed after the path the action targets.
+
+    Regression (live 2026-09-25 04:31): on an internal beat the turn's own origin
+    (``grillo/-1``) resolves to no chat interface, so the generic action was
+    relabelled ``message_synth_webui`` — the WebUI's outbound verb — even though
+    its payload pointed at a Telegram chat. Delivery only worked because
+    ``message_plugin`` trusts ``interface_path`` over the action type, and the
+    mislabelling hid a beat send behind a WebUI action name. The payload path now
+    decides the type, and an unresolvable origin keeps the unified
+    ``send_message``.
+    """
+
+    @patch("core.action_parser.run_action", new_callable=AsyncMock)
+    @patch("core.transport_layer.run_corrector_middleware", new_callable=AsyncMock)
+    @patch("core.action_parser.get_supported_action_types")
+    async def test_beat_send_message_keeps_its_payload_route(
+        self, mock_supported, mock_corrector, mock_run_action
+    ):
+        from core import message_chain
+
+        mock_supported.return_value = {"send_message", "message_synth_webui"}
+        mock_corrector.return_value = None
+        mock_run_action.return_value = (True, None)
+
+        json_text = (
+            '{"actions": [{"type": "send_message", "payload": {"text": "hello",'
+            ' "interface_path": "telegram_bot/5208932647"}}]}'
+        )
+        msg = SimpleNamespace(
+            chat_id=-1,
+            text=json_text,
+            from_cortex=True,
+            thread_id=None,
+        )
+
+        await message_chain.handle_incoming_message(
+            bot=None,
+            message=msg,
+            text=json_text,
+            source="llm",
+            interface_path=None,
+            context={
+                "interface_path": "grillo/-1",
+                "grillo_beat": True,
+                "beat_type": "observer",
+            },
+        )
+
+        mock_run_action.assert_called_once()
+        called_action = mock_run_action.call_args[0][0]
+        self.assertEqual(called_action.get("type"), "send_message")

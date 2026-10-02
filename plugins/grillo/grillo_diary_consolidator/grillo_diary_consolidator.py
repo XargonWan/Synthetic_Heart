@@ -1,16 +1,19 @@
 """Grillo beat plugin: daily diary consolidation.
 
 This plugin is intended to be called from the G.R.I.L.L.O. beat scheduler.
-It checks recent *completed* diary days (never today, which is still being
-written) for entries that still contain fragments ("---") or that consist of
-multiple rows, and asks the LLM to consolidate them into a single coherent
-daily diary entry.
+It checks diary days for entries that still contain fragments ("---") or that
+consist of multiple rows, and asks the LLM to consolidate them into a single
+coherent daily diary entry.  Completed days are handled first; today is offered
+only once it has grown past the chunk limit, so a day that keeps growing is
+merged in parts during the day instead of becoming one oversized call
+overnight.
 
-Each invocation processes a single day: the most recent unconsolidated day
-before today, going backward.  This guarantees the two days immediately
-preceding today are cleaned up first (highest priority) and keeps each
-consolidation prompt small enough for the LLM to complete reliably.  Over
-successive runs every historical day is eventually cleaned up.
+Each invocation processes a single day, and a day longer than
+``GRILLO_DIARY_CONSOLIDATE_CHUNK_CHARS`` is sent in parts (earliest fragments
+first).  This guarantees the days immediately preceding today are cleaned up
+first (highest priority) and keeps each consolidation prompt small enough for
+the LLM to complete reliably.  Over successive runs every historical day is
+eventually cleaned up.
 """
 
 from __future__ import annotations
@@ -31,6 +34,28 @@ from core.logging_utils import log_debug, log_info, log_error
 # "never attempted" and gets re-selected by _find_unmerged_days forever, once
 # per beat cycle, indefinitely.
 DEFAULT_MAX_CONSOLIDATION_ATTEMPTS = 5
+
+# The fragment separator the diary uses between the pieces of one day. It is
+# what ``_find_unmerged_days`` joins rows with and what marks a day as "not yet
+# merged", so a partially merged day stays eligible for a later run.
+FRAGMENT_SEPARATOR = "\n\n---\n\n"
+
+# Default ceiling on how much of one day goes into a single consolidation
+# prompt. A day's diary row grows all day long: the day that broke on
+# 2026-09-24 02:22 reached ~130,000 characters (it is 5,383 once merged) and the
+# whole day went into one call, which built a 143,375-character prompt: over the
+# 100,000-character prompt limit, past the reducer (which may not touch
+# ``input``), and 138,476 characters of it was the protected system + current
+# turn, so the downstream bridge could not trim it either ("the budget is
+# unreachable"). 25,000 keeps the serialized prompt near 75-90k (the dict
+# measures roughly three times the text an engine receives) and the rendered
+# prompt near 35k, inside the bridge's own 50,000-character budget.
+#
+# Merging the earliest fragments first keeps every prompt bounded and lets the
+# day shrink as it goes: each part is merged together with the prose already
+# produced for that day, so the next part is cheaper than the one before it and
+# the day still reads as one continuous page.
+DEFAULT_CONSOLIDATION_CHUNK_CHARS = 25000
 
 
 class GrilloDiaryConsolidatorPlugin:
@@ -138,12 +163,53 @@ class GrilloDiaryConsolidatorPlugin:
             _update_max_attempts,
         )
 
+        self.chunk_chars = int(
+            config_registry.get_value(
+                "GRILLO_DIARY_CONSOLIDATE_CHUNK_CHARS",
+                DEFAULT_CONSOLIDATION_CHUNK_CHARS,
+                label="Diary consolidation chunk size (characters)",
+                description=(
+                    "How much of a single diary day may go into one "
+                    "consolidation prompt. A day longer than this is merged in "
+                    "parts, earliest fragments first, each part into the last "
+                    "row of that part (the fragments after it are left for the "
+                    "next run). 0 disables chunking and sends whole days."
+                ),
+                value_type=int,
+                group="grillo",
+                component="grillo_diary_consolidator",
+            )
+        )
+
+        def _update_chunk_chars(val):
+            try:
+                self.chunk_chars = int(val)
+                log_info(
+                    f"[grillo_diary_consolidator] chunk_chars set to {self.chunk_chars}"
+                )
+            except Exception:
+                pass
+
+        config_registry.add_listener(
+            "GRILLO_DIARY_CONSOLIDATE_CHUNK_CHARS",
+            _update_chunk_chars,
+        )
+
         # In-process attempt tracking, keyed by diary ``day``. Resets on
         # restart, which is an acceptable/conservative reset (a fresh process
         # gets a clean slate rather than needing extra DB schema to persist
         # counts).
         self._consolidation_attempt_counts: dict = {}
         self._consolidation_exhausted_days: set = set()
+        # The size of the day's text at the previous offer, so a merge that
+        # actually landed (the day got shorter) counts as progress rather than
+        # as another failed attempt.
+        self._consolidation_last_sizes: dict = {}
+
+        # Handed to the executor with the next enqueued beat: it tells the diary
+        # write how much of the day this merge covers, so a part-merge keeps the
+        # fragments after that offset. Cleared after every use.
+        self.pending_beat_context: Optional[dict] = None
 
     async def build_prompt(self) -> Optional[str]:
         """Build a consolidation prompt for the most recent unmerged diary day(s).
@@ -167,7 +233,10 @@ class GrilloDiaryConsolidatorPlugin:
             return None
 
         eligible = [
-            c for c in candidates if c[0] not in self._consolidation_exhausted_days
+            c
+            for c in candidates
+            if c[0] not in self._consolidation_exhausted_days
+            and self._is_eligible_day(c)
         ]
         days = eligible[: self.MAX_DAYS_PER_RUN]
         if not days:
@@ -177,7 +246,25 @@ class GrilloDiaryConsolidatorPlugin:
         if not days:
             return None
 
-        return self._build_multi_day_prompt(days)
+        return await self._build_multi_day_prompt(days)
+
+    def _is_eligible_day(self, candidate: tuple) -> bool:
+        """Whether a candidate day may be consolidated right now.
+
+        A completed day is always eligible. Today is still being written, so it
+        is only offered once it has already grown past the chunk limit: at that
+        point merging its earliest fragments into one keeps the row (and every
+        prompt that reads it) bounded, which is cheaper than the single
+        oversized call it would otherwise become overnight. Below the limit
+        today is left alone exactly as before.
+        """
+        day = candidate[0]
+        if day != date.today():
+            return True
+        limit = self.chunk_chars
+        if limit <= 0:
+            return False
+        return len(candidate[2] or "") > limit
 
     def _record_attempts_and_filter(self, days: list) -> list:
         """Record an attempt for each day about to be offered to the LLM.
@@ -194,6 +281,15 @@ class GrilloDiaryConsolidatorPlugin:
         kept = []
         for entry in days:
             day = entry[0]
+            size = len(entry[2] or "")
+            previous_size = self._consolidation_last_sizes.get(day)
+            if previous_size is not None and size < previous_size:
+                # The previous offer actually merged something: the day's text
+                # got shorter. That is progress, not another failed attempt, so
+                # the counter restarts and a day being merged in parts is never
+                # given up on halfway through.
+                self._consolidation_attempt_counts[day] = 0
+            self._consolidation_last_sizes[day] = size
             count = self._consolidation_attempt_counts.get(day, 0) + 1
             self._consolidation_attempt_counts[day] = count
             if count > self.max_consolidation_attempts:
@@ -214,11 +310,12 @@ class GrilloDiaryConsolidatorPlugin:
         """Return up to *max_days* unconsolidated diary days (newest first).
 
         Each element is a tuple ``(day, entry_id, combined, row_count)``.
-        Today is excluded (it is still being written); only *completed* days
-        before today are eligible, newest first, so the days immediately
-        preceding today are consolidated with the highest priority.  Only
-        returns days whose content still contains the ``---`` fragment
-        separator OR have more than one row.
+        Completed days come first, newest first, so the days immediately
+        preceding today are consolidated with the highest priority; today is
+        last in the queue (it is still being written, and the caller only offers
+        it once it has grown past the chunk limit).  Only returns days whose
+        content still contains the ``---`` fragment separator OR have more than
+        one row.
         """
         cutoff = date.today() - timedelta(days=self.lookback_days)
         try:
@@ -234,11 +331,11 @@ class GrilloDiaryConsolidatorPlugin:
                                 COUNT(*) AS row_count
                             FROM ai_diary
                             WHERE DATE(created_at) >= %s
-                              AND DATE(created_at) < CURDATE()
+                              AND DATE(created_at) <= CURDATE()
                             GROUP BY DATE(created_at)
                         ) t
                         WHERE row_count > 1 OR combined LIKE '%%---%%'
-                        ORDER BY day DESC
+                        ORDER BY (day = CURDATE()) ASC, day DESC
                         LIMIT %s
                         """,
                         (cutoff, max_days),
@@ -270,18 +367,37 @@ class GrilloDiaryConsolidatorPlugin:
 
         return results
 
-    def _build_multi_day_prompt(self, days: list) -> str:
+    async def _build_multi_day_prompt(self, days: list) -> str:
         """Build a single prompt asking the LLM to consolidate multiple days.
 
         Each day gets its own ``update_diary_entry`` action in the response.
+        A day longer than ``chunk_chars`` is sent in parts: only its earliest
+        fragments go into this prompt, and the rest is preserved untouched by
+        the diary write (see ``_split_day_text`` and the
+        ``diary_merge_preserve_from`` context key).
         """
+        self.pending_beat_context = None
         actions = []
         sections = []
+        partial_days = 0
         for day, entry_id, combined, row_count in days:
-            log_info(
-                f"[grillo_diary_consolidator] Including day {day} "
-                f"(entry_id={entry_id}, {row_count} rows)"
-            )
+            text, cut = self._split_day_text(combined)
+            partial = cut < len(combined)
+            if partial:
+                partial_days += 1
+                parts = self._count_parts(combined)
+                self.pending_beat_context = {"diary_merge_preserve_from": cut}
+                log_info(
+                    f"[grillo_diary_consolidator] Day {day} is {len(combined)} "
+                    f"characters: consolidating PART 1 of {parts} "
+                    f"({len(text)} chars sent, {len(combined) - cut} kept for a "
+                    "later run)"
+                )
+            else:
+                log_info(
+                    f"[grillo_diary_consolidator] Including day {day} "
+                    f"(entry_id={entry_id}, {row_count} rows)"
+                )
             actions.append(
                 {
                     "type": "update_diary_entry",
@@ -291,7 +407,20 @@ class GrilloDiaryConsolidatorPlugin:
                     },
                 }
             )
-            sections.append(f"--- Day: {day} (entry id: {entry_id}) ---\n\n{combined}")
+            header = f"--- Day: {day} (entry id: {entry_id}) ---"
+            if partial:
+                header += " [PART 1: earliest fragments only]"
+            sections.append(f"{header}\n\n{text}")
+
+        part_rule = ""
+        if partial_days:
+            part_rule = (
+                "- A day marked PART 1 is given to you in pieces: merge ONLY the "
+                "fragments shown for it. Its later fragments are preserved "
+                "untouched and are merged in a later run, so do not write about "
+                "them, do not summarise the whole day, and never repeat content "
+                "you were not shown.\n"
+            )
 
         prompt = (
             "[DIARY CONSOLIDATION — INTERNAL SYSTEM TASK]\n\n"
@@ -310,7 +439,8 @@ class GrilloDiaryConsolidatorPlugin:
             "- Remove exact duplicates; keep nuance and emotional context.\n"
             "- Group related topics together into coherent paragraphs.\n"
             "- End each day with an emotional reflection or thought.\n"
-            "- You MUST produce ONE update_diary_entry action per day.\n\n"
+            "- You MUST produce ONE update_diary_entry action per day.\n"
+            f"{part_rule}\n"
             "Diary fragments:\n\n"
             f"{chr(10).join(sections)}\n\n"
             "Respond with ONLY valid JSON (no additional text):\n"
@@ -319,6 +449,38 @@ class GrilloDiaryConsolidatorPlugin:
 
         return prompt
 
+    def _split_day_text(self, combined: str) -> tuple:
+        """Return ``(text_to_send, offset_of_the_preserved_remainder)``.
+
+        A day's fragments live inside one row, separated by
+        ``FRAGMENT_SEPARATOR``, so the split happens on a fragment boundary: the
+        last separator that still fits inside ``chunk_chars``. The caller sends
+        only the text before it and passes the offset on, so the diary write
+        keeps everything from that offset onward. A merged part is always
+        shorter than the fragments it replaces, so the next part is cheaper than
+        this one. ``chunk_chars <= 0`` disables splitting entirely.
+        """
+        text = combined or ""
+        limit = self.chunk_chars
+        if limit <= 0 or len(text) <= limit:
+            return text, len(text)
+        window = text[:limit]
+        boundary = window.rfind(FRAGMENT_SEPARATOR)
+        cut = boundary if boundary > 0 else limit
+        return text[:cut], cut
+
+    def _count_parts(self, combined: str) -> int:
+        """How many runs a day of this size will take (for the prompt note)."""
+        text = combined or ""
+        count = 0
+        while text:
+            _piece, cut = self._split_day_text(text)
+            count += 1
+            if cut >= len(text):
+                break
+            text = text[cut:]
+        return count
+
     def get_supported_actions(self) -> dict:
         return {}
 
@@ -326,10 +488,11 @@ class GrilloDiaryConsolidatorPlugin:
         """Enqueue a diary consolidation beat immediately (WebUI "Run Now").
 
         Builds the consolidation prompt using the unchanged day-selection logic
-        (never today; most recent unconsolidated day first) and enqueues it as a
-        ``diary_consolidation`` beat via the official Grillo low-priority queue
-        API. Returns a status dict reporting the queue priority so the WebUI can
-        display "scheduled with priority X".
+        (completed days first, newest first; today only once it has grown past
+        the chunk limit) and enqueues it as a ``diary_consolidation`` beat via
+        the official Grillo low-priority queue API. Returns a status dict
+        reporting the queue priority so the WebUI can display "scheduled with
+        priority X".
         """
         if not self.enabled:
             return {

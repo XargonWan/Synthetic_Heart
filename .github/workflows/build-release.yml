@@ -7,6 +7,8 @@ on:
       - "develop"
       - "fix/**"
       - "feat/**"
+    tags:
+      - "v*"
   pull_request:
     branches:
       - "main"
@@ -14,6 +16,11 @@ on:
       - "fix/**"
       - "feat/**"
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "Attach the Windows installer to a GitHub Release"
+        type: boolean
+        default: false
 
 jobs:
   prepare:
@@ -22,6 +29,7 @@ jobs:
       contents: read
     outputs:
       semver: ${{ steps.gitversion.outputs.majorMinorPatch }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -35,6 +43,28 @@ jobs:
         uses: gittools/actions/gitversion/execute@v0.9.14
         with:
           useConfigFile: true
+      # The installer needs one version, and two sources can disagree about it: a tag
+      # is a person stating what this build is called, while GitVersion guesses the
+      # next version from the commits. On a tag push the tag wins, so a release can
+      # never be tagged v1.0.16 and hand out SyntH-Setup-1.1.0.exe.
+      - name: Decide the version this run builds
+        id: version
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="${{ steps.gitversion.outputs.majorMinorPatch }}"
+          fi
+          case "$version" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *)
+              echo "::error::$version from ${GITHUB_REF_NAME} is not a semantic version"
+              exit 1
+              ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "ref ${GITHUB_REF_NAME} -> SyntH-Setup-$version.exe"
 
   build-images:
     needs: prepare
@@ -139,6 +169,7 @@ jobs:
       - name: Install deps
         run: |
           # dependencies are managed via pyproject.toml/uv.lock
+          python -m pip install uv
           uv sync --no-cache
           pip install pytest pytest-asyncio aiomysql
       - name: Wait for mysql
@@ -176,6 +207,7 @@ jobs:
           python-version: '3.x'
       - name: Install deps
         run: |
+          python -m pip install uv
           uv sync --no-cache
           pip install pytest pytest-asyncio zen
       - name: Wait for services
@@ -198,8 +230,29 @@ jobs:
       - name: Run mypy
         run: python -m mypy . --strict
 
+  have-dockerhub:
+    # A fork does not inherit this repository's secrets, so the jobs that push to Docker
+    # Hub cannot succeed there. Asking once, here, keeps `manifest` (the only job whose
+    # failure fails the whole run) from turning every fork run red for a reason that is
+    # not code. Where the secret exists, nothing about the run changes.
+    runs-on: ubuntu-latest
+    outputs:
+      present: ${{ steps.check.outputs.present }}
+    steps:
+      - id: check
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          if [ -n "$DOCKERHUB_USERNAME" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::DOCKERHUB_USERNAME is not set for this repository, so the image manifest is skipped"
+          fi
+
   manifest:
-    needs: [prepare, build-images]
+    needs: [prepare, build-images, have-dockerhub]
+    if: needs.have-dockerhub.outputs.present == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -344,3 +397,145 @@ jobs:
             done
           
           echo "✅ Cleanup completed"
+
+  windows-installer:
+    # The one-click installer for Windows, built from the same tree the tests
+    # just ran against.
+    #
+    # Not on pull requests: it downloads ~320 MB of PostgreSQL binaries per
+    # architecture and takes several minutes. Installer breakage surfaces on
+    # develop, where a human is looking, instead of on every PR.
+    #
+    # pgvector is built here rather than downloaded from the other workflow so
+    # this job is self-contained: pgvector publishes no prebuilt Windows
+    # binaries, and the DLL must be linked against the exact PostgreSQL build
+    # the installer unpacks. See installer/vendor/README.md.
+    if: github.event_name != 'pull_request'
+    needs: [prepare]
+    runs-on: windows-latest
+    env:
+      PGVECTOR_TAG: v0.8.6
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build pgvector for the bundled PostgreSQL
+        shell: pwsh
+        run: |
+          $matrix = [ordered]@{ '16' = '16.10-1'; '17' = '17.6-1' }
+          $ProgressPreference = 'SilentlyContinue'
+          foreach ($major in $matrix.Keys) {
+            $release = $matrix[$major]
+            $zip = Join-Path $env:RUNNER_TEMP "pg$major.zip"
+            Write-Host "::group::PostgreSQL $release binaries"
+            Invoke-WebRequest -Uri "https://get.enterprisedb.com/postgresql/postgresql-$release-windows-x64-binaries.zip" -OutFile $zip
+            $dest = Join-Path $env:RUNNER_TEMP "pg$major"
+            Expand-Archive -Path $zip -DestinationPath $dest -Force
+            $pgRoot = Join-Path $dest 'pgsql'
+            if (-not (Test-Path (Join-Path $pgRoot 'include\server\postgres.h'))) {
+              throw "the PostgreSQL $major archive has no server headers; pgvector cannot be built against it"
+            }
+
+            $src = Join-Path $env:RUNNER_TEMP "pgvector-$major"
+            git clone --branch $env:PGVECTOR_TAG --depth 1 https://github.com/pgvector/pgvector.git $src
+            Push-Location $src
+            $env:PGROOT = $pgRoot
+            cmd /c "nmake /F Makefile.win"
+            if ($LASTEXITCODE -ne 0) { throw "nmake failed for PostgreSQL $major" }
+            cmd /c "nmake /F Makefile.win install"
+            if ($LASTEXITCODE -ne 0) { throw "nmake install failed for PostgreSQL $major" }
+            Pop-Location
+
+            $vendor = "installer/vendor/pgvector/pg$major"
+            New-Item -ItemType Directory -Force -Path $vendor | Out-Null
+            Copy-Item (Join-Path $pgRoot 'lib\vector.dll') $vendor
+            Copy-Item (Join-Path $pgRoot 'share\extension\vector.control') $vendor
+            Copy-Item (Join-Path $pgRoot 'share\extension\vector--*.sql') $vendor
+            $dll = Get-Item (Join-Path $vendor 'vector.dll')
+            if ($dll.Length -lt 100kb) { throw "vector.dll for PostgreSQL $major is only $($dll.Length) bytes" }
+            Get-ChildItem $vendor | Select-Object Name, Length | Format-Table -AutoSize
+            Write-Host "::endgroup::"
+          }
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Build the installer
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          Write-Host "building SyntH $env:VERSION"
+          ./installer/build_installer.ps1 -Version $env:VERSION -SkipVendorWarning
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload the installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: SyntH-Setup-${{ needs.prepare.outputs.version }}-windows-x64
+          path: installer/Output/*.exe
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    # The step that was missing: every push already builds the installer and leaves it
+    # as a workflow artifact, where it expires and nobody can find it. This attaches
+    # that same executable to a GitHub Release.
+    #
+    # Only for a version tag (v1.0.16) or a manual run that asked for it: a release on
+    # every push to develop would be noise. A manual run has no tag yet, so the release
+    # creates v<version> at the commit the run was dispatched on.
+    if: >-
+      startsWith(github.ref, 'refs/tags/v')
+      || (github.event_name == 'workflow_dispatch' && inputs.publish_release)
+    needs: [prepare, windows-installer]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Fetch the installer this run built
+        uses: actions/download-artifact@v4
+        with:
+          name: SyntH-Setup-${{ needs.prepare.outputs.version }}-windows-x64
+          path: dist
+
+      - name: Check it is a complete installer before publishing it
+        run: |
+          set -euo pipefail
+          ls -l dist
+          shopt -s nullglob
+          installers=(dist/*.exe)
+          if [ ${#installers[@]} -eq 0 ]; then
+            echo "::error::no installer was downloaded, so there is nothing to publish"
+            exit 1
+          fi
+          for exe in "${installers[@]}"; do
+            size=$(stat -c%s "$exe")
+            echo "$exe is $size bytes"
+            # A published asset is what strangers download, and it cannot be quietly
+            # corrected afterwards, so refuse anything obviously truncated.
+            if [ "$size" -lt 20000000 ]; then
+              echo "::error::$exe is only $size bytes, which is not a whole installer"
+              exit 1
+            fi
+          done
+          # Bare file names, so downloading the installer and this file into one folder
+          # leaves a plain `sha256sum -c SHA256SUMS` working.
+          (cd dist && sha256sum -- *.exe > SHA256SUMS && cat SHA256SUMS)
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', needs.prepare.outputs.version) }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', needs.prepare.outputs.version) }}
+          files: |
+            dist/*.exe
+            dist/SHA256SUMS
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}

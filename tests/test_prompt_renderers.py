@@ -743,3 +743,114 @@ class TestTextRenderer:
         # A json.dumps(..., indent=2) blob would have lines starting with spaces
         # and double-quoted keys; plain text output is flat prose.
         assert '    "' not in result, "Output looks like indented JSON — use flat text"
+
+
+# ---------------------------------------------------------------------------
+# Reality Anchor on the current turn
+#
+# The full `[SYSTEM: REALITY ANCHOR]` block rides in the system message —
+# measured live at character 11 115 of a 15 406-character system message, so
+# roughly 11 000 characters away from the text being generated. These tests pin
+# the compact duplicate that every renderer places directly above the current
+# user turn.
+# ---------------------------------------------------------------------------
+
+ANCHOR_LINE = (
+    "[SYSTEM: REALITY ANCHOR] Monday, September 21, 2026 · 11:42 AM (morning) "
+    "· Early Autumn · Ljubljana"
+)
+
+_IMAGE_PART = {
+    "type": "image_url",
+    "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="},
+}
+_ANTHROPIC_IMAGE_PART = {
+    "type": "image",
+    "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="},
+}
+_GEMINI_IMAGE_PART = {"inline_data": {"mime_type": "image/png", "data": "iVBORw0KGgo="}}
+
+
+def _anchored_request() -> PromptRequest:
+    req = _basic_request()
+    req.runtime_ctx.reality_anchor = ANCHOR_LINE
+    return req
+
+
+def _current_turn_texts(req: PromptRequest) -> list[tuple[str, str]]:
+    """The current-turn text from EVERY renderer path, labelled.
+
+    Enumerated so a renderer that forgets the anchor is a visible failure rather
+    than an untested path.
+    """
+    out: list[tuple[str, str]] = []
+
+    openai_msgs = OpenAIRenderer(req).render()
+    out.append(("openai", openai_msgs[-1]["content"]))
+
+    openai_mm = OpenAIRenderer(req).render_with_multimodal([_IMAGE_PART])
+    mm_parts = openai_mm[-1]["content"]
+    out.append(("openai.multimodal", mm_parts[-1]["text"]))
+
+    anthropic = AnthropicRenderer(req).render()
+    out.append(("anthropic", anthropic["messages"][-1]["content"]))
+
+    anthropic_img = AnthropicRenderer(req).render_with_image_parts(
+        [_ANTHROPIC_IMAGE_PART]
+    )
+    anthropic_parts = anthropic_img["messages"][-1]["content"]
+    out.append(("anthropic.image", anthropic_parts[-1]["text"]))
+
+    gemini = GeminiRenderer(req).render()
+    out.append(("gemini", gemini["contents"][-1]["parts"][0]["text"]))
+
+    gemini_mm = GeminiRenderer(req).render_with_multimodal([_GEMINI_IMAGE_PART])
+    out.append(("gemini.multimodal", gemini_mm["contents"][-1]["parts"][-1]["text"]))
+
+    out.append(("text", TextRenderer(req).render()))
+
+    return out
+
+
+def test_anchor_renders_above_the_current_turn_on_every_renderer_path() -> None:
+    """The anchor line precedes the routing bracket, on all seven paths."""
+    for label, text in _current_turn_texts(_anchored_request()):
+        assert ANCHOR_LINE in text, f"{label}: anchor line missing from the turn"
+        assert "[lang:en" in text, f"{label}: routing bracket missing"
+        assert text.index(ANCHOR_LINE) < text.index("[lang:en"), (
+            f"{label}: the anchor must come before the routing bracket"
+        )
+
+
+def test_anchor_keeps_the_clock_out_of_the_routing_bracket() -> None:
+    """The anchor carries the exact time; the bracket must still omit it.
+
+    Both halves matter. The bracket deliberately excludes an absolute timestamp
+    (so a model does not mirror a stale clock into an ordinary reply), while the
+    anchor line IS the authoritative temporal context and therefore carries the
+    full facts. Asserting only one half would let the other regress.
+    """
+    req = _anchored_request()
+    req.runtime_ctx.timestamp = "2026-04-20 17:43 CEST (15:43 UTC)"
+
+    last = OpenAIRenderer(req).render()[-1]["content"]
+
+    assert "2026-04-20 17:43 CEST" not in last, (
+        "the bracket leaked an absolute timestamp"
+    )
+    assert "11:42 AM" in last, "the anchor lost the clock"
+    assert ANCHOR_LINE in last
+
+
+def test_no_anchor_means_no_blank_line() -> None:
+    """A turn without temporal facts contributes nothing, not an empty line."""
+    req = _basic_request()
+    assert req.runtime_ctx.reality_anchor == ""
+
+    for label, text in _current_turn_texts(req):
+        assert ANCHOR_LINE not in text, f"{label}: renderered an anchor with no data"
+        # The turn must not open with an empty/whitespace line.
+        assert text.lstrip() == text.rstrip() or not text.startswith("\n"), (
+            f"{label}: the turn starts with an empty line"
+        )
+        assert "[lang:en" in text, f"{label}: routing bracket missing"

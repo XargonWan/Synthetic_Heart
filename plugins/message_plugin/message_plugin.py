@@ -2,11 +2,33 @@
 """Message plugin for handling text message actions."""
 
 from difflib import SequenceMatcher
+from typing import Any, Optional
 
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.core_initializer import INTERFACE_REGISTRY
 from core.config_manager import config_registry
 from core.beat_utils import is_outbound_beat
+
+
+# Names that mark a cached chat row as the synth's own output. The structural
+# marker is ``sender_id == "self"`` (what the chat cache writes for its own
+# messages); the name hints cover rows written by older paths.
+_SYNTH_SENDER_NAME_HINTS = ("rekku", "synth", "bot")
+
+
+def _is_synth_authored(row: Any) -> bool:
+    """Return whether a cached chat-history row was authored by the synth.
+
+    Shared by both Grillo gates so "who spoke last" and "what did the synth
+    itself say" are decided by one definition, not two drifting ones.
+    """
+    if not isinstance(row, dict):
+        return False
+    sender_name = str(row.get("sender_name") or row.get("username") or "").lower()
+    sender_id = str(row.get("sender_id") or row.get("user_id") or "")
+    return sender_id == "self" or any(
+        k in sender_name for k in _SYNTH_SENDER_NAME_HINTS
+    )
 
 
 class MessagePlugin:
@@ -134,6 +156,169 @@ class MessagePlugin:
             return bool(extra.get("disable_tools") or extra.get("force_action_grammar"))
         except Exception:
             return False
+
+    async def _grillo_public_chat_block_reason(
+        self,
+        *,
+        interface_name: str,
+        target: Any,
+        target_interface_path: str,
+        text: str,
+    ) -> Optional[str]:
+        """Reason an internal Grillo beat must not speak into a public chat.
+
+        Unchanged behaviour, moved out of the delivery path: for **public** chats
+        (Telegram groups/channels, Discord/Reddit/Matrix rooms) an internal beat
+        is dropped when the synth spoke last (``GRILLO_SUPPRESS_INACTIVE``) or
+        when its text is close to anything already in that chat
+        (``GRILLO_DUP_SIMILARITY_THRESHOLD``). Private chats are deliberately not
+        covered here — a DM the synth answered is a normal conversation, not
+        spam, and the repeat gate covers the case that actually matters there.
+
+        Returns the suppression reason, or ``None`` to allow the send.
+        """
+        from core.chat_history_cache import get_last_message, load_chat_history
+
+        try:
+            suppress_enabled = config_registry.get_value(
+                "GRILLO_SUPPRESS_INACTIVE",
+                True,
+                label="Suppress Grillo outbound messages when last message is from synth",
+                description=(
+                    "When enabled, Grillo will skip outbound messages if the most recent message in the target chat was sent by the synth."
+                ),
+                group="grillo",
+                component="grillo_impl",
+            )
+        except Exception:
+            suppress_enabled = True
+
+        # Check if public chat logic
+        is_public = False
+        # Simple heuristic: Telegram negative IDs, or Discord/Reddit/Matrix channels
+        if interface_name == "telegram_bot" and target:
+            try:
+                if int(target) < 0:
+                    is_public = True
+            except Exception:
+                pass
+        elif (
+            interface_name
+            in ["discord", "discord_bot", "reddit", "matrix", "matrix_chat"]
+            and target
+        ):
+            is_public = True
+
+        if not is_public:
+            return None
+
+        last = await get_last_message(target_interface_path)
+        if last and _is_synth_authored(last) and suppress_enabled:
+            log_info(
+                f"[message_plugin] Suppressing Grillo message to {target_interface_path} (last msg from synth)"
+            )
+            return "last msg from synth"
+
+        similarity_threshold = float(
+            config_registry.get_value(
+                "GRILLO_DUP_SIMILARITY_THRESHOLD",
+                0.85,
+                label="Grillo Duplicate Similarity Threshold",
+                description=(
+                    "Similarity threshold above which Grillo suppresses outbound messages that are too close to recent public-chat text."
+                ),
+                value_type=float,
+                group="grillo",
+                component="grillo_impl",
+            )
+        )
+        candidate_text = str(text or "").strip().lower()
+        if not candidate_text:
+            return None
+        recent_history = await load_chat_history(target_interface_path)
+        for entry in recent_history or []:
+            if not isinstance(entry, dict):
+                continue
+            previous_text = str(entry.get("text") or "").strip().lower()
+            if not previous_text:
+                continue
+            similarity = SequenceMatcher(None, candidate_text, previous_text).ratio()
+            if similarity >= similarity_threshold:
+                log_info(
+                    f"[message_plugin] Suppressing Grillo message to {target_interface_path} (similarity={similarity:.2f})"
+                )
+                return f"duplicate similarity={similarity:.2f}"
+        return None
+
+    async def _grillo_repeats_own_last_line(
+        self, *, target_interface_path: str, text: str
+    ) -> Optional[float]:
+        """Similarity when ``text`` repeats the synth's own recent line in a chat.
+
+        Applies to **every** Grillo beat (outbound ones included) and **every**
+        chat type, because a repeat is a repeat wherever it lands — the reported
+        failure was an observer beat re-delivering, byte for byte, the reply the
+        normal turn had sent two minutes earlier into a private Telegram DM.
+
+        Deliberately narrower than the public-chat gate above: it compares the
+        candidate only against rows the synth itself authored, so a beat's
+        genuine new outreach — which may legitimately echo what the *human* said
+        — is never suppressed. Fail-open: any history-read error returns ``None``
+        (send allowed) rather than dropping a message on a broken lookup.
+
+        Returns the similarity that tripped the threshold, or ``None``.
+        """
+        from core.chat_history_cache import load_chat_history
+
+        candidate_text = str(text or "").strip().lower()
+        if not candidate_text:
+            return None
+
+        try:
+            similarity_threshold = float(
+                config_registry.get_value(
+                    "GRILLO_DUP_SIMILARITY_THRESHOLD",
+                    0.85,
+                    label="Grillo Duplicate Similarity Threshold",
+                    description=(
+                        "Similarity threshold above which Grillo suppresses outbound messages that are too close to recent public-chat text."
+                    ),
+                    value_type=float,
+                    group="grillo",
+                    component="grillo_impl",
+                )
+            )
+            recent_history = await load_chat_history(target_interface_path)
+            for entry in recent_history or []:
+                if not _is_synth_authored(entry):
+                    continue
+                previous_text = str(entry.get("text") or "").strip().lower()
+                if not previous_text:
+                    continue
+                similarity = SequenceMatcher(
+                    None, candidate_text, previous_text
+                ).ratio()
+                if similarity >= similarity_threshold:
+                    return similarity
+        except Exception as e:
+            log_debug(f"[message_plugin] Repeat-of-own-line check failed: {e}")
+        return None
+
+    async def _record_grillo_suppression(
+        self, activity_log_id: Optional[int], reason: str
+    ) -> None:
+        """Annotate the beat's activity-log row with a suppressed send."""
+        try:
+            from plugins.grillo.grillo_impl import GrilloPlugin
+
+            await GrilloPlugin.record_suppressed_event(
+                activity_log_id=activity_log_id,
+                reason=reason,
+            )
+        except Exception as suppression_error:
+            log_debug(
+                f"[message_plugin] Failed to record Grillo suppression event: {suppression_error}"
+            )
 
     async def _handle_message_action(
         self, action: dict, context: dict, bot, original_message
@@ -281,8 +466,21 @@ class MessagePlugin:
                 rebuilt_interface_path = f"{interface_name}/{target}"
 
         # --- Grillo Suppression Logic ---
-        # Outbound beats (observer) are EXEMPT from suppression: their purpose is
-        # to initiate conversation, so silencing them defeats the feature.
+        # Two gates, scoped separately because they answer different questions:
+        #
+        #  * public-chat gate — "may a beat speak into a public chat the synth
+        #    already spoke in / with text close to what is already there?"
+        #    Outbound beats (observer) are EXEMPT: initiating conversation is
+        #    their purpose, so silencing them defeats the feature.
+        #  * repeat gate — "is this the synth saying the same thing a second
+        #    time?" Applies to EVERY Grillo beat and EVERY chat type, private
+        #    DMs included: nothing may deliver a line the synth has just said.
+        #
+        # The repeat gate exists because outbound beats were exempt from the
+        # other one entirely, so a beat could re-deliver the synth's own last
+        # line verbatim (live 2026-09-25 04:31: the observer re-sent the reply
+        # the normal turn had produced two minutes earlier, byte for byte, into
+        # the same Telegram DM).
         is_outbound = isinstance(context, dict) and is_outbound_beat(
             context.get("beat_type")
         )
@@ -292,142 +490,49 @@ class MessagePlugin:
                 "grillo_activity_log_id"
             )
 
-        if (
-            not is_outbound
-            and isinstance(context, dict)
-            and (
-                context.get("grillo_beat")
-                or context.get("activity_log_id")
-                or context.get("grillo_activity_log_id")
-            )
-        ):
-            try:
-                suppress_enabled = config_registry.get_value(
-                    "GRILLO_SUPPRESS_INACTIVE",
-                    True,
-                    label="Suppress Grillo outbound messages when last message is from synth",
-                    description=(
-                        "When enabled, Grillo will skip outbound messages if the most recent message in the target chat was sent by the synth."
-                    ),
-                    group="grillo",
-                    component="grillo_impl",
-                )
-            except Exception:
-                suppress_enabled = True
+        is_grillo_beat = isinstance(context, dict) and bool(
+            context.get("grillo_beat")
+            or context.get("activity_log_id")
+            or context.get("grillo_activity_log_id")
+        )
 
+        if is_grillo_beat and "webui" not in (interface_name or "").lower():
+            # The WebUI keeps its own bubble bookkeeping (a session may
+            # legitimately repeat itself) and is exempt from both gates.
             try:
-                from core.chat_history_cache import get_last_message, load_chat_history
-
                 target_interface_path = (
                     rebuilt_interface_path
                     or interface_path
                     or f"{interface_name}/{target}"
                 )
 
-                # Check exemptions (WebUI)
-                bypass = False
-                if "webui" in (interface_name or "").lower():
-                    bypass = True
-
-                # Exemption: Trainer chats (simplified check without registry dependency to avoid circles)
-                # If we assume trainer is handled elsewhere or Grillo won't spam trainer chats excessively
-
-                if not bypass:
-                    # Check if public chat logic
-                    is_public = False
-                    # Simple heuristic: Telegram negative IDs, or Discord/Reddit/Matrix channels
-                    if interface_name == "telegram_bot" and target:
-                        try:
-                            if int(target) < 0:
-                                is_public = True
-                        except Exception:
-                            pass
-                    elif (
-                        interface_name
-                        in ["discord", "discord_bot", "reddit", "matrix", "matrix_chat"]
-                        and target
-                    ):
-                        is_public = True
-
-                    if is_public:
-                        last = await get_last_message(target_interface_path)
-                        if last:
-                            sender_name = (
-                                last.get("sender_name") or last.get("username") or ""
-                            ).lower()
-                            sender_id = str(
-                                last.get("sender_id") or last.get("user_id") or ""
-                            )
-
-                            is_synth = sender_id == "self" or any(
-                                k in sender_name for k in ["rekku", "synth", "bot"]
-                            )
-
-                            if is_synth and suppress_enabled:
-                                log_info(
-                                    f"[message_plugin] Suppressing Grillo message to {target_interface_path} (last msg from synth)"
-                                )
-                                try:
-                                    from plugins.grillo.grillo_impl import GrilloPlugin
-
-                                    await GrilloPlugin.record_suppressed_event(
-                                        activity_log_id=activity_log_id,
-                                        reason="last msg from synth",
-                                    )
-                                except Exception as suppression_error:
-                                    log_debug(
-                                        f"[message_plugin] Failed to record Grillo suppression event: {suppression_error}"
-                                    )
-                                return
-
-                        similarity_threshold = float(
-                            config_registry.get_value(
-                                "GRILLO_DUP_SIMILARITY_THRESHOLD",
-                                0.85,
-                                label="Grillo Duplicate Similarity Threshold",
-                                description=(
-                                    "Similarity threshold above which Grillo suppresses outbound messages that are too close to recent public-chat text."
-                                ),
-                                value_type=float,
-                                group="grillo",
-                                component="grillo_impl",
-                            )
+                if not is_outbound:
+                    public_block = await self._grillo_public_chat_block_reason(
+                        interface_name=interface_name,
+                        target=target,
+                        target_interface_path=target_interface_path,
+                        text=text,
+                    )
+                    if public_block:
+                        await self._record_grillo_suppression(
+                            activity_log_id, public_block
                         )
-                        candidate_text = str(text or "").strip().lower()
-                        if candidate_text:
-                            recent_history = await load_chat_history(
-                                target_interface_path
-                            )
-                            for entry in recent_history or []:
-                                previous_text = (
-                                    str(entry.get("text") or "").strip().lower()
-                                )
-                                if not previous_text:
-                                    continue
-                                similarity = SequenceMatcher(
-                                    None, candidate_text, previous_text
-                                ).ratio()
-                                if similarity >= similarity_threshold:
-                                    log_info(
-                                        f"[message_plugin] Suppressing Grillo message to {target_interface_path} (similarity={similarity:.2f})"
-                                    )
-                                    try:
-                                        from plugins.grillo.grillo_impl import (
-                                            GrilloPlugin,
-                                        )
+                        return
 
-                                        await GrilloPlugin.record_suppressed_event(
-                                            activity_log_id=activity_log_id,
-                                            reason=(
-                                                f"duplicate similarity={similarity:.2f}"
-                                            ),
-                                        )
-                                    except Exception as suppression_error:
-                                        log_debug(
-                                            f"[message_plugin] Failed to record Grillo suppression event: {suppression_error}"
-                                        )
-                                    return
-
+                repeat_similarity = await self._grillo_repeats_own_last_line(
+                    target_interface_path=target_interface_path, text=text
+                )
+                if repeat_similarity is not None:
+                    log_info(
+                        f"[message_plugin] Suppressing Grillo message to "
+                        f"{target_interface_path} (repeat of the synth's own last "
+                        f"line, similarity={repeat_similarity:.2f})"
+                    )
+                    await self._record_grillo_suppression(
+                        activity_log_id,
+                        f"repeat of own last line similarity={repeat_similarity:.2f}",
+                    )
+                    return
             except Exception as e:
                 log_debug(f"[message_plugin] Grillo suppression check failed: {e}")
 

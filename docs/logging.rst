@@ -42,6 +42,26 @@ Rotation is handled by :class:`core.logging_utils.TimestampedRotatingFileHandler
   line cap (``DEFAULT_MAX_LINES``) is disabled by default (``0``); the size cap
   is the primary safety net.
 
+Non-blocking writes
+-------------------
+
+File handlers are owned by a background writer thread (``synth-log-writer`` in
+:mod:`core.logging_utils`) and fed through a bounded queue, so the thread that
+logs never waits on the log destination. That thread is the asyncio event loop:
+a synchronous ``write`` to a destination that stalls (a full disk, a saturated
+network share) blocks the entire runtime — every component goes silent and an
+in-flight turn is lost with no error anywhere, because the reporter is blocked
+too.
+
+With the writer thread in place a stalled destination degrades to *dropped* log
+records: the caller enqueues and returns, a full queue drops records and counts
+them, and the writer reports the loss once it catches up
+(``Dropped N log record(s): the log destination is slower than the process``). A single write that takes longer than 5 seconds is likewise reported (at most once a minute) as ``Slow log destination: one write took N s``.
+Per-handler levels, formatting order and the error-only companion log are
+unchanged, console output stays synchronous, and the queue is drained on
+graceful shutdown. ``LOG_QUEUE_ENABLED=0`` restores direct writes when the
+logger itself is being debugged.
+
 Retention & compression
 ------------------------
 
@@ -98,6 +118,13 @@ Configuration summary
    * - Environment variable
      - Default
      - Purpose
+   * - ``LOG_QUEUE_ENABLED``
+     - ``1``
+     - Write file logs through the background writer thread; ``0`` restores
+       synchronous writes.
+   * - ``LOG_QUEUE_MAXLEN``
+     - ``5000``
+     - Bounded log queue length. Records past it are dropped and reported.
    * - ``LOG_DIR``
      - ``logs``
      - Directory that holds all log files.

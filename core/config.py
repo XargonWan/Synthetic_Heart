@@ -197,6 +197,30 @@ DSP_CORTEX = config_registry.get_var(
     allow_env_override=False,
 )
 
+# Which of an endpoint's models to start on when its default is chosen
+# automatically. Comma or newline separated fnmatch patterns, best first; the first
+# model the endpoint reports that matches wins, and no match means the endpoint's own
+# first model. This exists because an endpoint that lists a hundred models has no
+# meaningful default: the auto-selection took whatever came first, and a Venice
+# endpoint came up on a Gemini model that way. DeepSeek's *flash* variants are what
+# this project runs, so flash comes first and a bare `deepseek*` follows, which keeps
+# an endpoint that lists no flash model inside the same family.
+ENDPOINT_MODEL_PREFERENCES_DEFAULT = "*deepseek*flash*,deepseek*"
+
+ENDPOINT_MODEL_PREFERENCES = config_registry.get_var(
+    "ENDPOINT_MODEL_PREFERENCES",
+    ENDPOINT_MODEL_PREFERENCES_DEFAULT,
+    label="Endpoint Default Model Preference",
+    description="Ordered fnmatch patterns (comma separated) used to pick an external "
+    "endpoint's starting model, e.g. '*deepseek*flash*,deepseek*'. Earlier patterns "
+    "win; within a pattern the endpoint's own order decides. The first model matching "
+    "the first pattern is chosen, and with no match at all the endpoint's first model "
+    "is used.",
+    group="core",
+    component="cortex",
+    allow_env_override=False,
+)
+
 # Named engine-configuration presets (extra_config + optional model bundles)
 # edited from the Engines tab.  Stored as a JSON list; hidden from the generic
 # settings grid because it is managed by the dedicated preset UI in
@@ -228,6 +252,28 @@ LLM_GENERATION_TIMEOUT_SEC = config_registry.get_var(
         "Maximum time in seconds to wait for a single LLM cortex generation "
         "before aborting. Raise this on slow hardware so long replies are not "
         "cut off mid-generation. Settable via the .env file."
+    ),
+    value_type=int,
+    group="core",
+    component="cortex",
+)
+
+# Hard ceiling for a caller-supplied LLM request timeout. A call site may pass
+# its own budget (the debrief asks for 120 s, recon passes RECON_TIMEOUT, the
+# agent loop passes its per-call budget). The bridge honours that value up to
+# this ceiling - so a call site that needs longer than the endpoint's default is
+# no longer silently cut at the endpoint's value - while a caller cannot
+# re-introduce a multi-minute wedge. Raise it for a deliberately slow local
+# engine; keep it near the slowest legitimate generation for the endpoint.
+LLM_MAX_REQUEST_TIMEOUT_SEC = config_registry.get_var(
+    "LLM_MAX_REQUEST_TIMEOUT_SEC",
+    120,
+    label="LLM Max Request Timeout (s)",
+    description=(
+        "Ceiling in seconds for a caller-supplied LLM request timeout. A call "
+        "site asking for its own budget (e.g. the debrief's 120 s) is honoured "
+        "up to this value, and anything larger is clamped to it. Raise this on "
+        "deliberately slow local hardware."
     ),
     value_type=int,
     group="core",

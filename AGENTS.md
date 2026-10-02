@@ -150,7 +150,7 @@ Synth runtime MCP and developer MCP are separate systems:
 
 Never merge their configuration or lifecycle.
 
-Registered actions share the tool/action abstraction and must pass through the same safety gate. External effects determine Agent-Lane routing. Drones are single-level sub-agents and must never spawn other Drones.
+Registered actions share the tool/action abstraction and must pass through the same safety gate. External effects determine Agent-Lane routing, and they also determine prompt scope: an action that declares `external_effects` is **agent-scoped** by default (`core/prompt_engine.py::_action_scopes`), so it is offered through the Agent Lane's tool surface and never advertised in the Fast-Lane chat catalog. Declare an explicit `scope` in the schema to override (e.g. `spawn_drone` is deliberately `core`). Drones are single-level sub-agents and must never spawn other Drones.
 
 ### Rift Vessel
 
@@ -939,6 +939,7 @@ Before finishing a code task, verify:
 | `TRAINER_CORTEX` | LLM engine used for trainer-facing tasks |
 | `LIVE_CORTEX` | LLM engine used for live audio sessions |
 | `VESSEL_CORTEX` | LLM engine used for Rift Vessel will beats (the slow volition turn where Synth authors its in-world goals). `Default` means Base Cortex. Only the Will beat uses the LLM — the Motor tick is reflex-only and never routed here. |
+| `ENDPOINT_MODEL_PREFERENCES` | Ordered fnmatch patterns (comma/newline separated) that decide which model an **external endpoint** starts on when its default is chosen automatically (default `*deepseek*flash*,deepseek*`, editable). Earlier patterns win, and within one pattern the endpoint's own order decides, so the flash pattern comes first: this project runs the fast DeepSeek variants, never the large ones, and a bare `deepseek*` alone would have picked whichever of the two the API happened to list first. With no match at all the endpoint's own first model is used. Exists because an endpoint listing 120+ models has no meaningful "first": the auto-selection used to take whatever came back first, which is how a Venice endpoint came up on a Gemini model. Read by `core/external_endpoints/model_choice.py` from both the probe's ping (`probe.py`) and the auto-selection (`registry.py`). |
 | `ACTIVE_VOX_ENGINE` | Active TTS engine |
 | `ACTIVE_AURIS_ENGINE` | Active STT engine |
 | `ACTIVE_IRIS_ENGINE` | Active vision/image engine |

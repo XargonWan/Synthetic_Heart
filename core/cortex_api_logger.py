@@ -26,6 +26,7 @@ import logging
 import os
 import textwrap
 import contextvars
+import threading
 import time
 from importlib import import_module
 from datetime import datetime, timezone
@@ -243,34 +244,67 @@ def _langfuse_client_health(client: Any) -> str:
         return f"health_error={type(exc).__name__}"
 
 
+_LANGFUSE_SLOW_FLUSH_MS = 10_000
+_FLUSH_LOCK = threading.Lock()
+_FLUSH_IN_FLIGHT = False
+
+
 def _flush_langfuse_client(client: Any, *, context: str) -> None:
-    """Flush Langfuse and report worker health without affecting the caller."""
-    try:
-        flush_started = time.monotonic()
-        flush_fn = getattr(client, "flush", None)
-        if callable(flush_fn):
-            flush_fn()
-        flush_elapsed_ms = (time.monotonic() - flush_started) * 1000
-        if flush_elapsed_ms > 10_000:
-            _get_runtime_logger().warning(
-                "[langfuse-sdk] flush after %s took %.0fms — the Langfuse "
-                "server (ingestion pipeline / ClickHouse) is the bottleneck; "
-                "SyntH delivered the events, server-side queryability lags",
-                context,
-                flush_elapsed_ms,
-            )
-        health = _langfuse_client_health(client)
-        if "dead=" in health and "dead=0" not in health:
+    """Flush Langfuse on a background thread; never block the caller.
+
+    The flush waits on the Langfuse server's ingestion pipeline, which is not
+    always fast. When it is slow, awaiting it inside a turn stalls the reply for
+    as long as the server takes — observed live as 40.6 s per cortex API call
+    (``flush after cortex API request took 40609ms``), which is exactly the 4x
+    reply latency the operator reported while the engine itself answered in 3.7 s.
+
+    Nothing needs the flush to finish: the events are already handed to the SDK's
+    queue by the time this is called, so flushing only decides how soon they
+    become *queryable* in Langfuse. The turn continues immediately, the flush runs
+    on its own thread, and a slow flush is still reported (from that thread) so a
+    degraded ingestion pipeline stays visible instead of silently slow.
+    """
+    global _FLUSH_IN_FLIGHT
+
+    def _run() -> None:
+        global _FLUSH_IN_FLIGHT
+        try:
+            flush_started = time.monotonic()
+            flush_fn = getattr(client, "flush", None)
+            if callable(flush_fn):
+                flush_fn()
+            flush_elapsed_ms = (time.monotonic() - flush_started) * 1000
+            if flush_elapsed_ms > _LANGFUSE_SLOW_FLUSH_MS:
+                _get_runtime_logger().warning(
+                    "[langfuse-sdk] flush after %s took %.0fms — the Langfuse "
+                    "server (ingestion pipeline / ClickHouse) is the bottleneck; "
+                    "SyntH delivered the events, server-side queryability lags",
+                    context,
+                    flush_elapsed_ms,
+                )
+            health = _langfuse_client_health(client)
+            if "dead=" in health and "dead=0" not in health:
+                _warn_langfuse_once(
+                    f"langfuse-worker-health:{health}",
+                    f"Langfuse worker health is abnormal after {context}: {health}",
+                )
+        except Exception as exc:
             _warn_langfuse_once(
-                f"langfuse-worker-health:{health}",
-                f"Langfuse worker health is abnormal after {context}: {health}",
+                f"langfuse-flush:{type(exc).__name__}",
+                f"Failed to flush Langfuse client after {context}",
+                exc=exc,
             )
-    except Exception as exc:
-        _warn_langfuse_once(
-            f"langfuse-flush:{type(exc).__name__}",
-            f"Failed to flush Langfuse client after {context}",
-            exc=exc,
-        )
+        finally:
+            with _FLUSH_LOCK:
+                _FLUSH_IN_FLIGHT = False
+
+    with _FLUSH_LOCK:
+        if _FLUSH_IN_FLIGHT:
+            # A flush is already draining the same queue; stacking another one
+            # would only add threads for no extra delivery.
+            return
+        _FLUSH_IN_FLIGHT = True
+    threading.Thread(target=_run, name="langfuse-flush", daemon=True).start()
 
 
 def _ts() -> str:

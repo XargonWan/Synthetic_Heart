@@ -31,10 +31,24 @@ class _RecordingRepository:
 
     def __init__(self) -> None:
         self.notes: list[Any] = []
+        self.resolved: list[tuple[str, str]] = []
 
     async def upsert_situational_note(self, note: Any) -> str:
         self.notes.append(note)
         return note.id or "generated"
+
+    async def list_active_situational_notes(
+        self, now: Any, subject: Any = None
+    ) -> list[Any]:
+        return [n for n in self.notes if getattr(n, "status", "active") == "active"]
+
+    async def resolve_situational_note(
+        self, note_id: str, new_status: str, summary_delta: Any = None
+    ) -> None:
+        self.resolved.append((note_id, new_status))
+        for note in self.notes:
+            if note.id == note_id:
+                note.status = new_status
 
 
 def _install(
@@ -292,3 +306,366 @@ async def test_turn_content_reaches_the_model(
     assert context["llm_response_text"] in user_part
     # A bare JSON object is exactly what got swallowed before.
     assert not user_part.strip().startswith("{")
+
+
+def test_extract_instructions_scope_notes_to_the_human_and_canonical_subjects() -> None:
+    """The prompt must carry the rules the live store was missing.
+
+    Two live defects came from the prompt, not the code: notes about the
+    persona's own state and about third parties ("2D recovering from an intense
+    night of drinking") were stored as the human's situation, and one event was
+    re-described under a dozen different subjects ("Gathering at Sandro's",
+    "Gathering tonight", "Human", "upcoming outing"), so the store accumulated
+    twelve active notes for a single evening.
+    """
+    from plugins.debrief.debrief_situational_notes import _EXTRACT_INSTRUCTIONS
+
+    assert "EVERY NOTE MUST BE ABOUT THE HUMAN'S CIRCUMSTANCES" in _EXTRACT_INSTRUCTIONS
+    assert "SHORT canonical noun phrase" in _EXTRACT_INSTRUCTIONS
+    assert "Never use a bare person's name" in _EXTRACT_INSTRUCTIONS
+    assert "belong to the persona's diary" in _EXTRACT_INSTRUCTIONS
+
+
+def _older_note(subject: str, summary: str) -> Any:
+    from datetime import datetime, timezone
+
+    from core.soul.models import situational_note_from_extraction
+
+    note = situational_note_from_extraction(
+        note_type="EVENT",
+        subject=subject,
+        summary=summary,
+        valid_until=datetime(2026, 9, 19, tzinfo=timezone.utc),
+        now=datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc),
+    )
+    note.id = "tsc-older-account"
+    return note
+
+
+@pytest.mark.asyncio
+async def test_a_re_description_supersedes_the_older_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One circumstance, many accounts: the newest wins, the older ones retire.
+
+    Live effect of the old behaviour (2026-09-18): twelve active notes for one
+    evening gathering, two of them contradicting each other outright ("took place
+    last night and went fine" next to "expected tonight").
+    """
+    repo = _RecordingRepository()
+    repo.notes.append(
+        _older_note(
+            "Gathering at Sandro's",
+            "A gathering at Sandro's is happening tonight.",
+        )
+    )
+    _install(
+        monkeypatch,
+        llm_text=(
+            '{"notes":[{"note_type":"EVENT","subject":"Gathering at Sandro\'s tonight",'
+            '"summary":"The gathering at Sandro\'s happened last night and went fine.",'
+            '"priority":1,"confidence":0.85,'
+            '"valid_until":"2026-09-19T06:00:00+00:00"}]}'
+        ),
+        repository=repo,
+    )
+
+    original_message, context = _turn()
+    await DebriefSituationalNotesPlugin().on_debrief(
+        processed_actions=[],
+        failed_actions=[],
+        results={},
+        context=context,
+        original_message=original_message,
+    )
+
+    assert repo.resolved == [("tsc-older-account", "superseded")]
+    assert repo.notes[0].status == "superseded"
+    # The note just stored stays active; it is never retired by its own write.
+    assert repo.notes[-1].status == "active"
+
+
+@pytest.mark.asyncio
+async def test_unrelated_notes_are_not_superseded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _RecordingRepository()
+    repo.notes.append(
+        _older_note(
+            "Scar takes twice-daily medication",
+            "Scar takes pills twice a day before sleeping.",
+        )
+    )
+    _install(
+        monkeypatch,
+        llm_text=(
+            '{"notes":[{"note_type":"EVENT","subject":"Gathering at Sandro\'s tonight",'
+            '"summary":"A gathering at Sandro\'s is happening tonight.",'
+            '"priority":1,"confidence":0.8,'
+            '"valid_until":"2026-09-19T06:00:00+00:00"}]}'
+        ),
+        repository=repo,
+    )
+
+    original_message, context = _turn()
+    await DebriefSituationalNotesPlugin().on_debrief(
+        processed_actions=[],
+        failed_actions=[],
+        results={},
+        context=context,
+        original_message=original_message,
+    )
+
+    assert repo.resolved == []
+    assert repo.notes[0].status == "active"
+
+
+def _note(note_id: str, subject: str, summary: str) -> Any:
+    from datetime import datetime, timezone
+
+    from core.soul.models import situational_note_from_extraction
+
+    note = situational_note_from_extraction(
+        note_type="STATE",
+        subject=subject,
+        summary=summary,
+        valid_until=datetime(2026, 9, 20, tzinfo=timezone.utc),
+        now=datetime(2026, 9, 19, 0, 0, tzinfo=timezone.utc),
+    )
+    note.id = note_id
+    return note
+
+
+def test_ended_subjects_are_parsed_from_both_shapes() -> None:
+    """The ended channel accepts plain strings and objects, and ignores junk."""
+    plugin = DebriefSituationalNotesPlugin()
+
+    assert plugin._extract_ended_subjects({"ended": ["Sore cock"]}) == ["Sore cock"]
+    assert plugin._extract_ended_subjects({"ended": [{"subject": "Sore cock"}]}) == [
+        "Sore cock"
+    ]
+    assert plugin._extract_ended_subjects({"ended": "Sore cock"}) == ["Sore cock"]
+    assert plugin._extract_ended_subjects({"notes": []}) == []
+    assert plugin._extract_ended_subjects("nonsense") == []
+    assert plugin._extract_ended_subjects({"ended": ["  ", 7]}) == []
+
+
+def test_extract_instructions_ask_for_ended_circumstances() -> None:
+    """The prompt must carry the retirement obligation, or nothing resolves."""
+    from plugins.debrief.debrief_situational_notes import _EXTRACT_INSTRUCTIONS
+
+    assert "have ENDED or been CONTRADICTED" in _EXTRACT_INSTRUCTIONS
+    assert '"ended"' in _EXTRACT_INSTRUCTIONS
+    assert "I'm not sore any more" in _EXTRACT_INSTRUCTIONS
+    # The old contract promised only a notes list, which is what made a
+    # contradiction unexpressible.
+    assert "return an empty notes list when nothing time-bounded was said" not in (
+        _EXTRACT_INSTRUCTIONS
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_contradicted_circumstance_resolves_the_standing_note(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A note the turn contradicts must stop being injected.
+
+    Live (2026-09-19): the human said "I'm not sore" at 11:27 and again at 13:20,
+    the standing STATE note stayed active with ten hours of validity left, and the
+    soreness was asserted at 15:16 as present-tense fact ("you're sore, remember?
+    So it's hands and mouth only tonight"). Nothing retired a note unless a
+    replacement note was written about the same subject, and a correction is not a
+    new circumstance.
+    """
+    repo = _RecordingRepository()
+    repo.notes.append(_note("tsc-sore", "Sore cock", "The human's cock is sore."))
+    repo.notes.append(_note("tsc-weekend", "Weekend schedule", "The weekend is free."))
+    _install(
+        monkeypatch,
+        llm_text='{"notes":[],"ended":["Sore cock"]}',
+        repository=repo,
+    )
+
+    original_message, context = _turn()
+    await DebriefSituationalNotesPlugin().on_debrief(
+        processed_actions=[],
+        failed_actions=[],
+        results={},
+        context=context,
+        original_message=original_message,
+    )
+
+    assert repo.resolved == [("tsc-sore", "resolved")]
+    # A correction carries no new circumstance, so nothing was stored.
+    assert repo.notes[0].status == "resolved"
+    assert repo.notes[1].status == "active"
+
+
+@pytest.mark.asyncio
+async def test_an_ended_subject_leaves_unrelated_and_personal_notes_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retirement is scoped: an unmatched or too-thin subject resolves nothing."""
+    repo = _RecordingRepository()
+    repo.notes.append(_note("tsc-weekend", "Weekend schedule", "The weekend is free."))
+    _install(
+        monkeypatch,
+        llm_text='{"notes":[],"ended":["Sore cock","Scar"]}',
+        repository=repo,
+    )
+
+    original_message, context = _turn()
+    await DebriefSituationalNotesPlugin().on_debrief(
+        processed_actions=[],
+        failed_actions=[],
+        results={},
+        context=context,
+        original_message=original_message,
+    )
+
+    # "Sore cock" matches nothing here, and the bare name "Scar" is below the
+    # minimum meaningful tokens, so it can never stand in for a circumstance.
+    assert repo.resolved == []
+    assert repo.notes[0].status == "active"
+
+
+@pytest.mark.asyncio
+async def test_a_shorter_subject_retires_the_longer_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Containment, not equality: the human's shorter wording still matches."""
+    repo = _RecordingRepository()
+    repo.notes.append(
+        _note(
+            "tsc-long",
+            "Recovery soreness from yesterday",
+            "The human is recovering and sore.",
+        )
+    )
+    _install(
+        monkeypatch,
+        llm_text='{"notes":[],"ended":["Recovery soreness"]}',
+        repository=repo,
+    )
+
+    original_message, context = _turn()
+    await DebriefSituationalNotesPlugin().on_debrief(
+        processed_actions=[],
+        failed_actions=[],
+        results={},
+        context=context,
+        original_message=original_message,
+    )
+
+    assert repo.resolved == [("tsc-long", "resolved")]
+    assert repo.notes[0].status == "resolved"
+
+
+@pytest.mark.asyncio
+async def test_the_filed_notes_reach_the_extraction_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The extractor must be shown the filed wording it is asked to retire.
+
+    Regression (live, 2026-09-23): the instructions asked for a circumstance
+    "worded exactly as it was filed before" while the prompt never carried the
+    filed notes, so a correction could only be a guess and no stale note could
+    ever be named for retirement.
+    """
+    repo = _RecordingRepository()
+    repo.notes.append(
+        _older_note(
+            "wedding day",
+            "The wedding is tomorrow (2026-09-23); the day is Dee's.",
+        )
+    )
+    calls = _install(monkeypatch, llm_text='{"notes":[]}', repository=repo)
+
+    original_message, context = _turn()
+    await DebriefSituationalNotesPlugin().on_debrief(
+        processed_actions=[],
+        failed_actions=[],
+        results={},
+        context=context,
+        original_message=original_message,
+    )
+
+    user_part = next(m["content"] for m in calls["messages"] if m["role"] == "user")
+    assert "filed notes" in user_part
+    assert "wedding day" in user_part
+    assert "The wedding is tomorrow (2026-09-23); the day is Dee's." in user_part
+    # The window is absolute, so the extractor can see the note is out of date.
+    assert "2026-09-18T12:00:00+00:00 -> 2026-09-19T00:00:00+00:00" in user_part
+
+
+@pytest.mark.asyncio
+async def test_no_filed_notes_leaves_the_prompt_as_it_was(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty store adds no block: the fail-safe path is invisible."""
+    repo = _RecordingRepository()
+    calls = _install(monkeypatch, llm_text='{"notes":[]}', repository=repo)
+
+    original_message, context = _turn()
+    await DebriefSituationalNotesPlugin().on_debrief(
+        processed_actions=[],
+        failed_actions=[],
+        results={},
+        context=context,
+        original_message=original_message,
+    )
+
+    user_part = next(m["content"] for m in calls["messages"] if m["role"] == "user")
+    assert "filed notes" not in user_part
+
+
+@pytest.mark.asyncio
+async def test_a_stale_filed_note_is_retired_by_its_own_subject(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A claimed-in-the-future note the turn corrects must stop being injected.
+
+    Live (2026-09-23, the 2D instance): the store held `[TSC EVENT] The wedding
+    is tomorrow (2026-09-23)` active while the human had said, in the same
+    conversation, that the wedding happened two mornings earlier. The note's
+    window had not run out, so nothing retired it; and its subject reduces to a
+    single meaningful token ("wedding tomorrow" -> {"wedding"}), which the
+    containment rule alone can never match. The correction now names the filed
+    subject verbatim and that exact subject is enough.
+    """
+    repo = _RecordingRepository()
+    repo.notes.append(
+        _older_note(
+            "wedding tomorrow",
+            "The wedding is happening tomorrow (2026-09-23).",
+        )
+    )
+    _install(
+        monkeypatch,
+        llm_text='{"notes":[],"ended":["wedding tomorrow"]}',
+        repository=repo,
+    )
+
+    original_message, context = _turn()
+    await DebriefSituationalNotesPlugin().on_debrief(
+        processed_actions=[],
+        failed_actions=[],
+        results={},
+        context=context,
+        original_message=original_message,
+    )
+
+    assert repo.resolved == [("tsc-older-account", "resolved")]
+    assert repo.notes[0].status == "resolved"
+
+
+def test_extract_instructions_require_stale_filed_notes_to_be_reported() -> None:
+    """Two rules the wedding incident turned on must stay in the prompt."""
+    from plugins.debrief.debrief_situational_notes import _EXTRACT_INSTRUCTIONS
+
+    assert "STALE" in _EXTRACT_INSTRUCTIONS
+    assert "filed notes" in _EXTRACT_INSTRUCTIONS
+    assert "character for character" in _EXTRACT_INSTRUCTIONS
+    # A summary is read on later days, so relative day words make it a lie.
+    assert "ABSOLUTE date" in _EXTRACT_INSTRUCTIONS
+    assert "never a bare relative word" in _EXTRACT_INSTRUCTIONS

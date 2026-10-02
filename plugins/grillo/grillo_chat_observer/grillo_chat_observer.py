@@ -40,38 +40,14 @@ register_exposed_var(
 
 register_exposed_var(
     "GRILLO_OBSERVER_SELF_WINDOW",
-    label="Grillo Observer Self-Skip Window (s)",
+    label="Grillo Outbound Duplicate Window (s)",
     default=43200,
     value_type=float,
     ui_type="number",
-    description="Seconds during which a chat whose last message comes from the synth is ignored when collecting snippets",
+    description="Window (seconds) in which an identical outbound Grillo message to the same conversation is suppressed as a duplicate. It does NOT gate outreach eligibility — the live-conversation guard (GRILLO_OUTREACH_QUIET_MINUTES) is the only thing that holds outreach back",
     scope="plugins",
     component="grillo_chat_observer",
     advanced=True,
-    tags=["plugin"],
-)
-
-register_exposed_var(
-    "GRILLO_OBSERVER_SELF_COOLDOWN_DAYS",
-    label="Grillo Observer Self-Cooldown (days)",
-    default=3,
-    value_type=int,
-    ui_type="number",
-    description="Strict anti-spam guard: a conversation whose last message came from the synth is FORBIDDEN for proactive messaging for this many days. Set to 0 to fall back to the finer-grained minutes cooldown (GRILLO_OBSERVER_SELF_COOLDOWN_MINUTES)",
-    scope="plugins",
-    component="grillo_chat_observer",
-    tags=["plugin"],
-)
-
-register_exposed_var(
-    "GRILLO_OBSERVER_SELF_COOLDOWN_MINUTES",
-    label="Grillo Observer Self-Cooldown (minutes)",
-    default=45,
-    value_type=int,
-    ui_type="number",
-    description="Fine-grained anti-spam guard used when the days cooldown is 0: after the synth speaks last in a conversation, proactive messaging to it is blocked for this many minutes. Keep it below GRILLO_OBSERVER_INTERVAL or every other run will be skipped",
-    scope="plugins",
-    component="grillo_chat_observer",
     tags=["plugin"],
 )
 
@@ -81,7 +57,7 @@ register_exposed_var(
     default=15,
     value_type=int,
     ui_type="number",
-    description="Active-conversation guard: a chat whose last HUMAN message is younger than this is considered mid-conversation and is skipped by proactive outreach for that run",
+    description="Active-conversation guard — the ONLY gate that holds proactive outreach back: a chat whose most recent message (from either the human or the synth) is younger than this is considered mid-conversation and is skipped by proactive outreach for that run",
     scope="plugins",
     component="grillo_chat_observer",
     tags=["plugin"],
@@ -176,54 +152,18 @@ class GrilloChatObserverPlugin:
             component="grillo_chat_observer",
             advanced=True,
         )
-        # How far back (seconds) we honour the "last message was from self" rule.
-        # If the most recent message in a conversation comes from the bot and is
-        # younger than this window, the chat will be skipped when gathering
-        # snippets. This prevents Grillo from endlessly re‑poking a channel that
-        # already has an unanswered synthetic question. Default 12h.
-        self.self_skip_window = float(
-            config_registry.get_value(
-                "GRILLO_OBSERVER_SELF_WINDOW",
-                43200,
-                label="Grillo Observer Self-Skip Window (s)",
-                description="Seconds during which a chat whose last message comes from the synth is ignored when collecting snippets",
-                value_type=float,
-                group="grillo",
-                component="grillo_chat_observer",
-                advanced=True,
-            )
-        )
-        # Anti-spam self-cooldown: number of days a path is off-limits for
-        # proactive messaging if its most recent message came from the synth.
-        # When 0, the finer-grained minutes cooldown below applies instead.
-        self.self_cooldown_days = int(
-            config_registry.get_value(
-                "GRILLO_OBSERVER_SELF_COOLDOWN_DAYS",
-                3,
-                label="Grillo Observer Self-Cooldown (days)",
-                description="Strict anti-spam guard: a conversation whose last message came from the synth is forbidden for proactive messaging for this many days. Set to 0 to use the minutes cooldown instead",
-                value_type=int,
-                group="grillo",
-                component="grillo_chat_observer",
-            )
-        )
-        # Fine-grained self-cooldown used when the days guard is disabled (0).
-        # Must stay below the observer interval, otherwise consecutive runs
-        # will always land inside the cooldown and outreach halves in cadence.
-        self.self_cooldown_minutes = int(
-            config_registry.get_value(
-                "GRILLO_OBSERVER_SELF_COOLDOWN_MINUTES",
-                45,
-                label="Grillo Observer Self-Cooldown (minutes)",
-                description="Fine-grained anti-spam guard used when the days cooldown is 0: after the synth speaks last in a conversation, proactive messaging to it is blocked for this many minutes",
-                value_type=int,
-                group="grillo",
-                component="grillo_chat_observer",
-            )
-        )
-        # Active-conversation guard: if the last HUMAN message in a chat is
-        # younger than this, the conversation is considered live and proactive
-        # outreach must not butt into it; the next run re-evaluates.
+        # Live-conversation guard — the ONLY gate that holds proactive
+        # outreach back. A chat whose most recent message (from the human OR
+        # from the synth) is younger than this is a conversation happening
+        # right now, and outreach must not butt into it; the next run
+        # re-evaluates.
+        #
+        # There is deliberately no "the synth spoke last, so stay away" guard
+        # any more. A responsive synth is the newest speaker in every chat it
+        # is part of, so such a guard (a 12 h awaiting-reply window) excluded
+        # every real conversation permanently and outreach could never fire.
+        # The beat owns the cadence (GRILLO_OBSERVER_INTERVAL); this quiet
+        # window is what keeps it from derailing a live exchange.
         self.quiet_minutes = int(
             config_registry.get_value(
                 "GRILLO_OUTREACH_QUIET_MINUTES",
@@ -283,18 +223,6 @@ class GrilloChatObserverPlugin:
         config_registry.add_listener(
             "GRILLO_OBSERVER_STORE_MEMORIES",
             lambda v: setattr(self, "store_memories", bool(v)),
-        )
-        config_registry.add_listener(
-            "GRILLO_OBSERVER_SELF_WINDOW",
-            lambda v: setattr(self, "self_skip_window", float(v)),
-        )
-        config_registry.add_listener(
-            "GRILLO_OBSERVER_SELF_COOLDOWN_DAYS",
-            lambda v: setattr(self, "self_cooldown_days", int(v)),
-        )
-        config_registry.add_listener(
-            "GRILLO_OBSERVER_SELF_COOLDOWN_MINUTES",
-            lambda v: setattr(self, "self_cooldown_minutes", int(v)),
         )
         config_registry.add_listener(
             "GRILLO_OUTREACH_QUIET_MINUTES",
@@ -450,17 +378,38 @@ class GrilloChatObserverPlugin:
                     except (TypeError, ValueError):
                         max_ts_epoch = None
 
-                if cnt == 0:
-                    # No fresh non-self traffic. Rather than going passive, this
+                # Freshness is a WALL-CLOCK question, not a cursor question.
+                # "Newer than last_run" stops meaning "live" the moment the
+                # process is away for longer than one cadence: the newest message
+                # can be hours old and still newer than the cursor, and calling
+                # that fresh traffic drops the proactive note further down (and
+                # leaves the header's "do not reply to a stale line" in force),
+                # so a run that comes back after an outage answers nothing and
+                # outreach silently stops happening.
+                now_ts = datetime.now(timezone.utc).timestamp()
+                freshness_window = float(max(60, int(self.interval)))
+                newest_is_recent = (
+                    max_ts_epoch is None or (now_ts - max_ts_epoch) <= freshness_window
+                )
+                if cnt == 0 or not newest_is_recent:
+                    # No live non-self traffic. Rather than going passive, this
                     # is precisely the "vacuum of initiative" the observer is
                     # meant to overcome: proceed on a decay-driven basis so the
                     # synth can be proactive. The anti-dead-chat and
                     # self-cooldown gates in _collect_eligible_targets keep this
                     # from spamming silent or synth-dominated conversations.
                     decay_driven = True
-                    log_debug(
-                        "[grillo_chat_observer] No new non-self messages since last_run; entering decay-driven proactive mode"
-                    )
+                    if max_ts_epoch is not None:
+                        log_debug(
+                            f"[grillo_chat_observer] {cnt} new non-self message(s) "
+                            f"since last_run but the newest is "
+                            f"{(now_ts - max_ts_epoch) / 3600.0:.1f}h old (older than one "
+                            "cadence); entering decay-driven proactive mode"
+                        )
+                    else:
+                        log_debug(
+                            "[grillo_chat_observer] No new non-self messages since last_run; entering decay-driven proactive mode"
+                        )
                 else:
                     decay_driven = False
                     log_debug(
@@ -491,11 +440,33 @@ class GrilloChatObserverPlugin:
                         f"[grillo_chat_observer] Chat update checker fallback failed; proceeding in decay-driven mode: {e2}"
                     )
 
-            fragments = await self._collect_recent_snippets(self.samples)
+            fragments, own_lines = await self._collect_recent_snippets(self.samples)
 
             # Per-path metadata for routable, anti-spam-aware proactivity.
             targets = await self._collect_eligible_targets(self.samples)
             eligible_targets = [t for t in targets if t.get("eligible")]
+
+            # The conversation that was active MOST RECENTLY is the natural place
+            # to speak. When it is live the person is right there, so reaching
+            # into a different chat is outreach drifting away from them rather
+            # than toward them (live 2026-09-20 11:07: the direct message was
+            # live, so the run reached into a group chat instead). Proactive mode
+            # only: the react path below still answers fresh traffic normally, and
+            # the next run re-evaluates. Structural only — the same recency
+            # ordering and live flag this metadata already carries, never text.
+            newest_target = min(
+                (t for t in targets if t.get("age_seconds") is not None),
+                key=lambda t: t.get("age_seconds") or 0.0,
+                default=None,
+            )
+            if decay_driven and newest_target is not None:
+                if newest_target.get("in_active_conversation"):
+                    log_info(
+                        "[grillo_chat_observer] Newest conversation "
+                        f"{newest_target.get('interface_path')} is live; staying "
+                        "silent instead of reaching out elsewhere"
+                    )
+                    eligible_targets = []
 
             # In decay-driven mode there is no fresh traffic to react to, so we
             # need at least one eligible target to speak into; otherwise the
@@ -515,7 +486,7 @@ class GrilloChatObserverPlugin:
                 await self._store_passive_memories(fragments)
 
             prompt = self._build_observer_prompt(
-                fragments, eligible_targets, decay_driven
+                fragments, eligible_targets, decay_driven, own_lines=own_lines
             )
 
             # Activity log entry
@@ -646,11 +617,110 @@ class GrilloChatObserverPlugin:
                 return True
         return False
 
-    async def _collect_recent_snippets(self, limit: int) -> List[str]:
-        snippets = []
+    @staticmethod
+    def _last_used_datetime(value: Any) -> Optional[datetime]:
+        """Parse an ``interface_paths.last_used`` value (datetime or ISO string)."""
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            text = str(value).strip()
+            if not text:
+                return None
+            try:
+                dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except Exception:
+                return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+
+    @classmethod
+    def _render_own_line(cls, chat_path: str, text: str, timestamp: Any) -> str:
+        """Render one of the synth's own lines as CONTEXT, never as a target.
+
+        Same tag shape as every other snippet, plus the two things a small model
+        gets wrong about its own output: that the line is its own, and that it is
+        not something to answer.
+        """
+        snippet = " ".join(str(text or "").split())
+        if len(snippet) > 300:
+            snippet = snippet[:300] + "..."
+        age_label = cls._relative_age_label(timestamp)
+        return (
+            f"(chat:{chat_path} | sender:self | {age_label} | your own line, "
+            f"not a reply target) {snippet}"
+        )
+
+    @classmethod
+    def _render_answered_line(
+        cls, chat_path: str, sender: str, text: Any, timestamp: Any
+    ) -> str:
+        """Render a line the synth has ALREADY answered as CONTEXT, not a target.
+
+        Same tag shape as every other snippet, plus the fact a small model gets
+        wrong about a conversation it just handled: that this line is already
+        answered, so there is nothing left to reply to here. Whether a chat
+        counts as answered is decided structurally by the caller, from message
+        timestamps (the synth's newest line is newer than the newest line from
+        the other person) together with the live-conversation window — never
+        from message text.
+
+        Live 2026-09-25 04:31: the DM had been answered two minutes earlier, the
+        beat was still handed the human's line as a reply target, and it re-sent
+        the synth's own previous reply verbatim into Telegram. Lines rendered
+        here never enter ``snippets``/``grillo_snippets``, so a reply aimed at
+        them is dropped as misrouted instead of being delivered twice.
+        """
+        snippet = " ".join(str(text or "").split())
+        if len(snippet) > 300:
+            snippet = snippet[:300] + "..."
+        age_label = cls._relative_age_label(timestamp)
+        return (
+            f"(chat:{chat_path} | sender:{sender} | {age_label} | you already "
+            f"answered this, not a reply target) {snippet}"
+        )
+
+    async def _collect_recent_snippets(self, limit: int) -> tuple[List[str], List[str]]:
+        """Collect ``(snippets from other people, context lines)``.
+
+        The two lists are deliberately separate. ``snippets`` is what the beat may
+        answer and what ``grillo_snippets`` carries into the routing guard; the
+        second is context only — what each conversation already holds, from the
+        synth's side and from lines it has already answered — and is rendered
+        into the prompt without ever widening the set of reachable chats.
+
+        A chat counts as *already answered* when the synth's own newest line is
+        newer than the newest line from anyone else there, and as *live* while
+        any message in it is younger than ``GRILLO_OUTREACH_QUIET_MINUTES``. In
+        that combination — the conversation is happening right now and the synth
+        has already replied to it — the other person's lines are context, not
+        reply targets: the synth has nothing pending there, and the live-guard
+        that keeps proactive outreach out of a live chat applies to snippet
+        replies too.
+        """
+        snippets: List[str] = []
+        own_lines: List[str] = []
         try:
             from core.chat_history_cache import load_chat_history
             from core.interface_paths import get_recent_interface_paths
+
+            now = datetime.now(timezone.utc)
+            # Same anti-dead-chat gate the target list applies: a conversation
+            # nobody has touched within GRILLO_OBSERVER_ACTIVITY_WINDOW_DAYS
+            # contributes no context. Without it the snippet pool was "the N most
+            # recently used paths" with no cutoff at all, so whenever the live
+            # conversations did not fill the limit the observer's context was
+            # padded with lines from chats dead for weeks — 40-day-old WebUI
+            # entries and 77-day-old roleplay from a chat that no longer exists
+            # were observed in a live outreach prompt, which reads as a broken
+            # memory context (and invites the model to reply to ancient lines).
+            activity_cutoff = now - timedelta(days=self.activity_window_days)
+            # Same live-conversation window the eligible-target builder uses: any
+            # message younger than this means the chat is being spoken in right
+            # now.
+            quiet_cutoff = now - timedelta(minutes=self.quiet_minutes)
 
             recent = await get_recent_interface_paths(limit * 2)
             for item in recent:
@@ -660,6 +730,11 @@ class GrilloChatObserverPlugin:
                 if not chat_path:
                     continue
                 chat_path = str(chat_path)
+                last_used = self._last_used_datetime(
+                    item.get("last_used") if isinstance(item, dict) else None
+                )
+                if last_used is not None and last_used < activity_cutoff:
+                    continue
                 # Never surface chats whose stored path is a placeholder —
                 # the model would copy the garbage path into an action.
                 if self._is_placeholder_path(chat_path):
@@ -675,45 +750,25 @@ class GrilloChatObserverPlugin:
                     continue
                 try:
                     messages = await load_chat_history(chat_path)
-                    # if the most recent message belongs to the synth and it was
-                    # sent less than `self.self_skip_window` seconds ago, ignore
-                    # this chat entirely. this does not affect messages already
-                    # queued for processing; it only controls what snippets the
-                    # observer hands to the LLM.
-                    try:
-                        if messages:
-                            last_msg = messages[-1]
-                            if isinstance(last_msg, dict):
-                                sender = (
-                                    last_msg.get("sender_name")
-                                    or last_msg.get("sender_id")
-                                    or ""
-                                )
-                                ts_str = last_msg.get("timestamp") or ""
-                                if sender in ("self", "synth") and ts_str:
-                                    try:
-                                        ts = datetime.fromisoformat(
-                                            ts_str.replace("Z", "+00:00")
-                                        )
-                                        if ts.tzinfo is None:
-                                            ts = ts.replace(tzinfo=timezone.utc)
-                                        age = (
-                                            datetime.now(timezone.utc) - ts
-                                        ).total_seconds()
-                                        if age < self.self_skip_window:
-                                            # skip this chat
-                                            continue
-                                    except Exception:
-                                        pass
-                    except Exception:
-                        # defensively ignore any parsing errors and continue
-                        pass
+                    # No chat-level "the synth spoke last, so ignore the whole
+                    # chat" rule: for a responsive synth that matches every
+                    # conversation, which left the observer with no live
+                    # context to reason about. Synth's own lines are still
+                    # filtered out per message below, so self-reply spam stays
+                    # impossible while the human's lines stay visible.
                     # take up to 2 recent messages per chat — HUMAN-authored
                     # only. Synth's own messages must never be surfaced as
                     # snippets to "naturally reply to": a small model cannot
                     # reliably distinguish its own output from a human turn and
                     # will talk to itself (self-reply spam).
                     taken = 0
+                    own_line: Optional[str] = None
+                    # Other people's renderable lines for this chat, kept until
+                    # the timestamps say whether the chat is answered.
+                    chat_lines: List[tuple[str, Any, str]] = []
+                    newest_other_ts: Optional[datetime] = None
+                    newest_self_ts: Optional[datetime] = None
+                    newest_any_ts: Optional[datetime] = None
                     for msg in reversed(list(messages)):
                         if not isinstance(msg, dict):
                             continue
@@ -721,27 +776,82 @@ class GrilloChatObserverPlugin:
                         sender = (
                             msg.get("sender_name") or msg.get("sender_id") or "unknown"
                         )
-                        if self._is_self_sender(sender):
-                            continue
                         timestamp = msg.get("timestamp") or ""
-                        # Relative-age annotation. A bare ISO timestamp is
-                        # invisible-as-old to a small model, so it treats a
-                        # days-old line as the current moment and continues it
-                        # (see AGENTS.md §12 staleness note). Tagging each
-                        # snippet with how long ago it was said lets the model
-                        # judge staleness itself — no hard age gate, so outreach
-                        # always has context behind it.
+                        msg_ts = self._parse_ts(timestamp)
+                        if msg_ts is not None and (
+                            newest_any_ts is None or msg_ts > newest_any_ts
+                        ):
+                            newest_any_ts = msg_ts
+                        if self._is_self_sender(sender):
+                            # The synth's OWN most recent line in this chat is
+                            # kept, but as context: a beat handed only the
+                            # human's first-person lines carries on in the
+                            # human's voice (live 2026-09-23, trace 3499288d:
+                            # the DM outreach addressed the human as "wife",
+                            # while the same turn's diary wrote "him"). One per
+                            # chat, and it never enters ``grillo_snippets`` —
+                            # that list is what the routing guard turns into
+                            # reachable paths, and a chat the human never spoke
+                            # in must not become reachable through the synth's
+                            # own line.
+                            if msg_ts is not None and (
+                                newest_self_ts is None or msg_ts > newest_self_ts
+                            ):
+                                newest_self_ts = msg_ts
+                            if own_line is None and text:
+                                own_line = self._render_own_line(
+                                    chat_path, text, timestamp
+                                )
+                            continue
                         if text:
-                            snippet = text.strip()
+                            if msg_ts is not None and (
+                                newest_other_ts is None or msg_ts > newest_other_ts
+                            ):
+                                newest_other_ts = msg_ts
+                            chat_lines.append((sender, timestamp, text.strip()))
+                            taken += 1
+                        if taken >= 2 or len(snippets) >= limit:
+                            break
+                    if chat_lines:
+                        # Structural decision, from timestamps only: the synth
+                        # has the last word here (``answered``) while the chat is
+                        # still being spoken in (``live``) => there is nothing
+                        # pending to answer, so these lines are context and never
+                        # reply targets. An answered but idle chat keeps its
+                        # human lines as replyable snippets: reaching out there
+                        # later with something new is the beat's purpose, and a
+                        # repeat of the synth's own last line is caught at
+                        # delivery (``GRILLO_DUP_SIMILARITY_THRESHOLD``).
+                        answered = newest_self_ts is not None and (
+                            newest_other_ts is None or newest_self_ts > newest_other_ts
+                        )
+                        live = (
+                            newest_any_ts is not None and newest_any_ts > quiet_cutoff
+                        )
+                        for sender, timestamp, raw_text in chat_lines:
+                            if answered and live and len(own_lines) < limit:
+                                own_lines.append(
+                                    self._render_answered_line(
+                                        chat_path, sender, raw_text, timestamp
+                                    )
+                                )
+                                continue
+                            # Relative-age annotation. A bare ISO timestamp is
+                            # invisible-as-old to a small model, so it treats a
+                            # days-old line as the current moment and continues it
+                            # (see AGENTS.md §12 staleness note). Tagging each
+                            # snippet with how long ago it was said lets the model
+                            # judge staleness itself — no hard age gate, so outreach
+                            # always has context behind it.
+                            snippet = raw_text
                             if len(snippet) > 300:
                                 snippet = snippet[:300] + "..."
                             age_label = self._relative_age_label(timestamp)
                             snippets.append(
                                 f"(chat:{chat_path} | sender:{sender} | {age_label}) {snippet}"
                             )
-                            taken += 1
-                        if taken >= 2 or len(snippets) >= limit:
-                            break
+                    if own_line and len(own_lines) < limit:
+                        own_lines.append(own_line)
                 except Exception:
                     continue
 
@@ -756,11 +866,11 @@ class GrilloChatObserverPlugin:
                     out.append(s)
                     if len(out) >= limit:
                         break
-                return out
-            return []
+                return out, own_lines
+            return [], own_lines
         except Exception as e:
             log_error(f"[grillo_chat_observer] Error collecting snippets: {e}")
-            return []
+            return [], []
 
     async def _collect_eligible_targets(self, limit: int) -> List[Dict[str, Any]]:
         """Build per-path metadata for proactivity decisions (network-agnostic).
@@ -771,15 +881,16 @@ class GrilloChatObserverPlugin:
         - ``last_from_self``: whether the synth spoke last
         - ``age_seconds``: absolute time delta since the last message
         - ``eligible``: True only if there was genuine human (non-self)
-          activity within ``activity_window_days`` (anti-dead-chat gate), the
-          self-cooldown is not currently active, AND the conversation is not
-          live right now (see ``in_active_conversation``).
-        - ``cooldown_active``: True when the synth spoke last within the
-          cooldown window. The window is ``self_cooldown_days`` when > 0
-          (strict legacy behaviour); otherwise ``self_cooldown_minutes``.
-        - ``in_active_conversation``: True when a human spoke last within
-          ``quiet_minutes`` — the chat is mid-conversation and outreach must
-          not interrupt it; the next run re-evaluates.
+          activity within ``activity_window_days`` (anti-dead-chat gate) AND
+          the conversation is not live right now (see
+          ``in_active_conversation``). Who spoke last does not matter: a chat
+          the synth answered an hour ago is a perfectly good outreach target,
+          because a responsive synth is the newest speaker in every chat it
+          takes part in.
+        - ``in_active_conversation``: True when ANY message (from either the
+          human or the synth) arrived within ``quiet_minutes`` — the chat is
+          mid-conversation and outreach must not interrupt it; the next run
+          re-evaluates.
 
         The activation-frame prompt uses this to pick a precise
         ``interface_path`` where a void was detected, instead of routing to a
@@ -792,10 +903,6 @@ class GrilloChatObserverPlugin:
 
             now = datetime.now(timezone.utc)
             activity_cutoff = now - timedelta(days=self.activity_window_days)
-            if self.self_cooldown_days > 0:
-                cooldown_cutoff = now - timedelta(days=self.self_cooldown_days)
-            else:
-                cooldown_cutoff = now - timedelta(minutes=self.self_cooldown_minutes)
             quiet_cutoff = now - timedelta(minutes=self.quiet_minutes)
 
             recent = await get_recent_interface_paths(limit * 2)
@@ -838,19 +945,23 @@ class GrilloChatObserverPlugin:
                 if last_ts is not None:
                     age_seconds = (now - last_ts).total_seconds()
 
-                # Anti-spam self-cooldown: synth spoke last within the window.
-                cooldown_active = bool(
-                    last_from_self
-                    and last_ts is not None
-                    and last_ts >= cooldown_cutoff
-                )
-
-                # Active-conversation guard: a human spoke last and recently —
-                # the chat is live, outreach must not interrupt it this run.
+                # Live-conversation guard — the ONLY gate that holds outreach
+                # back. Any message, from the human or from the synth, younger
+                # than ``quiet_minutes`` means the conversation is happening
+                # right now and proactive outreach must not interrupt it.
+                #
+                # This replaces the old 12 h "the synth spoke last, so stay
+                # away" awaiting-reply guard plus the self-cooldown. For a
+                # synth that answers everything, the newest message in a chat
+                # is its own, so that guard marked every real conversation
+                # ineligible forever (verified live: the only target the
+                # hourly beat could ever offer was a bot-notification channel)
+                # and outreach never fired. Cadence belongs to the beat
+                # schedule; a live exchange is the only thing worth deferring
+                # to. Structural sender/timestamp metadata only, never keyword
+                # logic.
                 in_active_conversation = bool(
-                    not last_from_self
-                    and last_ts is not None
-                    and last_ts >= quiet_cutoff
+                    last_ts is not None and last_ts >= quiet_cutoff
                 )
 
                 # Anti-dead-chat gate: genuine human activity within window.
@@ -866,30 +977,7 @@ class GrilloChatObserverPlugin:
                         has_recent_human = True
                         break
 
-                # Awaiting-reply guard: when the synth spoke last, the human has
-                # simply not replied yet — the person is not "gone". Mirror the
-                # snippet rule (self_skip_window): a chat whose last message is
-                # the synth's own, sent within the skip window, is NOT an
-                # outreach target. Without this, the 45-min self-cooldown
-                # expired while the human still had not answered, so the same DM
-                # was re-offered as "cooldown=ok" every hourly run and the beat
-                # nagged ("still coming tonight?" -> "hurry home!" -> "did you
-                # get home okay?") into a thread the synth already dominates
-                # (5 consecutive hourly observer beats, langfuse 404f8b76 /
-                # 1331d0ee / b4d0490c / c8b5a672 / 416e8e23). Structural sender
-                # metadata only, never keyword logic.
-                awaiting_reply = bool(
-                    last_from_self
-                    and last_ts is not None
-                    and (now - last_ts).total_seconds() < self.self_skip_window
-                )
-
-                eligible = (
-                    has_recent_human
-                    and not cooldown_active
-                    and not in_active_conversation
-                    and not awaiting_reply
-                )
+                eligible = has_recent_human and not in_active_conversation
 
                 targets.append(
                     {
@@ -897,9 +985,7 @@ class GrilloChatObserverPlugin:
                         "last_sender": last_sender,
                         "last_from_self": last_from_self,
                         "age_seconds": age_seconds,
-                        "cooldown_active": cooldown_active,
                         "in_active_conversation": in_active_conversation,
-                        "awaiting_reply": awaiting_reply,
                         "has_recent_human": has_recent_human,
                         "eligible": eligible,
                     }
@@ -965,14 +1051,140 @@ class GrilloChatObserverPlugin:
         except Exception:
             return "?"
 
+    # How many recent observer rows are compared against when deciding whether a
+    # snippet has already been stored. A snippet stays in the collection window for
+    # hours, so the same lines come back beat after beat; a few hundred rows cover
+    # every conversation the observer can currently see.
+    _DEDUPE_LOOKBACK_ROWS = 500
+
+    # A snippet younger than this is still the head of a conversation being
+    # spoken in right now: the very next prompt carries that same line as the
+    # live message, so remembering it writes a copy of the current turn into the
+    # store and the recall path serves it back beside the original. The model
+    # then reads one message as the person repeating themselves (live
+    # 2026-09-28 22:13: the human sent "I'm fine, your belly and ur so warm"
+    # once; the observer stored it 8s later and the outreach that followed wrote
+    # "'Fine' again. Second time in four minutes, husband"). Skipped, not
+    # dropped: the line stays in the collection window for hours, so a later
+    # beat stores it once it is genuinely history.
+    _FRESH_SNIPPET_SKIP_SEC = 300
+
+    @staticmethod
+    def _snippet_age_seconds(snippet: str) -> Optional[float]:
+        """Age in seconds the snippet's own age marker reports, or ``None``.
+
+        Snippets are rendered ``(chat:<path> | sender:<who> | <age>) body`` with
+        a compact age (``12m``, ``3h``, ``2d``; ``just now`` when younger than a
+        minute). Fail-safe: an unrecognised marker returns ``None`` so the
+        caller treats the line as old and stores it, never the reverse.
+        """
+        text = (snippet or "").strip()
+        head, sep, _body = text.partition(") ")
+        if not sep or not head.startswith("("):
+            return None
+        parts = [p.strip() for p in head[1:].split("|")]
+        if len(parts) < 3:
+            return None
+        label = parts[2].casefold()
+        if label.startswith("age:"):
+            label = label[4:]
+        if label.endswith(" ago"):
+            label = label[:-4]
+        label = label.strip()
+        if label in ("just now", "now"):
+            return 0.0
+        if len(label) >= 2 and label[:-1].isdigit():
+            factor = {"m": 60.0, "h": 3600.0, "d": 86400.0}.get(label[-1])
+            if factor is not None:
+                return float(int(label[:-1])) * factor
+        return None
+
+    @staticmethod
+    def _snippet_identity(snippet: str) -> str:
+        """Identity of a snippet for dedupe, with the volatile age marker removed.
+
+        A snippet is rendered as ``(chat:<path> | sender:<who> | <age>[ | <flags>]) body``
+        and the age is recomputed on every run, so the same line arrives looking new
+        each beat (``26m``, then ``3h``, then ``5h``). Dropping that one field keeps the
+        identity stable across runs while the path, the sender, any flag and the body
+        still have to match. Fail-safe: anything unparseable is compared as it stands.
+        """
+        text = (snippet or "").strip()
+        head, sep, body = text.partition(") ")
+        if not sep or not head.startswith("("):
+            return text
+        parts = [p.strip() for p in head[1:].split("|")]
+        if len(parts) >= 3:
+            parts = [parts[0], parts[1], *parts[3:]]
+        return "(" + " | ".join(parts) + ") " + body.strip()
+
+    async def _load_stored_snippet_identities(self) -> set:
+        """Identities of the observer rows already in ``memories`` (recent window)."""
+        from core.db import get_conn_ctx
+
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT content FROM memories WHERE scope = %s ORDER BY id DESC LIMIT %s",
+                    ("observer", self._DEDUPE_LOOKBACK_ROWS),
+                )
+                fetched = await cur.fetchall()
+
+        out = set()
+        for r in fetched or []:
+            content = r.get("content") if isinstance(r, dict) else (r[0] if r else None)
+            if content:
+                out.add(self._snippet_identity(str(content)))
+        return out
+
     async def _store_passive_memories(self, snippets: List[str]) -> None:
-        """Persist observer snippets as passive memories when enabled."""
+        """Persist observer snippets as passive memories, once each.
+
+        A beat re-reads the same conversations every run, so a snippet stays in the
+        window for hours and the age marker it carries is rewritten each time. Storing
+        without comparing wrote a fresh copy of the same line every beat (measured
+        2026-09-27: 511 observer rows in two days, one sentence stored seven times, and
+        those rows are in the table recall searches), so the same line could reach a
+        prompt several times over. The age marker is stripped before comparison and a
+        snippet that is already stored is skipped.
+
+        A snippet younger than ``_FRESH_SNIPPET_SKIP_SEC`` is skipped too: it is
+        still the head of a live conversation and the next prompt carries it as the
+        live message, so remembering it here is what put one message into a prompt
+        twice.
+        """
         try:
             from core.db import insert_memory
 
+            try:
+                stored = await self._load_stored_snippet_identities()
+            except Exception as e:
+                # Without the comparison every snippet looks new, which is exactly the
+                # duplication this guard exists to stop: skip the store for this run
+                # rather than write copies, and say so loudly enough to be found.
+                log_warning(
+                    "[grillo_chat_observer] could not read stored observer memories "
+                    f"({e}); skipping this run's memory store"
+                )
+                return
+
             tags = json.dumps(["grillo", "observer", "passive"])
+            written = 0
+            skipped = 0
+            fresh = 0
             for snippet in snippets:
                 try:
+                    age_seconds = self._snippet_age_seconds(snippet)
+                    if (
+                        age_seconds is not None
+                        and age_seconds < self._FRESH_SNIPPET_SKIP_SEC
+                    ):
+                        fresh += 1
+                        continue
+                    identity = self._snippet_identity(snippet)
+                    if identity in stored:
+                        skipped += 1
+                        continue
                     await insert_memory(
                         content=snippet,
                         author="observer",
@@ -980,10 +1192,13 @@ class GrilloChatObserverPlugin:
                         tags=tags,
                         scope="observer",
                     )
+                    stored.add(identity)
+                    written += 1
                 except Exception as e:
                     log_debug(f"[grillo_chat_observer] Failed to store memory: {e}")
             log_info(
-                f"[grillo_chat_observer] Stored {len(snippets)} observer snippets as memories"
+                f"[grillo_chat_observer] Stored {written} observer snippet(s) as memories "
+                f"({skipped} already stored, {fresh} still live, skipped)"
             )
         except Exception as e:
             log_warning(f"[grillo_chat_observer] Memory storage failed: {e}")
@@ -993,18 +1208,26 @@ class GrilloChatObserverPlugin:
         snippets: List[str],
         targets: Optional[List[Dict[str, Any]]] = None,
         decay_driven: bool = False,
+        own_lines: Optional[List[str]] = None,
     ) -> str:
+        own_lines = list(own_lines or [])
         header = (
             "[G.R.I.L.L.O. CHAT OBSERVER] Below are chat snippets from across conversations. "
             "Each snippet is tagged with an 'age:' marker showing how long ago it was said. "
             "Treat older snippets as historical context, NOT as the current moment — do not "
             "continue or reply to a stale line as if it just happened. Analyze and propose any "
-            "actions that would be genuinely helpful right now."
+            "actions that would be genuinely helpful right now. "
+            "A snippet whose sender is `self` is YOUR OWN earlier line in that chat: it is there "
+            "so you can see where the conversation stands, it is what YOU said (not the other "
+            "person's words), and it is never a message to reply to. "
+            "A snippet tagged `you already answered this` is the other person's line in a chat "
+            "you have ALREADY replied to just now: it is context for where that conversation "
+            "stands, not something to answer again — the conversation is up to date."
         )
 
         body = "\n\nSnippets:\n"
-        if snippets:
-            for i, s in enumerate(snippets, 1):
+        if snippets or own_lines:
+            for i, s in enumerate(list(snippets) + own_lines, 1):
                 body += f"{i}. {s}\n"
         else:
             body += "(no fresh snippets — the network is quiet)\n"
@@ -1021,19 +1244,10 @@ class GrilloChatObserverPlugin:
                     age_h = f"{float(age) / 3600.0:.1f}h" if age is not None else "?"
                 except Exception:
                     age_h = "?"
-                if t.get("cooldown_active"):
-                    cd = "ON-COOLDOWN(OFF-LIMITS)"
-                elif t.get("in_active_conversation"):
-                    cd = "LIVE-CONVERSATION(OFF-LIMITS)"
-                elif t.get("last_from_self"):
-                    # Synth spoke last and the human has not replied yet. The
-                    # person is simply away from the chat — reaching out again
-                    # to ask if they are coming back is nagging, not initiative
-                    # (observed live: "hurry home!" / "did you get home okay?"
-                    # sent into a DM where the last message was the synth's own
-                    # and the human was present). Structural sender metadata,
-                    # never keyword logic.
-                    cd = "AWAITING-REPLY(OFF-LIMITS — you spoke last; the human has not replied yet)"
+                if t.get("in_active_conversation"):
+                    # A message landed moments ago (from either side): the
+                    # conversation is live and outreach must not derail it.
+                    cd = "LIVE-CONVERSATION(OFF-LIMITS — a message arrived moments ago; do not interrupt)"
                 else:
                     cd = "ok"
                 last = t.get("last_sender") or "?"
@@ -1044,14 +1258,17 @@ class GrilloChatObserverPlugin:
         decay_note = ""
         if decay_driven:
             decay_note = (
-                "\n\nNOTE: There is no fresh incoming traffic right now. If — and only if — you have a genuine internal reason, "
-                'you may proactively reach out to one of the eligible targets above. Otherwise return {"actions": []}.\n'
+                "\n\nNOTE: There is no fresh incoming traffic right now — that is what this run is for. "
+                "Reach out to one of the eligible targets above (skipping any marked LIVE-CONVERSATION): say something new to someone who is not live, "
+                "grounded in what was last said there or in something you are actually carrying. Do not repeat a recent message and do not open with a canned line. "
+                'Return {"actions": []} only if every listed target is live, or if you genuinely have nothing that is not a repeat.\n'
             )
 
         # Ask the LLM to think like a helpful participant: choose which recent message(s) you'd naturally reply to and propose short, human replies.
         propose_clause = (
             "Think like a helpful human reading these snippets: which message(s) would you naturally reply to, and what would you say? "
             "Do NOT propose messages that are conceptually duplicate of what already appears in the snippets. "
+            "Answer as yourself, in your own voice: a snippet from someone else is what you reply to, and you never write that person's lines for them. "
             "Do NOT address or mention the WebUI or any system/internal labels (for example: 'webui' or 'system'); write as if speaking directly to the human participant(s) in the conversation."
         )
         if self.propose_only:

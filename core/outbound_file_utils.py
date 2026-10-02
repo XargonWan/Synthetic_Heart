@@ -7,8 +7,13 @@ hallucinated action cannot exfiltrate arbitrary host files.
 
 The sandbox roots come from, in order of precedence:
 
-* ``AGENT_FS_ROOTS`` — a colon-separated list of absolute roots, or
-* ``[AGENT_FS_ROOT | "/app", SYNTH_LOG_DIR | "/app/logs"]`` as the default.
+* ``AGENT_FS_ROOTS`` — a platform-path-separated list of absolute roots, or
+* ``AGENT_FS_ROOT`` and ``SYNTH_LOG_DIR``, or
+* the application root and its ``logs`` directory.
+
+Resolution lives in :func:`core.app_paths.agent_fs_roots`, so the container's
+application layout and a native install (where that path does not exist) behave
+the same way.
 
 This mirrors :meth:`plugins.agent_plugin.AgentPlugin._allowed_roots` /
 ``_resolve_safe_path`` but is a standalone module so every interface can share a
@@ -17,6 +22,7 @@ single validation path without importing the plugin.
 
 from __future__ import annotations
 
+import fnmatch
 import mimetypes
 import os
 from pathlib import Path
@@ -66,15 +72,145 @@ _IMAGE_EXTS = {
 }
 
 
+# --- Credential material is never deliverable ------------------------------
+# Files that are never attached, even from inside an allowed root. This is
+# defence in depth BEHIND the roots, not a boundary of its own: it matches the
+# resolved name and the directory parts, so a copy under an unrelated name
+# passes. It exists because an outbound root is normally the application tree,
+# and a bare checkout of that tree contains the environment file (bot tokens,
+# database and service passwords) while the container image does not, because
+# `.dockerignore` excludes `.env`.
+_DENIED_FILE_NAMES: frozenset[str] = frozenset(
+    {
+        ".env",
+        ".netrc",
+        "_netrc",
+        ".pgpass",
+        ".my.cnf",
+        ".git-credentials",
+        ".htpasswd",
+        "id_rsa",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+        "credentials",
+        "secrets",
+    }
+)
+_DENIED_NAME_PATTERNS: tuple[str, ...] = (
+    "*.env",
+    ".env.*",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    "*.jks",
+    "*.keystore",
+    "*.ppk",
+    "id_rsa.*",
+    "id_dsa.*",
+    "id_ecdsa.*",
+    "id_ed25519.*",
+    "credentials.*",
+    "secrets.*",
+    "*credentials.json",
+    "*service-account*.json",
+)
+# Directories whose whole contents are credential material.
+_DENIED_DIR_PARTS: frozenset[str] = frozenset(
+    {".git", ".ssh", ".aws", ".gnupg", ".docker", ".kube"}
+)
+
+# Generated media the application itself writes, which the container keeps
+# OUTSIDE the application tree on purpose (Vox's output is a mounted volume at
+# /config/media/tts so clips survive a rebuild). Both halves must match: the
+# directory the producer is configured with AND that producer's own filename
+# pattern. A misconfigured directory therefore cannot be used to read unrelated
+# files out of it, and a new engine writing a different name is refused here
+# (visible in the interface log as "Path is outside allowed roots") rather than
+# silently widening the sandbox.
+_APP_GENERATED_MEDIA: tuple[tuple[str, str], ...] = (
+    ("VOX_OUTPUT_DIR", "vox_*.wav"),
+    ("TTS_OUTPUT_DIR", "tts_*.wav"),
+)
+
+
+def _split_roots(raw: str) -> list[str]:
+    """Split an ``AGENT_FS_ROOTS`` string into roots.
+
+    The documented separator is ``:``, but a plain ``raw.split(":")`` shreds a
+    Windows drive letter: ``C:/Users/x/sandbox`` becomes ``["C", "/Users/x/sandbox"]``
+    and the sandbox then resolves to ``<cwd>/C`` plus a drive-relative path — so
+    the real file is rejected as "outside allowed roots" (and the same call
+    PASSES when cwd happens to sit on the same drive, which is how it stayed
+    hidden). A one-letter segment is therefore re-joined to the segment after it.
+    """
+    merged: list[str] = []
+    pending: str | None = None
+    for part in (p.strip() for p in raw.split(":")):
+        if pending is not None:
+            part = f"{pending}:{part}"
+            pending = None
+        if not part:
+            continue
+        if len(part) == 1 and part.isalpha():
+            pending = part
+            continue
+        merged.append(part)
+    if pending:
+        merged.append(pending)
+    return merged
+
+
+def _is_denied_secret_path(resolved: Path) -> bool:
+    """Return True when ``resolved`` is credential material (see the lists above)."""
+    name = resolved.name.lower()
+    if name in _DENIED_FILE_NAMES:
+        return True
+    if any(fnmatch.fnmatchcase(name, pat) for pat in _DENIED_NAME_PATTERNS):
+        return True
+    return any(part.lower() in _DENIED_DIR_PARTS for part in resolved.parts[:-1])
+
+
+def _is_app_generated_media(resolved: Path) -> bool:
+    """Return True for a clip the application itself generated moments ago.
+
+    This is the only exemption from the sandbox roots. The file must sit
+    DIRECTLY in the directory its producer is configured with and carry that
+    producer's filename prefix (``vox_<epoch>.wav`` and ``vox_<turn>_<i>.wav``
+    for streamed replies, ``tts_<epoch>.wav`` for the tts_lipsync producer).
+    """
+    for env_var, pattern in _APP_GENERATED_MEDIA:
+        raw = (os.getenv(env_var) or "").strip()
+        if not raw:
+            continue
+        try:
+            media_dir = Path(raw).resolve()
+        except Exception:
+            continue
+        if resolved.parent != media_dir:
+            continue
+        if fnmatch.fnmatchcase(resolved.name.lower(), pattern):
+            return True
+    return False
+
+
 def allowed_file_roots() -> list[Path]:
     """Return the resolved filesystem roots outbound files must live inside."""
     roots_raw = os.getenv("AGENT_FS_ROOTS")
     if roots_raw:
-        roots = [p.strip() for p in roots_raw.split(":") if p.strip()]
+        roots = _split_roots(roots_raw)
     else:
+        # Default to the APPLICATION ROOT rather than the literal "/app". In the
+        # container the app is at /app so the two are the same directory, but in
+        # a bare checkout (a Windows dev tree, a venv install) "/app" does not
+        # exist and every outbound attachment is rejected with "Path is outside
+        # allowed roots": the text still arrives, the media is silently dropped.
+        # An explicit AGENT_FS_ROOT / SYNTH_LOG_DIR still takes precedence.
+        app_root = Path(__file__).resolve().parent.parent
         roots = [
-            os.getenv("AGENT_FS_ROOT", "/app"),
-            os.getenv("SYNTH_LOG_DIR", "/app/logs"),
+            os.getenv("AGENT_FS_ROOT") or str(app_root),
+            os.getenv("SYNTH_LOG_DIR") or str(app_root / "logs"),
         ]
 
     out: list[Path] = []
@@ -118,13 +254,15 @@ def resolve_safe_outbound_path(raw_path: str) -> tuple[Path | None, str | None]:
         except ValueError:
             continue
 
-    if not inside_root:
+    if not inside_root and not _is_app_generated_media(resolved):
         return None, "Path is outside allowed roots"
 
     if not resolved.exists():
         return None, "File does not exist"
     if not resolved.is_file():
         return None, "Path is not a regular file"
+    if _is_denied_secret_path(resolved):
+        return None, "Refusing to attach a credential or key file"
 
     return resolved, None
 

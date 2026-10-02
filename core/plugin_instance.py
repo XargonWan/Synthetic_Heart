@@ -14,6 +14,7 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from core.logging_utils import log_debug, log_info, log_warning, log_error
+from core.app_paths import agent_fs_roots
 from core.json_utils import (
     dumps as json_dumps,
     redact_multimodal_for_logging,
@@ -2112,9 +2113,9 @@ def _persist_attachments_to_sandbox(attachments: list[dict]) -> list[str]:
 
     roots_raw = os.getenv("AGENT_FS_ROOTS") or ""
     if roots_raw.strip():
-        roots = [p.strip() for p in roots_raw.split(":") if p.strip()]
+        roots = [p.strip() for p in roots_raw.split(os.pathsep) if p.strip()]
     else:
-        roots = [os.getenv("AGENT_FS_ROOT", "/app")]
+        roots = [str(agent_fs_roots()[0])] if agent_fs_roots() else []
     if not roots:
         return []
 

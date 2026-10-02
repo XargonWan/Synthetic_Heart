@@ -47,13 +47,24 @@ class TestLoadJsonInstructions:
         )
 
     def test_instructions_size_reasonable(self):
-        """Minified instructions should stay within a bounded budget."""
+        """Minified instructions should stay within a bounded budget.
+
+        The budget is the single source of truth in
+        ``core.prompt_instructions.INSTRUCTION_BUDGETS`` (asserted per route by
+        ``tests/test_prompt_instruction_budget.py``). Before that existed this
+        test carried a hardcoded ``< 7500`` and the block had grown past it, so
+        the guard was failing while the block kept growing.
+        """
+        from core.prompt_instructions import ROUTE_CHAT, instruction_budget
+
         instructions = load_json_instructions()
         size = len(instructions)
+        budget = instruction_budget(ROUTE_CHAT)
 
-        # Guard against accidental runaway growth while allowing expanded safety rules.
-        assert size < 7500, f"Instructions too large: {size} chars (expected < 7500)"
-        print(f"✅ Minified instructions: {size} chars")
+        assert size < budget, (
+            f"Instructions too large: {size} chars (expected < {budget})"
+        )
+        print(f"✅ Minified instructions: {size} chars (budget {budget})")
 
     def test_instructions_preserves_meaning(self):
         """Minified instructions should preserve all critical rules."""

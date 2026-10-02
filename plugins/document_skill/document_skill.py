@@ -24,12 +24,12 @@ Design notes
 
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.ai_plugin_base import AIPluginBase
+from core.app_paths import agent_fs_roots
 from core.logging_utils import log_info
 
 
@@ -99,21 +99,13 @@ class DocumentSkillPlugin(AIPluginBase):
     # Sandbox path resolution (mirrors the Agent plugin's roots).
     # ------------------------------------------------------------------ #
     def _allowed_roots(self) -> List[Path]:
-        roots_raw = os.getenv("AGENT_FS_ROOTS")
-        if roots_raw:
-            roots = [p.strip() for p in roots_raw.split(":") if p.strip()]
-        else:
-            roots = [
-                os.getenv("AGENT_FS_ROOT", "/app"),
-                os.getenv("SYNTH_LOG_DIR", "/app/logs"),
-            ]
-        out: List[Path] = []
-        for root in roots:
-            try:
-                out.append(Path(root).resolve())
-            except Exception:
-                continue
-        return out
+        """Return the sandbox roots, shared with the Agent plugin.
+
+        Delegates to :func:`core.app_paths.agent_fs_roots` so this skill and the
+        Agent plugin can never disagree, and so the default is the application
+        root rather than the container-only ``/app``.
+        """
+        return agent_fs_roots()
 
     def _resolve_safe_path(self, raw_path: str) -> Tuple[Optional[Path], Optional[str]]:
         if not raw_path or not str(raw_path).strip():

@@ -225,3 +225,73 @@ async def test_observer_background_task_is_not_cancelled_by_user_message(
         message_queue._lock_loop = original_lock_loop
         message_queue._bg_tasks.clear()
         message_queue._bg_tasks.update(original_bg_tasks)
+
+
+class _FakeTask:
+    """Minimal stand-in for the processing task behind a background entry."""
+
+    def __init__(self, done: bool = False):
+        self._done = done
+
+    def done(self) -> bool:
+        return self._done
+
+    def cancel(self) -> None:
+        self._done = True
+
+
+class _Entry:
+    def __init__(self, *, cancel_on_user_message: bool, done: bool = False):
+        self.task = _FakeTask(done=done)
+        self.cancel_on_user_message = cancel_on_user_message
+
+
+def test_beat_message_is_recognised_structurally():
+    """A beat is recognised by its context flag, never by text."""
+    assert message_queue._is_beat_message(
+        {"grillo_beat": True, "beat_type": "observer"}
+    )
+    assert message_queue._is_beat_message({"grillo_beat": True})
+    assert not message_queue._is_beat_message({"beat_type": "observer"})
+    assert not message_queue._is_beat_message({})
+    assert not message_queue._is_beat_message(None)
+
+
+def test_incoming_beat_does_not_cancel_a_running_beat():
+    """A Grillo beat must never pre-empt another Grillo beat.
+
+    Observed live: the observer beat's arrival on ``grillo/-1`` cancelled the
+    in-flight diary consolidation ~12s into its model call, so the day was never
+    merged and its ``update_diary_entry`` never ran — on every run. Both beats
+    share the ``grillo/-1`` lane, so the guards below are what keep the
+    consolidator alive.
+    """
+    entry = _Entry(cancel_on_user_message=True)
+    assert not message_queue._should_cancel_background_task(
+        entry, context={"grillo_beat": True, "beat_type": "observer"}
+    )
+    assert not message_queue._should_cancel_background_task(
+        entry, context={"grillo_beat": True, "beat_type": "diary_consolidation"}
+    )
+
+
+def test_user_message_still_cancels_a_running_beat():
+    """A real user message still pre-empts a running internal beat."""
+    entry = _Entry(cancel_on_user_message=True)
+    assert message_queue._should_cancel_background_task(
+        entry, context={"core_animation_broadcast": False}
+    )
+
+
+def test_beat_does_not_bypass_the_other_guards():
+    """The beat exemption is an addition, not a replacement for the guards."""
+    # A task that opted out of cancellation is never cancelled.
+    assert not message_queue._should_cancel_background_task(
+        _Entry(cancel_on_user_message=False), context={}
+    )
+    # A finished task is never cancelled.
+    assert not message_queue._should_cancel_background_task(
+        _Entry(cancel_on_user_message=True, done=True), context={}
+    )
+    # Nothing tracked, nothing to cancel.
+    assert not message_queue._should_cancel_background_task(None, context={})

@@ -757,8 +757,16 @@ async def test_set_default_model_uses_datetime_objects(monkeypatch) -> None:
 
     class FakeCursor:
         async def execute(self, query, params=None):
-            captured["query"] = query
-            captured["params"] = params
+            # set_default_model also reads the row back with a SELECT, so capture the
+            # UPDATE the test is about rather than whichever statement ran last.
+            if query.strip().upper().startswith("UPDATE"):
+                captured["query"] = query
+                captured["params"] = params
+
+        async def fetchone(self):
+            # set_default_model reads the endpoint back to sync the scope keys, and a
+            # missing row is a supported outcome; this test is about the UPDATE itself.
+            return None
 
         async def __aenter__(self):
             return self

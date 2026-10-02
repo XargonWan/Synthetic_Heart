@@ -38,18 +38,16 @@ dependencies = [
     "websockets>=15.0.1",
     "setuptools>=70.0.0",
     "discord-ext-voice-recv>=0.5.2a179",
-    # Auris/Vox default audio engines (packages that exist on PyPI and build cleanly)
-    "vosk>=0.3.45",                    # local STT; model downloaded at runtime
+    # Local voice (TTS/STT) packages are deliberately NOT base dependencies.
+    # They pull hundreds of MB (torch/torchaudio CPU wheels dominate) and most
+    # deployments use a cloud engine or an external endpoint, so a one-click
+    # install must not pay for them. Install the "local-voice" extra to get the
+    # full local stack: uv pip install '.[local-voice]' (see [project.optional-dependencies]).
     # audio dependencies are intentionally pared back for a CPU-only container.
-    # VOSK remains the only default engine; other packages are available via extras
-    # (see [project.optional-dependencies] below). Keeping these in the base
     "pydub>=0.25.1",
     "huggingface-hub>=1.5.0",
     "gtts>=2.5.4",
     "lingua-language-detector>=2.0.2",
-    "kittentts",
-    "torch",
-    "torchaudio",
     "gemini-cli>=0.1.0",
     "mcp>=1.27.0",
     "langfuse>=2.60.10",
@@ -67,12 +65,24 @@ dependencies = [
 
 [project.optional-dependencies]
 # Install one or more extras to enable the corresponding audio engine.
-# Example: uv pip install '.[silero]' or uv pip install '.[vosk,qwen3tts]'
+# Example: uv pip install '.[local-voice]' or uv pip install '.[vosk,qwen3tts]'
+#
+# ``local-voice`` is the complete offline voice stack: local TTS (kittentts,
+# torch, torchaudio) plus local STT (vosk). A default install leaves it out on
+# purpose, because torch/torchaudio are the largest thing in the dependency set
+# and most deployments talk to a cloud engine or an endpoint instead.
+local-voice = [
+    "kittentts",
+    "torch",
+    "torchaudio",
+    "vosk>=0.3.45",
+]
 
 # ── Auris STT engines ─────────────────────────────────────────────────────────
 vosk      = ["vosk>=0.3.45"]          # local CPU STT (Auris vosk engine)
                                        # ~50 MB model downloaded on first use
 whisper   = ["faster-whisper>=0.8.1"]   # optional language-detection helper
+tts-local = ["kittentts", "torch", "torchaudio"]  # local Vox engines (alias of local-voice minus vosk)
 
 [dependency-groups]
 dev = [

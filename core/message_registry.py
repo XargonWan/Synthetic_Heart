@@ -60,7 +60,11 @@ def get_send_message_schema(
         "replying to an incoming message you may omit it and the reply "
         "auto-routes to the origin conversation. Provide `text` and/or "
         "`media` (list of sandbox file paths; auto-detected image/video/"
-        "audio/document). `text` doubles as the media caption."
+        "audio/document). `text` doubles as the media caption. "
+        "`reply_to` optionally quotes ONE specific message: it takes that "
+        "message's *message id* (the small per-chat id of the line you are "
+        "quoting) — never the chat id, never a path. Omit it when replying to "
+        "the message you just received: the reply already quotes it."
     )
     if destinations:
         description += f" Active destinations: {', '.join(sorted(destinations))}."

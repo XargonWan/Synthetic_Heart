@@ -13,6 +13,7 @@ These tests verify:
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -225,3 +226,49 @@ def test_coerce_datetime_variants():
     assert isinstance(_coerce_datetime(datetime.now()), datetime)
     assert isinstance(_coerce_datetime("2026-07-18T10:00:00+00:00"), datetime)
     assert _coerce_datetime("not-a-date") is None
+
+
+@pytest.mark.asyncio
+async def test_only_one_recovery_loop_runs_per_process(monkeypatch):
+    """A second instance must not build a second loop.
+
+    GrilloPlugin is instantiated several times at boot and each instance built
+    its own copy of this plugin; four loops then recovered the same failures at
+    the same moment, so one failed turn produced up to four recovery messages
+    (observed live: four "recovery loop started" and four "recovery delivered"
+    for a single chat).
+    """
+    from plugins.grillo import grillo_llm_failure_recovery as recovery_mod
+
+    monkeypatch.setattr(recovery_mod, "_ACTIVE_RECOVERY", None)
+
+    async def _idle_loop(self):
+        # Stays pending until stop() cancels it, so the stop path is covered too.
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(
+        recovery_mod.GrilloLLMFailureRecoveryPlugin, "_recovery_loop", _idle_loop
+    )
+
+    first = recovery_mod.GrilloLLMFailureRecoveryPlugin()
+    second = recovery_mod.GrilloLLMFailureRecoveryPlugin()
+    try:
+        await first.start()
+        await second.start()
+        assert first._running is True
+        assert second._running is False
+        assert recovery_mod._ACTIVE_RECOVERY is first
+    finally:
+        await first.stop()
+        await second.stop()
+
+    # The guard is released with the owning loop, so the next instance starts.
+    assert recovery_mod._ACTIVE_RECOVERY is None
+    third = recovery_mod.GrilloLLMFailureRecoveryPlugin()
+    try:
+        await third.start()
+        assert third._running is True
+        assert recovery_mod._ACTIVE_RECOVERY is third
+    finally:
+        await third.stop()
+    assert recovery_mod._ACTIVE_RECOVERY is None

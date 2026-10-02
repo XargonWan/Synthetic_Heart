@@ -10,6 +10,7 @@ from collections.abc import Callable
 from typing import Optional, Dict, Any
 
 from core.ai_plugin_base import AIPluginBase
+from core.app_paths import agent_fs_roots
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.core_initializer import register_plugin
 from core.config_manager import config_registry
@@ -330,23 +331,15 @@ class AgentPlugin(AIPluginBase):
         }
 
     def _allowed_roots(self) -> list[Path]:
-        """Return the filesystem roots the agent is allowed to read."""
-        roots_raw = os.getenv("AGENT_FS_ROOTS")
-        if roots_raw:
-            roots = [p.strip() for p in roots_raw.split(":") if p.strip()]
-        else:
-            roots = [
-                os.getenv("AGENT_FS_ROOT", "/app"),
-                os.getenv("SYNTH_LOG_DIR", "/app/logs"),
-            ]
+        """Return the filesystem roots the agent is allowed to read.
 
-        out: list[Path] = []
-        for root in roots:
-            try:
-                out.append(Path(root).resolve())
-            except Exception:
-                continue
-        return out
+        Delegates to :func:`core.app_paths.agent_fs_roots`, which defaults to the
+        application root rather than the container-only ``/app``. On Windows the
+        literal ``/app`` resolves to ``C:\\app``, which does not exist, so every
+        file tool used to run against an empty sandbox. ``AGENT_FS_ROOTS`` is
+        split on ``os.pathsep`` so a multi-root list also works on Windows.
+        """
+        return agent_fs_roots()
 
     def _resolve_safe_path(self, raw_path: str) -> tuple[Path | None, str | None]:
         """Resolve a user path and ensure it stays inside allowed roots."""

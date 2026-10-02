@@ -7,6 +7,17 @@ prompt context so Synth stays aware of what's coming.
 
 Backed by the `scheduled_events` table.
 
+## How the block reaches the model
+
+`static_inject` contributes the `upcoming_events` block ("upcoming events (next N
+days) (informational only, do not act unless relevant)") for the configured
+lookahead window, and the core renderer prints it under an `[Upcoming events]`
+heading on the ordinary chat and beat prompts (`_PLUGIN_CONTEXT_BLOCKS` in
+`core/prompt_engine.py`). The block was built on every turn and dropped until it
+was declared there, so this is the first time it reaches the model; the plugin's
+own scheduling and firing path is unaffected. Vessel turns deliberately drop it
+(`core/prompt_engine.py::_compact_prompt_for_vessel`).
+
 ## Actions
 
 | Action | Purpose |

@@ -154,12 +154,45 @@ async def test_unknown_error_still_raises_and_cooldowns(monkeypatch) -> None:
     assert msu._CHAT_COOLDOWNS[12345] > time.time()
 
 
+@pytest.mark.asyncio
+async def test_alternate_reply_error_wording_also_retries_without_reply_id(
+    monkeypatch,
+) -> None:
+    """The same condition reaches us with wordings other than Telegram's canonical
+    "Message to be replied not found". An unmatched wording used to escalate to
+    the corrector and lose the reply (live incident 2026-09-17 06:57Z); the
+    ladder must strip the reply reference for any reply-not-found variant."""
+    calls: list[dict] = []
+
+    async def fake_cortex_send(bot, chat_id, text, **kwargs):
+        calls.append(dict(kwargs))
+        if "reply_to_message_id" in kwargs:
+            raise BadRequest("Bad Request: reply message not found")
+        return SimpleNamespace(message_id=43)
+
+    monkeypatch.setattr(msu, "cortex_response_send", fake_cortex_send)
+
+    result = await msu.send_with_thread_fallback(
+        object(), 12345, "hello", reply_to_message_id=987654
+    )
+
+    assert result is not None
+    assert len(calls) == 2
+    assert "reply_to_message_id" not in calls[1]
+
+
 def test_is_stale_identifier_error() -> None:
     assert msu._is_stale_identifier_error("Message to be replied not found")
     assert msu._is_stale_identifier_error("Thread not found")
     assert msu._is_stale_identifier_error("Chat not found")
     assert not msu._is_stale_identifier_error("Message is too long")
     assert msu._is_stale_reply_target("Message to be replied not found")
+    # Other wordings for the same condition.
+    assert msu._is_stale_reply_target("Bad Request: reply message not found")
+    assert msu._is_stale_reply_target("Replied message not found")
+    # Unrelated BadRequests must never be treated as a stale reply target.
+    assert not msu._is_stale_reply_target("Message is too long")
+    assert not msu._is_stale_reply_target("Chat not found")
 
 
 def test_stale_reply_drop_renders_structured_prompt_block() -> None:
