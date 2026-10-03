@@ -2141,9 +2141,10 @@ async def insert_memory(
 
     async def _run(connection) -> bool:
         async with connection.cursor() as cur:
-            # ponytail: exact-dupe guard — one SELECT in the shared choke
+            # Exact-dupe guard — one SELECT in the shared choke
             # point beats per-caller dedupe (observer/compactor re-insert
-            # the same snippets every beat). No migration needed.
+            # the same snippets every beat). Indexed by
+            # idx_memories_dedupe (see core/migrations.py).
             await cur.execute(
                 "SELECT 1 FROM memories WHERE content = %s AND author = %s AND source = %s LIMIT 1",
                 (content, author, source),
