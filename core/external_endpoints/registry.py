@@ -885,17 +885,19 @@ async def ensure_default_zen_endpoint() -> None:
         )
 
         if existing is None:
-            await registry.add_endpoint(
-                name=suggested_name,
-                base_url=correct_base_url,
-                protocol=zen_preset["protocol"],
-                display_label=zen_preset["suggested_label"],
-                extra_config=zen_preset.get("extra_config"),
-                subsystem_map=zen_preset.get("default_capabilities"),
-            )
-            log_info(
-                f"[ext_endpoints] Bootstrapped default '{suggested_name}' endpoint"
-            )
+            # Seed only on a fresh registry — a user-deleted Zen stays deleted.
+            if not endpoints:
+                await registry.add_endpoint(
+                    name=suggested_name,
+                    base_url=correct_base_url,
+                    protocol=zen_preset["protocol"],
+                    display_label=zen_preset["suggested_label"],
+                    extra_config=zen_preset.get("extra_config"),
+                    subsystem_map=zen_preset.get("default_capabilities"),
+                )
+                log_info(
+                    f"[ext_endpoints] Bootstrapped default '{suggested_name}' endpoint"
+                )
             return
 
         if (
