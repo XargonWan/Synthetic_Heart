@@ -853,7 +853,9 @@ async def ensure_default_zen_endpoint() -> None:
     manual wizard step. Two situations are handled here, both derived from
     ``providers/zen_llm_engine.json``:
 
-    1. No Zen endpoint is registered yet -> create it from the preset.
+    1. The registry is completely empty -> create it from the preset.
+       A user-deleted Zen stays deleted once other endpoints exist;
+       endpoints are never added behind a configured user.
     2. A Zen endpoint exists but its ``base_url`` still points at the old
        "selenium-llm-engine" container hostname from before the rename ->
        correct it in place. Only an exact match against a known legacy URL

@@ -9,6 +9,11 @@ import pytest
 from core.external_endpoints import registry as registry_mod
 
 
+class _FakeEndpoint:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
 class _FakeRegistry:
     def __init__(self, endpoints: list) -> None:
         self._endpoints = endpoints
@@ -35,7 +40,7 @@ def _preset() -> list[dict]:
 
 
 async def _run_with(endpoints: list) -> _FakeRegistry:
-    fake = _FakeRegistry(endpoints)
+    fake = _FakeRegistry([_FakeEndpoint(n) for n in endpoints])
     with (
         patch.object(registry_mod, "get_external_endpoint_registry", return_value=fake),
         patch(
