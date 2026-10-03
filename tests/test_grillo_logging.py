@@ -58,6 +58,9 @@ async def test_observer_logs_activity(caplog, monkeypatch, idle_eligible_target)
     logged = "\n".join(logged_messages)
     assert "GRILLO_ACTIVITY id=999" in logged
     assert "Observer prompt enqueued for LLM processing" in logged
+    # Privacy: the observer prompt is verbatim user chat — it must never
+    # reach the logs, even as a snippet.
+    assert "Test message" not in logged
 
 
 @pytest.mark.asyncio
