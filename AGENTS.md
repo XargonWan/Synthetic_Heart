@@ -962,6 +962,7 @@ Before finishing a code task, verify:
 | `EMOTION_MAX_DISPLAY` | Max emotions to display in UI |
 | `SOUL_COMPILE_IDLE_SECONDS` | Idle seconds before SOUL compiles buffered transcript |
 | `SOUL_SCHEDULER_INTERVAL_SECONDS` | Scheduler tick interval for SOUL compile/rollup checks |
+| `SOUL_REPOSITORY_BACKEND` | SOUL persistence backend selector (`memory` or `postgres`) |
 | `SOUL_POSTGRES_DSN` | PostgreSQL DSN used when SOUL backend is `postgres` |
 | `SOUL_EMBEDDER_ID` | FastEmbed model for Soul vectors (default `BAAI/bge-base-en-v1.5`) |
 | `MEMORY_SEARCH_MAX_RESULTS` | Max memories returned per query |
