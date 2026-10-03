@@ -542,9 +542,6 @@ class SynthWebUIInterface:
             class _IndexMiddleware(BaseHTTPMiddleware):
                 async def dispatch(inner_self, request, call_next):
                     if request.url.path == "/":
-                        log_info(
-                            f"{LOG_PREFIX} Index middleware handing the root to the handler"
-                        )
                         try:
                             response = await self.index(request)
                         except Exception as e:
@@ -2383,7 +2380,6 @@ class SynthWebUIInterface:
         return host in LOCAL_CLIENT_HOSTS
 
     async def index(self, request: Request):
-        log_info(f"{LOG_PREFIX} Index route called")
         try:
             # A brand-new native install lands on the setup page instead of an
             # empty interface. Local requests only: a remote browser must never
@@ -2393,7 +2389,6 @@ class SynthWebUIInterface:
                 return RedirectResponse(url="/setup", status_code=307)
 
             html = self._render_index()
-            log_info(f"{LOG_PREFIX} Rendered HTML length: {len(html)}")
             # Return the rendered HTML as an HTMLResponse. Keep this inside
             # the try-block so exceptions during rendering lead to a 500 and
             # we never fall through returning None.
@@ -3194,12 +3189,10 @@ class SynthWebUIInterface:
         answered nothing but a connection error.
 
         Any doubt resolves to False, because a wrong redirect is worse than a
-        missing one. Every decline is logged, because a wrong redirect shows up
-        as a bug report while a missing one looks exactly like a feature nobody
-        built.
+        missing one. Declines stay silent on this hot path (it runs on every
+        `/` hit); the offered page and the redirect log instead.
         """
         if self._setup_completed():
-            log_info(f"{LOG_PREFIX} setup page not offered: already completed")
             return False
         try:
             from core.external_endpoints.registry import get_external_endpoint_registry
@@ -3216,10 +3209,6 @@ class SynthWebUIInterface:
             endpoint for endpoint in endpoints if _endpoint_looks_configured(endpoint)
         ]
         if configured:
-            log_info(
-                f"{LOG_PREFIX} setup page not offered: "
-                f"{len(configured)} enabled endpoint(s) already configured"
-            )
             return False
         if endpoints:
             log_info(
