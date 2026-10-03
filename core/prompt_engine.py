@@ -271,7 +271,6 @@ def _memory_merge_key(memory: Any) -> str:
     two of the limited memory slots in every prompt. Two rows holding the same
     text are the same memory whatever their ids are.
     """
-    # ponytail: key on normalized body text — source::id keys can never match
     # a soul string, so the same fact shipped twice (cross-tier dupe).
     if isinstance(memory, dict):
         snippet = (
@@ -3484,7 +3483,7 @@ async def build_prompt_request(
             prompt_with_instructions = reduce_prompt_for_llm_limit(
                 prompt_with_instructions, max_prompt_chars
             )
-            # ponytail: reduce deep-copies, so sync the trimmed context back —
+            # reduce deep-copies, so sync the trimmed context back —
             # _assemble_prompt_request builds context_summary from
             # context_section, otherwise the trim never reaches the model.
             if isinstance(prompt_with_instructions, dict):
