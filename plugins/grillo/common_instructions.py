@@ -10,7 +10,9 @@ sentences answer a live incident and the incident is rarely visible in the
 wording:
 
 * a quiet network is the REASON this beat runs, not a reason to stay silent;
-* a conversation you spoke in last is NOT off-limits;
+* a conversation you spoke in last is NOT off-limits — unless it is marked
+  AWAITING-REPLY, which means the human has not answered and re-asking is
+  nagging;
 * an idle target has not "gone out" — idle time is not a physical-presence fact;
 * the last human line being hours old does not make the moment live, and does not
   excuse a fabricated ``reply_message_id``;
@@ -62,7 +64,8 @@ OBSERVER_PROACTIVE_INSTRUCTIONS = (
     "- ROUTING: send with the unified 'send_message' action and put the path in its 'interface_path' — that field decides which interface delivers it (e.g. 'telegram_bot/<chat_id>' or 'discord_bot/<guild>/<channel>'). The legacy per-interface names (message_telegram_bot, message_discord_bot, …) still work where they are registered, but 'send_message' is the one action every connected interface exposes; never target an interface that is not in the snippets or ELIGIBLE TARGETS.\n"
     "- ANTI-SPAM (hard rules): do NOT repeat a message that is semantically similar to something already said in the snippets or that you have sent recently — vary intent and content, never re-send a canned or near-duplicate opener.\n"
     "- ANTI-SPAM: a target marked LIVE-CONVERSATION in the ELIGIBLE TARGETS list is happening right now: do not interrupt that conversation on this run.\n"
-    "- ANTI-SPAM: you speaking last in a conversation does NOT put it off-limits. It only means the last thing heard there was yours — reach out with something genuinely new, grounded in what was last said, rather than waiting for them to answer first. Repeating the previous message, or re-asking a question you already asked, is the failure to avoid here; silence is not.\n"
+    "- ANTI-SPAM: a target marked AWAITING-REPLY is one where YOU spoke last and the human has not answered yet. They are simply not replying at the moment — they have not left. Do not message it: asking again whether they are coming back is nagging, not initiative. Wait for them to answer, and let a later run pick it up once they have.\n"
+    "- ANTI-SPAM: speaking last in a conversation that is NOT marked AWAITING-REPLY or LIVE-CONVERSATION is not off-limits either — reach out with something genuinely new, grounded in what was last said, rather than repeating your previous message or re-asking a question you already asked. That repeat is the failure to avoid; silence is not.\n"
     "- STALE CONTEXT: chat lines may carry a relative-age marker (e.g. '[3 hours earlier]', '[2 days earlier]') and the ELIGIBLE TARGETS list shows each chat's idle time. An exchange marked hours/days old is NOT a live conversation — do not reply to it as if the person just spoke, do not assume an on-going intimate/emotional moment is still happening, and never fabricate a reply_message_id. An old last human message is not a reason to skip a target: if you reach out there, open with something that acknowledges the gap naturally instead of pretending the moment is still live.\n"
     "- GROUNDING (critical): idle time or a long gap between messages does NOT mean the person left, went out, or is away — it only means nobody has spoken recently. Never invent physical-presence claims that are not in the snippets: do not say the person 'went out', 'left', 'is gone', 'came home', 'hurried home', 'is almost here', or that they need to 'come back'/'get home', unless a snippet actually shows them going somewhere.\n"
 )

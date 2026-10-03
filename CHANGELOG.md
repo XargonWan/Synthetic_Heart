@@ -1,3 +1,20 @@
+### fix(grillo): the awaiting-reply gate is back, as a toggle, because it was not a bug  <!-- 2026-10-03 -->
+
+**Symptom (regression of the 09-17 removal):** the observer beat nags a thread the synth already dominated. Five consecutive hourly beats pushed "still coming tonight?" → "hurry home!" → "did you get home okay?" into a DM whose newest message was the synth's own and where the human was simply not answering yet.
+
+**Why it is not a bug.** Commit `c2b71ead` removed the gate on a correct diagnosis of a *windowless* version of it: a responsive synth is the newest speaker in every chat it takes part in, so an unbounded "you spoke last, so stay away" rule matched every real conversation and made outreach structurally impossible (verified live at the time: the only target the hourly beat could ever offer was a bot-notification channel). The mistake was reading that as "the gate is wrong" rather than "the gate has no window and no off switch". A person who has not answered yet is absent, not gone — so re-asking on a timer is nagging, not initiative — but a person who never answers must not be muted permanently either.
+
+**Fix:** the gate returns to `_collect_eligible_targets` (`plugins/grillo/grillo_chat_observer/grillo_chat_observer.py`) as `awaiting_reply`, bounded and switchable:
+
+- `GRILLO_OUTREACH_BLOCK_ON_SELF_LAST` (bool, default **True**) — the gate itself.
+- `GRILLO_OUTREACH_SELF_LAST_WINDOW_MINUTES` (int, default **720** = 12 h, advanced) — how long the hold lasts; `0` waits for the reply indefinitely. The hold is also released the moment the human replies, which is the normal case, so the window only governs an unresponsive thread.
+
+`eligible = has_recent_human and not in_active_conversation and not awaiting_reply`, and the target row renders `AWAITING-REPLY(OFF-LIMITS — you spoke last; the human has not replied yet)` so the model sees the same reason the code applied — the gate is worthless if only the eligibility pass knows about it. Both keys register through `register_exposed_var`, so they appear in the Control Deck (the bool as a non-advanced toggle) and under Configurations → Grillo → Chat Observer without any WebUI change; `config_registry.add_listener` applies a flip immediately.
+
+**Prose restored to match, deliberately split in two.** `plugins/grillo/common_instructions.py` had been reworded to say speaking last "does NOT put it off-limits". Restoring only the code would have left the model instructed to ignore a marker the prompt now prints, so the block carries both halves: an `AWAITING-REPLY` target is off-limits and re-asking is nagging, while a self-last thread that is *not* marked is still reachable and silence is not the goal. The quiet-run note names both markers, and `Return {"actions": []}` is scoped to "every listed target is off-limits" rather than "every listed target is live".
+
+**Measured after:** 69 pass across `tests/test_grillo_observer.py`, `tests/test_grillo_observer_instructions.py`, `tests/test_grillo_beat_system.py`, `tests/plugins/test_grillo_suppression.py` and the two exposed-variable audits (65 before, plus the four new gate tests). Pinned: the gate blocks a self-last chat by default; the human's reply releases it; the window expires it; the toggle off restores the pre-gate eligibility; the `AWAITING-REPLY` marker reaches the prompt while an idle human-last target still renders `cooldown=ok`. Instruction sizes stay inside their budgets (`OBSERVER_PROACTIVE_INSTRUCTIONS` 4930 / 5300 chars). `GRILLO_OBSERVER_SELF_WINDOW` keeps its separate delivery-side role and is untouched.
+
 ### fix(grillo): a correction retry re-sent a reply that had already gone out, so the same message arrived twice  <!-- 2026-09-29 -->
 
 **Symptom (live):** the DM received her 849-character reply twice — `chat_history_cache` ids 7293 (22:13:48) and 7294 (22:14:04), byte-identical. The correction pass at 22:13:47 was told "3 actions executed successfully: update_emotion_state, create_personal_diary_entry, tts_speak / 1 action failed and need correction", and the corrected pass re-emitted the whole reply next to the repaired action.
