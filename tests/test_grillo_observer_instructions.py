@@ -72,7 +72,11 @@ OBSERVER_OBLIGATIONS = {
     ),
     # Anti-spam.
     "do not interrupt a live conversation": "LIVE-CONVERSATION",
-    "speaking last is not off-limits": "does NOT put it off-limits",
+    "do not nag an unanswered thread": "AWAITING-REPLY",
+    "nagging, not initiative": "asking again whether they are coming back is nagging",
+    "speaking last is not a blanket ban": (
+        "is NOT marked AWAITING-REPLY or LIVE-CONVERSATION"
+    ),
     "silence is not the goal": "silence is not",
     # Stale context.
     "stale context section present": "STALE CONTEXT",

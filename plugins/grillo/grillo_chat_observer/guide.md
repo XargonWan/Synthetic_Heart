@@ -31,19 +31,31 @@ re-sending its own previous reply verbatim. An answered but *idle* chat still
 offers its human lines: reaching out there later with something new is what the
 run is for, and delivery is protected separately (below).
 
-Proactive outreach is governed by exactly one gate: **a live conversation**. A
+Proactive outreach is governed by two gates. **A live conversation** first: a
 chat whose most recent message — from the human *or* from the synth — is younger
-than `GRILLO_OUTREACH_QUIET_MINUTES` is marked `LIVE-CONVERSATION` and skipped for
-that run. Every other conversation is offered to the model, and reaching out to
-one of them is what the run is for: what has to be genuine is the *content*
-(a new, grounded message — never a canned opener, never a restatement of its own
-last message), not the fact of speaking. "I have nothing new to say here" is a
-reason to write something else, not a reason to stay silent while a target is
-offered. Who spoke last is deliberately irrelevant: a synth that answers
-everything is the newest speaker in every chat it takes part in, so any "you
-spoke last, stay away" rule would silence outreach permanently. Cadence belongs
-to `GRILLO_OBSERVER_INTERVAL`; the last run is tracked in
-`GRILLO_OBSERVER_LAST_RUN_TS`. Discovery is automatic via the plugin registry.
+than `GRILLO_OUTREACH_QUIET_MINUTES` is marked `LIVE-CONVERSATION` and skipped
+for that run. Second, and independently, **the awaiting-reply gate**
+(`GRILLO_OUTREACH_BLOCK_ON_SELF_LAST`, on by default): when the synth's own line
+is the newest in a chat, the human has not answered yet, so the chat is marked
+`AWAITING-REPLY` and held until they reply or
+`GRILLO_OUTREACH_SELF_LAST_WINDOW_MINUTES` expires (12 h by default; `0` waits
+indefinitely). Without it the hourly beat re-offered a thread it already
+dominated and nagged it every run. Turn the gate off if it is measurably
+silencing every outreach — the earlier removal of it was made on the grounds
+that a responsive synth is the newest speaker in every chat and so the guard
+matched every conversation, which is a property of an unbounded window rather
+than of the gate itself.
+
+Every conversation that clears both gates is offered to the model, and reaching
+out to one of them is what the run is for: what has to be genuine is the
+*content* (a new, grounded message — never a canned opener, never a restatement
+of its own last message), not the fact of speaking. "I have nothing new to say
+here" is a reason to write something else, not a reason to stay silent while a
+target is offered. Speaking last is not itself a reason to stay silent — the
+distinction the target list draws is between a thread marked `AWAITING-REPLY`
+and one that is merely idle. Cadence belongs to `GRILLO_OBSERVER_INTERVAL`; the
+last run is tracked in `GRILLO_OBSERVER_LAST_RUN_TS`. Discovery is automatic via
+the plugin registry.
 
 Independently of where a snippet came from, `message_plugin` refuses at delivery
 any beat message whose text repeats the synth's own recent line in that chat
@@ -70,5 +82,7 @@ cursor behind a message that is now hours old, and the run would go quiet.
 | `GRILLO_OBSERVER_ACTIVITY_WINDOW_DAYS` | How recent a conversation must be to consider. |
 | `GRILLO_OBSERVER_SELF_WINDOW` | Duplicate-suppression window for identical outbound messages. Does not gate outreach. |
 | `GRILLO_OUTREACH_QUIET_MINUTES` | Live-conversation guard: a chat with a message (either side) younger than this is skipped for that run. |
+| `GRILLO_OUTREACH_BLOCK_ON_SELF_LAST` | Awaiting-reply gate (default on): a chat whose newest message is the synth's own is held until the human replies or the window below expires. Turn off to restore ungated outreach. |
+| `GRILLO_OUTREACH_SELF_LAST_WINDOW_MINUTES` | How long that hold lasts, in minutes (default 720 = 12 h; `0` = until the human replies). |
 
 Plus the shared Grillo settings. See the [G.R.I.L.L.O. guide](../guide.md).

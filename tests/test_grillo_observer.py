@@ -6,9 +6,7 @@ from core import message_queue
 
 
 @pytest.mark.asyncio
-async def test_observer_builds_prompt_and_collects(
-    monkeypatch, idle_eligible_target
-):
+async def test_observer_builds_prompt_and_collects(monkeypatch, idle_eligible_target):
     plugin = gco.GrilloChatObserverPlugin()
 
     # force update checker to report new messages (DB not available)
@@ -485,9 +483,7 @@ async def test_collect_recent_snippets_keeps_human_lines_when_synth_spoke_last(
 
 
 @pytest.mark.asyncio
-async def test_observer_propose_only_flag_in_prompt(
-    monkeypatch, idle_eligible_target
-):
+async def test_observer_propose_only_flag_in_prompt(monkeypatch, idle_eligible_target):
     plugin = gco.GrilloChatObserverPlugin()
     plugin.propose_only = True
 
@@ -968,16 +964,22 @@ def test_is_self_sender():
 
 
 @pytest.mark.asyncio
-async def test_eligible_targets_include_chat_where_synth_spoke_last(monkeypatch):
-    """A chat the synth answered an hour ago IS an outreach target.
+async def test_eligible_targets_block_chat_where_synth_spoke_last(monkeypatch):
+    """A chat whose newest message is the synth's own is OFF-LIMITS by default.
 
-    The old 12 h awaiting-reply guard excluded every chat whose newest message
-    was the synth's own. For a synth that answers everything that is *every*
-    chat, so the hourly beat could never reach out (verified live: its only
-    eligible target was a bot-notification channel). Cadence belongs to the
-    beat schedule; only a live conversation defers outreach now.
+    This is the awaiting-reply gate, restored with a window and a toggle
+    (``GRILLO_OUTREACH_BLOCK_ON_SELF_LAST`` /
+    ``GRILLO_OUTREACH_SELF_LAST_WINDOW_MINUTES``). Without it the hourly beat
+    re-offered a DM it already dominated every run and nagged it: "still coming
+    tonight?" -> "hurry home!" -> "did you get home okay?" (five consecutive
+    observer beats). It had been removed in c2b71ead because a responsive synth
+    is the newest speaker in every chat, which made a windowless gate exclude
+    everything — a bounded window plus a toggle is the fix for that, not the
+    absence of the gate. Turn the key off for the pre-gate behaviour.
     """
     plugin = gco.GrilloChatObserverPlugin()
+    plugin.block_on_self_last = True
+    plugin.self_last_window_minutes = 720
     now = datetime.now(timezone.utc)
 
     async def fake_recent_paths(limit):
@@ -1014,6 +1016,140 @@ async def test_eligible_targets_include_chat_where_synth_spoke_last(monkeypatch)
     assert targets[0]["interface_path"] == "telegram_bot/5208932647"
     assert targets[0]["last_from_self"] is True
     assert targets[0]["in_active_conversation"] is False
+    assert targets[0]["awaiting_reply"] is True
+    assert targets[0]["eligible"] is False
+
+
+@pytest.mark.asyncio
+async def test_self_last_gate_releases_when_the_human_replies(monkeypatch):
+    """The hold is released the moment the human answers."""
+    plugin = gco.GrilloChatObserverPlugin()
+    plugin.block_on_self_last = True
+    plugin.self_last_window_minutes = 720
+    now = datetime.now(timezone.utc)
+
+    async def fake_recent_paths(limit):
+        return [{"interface_path": "telegram_bot/5208932647"}]
+
+    messages = [
+        {
+            "sender_name": "self",
+            "text": "did you get home okay?",
+            "timestamp": (now - timedelta(minutes=40)).isoformat(),
+        },
+        {
+            "sender_name": "Scar",
+            "text": "yes, door's open, come in",
+            "timestamp": (now - timedelta(minutes=35)).isoformat(),
+        },
+    ]
+
+    async def fake_load(path):
+        return list(messages)
+
+    monkeypatch.setattr(
+        "core.interface_paths.get_recent_interface_paths", fake_recent_paths
+    )
+    monkeypatch.setattr("core.chat_history_cache.load_chat_history", fake_load)
+    monkeypatch.setattr(
+        "core.interface_path_utils.is_vessel_interface_path", lambda p: False
+    )
+
+    targets = await plugin._collect_eligible_targets(limit=5)
+
+    assert targets[0]["last_from_self"] is False
+    assert targets[0]["awaiting_reply"] is False
+    # Still live (35 min old vs a 15 min quiet window would be past, but the
+    # human line is the newest and nothing else blocks it).
+    assert targets[0]["eligible"] is True
+
+
+@pytest.mark.asyncio
+async def test_self_last_gate_expires_after_the_window(monkeypatch):
+    """After the window the thread is reachable again, so a silent human is
+    not muted forever — which is the failure that got the gate removed."""
+    plugin = gco.GrilloChatObserverPlugin()
+    plugin.block_on_self_last = True
+    plugin.self_last_window_minutes = 60
+    now = datetime.now(timezone.utc)
+
+    async def fake_recent_paths(limit):
+        return [{"interface_path": "telegram_bot/5208932647"}]
+
+    messages = [
+        {
+            "sender_name": "Scar",
+            "text": "brb, back in ten",
+            "timestamp": (now - timedelta(hours=4)).isoformat(),
+        },
+        {
+            "sender_name": "self",
+            "text": "no rush",
+            "timestamp": (now - timedelta(hours=3)).isoformat(),
+        },
+    ]
+
+    async def fake_load(path):
+        return list(messages)
+
+    monkeypatch.setattr(
+        "core.interface_paths.get_recent_interface_paths", fake_recent_paths
+    )
+    monkeypatch.setattr("core.chat_history_cache.load_chat_history", fake_load)
+    monkeypatch.setattr(
+        "core.interface_path_utils.is_vessel_interface_path", lambda p: False
+    )
+
+    targets = await plugin._collect_eligible_targets(limit=5)
+
+    assert targets[0]["last_from_self"] is True
+    assert targets[0]["awaiting_reply"] is False
+    assert targets[0]["eligible"] is True
+
+
+@pytest.mark.asyncio
+async def test_self_last_gate_toggle_off_restores_the_old_behaviour(monkeypatch):
+    """With the toggle off, speaking last puts nothing off-limits.
+
+    This is the escape hatch for the original removal: an operator who finds the
+    gate is silencing all outreach flips one key instead of editing code.
+    """
+    plugin = gco.GrilloChatObserverPlugin()
+    plugin.block_on_self_last = False
+    plugin.self_last_window_minutes = 720
+    now = datetime.now(timezone.utc)
+
+    async def fake_recent_paths(limit):
+        return [{"interface_path": "telegram_bot/5208932647"}]
+
+    messages = [
+        {
+            "sender_name": "Scar",
+            "text": "we're staying here for a while",
+            "timestamp": (now - timedelta(hours=2)).isoformat(),
+        },
+        {
+            "sender_name": "self",
+            "text": "I'm gonna stay right here and cling to you forever~",
+            "timestamp": (now - timedelta(hours=1)).isoformat(),
+        },
+    ]
+
+    async def fake_load(path):
+        return list(messages)
+
+    monkeypatch.setattr(
+        "core.interface_paths.get_recent_interface_paths", fake_recent_paths
+    )
+    monkeypatch.setattr("core.chat_history_cache.load_chat_history", fake_load)
+    monkeypatch.setattr(
+        "core.interface_path_utils.is_vessel_interface_path", lambda p: False
+    )
+
+    targets = await plugin._collect_eligible_targets(limit=5)
+
+    assert targets[0]["last_from_self"] is True
+    assert targets[0]["awaiting_reply"] is False
     assert targets[0]["eligible"] is True
 
 
@@ -1104,15 +1240,17 @@ async def test_eligible_targets_include_chat_with_recent_human_reply(monkeypatch
     assert targets[0]["last_from_self"] is False
 
 
-def test_observer_outreach_is_not_gated_by_speaking_last():
-    """The removed awaiting-reply gate must not survive in the instructions.
+def test_observer_prose_matches_the_awaiting_reply_gate():
+    """The prose and the code must agree about the awaiting-reply gate.
 
-    The 12h awaiting-reply guard was taken out of the code because a responsive
-    synth is the newest speaker in every chat, which made outreach structurally
-    impossible. The same rule was still written in prose ("someone who has not
-    answered you is not someone waiting for you ... or stay silent"), and live
-    observers kept declining on exactly that basis while a non-live target sat
-    idle at 1-3h. This pins the replacement wording.
+    The gate was removed from the code in c2b71ead and the same rule was also
+    reworded in the instructions, so the model stopped declining. It has since
+    been restored with a window and a toggle, which means the prose needs to
+    describe it again — but only as an OFF-LIMITS MARKER the reader can see in
+    the target list, never as a blanket "stay silent" rule. The previous failure
+    was that observers declined hour after hour while a non-live target sat
+    idle; a model told to treat every self-last thread as forbidden reproduces
+    it, so both halves are pinned.
     """
     from plugins.grillo.common_instructions import (
         GRILLO_INSTRUCTIONS,
@@ -1121,13 +1259,14 @@ def test_observer_outreach_is_not_gated_by_speaking_last():
 
     text = OBSERVER_PROACTIVE_INSTRUCTIONS
 
-    # The removed gate, in its old prose form.
-    assert "is not someone waiting for you" not in text
-    assert "genuine void of initiative" not in text
-    assert "worth more than several shallow" not in text
+    # The gate is described, and it is tied to a marker the target list shows.
+    assert "AWAITING-REPLY" in text
+    assert "asking again whether they are coming back is nagging" in text
+    # ... and the marker is what switches it off, not who spoke last alone.
+    assert "is NOT marked AWAITING-REPLY or LIVE-CONVERSATION" in text
 
-    # Speaking last is explicitly fine, and reaching out is the run's purpose.
-    assert "does NOT put it off-limits" in text
+    # Reaching out is still the run's purpose, and a quiet network is still the
+    # cue to act: neither half may come back with the gate.
     assert "reaching out to it is the purpose of the beat" in text
     assert "silence is not" in text
 
@@ -1173,12 +1312,48 @@ def test_quiet_run_note_frames_outreach_as_the_job():
     )
 
     assert "that is what this run is for" in prompt
-    assert "skipping any marked LIVE-CONVERSATION" in prompt
+    assert "skipping any marked LIVE-CONVERSATION or AWAITING-REPLY" in prompt
     assert "Otherwise return" not in prompt
     # The live target is still flagged off-limits, the idle one is not.
     assert "LIVE-CONVERSATION" in prompt
     assert "indulgence" not in prompt
     assert "last_sender=self" in prompt
+
+
+def test_awaiting_reply_target_is_rendered_off_limits():
+    """A target held by the awaiting-reply gate says so in the prompt.
+
+    The gate decides eligibility in code, but the model is what actually picks a
+    target — so the row has to carry the reason, or the beat reaches into a
+    thread the eligibility pass just excluded.
+    """
+    plugin = gco.GrilloChatObserverPlugin()
+    prompt = plugin._build_observer_prompt(
+        [],
+        targets=[
+            {
+                "interface_path": "telegram_bot/1",
+                "age_seconds": 3600,
+                "last_sender": "self",
+                "in_active_conversation": False,
+                "awaiting_reply": True,
+            },
+            {
+                "interface_path": "telegram_bot/2",
+                "age_seconds": 10800,
+                "last_sender": "Scar",
+                "in_active_conversation": False,
+                "awaiting_reply": False,
+            },
+        ],
+        decay_driven=True,
+    )
+
+    assert "AWAITING-REPLY(OFF-LIMITS — you spoke last" in prompt
+    assert "the human has not replied yet" in prompt
+    # The idle, human-last target is still offered as reachable.
+    assert "telegram_bot/2" in prompt
+    assert prompt.count("cooldown=ok") == 1
 
 
 @pytest.mark.asyncio
