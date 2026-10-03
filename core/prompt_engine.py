@@ -4543,14 +4543,6 @@ async def build_live_prompt_request(
     except Exception as e:
         log_warning(f"[live_prompt] Failed to gather injections for Live API: {e}")
 
-    live_user_text = ""
-    if message is not None:
-        raw_live_text = getattr(message, "text", None) or getattr(
-            message, "caption", None
-        )
-        if raw_live_text is not None:
-            live_user_text = str(raw_live_text)
-
     parts: list[str] = []
 
     # --- Persona identity ---
@@ -4614,19 +4606,15 @@ async def build_live_prompt_request(
             "Use time, date, and location as ambient context for scheduling, logistics, or natural scene-setting only.",
             "Do not volunteer or copy exact runtime facts in ordinary replies unless the user explicitly asked for them.",
         ]
-        if _turn_requests_explicit_runtime_facts(live_user_text):
-            if location_val:
-                time_parts.append(f"Location: {location_val}")
-            if date_val:
-                time_parts.append(f"Date: {date_val}")
-            if time_val:
-                time_parts.append(f"Time: {time_val}")
-        elif time_of_day_val:
+        # Ambient injection is unconditional (~40 chars) — no keyword gate.
+        if location_val:
+            time_parts.append(f"Location: {location_val}")
+        if date_val:
+            time_parts.append(f"Date: {date_val}")
+        if time_val:
+            time_parts.append(f"Time: {time_val}")
+        if time_of_day_val:
             time_parts.append(f"Current part of day: {time_of_day_val}.")
-        else:
-            time_parts.append(
-                "Keep the exact local date, time, and location in the background unless the conversation specifically needs them."
-            )
         parts.append("Ambient runtime context:\n" + "\n".join(time_parts))
 
     # Plugin blocks (same source of truth as the chat/beat renderer). Applied

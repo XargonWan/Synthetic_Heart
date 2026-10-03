@@ -5,9 +5,9 @@ Part of the [G.R.I.L.L.O.](../guide.md) background subsystem.
 ## Purpose
 
 Nightly memory housekeeping. Groups older memories by tag, asks the active LLM
-to synthesize each cluster into a single compacted memory, archives the source
-rows into `archived_memories`, and inserts the new compacted memory back into
-`memories` with LLM-suggested tags and feeling. Keeps long-term memory dense and
+to synthesize each cluster into a single compacted memory, moves the source
+diary rows into `ai_diary_archive`, and inserts the new compacted memory back
+into `memories` with LLM-suggested tags and feeling. Keeps long-term memory dense and
 useful instead of unbounded.
 
 ## Beat
