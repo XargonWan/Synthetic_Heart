@@ -1642,3 +1642,47 @@ def test_cache_covers_buffer_requires_every_buffered_line() -> None:
         )
         is False
     )
+
+
+@pytest.mark.asyncio
+async def test_vessel_turn_skips_soul_recall() -> None:
+    """Vessel-focus turns must not leak global memory back in via
+    soul_recalled_memories (history_engine suppresses the core tier)."""
+
+    async def _must_not_recall(**kwargs: Any) -> list[str]:
+        raise AssertionError(f"soul recall must not run on vessel turns: {kwargs!r}")
+
+    plugin = SoulPlugin()
+    plugin._recall_memories = _must_not_recall  # type: ignore[method-assign]
+    message = SimpleNamespace(
+        interface_path="vessel/minecraft",
+        text="hello",
+        caption=None,
+    )
+    payload = await plugin.get_static_injection(
+        message, {"interface_path": "vessel/minecraft"}
+    )
+    assert payload["soul_recalled_memories"] == []
+
+
+def test_build_embedder_honours_soul_embedder_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The setup wizard's SOUL_EMBEDDER_ID pick must reach FastEmbedder."""
+    monkeypatch.setenv("SOUL_EMBEDDER_ID", "custom/model")
+    monkeypatch.setattr("importlib.util.find_spec", lambda _name: object())
+    # Function scope overrides the module autouse fixture (mariadb) so the
+    # postgres embedder branch runs.
+    monkeypatch.setattr(
+        SoulPlugin, "_get_repository_backend", staticmethod(lambda: "postgres")
+    )
+    captured: dict[str, Any] = {}
+
+    class _FakeEmbedder:
+        def __init__(self, model_id: str) -> None:
+            captured["model_id"] = model_id
+
+    monkeypatch.setattr("plugins.soul_plugin.FastEmbedder", _FakeEmbedder)
+    plugin = SoulPlugin()
+    plugin._build_embedder()
+    assert captured["model_id"] == "custom/model"

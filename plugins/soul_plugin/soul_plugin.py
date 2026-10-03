@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -638,7 +639,8 @@ class SoulPlugin(PluginBase):
 
         backend = self._get_repository_backend()
         if backend == "postgres":
-            model_id = "BAAI/bge-base-en-v1.5"
+            # Honour the setup-wizard pick; default matches VECTOR(768).
+            model_id = os.environ.get("SOUL_EMBEDDER_ID", "BAAI/bge-base-en-v1.5")
             try:
                 if find_spec("fastembed") is None:
                     raise ModuleNotFoundError("fastembed")
@@ -724,6 +726,16 @@ class SoulPlugin(PluginBase):
         if interface_path.startswith("grillo/"):
             return await self._get_grillo_beat_context(message)
 
+        # Vessel-focus turns suppress global memory (history_engine does the
+        # same for the core tier): recall here would leak it back in via
+        # soul_recalled_memories. Session state/foresight below still apply.
+        try:
+            from core.vessel_focus import is_vessel_turn
+
+            _vessel_turn = bool(is_vessel_turn(message, context_memory, interface_path))
+        except Exception:
+            _vessel_turn = False
+
         now = datetime.now(timezone.utc)
 
         session = self._sessions.get(interface_path)
@@ -763,7 +775,7 @@ class SoulPlugin(PluginBase):
         turn_delta = self._emotion_engine.to_turn_delta_payload(session.emotional_state)
         recalled_memories: list[str] = []
 
-        if incoming_text:
+        if incoming_text and not _vessel_turn:
             try:
                 recalled_memories = await self._recall_memories(
                     interface_path=interface_path,
