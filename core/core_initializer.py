@@ -3080,6 +3080,27 @@ class CoreInitializer:
                     if actions
                     else "Plugin with no actions",
                 )
+                # Self-registered alias (e.g. "radio_host" for module
+                # plugins.radio_host.radio_host_plugin): carry the module
+                # identity so a later WebUI disable/enable round-trip can
+                # re-instantiate it (else unknown_plugin_module).
+                info = self.components.get(plugin_name)
+                if info is not None and plugin_obj is not None:
+                    try:
+                        import sys as _sys
+
+                        mod_name = getattr(plugin_obj, "__module__", "") or ""
+                        if mod_name and not info.module_name:
+                            info.module_name = mod_name
+                            mod = _sys.modules.get(mod_name)
+                            mod_file = getattr(mod, "__file__", None) if mod else None
+                            if mod_file:
+                                info.dir_path = str(Path(mod_file).parent)
+                                info.category = derive_plugin_category(
+                                    mod_name, info.dir_path
+                                )
+                    except Exception:
+                        pass
 
                 if actions:
                     log_info(

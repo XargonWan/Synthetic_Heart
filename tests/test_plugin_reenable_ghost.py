@@ -64,3 +64,35 @@ def test_disable_enable_self_registered_alias() -> None:
             asyncio.run(core_initializer._build_actions_block())
         except Exception:
             pass
+
+
+def test_register_plugin_stamps_module_identity() -> None:
+    from core.core_initializer import PLUGIN_REGISTRY, core_initializer
+
+    original_registry = dict(PLUGIN_REGISTRY)
+    original_components = dict(core_initializer.components)
+    original_loaded = list(core_initializer.loaded_plugins)
+
+    class FakeRadio:
+        display_name = "Fake Radio"
+
+        def get_supported_actions(self):
+            return {}
+
+    # Simulate a self-registering plugin whose __module__ is the real file.
+    FakeRadio.__module__ = "plugins.radio_host.radio_host_plugin"
+    inst = FakeRadio()
+    PLUGIN_REGISTRY["radio_host"] = inst
+    core_initializer.components.pop("radio_host", None)
+
+    try:
+        core_initializer.register_plugin("radio_host")
+        info = core_initializer.components.get("radio_host")
+        assert info is not None
+        assert info.module_name == "plugins.radio_host.radio_host_plugin"
+    finally:
+        PLUGIN_REGISTRY.clear()
+        PLUGIN_REGISTRY.update(original_registry)
+        core_initializer.components.clear()
+        core_initializer.components.update(original_components)
+        core_initializer.loaded_plugins[:] = original_loaded
