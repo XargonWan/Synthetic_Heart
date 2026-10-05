@@ -485,7 +485,11 @@ function appendMessage(container, sender, text, ts, attachments) {
     // Format time for the small timestamp
     let timeText = '';
     try {
-        timeText = dt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+        const opts = { hour: 'numeric', minute: '2-digit' };
+        try {
+            if (window.SynthUtils && window.SynthUtils.is12Hour && window.SynthUtils.is12Hour()) opts.hour12 = true;
+        } catch (e) { /* default locale behavior */ }
+        timeText = dt.toLocaleTimeString(undefined, opts);
     } catch (e) {
         const hh = dt.getHours().toString().padStart(2,'0');
         const mm = dt.getMinutes().toString().padStart(2,'0');

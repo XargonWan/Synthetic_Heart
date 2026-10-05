@@ -27,6 +27,12 @@ window.SynthUtils.escapeHtml = function(text) {
         .replace(/'/g, '&#39;');
 };
 
+window.SynthUtils.TIME_12H_KEY = 'synth-time-12h';
+
+window.SynthUtils.is12Hour = function() {
+    try { return localStorage.getItem(window.SynthUtils.TIME_12H_KEY) === '1'; } catch (e) { return false; }
+};
+
 window.SynthUtils.formatTimestamp = function(isoString) {
     if (!isoString) return 'Unknown time';
     try {
@@ -38,7 +44,7 @@ window.SynthUtils.formatTimestamp = function(isoString) {
         return new Intl.DateTimeFormat('it-IT', {
             year: 'numeric', month: '2-digit', day: '2-digit',
             hour: '2-digit', minute: '2-digit', second: '2-digit',
-            hour12: false, timeZone: localTZ, timeZoneName: 'short'
+            hour12: window.SynthUtils.is12Hour(), timeZone: localTZ, timeZoneName: 'short'
         }).format(parsed);
     } catch (e) {
         return isoString;
