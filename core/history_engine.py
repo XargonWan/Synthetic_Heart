@@ -274,11 +274,20 @@ def _get_int_env_first(key: str, default: int) -> int:
 _EXCHANGE_SCAN_MESSAGES = 60
 
 # A rendered history line: optional "[from ...]" prefix, "[ts]", sender,
-# optional "[replied to ...]" annotation, then the quoted text. Mirrors what
+# optional "[replied to ...]" annotation, then the quoted text, then an optional
+# trailing age marker OUTSIDE the quotes ("[13 minutes earlier]"). Mirrors what
 # ``_entry_to_text`` writes and ``core/prompt_engine.py::_TURN_PARSE_RE`` reads.
 _RENDERED_LINE_SENDER_RE = re.compile(
     r"^(?:\[from\s[^\]]*\]\s+)?\[[^\s\]]+\]\s+([^:\[\"]+?)"
     r"(?:\s+\[replied to [^\]]+\])?:\s+\"",
+)
+
+# An age marker at the start of a string: the shape ``_relative_age_marker``
+# writes ("[13 minutes earlier]", "[3 hours earlier]", "[2 days earlier]"). A
+# small syntax parser for a format we author, used by
+# ``strip_leading_age_marker`` so a copied marker never leaves as outbound text.
+_LEADING_AGE_MARKER = re.compile(
+    r"^\[\s*\d{1,4}\s+[^\]]{1,20}?earlier\s*\]\s*", re.IGNORECASE
 )
 
 
@@ -507,10 +516,57 @@ def _entry_to_text(entry: HistoryEntry) -> str:
             reply_suffix = f' [replied to {reply_sender}: "{reply_text_safe}"]'
 
     safe_text = str(text).replace('"', "'")
+    # The age marker goes OUTSIDE the quoted body, after the closing quote.
+    # It used to ride inside (`"[13 minutes earlier] Then the look stays…"`),
+    # which `_TURN_PARSE_RE` captured verbatim into the provider's
+    # conversation_history turns — so the model's own past messages each began
+    # with a bracketed marker, and it imitated the shape, opening a reply with
+    # "[13 minutes earlier] …" and sending it to the DM (2026-09-30, twice in a
+    # day: chat_history_cache 7445 and 7512). Trailing keeps staleness
+    # model-visible without demonstrating a marker-first message.
     age_marker = _relative_age_marker(ts)
-    if age_marker:
-        safe_text = f"{age_marker} {safe_text}"
-    return f'[{_format_ts(ts)}] {sender}{reply_suffix}: "{safe_text}"'.strip()
+    age_suffix = f" {age_marker}" if age_marker else ""
+    return (
+        f'[{_format_ts(ts)}] {sender}{reply_suffix}: "{safe_text}"{age_suffix}'.strip()
+    )
+
+
+def split_leading_age_marker(text: str) -> tuple[str, str]:
+    """Split a leading age marker off ``text``: returns ``(body, marker)``.
+
+    The marker comes back so a caller can re-attach the age somewhere the model
+    cannot mistake for the start of a message: the turn builder moves a legacy
+    in-quote marker to the end of the turn rather than losing how old the line
+    is. Stacked markers (a polluted row re-rendered with a fresh age) are joined
+    oldest-first.
+    """
+    if not isinstance(text, str) or "earlier" not in text:
+        return text, ""
+    cleaned = text.lstrip()
+    found: list[str] = []
+    while True:
+        m = _LEADING_AGE_MARKER.match(cleaned)
+        if not m:
+            break
+        found.append(m.group(0).strip())
+        cleaned = cleaned[m.end() :].lstrip()
+    if not found:
+        return text, ""
+    return cleaned, " ".join(reversed(found))
+
+
+def strip_leading_age_marker(text: str) -> str:
+    """Remove age markers from the start of outbound text.
+
+    The marker is system-written and describes the message, not the speaker
+    (``RULE_ANNOTATIONS_ARE_NOT_PEOPLE``) — it exists for the model's eyes and
+    must never reach a person. The model occasionally opens a reply with one it
+    copied from history, so every outbound path normalises the text the same way
+    emotion tags are stripped. Only *leading* markers go: a marker deeper in the
+    text is not a transcription of the prompt format, and removing it would cut
+    into something the model actually wrote.
+    """
+    return split_leading_age_marker(text)[0]
 
 
 def telegram_chat_kind(path: str) -> str | None:

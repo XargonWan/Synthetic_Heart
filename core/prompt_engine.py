@@ -37,7 +37,8 @@ if not hasattr(re, "_TURN_PARSE_RE_SENTINEL"):
         r"\[[^\s\]]+\]\s+"  # [timestamp] — NO spaces inside brackets
         r'([^:\["]+?)'  # sender name (group 1)
         r"(?:\s+\[replied to [^\]]+\])?"  # optional reply annotation
-        r':\s+"(.*)"$',  # : "content" (group 2)
+        r':\s+"(.*)"'  # : "content" (group 2)
+        r"(?:\s+(\[[^\]]{1,30}earlier\]))?$",  # trailing age marker (group 3)
         re.DOTALL,
     )
 else:  # pragma: no cover
@@ -1536,6 +1537,8 @@ def _history_to_turns(
     """
     from core.prompt_request import Turn
 
+    from core.history_engine import split_leading_age_marker
+
     # "self" is the canonical sender_name for the AI in history format
     all_synth_names = synth_names | {"self"}
 
@@ -1563,7 +1566,15 @@ def _history_to_turns(
         if not m:
             continue
         sender = m.group(1).strip()
-        content = m.group(2)
+        content, legacy_marker = split_leading_age_marker(m.group(2))
+        trailing_marker = (m.group(3) or "").strip() or legacy_marker
+        # An age marker is an annotation about a message, never the opening of
+        # one. The renderer used to put it inside the quotes, so a turn content
+        # began with "[13 minutes earlier]"; the model imitated the shape and
+        # sent exactly that to the DM (2026-09-30, twice in a day). A leading
+        # marker — from that era or copied by the model — is split off here and
+        # the age is re-attached at the END of the turn below, so staleness stays
+        # model-visible without any turn demonstrating a marker-first message.
         # Skip turns whose quoted content is empty/whitespace. A blank
         # '[ts] Sender: ""' line (e.g. media without a caption) would otherwise
         # become an empty-content user/assistant message in the provider
@@ -1592,6 +1603,8 @@ def _history_to_turns(
                 # in the content itself.
                 content = f"[{peer_name}]: {content}"
                 is_peer = True
+        if trailing_marker:
+            content = f"{content} {trailing_marker}"
         entries.append((Turn(role=role, content=content), is_peer))
 
     if not entries:

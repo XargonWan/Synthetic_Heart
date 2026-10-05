@@ -1446,6 +1446,19 @@ async def _dispatch_send_message(
         _maybe_unescape_text_in_payload(payload)
     except Exception:
         log_debug("[action_parser] Text unescape normalization failed (non-fatal)")
+    # System-written annotations never go out either: the model copied the age
+    # marker out of history and sent "[13 minutes earlier] …" to the DM on
+    # 2026-09-30 (chat_history_cache 7445 and 7512). Unlike the emotion tags
+    # below, a marker carries no brace, so this is not gated on "{".
+    _marker_text = payload.get("text")
+    if isinstance(_marker_text, str) and "earlier" in _marker_text:
+        try:
+            from core.history_engine import strip_leading_age_marker
+
+            payload["text"] = strip_leading_age_marker(_marker_text)
+        except Exception:
+            pass
+
     # Strip emotion / meta tags from outbound text so they never leak to the
     # end-user interface.
     raw_text = payload.get("text")
@@ -1573,6 +1586,17 @@ async def _handle_plugin_action(
                     log_debug(
                         "[action_parser] Text unescape normalization failed (non-fatal)"
                     )
+                # System-written annotations never go out: see the age-marker
+                # note on the send_message path above.
+                if isinstance(payload, dict):
+                    _marker_text2 = payload.get("text")
+                    if isinstance(_marker_text2, str) and "earlier" in _marker_text2:
+                        try:
+                            from core.history_engine import strip_leading_age_marker
+
+                            payload["text"] = strip_leading_age_marker(_marker_text2)
+                        except Exception:
+                            pass
                 # Strip emotion / meta tags from outbound text so they
                 # never leak to the end-user interface.
                 if isinstance(payload, dict):
