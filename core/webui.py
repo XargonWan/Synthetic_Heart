@@ -2081,10 +2081,11 @@ class SynthWebUIInterface:
     def _get_session_username(self) -> str:
         """Best-effort display name for the interacting WebUI user."""
         try:
-            from core.config import TRAINER_NAME
+            from core.config import get_trainer_display_name
 
-            if TRAINER_NAME and TRAINER_NAME != "Trainer":
-                return str(TRAINER_NAME)
+            name = get_trainer_display_name()
+            if name:
+                return str(name)
         except Exception:
             pass
         return "Trainer"
@@ -4902,7 +4903,7 @@ class SynthWebUIInterface:
         is_voice_input: bool = False,
     ) -> None:
         from types import SimpleNamespace
-        from core.config import TRAINER_NAME
+        from core.config import get_trainer_display_name
         from core import message_queue
 
         normalized_attachments = [
@@ -4924,11 +4925,7 @@ class SynthWebUIInterface:
             )
 
         # Get trainer name for the user
-        trainer_name = (
-            str(TRAINER_NAME)
-            if TRAINER_NAME and TRAINER_NAME != "Trainer"
-            else "Trainer"
-        )
+        trainer_name = get_trainer_display_name() or "Trainer"
 
         message = SimpleNamespace(
             chat_id=session_id,
