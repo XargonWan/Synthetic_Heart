@@ -271,12 +271,18 @@ def _memory_merge_key(memory: Any) -> str:
     two of the limited memory slots in every prompt. Two rows holding the same
     text are the same memory whatever their ids are.
     """
-    # a soul string, so the same fact shipped twice (cross-tier dupe).
+    # A Soul string ("[SOUL recalled memory | ...] body") keys on its body, so
+    # the same fact shipped by both the core tier and Soul counts once.
     if isinstance(memory, dict):
         snippet = (
             memory.get("snippet") or memory.get("content") or memory.get("summary")
         )
-        return _dedupe_context_segments(str(snippet or "")).casefold()
+        text = _dedupe_context_segments(str(snippet or "")).casefold()
+        if text:
+            return text
+        # No text to compare: fall back to the row identity so distinct empty
+        # entries are not collapsed into one.
+        return f"{memory.get('source')}::{memory.get('id')}"
     text = str(memory)
     soul_match = _SOUL_RECALLED_MEMORY_RE.match(text)
     if soul_match:
@@ -3488,8 +3494,18 @@ async def build_prompt_request(
             # context_section, otherwise the trim never reaches the model.
             if isinstance(prompt_with_instructions, dict):
                 if "context" not in prompt_with_instructions:
-                    # Emergency path deleted the whole context.
+                    # Emergency path deleted the whole context. Keep the newest
+                    # line of the current chat (the floor STEP 4 trims to):
+                    # without it the model answers a turn with no conversation.
+                    _kept_history = context_section.get("history_current_chat")
+                    _kept_history = (
+                        list(_kept_history[-1:])
+                        if isinstance(_kept_history, list)
+                        else []
+                    )
                     context_section.clear()
+                    if _kept_history:
+                        context_section["history_current_chat"] = _kept_history
                 else:
                     _reduced_ctx = prompt_with_instructions.get("context")
                     if (
