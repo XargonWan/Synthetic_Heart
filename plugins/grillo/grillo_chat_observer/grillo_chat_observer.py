@@ -497,15 +497,12 @@ class GrilloChatObserverPlugin:
                 activity_log_id = await GrilloPlugin.create_activity_log(
                     beat_type="observer", prompt_text=prompt
                 )
-                # Definitive logging: include activity id and short prompt snippet for traceability
-                try:
-                    snippet = str(prompt).replace("\n", " ")[:200]
-                    log_info(
-                        f"[grillo_chat_observer] Activity created: GRILLO_ACTIVITY id={activity_log_id} beat=observer propose_only={self.propose_only} prompt_snippet={snippet}"
-                    )
-                except Exception:
-                    # Non-fatal; continue
-                    pass
+                # Definitive logging: activity id for traceability. Never log a
+                # prompt snippet — the observer prompt is composed of verbatim
+                # user chat (privacy: chat/diary text in logs is a bug).
+                log_info(
+                    f"[grillo_chat_observer] Activity created: GRILLO_ACTIVITY id={activity_log_id} beat=observer propose_only={self.propose_only}"
+                )
             except Exception as e:
                 log_debug(f"[grillo_chat_observer] Could not create activity log: {e}")
 

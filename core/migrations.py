@@ -644,6 +644,43 @@ async def _migrate_llm_failure_log_is_test() -> None:
                 pass
 
 
+async def _migrate_memories_dedupe_index() -> None:
+    """Index the ``insert_memory`` exact-dupe guard (author/source/content).
+
+    The guard runs ``SELECT 1 FROM memories WHERE content = %s AND author
+    = %s AND source = %s`` before every insert; without an index that is a
+    full sequential scan on each write. Postgres gets an expression index
+    on ``md5(content)`` (content is unbounded TEXT); MariaDB gets a plain
+    ``(author, source)`` prefix. Idempotent and fail-open.
+    """
+    from core.db import _get_db_type, get_conn_ctx
+
+    db_type = _get_db_type()
+    async with get_conn_ctx() as conn:
+        async with conn.cursor() as cur:
+            if not await _table_exists(cur, "memories", db_type):
+                return
+            try:
+                if db_type == "postgres":
+                    await cur.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_memories_dedupe "
+                        "ON memories (author, source, md5(content))"
+                    )
+                else:
+                    await cur.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_memories_dedupe "
+                        "ON memories (author, source)"
+                    )
+                log_info("[migrations] Ensured idx_memories_dedupe index")
+            except Exception as exc:
+                log_warning(f"[migrations] idx_memories_dedupe skipped: {exc}")
+                return
+            try:
+                await conn.commit()
+            except Exception:
+                pass
+
+
 async def _migrate_selenium_config_keys() -> None:
     """Rename legacy ``SELENIUM_*`` config keys to ``ZEN_*``.
 
@@ -768,10 +805,9 @@ _STARTUP_MIGRATIONS: list[tuple[str, Any]] = [
     ("migrate_goals_table", _migrate_goals_table),
     ("migrate_llm_failure_log_is_test", _migrate_llm_failure_log_is_test),
     ("migrate_selenium_config_keys", _migrate_selenium_config_keys),
-
-
     ("widen_memories_text_columns", _widen_memories_text_columns),
     ("flag_historic_test_failure_rows", _flag_historic_test_failure_rows),
+    ("migrate_memories_dedupe_index", _migrate_memories_dedupe_index),
 ]
 
 
