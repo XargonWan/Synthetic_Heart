@@ -120,8 +120,10 @@
             max-width: 100%;
         }
         .nav-btn:hover, .nav-btn:focus {
-            border: 1px solid transparent;
-            border-image: linear-gradient(90deg, var(--accent), var(--accent-dark)) 1;
+            border-color: var(--accent);
+            background: var(--accent-soft);
+            transform: translateY(-1px);
+            box-shadow: 0 12px 30px -20px var(--accent-soft);
         }
         .nav-btn .icon { font-size: 1.25rem; }
         .nav-btn.active {
