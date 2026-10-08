@@ -3778,7 +3778,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         return row;
                     };
 
-                    const renderDetailsList = (items, container) => {
+                    function renderDetailsList(items, container) {
                         container.innerHTML = '';
                         if (!items || !items.length) {
                             const empty = document.createElement('div');
@@ -4070,7 +4070,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                             container.appendChild(details);
                         });
-                    };
+                    }
 
                     // ── Two-column plugins renderer (banner list + detail pane) ────
                     // Minimal, dependency-free Markdown → HTML for guide.md content.
