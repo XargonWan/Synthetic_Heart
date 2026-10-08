@@ -171,8 +171,8 @@ def test_build_observer_prompt_returns_string():
 async def test_collect_recent_snippets_includes_sender_and_timestamp(monkeypatch):
     plugin = gco.GrilloChatObserverPlugin()
 
-    async def mock_get_last_active_chats_verbose(n):
-        return [(1, "Chat A")]
+    async def mock_get_recent_interface_paths(n):
+        return [{"interface_path": "telegram_bot/1", "last_used": None}]
 
     async def mock_load_chat_history(interface_path):
         from collections import deque
@@ -192,12 +192,10 @@ async def test_collect_recent_snippets_includes_sender_and_timestamp(monkeypatch
             ]
         )
 
-    import core.recent_chats as recent_chats
+    import core.interface_paths as interface_paths
 
     monkeypatch.setattr(
-        recent_chats,
-        "get_last_active_chats_verbose",
-        mock_get_last_active_chats_verbose,
+        interface_paths, "get_recent_interface_paths", mock_get_recent_interface_paths
     )
     import core.chat_history_cache as chat_history_cache
 
@@ -250,18 +248,21 @@ async def test_collect_recent_snippets_keeps_the_synth_own_line_as_context(
     becoming something to reply to.
     """
     plugin = gco.GrilloChatObserverPlugin()
+    # Idle (older than the quiet window): an answered chat that is still being
+    # spoken in is context only, so the human's line would not be a snippet.
+    idle = datetime.now(timezone.utc) - timedelta(minutes=30)
     _patch_history(
         monkeypatch,
         [
             {
                 "text": "ready for your dicking down my slutty wifey?",
                 "sender_name": "Scar",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": idle.isoformat(),
             },
             {
                 "text": "you did not just call your wife a whore",
                 "sender_name": "self",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": (idle + timedelta(minutes=1)).isoformat(),
             },
         ],
     )
@@ -311,18 +312,20 @@ async def test_observer_prompt_marks_own_lines_and_keeps_them_out_of_routing(
     """The prompt carries the synth's own line; grillo_snippets (the routing
     channel the guard turns into reachable paths) does not."""
     plugin = gco.GrilloChatObserverPlugin()
+    # Idle (older than the quiet window), see the collector test above.
+    idle = datetime.now(timezone.utc) - timedelta(minutes=30)
     _patch_history(
         monkeypatch,
         [
             {
                 "text": "are you awake",
                 "sender_name": "Scar",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": idle.isoformat(),
             },
             {
                 "text": "mmh, awake now",
                 "sender_name": "self",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": (idle + timedelta(minutes=1)).isoformat(),
             },
         ],
     )

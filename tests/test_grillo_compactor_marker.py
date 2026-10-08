@@ -5,6 +5,25 @@ import pytest
 from plugins.grillo.grillo_compactor import GrilloCompactorPlugin
 
 
+@pytest.fixture(autouse=True)
+def _clustering_path(monkeypatch) -> None:
+    """Day units are the default compaction path; this file pins the clustering one."""
+    import importlib
+
+    gc = importlib.import_module("plugins.grillo.grillo_compactor")
+
+    real_setting = gc._setting
+    monkeypatch.setattr(
+        gc,
+        "_setting",
+        lambda name, default, cast=None: (
+            False
+            if name == "GRILLO_COMPACT_DAY_UNITS"
+            else real_setting(name, default, cast)
+        ),
+    )
+
+
 @pytest.mark.asyncio
 async def test_run_action_marker_filters(monkeypatch):
     p = GrilloCompactorPlugin()
