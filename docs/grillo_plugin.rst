@@ -331,7 +331,10 @@ UI: These variables are exposed in the WebUI under **Configurations → Grillo**
 Observer configuration flags:
 
 - ``GRILLO_OBSERVER_STORE_MEMORIES`` (bool, default: ``True``) — when enabled, the observer persists sampled snippets as passive memories.
-- ``GRILLO_OBSERVER_SELF_WINDOW`` (float, default: ``43200``) — duplicate-suppression window (seconds): an identical outbound Grillo message to the same conversation within this window is dropped. It does **not** gate outreach eligibility; the live-conversation guard (``GRILLO_OUTREACH_QUIET_MINUTES``) is the only thing that holds proactive outreach back.
+- ``GRILLO_OBSERVER_SELF_WINDOW`` (float, default: ``43200``) — duplicate-suppression window (seconds): an identical outbound Grillo message to the same conversation within this window is dropped. It does **not** gate outreach eligibility.
+- ``GRILLO_OUTREACH_BLOCK_ON_SELF_LAST`` (bool, default: ``True``) — the awaiting-reply gate. When the synth's own message is the newest in a conversation, that conversation is off-limits for proactive outreach until the human replies or ``GRILLO_OUTREACH_SELF_LAST_WINDOW_MINUTES`` expires. Set it to ``False`` to restore the ungated behaviour, in which every idle conversation is an outreach target including ones the synth already spoke last in.
+- ``GRILLO_OUTREACH_SELF_LAST_WINDOW_MINUTES`` (int, default: ``720``) — how long a conversation stays off-limits after the synth spoke last, in minutes (12 h). ``0`` holds it until the human replies. Only consulted while ``GRILLO_OUTREACH_BLOCK_ON_SELF_LAST`` is on. (advanced)
+- ``GRILLO_OUTREACH_QUIET_MINUTES`` (int, default: ``15``) — live-conversation guard: a chat whose most recent message (either side) is younger than this is mid-conversation and is skipped for that run.
 - ``GRILLO_OBSERVER_LAST_RUN_TS`` (float, default: ``0.0``) — internal timestamp (UTC) of the last observer run. This value is persisted across restarts and usually does not need manual editing.
 
 Notes:

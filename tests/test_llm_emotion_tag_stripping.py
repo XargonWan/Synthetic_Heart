@@ -111,3 +111,42 @@ def test_strip_emotion_tags_meta_only():
 def test_strip_emotion_tags_removes_facial_expression_markers():
     text = "[em_smile:0.3] Hello [em] world"
     assert strip_emotion_tags(text) == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_llm_to_interface_strips_a_leading_age_marker(monkeypatch):
+    """A copied history age marker must not reach the person.
+
+    Live 2026-09-30: the model opened a DM reply with "[13 minutes earlier]",
+    copied out of the history rendering, and Telegram showed it verbatim
+    (chat_history_cache 7445 and 7512). The delivery path normalises it the way
+    it already normalises emotion tags.
+    """
+    captured = {}
+
+    async def fake_corrector_orchestrator(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "core.action_parser.corrector_orchestrator",
+        fake_corrector_orchestrator,
+    )
+
+    async def fake_handle(bot, message, text, source, context=None, **kwargs):
+        captured["text"] = text
+        return None
+
+    monkeypatch.setattr("core.message_chain.handle_incoming_message", fake_handle)
+
+    async def fake_send(*args, **kwargs):
+        pass
+
+    await transport_layer.llm_to_interface(
+        fake_send,
+        None,
+        text="[13 minutes earlier] Then the look stays, and so do I",
+        chat_id=123,
+        interface="telegram",
+    )
+
+    assert captured["text"] == "Then the look stays, and so do I"

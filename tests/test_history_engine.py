@@ -72,8 +72,13 @@ def test_relative_age_marker_disabled_when_threshold_zero(monkeypatch) -> None:
 
 
 def test_entry_to_text_includes_age_marker_for_old_messages(monkeypatch) -> None:
-    """An hours-old chat line carries the relative-age marker inside its quoted
-    content so the model can see it is stale (CHANGELOG 2026-07-05)."""
+    """An hours-old chat line carries the relative-age marker, OUTSIDE the quotes.
+
+    The marker used to ride inside the quoted body, which meant every history
+    turn for the model began with "[3 hours earlier]" — it imitated that shape
+    and sent a marker to the DM on 2026-09-30. Trailing (after the closing
+    quote) keeps staleness visible without demonstrating a marker-first message.
+    """
     from core import history_engine
 
     now = datetime.now(timezone.utc)
@@ -84,8 +89,10 @@ def test_entry_to_text_includes_age_marker_for_old_messages(monkeypatch) -> None
         "interface_path": "telegram_bot/123",
     }
     line = history_engine._entry_to_text(old)
-    assert "[3 hours earlier]" in line
-    assert "nighty night bubu" in line
+    assert line.endswith("[3 hours earlier]")
+    assert '"nighty night bubu" [3 hours earlier]' in line
+    # The quoted body itself stays clean: nothing opens the message but the text.
+    assert '"[3 hours earlier]' not in line
 
     fresh = {
         "sender_name": "Scar",
@@ -96,6 +103,41 @@ def test_entry_to_text_includes_age_marker_for_old_messages(monkeypatch) -> None
     line = history_engine._entry_to_text(fresh)
     assert "[1 minute earlier]" not in line
     assert "hi there" in line
+
+
+def test_strip_leading_age_marker_removes_what_the_model_copied() -> None:
+    """A marker at the front of outbound text never reaches a person.
+
+    Live 2026-09-30: the model opened a DM reply with the marker it had copied
+    out of history, and chat_history_cache 7445 and 7512 stored it verbatim.
+    """
+    from core.history_engine import strip_leading_age_marker
+
+    assert (
+        strip_leading_age_marker(
+            "[13 minutes earlier] Then the look stays, and so do I"
+        )
+        == "Then the look stays, and so do I"
+    )
+    assert strip_leading_age_marker("[3 hours earlier]   padded text") == "padded text"
+    # Stacked markers (a polluted row re-rendered with a fresh age) all go.
+    assert (
+        strip_leading_age_marker("[5 hours earlier] [13 minutes earlier] body")
+        == "body"
+    )
+    # Nothing to do: no marker, a marker deeper in the text the model wrote
+    # itself, or a non-string value.
+    assert strip_leading_age_marker("plain text") == "plain text"
+    assert (
+        strip_leading_age_marker("I read your line [13 minutes earlier] and laughed")
+        == "I read your line [13 minutes earlier] and laughed"
+    )
+    assert strip_leading_age_marker("") == ""
+    assert strip_leading_age_marker(None) is None
+    # An unrelated bracketed annotation is not an age marker.
+    assert strip_leading_age_marker("[from the group chat] hello") == (
+        "[from the group chat] hello"
+    )
 
 
 @pytest.mark.asyncio

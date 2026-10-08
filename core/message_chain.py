@@ -1379,6 +1379,16 @@ async def handle_incoming_message(
 
         # Remove internal emotion tags from the LLM text once they have been
         # processed so downstream actions and interfaces only see clean text.
+        # System-written age markers go the same way (see RULE_ANNOTATIONS_ARE_NOT_PEOPLE).
+        try:
+            from core.history_engine import strip_leading_age_marker
+
+            _no_marker = strip_leading_age_marker(text)
+            if _no_marker != text:
+                log_debug("[message_chain] Stripped an age marker from LLM-origin text")
+                text = _no_marker
+        except Exception:
+            pass
         try:
             from plugins.emotion_manager import strip_emotion_tags
 

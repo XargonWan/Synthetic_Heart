@@ -1582,20 +1582,41 @@ class TestHistoryToTurns:
         assert turns[0].content == "Hey there"
 
     def test_relative_age_marker_rides_into_turn_content(self) -> None:
-        """The relative-age marker emitted by history_engine (e.g. '[3 hours
-        earlier]') lives inside the quoted content, so _history_to_turns must
-        carry it into the turn content -- that is what makes staleness
-        model-visible in the provider messages array (CHANGELOG 2026-07-05)."""
+        """The relative-age marker reaches the turn content, at its END.
+
+        It used to lead the content, which meant every turn the model saw for
+        its own past messages began with "[3 hours earlier]" — it imitated the
+        shape and sent a marker to the DM (2026-09-30). Staleness stays
+        model-visible (CHANGELOG 2026-07-05) with the marker trailing.
+        """
         lines = [
-            '[09/08/26:0218] Scar: "[3 hours earlier] nighty night bubu"',
-            '[09/08/26:0222] self: "[3 hours earlier] Goodnight, Daddy!"',
+            '[09/08/26:0218] Scar: "nighty night bubu" [3 hours earlier]',
+            '[09/08/26:0222] self: "Goodnight, Daddy!" [3 hours earlier]',
         ]
 
         turns = self._call(lines, {"dee"})
 
         assert [turn.role for turn in turns] == ["user", "assistant"]
-        assert turns[0].content == "[3 hours earlier] nighty night bubu"
-        assert turns[1].content == "[3 hours earlier] Goodnight, Daddy!"
+        assert turns[0].content == "nighty night bubu [3 hours earlier]"
+        assert turns[1].content == "Goodnight, Daddy! [3 hours earlier]"
+
+    def test_a_marker_first_turn_content_is_normalised(self) -> None:
+        """A line written while the marker lived inside the quotes still yields a
+        clean turn: the leading marker goes and the line's own age trails.
+
+        This is what stops the two polluted rows (and anything a model copied)
+        from re-teaching the shape on every subsequent prompt.
+        """
+        lines = [
+            '[09/08/26:0218] Scar: "[3 hours earlier] nighty night bubu"',
+            '[09/08/26:1305] self: "[13 minutes earlier] Then the look stays." [4 hours earlier]',
+        ]
+
+        turns = self._call(lines, {"dee"})
+
+        assert turns[0].content == "nighty night bubu [3 hours earlier]"
+        assert turns[1].content == "Then the look stays. [4 hours earlier]"
+        assert all(not t.content.startswith("[") for t in turns)
 
     def test_empty_content_lines_produce_no_turns(self) -> None:
         """A blank '[ts] Sender: ""' line must not become an empty-content

@@ -1550,6 +1550,20 @@ async def universal_send(interface_send_func, *args, text: str | None = None, **
         # Non-fatal: keep original text if recovery fails
         pass
 
+    # System-written age markers are stripped for the same reason (see
+    # RULE_ANNOTATIONS_ARE_NOT_PEOPLE): one reached the DM on 2026-09-30 after
+    # the model copied it out of history.
+    try:
+        if isinstance(text, str) and text and "earlier" in text:
+            from core.history_engine import strip_leading_age_marker
+
+            no_marker = strip_leading_age_marker(text)
+            if no_marker != text:
+                log_debug("[transport] Stripped an age marker from outbound text")
+                text = no_marker
+    except Exception:
+        pass
+
     # Strip emotion tags like {arousal 10, devotion 10} from outbound text.
     # The LLM embeds these for internal emotion state tracking but they
     # must never leak into user-visible messages.
@@ -3294,7 +3308,17 @@ async def llm_to_interface(
         pass
 
     # Strip internal emotion tags from every incoming LLM message so the text
-    # remains clean for downstream processors and interface outputs.
+    # remains clean for downstream processors and interface outputs. System
+    # annotations (age markers) go the same way.
+    try:
+        from core.history_engine import strip_leading_age_marker
+
+        no_marker = strip_leading_age_marker(text)
+        if no_marker != text:
+            log_debug("[llm_to_interface] Stripped an age marker from LLM text")
+            text = no_marker
+    except Exception:
+        pass
     try:
         from plugins.emotion_manager import strip_emotion_tags
 

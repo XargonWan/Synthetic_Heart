@@ -44,7 +44,7 @@ register_exposed_var(
     default=43200,
     value_type=float,
     ui_type="number",
-    description="Window (seconds) in which an identical outbound Grillo message to the same conversation is suppressed as a duplicate. It does NOT gate outreach eligibility — the live-conversation guard (GRILLO_OUTREACH_QUIET_MINUTES) is the only thing that holds outreach back",
+    description="Window (seconds) in which an identical outbound Grillo message to the same conversation is suppressed as a duplicate. Separately from this, GRILLO_OUTREACH_BLOCK_ON_SELF_LAST decides whether speaking last in a conversation makes it ineligible for proactive outreach",
     scope="plugins",
     component="grillo_chat_observer",
     advanced=True,
@@ -57,9 +57,34 @@ register_exposed_var(
     default=15,
     value_type=int,
     ui_type="number",
-    description="Active-conversation guard — the ONLY gate that holds proactive outreach back: a chat whose most recent message (from either the human or the synth) is younger than this is considered mid-conversation and is skipped by proactive outreach for that run",
+    description="Live-conversation guard: a chat whose most recent message (from either the human or the synth) is younger than this is considered mid-conversation and is skipped by proactive outreach for that run",
     scope="plugins",
     component="grillo_chat_observer",
+    tags=["plugin"],
+)
+
+register_exposed_var(
+    "GRILLO_OUTREACH_BLOCK_ON_SELF_LAST",
+    label="Block Outreach When Synth Spoke Last",
+    default=True,
+    value_type=bool,
+    ui_type="bool",
+    description="Awaiting-reply gate: when the synth's own message is the newest in a conversation, that conversation is off-limits for proactive outreach until the human replies or the window below expires. Turn this off to let outreach reach into a conversation the synth already spoke last in (the behaviour that made the hourly beat nag the same DM). Leave it on unless the gate is measurably silencing every outreach",
+    scope="plugins",
+    component="grillo_chat_observer",
+    tags=["plugin"],
+)
+
+register_exposed_var(
+    "GRILLO_OUTREACH_SELF_LAST_WINDOW_MINUTES",
+    label="Outreach Self-Last Window (minutes)",
+    default=720,
+    value_type=int,
+    ui_type="number",
+    description="How long a conversation stays off-limits after the synth spoke last in it, in minutes (default 720 = 12 h). Only used while Block Outreach When Synth Spoke Last is on. Set it to 0 to hold a conversation off-limits indefinitely until the human replies, or to a small value to release it quickly. Keep it above the observer interval if you do not want every run to find nothing eligible",
+    scope="plugins",
+    component="grillo_chat_observer",
+    advanced=True,
     tags=["plugin"],
 )
 
@@ -152,18 +177,17 @@ class GrilloChatObserverPlugin:
             component="grillo_chat_observer",
             advanced=True,
         )
-        # Live-conversation guard — the ONLY gate that holds proactive
-        # outreach back. A chat whose most recent message (from the human OR
-        # from the synth) is younger than this is a conversation happening
-        # right now, and outreach must not butt into it; the next run
+        # Live-conversation guard: a chat whose most recent message (from the
+        # human OR from the synth) is younger than this is a conversation
+        # happening right now, and outreach must not butt into it; the next run
         # re-evaluates.
         #
-        # There is deliberately no "the synth spoke last, so stay away" guard
-        # any more. A responsive synth is the newest speaker in every chat it
-        # is part of, so such a guard (a 12 h awaiting-reply window) excluded
-        # every real conversation permanently and outreach could never fire.
-        # The beat owns the cadence (GRILLO_OBSERVER_INTERVAL); this quiet
-        # window is what keeps it from derailing a live exchange.
+        # This is the *other* of the two gates. The second is the awaiting-reply
+        # gate below (``block_on_self_last``): this one defers outreach to a
+        # live exchange, that one keeps the beat out of a thread whose last word
+        # was the synth's own. The beat owns the cadence
+        # (GRILLO_OBSERVER_INTERVAL); together these two decide which threads a
+        # run may speak into.
         self.quiet_minutes = int(
             config_registry.get_value(
                 "GRILLO_OUTREACH_QUIET_MINUTES",
@@ -173,6 +197,37 @@ class GrilloChatObserverPlugin:
                 value_type=int,
                 group="grillo",
                 component="grillo_chat_observer",
+            )
+        )
+        # Awaiting-reply gate. A synth that answers everything is the newest
+        # speaker in every chat it takes part in, so with this off the hourly
+        # beat re-offered the same DM every run and nagged it ("still coming
+        # tonight?" -> "hurry home!" -> "did you get home okay?" — five
+        # consecutive observer beats). It was removed once on the grounds that
+        # it matched every real conversation and made outreach structurally
+        # impossible, which is true of a gate with no window and no toggle —
+        # hence the window and the toggle here. Default ON, because an
+        # unanswered conversation is the case where re-asking is nagging, and
+        # the human replying releases the hold immediately.
+        self.block_on_self_last = config_registry.get_value(
+            "GRILLO_OUTREACH_BLOCK_ON_SELF_LAST",
+            True,
+            label="Block Outreach When Synth Spoke Last",
+            description="Awaiting-reply gate: a conversation whose newest message is the synth's own is off-limits for proactive outreach until the human replies",
+            value_type=bool,
+            group="grillo",
+            component="grillo_chat_observer",
+        )
+        self.self_last_window_minutes = int(
+            config_registry.get_value(
+                "GRILLO_OUTREACH_SELF_LAST_WINDOW_MINUTES",
+                720,
+                label="Outreach Self-Last Window (minutes)",
+                description="How long a conversation stays off-limits after the synth spoke last, in minutes; 0 means until the human replies",
+                value_type=int,
+                group="grillo",
+                component="grillo_chat_observer",
+                advanced=True,
             )
         )
         # Anti-dead-chat gate: a path is eligible for decay-driven proactivity
@@ -227,6 +282,14 @@ class GrilloChatObserverPlugin:
         config_registry.add_listener(
             "GRILLO_OUTREACH_QUIET_MINUTES",
             lambda v: setattr(self, "quiet_minutes", int(v)),
+        )
+        config_registry.add_listener(
+            "GRILLO_OUTREACH_BLOCK_ON_SELF_LAST",
+            lambda v: setattr(self, "block_on_self_last", bool(v)),
+        )
+        config_registry.add_listener(
+            "GRILLO_OUTREACH_SELF_LAST_WINDOW_MINUTES",
+            lambda v: setattr(self, "self_last_window_minutes", int(v)),
         )
         config_registry.add_listener(
             "GRILLO_OBSERVER_ACTIVITY_WINDOW_DAYS",
@@ -478,7 +541,8 @@ class GrilloChatObserverPlugin:
                 return
             if decay_driven and not eligible_targets:
                 log_info(
-                    "[grillo_chat_observer] Decay-driven run but no eligible targets (dead/cooldown/live); skipping"
+                    "[grillo_chat_observer] Decay-driven run but no eligible targets "
+                    "(dead/live/awaiting-reply); skipping"
                 )
                 return
 
@@ -878,16 +942,18 @@ class GrilloChatObserverPlugin:
         - ``last_from_self``: whether the synth spoke last
         - ``age_seconds``: absolute time delta since the last message
         - ``eligible``: True only if there was genuine human (non-self)
-          activity within ``activity_window_days`` (anti-dead-chat gate) AND
-          the conversation is not live right now (see
-          ``in_active_conversation``). Who spoke last does not matter: a chat
-          the synth answered an hour ago is a perfectly good outreach target,
-          because a responsive synth is the newest speaker in every chat it
-          takes part in.
+          activity within ``activity_window_days`` (anti-dead-chat gate), the
+          conversation is not live right now (see ``in_active_conversation``),
+          and the awaiting-reply gate is not holding it (see
+          ``awaiting_reply``).
         - ``in_active_conversation``: True when ANY message (from either the
           human or the synth) arrived within ``quiet_minutes`` — the chat is
           mid-conversation and outreach must not interrupt it; the next run
           re-evaluates.
+        - ``awaiting_reply``: True when the synth spoke last within
+          ``self_last_window_minutes`` and the gate is enabled — the person has
+          not answered yet, so the conversation waits instead of being re-asked.
+          Always False when ``GRILLO_OUTREACH_BLOCK_ON_SELF_LAST`` is off.
 
         The activation-frame prompt uses this to pick a precise
         ``interface_path`` where a void was detected, instead of routing to a
@@ -942,20 +1008,13 @@ class GrilloChatObserverPlugin:
                 if last_ts is not None:
                     age_seconds = (now - last_ts).total_seconds()
 
-                # Live-conversation guard — the ONLY gate that holds outreach
-                # back. Any message, from the human or from the synth, younger
-                # than ``quiet_minutes`` means the conversation is happening
-                # right now and proactive outreach must not interrupt it.
-                #
-                # This replaces the old 12 h "the synth spoke last, so stay
-                # away" awaiting-reply guard plus the self-cooldown. For a
-                # synth that answers everything, the newest message in a chat
-                # is its own, so that guard marked every real conversation
-                # ineligible forever (verified live: the only target the
-                # hourly beat could ever offer was a bot-notification channel)
-                # and outreach never fired. Cadence belongs to the beat
-                # schedule; a live exchange is the only thing worth deferring
-                # to. Structural sender/timestamp metadata only, never keyword
+                # Live-conversation guard: any message, from the human or from
+                # the synth, younger than ``quiet_minutes`` means the
+                # conversation is happening right now and proactive outreach
+                # must not interrupt it. The awaiting-reply gate below is
+                # separate: that one is about a thread whose last word was the
+                # synth's, this one is about a thread still being spoken in.
+                # Structural sender/timestamp metadata only, never keyword
                 # logic.
                 in_active_conversation = bool(
                     last_ts is not None and last_ts >= quiet_cutoff
@@ -974,7 +1033,41 @@ class GrilloChatObserverPlugin:
                         has_recent_human = True
                         break
 
-                eligible = has_recent_human and not in_active_conversation
+                # Awaiting-reply gate (GRILLO_OUTREACH_BLOCK_ON_SELF_LAST, on by
+                # default): when the synth's own line is the newest in the chat,
+                # the human has simply not answered yet — they are not gone.
+                # Re-offering it on a timer produced the live nag cycle
+                # ("still coming tonight?" -> "hurry home!" -> "did you get
+                # home okay?" into a DM the synth already dominated), so the
+                # hold is released the moment the human replies and otherwise
+                # expires after ``self_last_window_minutes`` (0 = wait for the
+                # reply indefinitely).
+                #
+                # This is the gate that was removed in c2b71ead, on the grounds
+                # that a responsive synth is the newest speaker in every chat and
+                # so the guard matched every real conversation. That diagnosis
+                # was right about the windowless version and wrong about the
+                # behaviour: the fix is a bounded window plus a toggle, not
+                # absence. Set GRILLO_OUTREACH_BLOCK_ON_SELF_LAST to False to get
+                # the pre-gate behaviour back (every idle chat eligible,
+                # synth-dominated threads included). Structural sender/timestamp
+                # metadata only, never keyword logic.
+                awaiting_reply = bool(
+                    self.block_on_self_last
+                    and last_from_self
+                    and last_ts is not None
+                    and (
+                        self.self_last_window_minutes <= 0
+                        or (now - last_ts).total_seconds()
+                        < self.self_last_window_minutes * 60
+                    )
+                )
+
+                eligible = (
+                    has_recent_human
+                    and not in_active_conversation
+                    and not awaiting_reply
+                )
 
                 targets.append(
                     {
@@ -983,6 +1076,7 @@ class GrilloChatObserverPlugin:
                         "last_from_self": last_from_self,
                         "age_seconds": age_seconds,
                         "in_active_conversation": in_active_conversation,
+                        "awaiting_reply": awaiting_reply,
                         "has_recent_human": has_recent_human,
                         "eligible": eligible,
                     }
@@ -1245,6 +1339,11 @@ class GrilloChatObserverPlugin:
                     # A message landed moments ago (from either side): the
                     # conversation is live and outreach must not derail it.
                     cd = "LIVE-CONVERSATION(OFF-LIMITS — a message arrived moments ago; do not interrupt)"
+                elif t.get("awaiting_reply"):
+                    # The synth spoke last and the human has not replied yet.
+                    # They are simply away, not gone, so asking again whether
+                    # they are coming back is nagging, not initiative.
+                    cd = "AWAITING-REPLY(OFF-LIMITS — you spoke last; the human has not replied yet)"
                 else:
                     cd = "ok"
                 last = t.get("last_sender") or "?"
@@ -1256,9 +1355,9 @@ class GrilloChatObserverPlugin:
         if decay_driven:
             decay_note = (
                 "\n\nNOTE: There is no fresh incoming traffic right now — that is what this run is for. "
-                "Reach out to one of the eligible targets above (skipping any marked LIVE-CONVERSATION): say something new to someone who is not live, "
+                "Reach out to one of the eligible targets above (skipping any marked LIVE-CONVERSATION or AWAITING-REPLY): say something new to someone who is not live, "
                 "grounded in what was last said there or in something you are actually carrying. Do not repeat a recent message and do not open with a canned line. "
-                'Return {"actions": []} only if every listed target is live, or if you genuinely have nothing that is not a repeat.\n'
+                'Return {"actions": []} only if every listed target is off-limits, or if you genuinely have nothing that is not a repeat.\n'
             )
 
         # Ask the LLM to think like a helpful participant: choose which recent message(s) you'd naturally reply to and propose short, human replies.
