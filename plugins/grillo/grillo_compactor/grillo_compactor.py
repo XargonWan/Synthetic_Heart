@@ -737,9 +737,7 @@ class GrilloCompactorPlugin:
         string or a plain list, and ignores anything unparseable: an id it cannot read is
         simply treated as not covered.
 
-        To make a day eligible again, delete the archive record that names it
-        (`GRILLO_COMPACT_ALLOW_RECOMPACT` is registered but never read, so it does not do
-        this, and its description speaks about the clustering path rather than this one).
+        To make a day eligible again, delete the archive record that names it.
         """
         covered = set()
         for r in rows or []:
@@ -1485,15 +1483,6 @@ class GrilloCompactorPlugin:
                     tags = cl.get("tags") or []
                     feeling = str(cl.get("feeling") or "")
                     source_ids = cl.get("source_ids") or []
-                    # The prompt asks for confidence as a LABEL [low, medium, high]
-                    # but the column is double precision: passing the label through
-                    # made every archived_memories insert fail ("invalid input for
-                    # query argument $6: 'high' (must be real number, not str)"),
-                    # which aborted the whole cluster — so compaction never wrote a
-                    # memory at all (archived_memories had 0 rows) and the source
-                    # diary entries were never archived or folded. Coerce the label
-                    # to a number, accept a number as-is, default when unreadable.
-                    confidence = _parse_confidence(cl.get("confidence"))
                     justification = str(cl.get("justification") or "")
                     detailed = cl.get("detailed") or cl.get("detailed_summary") or None
                     if detailed:
@@ -1698,8 +1687,9 @@ class GrilloCompactorPlugin:
                             log_info(
                                 f"[grillo_compactor] notes_obj for cluster {cid}: {notes_obj} -> notes_value={json.dumps(notes_obj) if notes_obj else None}"
                             )
-                            # NOTE: no archived_memories write — nothing reads that
-                            # table, so it was unbounded dead weight. Provenance
+                            # NOTE: the cluster path no longer writes archived_memories
+                            # (only the day-unit path writes and reads it, see
+                            # _load_covered_day_ids). Provenance of the source entries
                             # is preserved via ai_diary_archive below.
                             # Move source ai_diary entries into ai_diary_archive (preserve provenance) and delete originals
                             if source_ids:
