@@ -3363,6 +3363,7 @@ async def corrector_orchestrator(
                     # message_chain but kept inline to avoid circular imports.
                     _iface_msg_map: dict[str, str] = {
                         "telegram_bot": "message_telegram_bot",
+                        "telegram": "message_telegram",
                         "discord_bot": "message_discord_bot",
                         "synth_webui": "message_synth_webui",
                         "matrix_chat": "message_matrix_chat",

@@ -395,13 +395,13 @@ async def _self_replied_recently(chat_id: int, cooldown_seconds: float) -> bool:
     try:
         from core.db import get_conn_ctx
 
-        path_prefix = f"telegram_bot/{chat_id}%"
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     "SELECT MAX(created_at) FROM chat_history_cache "
-                    "WHERE interface_path LIKE %s AND sender_id = 'self'",
-                    (path_prefix,),
+                    "WHERE (interface_path LIKE %s OR interface_path LIKE %s) "
+                    "AND sender_id = 'self'",
+                    (f"telegram_bot/{chat_id}%", f"telegram/{chat_id}%"),
                 )
                 row = await cur.fetchone()
                 if not row or not row[0]:

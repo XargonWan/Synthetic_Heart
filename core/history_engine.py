@@ -514,7 +514,7 @@ def _entry_to_text(entry: HistoryEntry) -> str:
 
 
 def telegram_chat_kind(path: str) -> str | None:
-    """Return ``"group"`` or ``"dm"`` for a telegram_bot interface_path.
+    """Return ``"group"`` or ``"dm"`` for a telegram_bot / telegram interface_path.
 
     Telegram chat IDs are negative for groups/supergroups and positive for
     private chats -- a reliable signal that's already on every interface_path,
@@ -523,7 +523,7 @@ def telegram_chat_kind(path: str) -> str | None:
     chat id, where this convention doesn't apply.
     """
     parts = path.split("/")
-    if len(parts) >= 2 and parts[0] == "telegram_bot":
+    if len(parts) >= 2 and parts[0] in ("telegram_bot", "telegram"):
         try:
             chat_id = int(parts[1])
         except ValueError:

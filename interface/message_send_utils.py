@@ -789,7 +789,8 @@ async def send_with_thread_fallback(
 # malformed ``telegram/<id>`` path; the model copied both verbatim, the
 # corrected action was rejected and the reply was never delivered (live
 # 2026-09-21, langfuse feca9072-0abe-46ef-90da-f1409723088e).
-_INTERFACE_DISPLAY_ALIASES: dict[str, str] = {"telegram": "telegram_bot"}
+# "telegram" is a registered interface now (user account), so it is NOT an alias.
+_INTERFACE_DISPLAY_ALIASES: dict[str, str] = {}
 
 # Field names from the action schema. A REAL action envelope keeps its keys even
 # when its punctuation is mangled, so their presence is what separates broken
@@ -1223,7 +1224,7 @@ async def cortex_response_send(
                     from core.action_parser import run_actions
 
                     context = {
-                        "interface": "telegram",
+                        "interface": _resolve_sender_interface_id(kwargs),
                         "original_chat_id": chat_id,
                         "original_thread_id": kwargs.get("thread_id"),
                         "original_text": text[:500] if text else "",

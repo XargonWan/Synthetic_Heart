@@ -113,6 +113,12 @@ _EXTRACT_INSTRUCTIONS = (
     "note whose validity window has not run out yet is retired by NOTHING else, "
     "so a stale filed note that goes unreported keeps being told to you as "
     "current fact. Report it even when the turn has no new circumstance to note.\n"
+    "A circumstance the human DENIES, corrects or merely jokes about ('I am not "
+    "going on a trip', 'that was a joke') is not a circumstance: never write a "
+    "note that asserts it, even when the persona's reply repeated it. Retire the "
+    "filed note under 'ended' instead. Each filed note carries a reference like "
+    "[n3]; giving that reference in 'ended' instead of the subject is the safest "
+    "way to name it, because a reworded or translated subject cannot be matched.\n"
     "A summary outlives the turn that wrote it and is read again on later days, "
     "so it must carry the ABSOLUTE date or time it refers to ('the wedding took "
     "place on 2026-09-21'), and never a bare relative word ('today', 'tomorrow', "
@@ -121,8 +127,8 @@ _EXTRACT_INSTRUCTIONS = (
     'Return ONLY a JSON object: {"notes": [{"note_type": ..., "subject": ..., '
     '"summary": ..., "priority": 0, "confidence": 0.5, '
     '"valid_from": "2026-05-05T00:00:00+00:00", '
-    '"valid_until": "2026-05-12T00:00:00+00:00"}], "ended": ["<subject that is now '
-    'over>"]} — return an empty notes list and an empty ended list '
+    '"valid_until": "2026-05-12T00:00:00+00:00"}], "ended": ["<subject or [nN] reference '
+    'of a note that is now over>"]} — return an empty notes list and an empty ended list '
     "when nothing time-bounded was said."
 )
 
@@ -210,7 +216,7 @@ class DebriefSituationalNotesPlugin:
             if isinstance(item, str) and item.strip():
                 subjects.append(item.strip())
             elif isinstance(item, dict):
-                subject = item.get("subject")
+                subject = item.get("subject") or item.get("ref") or item.get("id")
                 if isinstance(subject, str) and subject.strip():
                     subjects.append(subject.strip())
         return subjects
@@ -312,8 +318,37 @@ class DebriefSituationalNotesPlugin:
         )
         return f"{start} -> {end}"
 
-    async def _filed_notes_block(self) -> str:
+    @classmethod
+    def _select_filed_notes(
+        cls, active: List[Any], exchange_text: str
+    ) -> tuple[List[Any], int]:
+        """Pick the filed notes the extractor is shown, most relevant first.
+
+        The store can hold far more active notes than the prompt may carry (64 were
+        active live), and the extractor can only retire a note it is shown. Taking
+        the first N by priority therefore hid exactly the stale notes a correction
+        was about: ranking by token overlap with the exchange keeps the notes the
+        human and the persona just talked about in the list, whatever their
+        priority. Ties keep the store's own order. Returns ``(shown, hidden_count)``.
+        """
+        from core.soul.situational import subject_tokens
+
+        exchange = subject_tokens(exchange_text)
+        scored = []
+        for index, note in enumerate(active):
+            note_tokens = subject_tokens(f"{note.subject} {note.summary}")
+            scored.append((-len(exchange & note_tokens), index, note))
+        scored.sort(key=lambda item: (item[0], item[1]))
+        shown = [note for _score, _index, note in scored[: cls._FILED_NOTES_IN_PROMPT]]
+        return shown, max(len(active) - len(shown), 0)
+
+    async def _filed_notes_block(
+        self, exchange_text: str = ""
+    ) -> tuple[str, Dict[str, str]]:
         """Render the notes standing for the human, for the extraction prompt.
+
+        Returns ``(block, refs)`` where ``refs`` maps the reference printed in
+        front of each line (``n1``, ``n2`` ...) to the note's id.
 
         The prompt asked the model to report a circumstance that has ended
         "worded exactly as it was filed before" while never showing it the filed
@@ -325,31 +360,43 @@ class DebriefSituationalNotesPlugin:
         they still called tomorrow, because nothing in the store could connect
         the correction to them.
 
+        The references exist for the same reason one level up: a subject copied
+        "character for character" still failed whenever the model reworded or
+        translated it (an Italian conversation about a note filed in English), and
+        that failure was silent. A reference cannot be misspelt into a mismatch.
+
         Fail-safe: no repository, or a failing lookup, renders no block and the
         extraction carries on exactly as it did before.
         """
         repository = self._get_soul_repository()
         if repository is None:
-            return ""
+            return "", {}
         from core.soul.models import now_utc
 
         try:
             active = await repository.list_active_situational_notes(now=now_utc())
         except Exception as exc:
             log_debug(f"[debrief_situational_notes] filed-note lookup failed: {exc}")
-            return ""
+            return "", {}
         if not active:
-            return ""
-        lines = [
-            f"- {note.subject} | {self._filed_window(note)} | "
-            f"{self._short_summary(note.summary)}"
-            for note in active[: self._FILED_NOTES_IN_PROMPT]
-        ]
+            return "", {}
+        shown, hidden = self._select_filed_notes(active, exchange_text)
+        refs: Dict[str, str] = {}
+        lines = []
+        for position, note in enumerate(shown, start=1):
+            ref = f"n{position}"
+            refs[ref] = note.id
+            lines.append(
+                f"- [{ref}] {note.subject} | {self._filed_window(note)} | "
+                f"{self._short_summary(note.summary)}"
+            )
+        if hidden:
+            lines.append(f"({hidden} more filed notes not shown)")
         return (
             "filed notes (what is currently standing for the human; a note this "
             "exchange shows is out of date must be retired by copying its subject "
-            "exactly into 'ended'):\n" + "\n".join(lines)
-        )
+            "exactly, or its [nN] reference, into 'ended'):\n" + "\n".join(lines)
+        ), refs
 
     async def _store_notes(
         self, candidates: List[Dict[str, Any]], session_id: str | None
@@ -451,7 +498,22 @@ class DebriefSituationalNotesPlugin:
                 )
         return superseded
 
-    async def _retire_ended(self, repository: Any, subjects: List[str]) -> int:
+    @staticmethod
+    def _as_reference(item: str, refs: Dict[str, str]) -> str | None:
+        """The note id a reference such as ``[n3]``, ``n3`` or ``#3`` names."""
+        import re
+
+        match = re.fullmatch(r"\[?\s*[#n]?\s*(\d{1,3})\s*\]?", item.strip(), re.I)
+        if not match:
+            return None
+        return refs.get(f"n{int(match.group(1))}")
+
+    async def _retire_ended(
+        self,
+        repository: Any,
+        subjects: List[str],
+        refs: Dict[str, str] | None = None,
+    ) -> tuple[int, List[set[str]]]:
         """Resolve the active notes whose circumstance this turn shows has ended.
 
         Nothing retired a note when the human contradicted it: a note's id is
@@ -463,40 +525,74 @@ class DebriefSituationalNotesPlugin:
         asserted at 15:16 as present-tense fact ("you're sore, remember? So it's
         hands and mouth only tonight").
 
-        Matching uses the same blunt subject-token containment as superseding, so
-        a subject naming a person can never resolve a real circumstance. The store
-        keeps every row; only the status changes, so nothing is deleted. Fail-safe:
-        a lookup or update error is logged and never raised.
+        An item naming a ``[nN]`` reference resolves that note directly. Any other
+        item is matched by the same blunt subject-token containment as
+        superseding, so a subject naming a person can never resolve a real
+        circumstance. The store keeps every row; only the status changes, so
+        nothing is deleted. Fail-safe: a lookup or update error is logged and never
+        raised.
+
+        Returns ``(retired_count, blocked)`` where ``blocked`` holds the subject
+        tokens of everything this turn declared over, so the caller can refuse to
+        re-file the same circumstance in the same turn. An item that matched no
+        active note is logged: that used to be completely silent, which is how a
+        correction repeated "several times" could change nothing.
         """
         from core.soul.models import now_utc
         from core.soul.situational import is_same_circumstance, subject_tokens
 
-        wanted = [subject_tokens(subject) for subject in subjects]
-        wanted = [tokens for tokens in wanted if tokens]
-        if not wanted:
-            return 0
+        refs = refs or {}
+        by_ref: set[str] = set()
+        by_subject: List[tuple[str, set[str]]] = []
+        for item in subjects:
+            ref_id = self._as_reference(item, refs)
+            if ref_id:
+                by_ref.add(ref_id)
+                continue
+            tokens = subject_tokens(item)
+            if tokens:
+                by_subject.append((item, tokens))
+        if not by_ref and not by_subject:
+            return 0, []
 
         try:
             active = await repository.list_active_situational_notes(now=now_utc())
         except Exception as exc:
             log_debug(f"[debrief_situational_notes] retire lookup failed: {exc}")
-            return 0
+            return 0, []
 
         retired = 0
+        blocked: List[set[str]] = [tokens for _item, tokens in by_subject]
+        matched_items: set[str] = set()
         for note in active:
             note_tokens = subject_tokens(note.subject)
-            if not any(is_same_circumstance(tokens, note_tokens) for tokens in wanted):
+            hit = note.id in by_ref
+            for item, tokens in by_subject:
+                if is_same_circumstance(tokens, note_tokens):
+                    hit = True
+                    matched_items.add(item)
+            if not hit:
                 continue
             try:
                 await repository.resolve_situational_note(
                     note.id, new_status="resolved"
                 )
                 retired += 1
+                if note_tokens:
+                    blocked.append(note_tokens)
             except Exception as exc:
                 log_warning(
                     f"[debrief_situational_notes] could not resolve {note.id}: {exc}"
                 )
-        return retired
+        unmatched = [item for item, _tokens in by_subject if item not in matched_items]
+        stale_refs = by_ref - {note.id for note in active}
+        if unmatched or stale_refs:
+            log_warning(
+                "[debrief_situational_notes] ended item(s) matched no active note: "
+                f"{unmatched + sorted(stale_refs)!r} "
+                f"(active subjects: {[note.subject for note in active][:20]!r})"
+            )
+        return retired, blocked
 
     async def on_debrief(
         self,
@@ -535,7 +631,9 @@ class DebriefSituationalNotesPlugin:
             return None
 
         now = datetime.now(timezone.utc)
-        filed_block = await self._filed_notes_block()
+        filed_block, filed_refs = await self._filed_notes_block(
+            f"{user_message}\n{llm_response}"
+        )
         # Plain labelled text, deliberately not a JSON blob. An OpenAI-compatible
         # backend may try to read a JSON string as structured content and keep
         # only the keys it recognises (text/content/parts), silently dropping
@@ -598,15 +696,35 @@ class DebriefSituationalNotesPlugin:
         )
         # Retire before storing: a circumstance the turn showed has ended must not
         # survive as an active note, even if storing the new notes then fails.
+        blocked: List[set[str]] = []
         if ended_subjects:
             repository = self._get_soul_repository()
             if repository is not None:
-                retired = await self._retire_ended(repository, ended_subjects)
+                retired, blocked = await self._retire_ended(
+                    repository, ended_subjects, filed_refs
+                )
                 if retired:
                     log_info(
                         f"[debrief_situational_notes] retired {retired} note(s) this "
                         "turn showed have ended"
                     )
+        if blocked:
+            # The persona's reply usually repeats the very claim the human just
+            # denied, so the extractor can re-file it in the same breath it
+            # retires it. A circumstance declared over this turn is not stored.
+            from core.soul.situational import is_same_circumstance, subject_tokens
+
+            kept = []
+            for candidate in candidates:
+                tokens = subject_tokens(candidate.get("subject"))
+                if tokens and any(is_same_circumstance(tokens, b) for b in blocked):
+                    log_info(
+                        "[debrief_situational_notes] not re-filing a circumstance "
+                        f"this turn declared over: {candidate.get('subject')!r}"
+                    )
+                    continue
+                kept.append(candidate)
+            candidates = kept
         stored = await self._store_notes(candidates, session_id)
         if stored:
             log_info(f"[debrief_situational_notes] Stored {stored} situational note(s)")

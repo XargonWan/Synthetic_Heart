@@ -1013,6 +1013,18 @@ class SynthWebUIInterface:
         # component pane). GET renders them, PUT replaces them with the text.
         self.app.get("/api/soul/situational-notes")(self.get_situational_notes)
         self.app.put("/api/soul/situational-notes")(self.put_situational_notes)
+        # Synth avatar (Settings → Synth Avatar): stored by core, pushed to interfaces.
+        from core import synth_avatar as _synth_avatar  # noqa: F401  (registers SYNTH_AVATAR)
+        from core.karada_api import _require_api_token as _avatar_token
+
+        self.app.get("/api/synth_avatar")(self.get_synth_avatar)
+        self.app.get("/api/synth_avatar/info")(self.get_synth_avatar_info)
+        self.app.post("/api/synth_avatar", dependencies=[Depends(_avatar_token)])(
+            self.upload_synth_avatar
+        )
+        self.app.delete("/api/synth_avatar", dependencies=[Depends(_avatar_token)])(
+            self.delete_synth_avatar
+        )
         # On-demand run of the nightly memory compaction (Settings → Memory Compaction).
         self.app.get("/api/grillo/compaction")(self.grillo_compaction_status)
         self.app.post("/api/grillo/compaction")(self.start_grillo_compaction)
@@ -10584,6 +10596,69 @@ class SynthWebUIInterface:
                 "text": await self._situational_notes_text(repository),
                 **counts,
             }
+        )
+
+    # ------------------------------------------------------------------
+    # Synth avatar
+    # ------------------------------------------------------------------
+    async def get_synth_avatar(self) -> Response:
+        """The stored avatar PNG; the ``?v=`` cache-buster makes it cacheable."""
+        from core import synth_avatar
+
+        loaded = synth_avatar.load_avatar()
+        if loaded is None:
+            raise HTTPException(status_code=404, detail="No avatar set")
+        data, version = loaded
+        return Response(
+            content=data,
+            media_type=synth_avatar.AVATAR_MIME,
+            headers={"ETag": f'"{version}"', "Cache-Control": "no-cache"},
+        )
+
+    async def get_synth_avatar_info(self) -> JSONResponse:
+        from core import synth_avatar
+
+        version = synth_avatar.current_version()
+        return JSONResponse(
+            {
+                "success": True,
+                "exists": version is not None,
+                "version": version,
+                "size": synth_avatar.AVATAR_SIZE,
+                "interfaces": synth_avatar.interface_support(),
+            }
+        )
+
+    async def upload_synth_avatar(self, file: UploadFile = File(...)) -> JSONResponse:
+        """Store the (already framed) image and push it to the interfaces."""
+        from core import synth_avatar
+
+        raw = await file.read(synth_avatar.MAX_UPLOAD_BYTES + 1)
+        await file.close()
+        try:
+            info = await asyncio.to_thread(synth_avatar.save_avatar, raw)
+        except synth_avatar.AvatarError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to store synth avatar: {exc}")
+            raise HTTPException(
+                status_code=500, detail="Could not store avatar"
+            ) from exc
+        await synth_avatar.persist_version(info.version)
+        results = await synth_avatar.broadcast_avatar_changed()
+        log_info(f"{LOG_PREFIX} Synth avatar updated ({info.version}): {results}")
+        return JSONResponse(
+            {"success": True, "version": info.version, "interfaces": results}
+        )
+
+    async def delete_synth_avatar(self) -> JSONResponse:
+        from core import synth_avatar
+
+        removed = synth_avatar.clear_avatar()
+        await synth_avatar.persist_version(None)
+        results = await synth_avatar.broadcast_avatar_changed() if removed else {}
+        return JSONResponse(
+            {"success": True, "removed": removed, "interfaces": results}
         )
 
     # ------------------------------------------------------------------

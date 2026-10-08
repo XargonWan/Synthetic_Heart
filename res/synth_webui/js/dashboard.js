@@ -204,6 +204,8 @@
         if (ut === 'file') { return 'file'; }
         // Edited in its component pane, not a stored setting: skipped like files.
         if (ut === 'situational-notes') { return 'file'; }
+        // Own editor and endpoint (/api/synth_avatar): not a dashboard widget.
+        if (ut === 'avatar') { return 'file'; }
         if (vt === 'bool' || vt === 'boolean') { return 'bool'; }
         if (vt === 'int' || vt === 'float' || vt === 'number') { return 'num'; }
         if (vt === 'select' || vt === 'enum' || ut === 'select' || ut === 'combobox-with-options') { return 'select'; }

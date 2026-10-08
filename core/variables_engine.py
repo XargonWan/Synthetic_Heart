@@ -25,6 +25,8 @@ API compatibility:
 # - `tag-combobox` → tag-list with suggestion support (uses `options`)
 # - `file`    → file upload control
 # - `color`   → color picker with optional preset swatches
+# - `avatar` → image upload with square/round preview, zoom and drag (synth avatar;
+#               saved through /api/synth_avatar, not /api/config)
 # - `interface-path` → interface-path picker (opens the WebUI picker modal;
 #                     value persisted as a string interface_path)
 #

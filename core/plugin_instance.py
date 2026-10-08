@@ -2179,7 +2179,7 @@ async def _extract_multimodal_attachments(
     try:
         image_processor = get_image_processor()
 
-        if interface_name == "telegram_bot":
+        if interface_name in ("telegram_bot", "telegram"):
             return await extract_multimodal_from_telegram(bot, message, image_processor)
         elif interface_name == "discord_bot":
             return await extract_multimodal_from_discord(message, image_processor)

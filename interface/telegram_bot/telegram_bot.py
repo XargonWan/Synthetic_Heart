@@ -2861,7 +2861,7 @@ class TelegramInterface:
                 self.bot,
                 chat_id=None,
                 thread_id=None,
-                interface="telegram",
+                interface="telegram_bot",
             )
             return False
 
@@ -3024,7 +3024,7 @@ class TelegramInterface:
                     self.bot,
                     chat_id=chat_id,
                     thread_id=thread_id,
-                    interface="telegram",
+                    interface="telegram_bot",
                 )
                 return False
             else:
@@ -3036,7 +3036,7 @@ class TelegramInterface:
                     self.bot,
                     chat_id=chat_id,
                     thread_id=thread_id,
-                    interface="telegram",
+                    interface="telegram_bot",
                 )
                 return False
         except Exception as e:

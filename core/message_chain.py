@@ -78,6 +78,7 @@ def get_failed_message_text() -> str:
 # remains for special interfaces whose outbound verb differs (WebUI, radio).
 _INTERFACE_TO_MESSAGE_ACTION: Dict[str, str] = {
     "telegram_bot": "send_message",
+    "telegram": "send_message",
     "discord_bot": "send_message",
     "synth_webui": "message_synth_webui",
     "matrix_chat": "send_message",
@@ -1439,6 +1440,7 @@ async def handle_incoming_message(
         user_facing_interfaces = [
             "discord_bot",
             "telegram_bot",
+            "telegram",
             "synth_webui",
             "matrix_chat",
             "ollama_serve",
@@ -2689,6 +2691,7 @@ async def handle_incoming_message(
                         user_facing_interfaces = [
                             "discord_bot",
                             "telegram_bot",
+                            "telegram",
                             "synth_webui",
                             "matrix_chat",
                             "ollama_serve",
@@ -2929,7 +2932,7 @@ async def handle_incoming_message(
                         _iface_tts_prefix = (ctx.get("interface_path") or "").split(
                             "/"
                         )[0]
-                        _voice_only_tts_ifaces = {"telegram_bot", "discord_bot"}
+                        _voice_only_tts_ifaces = {"telegram_bot", "telegram", "discord_bot"}
                         tts_allowed = (
                             _iface_tts_prefix not in _voice_only_tts_ifaces
                         ) or _is_voice_input
