@@ -2155,6 +2155,27 @@ class CoreInitializer:
                 ComponentStatus.SKIPPED,
                 details="Disabled from WebUI",
             )
+            # Self-registered alias (e.g. "radio_host" for module
+            # plugins.radio_host.radio_host_plugin): no component record
+            # exists under this name, so carry the module identity from
+            # the live instance. Without it, re-enable fails with
+            # unknown_plugin_module and the ghost card loses icon/guide.
+            ghost = self.components.get(plugin_short_name)
+            if ghost is not None:
+                try:
+                    import sys as _sys
+
+                    ghost_module = getattr(instance, "__module__", "") or ""
+                    ghost.module_name = ghost_module
+                    mod = _sys.modules.get(ghost_module) if ghost_module else None
+                    mod_file = getattr(mod, "__file__", None) if mod else None
+                    if mod_file:
+                        ghost.dir_path = str(Path(mod_file).parent)
+                        ghost.category = derive_plugin_category(
+                            ghost_module, ghost.dir_path
+                        )
+                except Exception:
+                    pass
 
         self._invalidate_action_caches()
         await self._build_actions_block()
@@ -3059,6 +3080,27 @@ class CoreInitializer:
                     if actions
                     else "Plugin with no actions",
                 )
+                # Self-registered alias (e.g. "radio_host" for module
+                # plugins.radio_host.radio_host_plugin): carry the module
+                # identity so a later WebUI disable/enable round-trip can
+                # re-instantiate it (else unknown_plugin_module).
+                info = self.components.get(plugin_name)
+                if info is not None and plugin_obj is not None:
+                    try:
+                        import sys as _sys
+
+                        mod_name = getattr(plugin_obj, "__module__", "") or ""
+                        if mod_name and not info.module_name:
+                            info.module_name = mod_name
+                            mod = _sys.modules.get(mod_name)
+                            mod_file = getattr(mod, "__file__", None) if mod else None
+                            if mod_file:
+                                info.dir_path = str(Path(mod_file).parent)
+                                info.category = derive_plugin_category(
+                                    mod_name, info.dir_path
+                                )
+                    except Exception:
+                        pass
 
                 if actions:
                     log_info(
