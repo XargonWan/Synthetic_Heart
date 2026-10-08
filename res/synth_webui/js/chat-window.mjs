@@ -982,6 +982,10 @@ export function initChatUI() {
 
         async function _ensureMicStream() {
             if (micStream && micStream.active) return micStream;
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                _showMicNotice('🎤 Voice input needs HTTPS or localhost — mic unavailable over plain HTTP, chat still works.');
+                return null;
+            }
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
                 micStream = stream;
