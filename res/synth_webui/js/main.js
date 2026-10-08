@@ -1394,7 +1394,11 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         let inputEl = null;
                         let extraEl = null;
                         let skipAutoSave = false;
-                        if (item.ui_type === 'bool' || item.value_type === 'bool') {
+                        if (item.ui_type === 'avatar' && window.createSynthAvatarEditor) {
+                            // Saved through /api/synth_avatar by the editor itself.
+                            inputEl = window.createSynthAvatarEditor();
+                            skipAutoSave = true;
+                        } else if (item.ui_type === 'bool' || item.value_type === 'bool') {
                             const checkbox = document.createElement('input');
                             const key = item.key || item.label || `bool-${Math.random().toString(36).slice(2)}`;
                             checkbox.type = 'checkbox';
@@ -4254,6 +4258,15 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             err.className = 'component-error';
                             err.textContent = item.error;
                             pane.appendChild(err);
+                        }
+
+                        // Extension point: interfaces/plugins may inject a custom card
+                        // (e.g. a login flow) via window.synthInterfaceDetailHooks[name].
+                        try {
+                            const detailHook = (window.synthInterfaceDetailHooks || {})[item.name];
+                            if (typeof detailHook === 'function') detailHook(item, pane);
+                        } catch (hookErr) {
+                            console.warn('Detail hook failed for', item.name, hookErr);
                         }
 
                         // Optional metadata-driven "Run Now" button.

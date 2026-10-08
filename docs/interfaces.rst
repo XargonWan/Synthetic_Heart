@@ -24,12 +24,15 @@ Available Interfaces
 * ``matrix_interface`` – Matrix chat bridge powered by ``matrix-nio``. Requires homeserver credentials and tokenizer (password or access token).
 * ``openai_api_server`` – OpenAI-compatible REST bridge that lets external clients talk to SyntH as if it were an OpenAI endpoint. It also implements the legacy ``/api/generate`` · ``/api/chat`` · ``/api/tags`` routes, so tools written for a local Ollama daemon work unchanged.
 * ``telegram_bot`` – Telegram bot interface with media support. Requires ``BOTFATHER_TOKEN`` and trainer ID.
+* ``telegram`` – Telegram **user-account** interface (real phone number, MTProto via Telethon) with a WebUI login. Requires ``TELEGRAM_API_ID`` and ``TELEGRAM_API_HASH``. See :doc:`telegram_user_interface`.
+
+Interfaces that can set their own account picture (currently ``telegram``) use the core synth avatar; see :doc:`synth_avatar` for the support matrix.
 
 **Development Interfaces** (in ``interface_dev/`` directory):
 
 * ``cli`` – Local command-line interface for direct interaction (no configuration).
 * ``reddit_interface`` – Asynchronous Reddit client for posts, comments, and DMs. Requires Reddit API credentials.
-* ``telethon_userbot`` – Advanced Telegram userbot using Telethon. Requires ``API_ID``, ``API_HASH``, and session.
+* ``telethon_userbot`` – Legacy Telethon userbot prototype (superseded by the stable ``telegram`` interface). Requires ``API_ID``, ``API_HASH``, and session.
 * ``webui`` – FastAPI-based web interface for browser access. Configurable host/port.
 * ``x_interface`` – Experimental X (Twitter) integration with timeline features. Requires ``X_USERNAME``.
 
