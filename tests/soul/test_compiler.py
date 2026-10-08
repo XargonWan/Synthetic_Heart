@@ -121,7 +121,7 @@ async def test_post_session_compile_resolves_relative_time() -> None:
 
 
 @pytest.mark.asyncio
-async def test_async_consolidate_creates_scene_and_kg() -> None:
+async def test_async_consolidate_creates_scene() -> None:
     repo = InMemorySoulRepository()
     compiler = SoulCompiler(
         repository=repo,
@@ -141,7 +141,6 @@ async def test_async_consolidate_creates_scene_and_kg() -> None:
 
     assert len(scene_ids) == 1
     assert len(repo.scenes) == 1
-    assert len(repo.kg_triples) == 1
 
 
 @pytest.mark.asyncio

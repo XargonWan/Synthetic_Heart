@@ -16,7 +16,6 @@ from .models import (
     DspVersion,
     EmotionalTag,
     ForesightSignal,
-    KgTriple,
     MemCell,
     MemCellSummary,
     MemScene,
@@ -542,19 +541,7 @@ class SoulCompiler:
 
                 for cell in cells:
                     await self.repository.set_memcell_scene(cell.id, scene_id)
-                    for fact in cell.atomic_facts:
-                        parts = [p.strip() for p in fact.split("|")]
-                        if len(parts) != 3:
-                            continue
-                        triple = KgTriple(
-                            subject=parts[0],
-                            predicate=parts[1],
-                            object=parts[2],
-                            valid_from=cell.event_timestamp,
-                            valid_until=None,
-                            scene_id=scene_id,
-                        )
-                        await self.repository.upsert_kg_triple(triple)
+                # NOTE: no kg_triple emission — nothing reads kg_triples.
 
             if trace is not None:
                 try:
