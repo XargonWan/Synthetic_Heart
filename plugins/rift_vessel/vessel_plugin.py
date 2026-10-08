@@ -911,6 +911,42 @@ config_registry.get_value(
     component="vessel_plugin",
     advanced=True,
 )
+config_registry.get_value(
+    "VESSEL_PASSIVE_ACTIVITY_ENABLED",
+    True,
+    value_type=bool,
+    label="Passive Activity",
+    description=(
+        "When enabled, if the body has no goal to pursue at all (before the "
+        "first will beat, or between a finished goal and the next one) the "
+        "fast motor reflex opportunistically works a nearby low-risk "
+        "affordance (mine/use) or explores, instead of standing inert. Always "
+        "the lowest-priority layer: a real goal, danger, an in-flight "
+        "deliberate action, or an actively chatting player all take over "
+        "immediately. Purely structural, on the fast reflex layer (no LLM, no "
+        "diary, no new agentic loop). Only used when Autonomous In-World Play "
+        "is enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_PASSIVE_ACTIVITY_LEASE_TICKS",
+    12,
+    value_type=int,
+    label="Passive Activity: Lease (ticks)",
+    description=(
+        "How many consecutive motor ticks the body may keep pursuing the same "
+        "passively-chosen affordance before it lets go and reselects. Bounds a "
+        "passive activity so it never commits to one unreachable target "
+        "forever. With the default motor interval (~3 s per tick) 12 ticks is "
+        "roughly 36 s. Clamped 2–200."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
 
 
 class VesselPlugin(AIPluginBase):

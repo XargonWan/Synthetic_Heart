@@ -98,11 +98,28 @@ async def test_motor_step_not_connected() -> None:
 
 
 @pytest.mark.asyncio
-async def test_motor_step_no_goal() -> None:
+async def test_motor_step_no_goal_and_passive_activity_disallowed() -> None:
+    # With passive activity explicitly disallowed this tick (e.g. the
+    # interface scheduler suppressing it, per docs/rift_vessel.rst), a goal-
+    # less tick is still a true no-op — the pre-passive-activity behaviour.
     conn = _FakeConnector(connected=True)
-    result = await conn.motor_step(None)
+    result = await conn.motor_step(None, passive_activity_allowed=False)
     assert result == {"acted": False, "reason": "no_goal"}
     assert conn.calls == []
+
+
+@pytest.mark.asyncio
+async def test_motor_step_no_goal_engages_passive_activity_by_default() -> None:
+    # Passive activity (see docs/rift_vessel.rst) is the lowest-priority
+    # embodiment layer: by default (``passive_activity_allowed`` defaults to
+    # True) a goal-less tick no longer idles — with nothing benign nearby it
+    # falls back to the same directional march used elsewhere in the reflex.
+    conn = _FakeConnector(connected=True)
+    result = await conn.motor_step(None)
+    assert result["acted"] is True
+    assert result["reason"] == "passive_activity"
+    assert result["action"] == "goto"
+    assert conn.calls
 
 
 @pytest.mark.asyncio
@@ -1455,3 +1472,221 @@ async def test_survival_guard_preempts_deliberate_action_in_flight() -> None:
     result = await conn.motor_step(_ACTIVE_GOAL)
     assert result.get("reason") == "survival:drowning"
     assert ("surface", {}) in conn.calls
+
+
+# ----------------------------------------------------------------------
+# Passive activity (lowest-priority embodiment layer — docs/rift_vessel.rst)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_motor_step_passive_activity_mines_in_reach_block() -> None:
+    # No goal, but a benign block affordance is right there — work it instead
+    # of standing inert.
+    conn = _FakeConnector(
+        affordances=[
+            {"kind": "block", "target": "oak_log", "verb": "mine", "distance": 1.0}
+        ]
+    )
+    result = await conn.motor_step(None)
+    assert result == {
+        "acted": True,
+        "action": "mine",
+        "target": "oak_log",
+        "target_kind": "block",
+        "reason": "passive_activity",
+    }
+    assert ("mine", {"target": "oak_log"}) in conn.calls
+
+
+@pytest.mark.asyncio
+async def test_motor_step_passive_activity_uses_in_reach_entity() -> None:
+    # A non-block affordance (e.g. a chest) is "used", not mined — mirroring
+    # the goal-directed reflex's kind-based dispatch, not the affordance's own
+    # ``verb`` field (every affordance from ``_build_affordances`` already
+    # says ``use``; ``mine`` is the reflex's own decision for blocks only).
+    conn = _FakeConnector(
+        affordances=[
+            {"kind": "entity", "target": "chest", "verb": "use", "distance": 1.0}
+        ]
+    )
+    result = await conn.motor_step(None)
+    assert result == {
+        "acted": True,
+        "action": "use",
+        "target": "chest",
+        "target_kind": "entity",
+        "reason": "passive_activity",
+    }
+    assert ("use", {"target": "chest"}) in conn.calls
+
+
+@pytest.mark.asyncio
+async def test_motor_step_passive_activity_walks_to_out_of_reach_affordance() -> None:
+    conn = _FakeConnector(
+        affordances=[
+            {"kind": "block", "target": "oak_log", "verb": "mine", "distance": 10.0}
+        ]
+    )
+    result = await conn.motor_step(None)
+    assert result["acted"] is True
+    assert result["action"] == "goto"
+    assert result["target"] == "oak_log"
+    assert result["reason"] == "passive_activity"
+    assert ("goto", {"target": "oak_log"}) in conn.calls
+
+
+@pytest.mark.asyncio
+async def test_motor_step_passive_activity_skips_utility_blocks() -> None:
+    # A torch is structurally benign (verb "use") but must never be reflex-
+    # mined (AGENTS.md §5c — stripping a player's light source). With nothing
+    # else nearby, passive activity falls through to the directional march
+    # instead of touching it.
+    conn = _FakeConnector(
+        affordances=[
+            {"kind": "block", "target": "torch", "verb": "use", "distance": 1.0}
+        ]
+    )
+    result = await conn.motor_step(None)
+    assert result["acted"] is True
+    assert result["action"] == "goto"
+    assert result["reason"] == "passive_activity"
+    assert "target" not in result
+    assert all(call[0] != "use" for call in conn.calls)
+
+
+@pytest.mark.asyncio
+async def test_motor_step_passive_activity_ignores_hostile_affordances() -> None:
+    # Only a hostile "attack" affordance is present — reflexes stay peaceful
+    # even in the passive layer, so the body marches instead of engaging.
+    conn = _FakeConnector(
+        affordances=[
+            {"kind": "entity", "target": "zombie", "verb": "attack", "distance": 1.0}
+        ]
+    )
+    result = await conn.motor_step(None)
+    assert result["acted"] is True
+    assert result["action"] == "goto"
+    assert result["reason"] == "passive_activity"
+    assert all(call[0] != "attack" for call in conn.calls)
+
+
+@pytest.mark.asyncio
+async def test_motor_step_passive_activity_persists_target_across_ticks() -> None:
+    # The same out-of-reach affordance stays live across ticks: the reflex
+    # keeps pursuing the SAME target (not re-rolling a new one every tick)
+    # and its lease tick counter accrues.
+    conn = _FakeConnector(
+        affordances=[
+            {"kind": "block", "target": "oak_log", "verb": "mine", "distance": 10.0}
+        ]
+    )
+    await conn.motor_step(None)
+    await conn.motor_step(None)
+    assert conn._passive_activity is not None
+    assert conn._passive_activity["target"] == "oak_log"
+    assert conn._passive_activity["ticks"] == 2
+    assert conn.calls == [
+        ("goto", {"target": "oak_log"}),
+        ("goto", {"target": "oak_log"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_motor_step_passive_activity_lease_expires_and_marches() -> None:
+    # Once a selection's lease is exhausted, that exact target is excluded
+    # from the immediate reselection (else a perpetually-nearest affordance
+    # would never actually be let go). With no other candidate, the body
+    # falls through to the directional march instead of continuing forever.
+    conn = _FakeConnector(
+        affordances=[
+            {"kind": "block", "target": "oak_log", "verb": "mine", "distance": 10.0}
+        ]
+    )
+    conn._passive_activity_lease_ticks = 2
+
+    r1 = await conn.motor_step(None)
+    r2 = await conn.motor_step(None)
+    r3 = await conn.motor_step(None)
+
+    assert r1["target"] == "oak_log"
+    assert r2["target"] == "oak_log"
+    # Lease exhausted on tick 2 (ticks reached the limit) — tick 3 must not
+    # keep chasing the same target.
+    assert "target" not in r3
+    assert r3["action"] == "goto"
+    assert r3["reason"] == "passive_activity"
+
+
+@pytest.mark.asyncio
+async def test_motor_step_passive_activity_cleared_when_goal_takes_over() -> None:
+    # A conscious goal change interrupts passive activity immediately: once a
+    # real goal is supplied, any pending passive-activity lease is dropped.
+    conn = _FakeConnector(
+        affordances=[
+            {"kind": "block", "target": "oak_log", "verb": "mine", "distance": 10.0}
+        ]
+    )
+    await conn.motor_step(None)
+    assert conn._passive_activity is not None
+
+    await conn.motor_step(_ACTIVE_GOAL)
+    assert conn._passive_activity is None
+
+
+@pytest.mark.asyncio
+async def test_motor_step_passive_activity_yields_to_deliberate_action() -> None:
+    # The deliberate-action busy guard runs before the no-goal branch, so
+    # passive activity never engages while a cognition-driven action is
+    # in flight.
+    conn = _FakeConnector(
+        affordances=[
+            {"kind": "block", "target": "oak_log", "verb": "mine", "distance": 1.0}
+        ]
+    )
+    conn._deliberate_in_flight = 1
+    result = await conn.motor_step(None)
+    assert result == {"acted": False, "reason": "deliberate_action_in_flight"}
+    assert conn.calls == []
+
+
+@pytest.mark.asyncio
+async def test_motor_step_passive_activity_yields_to_survival_guard() -> None:
+    # Danger pre-empts even the goal-less passive-activity fallback: the
+    # survival guard runs first, unconditionally.
+    conn = _FakeConnector()
+    conn._sp_enabled = True
+    conn._sp_low_oxygen = float(MinecraftConnector._LOW_OXYGEN)
+    conn._sp_low_health = float(MinecraftConnector._LOW_HEALTH_FLEE)
+    conn._sp_hostile_dist = float(MinecraftConnector._HOSTILE_NEAR_DIST)
+    conn._sp_fight_back = True
+    conn._sp_fight_max_fails = int(MinecraftConnector._FIGHT_MAX_FAILS)
+    conn._sp_use_ranged = True
+    conn._sp_ranged_min_dist = float(MinecraftConnector._RANGED_MIN_DIST)
+    conn._sp_appraisal_enabled = True
+    conn._sp_engage_ratio = float(MinecraftConnector._ENGAGE_RATIO)
+    conn._sp_weak_mob_power = float(MinecraftConnector._WEAK_MOB_POWER)
+    conn._world_state = WorldState(
+        environment="minecraft",
+        health=20.0,
+        position={"x": 0.0, "y": 64.0, "z": 0.0},
+        possible_actions=[],
+        flags={"connected": True},
+        extra={
+            "is_alive": True,
+            "oxygen": 2,
+            "health": 20.0,
+            "block_head": "water",
+            "block_feet": "water",
+            "is_in_water": True,
+            "entities": [],
+            "affordances": [
+                {"kind": "block", "target": "oak_log", "verb": "mine", "distance": 1.0}
+            ],
+        },
+    )
+
+    result = await conn.motor_step(None)
+    assert result.get("reason") == "survival:drowning"
+    assert ("surface", {}) in conn.calls
+    assert all(call[0] != "mine" for call in conn.calls)
