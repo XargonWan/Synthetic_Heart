@@ -123,3 +123,13 @@ def test_preset_apply_updates_visible_model_from_apply_response() -> None:
     apply_handler = text[apply_start:apply_end]
     assert "await loadComponentsSummary()" in apply_handler
     assert "syncAppliedEnginePreset(data)" in apply_handler
+
+
+def test_logs_feed_capped_and_sockets_parked_on_pagehide() -> None:
+    """Overnight tabs must not grow unbounded DOM or reconnect-loop against
+    frozen (bfcache) pages."""
+    main = Path("res/synth_webui/js/main.js").read_text(encoding="utf-8")
+    assert "logsReconnectDelay" in main
+    assert "pagehide" in main
+    chat = Path("res/synth_webui/js/chat-window.mjs").read_text(encoding="utf-8")
+    assert "pagehide" in chat
