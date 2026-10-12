@@ -618,9 +618,22 @@ window.SynthWebUI.initAgentTab = function(){
       msgInput.__agentBound = true;
     }
 
+    // Restart semantics: init runs on every tab visit, so clear any timers
+    // from the previous visit first — otherwise each visit stacks another
+    // pair of pollers and /api/agent/tasks gets hammered N times over.
+    try { if (typeof window.SynthWebUI.stopAgentTab === 'function') window.SynthWebUI.stopAgentTab(); } catch (e) { /* ignore */ }
     window.__synth_agent_tasks_timer = setInterval(fetchAgentTasks, 5000);
     window.__synth_agent_tools_timer = setInterval(fetchAgentTools, 15000);
   }catch(e){ console.error('initAgentTab failed', e); }
+};
+
+// Stop the live auto-refresh polls (mirrors the queue tab's
+// stopQueueAutoRefresh — called when leaving the agent sub-tab).
+window.SynthWebUI.stopAgentTab = function(){
+  try{
+    if (window.__synth_agent_tasks_timer) { clearInterval(window.__synth_agent_tasks_timer); window.__synth_agent_tasks_timer = null; }
+    if (window.__synth_agent_tools_timer) { clearInterval(window.__synth_agent_tools_timer); window.__synth_agent_tools_timer = null; }
+  }catch(e){ /* ignore */ }
 };
 
 })();
