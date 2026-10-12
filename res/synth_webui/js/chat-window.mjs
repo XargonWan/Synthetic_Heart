@@ -416,7 +416,7 @@ function formatBubbleTime(date) {
     try {
         const opts = { hour: 'numeric', minute: '2-digit' };
         try {
-            if (window.SynthUtils && window.SynthUtils.is12Hour && window.SynthUtils.is12Hour()) opts.hour12 = true;
+            if (window.SynthUtils && window.SynthUtils.is12Hour) opts.hour12 = !!window.SynthUtils.is12Hour();
         } catch (e) { /* default locale behavior */ }
         return date.toLocaleTimeString(undefined, opts);
     } catch (e) {
