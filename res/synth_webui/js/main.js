@@ -8006,6 +8006,9 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 toggle.checked = enabled;
                 toggle.addEventListener('change', () => {
                     try { localStorage.setItem(KEY, toggle.checked ? '1' : '0'); } catch (e) { /* ignore */ }
+                    // Live-update already-rendered timestamps, no refresh needed.
+                    try { if (typeof window.refreshChatTimestamps === 'function') window.refreshChatTimestamps(); } catch (e) { /* ignore */ }
+                    try { if (typeof window.refreshHistoryTimestamps === 'function') window.refreshHistoryTimestamps(); } catch (e) { /* ignore */ }
                 });
             }
 
