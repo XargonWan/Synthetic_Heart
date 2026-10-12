@@ -5150,6 +5150,12 @@ class SynthWebUIInterface:
                 "sender": sender,
                 "text": text,
             }
+            # Propagate the original timestamp so the WebUI shows the real send
+            # time instead of falling back to Date.now() (which reset bubbles to
+            # "now" on reconnect/restart).
+            item_ts = item.get("timestamp") if isinstance(item, dict) else None
+            if item_ts:
+                replay_payload["ts"] = item_ts
             # Propagate metadata fields (e.g. tts_url) so the client can restore
             # click-to-replay audio icons on reconnect / restart.
             meta = item.get("metadata") if isinstance(item, dict) else None
@@ -5549,6 +5555,7 @@ class SynthWebUIInterface:
                 "type": "message",
                 "sender": "synth",
                 "text": text,
+                "ts": datetime.now(timezone.utc).isoformat(),
             }
             # Forward attachments if present so the WebUI can render them.
             if metadata and isinstance(metadata.get("attachments"), list):
