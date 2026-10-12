@@ -114,7 +114,7 @@ function injectChatStyles() {
         .message-day .day-label { background: rgba(255,255,255,0.04); color: var(--text); padding: 0.35rem 0.8rem; border-radius: 999px; font-weight:600; font-size:0.9rem; }
         /* Message timestamp in bubble */
         .bubble { position: relative; padding: 1rem 1.2rem 1.8rem; }
-        .bubble-time { position: absolute; right: 8px; bottom: 6px; font-size: 0.75rem; color: var(--text-soft); opacity: 0.9; }
+        .bubble-time { position: absolute; right: 8px; bottom: 6px; font-size: 0.75rem; color: inherit; }
         /* Synth bubbles with attached TTS audio – click to replay */
         .bubble.synth.clickable-audio { cursor: pointer; }
         .bubble.synth.clickable-audio::after {

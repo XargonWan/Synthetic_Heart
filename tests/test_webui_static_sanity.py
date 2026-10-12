@@ -137,3 +137,6 @@ def test_12h_toggle_updates_visible_timestamps_without_refresh() -> None:
     handler = main[handler_start : handler_start + 1200]
     assert "refreshChatTimestamps" in handler
     assert "refreshHistoryTimestamps" in handler
+    assert ".bubble-time { position: absolute" in chat and "color: inherit" in chat, (
+        "bubble timestamps should inherit the bubble text color, not pin --text-soft"
+    )
