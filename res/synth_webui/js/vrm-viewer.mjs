@@ -6136,6 +6136,46 @@ async function loadVRM(url, name, { isObjectUrl = false } = {}) {
             console.log('[synth_webui] Scene rotation:', vrm.scene.rotation);
             console.log('[synth_webui] Scene position:', vrm.scene.position);
 
+            // Snap the model up so its lowest rest-pose point sits slightly
+            // above the floor (+8mm margin covers bind-pose measurement slop
+            // and the idle clip dipping a few mm mid-cycle). Some models are
+            // authored below y=0 (measured: Riko bottoms out at -0.039 while
+            // Rei/Zero/Miku sit at ~0.000..0.002), and no motion-scale fix
+            // can plant feet that start underground. Sub-centimeter lifts
+            // are invisible at stage distance; floor clipping is not.
+            try {
+                vrm.scene.updateMatrixWorld(true);
+                const _box = new THREE.Box3().setFromObject(vrm.scene);
+                if (Number.isFinite(_box.min.y) && _box.min.y < 0.008) {
+                    vrm.scene.position.y += (0.008 - _box.min.y);
+                    vrm.scene.updateMatrixWorld(true);
+                    console.log('[synth_webui] Lifted model to floor:', vrm.scene.position.y);
+                }
+            } catch (groundErr) {
+                console.warn('[synth_webui] Could not snap model to floor:', groundErr);
+            }
+
+            // Cache the REST-pose hips height for animation retargeting.
+            // loadMixamoAnimation scales hips motion by vrm/rest hips ratio;
+            // measuring it there reads the CURRENT (possibly animated) pose,
+            // so lazily-loaded clips got a wrong scale and sank through the
+            // floor. The mixer is still fresh here, so this is true rest.
+            try {
+                vrm.scene.updateMatrixWorld(true);
+                const _hips = vrm.humanoid?.getNormalizedBoneNode
+                    ? (vrm.humanoid.getNormalizedBoneNode('hips') || vrm.humanoid.getNormalizedBoneNode('Hips'))
+                    : null;
+                if (_hips) {
+                    const _hp = new THREE.Vector3();
+                    _hips.getWorldPosition(_hp);
+                    vrm.userData = vrm.userData || {};
+                    vrm.userData.restHipsHeight = Math.abs(_hp.y - vrm.scene.position.y);
+                    console.log('[synth_webui] Rest hips height cached:', vrm.userData.restHipsHeight);
+                }
+            } catch (hipsErr) {
+                console.warn('[synth_webui] Could not cache rest hips height:', hipsErr);
+            }
+
             console.log('[synth_webui] Disabling frustum culling for all objects...');
             let objectCount = 0;
             vrm.scene.traverse((obj) => {
