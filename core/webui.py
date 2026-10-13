@@ -840,6 +840,12 @@ class SynthWebUIInterface:
         self.app.get("/logs")(self.logs_page)
         self.app.get("/diary")(self.diary_page)
         self.app.get("/setup")(self.setup_page)
+        # Register the first-run flag now, not only where the root redirect reads
+        # it. The page saves it through /api/config, which answers 404 for a key
+        # nothing has registered, and a configured install never takes the
+        # redirect path — so Finish setup failed with
+        # "Something was not saved: SETUP_COMPLETED: HTTP 404".
+        self._setup_completed()
         self.app.post("/api/log-console")(self.log_console_endpoint)
         self.app.websocket("/ws")(self.websocket_endpoint)
         self.app.websocket("/logs")(self.logs_ws_endpoint)
