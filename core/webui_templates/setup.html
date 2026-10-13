@@ -79,7 +79,7 @@
   .row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
   @media (max-width: 620px) { .row { grid-template-columns: 1fr; } }
 
-  .presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 0.6rem; margin-bottom: 1.1rem; }
+  .presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); grid-auto-rows: 1fr; gap: 0.6rem; margin-bottom: 1.1rem; }
   .preset {
     text-align: left; cursor: pointer; padding: 0.7rem 0.8rem; border-radius: 10px;
     border: 1px solid var(--border-strong); background: var(--surface-alt); color: var(--text);
@@ -116,8 +116,8 @@
     background: linear-gradient(to top, var(--bg) 65%, transparent);
     display: flex; justify-content: center; gap: 0.75rem;
   }
-  footer.bar .inner { width: 100%; max-width: 780px; display: flex; align-items: center; gap: 0.75rem; }
-  footer.bar .spacer { flex: 1; }
+  footer.bar .inner { width: 100%; max-width: 780px; display: flex; align-items: center; justify-content: center; position: relative; }
+  footer.bar #saved-note { position: absolute; left: 0; top: 50%; transform: translateY(-50%); }
   .fineprint { color: var(--text-dim); font-size: 0.78rem; }
   code { background: var(--surface-alt); padding: 0.1rem 0.35rem; border-radius: 5px; font-size: 0.85em; }
 </style>
@@ -206,7 +206,7 @@
     <h2><span class="step-num">4</span> Done</h2>
     <p class="hint">Save everything and go to the interface.</p>
     <button class="primary" id="finish">Finish setup</button>
-    <button class="ghost" id="skip">Skip for now</button>
+    <button class="ghost" id="skip">Skip</button>
     <div class="status" id="finish-status"></div>
   </section>
 </main>
@@ -214,8 +214,7 @@
 <footer class="bar">
   <div class="inner">
     <span class="fineprint" id="saved-note"></span>
-    <span class="spacer"></span>
-    <span class="fineprint">Settings live in <code>Settings</code> afterwards.</span>
+    <span class="fineprint">You can change these in 🔧 <code>Settings</code> afterwards.</span>
   </div>
 </footer>
 
