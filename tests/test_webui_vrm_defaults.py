@@ -193,3 +193,30 @@ def test_current_skin_default_and_changes(_isolated_vrm_dir: Path):
         assert r5.json().get("skin") == dummy_skin
     finally:
         shutil.rmtree(skin_dir, ignore_errors=True)
+
+
+def test_list_skins_skips_empty_directories(_isolated_vrm_dir: Path):
+    """An empty folder is not a persona, so it must not be listed.
+
+    The Windows installer excluded the example personas as ``skins\\Miku\\*``,
+    which hides the files but still lets ``createallsubdirs`` create the folder,
+    so an empty ``skins\\Miku`` shipped and the WebUI showed it as a card with no
+    preview and an Activate button that never enabled.
+    """
+    ui = SynthWebUIInterface(autostart=False)
+    client = TestClient(ui.app)
+
+    empty_dir = Path("skins") / "GhostSkin"
+    stub_dir = Path("skins") / "StubSkin"
+    empty_dir.mkdir(parents=True, exist_ok=True)
+    stub_dir.mkdir(parents=True, exist_ok=True)
+    (stub_dir / "persona.json").write_text('{"name": "StubSkin"}', encoding="utf-8")
+    try:
+        names = [s["folder"] for s in client.get("/api/skins").json()]
+        assert "GhostSkin" not in names
+        # A skin that exists but has no VRM yet must still be listed: the card
+        # offers the VRM upload that makes it usable.
+        assert "StubSkin" in names
+    finally:
+        shutil.rmtree(empty_dir, ignore_errors=True)
+        shutil.rmtree(stub_dir, ignore_errors=True)
