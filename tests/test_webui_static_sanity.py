@@ -123,3 +123,11 @@ def test_preset_apply_updates_visible_model_from_apply_response() -> None:
     apply_handler = text[apply_start:apply_end]
     assert "await loadComponentsSummary()" in apply_handler
     assert "syncAppliedEnginePreset(data)" in apply_handler
+
+
+def test_chat_replay_propagates_original_timestamp() -> None:
+    """Replayed bubbles must carry the stored send time, not render as now."""
+    text = Path("core/webui.py").read_text(encoding="utf-8")
+    assert 'replay_payload["ts"] = item_ts' in text, (
+        "replay payload should forward the stored timestamp as ts"
+    )
