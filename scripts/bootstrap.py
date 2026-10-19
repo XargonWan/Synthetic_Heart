@@ -551,11 +551,6 @@ def ensure_portable_cluster(
         # The password file must live OUTSIDE the cluster directory, or initdb
         # rejects it with "exists but is not empty".
         pwfile = cluster.parent / ".initdb-pw"
-        pwfile.write_text(superuser_password, encoding="utf-8")
-        try:
-            os.chmod(pwfile, 0o600)
-        except Exception:
-            pass
         # initdb writes roughly a thousand small files, so on a slow disk (or
         # with real-time antivirus watching the install folder) it takes minutes.
         # It is the one genuinely slow step, and this line exists because the log
@@ -565,27 +560,44 @@ def ensure_portable_cluster(
             "running initdb (a minute or two is normal; this is the last line "
             "until it returns)"
         )
-        started_at = time.monotonic()
-        try:
-            result = run_command(
-                [
-                    initdb,
-                    "-D",
-                    str(cluster),
-                    "-U",
-                    "postgres",
-                    "--auth-local=trust",
-                    "--auth-host=scram-sha-256",
-                    f"--pwfile={pwfile}",
-                    "--encoding=UTF8",
-                ],
-                timeout=INITDB_TIMEOUT_SEC,
-            )
-        finally:
+        # The first run routinely exceeds the timeout while the immediate retry
+        # (caches warm, half-built directory removed) finishes in seconds, so a
+        # timeout gets exactly one retry. Any other failure is real: initdb said
+        # no, and running it again would say no the same way.
+        result = None
+        for attempt in (1, 2):
+            if attempt == 2:
+                reporter.detail("retrying initdb once after the timeout")
+                shutil.rmtree(cluster, ignore_errors=True)
+                superuser_password = generate_password(24)
+            pwfile.write_text(superuser_password, encoding="utf-8")
             try:
-                pwfile.unlink()
+                os.chmod(pwfile, 0o600)
             except Exception:
                 pass
+            started_at = time.monotonic()
+            try:
+                result = run_command(
+                    [
+                        initdb,
+                        "-D",
+                        str(cluster),
+                        "-U",
+                        "postgres",
+                        "--auth-local=trust",
+                        "--auth-host=scram-sha-256",
+                        f"--pwfile={pwfile}",
+                        "--encoding=UTF8",
+                    ],
+                    timeout=INITDB_TIMEOUT_SEC,
+                )
+            finally:
+                try:
+                    pwfile.unlink()
+                except Exception:
+                    pass
+            if result.ok or result.returncode != 124:
+                break
         if not result.ok:
             if result.returncode == 124:
                 reporter.fail(
@@ -629,9 +641,13 @@ def ensure_portable_cluster(
         ],
         timeout=60,
     )
-    if not start.ok and "already running" not in start.output.lower():
-        reporter.fail(f"pg_ctl start failed: {start.output}")
-        return None
+    if not start.ok:
+        # pg_ctl's wordings vary ("another server might be running", a locked
+        # log file from a concurrent run) and none of them reliably says
+        # whether anything is actually answering. Don't decide here — the
+        # readiness poll below is ground truth: if a server answers on the
+        # port with our credentials it is reused, otherwise we fail there.
+        reporter.detail(f"pg_ctl start said: {start.output.strip()[:200]}")
 
     target = PostgresTarget(
         host="127.0.0.1",
@@ -647,7 +663,10 @@ def ensure_portable_cluster(
             reporter.detail(f"private cluster is up on 127.0.0.1:{port}")
             return target
         time.sleep(1)
-    reporter.fail("the private cluster did not become ready")
+    reporter.fail(
+        "the private cluster did not become ready (another server may hold "
+        "the port or the data directory)"
+    )
     return None
 
 

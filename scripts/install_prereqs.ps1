@@ -151,26 +151,68 @@ function Stop-Leftovers([string]$Root) {
 
 function Ensure-Uv {
     $uvPath = Join-Path $env:USERPROFILE '.local\bin\uv.exe'
+    $uvExe = $null
     if (Test-Path $uvPath) {
         Write-Ok "uv already installed ($(& $uvPath --version))"
-        return $uvPath
+        $uvExe = $uvPath
+    } else {
+        $existing = Get-Command uv -ErrorAction SilentlyContinue
+        if ($existing) {
+            Write-Ok "uv already installed ($(& uv --version))"
+            $uvExe = $existing.Source
+        }
     }
-    $existing = Get-Command uv -ErrorAction SilentlyContinue
-    if ($existing) {
-        Write-Ok "uv already installed ($(& uv --version))"
-        return $existing.Source
+    if (-not $uvExe) {
+        Write-Note 'installing uv from astral.sh (user scope, no admin)'
+        $installer = Join-Path $env:TEMP 'synth-uv-install.ps1'
+        Get-Archive 'https://astral.sh/uv/install.ps1' $installer
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $installer | Out-Null
+        Remove-Item $installer -ErrorAction SilentlyContinue
+
+        if (Test-Path $uvPath) { Write-Ok "uv installed at $uvPath"; $uvExe = $uvPath }
+        else {
+            $found = Get-Command uv -ErrorAction SilentlyContinue
+            if ($found) { Write-Ok "uv installed ($($found.Source))"; $uvExe = $found.Source }
+        }
+        if (-not $uvExe) { Fail 'uv was installed but could not be located; open a new terminal and re-run' }
     }
 
-    Write-Note 'installing uv from astral.sh (user scope, no admin)'
-    $installer = Join-Path $env:TEMP 'synth-uv-install.ps1'
-    Get-Archive 'https://astral.sh/uv/install.ps1' $installer
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $installer | Out-Null
-    Remove-Item $installer -ErrorAction SilentlyContinue
-
-    if (Test-Path $uvPath) { Write-Ok "uv installed at $uvPath"; return $uvPath }
-    $found = Get-Command uv -ErrorAction SilentlyContinue
-    if ($found) { Write-Ok "uv installed ($($found.Source))"; return $found.Source }
-    Fail 'uv was installed but could not be located; open a new terminal and re-run'
+    # Pre-warm uv's managed Python now, while a failure still lands in this
+    # log with a clear message. A broken/missing managed interpreter otherwise
+    # surfaces later as a bare `uv run` exit code, before bootstrap.py ever
+    # starts — and therefore with no bootstrap log at all.
+    $pyVersion = '3.12'
+    try {
+        $pinFile = Join-Path $script:RepoRoot '.python-version'
+        if (Test-Path $pinFile) {
+            $pinned = (Get-Content $pinFile -ErrorAction Stop | Select-Object -First 1).Trim()
+            if ($pinned) { $pyVersion = $pinned }
+        }
+    } catch { /* keep the default */ }
+    Write-Note "checking uv-managed Python $pyVersion"
+    # Native stderr throws as a terminating error under this script's
+    # `$ErrorActionPreference = 'Stop'` NO MATTER the redirection target
+    # (verified live: even `2> file` throws). Drop to Continue around native
+    # calls so their text stays capturable and `$LASTEXITCODE` stays readable.
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $findOut = & $uvExe python find $pyVersion 2>&1 | Out-String
+        $findRc = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $prevEAP }
+    if ($findRc -ne 0) {
+        Write-Note 'managed Python missing or broken; (re)installing it now'
+        $ErrorActionPreference = 'Continue'
+        try {
+            $instOut = & $uvExe python install $pyVersion --force 2>&1 | Out-String
+            $instRc = $LASTEXITCODE
+        } finally { $ErrorActionPreference = $prevEAP }
+        if ($instRc -ne 0) {
+            Fail "uv could not provision Python $pyVersion : $instOut"
+        }
+    }
+    Write-Ok 'uv-managed Python ready'
+    return $uvExe
 }
 
 function Ensure-Postgres {
