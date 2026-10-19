@@ -55,3 +55,22 @@ def test_tag_missing_intensity():
     text = "Foo [em_angry] Bar"
     clean, events = parse_facial_expressions(text)
     assert events[0].intensity == 1.0
+
+
+def test_parse_colon_separator():
+    # The model sometimes emits [em:name:i] instead of [em_name:i]; it must
+    # parse and strip the same, not leak to the user.
+    text = "Ciao [em:smile:0.4] come va?"
+    clean, events = parse_facial_expressions(text)
+    assert clean == "Ciao  come va?"
+    assert len(events) == 1
+    assert events[0].name == "smile"
+    assert pytest.approx(events[0].intensity, 0.0001) == 0.4
+
+
+def test_emoji_bracket_not_a_tag():
+    # The separator is mandatory before a name, so ordinary text is untouched.
+    text = "Nice [emoji] here"
+    clean, events = parse_facial_expressions(text)
+    assert clean == text
+    assert events == []

@@ -113,6 +113,11 @@ def test_strip_emotion_tags_removes_facial_expression_markers():
     assert strip_emotion_tags(text) == "Hello world"
 
 
+def test_strip_emotion_tags_removes_colon_separator_markers():
+    text = "[em:smile:0.4] Hello [em] world"
+    assert strip_emotion_tags(text) == "Hello world"
+
+
 @pytest.mark.asyncio
 async def test_llm_to_interface_strips_a_leading_age_marker(monkeypatch):
     """A copied history age marker must not reach the person.
