@@ -7314,6 +7314,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     loadingReasonTrail: false,
                 };
                 window.__synth_logs_state = logsState;
+                let logsReconnectDelay = 2000;
 
                 function debounce(fn, wait) {
                     let timer = null;
@@ -7365,6 +7366,11 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     line.dataset.level = level;
                     line.textContent = text;
                     logOutput.appendChild(line);
+                    // hard cap — /logs replays 200 lines per reconnect
+                    // and never stops; an overnight flap stacked 100k+ divs (2GB).
+                    while (logOutput.childElementCount > 1000) {
+                        logOutput.removeChild(logOutput.firstChild);
+                    }
                     const auto = logAutoscroll ? logAutoscroll.checked : true;
                     if (auto) {
                         scrollLogsToBottom();
@@ -7710,10 +7716,30 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     ws.onmessage = (event) => {
                         appendLogLine(event.data);
                     };
+                    ws.onopen = () => {
+                        logsReconnectDelay = 2000;
+                    };
                     ws.onclose = () => {
-                        setTimeout(connectLogs, 2000);
+                        const wait = logsReconnectDelay;
+                        logsReconnectDelay = Math.min(logsReconnectDelay * 2, 30000);
+                        setTimeout(connectLogs, wait);
                     };
                 }
+
+                // Bfcache/navigate-away: park the socket instead of failing
+                // reconnects against a frozen page (console spam); one reconnect
+                // on restore. pagehide/pageshow keep bfcache eligible (unlike unload).
+                document.addEventListener('pagehide', () => {
+                    try {
+                        if (window.__synth_logs_socket) window.__synth_logs_socket.close();
+                    } catch (e) { /* ignore */ }
+                });
+                document.addEventListener('pageshow', (event) => {
+                    if (event && event.persisted) {
+                        logsReconnectDelay = 2000;
+                        connectLogs();
+                    }
+                });
 
                 logFilters.forEach((checkbox) => {
                     checkbox.addEventListener('change', applyFilters);
