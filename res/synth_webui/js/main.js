@@ -2553,7 +2553,9 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         await renderAccentControl(accentCard, accentContainer);
                         await renderAccentControl(themeCard, themeContainer);
                     } else {
-                        if (accentCard) accentCard.style.display = 'none';
+                        // Appearance card also hosts the 12-hour toggle, so it
+                        // stays visible even without accent config.
+                        if (accentCard) accentCard.style.display = 'block';
                         if (themeCard) themeCard.style.display = 'none';
                     }
                 } catch (e) {
@@ -6939,6 +6941,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                         pollCompaction();
                     }
+                    initTimeDisplay();
                     initNotifications();
                     window.__synth_settings_initialized = true;
                 }
@@ -7992,6 +7995,21 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 if (days > 0) return `${days}d ${hours}h ${minutes}m`;
                 if (hours > 0) return `${hours}h ${minutes}m`;
                 return `${minutes}m`;
+            }
+
+            function initTimeDisplay() {
+                const toggle = document.getElementById('time-12h-toggle');
+                if (!toggle) return;
+                const KEY = (window.SynthUtils && window.SynthUtils.TIME_12H_KEY) || 'synth-time-12h';
+                let enabled = false;
+                try { enabled = (localStorage.getItem(KEY) === '1'); } catch (e) { /* ignore */ }
+                toggle.checked = enabled;
+                toggle.addEventListener('change', () => {
+                    try { localStorage.setItem(KEY, toggle.checked ? '1' : '0'); } catch (e) { /* ignore */ }
+                    // Live-update already-rendered timestamps, no refresh needed.
+                    try { if (typeof window.refreshChatTimestamps === 'function') window.refreshChatTimestamps(); } catch (e) { /* ignore */ }
+                    try { if (typeof window.refreshHistoryTimestamps === 'function') window.refreshHistoryTimestamps(); } catch (e) { /* ignore */ }
+                });
             }
 
             function initNotifications() {
