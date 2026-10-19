@@ -14514,6 +14514,16 @@ class SynthWebUIInterface:
             vrm_version = None
 
             try:
+                # A directory with nothing in it is not a persona. create_skin
+                # always writes a persona.json, so an empty folder is packaging
+                # debris: the Windows installer used to leave an empty skins\Miku
+                # behind (Excludes of the form "skins\Miku\*" hides the files but
+                # createallsubdirs still makes the folder), and the WebUI then
+                # showed a card with no preview and an Activate button that never
+                # enabled.
+                if not any(entry.iterdir()):
+                    continue
+
                 # Check for preview image
                 preview_path = entry / "preview.png"
                 if preview_path.exists():
