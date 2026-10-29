@@ -25,6 +25,40 @@ from plugins.grillo.common_instructions import (
     OBSERVER_PROACTIVE_INSTRUCTIONS,
 )
 
+# A ``synth_webui/<session>`` history path is created the moment a WebUI client
+# connects and is never removed, so it keeps qualifying as a conversation long
+# after the browser is closed.
+_WEBUI_PATH_PREFIX = "synth_webui/"
+
+
+def _is_webui_path(interface_path: str) -> bool:
+    return interface_path.startswith(_WEBUI_PATH_PREFIX)
+
+
+def _webui_has_live_client() -> bool:
+    """Return True when at least one WebUI client is attached.
+
+    Outreach written into a WebUI path with no client is stored for the next
+    reconnect and never seen (``core/webui.py`` logs ``no active websocket`` and
+    persists anyway) — and because the stored line is dated *now* it also
+    refreshes that path's recency, which is how the observer ended up narrating
+    "hour four of you not answering" into a closed tab every hour while the real
+    conversation drifted further down the target list.
+
+    Fail-open: any failure reports True, so a liveness probe can never silence
+    outreach on its own.
+    """
+    try:
+        from core.animation_handler import get_karada_state_server
+
+        server = get_karada_state_server()
+        if server is None:
+            return True
+        return bool(server.has_connected_clients())
+    except Exception as exc:  # pragma: no cover - defensive
+        log_debug(f"[grillo_chat_observer] WebUI liveness probe failed: {exc}")
+        return True
+
 
 register_exposed_var(
     "GRILLO_OBSERVER_STORE_MEMORIES",
@@ -809,6 +843,12 @@ class GrilloChatObserverPlugin:
 
                 if is_vessel_interface_path(chat_path):
                     continue
+                # A closed WebUI is not a conversation: its history is the
+                # synth's own outreach into an empty tab, and rendering that as
+                # context invites it to keep answering itself. Skip it until a
+                # client is actually attached (fail-open inside the probe).
+                if _is_webui_path(chat_path) and not _webui_has_live_client():
+                    continue
                 try:
                     messages = await load_chat_history(chat_path)
                     # No chat-level "the synth spoke last, so ignore the whole
@@ -987,6 +1027,19 @@ class GrilloChatObserverPlugin:
                 # Skip live voice paths — audio-only, cannot receive text.
                 if "_live_" in chat_path:
                     continue
+                # A WebUI path outlives the client that created it. Speaking
+                # into one with no browser attached is invisible to the human
+                # (core/webui.py persists it for the next reconnect and warns
+                # "no active websocket"), and that persisted line then refreshes
+                # the path's recency — so the closed tab becomes the *most*
+                # attractive target and starves the real conversations. Skip it
+                # until somebody is actually watching.
+                if _is_webui_path(chat_path) and not _webui_has_live_client():
+                    log_info(
+                        "[grillo_chat_observer] Skipping "
+                        f"{chat_path}: no WebUI client connected"
+                    )
+                    continue
                 try:
                     messages = await load_chat_history(chat_path)
                 except Exception:
@@ -1021,7 +1074,13 @@ class GrilloChatObserverPlugin:
                 )
 
                 # Anti-dead-chat gate: genuine human activity within window.
+                # While scanning, remember WHEN the human last spoke: that, not
+                # the newest line of any author, is what "how idle is this
+                # conversation" actually means. Ranking on any-message recency
+                # let the observer re-pick the path it had just spoken into
+                # (its own outreach refreshes that path) and starve the rest.
                 has_recent_human = False
+                last_human_ts: Optional[datetime] = None
                 for msg in reversed(list(messages)):
                     if not isinstance(msg, dict):
                         continue
@@ -1029,9 +1088,19 @@ class GrilloChatObserverPlugin:
                     if sender in ("self", "synth", "-1"):
                         continue
                     ts = self._parse_ts(msg.get("timestamp"))
-                    if ts is not None and ts >= activity_cutoff:
-                        has_recent_human = True
+                    if ts is None:
+                        continue
+                    if last_human_ts is None:
+                        # reversed(): the first non-self line is the newest one.
+                        last_human_ts = ts
+                    if ts < activity_cutoff:
                         break
+                    has_recent_human = True
+                    break
+
+                human_age_seconds: Optional[float] = None
+                if last_human_ts is not None:
+                    human_age_seconds = (now - last_human_ts).total_seconds()
 
                 # Awaiting-reply gate (GRILLO_OUTREACH_BLOCK_ON_SELF_LAST, on by
                 # default): when the synth's own line is the newest in the chat,
@@ -1075,12 +1144,27 @@ class GrilloChatObserverPlugin:
                         "last_sender": last_sender,
                         "last_from_self": last_from_self,
                         "age_seconds": age_seconds,
+                        "human_age_seconds": human_age_seconds,
                         "in_active_conversation": in_active_conversation,
                         "awaiting_reply": awaiting_reply,
                         "has_recent_human": has_recent_human,
                         "eligible": eligible,
                     }
                 )
+
+            # Rank by the newest line from *someone else*. Age of the newest line
+            # of any author is self-refreshing: an outreach dated now re-arms the
+            # path it was sent to, so that path comes back at the top of the list
+            # every run and the conversations the human actually feeds drift
+            # permanently downwards. A path with no readable human line sorts
+            # last (it is ineligible anyway).
+            targets.sort(
+                key=lambda t: (
+                    t.get("human_age_seconds")
+                    if t.get("human_age_seconds") is not None
+                    else float("inf")
+                )
+            )
         except Exception as e:
             log_error(f"[grillo_chat_observer] Error collecting targets: {e}")
         return targets
@@ -1294,6 +1378,36 @@ class GrilloChatObserverPlugin:
         except Exception as e:
             log_warning(f"[grillo_chat_observer] Memory storage failed: {e}")
 
+    @staticmethod
+    def _snippet_source_paths(snippets: List[str]) -> List[str]:
+        """Return the distinct ``interface_path`` of the conversations the snippets came from.
+
+        Each snippet is rendered as ``(chat:<path> | sender:... | age:...)``, and
+        that ``chat:`` value is exactly what ``core/message_chain.py`` accepts as
+        an offered target for the beat. The same delimiter rules as that guard's
+        extraction apply here, so the rendered list can never offer a path the
+        dispatcher would reject. Structural only (the collector's own label
+        format), never message content.
+        """
+        paths: List[str] = []
+        seen: set[str] = set()
+        for snippet in snippets or []:
+            if not isinstance(snippet, str):
+                continue
+            marker = "chat:"
+            start = snippet.find(marker)
+            if start == -1:
+                continue
+            start += len(marker)
+            end = start
+            while end < len(snippet) and snippet[end] not in (" ", "|", ")"):
+                end += 1
+            path = snippet[start:end].strip()
+            if path and path not in seen:
+                seen.add(path)
+                paths.append(path)
+        return paths
+
     def _build_observer_prompt(
         self,
         snippets: List[str],
@@ -1330,7 +1444,13 @@ class GrilloChatObserverPlugin:
             targets_block = "\n\nELIGIBLE TARGETS (routable interface_path values you may reach out to):\n"
             for t in targets:
                 path = t.get("interface_path", "")
-                age = t.get("age_seconds")
+                # How long the *human* has been silent. The any-message age is
+                # self-refreshing: every outreach re-dates the path it was sent
+                # to, so a tab the synth keeps talking into looked like the most
+                # active conversation in the list.
+                age = t.get("human_age_seconds")
+                if age is None:
+                    age = t.get("age_seconds")
                 try:
                     age_h = f"{float(age) / 3600.0:.1f}h" if age is not None else "?"
                 except Exception:
@@ -1350,6 +1470,26 @@ class GrilloChatObserverPlugin:
                 targets_block += f"- interface_path={path} | idle={age_h} | last_sender={last} | cooldown={cd}\n"
         else:
             targets_block = "\n\nELIGIBLE TARGETS: (none currently eligible — do NOT reach out to anyone)\n"
+
+        # The snippet's own ``chat:`` value is already an offered destination for
+        # the dispatcher (``core/message_chain.py`` drops any beat action routed
+        # outside the offered set), but the prompt only showed it buried in the
+        # snippet label, so the model reconstructed a path instead of copying one
+        # and sent to ``grillo/-1`` twice (dropped both times, wasting the beat).
+        # Listing the snippet paths makes the pick-list identical to what delivery
+        # accepts. ``own_lines`` is context only and is NOT in ``grillo_snippets``,
+        # so its paths must not be offered.
+        source_paths = self._snippet_source_paths(snippets)
+        sources_block = ""
+        if source_paths:
+            sources_block = "\n\nSNIPPET SOURCES (the exact interface_path of each conversation above):\n"
+            for path in source_paths:
+                sources_block += f"- interface_path={path}\n"
+            sources_block += (
+                "Reply to a snippet by copying ITS interface_path from this list. A path that "
+                "appears in neither this list nor ELIGIBLE TARGETS is rejected before delivery, "
+                "so an action aimed at one is wasted.\n"
+            )
 
         decay_note = ""
         if decay_driven:
@@ -1380,6 +1520,7 @@ class GrilloChatObserverPlugin:
             header
             + body
             + targets_block
+            + sources_block
             + decay_note
             + propose_clause
             + OBSERVER_INSTRUCTIONS

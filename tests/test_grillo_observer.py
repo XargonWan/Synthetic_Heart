@@ -1785,3 +1785,214 @@ async def test_a_lookback_that_fails_writes_nothing(monkeypatch):
     )
 
     assert written == []
+
+
+@pytest.mark.asyncio
+async def test_closed_webui_is_not_an_outreach_target(monkeypatch):
+    """A WebUI path outlives its client, so it must not be offered while nobody watches.
+
+    Live 2026-10-29: the observer wrote "hour four of you not answering" into
+    ``synth_webui/webui_default`` every hour. That path's only non-self line was
+    a Karada window-tap event days old, which still satisfied the 14-day human
+    gate, and ``core/webui.py`` stored each outreach for a reconnect that never
+    came ("no active websocket ... Saved message") — which also re-dated the
+    path, keeping it ranked freshest. The liveness probe is the same one the
+    action parser uses before emitting animation actions.
+    """
+    plugin = gco.GrilloChatObserverPlugin()
+    plugin.block_on_self_last = False
+    now = datetime.now(timezone.utc)
+
+    async def fake_recent_paths(limit):
+        return [
+            {"interface_path": "synth_webui/webui_default"},
+            {"interface_path": "telegram_bot/5208932647"},
+        ]
+
+    histories = {
+        "synth_webui/webui_default": [
+            {
+                "sender_name": "Karada",
+                "text": "Scarlet tapped a window in the webui",
+                "timestamp": (now - timedelta(days=3)).isoformat(),
+            },
+            {
+                "sender_name": "self",
+                "text": "hour four of you not answering",
+                "timestamp": (now - timedelta(minutes=5)).isoformat(),
+            },
+        ],
+        "telegram_bot/5208932647": [
+            {
+                "sender_name": "Scar",
+                "text": "night",
+                "timestamp": (now - timedelta(hours=4)).isoformat(),
+            },
+        ],
+    }
+
+    async def fake_load(path):
+        return list(histories[path])
+
+    monkeypatch.setattr(
+        "core.interface_paths.get_recent_interface_paths", fake_recent_paths
+    )
+    monkeypatch.setattr("core.chat_history_cache.load_chat_history", fake_load)
+    monkeypatch.setattr(
+        "core.interface_path_utils.is_vessel_interface_path", lambda p: False
+    )
+    monkeypatch.setattr(gco, "_webui_has_live_client", lambda: False)
+
+    targets = await plugin._collect_eligible_targets(limit=5)
+
+    assert [t["interface_path"] for t in targets] == ["telegram_bot/5208932647"]
+
+
+@pytest.mark.asyncio
+async def test_webui_stays_a_target_while_a_client_is_connected(monkeypatch):
+    """The gate is liveness, not an unconditional ban on the WebUI path."""
+    plugin = gco.GrilloChatObserverPlugin()
+    plugin.block_on_self_last = False
+    now = datetime.now(timezone.utc)
+
+    async def fake_recent_paths(limit):
+        return [{"interface_path": "synth_webui/webui_default"}]
+
+    async def fake_load(path):
+        return [
+            {
+                "sender_name": "Scar",
+                "text": "hey",
+                "timestamp": (now - timedelta(hours=2)).isoformat(),
+            }
+        ]
+
+    monkeypatch.setattr(
+        "core.interface_paths.get_recent_interface_paths", fake_recent_paths
+    )
+    monkeypatch.setattr("core.chat_history_cache.load_chat_history", fake_load)
+    monkeypatch.setattr(
+        "core.interface_path_utils.is_vessel_interface_path", lambda p: False
+    )
+    monkeypatch.setattr(gco, "_webui_has_live_client", lambda: True)
+
+    targets = await plugin._collect_eligible_targets(limit=5)
+
+    assert [t["interface_path"] for t in targets] == ["synth_webui/webui_default"]
+    assert targets[0]["eligible"] is True
+
+
+@pytest.mark.asyncio
+async def test_targets_are_ranked_by_human_freshness_not_by_own_outreach(monkeypatch):
+    """The synth's own line must not make a chat look like the freshest conversation.
+
+    ``get_recent_interface_paths`` orders by the newest message of ANY author, so
+    an outreach dated now re-armed the path it was sent to and it came back at
+    the top of every subsequent prompt while the human-fed conversation drifted
+    downwards. Ranking and the rendered ``idle=`` label follow the newest
+    non-self line instead.
+    """
+    plugin = gco.GrilloChatObserverPlugin()
+    plugin.block_on_self_last = False
+    now = datetime.now(timezone.utc)
+
+    async def fake_recent_paths(limit):
+        # Recency of ANY author: the self-spoken path comes back first.
+        return [
+            {"interface_path": "telegram_bot/1"},
+            {"interface_path": "telegram_bot/2"},
+        ]
+
+    histories = {
+        "telegram_bot/1": [
+            {
+                "sender_name": "Scar",
+                "text": "hours ago",
+                "timestamp": (now - timedelta(hours=6)).isoformat(),
+            },
+            {
+                "sender_name": "self",
+                "text": "just spoke into it",
+                "timestamp": (now - timedelta(minutes=1)).isoformat(),
+            },
+        ],
+        "telegram_bot/2": [
+            {
+                "sender_name": "Scar",
+                "text": "an hour ago",
+                "timestamp": (now - timedelta(hours=1)).isoformat(),
+            },
+            {
+                "sender_name": "self",
+                "text": "three hours ago",
+                "timestamp": (now - timedelta(hours=3)).isoformat(),
+            },
+        ],
+    }
+
+    async def fake_load(path):
+        return list(histories[path])
+
+    monkeypatch.setattr(
+        "core.interface_paths.get_recent_interface_paths", fake_recent_paths
+    )
+    monkeypatch.setattr("core.chat_history_cache.load_chat_history", fake_load)
+    monkeypatch.setattr(
+        "core.interface_path_utils.is_vessel_interface_path", lambda p: False
+    )
+    monkeypatch.setattr(gco, "_webui_has_live_client", lambda: True)
+
+    targets = await plugin._collect_eligible_targets(limit=5)
+
+    assert [t["interface_path"] for t in targets] == [
+        "telegram_bot/2",
+        "telegram_bot/1",
+    ]
+    # The human's age is what the prompt renders, not the synth's own line.
+    assert targets[0]["human_age_seconds"] == pytest.approx(3600, abs=120)
+    assert targets[1]["human_age_seconds"] == pytest.approx(6 * 3600, abs=120)
+    prompt = plugin._build_observer_prompt(
+        ["(chat:telegram_bot/1 | sender:Scar | 6h) hours ago"],
+        targets,
+        True,
+    )
+    assert "interface_path=telegram_bot/2 | idle=1.0h" in prompt
+    assert "interface_path=telegram_bot/1 | idle=6.0h" in prompt
+
+
+def test_prompt_lists_the_snippet_source_paths_delivery_will_accept():
+    """The prompt must show the same paths the dispatcher accepts.
+
+    ``core/message_chain.py`` drops a beat action routed outside the offered set
+    (the snippet ``chat:`` paths plus ``grillo_targets``). The prompt rendered
+    only ELIGIBLE TARGETS, so a chat visible solely inside a snippet had no
+    listed path and the model reconstructed one — ``grillo/-1`` twice, dropped
+    both times, losing that hour's outreach.
+    """
+    plugin = gco.GrilloChatObserverPlugin()
+    snippets = [
+        "(chat:telegram_bot/5208932647 | sender:Scar | 1h) hello there",
+        "(chat:synth_webui/webui_default | sender:self | 5m) my own line",
+        "(chat:telegram_bot/5208932647 | sender:Scar | 2h) same chat again",
+    ]
+
+    prompt = plugin._build_observer_prompt(snippets, [], False)
+
+    assert "SNIPPET SOURCES" in prompt
+    assert "- interface_path=telegram_bot/5208932647\n" in prompt
+    assert "- interface_path=synth_webui/webui_default\n" in prompt
+    # Deduplicated: a chat with two snippets is listed once.
+    assert prompt.count("- interface_path=telegram_bot/5208932647\n") == 1
+    assert plugin._snippet_source_paths(snippets) == [
+        "telegram_bot/5208932647",
+        "synth_webui/webui_default",
+    ]
+
+
+def test_prompt_omits_the_source_block_when_there_are_no_snippets():
+    plugin = gco.GrilloChatObserverPlugin()
+
+    prompt = plugin._build_observer_prompt([], [], True)
+
+    assert "SNIPPET SOURCES" not in prompt
+    assert plugin._snippet_source_paths([]) == []

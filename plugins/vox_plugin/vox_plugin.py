@@ -48,6 +48,7 @@ from core.core_initializer import register_plugin, INTERFACE_REGISTRY
 from core.facial_expression_parser import (
     FacialExpressionEvent,
     parse_facial_expressions,
+    strip_speech_tags,
 )
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.vox_registry import VOX_REGISTRY
@@ -686,6 +687,20 @@ class VoxPlugin(AIPluginBase):
                     )
                 except Exception as exc:
                     log_warning(f"[vox_plugin] preprocess_emotional_text failed: {exc}")
+
+            # Never SPEAK a facial-expression tag. The parse above only recognises
+            # the documented ``[em_NAME:INTENSITY]`` form, while the model routinely
+            # writes ``[em:NAME:INTENSITY]`` — that form used to reach synthesis
+            # verbatim and be read aloud. Chat text keeps its tags (owner's
+            # preference), so this strip belongs here, at the speech boundary.
+            # Applied after preprocessing, which only inserts engine-specific
+            # emotion markers that this pattern does not match.
+            _pre_strip_text = tts_text
+            tts_text = strip_speech_tags(tts_text)
+            if tts_text != _pre_strip_text:
+                log_info(
+                    "[vox_plugin] Stripped facial-expression tag(s) from the text sent to TTS"
+                )
 
             sentences = _split_sentences(tts_text) if chunk_karada else []
             streamed = False

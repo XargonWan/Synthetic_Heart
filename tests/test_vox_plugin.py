@@ -195,6 +195,59 @@ async def test_vox_plugin_speak_calls_engine_and_writes_file() -> None:
 
 
 @pytest.mark.asyncio
+async def test_vox_plugin_never_speaks_facial_expression_tags() -> None:
+    """Chat keeps its ``[em:...]`` tags; the synthesiser must not receive them.
+
+    ``parse_facial_expressions`` only matches the documented
+    ``[em_NAME:INTENSITY]`` form, so the model's colon-separated
+    ``[em:NAME:INTENSITY]`` used to be read aloud by the engine.
+    """
+    from core.vox_registry import VoxRegistry
+    from plugins.vox_base import VoxEngineBase
+
+    seen: list[str] = []
+
+    class FakeEngine(VoxEngineBase):
+        @property
+        def output_format(self) -> str:
+            return "wav"
+
+        def generate_tts(self, text, emotion=None, **kw):
+            seen.append(text)
+            return b"RIFF" + b"\x00" * 36
+
+    mock_reg = VoxRegistry()
+    mock_reg._engine_modules["fake"] = "fake_vox_mod"
+    mock_reg._instances["fake"] = FakeEngine()
+
+    from plugins.vox_plugin import VoxPlugin
+
+    plugin = VoxPlugin.__new__(VoxPlugin)
+    plugin._active_engine_name = "fake"
+    plugin._engine_settings = {}
+    plugin._fallback_to_text = True
+    plugin._sentence_chunking_enabled = False
+    plugin._output_dir = Path("/tmp/vox_test_tags")
+    plugin._output_dir.mkdir(parents=True, exist_ok=True)
+
+    with (
+        patch("plugins.vox_plugin.VOX_REGISTRY", mock_reg),
+        patch.object(plugin, "_dispatch", new=AsyncMock(return_value=None)),
+        patch.object(plugin, "refresh_config"),
+    ):
+        result = await plugin.speak(
+            "Morning, husband. [em:smile:0.7] You slept like a log. [em_smile:0.4]",
+            interface_path="synth_webui/sess123",
+        )
+
+    assert result["status"] == "success"
+    assert seen, "engine was never called"
+    assert "[em" not in seen[0]
+    assert "Morning, husband." in seen[0]
+    assert "You slept like a log." in seen[0]
+
+
+@pytest.mark.asyncio
 async def test_vox_plugin_detect_language_method() -> None:
     """The plugin should expose a detect_language method usable by recon."""
     from plugins.vox_plugin import VoxPlugin
