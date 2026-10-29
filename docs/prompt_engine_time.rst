@@ -53,6 +53,13 @@ renderer paths *and* that the bracket still carries no absolute timestamp.
 
 Configuration
 -------------
+An optional spatial companion to the temporal anchor is supplied by the
+Current Scene plugin (``plugins/scene_context/``). Its ``scene_context`` static
+injection renders as ``[Current scene]`` in both the full anchor and the
+current-turn duplicate, using one shared formatter. With no scene injection,
+the existing temporal-only formatting is unchanged. The duplicate can therefore
+span several lines when a scene is present. See :doc:`recon_debrief_hooks`.
+
 - ``INCLUDE_LOCAL_TIME_IN_PROMPTS`` (component: ``prompt_engine``) — boolean, default ``True``. When ``False``, the fields above are not included.
 
 Where the clock's timezone comes from

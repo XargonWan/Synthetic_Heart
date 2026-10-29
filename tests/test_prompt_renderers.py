@@ -822,6 +822,15 @@ def test_anchor_renders_above_the_current_turn_on_every_renderer_path() -> None:
         )
 
 
+def test_multiline_scene_anchor_survives_every_renderer_path() -> None:
+    req = _anchored_request()
+    scene = "[Current scene]\nRelation: You (2B) on top of Human"
+    req.runtime_ctx.reality_anchor += "\n" + scene
+    for label, text in _current_turn_texts(req):
+        assert scene in text, f"{label}: scene missing from the current turn"
+        assert text.index(scene) < text.index("[lang:en"), label
+
+
 def test_anchor_keeps_the_clock_out_of_the_routing_bracket() -> None:
     """The anchor carries the exact time; the bracket must still omit it.
 
