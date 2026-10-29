@@ -1,3 +1,21 @@
+### feat(hass): one entity can be dropped from the house-state block without narrowing the include list  <!-- 2026-10-29 -->
+
+**Symptom.** Every prompt carried `[Home] iPhone Kiosk Screensaver off, raineadmin home`. The kiosk line is noise in every turn: the iPhone screensaver state of a wall-mounted phone is not house state the persona can act on.
+
+**Root cause.** The default include list is `sensor.*_temperature,sensor.*_humidity,light.*,switch.*,person.*,cover.*,climate.*,binary_sensor.*`, and the entity is `binary_sensor.iphone_kiosk_screensaver` — matched by the broad `binary_sensor.*`. There was no way to exclude one entity: narrowing the include list would have dropped every other binary sensor with it, and `HASS_AWARENESS_ENTITIES` had no stored row, so the default was in force.
+
+**Fix.** `HASS_AWARENESS_EXCLUDE` (comma-separated entity ids or wildcard patterns, empty by default, exposed in the WebUI under the Home Assistant component) is applied in `_render_house_state` **after** the include match, so one noisy entity goes while the broad pattern keeps covering the rest. Live value on this deployment: `binary_sensor.iphone_kiosk_screensaver`.
+
+**Measured after.** Rendering the block from the live HA state (68 entities) with the deployment's own config:
+
+```
+BEFORE (no exclusion): iPhone Kiosk Screensaver off, raineadmin home
+AFTER  (live exclusion): raineadmin home
+dropped: ['iPhone Kiosk Screensaver off']
+```
+
+Three new tests in `tests/test_hass_awareness_exclude.py` pin it: an excluded entity leaves the block while the other entities the broad pattern matched stay, an empty exclusion renders it as before, and wildcard patterns work. `ruff format`, `ruff check` and `ty check` clean.
+
 ### fix(debrief): a finished activity stops being asserted as present fact, and STATE notes get a bounded window  <!-- 2026-10-29 -->
 
 **Symptom (live, trace 067dbfac).** The persona closed a reply with "…and you're still thinking about jumbo. Just checking that's normal." The human had said nothing about jumbo in that turn — his last line was "I'm not sure yet, I guess we'll see". The prompt was intact: all four turns were present and in order, including his jumbo line two turns earlier and her own reply about it.
