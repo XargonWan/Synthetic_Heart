@@ -669,6 +669,47 @@ def test_extract_instructions_require_stale_filed_notes_to_be_reported() -> None
     # A summary is read on later days, so relative day words make it a lie.
     assert "ABSOLUTE date" in _EXTRACT_INSTRUCTIONS
     assert "never a bare relative word" in _EXTRACT_INSTRUCTIONS
+    # Live 2026-10-29: a note about a delegated job stayed "running" hours after
+    # the human said the build worked, and the persona raised it out of nowhere.
+    assert "DELEGATED" in _EXTRACT_INSTRUCTIONS
+    assert "finished or worked" in _EXTRACT_INSTRUCTIONS
+
+
+def _install_with_state_cap(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    cap_hours: float,
+    llm_text: str,
+    repository: Any,
+) -> None:
+    """Install the turn harness, then pin the STATE window cap."""
+    _install(monkeypatch, llm_text=llm_text, repository=repository)
+
+    def reader(key: str, default: Any = None, value_type: Any = None, **_: Any) -> Any:
+        values = {
+            "SITUATIONAL_NOTES_DEBRIEF_ENABLED": True,
+            "SITUATIONAL_NOTES_MAX": 8,
+            "SITUATIONAL_NOTES_STATE_MAX_HOURS": cap_hours,
+        }
+        return values.get(key, default)
+
+    monkeypatch.setattr(
+        "plugins.debrief.debrief_situational_notes.config_registry.get_value", reader
+    )
+
+
+def _note_json(note_type: str, hours_to_live: int) -> str:
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    until = (now + timedelta(hours=hours_to_live)).isoformat()
+    start = now.isoformat()
+    return (
+        '{"notes":[{"note_type":"' + note_type + '","subject":"a circumstance",'
+        '"summary":"Something happening for a while","priority":0,'
+        '"confidence":0.7,"valid_from":"' + start + '",'
+        '"valid_until":"' + until + '"}]}'
+    )
 
 
 # --- retiring a note the human denied (live: trip to a made-up place) -------
@@ -697,6 +738,89 @@ async def _run_turn(repo: Any, user_text: str, reply_text: str) -> None:
         context=context,
         original_message=original_message,
     )
+
+
+@pytest.mark.asyncio
+async def test_a_state_note_window_is_capped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A STATE note may not claim to be current for longer than the cap.
+
+    The model writes ``valid_until`` itself and reached 14 hours on live data, so
+    a finished activity kept being injected as present-tense fact.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    repo = _RecordingRepository()
+    _install_with_state_cap(
+        monkeypatch, cap_hours=4, llm_text=_note_json("STATE", 12), repository=repo
+    )
+
+    original_message, context = _turn()
+    await DebriefSituationalNotesPlugin().on_debrief(
+        processed_actions=[],
+        failed_actions=[],
+        results={},
+        context=context,
+        original_message=original_message,
+    )
+
+    assert len(repo.notes) == 1
+    stored = repo.notes[0]
+    now = datetime.now(timezone.utc)
+    assert stored.valid_until <= now + timedelta(hours=4, minutes=1)
+    assert stored.valid_until >= now + timedelta(hours=3, minutes=55)
+
+
+@pytest.mark.asyncio
+async def test_an_event_note_window_is_not_capped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Date-anchored note types keep the window the model resolved for them."""
+    from datetime import datetime, timedelta, timezone
+
+    repo = _RecordingRepository()
+    _install_with_state_cap(
+        monkeypatch, cap_hours=4, llm_text=_note_json("EVENT", 48), repository=repo
+    )
+
+    original_message, context = _turn()
+    await DebriefSituationalNotesPlugin().on_debrief(
+        processed_actions=[],
+        failed_actions=[],
+        results={},
+        context=context,
+        original_message=original_message,
+    )
+
+    assert len(repo.notes) == 1
+    now = datetime.now(timezone.utc)
+    assert repo.notes[0].valid_until >= now + timedelta(hours=47)
+
+
+@pytest.mark.asyncio
+async def test_the_state_window_cap_can_be_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    repo = _RecordingRepository()
+    _install_with_state_cap(
+        monkeypatch, cap_hours=0, llm_text=_note_json("STATE", 12), repository=repo
+    )
+
+    original_message, context = _turn()
+    await DebriefSituationalNotesPlugin().on_debrief(
+        processed_actions=[],
+        failed_actions=[],
+        results={},
+        context=context,
+        original_message=original_message,
+    )
+
+    assert len(repo.notes) == 1
+    now = datetime.now(timezone.utc)
+    assert repo.notes[0].valid_until >= now + timedelta(hours=11)
 
 
 @pytest.mark.asyncio
