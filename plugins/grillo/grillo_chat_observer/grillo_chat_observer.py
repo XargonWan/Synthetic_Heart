@@ -192,6 +192,30 @@ class GrilloChatObserverPlugin:
             )
         )
 
+        # How many replyable lines one chat may contribute. It used to be a hard
+        # 2, which in a shared group means the two newest lines, and the peer
+        # SyntH is by far the most frequent speaker there: the person's own last
+        # line was dropped beat after beat, so the outreach read as if he had
+        # never spoken (live 2026-10-30: 17 peer / 15 own / 3 human in one
+        # evening, and every group snippet was the peer's).
+        self.snippets_per_chat = int(
+            config_registry.get_value(
+                "GRILLO_OBSERVER_SNIPPETS_PER_CHAT",
+                3,
+                label="Grillo Observer Snippets Per Chat",
+                description=(
+                    "How many recent lines one conversation may contribute to the "
+                    "observer prompt. When every line in that budget is a peer "
+                    "SyntH's, the oldest is swapped for the newest human line so "
+                    "the person in a shared group is always represented."
+                ),
+                value_type=int,
+                group="grillo",
+                component="grillo_chat_observer",
+                advanced=True,
+            )
+        )
+
         self.propose_only = config_registry.get_value(
             "GRILLO_OBSERVER_PROPOSE_ONLY",
             True,
@@ -304,6 +328,10 @@ class GrilloChatObserverPlugin:
         )
         config_registry.add_listener(
             "GRILLO_OBSERVER_SAMPLES", lambda v: setattr(self, "samples", int(v))
+        )
+        config_registry.add_listener(
+            "GRILLO_OBSERVER_SNIPPETS_PER_CHAT",
+            lambda v: setattr(self, "snippets_per_chat", int(v)),
         )
         config_registry.add_listener(
             "GRILLO_OBSERVER_PROPOSE_ONLY",
@@ -676,6 +704,84 @@ class GrilloChatObserverPlugin:
         """True when ``sender`` is the synth itself (self/synth/synthetic)."""
         return str(sender or "").strip().lower() in ("self", "synth", "synthetic")
 
+    # How many stored messages one chat may be scanned for its snippet window.
+    # The window is newest-first and tiny, but the scan has to reach past the
+    # peer SyntH's lines to find the human's and the synth's own, so it is
+    # bounded rather than "just two lines".
+    _SNIPPET_SCAN_MESSAGES = 60
+    # Budget multiplier: look through this many times the per-chat budget of
+    # non-self lines before giving up on finding a human line.
+    _SNIPPET_SCAN_FACTOR = 3
+
+    @staticmethod
+    def _peer_sender_tokens() -> frozenset[str]:
+        """Identifiers of configured peer SyntH instances, best-effort.
+
+        Both numeric ids and configured display names are returned, because a
+        stored row may carry only one of them. Empty when peer mode is off, so
+        the fairness rule below is inert outside a peer group.
+        """
+        try:
+            from core.peer_policy import get_peer_ids, get_peer_names
+
+            tokens = {str(pid) for pid in get_peer_ids()}
+            tokens |= {
+                str(name).strip().lower()
+                for name in get_peer_names().values()
+                if str(name or "").strip()
+            }
+            return frozenset(tokens)
+        except Exception:
+            return frozenset()
+
+    @staticmethod
+    def _line_is_peer(line: tuple, peer_tokens: frozenset[str]) -> bool:
+        """True when a stored ``(sender, ts, text, sender_id)`` row is a peer's."""
+        if not peer_tokens:
+            return False
+        sender = str(line[0] if len(line) > 0 else "").strip().lower()
+        sender_id = str(line[3] if len(line) > 3 else "").strip()
+        return bool(
+            (sender_id and sender_id in peer_tokens)
+            or (sender and sender in peer_tokens)
+        )
+
+    @classmethod
+    def _select_chat_snippets(
+        cls,
+        chat_lines: List[tuple[str, Any, str, str]],
+        per_chat: int,
+        peer_tokens: Optional[frozenset[str]] = None,
+    ) -> List[tuple[str, Any, str]]:
+        """Pick one chat's replyable lines, newest first.
+
+        A shared group holds two SyntHs and one person, and the peer SyntH is by
+        far the most frequent speaker there, so "the newest N lines" is almost
+        always peer-only: the person's last line never reached the beat and the
+        outreach then read as if he had never spoken (live 2026-10-30: an
+        evening of 17 peer / 15 own / 3 human group messages produced prompts in
+        which every single group snippet was the peer's). When the budget would
+        be entirely peer lines, the oldest is swapped for the newest human line.
+        """
+        chosen = list(chat_lines[:per_chat])
+        tokens = cls._peer_sender_tokens() if peer_tokens is None else peer_tokens
+        if (
+            chosen
+            and tokens
+            and all(cls._line_is_peer(line, tokens) for line in chosen)
+        ):
+            human = next(
+                (
+                    line
+                    for line in chat_lines[per_chat:]
+                    if not cls._line_is_peer(line, tokens)
+                ),
+                None,
+            )
+            if human is not None:
+                chosen = chosen[: max(0, per_chat - 1)] + [human]
+        return [(sender, timestamp, text) for sender, timestamp, text, _ in chosen]
+
     @staticmethod
     def _is_placeholder_path(interface_path: str) -> bool:
         """True when an interface path contains a placeholder/garbage segment.
@@ -801,6 +907,11 @@ class GrilloChatObserverPlugin:
             from core.chat_history_cache import load_chat_history
             from core.interface_paths import get_recent_interface_paths
 
+            # Configured peer SyntH identifiers, read once for the whole run:
+            # the fairness rule below needs them per chat, and each read is a
+            # config lookup. Empty outside peer mode, which makes the rule inert.
+            peer_tokens = self._peer_sender_tokens()
+
             now = datetime.now(timezone.utc)
             # Same anti-dead-chat gate the target list applies: a conversation
             # nobody has touched within GRILLO_OBSERVER_ACTIVITY_WINDOW_DAYS
@@ -857,26 +968,32 @@ class GrilloChatObserverPlugin:
                     # context to reason about. Synth's own lines are still
                     # filtered out per message below, so self-reply spam stays
                     # impossible while the human's lines stay visible.
-                    # take up to 2 recent messages per chat — HUMAN-authored
-                    # only. Synth's own messages must never be surfaced as
-                    # snippets to "naturally reply to": a small model cannot
-                    # reliably distinguish its own output from a human turn and
-                    # will talk to itself (self-reply spam).
-                    taken = 0
+                    # take up to ``snippets_per_chat`` recent messages per chat
+                    # — HUMAN-authored only. Synth's own messages must never be
+                    # surfaced as snippets to "naturally reply to": a small model
+                    # cannot reliably distinguish its own output from a human
+                    # turn and will talk to itself (self-reply spam).
+                    per_chat = max(1, int(getattr(self, "snippets_per_chat", 3)))
                     own_line: Optional[str] = None
-                    # Other people's renderable lines for this chat, kept until
-                    # the timestamps say whether the chat is answered.
-                    chat_lines: List[tuple[str, Any, str]] = []
+                    # Other people's renderable lines for this chat, newest
+                    # first, carrying the author id so a peer SyntH can be told
+                    # apart from the person in the same shared group.
+                    chat_lines: List[tuple[str, Any, str, str]] = []
                     newest_other_ts: Optional[datetime] = None
                     newest_self_ts: Optional[datetime] = None
                     newest_any_ts: Optional[datetime] = None
+                    scanned = 0
                     for msg in reversed(list(messages)):
                         if not isinstance(msg, dict):
                             continue
+                        scanned += 1
+                        if scanned > self._SNIPPET_SCAN_MESSAGES:
+                            break
                         text = msg.get("text")
                         sender = (
                             msg.get("sender_name") or msg.get("sender_id") or "unknown"
                         )
+                        sender_id = str(msg.get("sender_id") or "")
                         timestamp = msg.get("timestamp") or ""
                         msg_ts = self._parse_ts(timestamp)
                         if msg_ts is not None and (
@@ -909,9 +1026,21 @@ class GrilloChatObserverPlugin:
                                 newest_other_ts is None or msg_ts > newest_other_ts
                             ):
                                 newest_other_ts = msg_ts
-                            chat_lines.append((sender, timestamp, text.strip()))
-                            taken += 1
-                        if taken >= 2 or len(snippets) >= limit:
+                            chat_lines.append(
+                                (sender, timestamp, text.strip(), sender_id)
+                            )
+                        # Do NOT stop the moment the snippet budget is full. In a
+                        # shared group the peer SyntH usually speaks last, so the
+                        # synth's own newest line sits deeper in the scan; ending
+                        # early lost the one line that shows what it already said
+                        # there. The scan is bounded (``_SNIPPET_SCAN_MESSAGES``)
+                        # because the window below is newest-first and small.
+                        if (
+                            len(chat_lines) >= per_chat * self._SNIPPET_SCAN_FACTOR
+                            and own_line is not None
+                        ):
+                            break
+                        if len(snippets) >= limit:
                             break
                     if chat_lines:
                         # Structural decision, from timestamps only: the synth
@@ -929,7 +1058,9 @@ class GrilloChatObserverPlugin:
                         live = (
                             newest_any_ts is not None and newest_any_ts > quiet_cutoff
                         )
-                        for sender, timestamp, raw_text in chat_lines:
+                        for sender, timestamp, raw_text in self._select_chat_snippets(
+                            chat_lines, per_chat, peer_tokens
+                        ):
                             if answered and live and len(own_lines) < limit:
                                 own_lines.append(
                                     self._render_answered_line(

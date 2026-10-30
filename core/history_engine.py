@@ -58,6 +58,26 @@ register_exposed_var(
 )
 
 register_exposed_var(
+    "CONTEXT_TARGET_CHAT_LINES",
+    label="Context Lines For Offered Target Chats",
+    default=3,
+    value_type=int,
+    ui_type="number",
+    description=(
+        "A G.R.I.L.L.O. beat runs in an internal chat and reaches out through an "
+        "offered target list. The cross-chat block is capped globally, so a busy "
+        "direct message could fill every slot and a shared group the beat was "
+        "about vanished from its own prompt. This reserves up to N newest lines "
+        "per offered target (preferring one line from a human over a peer SyntH) "
+        "when they are not already in the block. 0 disables the reservation."
+    ),
+    scope="core",
+    component="history_engine",
+    advanced=True,
+)
+
+
+register_exposed_var(
     "THOUGHTS_LIMIT",
     label="Thoughts Limit (items)",
     default=5,
@@ -631,6 +651,188 @@ def _entry_to_text_with_source(
 def _dedup_key(text: str) -> str:
     normalized = " ".join((text or "").strip().split()).lower()
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+# How many offered targets a beat may reserve lines for. The observer offers a
+# handful at most; the cap keeps a misbehaving caller from filling the prompt.
+_BEAT_OFFERED_TARGETS_MAX = 4
+
+
+def _offered_target_paths(context_memory: Any) -> List[str]:
+    """Return the interface_paths a beat turn is allowed to reach into.
+
+    G.R.I.L.L.O. beats run in an internal ``grillo/-1`` chat and reach out
+    through an explicit target list the observer hands the chain as
+    ``context_memory["grillo_targets"]``. Those paths are the conversations the
+    beat is *about*, yet they compete for the same globally capped cross-chat
+    window as every other chat. Read structurally from routing metadata only,
+    never from message text.
+    """
+    if not isinstance(context_memory, dict):
+        return []
+    sources = [context_memory]
+    prior = context_memory.get("prior_context")
+    if isinstance(prior, dict):
+        sources.append(prior)
+    paths: List[str] = []
+    for source in sources:
+        raw = source.get("grillo_targets")
+        if not isinstance(raw, (list, tuple)):
+            continue
+        for item in raw:
+            path = ""
+            if isinstance(item, dict):
+                path = str(item.get("interface_path") or "").strip()
+            elif isinstance(item, str):
+                path = item.strip()
+            if path and "/" in path and path not in paths:
+                paths.append(path)
+    return paths[:_BEAT_OFFERED_TARGETS_MAX]
+
+
+def _peer_sender_tokens() -> frozenset[str]:
+    """Identifiers of configured peer SyntH instances, best-effort.
+
+    Both the numeric ids and the configured display names are returned so a
+    stored row can be classified whether or not its ``sender_id`` survived.
+    Fails open (empty set) so a config error never changes prompt content.
+    """
+    try:
+        from core.peer_policy import get_peer_ids, get_peer_names
+
+        tokens = {str(pid) for pid in get_peer_ids()}
+        tokens |= {
+            str(name).strip().lower()
+            for name in get_peer_names().values()
+            if str(name or "").strip()
+        }
+        return frozenset(tokens)
+    except Exception:
+        return frozenset()
+
+
+def _entry_is_peer(entry: Any, peer_tokens: frozenset[str]) -> bool:
+    """True when *entry* was authored by one of the configured peer SyntHs."""
+    if not peer_tokens or not isinstance(entry, dict):
+        return False
+    sender_id = str(entry.get("sender_id") or "").strip()
+    sender_name = str(entry.get("sender_name") or "").strip().lower()
+    if sender_id and sender_id in peer_tokens:
+        return True
+    return bool(sender_name) and sender_name in peer_tokens
+
+
+def _entry_is_human(entry: Any, peer_tokens: frozenset[str]) -> bool:
+    """True when *entry* is neither the synth's own line nor a peer SyntH's.
+
+    A shared group holds two SyntHs and one person; the peer speaks far more
+    often, so the person's line is what gets squeezed out of a newest-first
+    window.
+    """
+    if not isinstance(entry, dict):
+        return False
+    sender = str(
+        entry.get("sender_name")
+        or entry.get("username")
+        or entry.get("sender_id")
+        or ""
+    )
+    if not sender.strip():
+        return False
+    if sender.strip().casefold() in _SELF_SPEAKER_LABELS:
+        return False
+    return not _entry_is_peer(entry, peer_tokens)
+
+
+def _reserve_target_chat_lines(
+    other_lines: List[str],
+    candidates: Sequence[Any],
+    *,
+    context_memory: Any,
+    interface_path: Optional[str],
+    rendered_lines: Sequence[str],
+    note_path: Any,
+) -> List[str]:
+    """Guarantee a beat's offered target chats a slice of the cross-chat block.
+
+    ``other_lines`` is capped globally (``CONTEXT_VERBOSITY``) and rebuilt
+    newest-first across *every* chat, so a busy direct message can take all the
+    slots and a shared group the beat is about disappears from its own prompt.
+    Live 2026-10-29 20:15: the peer group's context in an outreach was six lines
+    of the peer SyntH and the synth's own lines, and none from the human, who
+    then read the outreach as if the group conversation had never happened.
+
+    When the turn carries offered targets (``grillo_targets``), reserve up to
+    ``CONTEXT_TARGET_CHAT_LINES`` newest lines per target that the global cap
+    dropped, and make sure a target that holds a human line contributes one (a
+    newest-first slice of a two-Synth group is otherwise peer-only).
+
+    Deduplication is against ``rendered_lines`` — what the prompt actually
+    carries — and not against the candidate pool's seen-set: that set is filled
+    *before* the cap bites, so every dropped line would look already present and
+    the reservation would never fire. A block that already holds the target's
+    newest lines is therefore returned unchanged.
+    """
+    targets = _offered_target_paths(context_memory)
+    if not targets:
+        return other_lines
+    try:
+        limit = int(_get_int("CONTEXT_TARGET_CHAT_LINES", 3))
+    except Exception:
+        limit = 3
+    if limit <= 0:
+        return other_lines
+
+    peer_tokens = _peer_sender_tokens()
+    reserve_newest_first: List[str] = []
+    taken_keys: set[str] = {_dedup_key(line) for line in (rendered_lines or [])}
+
+    for target in targets:
+        rows: List[tuple[str, str, Any]] = []  # (line, dedup key, entry)
+        for entry in reversed(list(candidates or [])):
+            if not isinstance(entry, dict):
+                continue
+            entry_path = str(
+                entry.get("interface_path") or entry.get("source_path") or ""
+            )
+            if entry_path != target:
+                continue
+            if _is_ignored_prompt_history_entry(entry):
+                continue
+            line = _entry_to_text_with_source(
+                entry, current_interface_path=interface_path
+            )
+            key = _dedup_key(line)
+            if not line or key in taken_keys:
+                continue
+            taken_keys.add(key)
+            rows.append((line, key, entry))
+            if len(rows) >= limit * 3:
+                break
+
+        chosen = rows[:limit]
+        if chosen and not any(
+            _entry_is_human(entry, peer_tokens) for _, _, entry in chosen
+        ):
+            newest_human = next(
+                (row for row in rows[limit:] if _entry_is_human(row[2], peer_tokens)),
+                None,
+            )
+            if newest_human is not None:
+                chosen = chosen[: max(0, limit - 1)] + [newest_human]
+
+        for line, _key, entry in reversed(chosen):
+            reserve_newest_first.append(line)
+            note_path(entry)
+
+    if not reserve_newest_first:
+        return other_lines
+    log_debug(
+        "[history_engine] Reserved "
+        f"{len(reserve_newest_first)} line(s) for offered beat target(s) "
+        f"{targets}"
+    )
+    return list(other_lines) + reserve_newest_first
 
 
 # Matches a run of digits (optionally with a decimal part). Used only to derive
@@ -1398,6 +1600,28 @@ class HistoryEngine:
                     # The cross-chat block keeps its own message count: the
                     # exchange window is about the chat being answered.
                     other_lines = other_lines[-verbosity:]
+
+                # A beat turn (the observer and the other G.R.I.L.L.O. beats)
+                # runs in an internal grillo/-1 chat and reaches out through an
+                # explicit target list. Those targets are what the beat is
+                # about, but they share this one globally capped window, so a
+                # busy DM could take every slot and a shared group vanished from
+                # its own prompt. Reserve a small slice per offered target; a
+                # block that already carries them is left untouched.
+                try:
+                    other_lines = _reserve_target_chat_lines(
+                        other_lines,
+                        unified_candidates,
+                        context_memory=context_memory,
+                        interface_path=interface_path,
+                        rendered_lines=list(local_lines) + list(other_lines),
+                        note_path=_note_path,
+                    )
+                except Exception as _target_exc:
+                    log_debug(
+                        "[history_engine] offered-target reservation skipped: "
+                        f"{_target_exc}"
+                    )
 
                 log_debug(
                     f"[history_engine] Messaggi globali passati al prompt: {len(local_lines) + len(other_lines)} (locali: {len(local_lines)}, altri: {len(other_lines)})"
