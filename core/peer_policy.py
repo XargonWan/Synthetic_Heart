@@ -165,10 +165,22 @@ def get_peer_names() -> dict[int, str]:
     return result
 
 
-def get_peer_context_block() -> str | None:
+def get_peer_context_block(form: str = "chat") -> str | None:
     """Build the prompt instruction block describing known peers.
 
     Returns ``None`` when peer mode is disabled or no peer IDs are configured.
+
+    ``form`` picks the channel paragraph, because the two turns where peers can
+    appear do not look alike:
+
+    - ``"chat"`` (default): the turn is a message arriving in a shared group, so
+      a peer's turn carries a ``[PeerName]: `` prefix at the start of the text
+      (see ``core/prompt_engine.py::_history_to_turns``).
+    - ``"outreach"``: the turn is a proactive beat (the chat observer and the
+      other G.R.I.L.L.O. beats) deciding whether to reach *into* a shared
+      group. Those lines are rendered in the cross-chat context block labelled
+      with the peer's own name (``2B: …``) and never carry the prefix, so the
+      block has to say so or the model reads the peer as the trainer.
     """
     if not is_peer_mode_enabled():
         return None
@@ -197,19 +209,66 @@ def get_peer_context_block() -> str | None:
     else:
         policy_note = f"Policy: {policy}"
 
+    if str(form or "chat").strip().lower() == "outreach":
+        channel_note = (
+            "On this turn you are not answering a line in that shared space: you are "
+            "deciding whether to reach into it. There is no separate channel for them "
+            "— their own lines are already in your context, rendered with their own "
+            "name at the start of the line (e.g. `2B: …`), without any `[PeerName]: ` "
+            "prefix. A line labelled with a peer's name is that peer speaking, never "
+            "your trainer, and your trainer's lines carry his own name; the same "
+            "conversation holds all of you."
+        )
+    else:
+        channel_note = (
+            "There is no separate channel for them: a peer's turn arrives in the same "
+            "message flow as your trainer's and is marked with a `[PeerName]: ` prefix "
+            "at the very start of the message (e.g. `[SynthA]: ...`). That prefix always "
+            "means the named peer said it — never your trainer — even though it shares "
+            "the same message channel. A message with no such prefix is your trainer "
+            "speaking directly."
+        )
+
     return (
         "=== PEER SYNTHS ===\n"
         "You are sharing this space with other SyntH instances. They are autonomous "
         "digital beings like you — not users, not bots, not assistants.\n\n"
         f"Known peers:\n{name_list}\n\n"
-        "There is no separate channel for them: a peer's turn arrives in the same "
-        "message flow as your trainer's and is marked with a `[PeerName]: ` prefix "
-        "at the very start of the message (e.g. `[SynthA]: ...`). That prefix always "
-        "means the named peer said it — never your trainer — even though it shares "
-        "the same message channel. A message with no such prefix is your trainer "
-        "speaking directly.\n\n"
+        f"{channel_note}\n\n"
         f"{policy_note}"
     )
+
+
+def is_peer_group_path(interface_path: str) -> bool:
+    """True when *interface_path* names a Telegram group/supergroup chat.
+
+    Group and supergroup chat ids are negative, which is the same structural
+    convention ``interface/message_send_utils.py::telegram_parse_mode_for``
+    uses; private chats have a positive id. No message text is inspected.
+    """
+    parts = str(interface_path or "").strip().split("/")
+    if len(parts) < 2 or parts[0] != "telegram_bot":
+        return False
+    return parts[1].lstrip().startswith("-")
+
+
+def offers_peer_group(interface_paths: Any) -> bool:
+    """True when peer mode is on and one of *interface_paths* is a peer group.
+
+    Used by the prompt engine to decide whether a proactive beat is reaching
+    into a shared space: those turns run in an internal ``grillo/-1`` chat, so
+    they can never be recognised by the incoming message's own chat type.
+    Fails closed (False) on any error.
+    """
+    try:
+        if not is_peer_mode_enabled() or not get_peer_ids():
+            return False
+        if isinstance(interface_paths, str):
+            interface_paths = [interface_paths]
+        return any(is_peer_group_path(path) for path in (interface_paths or []))
+    except Exception as e:
+        log_debug(f"[peer_policy] offers_peer_group failed (failing closed): {e}")
+        return False
 
 
 def get_peer_policy() -> str:
