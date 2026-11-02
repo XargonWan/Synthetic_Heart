@@ -307,6 +307,9 @@ class RetroXRConnector(VesselConnectorBase):
             if vox is None or not hasattr(vox, "speak"):
                 log_debug(f"{LOG_PREFIX} no Vox plugin: the line stays text")
                 return
+            from core.facial_expression_parser import parse_facial_expressions
+
+            clean, em_events = parse_facial_expressions(text)
             result = await vox.speak(
                 text, interface_path=None, generate_only=True, allow_fallback=False
             )
@@ -319,8 +322,13 @@ class RetroXRConnector(VesselConnectorBase):
                 audio_path=str(result["audio_path"]),
                 lipsync_data=result.get("lipsync_data"),
                 audio_duration_s=result.get("audio_duration_s"),
-                text=text,
+                text=clean or text,
             )
+            # Her face follows the [em_*] tags in what she said, as it does on the WebUI.
+            if em_events and hasattr(vox, "_schedule_expression_timeline"):
+                vox._schedule_expression_timeline(
+                    em_events, clean, None, result.get("audio_duration_s")
+                )
         except Exception as exc:
             log_warning(f"{LOG_PREFIX} speaking failed: {exc}")
 
@@ -442,6 +450,13 @@ class RetroXRConnector(VesselConnectorBase):
             spoken = str(payload.get("text") or "").strip()
             if spoken:
                 self._speak_in_background(spoken)
+                # The caption is what is said: no [em_*] tags in a speech bubble or the chat page.
+                try:
+                    from core.facial_expression_parser import parse_facial_expressions
+
+                    payload["text"] = parse_facial_expressions(spoken)[0] or spoken
+                except Exception:  # pragma: no cover - defensive
+                    pass
 
         action_id = next(self._ids)
         loop = asyncio.get_running_loop()

@@ -122,7 +122,11 @@ async def test_every_kind_of_karada_payload_reaches_the_mod() -> None:
 class FakeVox:
     def __init__(self, ok: bool = True) -> None:
         self.calls: list[dict[str, Any]] = []
+        self.timelines: list[tuple[Any, ...]] = []
         self.ok = ok
+
+    def _schedule_expression_timeline(self, events: Any, clean: str, path: Any, duration: Any) -> None:
+        self.timelines.append((len(events), clean, path, duration))
 
     async def speak(self, text: str, **kw: Any) -> dict[str, Any]:
         self.calls.append({"text": text, **kw})
@@ -159,6 +163,19 @@ async def test_say_is_always_spoken(monkeypatch: pytest.MonkeyPatch, karada: Fak
                           "allow_fallback": False}], "Vox synthesises only: Karada does the fan-out"
     assert karada.audio == [{"audio_path": "/tmp/vox_1.wav", "lipsync_data": {"v": [1]},
                              "audio_duration_s": 1.5, "text": "Ciao, sono qui."}]
+
+
+async def test_expression_tags_are_not_shown_and_move_her_face(monkeypatch: pytest.MonkeyPatch, karada: FakeKarada) -> None:
+    from core import core_initializer
+
+    vox = FakeVox()
+    monkeypatch.setitem(core_initializer.PLUGIN_REGISTRY, "vox_plugin", vox)
+    conn, ws = await _connected()
+    await _say(conn, ws, "[em_smile:0.6]Che bella stanza!")
+    action = next(f for f in ws.sent if f.get("type") == "action")
+    assert action["payload"]["text"] == "Che bella stanza!", "the caption has no tags in it"
+    assert karada.audio[0]["text"] == "Che bella stanza!"
+    assert vox.timelines == [(1, "Che bella stanza!", None, 1.5)], "her face follows the tag, over the clip's length"
 
 
 async def test_no_voice_engine_leaves_the_line_as_text(monkeypatch: pytest.MonkeyPatch, karada: FakeKarada) -> None:
