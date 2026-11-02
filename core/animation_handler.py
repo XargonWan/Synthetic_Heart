@@ -187,6 +187,11 @@ class KaradaStateServer:
         # periodic state refresh so every viewer of the shared avatar converges
         # on the same expression. ``None`` means no expression override active.
         self._current_expression: Optional[Dict[str, Any]] = None
+        # Presence: ``"summon"`` while a world is introducing her into itself (a Rift Vessel
+        # connecting), ``None`` otherwise. It is not an animation: the WebUI avatar goes on
+        # doing what it does. An embodied client (RetroXR) holds back her think/write poses
+        # while she is arriving. Any vessel may use it.
+        self._presence: Optional[str] = None
 
         # Priority registration: maps state names to their priority values.
         # Starts from ANIMATION_STATE_PRIORITIES and can be extended at runtime.
@@ -340,6 +345,28 @@ class KaradaStateServer:
             except Exception as exc:  # pragma: no cover - best effort
                 log_warning(
                     f"[KaradaStateServer] failed to broadcast face_values via {type(transport).__name__}: {exc}"
+                )
+
+    PRESENCE_SUMMON = "summon"
+
+    def get_presence(self) -> Optional[str]:
+        """``"summon"`` while she is being introduced into a world, else ``None``."""
+        return self._presence
+
+    async def set_presence(self, name: Optional[str], source: str = "") -> None:
+        """Set (or clear, with ``None``) her presence and tell every transport."""
+        name = str(name).strip() or None if name is not None else None
+        if name == self._presence:
+            return
+        self._presence = name
+        log_info(f"[KaradaStateServer] presence -> {name or 'idle'} ({source or 'unknown'})")
+        payload = {"type": "vrm_presence", "state": name or "idle"}
+        for transport in list(self._transports):
+            try:
+                await transport.broadcast_presence(payload)
+            except Exception as exc:  # pragma: no cover - best effort
+                log_warning(
+                    f"[KaradaStateServer] failed to broadcast presence via {type(transport).__name__}: {exc}"
                 )
 
     async def clear_face_values(self) -> None:
@@ -934,6 +961,8 @@ class KaradaStateServer:
         # client renders the same face as everyone else.
         if self._current_expression:
             state["expression"] = dict(self._current_expression)
+        if self._presence:
+            state["presence"] = self._presence
         return state
 
     async def set_vrm_model(

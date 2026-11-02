@@ -36,6 +36,8 @@ class FakeKarada:
         self.transports: list[Any] = []
         self.audio: list[dict[str, Any]] = []
         self._state = state
+        self.presence: str | None = None
+        self.presence_log: list[str | None] = []
 
     def add_transport(self, t: Any) -> None:
         if t not in self.transports:
@@ -50,6 +52,15 @@ class FakeKarada:
 
     async def broadcast_audio(self, **kw: Any) -> None:
         self.audio.append(kw)
+
+    def get_presence(self) -> str | None:
+        return self.presence
+
+    async def set_presence(self, name: str | None, source: str = "") -> None:
+        self.presence = name
+        self.presence_log.append(name)
+        for t in list(self.transports):
+            await t.broadcast_presence({"type": "vrm_presence", "state": name or "idle"})
 
 
 @pytest.fixture
@@ -114,6 +125,66 @@ async def test_every_kind_of_karada_payload_reaches_the_mod() -> None:
     sent.clear()
     await t.broadcast_animation({"state": "idle"})
     assert sent == [] and t.get_connected_sessions() == [], "nothing is sent to a closed rift"
+
+
+# -- presence: "summon" while she is being introduced -----------------------
+
+
+async def test_she_is_summoning_from_the_rift_opening_until_she_steps_out(karada: FakeKarada) -> None:
+    conn, ws = await _connected()
+    assert karada.presence == "summon", "the vessel says she is being introduced as soon as it connects"
+    await conn.announce_state()
+    assert {"type": "karada", "kind": "presence",
+            "payload": {"type": "vrm_presence", "state": "summon"}} in ws.sent, "the mod is told once it listens"
+    ws.sent.clear()
+    await conn.handle_frame({"type": "event", "event_type": "summoned", "summary": "out", "salience": 1.0})
+    assert karada.presence is None, "the mod's `summoned` event ends it"
+    assert ws.sent[-1]["payload"] == {"type": "vrm_presence", "state": "idle"}, "and the mod hears it"
+
+
+async def test_a_rift_closed_mid_arrival_does_not_leave_her_summoning(karada: FakeKarada) -> None:
+    conn, _ = await _connected()
+    assert karada.presence == "summon"
+    await conn.disconnect()
+    await asyncio.sleep(0)
+    assert karada.presence is None
+
+
+async def test_karada_presence_reaches_transports_and_a_late_client() -> None:
+    from core.animation_handler import KaradaStateServer
+    from core.karada_transport import KaradaTransport
+
+    class Spy(RiftKaradaTransport):
+        pass
+
+    got: list[dict[str, Any]] = []
+
+    async def send(frame: dict[str, Any]) -> bool:
+        got.append(frame)
+        return True
+
+    server = KaradaStateServer()
+    server.add_transport(RiftKaradaTransport(send, lambda: True))
+    await server.set_presence("summon", "test")
+    await server.set_presence("summon", "test")
+    assert server.get_presence() == "summon"
+    assert [f["payload"]["state"] for f in got] == ["summon"], "the same presence is not told twice"
+    assert (await server.get_full_state())["presence"] == "summon", "a client that joins late is told too"
+    await server.set_presence(None, "test")
+    assert got[-1]["payload"]["state"] == "idle" and "presence" not in (await server.get_full_state())
+
+    class Plain(KaradaTransport):  # a transport that knows nothing of presence (the WebUI's) must not break
+        async def broadcast_animation(self, payload): ...
+        async def broadcast_audio(self, payload): ...
+        async def broadcast_face(self, payload): ...
+        async def broadcast_model(self, payload): ...
+        async def broadcast_expression(self, payload): ...
+        async def send_to_session(self, session_id, payload): ...
+        async def preload_asset(self, session_id, payload): ...
+        def get_connected_sessions(self): return []
+
+    server.add_transport(Plain())
+    await server.set_presence("summon", "test")
 
 
 # -- voice: in RetroXR she speaks as well as writes --------------------------

@@ -150,7 +150,10 @@ class RetroXRConnector(VesselConnectorBase):
         self._pending: Dict[int, asyncio.Future] = {}
         self._ids = itertools.count(1)
         self._send_lock = asyncio.Lock()
-        self._karada = RiftKaradaTransport(self.send_frame, lambda: self.is_connected)
+        # Karada only speaks to the mod once it has been welcomed (announce_state): the mod does not
+        # listen before that, and a frame ahead of the welcome is one the handshake does not expect.
+        self._welcomed = False
+        self._karada = RiftKaradaTransport(self.send_frame, lambda: self.is_connected and self._welcomed)
         self._karada_registered = False
         self._speech_tasks: set[asyncio.Task] = set()
         self._emotes: list[str] = []
@@ -170,6 +173,7 @@ class RetroXRConnector(VesselConnectorBase):
     def detach_socket(self) -> None:
         """Forget the socket and fail every action still waiting for an answer."""
         self._unregister_karada()
+        self._welcomed = False
         self._ws = None
         self._connected = False
         for fut in list(self._pending.values()):
@@ -256,8 +260,13 @@ class RetroXRConnector(VesselConnectorBase):
         try:
             from core.animation_handler import get_karada_state_server
 
-            get_karada_state_server().add_transport(self._karada)
+            karada = get_karada_state_server()
+            karada.add_transport(self._karada)
             self._karada_registered = True
+            # She is being introduced into the room: Karada's presence says so until the mod
+            # reports that she has stepped out (the `summoned` event) or the rift closes.
+            if hasattr(karada, "set_presence"):
+                await karada.set_presence("summon", "retroxr")
             log_info(f"{LOG_PREFIX} registered as a Karada transport")
         except Exception as exc:
             log_warning(f"{LOG_PREFIX} could not register with Karada: {exc}")
@@ -268,14 +277,19 @@ class RetroXRConnector(VesselConnectorBase):
         Called by the rift's socket handler AFTER the welcome: the mod only listens for Karada
         once it has been welcomed.
         """
+        self._welcomed = True
         try:
             from core.animation_handler import get_karada_state_server
 
-            current = get_karada_state_server().get_current_animation_state()
+            karada = get_karada_state_server()
+            current = karada.get_current_animation_state()
             if isinstance(current, dict) and current.get("state"):
                 await self._karada.broadcast_animation(
                     {"type": "vrm_animation_v2", "state": current.get("state")}
                 )
+            presence = karada.get_presence() if hasattr(karada, "get_presence") else None
+            if presence:
+                await self._karada.broadcast_presence({"type": "vrm_presence", "state": presence})
         except Exception as exc:
             log_debug(f"{LOG_PREFIX} announce_state: {exc}")
 
@@ -286,9 +300,30 @@ class RetroXRConnector(VesselConnectorBase):
         try:
             from core.animation_handler import get_karada_state_server
 
-            get_karada_state_server().remove_transport(self._karada)
+            karada = get_karada_state_server()
+            karada.remove_transport(self._karada)
+            self._release_summon_nowait(karada)
         except Exception as exc:  # pragma: no cover - defensive
             log_debug(f"{LOG_PREFIX} karada unregister: {exc}")
+
+    async def _release_summon(self) -> None:
+        """She has arrived (or the rift closed): she is no longer being introduced."""
+        try:
+            from core.animation_handler import get_karada_state_server
+
+            karada = get_karada_state_server()
+            if hasattr(karada, "get_presence") and karada.get_presence() == "summon":
+                await karada.set_presence(None, "retroxr")
+        except Exception as exc:
+            log_debug(f"{LOG_PREFIX} release summon: {exc}")
+
+    def _release_summon_nowait(self, karada: Any) -> None:
+        if not hasattr(karada, "get_presence") or karada.get_presence() != "summon":
+            return
+        try:
+            asyncio.get_running_loop().create_task(karada.set_presence(None, "retroxr"))
+        except RuntimeError:  # no loop: nothing can be listening either
+            pass
 
     # ------------------------------------------------------------------
     # Voice: in RetroXR she speaks as well as writes
@@ -409,6 +444,8 @@ class RetroXRConnector(VesselConnectorBase):
         log_debug(f"{LOG_PREFIX} ignored frame type {kind!r}")
 
     async def _dispatch_event(self, raw: Dict[str, Any]) -> None:
+        if str(raw.get("event_type") or "") == "summoned":
+            await self._release_summon()
         if self._on_event is None:
             return
         try:

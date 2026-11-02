@@ -61,6 +61,9 @@ class RiftKaradaTransport(KaradaTransport):
     async def broadcast_expression(self, payload: Dict[str, Any]) -> None:
         await self._forward("expression", payload)
 
+    async def broadcast_presence(self, payload: Dict[str, Any]) -> None:
+        await self._forward("presence", payload)
+
     async def send_to_session(self, session_id: str, payload: Dict[str, Any]) -> None:
         await self._forward("direct", payload)
 
