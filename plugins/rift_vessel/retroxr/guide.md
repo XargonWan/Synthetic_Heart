@@ -47,7 +47,7 @@ player is; `data.seen` carries the same list. `summoned` is NOT ambient telemetr
 
 ## Her body follows Karada, and she speaks
 
-While a rift is open it is registered as a **Karada transport** (`karada_bridge.py`). Everything Karada
+While a rift is open it is registered as a **Karada transport** (`plugins/rift_vessel/karada_bridge.py`, shared by every rift). Everything Karada
 says reaches the mod as `{"type": "karada", "kind": ..., "payload": ...}` with Karada's own payload:
 
 | kind | payload | what the mod does |

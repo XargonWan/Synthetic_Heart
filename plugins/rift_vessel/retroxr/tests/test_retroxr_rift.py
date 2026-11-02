@@ -17,7 +17,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from core import embodiment_assets
-from core.vessel_retroxr_api import PROTOCOL_VERSION, create_retroxr_router
+from plugins.rift_vessel.retroxr.api import PROTOCOL_VERSION, create_retroxr_router
 from plugins.rift_vessel.retroxr.retroxr import (
     CORE_VERBS,
     WORLD_VERBS,
@@ -258,7 +258,8 @@ class FakeVesselPlugin:
 
 @pytest.fixture
 def rift(monkeypatch: pytest.MonkeyPatch):
-    from core import core_initializer, vessel_retroxr_api
+    from core import core_initializer
+    from plugins.rift_vessel.retroxr import api as vessel_retroxr_api
     from core.vessel_registry import VESSEL_REGISTRY
 
     VESSEL_REGISTRY.unload_connector("retroxr")
@@ -334,3 +335,41 @@ def test_summoned_is_a_real_event_not_ambient_telemetry() -> None:
 
     assert is_ephemeral_event("summoned") is False
     assert is_ephemeral_event("proximity") is True  # the control: ambient stays ambient
+
+
+# -- the plugin brings its own socket; the core only offers a place to mount it ---------------------------
+
+
+async def test_the_vessel_plugin_mounts_the_rift_socket_through_the_webui(monkeypatch: pytest.MonkeyPatch) -> None:
+    import core.webui as webui
+    from plugins.rift_vessel.vessel_plugin import VesselPlugin
+
+    mounted: list[tuple[Any, str]] = []
+
+    class FakeWebUI:
+        def register_plugin_router(self, router: Any, name: str = "") -> None:
+            mounted.append((router, name))
+
+    monkeypatch.setattr(webui, "synth_webui_interface", FakeWebUI())
+    await VesselPlugin._mount_world_routes(None)  # type: ignore[arg-type]
+    assert len(mounted) == 1
+    paths = [getattr(r, "path", "") for r in mounted[0][0].routes]
+    assert "/api/vessel/retroxr/ws" in paths, "the route the mod connects to is the one that was mounted"
+
+
+def test_the_webui_mounts_a_plugin_router_without_knowing_the_plugin(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from core.webui import SynthWebUIInterface
+    from plugins.rift_vessel.retroxr import api as rift_api
+
+    monkeypatch.setattr(rift_api.webui_auth, "configured_token", lambda: None)
+
+    class Host:
+        app = FastAPI()
+
+    SynthWebUIInterface.register_plugin_router(Host(), create_retroxr_router(), "test")  # type: ignore[arg-type]
+    with TestClient(Host.app).websocket_connect("/api/vessel/retroxr/ws") as ws:
+        ws.send_json({"type": "not-a-hello"})
+        assert ws.receive_json()["code"] == "bad_hello", "the mounted socket answers like the rift's own"

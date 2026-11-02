@@ -1004,6 +1004,37 @@ class VesselPlugin(AIPluginBase):
         log_info("[vessel_plugin] Initialized.")
 
     # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    async def start(self) -> None:
+        """Mount the endpoints the world connectors own (the RetroXR rift socket)."""
+        self._mount_task = asyncio.get_running_loop().create_task(self._mount_world_routes())
+
+    async def _mount_world_routes(self) -> None:
+        """A world game connects TO Synth, so its socket must be there before any rift is open. The WebUI may
+        not be up yet when this plugin starts: wait for it, quietly, and give up after a minute."""
+        try:
+            from plugins.rift_vessel.retroxr.api import create_retroxr_router
+        except Exception as exc:  # the sub-plugin was removed: nothing to mount
+            log_debug(f"[vessel_plugin] no RetroXR rift socket: {exc}")
+            return
+        for _ in range(30):
+            try:
+                from core.webui import synth_webui_interface
+
+                if synth_webui_interface is not None:
+                    synth_webui_interface.register_plugin_router(
+                        create_retroxr_router(), "RetroXR rift socket /api/vessel/retroxr/ws"
+                    )
+                    return
+            except Exception as exc:
+                log_warning(f"[vessel_plugin] RetroXR rift socket failed to mount (non-fatal): {exc}")
+                return
+            await asyncio.sleep(2.0)
+        log_warning("[vessel_plugin] the WebUI never came up: the RetroXR rift socket is not mounted")
+
+    # ------------------------------------------------------------------
     # Connector discovery
     # ------------------------------------------------------------------
 

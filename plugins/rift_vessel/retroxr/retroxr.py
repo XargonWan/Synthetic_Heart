@@ -37,7 +37,7 @@ from core.core_initializer import register_plugin
 from core.logging_utils import log_debug, log_info, log_warning
 from core.plugin_base import PluginBase
 from core.vessel_registry import register_vessel_connector
-from plugins.rift_vessel.retroxr.karada_bridge import RiftKaradaTransport
+from plugins.rift_vessel.karada_bridge import RiftKaradaTransport
 from plugins.rift_vessel.vessel_base import (
     PerceptionCallback,
     PerceptionEvent,
@@ -160,7 +160,7 @@ class RetroXRConnector(VesselConnectorBase):
         self.last_error = None
 
     # ------------------------------------------------------------------
-    # Socket ownership (driven by the route in core/vessel_retroxr_api.py)
+    # Socket ownership (driven by the route in plugins/rift_vessel/retroxr/api.py)
     # ------------------------------------------------------------------
 
     def attach_socket(self, ws: Any, hello: Dict[str, Any]) -> None:

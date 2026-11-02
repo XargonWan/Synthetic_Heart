@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from core import vessel_beat
-from plugins.rift_vessel.retroxr.karada_bridge import RiftKaradaTransport
+from plugins.rift_vessel.karada_bridge import RiftKaradaTransport
 from plugins.rift_vessel.retroxr.retroxr import RetroXRConnector
 from plugins.rift_vessel.vessel_base import VesselActionResult
 

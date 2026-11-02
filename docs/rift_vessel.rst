@@ -484,7 +484,7 @@ RetroXR
 Minecraft's direction: there is no bridge to start. The RetroXR mod
 ``xenu.synth_rift`` opens a WebSocket to ``/api/vessel/retroxr/ws`` (same token
 gate as the WebUI) when the player switches on the *Synthetic Heart Rift
-Summoner*, and that socket is the embodiment. ``core/vessel_retroxr_api.py``
+Summoner*, and that socket is the embodiment. ``plugins/rift_vessel/retroxr/api.py``
 does the handshake and calls ``VesselPlugin.connect_world("retroxr")``, so the
 session, recap and autonomy beats are the ones every world uses; leaving the
 socket calls ``disconnect_world``. The wire protocol is in

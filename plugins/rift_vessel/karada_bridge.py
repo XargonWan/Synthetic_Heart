@@ -1,14 +1,17 @@
-"""Karada -> RetroXR: her animation states, her voice and her face, over the rift socket.
+"""Karada -> a rift world: her animation states, her voice and her face, over the world's own socket.
+
+Shared by every Rift Vessel world that draws her body itself (RetroXR today); a world gives it two
+functions, ``send(frame)`` and ``is_open()``, and registers it with Karada while its rift is open.
 
 Synth's Karada state server is the single source of truth for "what the avatar is doing":
 it tells every registered *transport* when she starts thinking, writing or talking, when a
 clip of her voice plays (with lip-sync), and what her face looks like. The WebUI is one
-transport, the Karada API socket another. The rift is a third: while a RetroXR rift is open
+transport, the Karada API socket another. The rift is a third: while a rift is open
 this transport is registered, and everything Karada says goes to the mod as a ``karada``
 frame, so the body in the room does what the avatar does instead of standing in idle.
 
     Synth -> mod   {"type": "karada", "kind": "animation"|"audio"|"face"|"model"|"expression"
-                    |"direct", "payload": {...Karada's own payload...}}
+                    |"presence"|"direct", "payload": {...Karada's own payload...}}
 
 The payloads are Karada's, unchanged (``vrm_animation_v2`` carries ``state``/``descriptor``/
 ``started_at``; ``tts-play`` carries the audio ``url``, ``lipsync``, ``audio_duration_s`` and
