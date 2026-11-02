@@ -197,6 +197,12 @@ async def test_animation_lookup_order(tmp_path: Path) -> None:
     assert embodiment_assets.resolve_animation("moonwalk", "Mine", tmp_path) is None
 
 
+async def test_the_skins_folder_is_the_repositorys(tmp_path: Path) -> None:
+    # It was `parent.parent` of core/ once, and moving the module under plugins/ silently pointed it at plugins/skins.
+    assert embodiment_assets.SKINS_ROOT.name == "skins"
+    assert (embodiment_assets.SKINS_ROOT.parent / "plugins" / "rift_vessel").is_dir(), "its parent is the repository root"
+
+
 async def test_a_loose_clip_with_the_word_in_its_name_is_found_last(tmp_path: Path) -> None:
     # Rei's skin ships "Texting And Walking.fbx" at the top of animations/, with no folder of its own.
     base = tmp_path / "Rei" / "animations"

@@ -32,7 +32,8 @@ from typing import Any, Dict, List, Optional
 
 from core.logging_utils import log_debug, log_warning
 
-SKINS_ROOT = Path(__file__).resolve().parent.parent / "skins"
+# plugins/rift_vessel/embodiment_assets.py -> the repository root holds skins/
+SKINS_ROOT = Path(__file__).resolve().parents[2] / "skins"
 FALLBACK_SKIN = "Rei"
 VESSEL_NAMESPACE = "vessel"
 _ANIM_SUFFIXES = {".fbx"}
