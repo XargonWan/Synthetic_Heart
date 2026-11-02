@@ -77,7 +77,7 @@ async def test_action_round_trip() -> None:
 
 
 async def test_results_are_matched_by_id_not_order() -> None:
-    conn, ws, _ = await _connected()
+    conn, ws, _ = await _connected({"room": "den", "verbs": ["look_at", "touch"]})
     t1 = asyncio.create_task(conn.act("look_at", {"target": "tv"}))
     t2 = asyncio.create_task(conn.act("touch", {"target": "lamp"}))
     await asyncio.sleep(0.01)
@@ -98,7 +98,7 @@ async def test_body_never_plays_unknown_verbs_are_refused() -> None:
 
 
 async def test_every_declared_verb_is_a_known_one() -> None:
-    conn, ws, _ = await _connected()
+    conn, ws, _ = await _connected({"room": "den", "verbs": sorted(CORE_VERBS | set(WORLD_VERBS))})
     assert "attack" not in CORE_VERBS
     for verb in list(CORE_VERBS | set(WORLD_VERBS)):
         task = asyncio.create_task(conn.act(verb, {"target": "x"}))
@@ -157,7 +157,7 @@ async def test_state_frame_feeds_world_state() -> None:
     assert st.position == {"x": 1, "y": 0, "z": 2}
     assert st.flags["holding"] == "cart"
     assert st.extra["entities"] == [{"name": "tv"}] and st.extra["room"] == "den"
-    assert "pick_up" in st.possible_actions and "attack" not in st.possible_actions
+    assert "say" in st.possible_actions and "attack" not in st.possible_actions
 
 
 async def test_world_identity_is_the_room() -> None:

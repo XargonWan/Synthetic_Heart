@@ -296,6 +296,13 @@ class VesselConnectorBase(ABC):
     # wants to do. The world never scripts her; it only describes.
     uses_idle_beat: bool = False
 
+    # Which of the Vessel's world-agnostic core verbs (say, move, look, use, attack, follow,
+    # unfollow, respawn, status, observe) this world can really carry out. ``None`` means all of
+    # them (the Minecraft default). A world that implements only some must say which: Synth is
+    # shown nothing else, because an action she is offered and cannot do is an action she
+    # wastes a turn on (a RetroXR body offered ``attack`` and ``observe`` answered neither).
+    core_verbs: "frozenset[str] | None" = None
+
     def describe_surroundings(self) -> str | None:
         """Describe what is around the body, for the idle beat (optional).
 

@@ -63,8 +63,8 @@ CORE_VERBS = frozenset({"say", "move", "look", "use", "follow", "unfollow", "sta
 WORLD_VERBS: Dict[str, Dict[str, Any]] = {
     "look_at": {
         "description": (
-            "Turn your head and eyes toward something in the room: a screen, an "
-            "object, or the player. Give the object's id from your surroundings."
+            "Turn toward something in the room: an object, a machine, or the player. Give "
+            "its name as it appears in what is around you (or \"player\")."
         ),
         "required_fields": ["target"],
         "optional_fields": [],
@@ -117,14 +117,19 @@ WORLD_VERBS: Dict[str, Dict[str, Any]] = {
     },
     "inspect": {
         "description": (
-            "Look closely at an object or a screen and describe what you see. "
-            "For a screen this means what is on it right now."
+            "Turn to an object or machine near you and look at it closely: you are told what it "
+            "is, whether it is switched on, how far it is and where. Give its name as it appears "
+            "in what is around you. Walk closer first with move (target = its name) to be near it."
         ),
         "required_fields": ["target"],
         "optional_fields": [],
         "security_level": "low",
     },
 }
+
+
+#: What a mod that says nothing about it (an old one) is taken to do.
+DEFAULT_DECLARED = frozenset({"say", "move", "look", "status", "emote"})
 
 
 class RetroXRConnector(VesselConnectorBase):
@@ -175,6 +180,18 @@ class RetroXRConnector(VesselConnectorBase):
     @property
     def is_connected(self) -> bool:
         return bool(self._connected and self._ws is not None)
+
+    def declared_verbs(self) -> frozenset[str]:
+        """The verbs the mod said it can carry out (``hello.verbs``), within what this connector knows."""
+        raw = self._hello.get("verbs")
+        if isinstance(raw, list):
+            return frozenset(str(v) for v in raw) & (CORE_VERBS | frozenset(WORLD_VERBS))
+        return DEFAULT_DECLARED
+
+    @property
+    def core_verbs(self) -> frozenset[str]:  # type: ignore[override]
+        """Core verbs Synth is shown: only those the mod can do. Nothing she cannot do is offered."""
+        return CORE_VERBS & self.declared_verbs()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -413,6 +430,10 @@ class RetroXRConnector(VesselConnectorBase):
             return VesselActionResult(ok=False, detail=f"unknown_verb: {verb}")
         if not self.is_connected:
             return VesselActionResult(ok=False, detail="rift_closed")
+        if verb not in self.declared_verbs():
+            # Known, but this mod cannot do it: say so instead of letting the mod fail it.
+            log_warning(f"{LOG_PREFIX} refused {verb!r}: the mod did not declare it")
+            return VesselActionResult(ok=False, detail=f"not_available: {verb}")
 
         if verb == "say":
             # In RetroXR she speaks as well as writes, always: the text is the caption of the voice.
@@ -465,13 +486,14 @@ class RetroXRConnector(VesselConnectorBase):
             environment=ENVIRONMENT,
             health=None,
             position=st.get("position"),
-            possible_actions=sorted(CORE_VERBS | set(WORLD_VERBS)),
+            possible_actions=sorted(self.declared_verbs()),
             flags={"connected": True, "holding": st.get("holding")},
             extra=extra,
         )
 
     def get_world_actions(self) -> Dict[str, Dict[str, Any]]:
-        return {verb: dict(schema) for verb, schema in WORLD_VERBS.items()}
+        declared = self.declared_verbs()
+        return {verb: dict(schema) for verb, schema in WORLD_VERBS.items() if verb in declared}
 
     def describe_capabilities(self) -> Dict[str, Any]:
         return {

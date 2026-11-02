@@ -1948,6 +1948,20 @@ class VesselPlugin(AIPluginBase):
             if verb not in self._ACTION_VERBS and isinstance(schema, dict)
         }
 
+    @staticmethod
+    def _core_verbs_for(world: str) -> "frozenset[str] | None":
+        """The core verbs ``world``'s connector implements, or ``None`` for all of them.
+
+        Fail-safe: any trouble reading it means all of them (the historic behaviour).
+        """
+        if not world or world == "vessel":
+            return None
+        try:
+            allowed = getattr(VESSEL_REGISTRY.load_connector(world), "core_verbs", None)
+        except Exception:
+            return None
+        return frozenset(allowed) if allowed is not None else None
+
     def _world_extra_verbs(self) -> dict[str, dict[str, Any]]:
         """Backward-compatible wrapper reading extras for the active world."""
         return self._world_extra_verbs_for(self._action_world())
@@ -2015,8 +2029,12 @@ class VesselPlugin(AIPluginBase):
         # Connected: expose the world's verbs (core set minus connect) + extras,
         # namespaced by the connected world, plus a plain disconnect.
         prefix = f"vessel_{connected}_"
+        implemented = self._core_verbs_for(connected)
         for verb, schema in self._ACTION_VERBS.items():
             if verb in ("connect", "disconnect"):
+                continue
+            # Only the verbs this world can really do (a connector that implements a few says so).
+            if implemented is not None and verb not in implemented:
                 continue
             entry = dict(schema)
             entry["description"] = entry["description"].format(world=connected)

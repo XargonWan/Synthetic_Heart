@@ -61,10 +61,10 @@ def karada(monkeypatch: pytest.MonkeyPatch) -> FakeKarada:
     return k
 
 
-async def _connected() -> tuple[RetroXRConnector, FakeSocket]:
+async def _connected(hello: dict[str, Any] | None = None) -> tuple[RetroXRConnector, FakeSocket]:
     conn = RetroXRConnector()
     ws = FakeSocket()
-    conn.attach_socket(ws, {"room": "den", "capabilities": ["motion"]})
+    conn.attach_socket(ws, hello or {"room": "den", "capabilities": ["motion"]})
     assert await conn.connect({}, lambda e: None) is True
     return conn, ws
 
@@ -377,3 +377,58 @@ async def test_rift_priorities(monkeypatch: pytest.MonkeyPatch) -> None:
     assert idle == mq.PRIORITY_AMBIENT and chat == mq.PRIORITY_HIGH
     assert chat > mq.PRIORITY_GENERAL > idle, "her chat first, then ordinary chat, then her own idle turn"
     assert idle > mq.PRIORITY_BACKGROUND and idle > mq.PRIORITY_LOW, "the Vessel outranks G.R.I.L.L.O. and background work"
+
+
+# -- she is only offered what her body can do --------------------------------
+
+
+def _plugin_in_retroxr(monkeypatch: pytest.MonkeyPatch, verbs: list[str] | None):
+    """A VesselPlugin embodied in a RetroXR whose mod declared ``verbs`` (None: said nothing)."""
+    from plugins.rift_vessel.vessel_plugin import VesselPlugin
+
+    monkeypatch.setattr(VesselPlugin, "refresh_config", lambda self: None)
+    monkeypatch.setattr(VesselPlugin, "_import_builtin_connectors", staticmethod(lambda: None))
+    monkeypatch.setattr("plugins.rift_vessel.vessel_plugin.register_plugin", lambda name, inst: None)
+    plugin = VesselPlugin()
+    conn = RetroXRConnector()
+    hello: dict[str, Any] = {"room": "den"}
+    if verbs is not None:
+        hello["verbs"] = verbs
+    conn.attach_socket(FakeSocket(), hello)
+    conn._connected = True
+    monkeypatch.setattr("plugins.rift_vessel.vessel_plugin.VESSEL_REGISTRY.load_connector", lambda name: conn)
+    monkeypatch.setattr(VesselPlugin, "_connected_world", lambda self: "retroxr")
+    return plugin, conn
+
+
+def test_only_what_the_mod_can_do_is_offered(monkeypatch: pytest.MonkeyPatch) -> None:
+    plugin, _ = _plugin_in_retroxr(monkeypatch, ["say", "move", "look", "status", "emote", "look_at", "inspect", "follow", "unfollow"])
+    offered = {n.removeprefix("vessel_retroxr_") for n in plugin.get_supported_actions() if n.startswith("vessel_retroxr_")}
+    assert offered == {"say", "move", "look", "status", "emote", "look_at", "inspect", "follow", "unfollow"}
+    # what a RetroXR body cannot do is not on offer, and neither is the Minecraft way of looking around
+    for gone in ("attack", "respawn", "use", "observe", "pick_up", "put_down", "hand_over", "sit", "touch"):
+        assert gone not in offered, gone
+    assert "vessel_disconnect" in plugin.get_supported_actions()
+
+
+def test_a_mod_that_says_nothing_is_offered_very_little(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An old mod declares no verbs: better to offer five that work than thirteen that mostly do not."""
+    plugin, _ = _plugin_in_retroxr(monkeypatch, None)
+    offered = {n.removeprefix("vessel_retroxr_") for n in plugin.get_supported_actions() if n.startswith("vessel_retroxr_")}
+    assert offered == {"say", "move", "look", "status", "emote"}
+
+
+def test_other_worlds_still_offer_every_core_verb(monkeypatch: pytest.MonkeyPatch) -> None:
+    """core_verbs is opt-in: a world that does not say gets the historic full set."""
+    from plugins.rift_vessel.vessel_base import VesselConnectorBase
+    from plugins.rift_vessel.vessel_plugin import VesselPlugin
+
+    assert VesselConnectorBase.core_verbs is None
+    assert VesselPlugin._core_verbs_for("") is None and VesselPlugin._core_verbs_for("vessel") is None
+
+
+async def test_a_known_verb_the_mod_did_not_declare_is_refused_here(karada: FakeKarada) -> None:
+    conn, ws = await _connected({"room": "den", "verbs": ["say"]})
+    res = await conn.act("inspect", {"target": "tv"})
+    assert res.ok is False and res.detail == "not_available: inspect"
+    assert ws.sent == [], "it never reaches the room to fail there"
