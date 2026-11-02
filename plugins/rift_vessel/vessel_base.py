@@ -274,6 +274,22 @@ class VesselConnectorBase(ABC):
         finally:
             self._deliberate_in_flight -= 1
 
+    async def get_embodiment_assets(
+        self, wanted_animations: List[str] | None = None
+    ) -> Dict[str, Any] | None:
+        """Describe Synth's **body** for a world that draws it (optional).
+
+        Most worlds draw the avatar themselves (Minecraft has its own player model)
+        and never need this. A world that renders Synth (RetroXR) asks for it:
+        the connector answers with the active skin's model, the animations the
+        world named (``wanted_animations``) and where to download them (the Karada
+        ``/skins`` files, plus the hash manifest to skip what is cached). See
+        :mod:`core.embodiment_assets`. Nothing is ever pushed unasked.
+
+        Optional override. Defaults to ``None`` (this world takes no body).
+        """
+        return None
+
     async def get_world_state(self) -> WorldState | None:
         """Return the current :class:`WorldState`, or ``None`` if unavailable.
 

@@ -476,6 +476,38 @@ command is sent, and a failed/ignored command never breaks the session.
    ``curl -I http://<synth-host-ip>:<port>/api/config/MINECRAFT_SKIN_FILE/file``
    (must return ``200``), then reconnect the Vessel to re-run the skin command.
 
+RetroXR
+-------
+
+``plugins/rift_vessel/retroxr/retroxr.py`` is the second connector, for the
+`RetroXR <https://github.com/RetroXR/RetroXR>`_ VR retro-gaming room. It inverts
+Minecraft's direction: there is no bridge to start. The RetroXR mod
+``xenu.synth_rift`` opens a WebSocket to ``/api/vessel/retroxr/ws`` (same token
+gate as the WebUI) when the player switches on the *Synthetic Heart Rift
+Summoner*, and that socket is the embodiment. ``core/vessel_retroxr_api.py``
+does the handshake and calls ``VesselPlugin.connect_world("retroxr")``, so the
+session, recap and autonomy beats are the ones every world uses; leaving the
+socket calls ``disconnect_world``. The wire protocol is in
+``plugins/rift_vessel/retroxr/guide.md``.
+
+**The body never plays.** ``act`` refuses any verb outside the core set
+(``say move look use follow unfollow status``) and the RetroXR verbs
+(``look_at touch pick_up put_down hand_over sit emote inspect``); nothing
+writes input to a console.
+
+Embodiment assets
+~~~~~~~~~~~~~~~~~
+
+Until RetroXR a Vessel never sent a model or an animation to its world. A world
+that draws Synth itself can now ask: ``VesselConnectorBase.get_embodiment_assets``
+(optional, default ``None``) returns the active skin's VRM and the animations the
+world named, resolved by :mod:`core.embodiment_assets` from the Karada skins:
+``animations/vessel/<name>/`` first (a namespace any world shares), then the
+Karada state folder, then the fallback skin ``Rei``. The world downloads the
+files from ``/skins/...`` and skips what it already holds through
+``/api/karada/assets/manifest``. Nothing is pushed unasked, and the avatar of the
+WebUI (Karada's global ``AnimationState``) is never touched by a world's body.
+
 Commands
 --------
 

@@ -979,6 +979,7 @@ class VesselPlugin(AIPluginBase):
         """
         builtin = [
             "plugins.rift_vessel.minecraft.minecraft",
+            "plugins.rift_vessel.retroxr.retroxr",
         ]
         for module_path in builtin:
             try:

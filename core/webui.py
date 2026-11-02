@@ -756,6 +756,18 @@ class SynthWebUIInterface:
                 log_warning(
                     f"{LOG_PREFIX} Karada API router failed to mount (non-fatal): {karada_exc}"
                 )
+            # Mount the RetroXR rift socket (Rift Vessel world; non-fatal if absent)
+            try:
+                from core.vessel_retroxr_api import create_retroxr_router
+
+                self.app.include_router(create_retroxr_router())
+                log_info(
+                    f"{LOG_PREFIX} RetroXR rift socket mounted at /api/vessel/retroxr/ws"
+                )
+            except Exception as retroxr_exc:
+                log_warning(
+                    f"{LOG_PREFIX} RetroXR rift socket failed to mount (non-fatal): {retroxr_exc}"
+                )
         except Exception as e:
             # If KaradaStateServer fails to initialize, create a lightweight stub
             log_warning(f"{LOG_PREFIX} KaradaStateServer init failed: {e}")
