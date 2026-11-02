@@ -34,7 +34,7 @@ anything outside its declared verbs.
 named, resolved by name (`animations/vessel/<name>/`, then the Karada state folder, then
 the fallback skin). The mod downloads the files from `/skins/...` and uses
 `/api/karada/assets/manifest` to skip what it already has. Nothing is pushed unasked.
-See `core/embodiment_assets.py`.
+See `plugins/rift_vessel/embodiment_assets.py`.
 
 ## Being summoned
 

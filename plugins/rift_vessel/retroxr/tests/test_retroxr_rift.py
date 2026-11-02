@@ -16,7 +16,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from core import embodiment_assets
+from plugins.rift_vessel import embodiment_assets
 from plugins.rift_vessel.retroxr.api import PROTOCOL_VERSION, create_retroxr_router
 from plugins.rift_vessel.retroxr.retroxr import (
     CORE_VERBS,
@@ -195,6 +195,23 @@ async def test_animation_lookup_order(tmp_path: Path) -> None:
     assert got["skin"] == "Rei" and got["namespace"] == "state"
     # nothing anywhere
     assert embodiment_assets.resolve_animation("moonwalk", "Mine", tmp_path) is None
+
+
+async def test_a_loose_clip_with_the_word_in_its_name_is_found_last(tmp_path: Path) -> None:
+    # Rei's skin ships "Texting And Walking.fbx" at the top of animations/, with no folder of its own.
+    base = tmp_path / "Rei" / "animations"
+    base.mkdir(parents=True)
+    (base / "Texting And Walking.fbx").write_bytes(b"x")
+    (base / "Thankful.fbx").write_bytes(b"x")
+    got = embodiment_assets.resolve_animation("walk", "Rei", tmp_path)
+    assert got is not None and got["namespace"] == "loose" and got["clips"][0]["file"] == "Texting And Walking.fbx"
+    assert embodiment_assets.resolve_animation("thank", "Rei", tmp_path)["clips"][0]["file"] == "Thankful.fbx"
+    assert embodiment_assets.resolve_animation("moon", "Rei", tmp_path) is None, "a word must START with the name"
+    assert embodiment_assets.resolve_animation("ing", "Rei", tmp_path) is None, "not a piece from the middle of one"
+    # a folder or a vessel clip still wins over a loose file
+    (base / "vessel" / "walk").mkdir(parents=True)
+    (base / "vessel" / "walk" / "Proper.fbx").write_bytes(b"x")
+    assert embodiment_assets.resolve_animation("walk", "Rei", tmp_path)["clips"][0]["file"] == "Proper.fbx"
 
 
 async def test_animation_names_cannot_climb_out_of_the_skins(tmp_path: Path) -> None:

@@ -565,7 +565,7 @@ class RetroXRConnector(VesselConnectorBase):
         The mod fetches the files over ``/skins/...`` itself; here Synth names the
         skin and resolves the animation names RetroXR asked for. Nothing is pushed.
         """
-        from core.embodiment_assets import describe_assets
+        from plugins.rift_vessel.embodiment_assets import describe_assets
 
         wanted = wanted_animations
         if wanted is None:

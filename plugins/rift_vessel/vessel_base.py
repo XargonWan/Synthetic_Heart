@@ -284,7 +284,7 @@ class VesselConnectorBase(ABC):
         the connector answers with the active skin's model, the animations the
         world named (``wanted_animations``) and where to download them (the Karada
         ``/skins`` files, plus the hash manifest to skip what is cached). See
-        :mod:`core.embodiment_assets`. Nothing is ever pushed unasked.
+        :mod:`plugins.rift_vessel.embodiment_assets`. Nothing is ever pushed unasked.
 
         Optional override. Defaults to ``None`` (this world takes no body).
         """

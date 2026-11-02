@@ -14,7 +14,10 @@ Animations are looked up by NAME in the active skin, in this order:
 
 1. ``animations/vessel/<name>/``   -- the vessel namespace, shared by every world
 2. ``animations/<name>/``          -- a Karada state folder (``greet``, ``think``, ...)
-3. the same two places in the fallback skin (``Rei``), as Karada itself falls back.
+3. a loose clip at the top of ``animations/`` whose file name has a word that starts with the name
+   (``Texting And Walking.fbx`` is a ``walk``): skins ship such files without a folder, and a body that
+   cannot walk is worse than one that walks with a phone in its hand
+4. the same places in the fallback skin (``Rei``), as Karada itself falls back.
 
 so an animation a world needs (walk, sit, pick_up) is added once to the skin and any
 other game can use it.
@@ -23,6 +26,7 @@ other game can use it.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -75,6 +79,21 @@ def _safe_name(name: str) -> bool:
     return bool(name) and name not in (".", "..") and "/" not in name and "\\" not in name
 
 
+def _loose_clips(base: Path, name: str, skins_root: Path) -> List[Dict[str, Any]]:
+    """Files directly in ``base`` with a word in their name that starts with ``name`` ("Texting And Walking" ~ "walk")."""
+    if not base.is_dir():
+        return []
+    wanted = name.lower()
+    found: List[Path] = []
+    for p in sorted(base.iterdir()):
+        if not p.is_file() or p.suffix.lower() not in _ANIM_SUFFIXES:
+            continue
+        words = re.split(r"[^a-z0-9]+", p.stem.lower())
+        if any(w.startswith(wanted) for w in words if w):
+            found.append(p)
+    return [_clip_entry(p, skins_root) for p in found]
+
+
 def resolve_animation(
     name: str, skin: str, skins_root: Path = SKINS_ROOT
 ) -> Optional[Dict[str, Any]]:
@@ -92,6 +111,9 @@ def resolve_animation(
                     "namespace": VESSEL_NAMESPACE if folder.parent.name == VESSEL_NAMESPACE else "state",
                     "clips": clips,
                 }
+        loose = _loose_clips(base, name, skins_root)
+        if loose:
+            return {"name": name, "skin": skin_name, "namespace": "loose", "clips": loose}
     return None
 
 
