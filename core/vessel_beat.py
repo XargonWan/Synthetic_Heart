@@ -1558,3 +1558,82 @@ def resolve_goal_beat_interval(config_get: Any, default: int = 45) -> int:
     except Exception:
         return default
     return max(10, min(3600, value))
+
+
+# ---------------------------------------------------------------------------
+# Idle beat — "this is what is around you: what do you want to do?"
+# ---------------------------------------------------------------------------
+#
+# A world whose body Synth cannot be scripted to move (RetroXR: she is a person in a
+# room, not a bot with a goal list) gets no will/action/motor beats. When nobody is
+# talking to her, the Vessel instead hands her the world's own description of what is
+# around her and lets HER decide what, if anything, to do. Nothing is forced: the
+# prompt says doing nothing is a fine answer. It is an ordinary vessel perception, so
+# it is ranked AMBIENT (above background work like G.R.I.L.L.O., below every human), and
+# a player's chat prunes and outranks it.
+
+
+def is_idle_beat_enabled(config_get: Any) -> bool:
+    """Whether the idle beat may run. Default on (it only exists for worlds that ask)."""
+    try:
+        return bool(config_get("VESSEL_IDLE_BEAT_ENABLED", True))
+    except Exception:
+        return True
+
+
+def resolve_idle_interval(config_get: Any, default: int = 90) -> int:
+    """Seconds between idle beats, clamped to [20, 3600]. Fail-safe: ``default``."""
+    try:
+        value = int(config_get("VESSEL_IDLE_BEAT_INTERVAL_SEC", default))
+    except Exception:
+        return default
+    return max(20, min(3600, value))
+
+
+def resolve_idle_quiet_sec(config_get: Any, default: int = 45) -> int:
+    """Seconds after a player last spoke before the world counts as idle, [0, 3600]."""
+    try:
+        value = int(config_get("VESSEL_IDLE_BEAT_QUIET_SEC", default))
+    except Exception:
+        return default
+    return max(0, min(3600, value))
+
+
+def idle_beat_due(
+    now: float,
+    last_beat_at: float,
+    interval: float,
+    last_player_activity_at: float,
+    quiet_sec: float,
+) -> bool:
+    """Pure gate: enough time since the last beat AND the player has been quiet.
+
+    ``last_player_activity_at == 0`` means nobody has ever spoken. Structural only.
+    """
+    if now - last_beat_at < interval:
+        return False
+    if quiet_sec > 0 and last_player_activity_at > 0 and now - last_player_activity_at < quiet_sec:
+        return False
+    return True
+
+
+def build_idle_prompt(world: str, surroundings: str) -> str:
+    """The idle turn: what is around you, and an open question. Keyword-free.
+
+    ``surroundings`` is the connector's own description (objects with where they are, who
+    is near). Nothing is asked of Synth: not acting is an explicit option.
+    """
+    text = str(surroundings or "").strip()
+    return "\n".join(
+        [
+            f"You are in the world '{world}' and nobody is talking to you right now.",
+            "",
+            "This is what is around you:",
+            text if text else "(nothing you can make out)",
+            "",
+            "What do you want to do? Nothing is expected of you. You can look at or go to "
+            "something, handle an object, say something out loud, change what you are "
+            "doing, or just stay as you are. Do only what you can really do here; if you "
+            "would rather do nothing, do nothing.",
+        ]
+    )

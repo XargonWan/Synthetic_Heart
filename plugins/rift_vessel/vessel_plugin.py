@@ -291,6 +291,43 @@ config_registry.get_value(
     advanced=True,
 )
 config_registry.get_value(
+    "VESSEL_IDLE_BEAT_ENABLED",
+    True,
+    value_type=bool,
+    label="Idle Beat (\"what do you want to do?\")",
+    description=(
+        "For worlds whose body is a person in a room (RetroXR): when nobody has talked to "
+        "Synth for a while, she is told what is around her and asked what she wants to do. "
+        "She decides; doing nothing is allowed. Ranked below any player chat and above "
+        "background work."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_IDLE_BEAT_INTERVAL_SEC",
+    90,
+    value_type=int,
+    label="Idle Beat Interval (s)",
+    description="Seconds between idle beats (clamped 20-3600).",
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_IDLE_BEAT_QUIET_SEC",
+    45,
+    value_type=int,
+    label="Idle Beat Quiet Window (s)",
+    description=(
+        "Seconds after a player last spoke before the world counts as idle (clamped 0-3600)."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
     "VESSEL_ACTION_BEAT_ENABLED",
     True,
     value_type=bool,

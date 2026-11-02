@@ -171,6 +171,7 @@ class VesselInterface:
         # fast, prompt-less "motor tick" that steps the body toward the goal)
         # are paced independently — see core.vessel_beat and AGENTS.md §5c.
         self._last_will_beat_at: float = 0.0
+        self._last_idle_beat_at: float = 0.0
         self._last_motor_tick_at: float = 0.0
         # Action beat (the middle "concrete-doing" cognition turn that maps the
         # free-text goal onto a real verb — gather/craft/place — since the
@@ -1651,6 +1652,9 @@ class VesselInterface:
                 # advances the connector's ``_last_health`` baseline), so any
                 # earlier beat that reads the world state would clear it.
                 await self._maybe_run_damage_appraisal()
+                # Idle: a world whose body is a person in a room is told what is around
+                # her and asked what she wants to do (the world never scripts her).
+                await self._maybe_run_idle_beat()
                 await self._maybe_run_reflection()
                 # Dedicated goal beat: when Synth has no goal at all, fire a
                 # turn that can ONLY set/update the goal (restricted allowlist),
@@ -1774,6 +1778,9 @@ class VesselInterface:
         world, world_state = await self._read_active_world_state()
         if world is None or world_state is None:
             return
+        # A world that is asked what she wants (the idle beat) has no reflection pause.
+        if self._uses_idle_beat(world):
+            return
 
         # Structural trigger: reflect only when there is no real objective yet —
         # no goal, or a goal with no ordered step plan. Never inspects the goal's
@@ -1881,6 +1888,9 @@ class VesselInterface:
         world, world_state = await self._read_active_world_state()
         if world is None or world_state is None:
             return
+        # A world that is asked what she wants (the idle beat) has no goal beats.
+        if self._uses_idle_beat(world):
+            return
 
         # Structural trigger: only when there is genuinely no active goal —
         # the case where committing one is imperative. Never inspects the goal's
@@ -1928,6 +1938,83 @@ class VesselInterface:
         if has_goal:
             return {f"vessel_{world}_update_goal"}
         return {f"vessel_{world}_set_goal", f"vessel_{world}_update_goal"}
+
+    def _uses_idle_beat(self, world: str | None) -> bool:
+        """Whether ``world``'s connector opted into the idle beat (and so has no will/action/goal beats)."""
+        if not world:
+            return False
+        connector = self._connected_connector(world)
+        return bool(connector is not None and getattr(connector, "uses_idle_beat", False))
+
+    async def _maybe_run_idle_beat(self) -> None:
+        """Ask Synth what she wants to do, when nobody is talking to her (slow, LLM).
+
+        For connectors with ``uses_idle_beat``: every ``VESSEL_IDLE_BEAT_INTERVAL_SEC`` (default
+        90 s), if no player has spoken for ``VESSEL_IDLE_BEAT_QUIET_SEC`` (default 45 s), hand
+        her the connector's :meth:`describe_surroundings` and ask. She decides; doing nothing is
+        allowed. It is an ordinary vessel perception, ranked AMBIENT: above background work
+        such as G.R.I.L.L.O. (BACKGROUND), below every human, and a player's chat prunes it. Fully
+        guarded; never raises.
+        """
+        try:
+            from core import vessel_beat
+        except Exception:
+            return
+
+        def _cfg(key: str, default: Any) -> Any:
+            return config_registry.get_value(
+                key, default, group="vessel", component="vessel"
+            )
+
+        if not vessel_beat.is_idle_beat_enabled(_cfg):
+            return
+        if not get_vessel_session_manager().has_active_session():
+            return
+        world = None
+        connector = None
+        try:
+            from core.vessel_registry import VESSEL_REGISTRY
+
+            for name, candidate in (getattr(VESSEL_REGISTRY, "_instances", {}) or {}).items():
+                if getattr(candidate, "is_connected", False) and getattr(
+                    candidate, "uses_idle_beat", False
+                ):
+                    world, connector = name, candidate
+                    break
+        except Exception as exc:
+            log_debug(f"[vessel_interface] idle beat lookup failed: {exc}")
+            return
+        if connector is None or world is None:
+            return
+
+        now = asyncio.get_event_loop().time()
+        if not vessel_beat.idle_beat_due(
+            now,
+            self._last_idle_beat_at,
+            vessel_beat.resolve_idle_interval(_cfg),
+            self._last_player_activity_at,
+            vessel_beat.resolve_idle_quiet_sec(_cfg),
+        ):
+            return
+
+        try:
+            surroundings = connector.describe_surroundings()
+        except Exception as exc:
+            log_warning(f"[vessel_interface] describe_surroundings failed for '{world}': {exc}")
+            return
+        if not surroundings:
+            return
+        interface_path = self._decision_interface_path(world)
+        if interface_path is None:
+            return
+        self._last_idle_beat_at = now
+        log_info(f"[vessel_interface] Idle beat for '{world}': asking what she wants to do")
+        await self._enqueue_perception(
+            interface_path=interface_path,
+            summary=vessel_beat.build_idle_prompt(world, surroundings),
+            environment=world,
+            event_type="idle_beat",
+        )
 
     async def _maybe_run_will_beat(self) -> None:
         """Enqueue a **volition** cognition turn when it is due (slow layer).
@@ -1994,6 +2081,9 @@ class VesselInterface:
 
         world, world_state = await self._read_active_world_state()
         if world is None or world_state is None:
+            return
+        # A world that is asked what she wants (the idle beat) has no goal beats.
+        if self._uses_idle_beat(world):
             return
 
         interface_path = self._decision_interface_path(world)
@@ -2098,6 +2188,9 @@ class VesselInterface:
 
         world, world_state = await self._read_active_world_state()
         if world is None or world_state is None:
+            return
+        # A world that is asked what she wants (the idle beat) has no goal beats.
+        if self._uses_idle_beat(world):
             return
 
         interface_path = self._decision_interface_path(world)

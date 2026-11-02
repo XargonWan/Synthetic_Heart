@@ -112,6 +112,11 @@ async def handle_rift(websocket: WebSocket) -> None:
         }
     )
     log_info(f"{LOG_PREFIX} rift open (room={hello.get('room')!r})")
+    # Now that she is welcomed: say what she is doing, then Karada's changes follow on their own.
+    try:
+        await connector.announce_state()
+    except Exception as exc:
+        log_warning(f"{LOG_PREFIX} could not announce her state: {exc}")
 
     try:
         while True:

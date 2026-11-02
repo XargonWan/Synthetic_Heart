@@ -67,7 +67,7 @@ async def test_action_round_trip() -> None:
     await asyncio.sleep(0)
     frame = ws.sent[-1]
     assert frame["type"] == "action" and frame["action"] == "say"
-    assert frame["payload"] == {"text": "hi"}
+    assert frame["payload"] == {"text": "hi", "audio": True}, "in RetroXR a say is always spoken"
 
     await conn.handle_frame(
         {"type": "action_result", "id": frame["id"], "ok": True, "detail": "spoken", "data": {"n": 1}}
@@ -325,3 +325,12 @@ def test_a_second_rift_is_refused_while_one_is_open(rift) -> None:
         with client.websocket_connect("/api/vessel/retroxr/ws") as second:
             second.send_text(_hello())
             assert second.receive_json()["code"] == "busy"
+
+
+def test_summoned_is_a_real_event_not_ambient_telemetry() -> None:
+    """Being summoned (and what she sees) is a moment of its own: it must reach Synth as a
+    turn, not be folded into the batched ambient perceptions with 'proximity' and 'spawn'."""
+    from plugins.rift_vessel.vessel_base import is_ephemeral_event
+
+    assert is_ephemeral_event("summoned") is False
+    assert is_ephemeral_event("proximity") is True  # the control: ambient stays ambient

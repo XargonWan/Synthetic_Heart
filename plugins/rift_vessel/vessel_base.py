@@ -290,6 +290,21 @@ class VesselConnectorBase(ABC):
         """
         return None
 
+    # A world whose body is a person in a room, not a bot with goals, opts into the IDLE
+    # beat (see core.vessel_beat) instead of the will/action/goal beats and the motor tick:
+    # when nobody is talking to Synth she is told what is around her and asked what she
+    # wants to do. The world never scripts her; it only describes.
+    uses_idle_beat: bool = False
+
+    def describe_surroundings(self) -> str | None:
+        """Describe what is around the body, for the idle beat (optional).
+
+        Plain text for Synth: the objects near her with where they are, who is near, what
+        she holds. ``None`` or empty means there is nothing to say right now and no beat
+        is sent. Only read when :attr:`uses_idle_beat` is true. Must never raise.
+        """
+        return None
+
     async def get_world_state(self) -> WorldState | None:
         """Return the current :class:`WorldState`, or ``None`` if unavailable.
 

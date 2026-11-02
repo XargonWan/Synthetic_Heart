@@ -37,6 +37,7 @@ from core.core_initializer import register_plugin
 from core.logging_utils import log_debug, log_info, log_warning
 from core.plugin_base import PluginBase
 from core.vessel_registry import register_vessel_connector
+from plugins.rift_vessel.retroxr.karada_bridge import RiftKaradaTransport
 from plugins.rift_vessel.vessel_base import (
     PerceptionCallback,
     PerceptionEvent,
@@ -130,6 +131,9 @@ class RetroXRConnector(VesselConnectorBase):
     """Rift Vessel connector for the RetroXR room, over the mod's WebSocket."""
 
     display_name = "RetroXR"
+    # She is a person in a room, not a bot with goals: when nobody is talking to her she is
+    # told what is around her and asked what she wants to do (core.vessel_beat idle beat).
+    uses_idle_beat = True
 
     def __init__(self) -> None:
         self._on_event: PerceptionCallback | None = None
@@ -141,6 +145,10 @@ class RetroXRConnector(VesselConnectorBase):
         self._pending: Dict[int, asyncio.Future] = {}
         self._ids = itertools.count(1)
         self._send_lock = asyncio.Lock()
+        self._karada = RiftKaradaTransport(self.send_frame, lambda: self.is_connected)
+        self._karada_registered = False
+        self._speech_tasks: set[asyncio.Task] = set()
+        self._emotes: list[str] = []
         self.last_error = None
 
     # ------------------------------------------------------------------
@@ -156,6 +164,7 @@ class RetroXRConnector(VesselConnectorBase):
 
     def detach_socket(self) -> None:
         """Forget the socket and fail every action still waiting for an answer."""
+        self._unregister_karada()
         self._ws = None
         self._connected = False
         for fut in list(self._pending.values()):
@@ -184,6 +193,7 @@ class RetroXRConnector(VesselConnectorBase):
             return False
         self._on_event = on_event
         self._connected = True
+        await self._register_karada()
         log_info(
             f"{LOG_PREFIX} embodied (room={self._hello.get('room')!r}, "
             f"caps={self._hello.get('capabilities')})"
@@ -192,6 +202,7 @@ class RetroXRConnector(VesselConnectorBase):
 
     async def disconnect(self) -> None:
         ws = self._ws
+        self._unregister_karada()
         self.detach_socket()
         self._on_event = None
         if ws is not None:
@@ -205,6 +216,144 @@ class RetroXRConnector(VesselConnectorBase):
         """Per-room scope for goals and history: ``vessel/retroxr/<room>``."""
         room = str(self._hello.get("room") or "").strip()
         return room or None
+
+    async def send_frame(self, frame: Dict[str, Any]) -> bool:
+        """Send one JSON frame to the mod. False when the rift is not open or the send failed."""
+        ws = self._ws
+        if ws is None or not self._connected:
+            return False
+        try:
+            async with self._send_lock:
+                await ws.send_json(frame)
+            return True
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} send failed ({frame.get('type')}): {exc}")
+            return False
+
+    # ------------------------------------------------------------------
+    # Karada: her animation states, voice and face follow the avatar
+    # ------------------------------------------------------------------
+
+    async def _register_karada(self) -> None:
+        """Add the rift as a Karada transport (everything Karada says from now on reaches the mod)."""
+        try:
+            from core.animation_handler import get_karada_state_server
+
+            get_karada_state_server().add_transport(self._karada)
+            self._karada_registered = True
+            log_info(f"{LOG_PREFIX} registered as a Karada transport")
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} could not register with Karada: {exc}")
+
+    async def announce_state(self) -> None:
+        """Tell the mod what she is doing right now, not only what changes next.
+
+        Called by the rift's socket handler AFTER the welcome: the mod only listens for Karada
+        once it has been welcomed.
+        """
+        try:
+            from core.animation_handler import get_karada_state_server
+
+            current = get_karada_state_server().get_current_animation_state()
+            if isinstance(current, dict) and current.get("state"):
+                await self._karada.broadcast_animation(
+                    {"type": "vrm_animation_v2", "state": current.get("state")}
+                )
+        except Exception as exc:
+            log_debug(f"{LOG_PREFIX} announce_state: {exc}")
+
+    def _unregister_karada(self) -> None:
+        if not self._karada_registered:
+            return
+        self._karada_registered = False
+        try:
+            from core.animation_handler import get_karada_state_server
+
+            get_karada_state_server().remove_transport(self._karada)
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"{LOG_PREFIX} karada unregister: {exc}")
+
+    # ------------------------------------------------------------------
+    # Voice: in RetroXR she speaks as well as writes
+    # ------------------------------------------------------------------
+
+    async def _speak(self, text: str) -> None:
+        """Synthesize ``text`` with Vox and hand it to Karada (every transport, the rift too).
+
+        Karada then plays her TALK animation for the length of the clip and sends the audio
+        URL with lip-sync. Fully fail-safe: no voice engine means the line stays text.
+        """
+        try:
+            from core.core_initializer import PLUGIN_REGISTRY
+
+            vox = PLUGIN_REGISTRY.get("vox_plugin")
+            if vox is None or not hasattr(vox, "speak"):
+                log_debug(f"{LOG_PREFIX} no Vox plugin: the line stays text")
+                return
+            result = await vox.speak(
+                text, interface_path=None, generate_only=True, allow_fallback=False
+            )
+            if not isinstance(result, dict) or result.get("status") != "success":
+                log_debug(f"{LOG_PREFIX} Vox did not speak: {result}")
+                return
+            from core.animation_handler import get_karada_state_server
+
+            await get_karada_state_server().broadcast_audio(
+                audio_path=str(result["audio_path"]),
+                lipsync_data=result.get("lipsync_data"),
+                audio_duration_s=result.get("audio_duration_s"),
+                text=text,
+            )
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} speaking failed: {exc}")
+
+    def _speak_in_background(self, text: str) -> None:
+        task = asyncio.get_running_loop().create_task(self._speak(text))
+        self._speech_tasks.add(task)
+        task.add_done_callback(self._speech_tasks.discard)
+
+    # ------------------------------------------------------------------
+    # The idle beat: what is around her
+    # ------------------------------------------------------------------
+
+    def describe_surroundings(self) -> str | None:
+        """What she can see around her, in words, for "what do you want to do?"."""
+        if not self.is_connected:
+            return None
+        st = self._state or {}
+        entities = [e for e in ((st.get("extra") or {}).get("entities") or []) if isinstance(e, dict)]
+        lines: list[str] = []
+        player = next((e for e in entities if e.get("type") == "player"), None)
+        if player:
+            lines.append(
+                f"The player is {player.get('side', 'near you')}, "
+                f"{float(player.get('distance', 0)):.1f} m away."
+            )
+        else:
+            lines.append("You cannot see the player.")
+        things = [e for e in entities if e.get("type") != "player"]
+        if things:
+            lines.append("Around you:")
+            for e in things[:12]:
+                label = str(e.get("label") or e.get("name") or "something")
+                extra = []
+                if e.get("systemid"):
+                    extra.append(f"a {e['systemid']} machine")
+                if e.get("powered") is True:
+                    extra.append("switched on")
+                elif e.get("powered") is False:
+                    extra.append("switched off")
+                suffix = f" ({', '.join(extra)})" if extra else ""
+                lines.append(
+                    f"- {label}{suffix}, {e.get('side', 'near you')}, {float(e.get('distance', 0)):.1f} m"
+                )
+        else:
+            lines.append("There is nothing else near you.")
+        holding = st.get("holding")
+        lines.append(f"You are holding {holding}." if holding else "Your hands are empty.")
+        if self._emotes:
+            lines.append("Animations you can play: " + ", ".join(self._emotes) + ".")
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Inbound frames
@@ -264,6 +413,14 @@ class RetroXRConnector(VesselConnectorBase):
             return VesselActionResult(ok=False, detail=f"unknown_verb: {verb}")
         if not self.is_connected:
             return VesselActionResult(ok=False, detail="rift_closed")
+
+        if verb == "say":
+            # In RetroXR she speaks as well as writes, always: the text is the caption of the voice.
+            payload = dict(payload or {})
+            payload["audio"] = True
+            spoken = str(payload.get("text") or "").strip()
+            if spoken:
+                self._speak_in_background(spoken)
 
         action_id = next(self._ids)
         loop = asyncio.get_running_loop()
@@ -339,9 +496,14 @@ class RetroXRConnector(VesselConnectorBase):
         wanted = wanted_animations
         if wanted is None:
             wanted = list(self._hello.get("animations") or [])
-        return await describe_assets(
+        body = await describe_assets(
             wanted_animations=wanted,
         )
+        try:
+            self._emotes = sorted((body or {}).get("animations", {}).keys())
+        except Exception:  # pragma: no cover - defensive
+            pass
+        return body
 
 
 CONNECTOR_CLASS = RetroXRConnector
