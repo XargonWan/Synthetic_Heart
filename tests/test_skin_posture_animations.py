@@ -65,18 +65,26 @@ def test_the_manifest_offers_the_new_states(handler):
 
 
 def test_thinking_has_a_loop_that_closes_on_itself():
-    """intro -> loop -> outro are one run of frames, and the loop is a real piece of the held pose.
+    """intro -> loop -> outro are one run of frames, and the loop is made to repeat without a step.
 
-    Measured on the clip (RetroXR mod's `tests/loop_scan.gd`): frames 43..73 differ by 0.7 degrees per bone;
-    the old 49..79 ended 13 degrees away on the hand, the arm and the head (the outro had begun), so every
-    second she dropped her hand, thought again, and dropped it."""
+    A held pose DRIFTS (Thinking has no cycle in it): frames 43..73 end 4 degrees on the head and 3 on the arm away
+    from where they began, so a plain repeat steps every second (the mean over the bones said 0.7 and hid it; no
+    window of the clip does better than 2 degrees on its worst bone). So the descriptor asks for a seamless loop
+    (`blend_frames`): the client blends the window's end toward the frames BEFORE its start. That blend must come
+    from the part where the pose is still (the arrival, frames before ~46, moves the arm 20 degrees): measured on
+    the clip with the RetroXR mod's `tests/loop_scan.gd`, the window 54..74 blended over 16 frames has the smallest
+    step per frame (0.37 deg at 30 fps; 43..73 over 12 was 2.8) and strays 4.3 degrees from the clip at most."""
     d = _descriptor(REI_ANIMS / "think" / "Thinking.fbx.json")
     intro, loop, outro = d["intro"], d["loop"], d["outro"]
     assert intro["start_frame"] == 0
     assert intro["end_frame"] == loop["start_frame"]
     assert loop["end_frame"] == outro["start_frame"]
-    assert loop["end_frame"] - loop["start_frame"] >= 24  # long enough not to read as a twitch
-    assert (loop["start_frame"], loop["end_frame"]) == (43, 73)
+    assert (loop["start_frame"], loop["end_frame"]) == (54, 74)
+    blend = loop["blend_frames"]
+    assert blend >= 12, "a plain cut steps by the drift"
+    assert blend <= loop["start_frame"], "the frames before the window's start must exist"
+    assert blend <= loop["end_frame"] - loop["start_frame"]
+    assert loop["start_frame"] - blend >= 36, "the blend must not reach back into the arrival"
     assert outro["end_frame"] <= 127  # the clip has 128 frames
 
 

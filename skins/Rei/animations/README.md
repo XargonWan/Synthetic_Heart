@@ -129,20 +129,23 @@ New: the WebUI now exposes a rich `eyesState` mechanism and a DOM event `synth_e
 ### Making a clip loop (the `loop` window)
 
 A clip with `intro`/`loop`/`outro` plays its intro once, then repeats the **loop** window until the state changes.
-The window must **close on itself**: if the pose at `end_frame` is not the pose at `start_frame`, every repeat is a
-visible jump (Thinking's first window, 49..79, ended with the outro already under way: the hand, the arm and the head
-were 13 degrees away, so she dropped her hand, thought again, dropped it...).
+`intro.end_frame` = `loop.start_frame` and `loop.end_frame` = `outro.start_frame`: the three are one run of frames.
 
-Choose it by measuring, not by eye: the mean angle per bone between frame A and frame B over all the rotation tracks.
-`RetroXR/mods/xenu.synth_rift/tests/loop_scan.gd` prints the speed profile of a clip (a held pose is where it nearly
-stands still) and the best windows by length:
+A held pose is not a cycle: it **drifts** (Thinking's head is 4 degrees and its arm 3 away from where they were a second
+earlier). Cutting the window and repeating it steps by that much every repeat, and the mean angle over the bones hides it
+(0.7 deg/bone for a step of 4 on one bone): judge a window by its **worst bone**. Two ways to a smooth repeat:
 
-    godot --headless --path RetroXR --script res://mods/xenu.synth_rift/tests/loop_scan.gd -- clip.fbx 30
+1. Find a window whose ends meet. `RetroXR/mods/xenu.synth_rift/tests/loop_scan.gd` prints a clip's speed profile (a held
+   pose is where it nearly stands still) and the best windows by length:
+   `godot --headless --path RetroXR --script res://mods/xenu.synth_rift/tests/loop_scan.gd -- clip.fbx 20 --within=40,90`
+2. When none does (Thinking: nothing better than 2 degrees), `"loop": {..., "blend_frames": N}` asks the client to build the
+   repeat: the window's last N frames are blended toward the N frames before its start, so its end IS its start. The
+   blend must come from a still part of the clip (not the arrival, which moves the arm 20 degrees). A client that does
+   not know the field cuts the window, as before.
 
-Thinking: held between frames ~46 and ~74 (0.03-0.08 deg/bone/frame); window 43..73 (1.0 s) closes within 0.7 deg/bone.
-`intro.end_frame` = `loop.start_frame` and `loop.end_frame` = `outro.start_frame`, so the three are one run of frames.
-A clip that is already a cycle (Walking, Sitting Idle, Gaming, Crouching Idle: first and last frame within 0.03
-deg/bone) needs no window and no descriptor.
+Thinking: held between frames ~46 and ~74; `loop` 54..74 with `blend_frames` 16 (a step of 0.37 deg per 30 fps frame at its
+worst; 43..73 over 12 frames was 2.8). A clip that is already a cycle (Walking, Sitting Idle, Gaming, Crouching Idle:
+first and last frame within 0.03 deg/bone) needs no window and no descriptor.
 
 ### Descriptor Notes
 
