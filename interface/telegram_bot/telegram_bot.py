@@ -3209,14 +3209,22 @@ def shutdown_interface():
         log_error(f"[telegram_bot] Error during interface shutdown: {e}")
 
 
-def reload_interface():
+async def reload_interface() -> None:
     """Reload the interface with updated configuration.
 
     This is called when configuration variables change and the interface
-    needs to be restarted with new values.
+    needs to be restarted with new values: the running bot is stopped, a fresh
+    interface instance is created and, unless the operator disabled the
+    interface, started again with the new token.
     """
     log_info("[telegram_bot] Reloading Telegram interface...")
-    return initialize_interface()
+    await stop_bot()
+    interface = initialize_interface()
+
+    from core.core_initializer import core_initializer
+
+    if core_initializer._is_interface_enabled("telegram_bot"):
+        await interface.start()
 
 
 # Register the Telegram interface at import time if configured, so it's present

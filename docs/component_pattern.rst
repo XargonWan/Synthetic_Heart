@@ -108,9 +108,11 @@ For Interface Developers
        my_interface = None
 
 
-   def reload_interface():
-       """Reload with updated configuration."""
-       return initialize_interface()
+   async def reload_interface():
+       """Reload with updated configuration: stop, recreate, start again."""
+       await my_interface.stop()
+       interface = initialize_interface()
+       await interface.start()
 
 
    class MyInterface:
@@ -188,6 +190,12 @@ When a configuration variable changes (e.g., user updates token in WebUI):
 4. Core reloads variables from DB
 5. Core calls ``interface.initialize_interface()`` to recreate with new config
 6. Core calls ``interface.start()`` if it has a start method
+
+An interface whose module defines no ``reload_interface`` still reloads: the core
+registers a default handler that calls the instance's ``stop()`` (or
+``teardown`` / ``shutdown`` / ``close``) and then ``start()``, unless the
+operator disabled the interface. Give the class a ``stop()`` that really
+releases the connection so the restart picks up the new configuration.
 
 Rules for Component Developers
 ------------------------------

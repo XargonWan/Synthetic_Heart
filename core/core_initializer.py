@@ -4,6 +4,7 @@ import os
 import importlib
 import inspect
 import asyncio
+import functools
 import json
 import threading
 from pathlib import Path
@@ -1718,10 +1719,16 @@ class CoreInitializer:
                 module = sys.modules.get(module_name) if module_name else None
                 if module and hasattr(module, "reload_interface"):
                     handler = getattr(module, "reload_interface")
-                    config_registry.register_reload_handler(interface_name, handler)
-                    log_info(
-                        f"[core_initializer] ✅ Reload handler registered for component: {interface_name}"
+                else:
+                    # No module-level handler: restart the live instance in
+                    # place so a changed token/endpoint still takes effect.
+                    handler = functools.partial(
+                        self._restart_interface_in_place, interface_name
                     )
+                config_registry.register_reload_handler(interface_name, handler)
+                log_info(
+                    f"[core_initializer] ✅ Reload handler registered for component: {interface_name}"
+                )
             except Exception as e:
                 log_error(
                     f"[core_initializer] Failed to register reload handler for {interface_name}: {e}"
@@ -1784,6 +1791,23 @@ class CoreInitializer:
             log_warning(
                 f"[core_initializer] Failed to register Cortex reload handlers: {e}"
             )
+
+    async def _restart_interface_in_place(self, interface_name: str) -> None:
+        """Stop and start a registered interface so it re-reads its configuration.
+
+        Used as the reload handler of interfaces that do not ship their own
+        ``reload_interface``. An interface the operator disabled stays stopped.
+        """
+        instance = INTERFACE_REGISTRY.get(interface_name)
+        if instance is None or not self._is_interface_enabled(interface_name):
+            return
+        log_info(f"[core_initializer] Restarting interface '{interface_name}'")
+        await self._teardown_interface_instance(instance)
+        start_fn = getattr(instance, "start", None)
+        if callable(start_fn):
+            # start() may run for the whole connection lifetime: don't await it.
+            task = asyncio.create_task(start_fn())
+            task.set_name(f"interface_{interface_name}")
 
     def _missing_required_config_vars(self, interface_instance: Any) -> List[str]:
         """Return the list of declared-required config keys that are absent.
