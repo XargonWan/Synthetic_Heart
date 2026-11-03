@@ -40,6 +40,11 @@ class AnimationState(Enum):
     WRITE = "write"
     TALK = "talk"
     SKIN_CHANGE = "skin_change"
+    # Postures and activities of a body that has legs and hands to use. On the WebUI each plays its own
+    # clip like any state; an embodied client (RetroXR) can do more with the descriptor's ``mask``.
+    SIT = "sit"  # sitting down (a chair, a sofa; bed variants live in sit/bed/)
+    CROUCH = "crouch"  # crouching, e.g. to reach something on the floor (its play_once clip stands her up)
+    GAMING = "gaming"  # playing a game with a controller: the clip moves the upper body only (mask)
 
 
 AnimationStateChangedCallback = Callable[
@@ -52,6 +57,9 @@ AnimationStateChangedCallback = Callable[
 # Higher = more important, cannot be interrupted by lower priority animations
 ANIMATION_STATE_PRIORITIES = {
     AnimationState.IDLE: 0,  # Idle - lowest priority
+    AnimationState.SIT: 1,  # Postures give way to everything that talks or thinks
+    AnimationState.CROUCH: 1,
+    AnimationState.GAMING: 2,
     AnimationState.WRITE: 3,  # Writing - low priority
     AnimationState.TALK: 5,  # Talking - medium priority
     AnimationState.THINK: 10,  # Thinking - highest priority, cannot be interrupted

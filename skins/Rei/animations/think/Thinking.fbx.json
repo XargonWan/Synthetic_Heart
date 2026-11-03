@@ -2,15 +2,15 @@
   "fps": 30,
   "intro": {
     "start_frame": 0,
-    "end_frame": 49
+    "end_frame": 43
   },
   "loop": {
-    "start_frame": 49,
-    "end_frame": 79
+    "start_frame": 43,
+    "end_frame": 73
   },
   "outro": {
-    "start_frame": 79,
-    "end_frame": 126
+    "start_frame": 73,
+    "end_frame": 127
   },
   "expressions": [
     {

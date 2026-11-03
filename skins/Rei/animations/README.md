@@ -8,12 +8,21 @@ The SyntH animation system automatically manages avatar animations throughout th
 
 ### Animation States
 
-The system defines four logical animation states:
+The system defines these logical animation states (the first four are the conversation's; `touch` and
+`skin_change` are reactions; `sit`, `crouch` and `gaming` are what a body with legs and hands is doing):
 
 - **Idle**: Default state when no activity is occurring (files: `Idle.fbx`, `Idle2.fbx`, `Happy Idle.fbx`)
 - **Think**: Triggered when a message is received (files: `Thinking.fbx`)
 - **Write**: Triggered when the LLM starts generating a response (files: `Texting While Standing.fbx`, `Texting.fbx`)
 - **Talk**: Can be triggered for speech output (files: `talking.fbx`)
+- **Sit** (`sit/`): sitting down. `sit/Sitting Idle.fbx` loops. A bed is not a chair: the legs-swinging clip sits in
+  `sit/bed/` (a sub-folder is a variant the rotation never picks, like `idle/happy/`) until something can say "on a bed".
+- **Crouch** (`crouch/`): crouching, e.g. to reach something on the floor. `Crouching Idle.fbx` loops;
+  `Crouch To Stand.fbx` is `play_once`, i.e. a **post** clip: how the state ENDS (a client that can plays it when the
+  state is left; the rotation never picks it).
+- **Gaming** (`gaming/`): playing with a controller. `Gaming-sitting.fbx` was captured seated, so its descriptor says
+  `"mask": "upper_body"` (below): a client with a body shows only what the back, arms and hands do, whether she stands,
+  walks or sits. A client that cannot layer plays the whole clip, seated.
 
 When multiple files are specified for a state, one is randomly selected each time the animation plays.
 
@@ -74,6 +83,11 @@ Each `.fbx` animation file should have an optional adjacent descriptor `.fbx.jso
 - `fps`: Frames per second of the FBX (default: 30)
 - `play_once`: If true, animation plays once and does not loop (good for transitions)
 
+**Layer field:**
+- `mask`: `"upper_body"` = the clip drives only the spine up (back, neck, head, shoulders, arms, hands, fingers).
+  The hips and legs go on with whatever else is playing. Unknown values and clients that cannot layer ignore it and
+  play the whole clip. Posture (sitting, standing) and activity (playing, typing) are then two things, not one.
+
 **Facial Expression Fields:**
 - `lipsync`: Boolean flag (default: false). If true, animation is suitable for lip-sync synthesis
 - `expressions`: Array of expression objects with:
@@ -111,6 +125,24 @@ New: the WebUI now exposes a rich `eyesState` mechanism and a DOM event `synth_e
 **Implementation:**
  - Execution-time check in `_performBlink()`: skips blink if `eyes_closed > 0.5`
 - Frame-time monitoring in `applyExpressionsForFrame()`: monitors eye state every frame and auto-suspends/resumes loops
+
+### Making a clip loop (the `loop` window)
+
+A clip with `intro`/`loop`/`outro` plays its intro once, then repeats the **loop** window until the state changes.
+The window must **close on itself**: if the pose at `end_frame` is not the pose at `start_frame`, every repeat is a
+visible jump (Thinking's first window, 49..79, ended with the outro already under way: the hand, the arm and the head
+were 13 degrees away, so she dropped her hand, thought again, dropped it...).
+
+Choose it by measuring, not by eye: the mean angle per bone between frame A and frame B over all the rotation tracks.
+`RetroXR/mods/xenu.synth_rift/tests/loop_scan.gd` prints the speed profile of a clip (a held pose is where it nearly
+stands still) and the best windows by length:
+
+    godot --headless --path RetroXR --script res://mods/xenu.synth_rift/tests/loop_scan.gd -- clip.fbx 30
+
+Thinking: held between frames ~46 and ~74 (0.03-0.08 deg/bone/frame); window 43..73 (1.0 s) closes within 0.7 deg/bone.
+`intro.end_frame` = `loop.start_frame` and `loop.end_frame` = `outro.start_frame`, so the three are one run of frames.
+A clip that is already a cycle (Walking, Sitting Idle, Gaming, Crouching Idle: first and last frame within 0.03
+deg/bone) needs no window and no descriptor.
 
 ### Descriptor Notes
 
