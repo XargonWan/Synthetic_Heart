@@ -918,6 +918,15 @@ class VesselInterface:
         lost: it is carried on the enqueued message's ``from_user`` for
         attribution and mention detection.
         """
+        # A world may attach what its body SAW (``data["attachments"]``: ``{mime_type, data (base64), filename}``,
+        # the shape every interface's attachments take). The pictures go to the model with this turn and nowhere
+        # else: they are not written to the activity log, the experience record or the chat history, where a
+        # base64 frame would be a megabyte of noise per event.
+        attachments = [a for a in ((data or {}).get("attachments") or []) if isinstance(a, dict) and a.get("data")]
+        if attachments:
+            data = {k: v for k, v in (data or {}).items() if k != "attachments"}
+            data["attachments_count"] = len(attachments)
+
         # Prefer the path the open session was created with (so a perception
         # lands on the exact same ``vessel/<game>/<world>`` scope the will beat
         # and goals use); fall back to building one from the world token.
@@ -1066,6 +1075,7 @@ class VesselInterface:
             environment=environment,
             event_type=event_type,
             actor=entity,
+            attachments=attachments or None,
         )
         return True
 
@@ -1262,6 +1272,7 @@ class VesselInterface:
         allowed_actions: set[str] | None = None,
         world_state_context: dict[str, Any] | None = None,
         observation_followup: bool = False,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> None:
         """Wrap a perception as a normal message and enqueue it (Fast Lane).
 
@@ -1368,6 +1379,9 @@ class VesselInterface:
                 entities=None,
                 reply_to_message=None,
             )
+            if attachments:
+                # What the world's body saw, for the model's vision (see on_world_event).
+                wrapped.attachments = attachments
             # A per-turn action restriction: when ``allowed_actions`` is given
             # (the dedicated goal beat), pass it as ``context_memory`` so the
             # prompt engine trims this turn's action catalog to exactly those

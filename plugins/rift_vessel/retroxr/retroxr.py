@@ -79,23 +79,74 @@ WORLD_VERBS: Dict[str, Dict[str, Any]] = {
         "optional_fields": [],
         "security_level": "low",
     },
+    "search": {
+        "description": (
+            "Look for something in the room: turn all the way round, and if it is not in front of you "
+            "walk to other places and look again, for up to about a minute. You see only what a person "
+            "in front of you would. You are NOT asked anything meanwhile: you are told afterwards, as a "
+            "new event, whether you found it (and where) or looked everywhere and it is not here. Use it "
+            "when something is not in what is around you, instead of guessing where it is."
+        ),
+        "required_fields": ["target"],
+        "optional_fields": [],
+        "security_level": "low",
+    },
+    "explore": {
+        "description": (
+            "Look around the room from a few places (turning all the way round, walking between them). You "
+            "are told afterwards what you saw. Use it when you want to know what is here."
+        ),
+        "required_fields": [],
+        "optional_fields": [],
+        "security_level": "low",
+    },
+    "watch": {
+        "description": (
+            "Go to the TV (or another thing, with 'target') and watch it for a few seconds ('seconds', up to "
+            "30). You are told afterwards what you saw there: whether it is on and, when the room can show "
+            "it, a picture of the screen."
+        ),
+        "required_fields": [],
+        "optional_fields": ["target", "seconds"],
+        "security_level": "low",
+    },
+    "bring": {
+        "description": (
+            "Fetch an object for the player: find it (looking around if it is not in front of you), pick it up, "
+            "walk to the player and hold it out until they take it. You are told afterwards how it went: "
+            "brought, not found, or too heavy to carry."
+        ),
+        "required_fields": ["target"],
+        "optional_fields": [],
+        "security_level": "low",
+    },
+    "stop": {
+        "description": "Stop what you are doing on your own (looking, fetching, watching).",
+        "required_fields": [],
+        "optional_fields": [],
+        "security_level": "low",
+    },
     "pick_up": {
         "description": (
-            "Pick an object up in your hand so you can look at it or carry it. "
-            "You hold one object at a time. The player may take it from your hand."
+            "Walk up to a small object and pick it up in both hands so you can carry it (not furniture). "
+            "You hold one object at a time. The player may take it from your hands. You are told afterwards "
+            "that you are holding it."
         ),
         "required_fields": ["target"],
         "optional_fields": [],
         "security_level": "low",
     },
     "put_down": {
-        "description": "Put down what you are holding where you stand (or on 'target').",
+        "description": "Put down what you are holding, in front of you, on whatever is under your hands (a table, the floor).",
         "required_fields": [],
         "optional_fields": ["target"],
         "security_level": "low",
     },
     "hand_over": {
-        "description": "Hold what you are carrying out to the player so they can take it.",
+        "description": (
+            "Walk to the player and hold what you are carrying out so they can take it; if they do not, "
+            "you put it down in front of them. You are told afterwards what happened."
+        ),
         "required_fields": [],
         "optional_fields": [],
         "security_level": "low",
@@ -449,13 +500,19 @@ class RetroXRConnector(VesselConnectorBase):
         if self._on_event is None:
             return
         try:
+            data = dict(raw.get("data")) if isinstance(raw.get("data"), dict) else {}
+            # A picture from her eyes (the mod sends a JPEG as base64): it travels as an attachment, the shape
+            # every interface's attachments take, so the model can read it with this turn.
+            image = data.pop("image_jpeg_b64", None)
+            if isinstance(image, str) and image:
+                data["attachments"] = [{"mime_type": "image/jpeg", "data": image, "filename": "what_she_saw.jpg"}]
             event = PerceptionEvent(
                 environment=ENVIRONMENT,
                 event_type=str(raw.get("event_type") or "event"),
                 summary=str(raw.get("summary") or ""),
                 actor=raw.get("actor"),
                 salience=raw.get("salience"),
-                data=raw.get("data") if isinstance(raw.get("data"), dict) else {},
+                data=data,
             )
             result = self._on_event(event)
             if asyncio.iscoroutine(result):

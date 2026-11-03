@@ -75,4 +75,23 @@ action, goal or reflection beat: those push a bot toward a goal.
 ## Verbs
 
 Core set: `say`, `move`, `look`, `use`, `follow`, `unfollow`, `status`.
-RetroXR: `look_at`, `touch`, `pick_up`, `put_down`, `hand_over`, `sit`, `emote`, `inspect`.
+RetroXR: `look_at`, `touch`, `pick_up`, `put_down`, `hand_over`, `sit`, `emote`, `inspect`, and the ones she does ON HER OWN
+once asked: `search`, `explore`, `watch`, `bring`, `stop`.
+
+**Offered to her is what the mod declared**: `touch` and `sit` are in the schema but the mod does not build them, so she is not offered them.
+
+### What she sees, and what she is told afterwards
+
+The `state` frame (and so `Nearby entities` in her prompt, which prints each entity's `name`) lists only what a person in front of her would
+see: about 180 degrees, within ~6 m, not hidden. Each entity's `name` is what a person would call it ("Game Boy Color", "VHS tape 2",
+`unknown item`: never empty or an engine name), `type` its kind, `powered`/`held` when they apply; `id` is the node's own name. She can
+name only what she has seen: for the rest she `search`es.
+
+`search`, `explore`, `watch`, `bring`, `pick_up`, `hand_over` return **at once** ("looking for X: you will be told what you find") and the mod
+sends the result later as an event (`search_done`, `explore_done`, `watch_done`, `pick_up_done`, `hand_over_done`, `bring_done`, with
+`data.ok`), which is a turn of its own (they are not in `EPHEMERAL_EVENT_TYPES`). Meanwhile she is not asked anything. A `move` or
+`follow` replaces what she is doing.
+
+**Pictures.** `watch_done` can carry `data.image_jpeg_b64` (what her eyes took of the thing). The connector turns it into
+`data.attachments` (`{mime_type, data, filename}`); `interface/vessel_interface.py` hands attachments to the model with that turn and keeps
+them out of the activity log and the experience record. The player can switch pictures off in the Summoner's menu.

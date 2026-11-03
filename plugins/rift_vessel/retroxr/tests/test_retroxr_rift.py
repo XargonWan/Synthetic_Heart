@@ -145,6 +145,39 @@ async def test_events_become_perceptions() -> None:
     assert ev.data == {"part": "hand"}
 
 
+async def test_a_picture_from_her_eyes_rides_as_an_attachment() -> None:
+    conn, _, events = await _connected()
+    await conn.handle_frame(
+        {"type": "event", "event_type": "watch_done", "summary": "You watched TV for 4 seconds.",
+         "salience": 0.9, "data": {"seconds": 4, "image_jpeg_b64": "QUJD"}}
+    )
+    ev = events[0]
+    assert ev.event_type == "watch_done"
+    assert "image_jpeg_b64" not in ev.data, "the raw field does not travel twice"
+    assert ev.data["attachments"] == [{"mime_type": "image/jpeg", "data": "QUJD", "filename": "what_she_saw.jpg"}]
+    assert ev.data["seconds"] == 4
+    # an event with no picture has no attachments key
+    await conn.handle_frame({"type": "event", "event_type": "search_done", "summary": "x", "data": {"found": True}})
+    assert "attachments" not in events[1].data
+
+
+def test_what_she_does_on_her_own_is_not_ambient_telemetry() -> None:
+    """A finished search/fetch/watch is a turn of its own: the model asked for it and wants to know."""
+    from plugins.rift_vessel.vessel_base import is_ephemeral_event
+
+    for kind in ("search_done", "explore_done", "watch_done", "bring_done", "pick_up_done", "hand_over_done"):
+        assert not is_ephemeral_event(kind), kind
+
+
+def test_the_verbs_she_does_on_her_own_have_schemas() -> None:
+    from plugins.rift_vessel.retroxr.retroxr import WORLD_VERBS
+
+    for verb in ("search", "explore", "watch", "bring", "stop", "pick_up", "put_down", "hand_over"):
+        assert verb in WORLD_VERBS and WORLD_VERBS[verb]["description"]
+    assert WORLD_VERBS["search"]["required_fields"] == ["target"]
+    assert WORLD_VERBS["bring"]["required_fields"] == ["target"]
+
+
 async def test_state_frame_feeds_world_state() -> None:
     conn, _, _ = await _connected({"room": "den"})
     assert (await conn.get_world_state()).position is None
