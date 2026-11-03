@@ -4361,7 +4361,6 @@ class SynthWebUIInterface:
         """
         import asyncio as _asyncio
         from core.model_manager import MODEL_MANAGER
-        from core.vox_registry import VOX_REGISTRY
 
         lang = request.query_params.get("lang", "en")
 
@@ -4388,36 +4387,16 @@ class SynthWebUIInterface:
                 gender = vm.gender
                 break
 
-        # Import generator helper lazily to avoid circular imports
-        import inspect
+        # Import generator helpers lazily to avoid circular imports
+        from scripts.generate_model_samples import (
+            edge_fallback_sample,
+            vox_engine_sample,
+        )
 
         def _generate_fn(text: str, v: str | None) -> "bytes | None":
-            # Try VOX engine first
-            for engine_name in VOX_REGISTRY.get_available_engines():
-                try:
-                    engine = VOX_REGISTRY.load_engine(engine_name)
-                    if not hasattr(engine, "sample"):
-                        continue
-                    sig = inspect.signature(engine.sample)
-                    data: bytes | None = (
-                        engine.sample(text, v)
-                        if len(sig.parameters) == 2
-                        else engine.sample(v)
-                    )
-                    if data:
-                        return data
-                except Exception:
-                    continue
-            # edge-tts fallback with correct locale + gender
-            try:
-                from scripts.generate_model_samples import _edge_generate, _tweak_audio
-
-                data = _edge_generate(text, v, lang=lang, gender=gender)
-                if data:
-                    return _tweak_audio(data, v, lang)
-            except Exception:
-                pass
-            return None
+            return vox_engine_sample(text, v, model_id) or edge_fallback_sample(
+                text, v, lang, gender
+            )
 
         loop = _asyncio.get_event_loop()
         try:
