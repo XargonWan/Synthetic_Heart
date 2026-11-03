@@ -37,6 +37,7 @@ from typing import Any
 
 from core.ai_plugin_base import AIPluginBase
 from core.beat_utils import is_outbound_beat
+from core.app_paths import default_tts_output_dir, resolve_tts_output_dir
 from core.config_manager import config_registry
 from core.config import get_vox_language_override_async
 from core.core_initializer import register_plugin, INTERFACE_REGISTRY
@@ -151,7 +152,7 @@ config_registry.get_value(
 )
 config_registry.get_value(
     "VOX_OUTPUT_DIR",
-    "res/synth_webui/static/audio/tts",
+    default_tts_output_dir(),
     label="Vox Output Directory",
     description="Directory where synthesised Vox audio clips are stored.",
     value_type=str,
@@ -415,7 +416,7 @@ class VoxPlugin(AIPluginBase):
         # explicit enabled flag removed; use engine name "disabled" instead
         self._active_engine_name: str = "http"
         self._engine_settings: dict[str, Any] = {}
-        self._output_dir: Path = Path("res/synth_webui/static/audio/tts")
+        self._output_dir: Path = Path(default_tts_output_dir())
         self._fallback_to_text: bool = True
         self._sentence_chunking_enabled: bool = True
 
@@ -973,12 +974,12 @@ class VoxPlugin(AIPluginBase):
 
             output_dir_raw = config_registry.get_value(
                 "VOX_OUTPUT_DIR",
-                "res/synth_webui/static/audio/tts",
+                default_tts_output_dir(),
                 value_type=str,
                 group="plugins",
                 component="vox_plugin",
             )
-            self._output_dir = Path(str(output_dir_raw))
+            self._output_dir = Path(resolve_tts_output_dir(output_dir_raw))
             self._output_dir.mkdir(parents=True, exist_ok=True)
 
             self._fallback_to_text = bool(

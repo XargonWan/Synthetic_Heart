@@ -226,3 +226,48 @@ def test_radio_audio_dir_is_not_container_only() -> None:
         assert audio_dir == Path("/app/tmp_tts/radio_host")
     else:
         assert app_paths.app_root() in audio_dir.parents
+
+
+# --------------------------------------------------- generated-audio location
+
+
+def test_tts_output_defaults_to_the_data_volume(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    container = tmp_path / "config"
+    container.mkdir()
+    monkeypatch.setattr(app_paths, "CONTAINER_DATA_ROOT", container)
+    assert app_paths.default_tts_output_dir() == str(container / "media" / "tts")
+    assert app_paths.persistent_media_dir("radio_host") == (
+        container / "media" / "radio_host"
+    )
+
+
+def test_tts_output_keeps_the_in_tree_default_without_a_volume(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(app_paths, "CONTAINER_DATA_ROOT", tmp_path / "absent")
+    assert app_paths.default_tts_output_dir() == app_paths.LEGACY_TTS_OUTPUT_DIR
+    assert app_paths.persistent_media_dir("radio_host") is None
+
+
+def test_stored_legacy_tts_dir_is_moved_to_the_volume(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Earlier runs may have stored the old in-image default in the database."""
+    container = tmp_path / "config"
+    container.mkdir()
+    monkeypatch.setattr(app_paths, "CONTAINER_DATA_ROOT", container)
+    expected = str(container / "media" / "tts")
+    assert app_paths.resolve_tts_output_dir(app_paths.LEGACY_TTS_OUTPUT_DIR) == expected
+    assert app_paths.resolve_tts_output_dir("") == expected
+    assert app_paths.resolve_tts_output_dir(None) == expected
+
+
+def test_explicit_tts_dir_is_never_overridden(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    container = tmp_path / "config"
+    container.mkdir()
+    monkeypatch.setattr(app_paths, "CONTAINER_DATA_ROOT", container)
+    assert app_paths.resolve_tts_output_dir("/srv/my-audio") == "/srv/my-audio"
