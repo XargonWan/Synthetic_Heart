@@ -752,3 +752,101 @@ async def test_pending_proposal_is_discarded_when_it_restates_a_claim(
     )
     assert await plugin.discard_pending_proposal_matching([_false_claim()]) is False
     clear.assert_not_awaited()
+
+
+# ------------------------------------------------- missed-slot catch-up
+
+
+def test_previous_slot_is_most_recent_occurrence(plugin: GrilloGrowthPlugin) -> None:
+    # Tuesday 2026-11-03 10:00 -> the slot that matters is Sunday 2026-11-01 03:00.
+    now = datetime(2026, 11, 3, 10, 0, 0, tzinfo=timezone.utc)
+    assert plugin._previous_slot("Sunday", "03:00", now) == datetime(
+        2026, 11, 1, 3, 0, 0, tzinfo=timezone.utc
+    )
+
+
+def test_previous_slot_at_exact_slot_time(plugin: GrilloGrowthPlugin) -> None:
+    now = datetime(2026, 11, 1, 3, 0, 0, tzinfo=timezone.utc)
+    assert plugin._previous_slot("Sunday", "03:00", now) == now
+
+
+@pytest.mark.asyncio
+async def test_last_run_prefers_persisted_timestamp(
+    plugin: GrilloGrowthPlugin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        gg.config_registry, "get_value", lambda *a, **k: "2026-10-25T03:01:00+00:00"
+    )
+    now = datetime(2026, 11, 3, tzinfo=timezone.utc)
+    assert await plugin._last_run_at(now) == datetime(
+        2026, 10, 25, 3, 1, tzinfo=timezone.utc
+    )
+
+
+@pytest.mark.asyncio
+async def test_last_run_falls_back_to_latest_growth_state(
+    plugin: GrilloGrowthPlugin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(gg.config_registry, "get_value", lambda *a, **k: "")
+    monkeypatch.setattr(
+        gg,
+        "get_growth_history",
+        AsyncMock(return_value=[{"created_at": "2026-10-18T03:00:00+00:00"}]),
+    )
+    now = datetime(2026, 11, 3, tzinfo=timezone.utc)
+    assert await plugin._last_run_at(now) == datetime(
+        2026, 10, 18, 3, 0, tzinfo=timezone.utc
+    )
+
+
+@pytest.mark.asyncio
+async def test_last_run_seed_is_persisted_on_fresh_install(
+    plugin: GrilloGrowthPlugin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(gg.config_registry, "get_value", lambda *a, **k: "")
+    monkeypatch.setattr(gg, "get_growth_history", AsyncMock(return_value=[]))
+    record = AsyncMock()
+    monkeypatch.setattr(plugin, "_record_run", record)
+    now = datetime(2026, 11, 3, tzinfo=timezone.utc)
+    assert await plugin._last_run_at(now) == now
+    record.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_successful_cycle_records_the_run(
+    plugin: GrilloGrowthPlugin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proposal = {"self_growth": "You grew.", "likes": [], "dislikes": []}
+    monkeypatch.setattr(gg.config_registry, "get_value", lambda *a, **k: "on")
+    monkeypatch.setattr(plugin, "_fetch_recent_diaries", AsyncMock(return_value=""))
+    monkeypatch.setattr(gg, "get_current_growth", AsyncMock(return_value=""))
+    monkeypatch.setattr(plugin, "_current_likes_dislikes", lambda: ([], []))
+    monkeypatch.setattr(plugin, "_recall_memories", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        plugin, "_ask_llm_for_rewrite", AsyncMock(return_value=proposal)
+    )
+    monkeypatch.setattr(gg, "save_growth_state", AsyncMock(return_value=7))
+    monkeypatch.setattr(plugin, "_apply_likes_dislikes", AsyncMock())
+    record = AsyncMock()
+    monkeypatch.setattr(plugin, "_record_run", record)
+
+    await plugin.run_growth_cycle(force=True)
+    record.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_failed_cycle_does_not_record_the_run(
+    plugin: GrilloGrowthPlugin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(gg.config_registry, "get_value", lambda *a, **k: "on")
+    monkeypatch.setattr(plugin, "_fetch_recent_diaries", AsyncMock(return_value=""))
+    monkeypatch.setattr(gg, "get_current_growth", AsyncMock(return_value=""))
+    monkeypatch.setattr(plugin, "_current_likes_dislikes", lambda: ([], []))
+    monkeypatch.setattr(plugin, "_recall_memories", AsyncMock(return_value=[]))
+    monkeypatch.setattr(plugin, "_ask_llm_for_rewrite", AsyncMock(return_value=None))
+    record = AsyncMock()
+    monkeypatch.setattr(plugin, "_record_run", record)
+
+    result = await plugin.run_growth_cycle(force=True)
+    assert result["success"] is False
+    record.assert_not_awaited()

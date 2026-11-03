@@ -127,7 +127,7 @@ the config registry.
      - Day of the week the weekly reflection runs.
    * - ``GROWTH_WEEKLY_TIME``
      - ``03:00``
-     - Local time (HH:MM) the weekly reflection runs.
+     - Time (HH:MM, **UTC**) the weekly reflection runs.
    * - ``GROWTH_REQUEST_INTERFACE_PATH``
      - *(empty)*
      - ``interface_path`` to send the proposal to in ``request`` mode. Falls
@@ -191,9 +191,14 @@ of self"*. If there is no current state, no block is added.
 Manual & scheduled runs
 ------------------------
 
-- **Scheduled**: a background scheduler fires once a week at
-  ``GROWTH_WEEKLY_DAY`` / ``GROWTH_WEEKLY_TIME`` (skipped when
-  ``GROWTH_MODE=off``).
+- **Scheduled**: a background scheduler runs the cycle once a week at
+  ``GROWTH_WEEKLY_DAY`` / ``GROWTH_WEEKLY_TIME`` (skipped while
+  ``GROWTH_MODE=off``; the mode is re-read every minute, so switching it on needs
+  no restart). The time of the last completed run is persisted in the hidden
+  ``GROWTH_LAST_RUN`` key, so a restart that spans the slot is **caught up** on
+  the next start instead of skipping the week. A cycle that fails (the model
+  returned nothing usable, the proposal could not be delivered) is retried hourly,
+  at most four times per slot. A fresh install waits for its first slot.
 - **Manual (WebUI "Run Now")**: ``run_now`` triggers a cycle immediately,
   bypassing the schedule and the ``off`` gate (``force=True``), while still
   honouring ``GROWTH_MODE`` for delivery.
