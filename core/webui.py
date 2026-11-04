@@ -3671,7 +3671,12 @@ class SynthWebUIInterface:
                 # 4) Face values (emotions)
                 face = full_state.get("face_values", {})
                 if face:
-                    await websocket.send_json({"type": "vrm_face", "values": face})
+                    # Weights resolved per skin, as every later frame is (a raw emotion state here and
+                    # resolved ones after would flip the face at the first refresh).
+                    resolve = getattr(self.animation_handler, "resolve_face_values", None)
+                    await websocket.send_json(
+                        {"type": "vrm_face", "values": resolve(face) if callable(resolve) else face}
+                    )
 
                 # 5) If no animation is set yet, start idle
                 if not anim.get("descriptor") and self.persona_manager:

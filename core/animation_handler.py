@@ -314,6 +314,57 @@ class KaradaStateServer:
     # Face / expression helpers
     # ------------------------------------------------------------------
 
+    def _emotion_presets(self) -> Dict[str, Dict[str, float]]:
+        """The active skin's ``emotions`` from its persona.json: emotion name -> logical blendshape targets.
+
+        Every skin defines its own (one is more "sad" than another, a ``happy`` is a different smile), which is why
+        the SERVER turns an emotion into weights and not each client. {} when there is no persona or no section.
+        """
+        try:
+            import sys
+
+            pm_mod = sys.modules.get("core.persona_manager")
+            pm = pm_mod.get_persona_manager() if pm_mod and hasattr(pm_mod, "get_persona_manager") else None
+            current = getattr(pm, "_current_persona", None) if pm else None
+            name = getattr(current, "name", None) if current else None
+            if not name:
+                return {}
+            data = pm._load_persona_json(name)
+            emotions = data.get("emotions") if isinstance(data, dict) else None
+            if not isinstance(emotions, dict):
+                return {}
+            return {
+                str(k): {str(t): float(w) for t, w in v.items()}
+                for k, v in emotions.items()
+                if isinstance(v, dict)
+            }
+        except Exception as exc:  # pragma: no cover - best effort
+            log_debug(f"[KaradaStateServer] no emotion presets: {exc}")
+            return {}
+
+    def resolve_face_values(self, values: Dict[str, float]) -> Dict[str, float]:
+        """What clients are sent for ``values`` (an emotion state): blendshape weights, resolved per skin.
+
+        ``happy: 0.65`` becomes the skin's own ``{mouth_smile: 0.25, eyes_smile: 0.2}`` scaled by 0.65; the same
+        target from two emotions keeps the stronger. A name the persona has no preset for (a raw blendshape or an
+        emotion this skin does not define) goes through unchanged. The authoritative emotion state
+        (``_current_face_values``) is never touched.
+        """
+        presets = self._emotion_presets()
+        if not presets:
+            return dict(values)
+        out: Dict[str, float] = {}
+        for name, value in values.items():
+            preset = presets.get(name)
+            if preset is None:
+                out[name] = max(out.get(name, 0.0), float(value))
+                continue
+            for target, weight in preset.items():
+                scaled = float(weight) * float(value)
+                if scaled > 0.0001:
+                    out[target] = max(out.get(target, 0.0), scaled)
+        return {k: round(v, 4) for k, v in out.items()}
+
     async def set_face_values(self, values: Dict[str, float]) -> None:
         """Broadcast raw face values to all connected clients.
 
@@ -346,7 +397,7 @@ class KaradaStateServer:
 
         if not self._has_any_transport():
             return
-        payload = {"type": "vrm_face", "values": dict(self._current_face_values)}
+        payload = {"type": "vrm_face", "values": self.resolve_face_values(self._current_face_values)}
         for transport in self._transports:
             try:
                 await transport.broadcast_face(payload)
@@ -2575,7 +2626,7 @@ class KaradaStateServer:
         active expression override (or a clear if none is active) so all
         clients converge on the same shared-avatar face.
         """
-        face_payload = {"type": "vrm_face", "values": dict(self._current_face_values)}
+        face_payload = {"type": "vrm_face", "values": self.resolve_face_values(self._current_face_values)}
         expr_payload = (
             dict(self._current_expression)
             if self._current_expression
