@@ -2035,6 +2035,21 @@ class VesselInterface:
         ):
             return
 
+        # A beat nobody asked for must not make a person wait: only start one when the engine has had nothing to
+        # do for a whole interval. Without this a 90 s turn and a 90 s interval kept it busy for ever, and a chat
+        # always arrived behind a running beat (a "ciao" waited 4+ minutes, 2026-11-04).
+        try:
+            from core import message_queue
+
+            rested = message_queue.consumer_idle_seconds()
+        except Exception:  # pragma: no cover - defensive
+            rested = float("inf")
+        if rested < vessel_beat.resolve_idle_interval(_cfg):
+            log_debug(
+                f"[vessel_interface] Idle beat for '{world}' held: the engine has been free for only {rested:.0f}s"
+            )
+            return
+
         try:
             surroundings = connector.describe_surroundings()
         except Exception as exc:

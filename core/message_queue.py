@@ -123,6 +123,8 @@ _CONSUMER_STALL_WARN_SECONDS = 300.0
 _in_flight_label: str | None = None
 _in_flight_started_at: float = 0.0
 _in_flight_reported: bool = False
+# When the consumer last finished an item (monotonic); None until it has finished one.
+_last_item_finished_at: float | None = None
 
 
 def _item_label(item: dict[str, Any] | None) -> str:
@@ -147,9 +149,31 @@ def _note_item_in_flight(item: dict[str, Any] | None) -> None:
 
 def _clear_item_in_flight() -> None:
     """Clear the in-flight item once its handling block has finished."""
-    global _in_flight_label, _in_flight_reported
+    global _in_flight_label, _in_flight_reported, _last_item_finished_at
     _in_flight_label = None
     _in_flight_reported = False
+    _last_item_finished_at = time.monotonic()
+
+
+def consumer_idle_seconds() -> float:
+    """How long the consumer has had nothing to do: 0.0 while an item is in flight or anything is queued,
+    ``inf`` if it has never finished one (nothing ran yet).
+
+    Lets a producer of OPTIONAL work (an autonomous beat) wait until the engine has really rested, so a human's
+    message never lands behind a turn nobody asked for: a heap orders what runs NEXT, it cannot pull a running
+    generation back (Zen cannot be cancelled at all).
+    """
+    if _in_flight_label:
+        return 0.0
+    queue = _queue
+    try:
+        if queue is not None and queue.qsize() > 0:
+            return 0.0
+    except Exception:  # pragma: no cover - defensive
+        return 0.0
+    if _last_item_finished_at is None:
+        return float("inf")
+    return max(0.0, time.monotonic() - _last_item_finished_at)
 
 
 def _stalled_item_report() -> tuple[str, float] | None:

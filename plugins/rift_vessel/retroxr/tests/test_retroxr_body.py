@@ -389,6 +389,38 @@ async def test_idle_beat_asks_what_she_wants_to_do(iface) -> None:
     assert len(sent) == 1, "and not again until the interval has passed"
 
 
+async def test_idle_beat_waits_until_the_engine_has_rested(iface, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A turn nobody asked for must not run while a person could be waiting: the engine must have been free for a
+    whole interval (the queue's own clock), not merely 90 s since the last beat was ENQUEUED."""
+    from core import message_queue
+
+    vi, reg, sent = iface
+    reg._instances["retroxr"] = _Conn(idle=True)
+    monkeypatch.setattr(message_queue, "consumer_idle_seconds", lambda: 0.0)  # a turn in flight / queued
+    await vi._maybe_run_idle_beat()
+    assert sent == [], "a beat was started on a busy engine"
+    monkeypatch.setattr(message_queue, "consumer_idle_seconds", lambda: 30.0)  # free, but only for 30 s of 90
+    await vi._maybe_run_idle_beat()
+    assert sent == [], "a beat was started before the engine had rested for the interval"
+    monkeypatch.setattr(message_queue, "consumer_idle_seconds", lambda: 95.0)
+    await vi._maybe_run_idle_beat()
+    assert len(sent) == 1
+
+
+def test_the_queue_says_how_long_it_has_been_free(monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import message_queue as mq
+
+    monkeypatch.setattr(mq, "_queue", None)
+    monkeypatch.setattr(mq, "_in_flight_label", None)
+    monkeypatch.setattr(mq, "_last_item_finished_at", None)
+    assert mq.consumer_idle_seconds() == float("inf"), "never busy: nothing to wait for"
+    monkeypatch.setattr(mq, "_in_flight_label", "chat x")
+    assert mq.consumer_idle_seconds() == 0.0, "a turn in flight is busy"
+    monkeypatch.setattr(mq, "_in_flight_label", None)
+    mq._clear_item_in_flight()
+    assert 0.0 <= mq.consumer_idle_seconds() < 5.0, "just finished: just rested"
+
+
 async def test_idle_beat_yields_to_a_player_who_just_spoke(iface) -> None:
     vi, reg, sent = iface
     reg._instances["retroxr"] = _Conn(idle=True)
