@@ -178,6 +178,31 @@ class VesselConnectorBase(ABC):
     # there is no failure to report.
     last_error: str | None = None
 
+    #: True when this world is somewhere the vessel LIVES rather than a session it visits: the chat of one visit is
+    #: still there on the next (a person in a room; a Minecraft run is a fresh start each time, which is why the
+    #: default is False). :meth:`VesselInterface.end_session` skips the chat purge for a connector that sets it, and
+    #: the player clears it by hand (:meth:`forget_memory`). The lived-experience diary is unaffected either way.
+    remembers_chat: bool = False
+
+    async def forget_memory(self, environment: str, world: Any = None) -> bool:
+        """Clear this world's remembered chat (the in-memory context AND the durable history).
+
+        Generic for every rift adapter: the adapter passes its environment name (and its world identity, if it
+        has one); the Vessel interface owns where the chat lives. True when something was cleared.
+        """
+        try:
+            from core.core_initializer import INTERFACE_REGISTRY
+
+            iface = INTERFACE_REGISTRY.get("vessel")
+            if iface is None or not hasattr(iface, "forget_chat"):
+                return False
+            return bool(await iface.forget_chat(environment, world))
+        except Exception as exc:  # pragma: no cover - defensive
+            from core.logging_utils import log_warning
+
+            log_warning(f"[vessel_base] forget_memory({environment}) failed: {exc}")
+            return False
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------

@@ -765,7 +765,14 @@ class VesselInterface:
         # so each session starts clean. The goals table is left untouched: a
         # goal survives across sessions by design. Guarded + fail-safe.
         try:
-            if interface_path:
+            if interface_path and self._connector_remembers_chat(environment):
+                # A world the vessel lives in (a room): its chat is still there next time, until the player
+                # clears it (forget_chat). The experience diary above is flushed as always.
+                log_debug(
+                    f"[vessel_interface] kept the chat of {interface_path} past session end "
+                    f"('{environment}' remembers its chat)"
+                )
+            elif interface_path:
                 from core.chat_context_manager import clear_chat_context
                 from core.chat_history_cache import clear_chat_history
 
@@ -785,6 +792,37 @@ class VesselInterface:
             summary=f"Left {environment} ({reason})",
         )
         self._sessions.pop(session_id, None)
+
+    def _connector_remembers_chat(self, environment: str) -> bool:
+        """Does the connector of ``environment`` keep its chat between sessions? (``remembers_chat``)"""
+        connector = self._connector_environments().get(environment)
+        return bool(getattr(connector, "remembers_chat", False)) if connector is not None else False
+
+    async def forget_chat(self, environment: str, world: Any = None) -> bool:
+        """Clear the remembered chat of ``environment`` (every tracked scope of it, and the scope ``world`` names).
+
+        The in-memory deques and the durable ``chat_history_cache`` both: what the player asked to forget must not
+        come back at the next restart. Goals and the experience diary are not touched.
+        """
+        paths: set[str] = set()
+        for path in self._sessions.values():
+            parts = path.split("/")
+            if len(parts) >= 2 and parts[0] == INTERFACE_NAME and parts[1] == environment:
+                paths.add(path)
+        paths.add(build_interface_path(INTERFACE_NAME, environment, _slugify_world_token(world)))
+        cleared = False
+        try:
+            from core.chat_context_manager import clear_chat_context
+            from core.chat_history_cache import clear_chat_history
+
+            for path in paths:
+                await clear_chat_history(path)
+                clear_chat_context(path)
+                cleared = True
+                log_info(f"[vessel_interface] chat forgotten at the player's request: {path}")
+        except Exception as exc:
+            log_warning(f"[vessel_interface] forget_chat failed for '{environment}': {exc}")
+        return cleared
 
     def _tracked_path_for_environment(self, environment: str) -> str | None:
         """Return the interface path of a tracked session for ``environment``.

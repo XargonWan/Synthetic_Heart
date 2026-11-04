@@ -82,9 +82,23 @@ async def handle_rift(websocket: WebSocket) -> None:
 
     # 2. adopt the socket, then enter the world through the plugin's own path.
     connector = VESSEL_REGISTRY.load_connector(ENVIRONMENT)
+    # A mod that was welcomed before names its session in ``hello.resume``: a room change or a blip dropped the
+    # socket and it is back. The session was kept for the interface's disconnect grace; the mod's new socket
+    # replaces the old one even if the server has not noticed that one is dead yet.
+    resume = str(hello.get("resume") or "").strip()
     if connector.is_connected:
-        await _refuse(websocket, "busy", "a RetroXR rift is already open")
-        return
+        if resume and resume == connector.session_token:
+            log_info(f"{LOG_PREFIX} the mod is back before its old socket was seen to drop: replacing it")
+            old_ws = getattr(connector, "_ws", None)
+            connector.pause_socket()
+            try:
+                if old_ws is not None:
+                    await old_ws.close()
+            except Exception:
+                pass
+        else:
+            await _refuse(websocket, "busy", "a RetroXR rift is already open")
+            return
     connector.attach_socket(websocket, hello)
     try:
         result = await plugin.connect_world(connector_name=ENVIRONMENT)
@@ -98,6 +112,10 @@ async def handle_rift(websocket: WebSocket) -> None:
         return
 
     # 3. welcome (with the body), then pump frames until the mod goes away.
+    session_id = (result.data or {}).get("session_id")
+    # Resumed only when the session is the very one the mod held: past the grace the old one ended and this is new.
+    resumed = bool(resume) and bool(session_id) and str(session_id) == resume
+    connector.session_token = str(session_id) if session_id else connector.session_token
     assets: Dict[str, Any] | None = None
     try:
         assets = await connector.get_embodiment_assets()
@@ -107,17 +125,19 @@ async def handle_rift(websocket: WebSocket) -> None:
         {
             "type": "welcome",
             "protocol": PROTOCOL_VERSION,
-            "session": (result.data or {}).get("session_id"),
+            "session": session_id,
+            "resumed": resumed,
             "assets": assets or {},
         }
     )
-    log_info(f"{LOG_PREFIX} rift open (room={hello.get('room')!r})")
+    log_info(f"{LOG_PREFIX} rift {'resumed' if resumed else 'open'} (room={hello.get('room')!r}, session={session_id})")
     # Now that she is welcomed: say what she is doing, then Karada's changes follow on their own.
     try:
         await connector.announce_state()
     except Exception as exc:
         log_warning(f"{LOG_PREFIX} could not announce her state: {exc}")
 
+    said_goodbye = False
     try:
         while True:
             raw = await websocket.receive_text()
@@ -127,6 +147,10 @@ async def handle_rift(websocket: WebSocket) -> None:
                 continue
             if not isinstance(msg, dict):
                 continue
+            if msg.get("type") == "bye":
+                # The player sent her back (or switched the pod off): leaving on purpose ends the session.
+                said_goodbye = True
+                break
             if msg.get("type") == "request_assets":
                 names = msg.get("animations")
                 body = await connector.get_embodiment_assets(
@@ -140,13 +164,27 @@ async def handle_rift(websocket: WebSocket) -> None:
     except Exception as exc:
         log_warning(f"{LOG_PREFIX} socket error: {exc}")
     finally:
-        # Leaving ends the session through the plugin so the recap is written once.
-        try:
-            await plugin.disconnect_world(connector_name=ENVIRONMENT)
-        except Exception as exc:
-            log_warning(f"{LOG_PREFIX} disconnect_world failed: {exc}")
-            connector.detach_socket()
-        log_info(f"{LOG_PREFIX} rift closed")
+        if not connector.owns(websocket):
+            # The mod resumed on a newer socket: that one is the rift now, and this one's end is not its end.
+            log_info(f"{LOG_PREFIX} an old socket closed after the mod resumed on a new one: nothing to end")
+        elif said_goodbye:
+            # Leaving on purpose ends the session through the plugin so the recap is written once.
+            try:
+                await plugin.disconnect_world(connector_name=ENVIRONMENT)
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} disconnect_world failed: {exc}")
+                connector.detach_socket()
+            log_info(f"{LOG_PREFIX} rift closed (goodbye)")
+        else:
+            # The socket dropped (a room change, a lost network, a crash): the session is kept, frozen, for the
+            # interface's disconnect grace (VESSEL_DISCONNECT_GRACE_SEC); a mod that comes back with
+            # ``hello.resume`` picks it up, and past the grace the interface ends it as a logout would.
+            connector.pause_socket()
+            try:
+                await websocket.close()
+            except Exception:
+                pass
+            log_info(f"{LOG_PREFIX} rift dropped: session {connector.session_token} kept for the grace window")
 
 
 def create_retroxr_router() -> APIRouter:

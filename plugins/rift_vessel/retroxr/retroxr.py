@@ -15,7 +15,12 @@ world is told about (``get_embodiment_assets``).
 Wire protocol (JSON text frames, protocol 1)::
 
     mod  -> synth   {"type": "hello", "protocol": 1, "room": "...", "capabilities": [...]}
-    synth-> mod     {"type": "welcome", "session": "...", "assets": {...}}
+    mod  -> synth   (a mod that was welcomed before adds "resume": "<session>" to its hello)
+    synth-> mod     {"type": "welcome", "session": "...", "resumed": false, "assets": {...}}
+    mod  -> synth   {"type": "bye"}              leaving on purpose: the session ends. A socket that just drops
+                                                 does NOT end it: it waits out VESSEL_DISCONNECT_GRACE_SEC and a
+                                                 hello with "resume" picks it up (a room change, a lost network)
+    mod  -> synth   {"type": "forget"}           clear the remembered chat; synth-> mod {"type": "forgotten", "ok": true}
     mod  -> synth   {"type": "event", "event_type": "chat", "summary": "...", "actor": "...",
                      "salience": 0.7, "data": {...}}
     mod  -> synth   {"type": "state", "state": {"position": {...}, "extra": {...}}}
@@ -211,6 +216,9 @@ class RetroXRConnector(VesselConnectorBase):
     # She is a person in a room, not a bot with goals: when nobody is talking to her she is
     # told what is around her and asked what she wants to do (core.vessel_beat idle beat).
     uses_idle_beat = True
+    # A room is where she lives: what was said stays said on the next visit, until the player clears it from
+    # the pod's menu (the mod's ``forget`` frame).
+    remembers_chat = True
 
     def __init__(self) -> None:
         self._on_event: PerceptionCallback | None = None
@@ -233,6 +241,11 @@ class RetroXRConnector(VesselConnectorBase):
         self._chat_waiting_since: float | None = None
         self._emotes: list[str] = []
         self.last_error = None
+        # The session id the mod was welcomed with (what its ``hello.resume`` must name to pick the session up
+        # again), and whether the socket dropped WITHOUT a goodbye: the session then waits out the interface's
+        # disconnect grace (VESSEL_DISCONNECT_GRACE_SEC) instead of ending, so a room change or a blip can resume.
+        self.session_token: str | None = None
+        self.paused = False
 
     # ------------------------------------------------------------------
     # Socket ownership (driven by the route in plugins/rift_vessel/retroxr/api.py)
@@ -244,6 +257,16 @@ class RetroXRConnector(VesselConnectorBase):
         self._hello = dict(hello or {})
         self._state = {}
         self.last_error = None
+
+    def owns(self, ws: Any) -> bool:
+        """Is ``ws`` the socket this connector is attached to? (An old socket's handler must not touch a new one.)"""
+        return ws is not None and ws is self._ws
+
+    def pause_socket(self) -> None:
+        """The socket dropped without a goodbye: let go of it but keep the session (see ``paused``)."""
+        self.paused = True
+        self.detach_socket()
+        log_info(f"{LOG_PREFIX} socket lost: the session {self.session_token} waits for the mod to come back")
 
     def detach_socket(self) -> None:
         """Forget the socket and fail every action still waiting for an answer."""
@@ -280,6 +303,10 @@ class RetroXRConnector(VesselConnectorBase):
         self, settings: Dict[str, Any], on_event: PerceptionCallback
     ) -> bool:
         self._connect_settings = dict(settings or {})
+        if self._ws is None and self.paused:
+            # The interface's reconnect sweep asks every few seconds: the mod's own hello is the way back in.
+            log_debug(f"{LOG_PREFIX} paused: waiting for the mod to resume")
+            return False
         if self._ws is None:
             self.last_error = (
                 "the RetroXR rift is closed: switch on the Synthetic Heart Rift "
@@ -289,6 +316,7 @@ class RetroXRConnector(VesselConnectorBase):
             return False
         self._on_event = on_event
         self._connected = True
+        self.paused = False
         await self._register_karada()
         log_info(
             f"{LOG_PREFIX} embodied (room={self._hello.get('room')!r}, "
@@ -297,6 +325,8 @@ class RetroXRConnector(VesselConnectorBase):
         return True
 
     async def disconnect(self) -> None:
+        self.paused = False
+        self.session_token = None
         ws = self._ws
         self._unregister_karada()
         self.detach_socket()
@@ -309,9 +339,12 @@ class RetroXRConnector(VesselConnectorBase):
         log_info(f"{LOG_PREFIX} disconnected")
 
     def get_world_identity(self) -> str | None:
-        """Per-room scope for goals and history: ``vessel/retroxr/<room>``."""
-        room = str(self._hello.get("room") or "").strip()
-        return room or None
+        """One scope for the whole house: ``vessel/retroxr``.
+
+        It was per room, which cut her chat (and a session resumed after a room change) off from the room she
+        came from. The room is a thing she is told about, not who she is talking in front of.
+        """
+        return None
 
     async def send_frame(self, frame: Dict[str, Any]) -> bool:
         """Send one JSON frame to the mod. False when the rift is not open or the send failed."""
@@ -515,6 +548,12 @@ class RetroXRConnector(VesselConnectorBase):
             return
         if kind == "event":
             await self._dispatch_event(msg)
+            return
+        if kind == "forget":
+            # The pod's menu: clear what has been said. The mod clears its own log; this is Synth's.
+            ok = await self.forget_memory(ENVIRONMENT, self.get_world_identity())
+            log_info(f"{LOG_PREFIX} the player asked her to forget the chat: {'done' if ok else 'nothing to clear'}")
+            await self.send_frame({"type": "forgotten", "ok": ok})
             return
         if kind == "audio":
             # Transcribing takes a while: never inside the read loop, or the socket stops being read.

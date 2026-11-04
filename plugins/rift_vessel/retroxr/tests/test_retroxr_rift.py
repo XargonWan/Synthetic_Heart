@@ -193,9 +193,51 @@ async def test_state_frame_feeds_world_state() -> None:
     assert "say" in st.possible_actions and "attack" not in st.possible_actions
 
 
-async def test_world_identity_is_the_room() -> None:
+async def test_world_identity_is_the_house_not_the_room() -> None:
+    """One scope: a chat (and a session resumed after a room change) must not be cut off from the room it began in."""
     conn, _, _ = await _connected({"room": "xenu.mod:attic"})
-    assert conn.get_world_identity() == "xenu.mod:attic"
+    assert conn.get_world_identity() is None
+    other, _, _ = await _connected({"room": "bedroom"})
+    assert other.get_world_identity() == conn.get_world_identity()
+
+
+def test_she_remembers_her_chat_between_sessions() -> None:
+    assert RetroXRConnector.remembers_chat is True
+
+
+async def test_a_forget_frame_clears_the_chat_and_answers(monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import core_initializer
+
+    asked: list[tuple[str, Any]] = []
+
+    class _Iface:
+        async def forget_chat(self, environment: str, world: Any = None) -> bool:
+            asked.append((environment, world))
+            return True
+
+    monkeypatch.setitem(core_initializer.INTERFACE_REGISTRY, "vessel", _Iface())
+    conn, ws, _ = await _connected()
+    await conn.handle_frame({"type": "forget"})
+    assert asked == [("retroxr", None)]
+    assert {"type": "forgotten", "ok": True} in ws.sent
+
+
+async def test_a_forget_with_no_interface_says_nothing_was_cleared(monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import core_initializer
+
+    monkeypatch.delitem(core_initializer.INTERFACE_REGISTRY, "vessel", raising=False)
+    conn, ws, _ = await _connected()
+    await conn.handle_frame({"type": "forget"})
+    assert {"type": "forgotten", "ok": False} in ws.sent
+
+
+async def test_a_dropped_socket_pauses_the_session_it_does_not_end_it() -> None:
+    conn, ws, _ = await _connected()
+    conn.session_token = "sess-1"
+    conn.pause_socket()
+    assert conn.paused is True and conn.is_connected is False
+    # the interface's reconnect sweep asks again and again: no error shown to anyone, no new socket made up
+    assert await conn.connect({}, lambda e: None) is False and conn.last_error is None
 
 
 async def test_disconnect_closes_the_socket() -> None:
@@ -351,7 +393,71 @@ def test_handshake_welcomes_with_the_body(rift) -> None:
         assert welcome["session"] == "sess-1"
         assert "assets" in welcome
     assert plugin.connected == ["retroxr"]
-    assert plugin.disconnected == ["retroxr"], "leaving must end the session through the plugin"
+    assert plugin.disconnected == [], "a socket that just drops does NOT end the session: it waits out the grace"
+
+
+def test_a_goodbye_ends_the_session_through_the_plugin(rift) -> None:
+    client, plugin = rift
+    with client.websocket_connect("/api/vessel/retroxr/ws") as ws:
+        ws.send_text(_hello())
+        assert ws.receive_json()["type"] == "welcome"
+        ws.send_text(json.dumps({"type": "bye"}))
+    assert plugin.disconnected == ["retroxr"], "leaving on purpose must end the session through the plugin"
+
+
+def test_a_dropped_rift_can_be_resumed_by_naming_its_session(rift) -> None:
+    from core.vessel_registry import VESSEL_REGISTRY
+
+    client, plugin = rift
+    with client.websocket_connect("/api/vessel/retroxr/ws") as ws:
+        ws.send_text(_hello())
+        first = ws.receive_json()
+        assert first["resumed"] is False
+    conn = VESSEL_REGISTRY.load_connector("retroxr")
+    assert conn.paused is True and conn.session_token == first["session"]
+    with client.websocket_connect("/api/vessel/retroxr/ws") as ws:
+        ws.send_text(_hello(resume=first["session"]))
+        again = ws.receive_json()
+        assert again["type"] == "welcome" and again["resumed"] is True
+        assert conn.paused is False and conn.is_connected
+    assert plugin.disconnected == []
+
+
+def test_resuming_a_session_that_has_ended_is_a_new_one(rift) -> None:
+    """Control: `resumed` is true only when the server's session IS the one the mod named."""
+    client, _ = rift
+    with client.websocket_connect("/api/vessel/retroxr/ws") as ws:
+        ws.send_text(_hello())
+        assert ws.receive_json()["resumed"] is False
+    with client.websocket_connect("/api/vessel/retroxr/ws") as ws:
+        ws.send_text(_hello(resume="some-other-session"))
+        assert ws.receive_json()["resumed"] is False
+
+
+def test_a_resume_replaces_a_socket_the_server_has_not_seen_die(rift) -> None:
+    import time
+
+    from core.vessel_registry import VESSEL_REGISTRY
+
+    client, plugin = rift
+    old_cm = client.websocket_connect("/api/vessel/retroxr/ws")
+    old = old_cm.__enter__()
+    old.send_text(_hello())
+    sid = old.receive_json()["session"]
+    new_cm = client.websocket_connect("/api/vessel/retroxr/ws")
+    new = new_cm.__enter__()
+    try:
+        new.send_text(_hello(resume=sid))
+        welcome = new.receive_json()
+        assert welcome["type"] == "welcome" and welcome["resumed"] is True
+        # now the old socket really dies: its handler ends, and must not take the new rift down with it
+        old_cm.__exit__(None, None, None)
+        time.sleep(0.5)
+        conn = VESSEL_REGISTRY.load_connector("retroxr")
+        assert conn.is_connected and conn.paused is False, "the old socket's end ended the new rift"
+        assert plugin.disconnected == []
+    finally:
+        new_cm.__exit__(None, None, None)
 
 
 @pytest.mark.parametrize(
