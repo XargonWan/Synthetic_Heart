@@ -257,8 +257,12 @@ Configuration (all WebUI-configurable):
      - ``{}``
      - JSON string forwarded to the engine at load time.
    * - ``VOX_OUTPUT_DIR``
-     - ``tmp_tts``
-     - Directory where generated audio files are written.
+     - ``/config/media/tts`` in the container, ``res/synth_webui/static/audio/tts`` otherwise
+     - Directory where generated audio files are written. In the container the
+       default sits on the ``/config`` volume so voice messages survive a
+       container recreate; an explicit value (or the environment variable) wins.
+       The radio host keeps its banter clips under ``/config/media/radio_host``
+       (``SYNTH_RADIO_AUDIO_DIR`` overrides).
    * - ``VOX_TIMEOUT_SECONDS``
      - ``10``
      - Maximum seconds to wait for a TTS engine response.

@@ -27,6 +27,8 @@ import mimetypes
 import os
 from pathlib import Path
 
+from core.app_paths import default_tts_output_dir
+
 # Media kinds returned by :func:`classify_media`.
 MEDIA_IMAGE = "image"
 MEDIA_VIDEO = "video"
@@ -181,7 +183,9 @@ def _is_app_generated_media(resolved: Path) -> bool:
     for streamed replies, ``tts_<epoch>.wav`` for the tts_lipsync producer).
     """
     for env_var, pattern in _APP_GENERATED_MEDIA:
-        raw = (os.getenv(env_var) or "").strip()
+        # The env var names the directory explicitly; without it the producer
+        # falls back to the persistent-volume default, which is just as trusted.
+        raw = (os.getenv(env_var) or "").strip() or default_tts_output_dir()
         if not raw:
             continue
         try:

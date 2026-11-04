@@ -48,6 +48,7 @@ from core.cortex_registry import get_cortex_registry
 from core.growth_state import (
     ensure_growth_table,
     get_current_growth,
+    get_growth_history,
     save_growth_state,
 )
 from core.json_utils import extract_json_from_text
@@ -73,6 +74,13 @@ _WEEKDAY_NAMES = [
     "Sunday",
 ]
 _WEEKDAY_INDEX = {name.lower(): idx for idx, name in enumerate(_WEEKDAY_NAMES)}
+
+
+# How often the scheduler checks whether the weekly slot is due, and how it backs
+# off when a cycle fails (the LLM returned nothing usable, delivery failed, ...).
+_SCHEDULER_TICK_SECONDS = 60
+_RETRY_DELAY_SECONDS = 3600
+_MAX_ATTEMPTS_PER_SLOT = 4
 
 
 # Appended to the generator instructions while a retraction is in force.
@@ -130,7 +138,7 @@ class GrilloGrowthPlugin:
             default="03:00",
             value_type=str,
             ui_type="string",
-            description="Local time (HH:MM) the weekly self-growth reflection runs.",
+            description="Time (HH:MM, UTC) the weekly self-growth reflection runs.",
             scope="grillo",
             component="grillo_growth",
         )
@@ -180,6 +188,19 @@ class GrilloGrowthPlugin:
                 "Internal: serialized self-growth proposal awaiting trainer "
                 "approval in 'request' mode."
             ),
+            scope="grillo",
+            component="grillo_growth",
+            hidden=True,
+        )
+        # When the last weekly cycle completed. Persisted so a restart that
+        # spans the weekly slot is caught up instead of silently skipping a week.
+        register_exposed_var(
+            "GROWTH_LAST_RUN",
+            label="Self-Growth Last Run",
+            default="",
+            value_type=str,
+            ui_type="string",
+            description="Internal: ISO timestamp (UTC) of the last completed run.",
             scope="grillo",
             component="grillo_growth",
             hidden=True,
@@ -382,10 +403,8 @@ class GrilloGrowthPlugin:
         except Exception as e:
             log_warning(f"[grillo_growth] ensure_growth_table at start failed: {e}")
 
-        if str(self.mode).lower() == "off":
-            log_info("[grillo_growth] GROWTH_MODE=off; scheduler not started")
-            return
-
+        # The scheduler starts whatever GROWTH_MODE is: the loop re-reads the mode
+        # on every tick, so switching it from 'off' to 'on' needs no restart.
         if (
             GrilloGrowthPlugin._scheduler_task
             and not GrilloGrowthPlugin._scheduler_task.done()
@@ -411,23 +430,13 @@ class GrilloGrowthPlugin:
 
     async def _growth_loop(self) -> None:
         log_info("[grillo_growth] Self-growth loop running")
+        attempts_slot: datetime | None = None
+        attempts = 0
+        last_attempt: datetime | None = None
         try:
             while GrilloGrowthPlugin._scheduler_running:
                 try:
-                    wait_seconds = self._seconds_until_next_run(
-                        self.weekly_day, self.weekly_time
-                    )
-                    log_debug(
-                        f"[grillo_growth] Sleeping {wait_seconds}s until next run "
-                        f"({self.weekly_day} {self.weekly_time})"
-                    )
-                    slept = 0
-                    while (
-                        slept < wait_seconds and GrilloGrowthPlugin._scheduler_running
-                    ):
-                        to_sleep = min(60, wait_seconds - slept)
-                        await asyncio.sleep(to_sleep)
-                        slept += to_sleep
+                    await asyncio.sleep(_SCHEDULER_TICK_SECONDS)
                     if not GrilloGrowthPlugin._scheduler_running:
                         break
 
@@ -437,20 +446,45 @@ class GrilloGrowthPlugin:
                         config_registry.get_value("GROWTH_MODE", self.mode) or "on"
                     ).lower()
                     if mode == "off":
-                        log_info(
-                            "[grillo_growth] GROWTH_MODE=off at run time; skipping"
-                        )
-                        # Sleep a minute to avoid a tight loop on the same minute.
-                        await asyncio.sleep(60)
                         continue
 
+                    now = datetime.now(timezone.utc)
+                    slot = self._previous_slot(
+                        config_registry.get_value("GROWTH_WEEKLY_DAY", self.weekly_day),
+                        config_registry.get_value(
+                            "GROWTH_WEEKLY_TIME", self.weekly_time
+                        ),
+                        now,
+                    )
+                    if await self._last_run_at(now) >= slot:
+                        continue
+
+                    if slot != attempts_slot:
+                        attempts_slot, attempts, last_attempt = slot, 0, None
+                    if attempts >= _MAX_ATTEMPTS_PER_SLOT:
+                        continue
+                    if (
+                        last_attempt is not None
+                        and (now - last_attempt).total_seconds() < _RETRY_DELAY_SECONDS
+                    ):
+                        continue
+
+                    attempts += 1
+                    last_attempt = now
+                    log_info(
+                        f"[grillo_growth] Weekly slot {slot.isoformat()} is due "
+                        f"(attempt {attempts}/{_MAX_ATTEMPTS_PER_SLOT})"
+                    )
                     try:
-                        await self.run_growth_cycle(force=False)
+                        result = await self.run_growth_cycle(force=False)
                     except Exception as e:
                         log_error(f"[grillo_growth] Growth cycle error: {e}")
-
-                    # Avoid re-triggering within the same target minute.
-                    await asyncio.sleep(61)
+                    else:
+                        if not result.get("success"):
+                            log_warning(
+                                "[grillo_growth] Growth cycle did not complete: "
+                                f"{result.get('message')}"
+                            )
 
                 except asyncio.CancelledError:
                     break
@@ -460,7 +494,61 @@ class GrilloGrowthPlugin:
         finally:
             log_info("[grillo_growth] Self-growth loop exiting")
 
-    def _seconds_until_next_run(self, day_name: str, hhmm: str) -> int:
+    def _previous_slot(self, day_name: str, hhmm: str, now: datetime) -> datetime:
+        """The most recent occurrence of ``day_name`` at ``hhmm`` (UTC) at or before ``now``."""
+        return (
+            now
+            + timedelta(seconds=self._seconds_until_next_run(day_name, hhmm, now=now))
+            - timedelta(days=7)
+        )
+
+    async def _last_run_at(self, now: datetime) -> datetime:
+        """When the last weekly cycle completed.
+
+        Falls back to the newest saved growth state (a run that predates
+        ``GROWTH_LAST_RUN``) and finally to ``now``, so a fresh install waits for
+        its first weekly slot instead of running at once.
+        """
+        raw = str(config_registry.get_value("GROWTH_LAST_RUN", "") or "").strip()
+        if raw:
+            try:
+                parsed = datetime.fromisoformat(raw)
+                return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+            except ValueError:
+                log_warning(f"[grillo_growth] Ignoring invalid GROWTH_LAST_RUN {raw!r}")
+        try:
+            history = await get_growth_history(1)
+        except Exception as e:
+            log_warning(f"[grillo_growth] Could not read growth history: {e}")
+            return now
+        if not history:
+            # Persist the seed: recomputing ``now`` on every tick would keep the
+            # slot from ever becoming due.
+            await self._record_run()
+            return now
+        if history:
+            stamp = str(history[0].get("created_at") or "").strip()
+            try:
+                parsed = datetime.fromisoformat(stamp)
+                return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+            except ValueError:
+                pass
+        return now
+
+    async def _record_run(self) -> None:
+        """Remember that a weekly cycle completed (survives restarts)."""
+        try:
+            await config_registry.set_value(
+                "GROWTH_LAST_RUN",
+                datetime.now(timezone.utc).isoformat(),
+                require_persist=True,
+            )
+        except Exception as e:
+            log_error(f"[grillo_growth] Failed to persist GROWTH_LAST_RUN: {e}")
+
+    def _seconds_until_next_run(
+        self, day_name: str, hhmm: str, *, now: datetime | None = None
+    ) -> int:
         """Seconds until the next occurrence of ``day_name`` at ``hhmm`` (UTC)."""
         try:
             parts = str(hhmm).split(":")
@@ -471,7 +559,7 @@ class GrilloGrowthPlugin:
 
         target_weekday = _WEEKDAY_INDEX.get(str(day_name).strip().lower(), 6)
 
-        now = datetime.now(timezone.utc)
+        now = now or datetime.now(timezone.utc)
         target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         days_ahead = (target_weekday - now.weekday()) % 7
         target = target + timedelta(days=days_ahead)
@@ -1507,6 +1595,8 @@ class GrilloGrowthPlugin:
 
         if mode == "request":
             delivered = await self._deliver_proposal(proposal)
+            if delivered:
+                await self._record_run()
             return {
                 "success": delivered,
                 "message": (
@@ -1519,6 +1609,8 @@ class GrilloGrowthPlugin:
 
         # mode == "on" (or forced): apply directly.
         new_id = await self._commit_proposal(proposal, source="weekly")
+        if new_id is not None:
+            await self._record_run()
         return {
             "success": new_id is not None,
             "message": f"Self-growth updated (state id {new_id})",

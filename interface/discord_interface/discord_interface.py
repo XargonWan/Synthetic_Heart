@@ -769,9 +769,23 @@ class DiscordInterface:
             )
             return
 
+        # A client closed by stop() has to be re-opened before it can connect.
+        if self.client is not None and self.client.is_closed():
+            self.client.clear()
+
         # Start the Discord client
         await self._start_discord_client()
         log_info("[discord_interface] Discord interface started successfully")
+
+    async def stop(self) -> None:
+        """Close the Discord client (disable and token-reload both rely on it)."""
+        client = self.client
+        if client is None or client.is_closed():
+            return
+        try:
+            await client.close()
+        except Exception as e:  # pragma: no cover - shutdown errors
+            log_warning(f"[discord_interface] Error while closing Discord client: {e}")
 
     async def _start_discord_client(self):
         """Start the Discord client with proper error handling."""
