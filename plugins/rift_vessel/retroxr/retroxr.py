@@ -61,7 +61,8 @@ def _queued_turns() -> int | str:
     try:
         from core import message_queue
 
-        return len(message_queue._queue._queue)  # type: ignore[union-attr]
+        # The public snapshot: core_initializer refuses any plugin file that names the queue's internals.
+        return len(message_queue.snapshot_queue(limit=5000))
     except Exception:
         return "?"
 

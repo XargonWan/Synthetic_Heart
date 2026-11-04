@@ -551,3 +551,28 @@ async def test_the_chat_clock_stops_when_she_answers() -> None:
     assert conn._chat_waiting_since is None, "the latency clock kept running after she spoke"
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
+
+
+# -- the plugin loader's policy ------------------------------------------------
+
+
+def test_no_rift_vessel_plugin_file_names_the_queue_internals() -> None:
+    """core_initializer SKIPS a plugin file (tests in the plugin folder too) that mentions the message queue's
+    internals: the whole connector, silently, and the Summoner then sits on LINKING for ever. The tokens are built
+    here so that this file does not trip the same rule."""
+    root = Path(__file__).resolve().parents[2]
+    forbidden = ("message_queue." + "_queue", "_queue." + "put(", "_queue." + "_queue")
+    offenders = [
+        f"{p.relative_to(root)}: {tok}"
+        for p in root.rglob("*.py")
+        if "__pycache__" not in p.parts
+        for tok in forbidden
+        if tok in p.read_text(encoding="utf-8")
+    ]
+    assert offenders == [], f"the plugin loader would refuse these files: {offenders}"
+
+
+async def test_the_queue_depth_for_the_latency_log_is_a_number() -> None:
+    from plugins.rift_vessel.retroxr import retroxr as mod
+
+    assert isinstance(mod._queued_turns(), int)
