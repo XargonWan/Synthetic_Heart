@@ -152,9 +152,19 @@ async def describe_assets(
     if missing:
         log_debug(f"[embodiment_assets] skin {skin!r} has no animation for {missing}")
 
+    # Her face map (which VRM expression each logical face name is) lives in the SKIN, not beside the model: a model
+    # served from /avatars/ has no persona.json next to it.
+    persona: Dict[str, Any] = {}
+    persona_file = skins_root / skin / "persona.json"
+    if persona_file.is_file():
+        persona = {"url": _url_for(persona_file, skins_root)}
+    else:
+        log_debug(f"[embodiment_assets] skin {skin!r} has no persona.json: her face map is unknown")
+
     return {
         "skin": skin,
         "model": model,
+        "persona": persona,
         "animations": animations,
         "missing_animations": missing,
         "manifest_url": "/api/karada/assets/manifest",

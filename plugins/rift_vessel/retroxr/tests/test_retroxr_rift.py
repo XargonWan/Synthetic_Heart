@@ -281,6 +281,15 @@ async def test_describe_assets_names_missing_animations(tmp_path: Path) -> None:
     assert list(body["animations"]) == ["walk"]
     assert body["missing_animations"] == ["dance"]
     assert body["manifest_url"] == "/api/karada/assets/manifest"
+    assert body["persona"] == {}, "no persona.json in the skin: nothing is promised"
+
+
+async def test_describe_assets_points_at_the_skins_persona_not_the_models_folder(tmp_path: Path) -> None:
+    """The model may come from /avatars/ (the server's active VRM): its face map is still the SKIN's persona.json."""
+    _skin(tmp_path, "Rei", {"vessel/walk": ["Walk.fbx"]})
+    (tmp_path / "Rei" / "persona.json").write_text('{"blendshape_map": {"mouth_smile": "happy"}}', encoding="utf-8")
+    body = await embodiment_assets.describe_assets(["walk"], skins_root=tmp_path)
+    assert body["persona"] == {"url": "/skins/Rei/persona.json"}
 
 
 # -- the socket --------------------------------------------------------------
