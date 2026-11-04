@@ -63,8 +63,10 @@ async def test_action_round_trip() -> None:
     conn, ws, _ = await _connected()
 
     task = asyncio.create_task(conn.act("say", {"text": "hi"}))
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
+    for _ in range(20):  # the text waits for its voice's first sentence (none here: it goes at once)
+        if ws.sent:
+            break
+        await asyncio.sleep(0)
     frame = ws.sent[-1]
     assert frame["type"] == "action" and frame["action"] == "say"
     assert frame["payload"] == {"text": "hi", "audio": True}, "in RetroXR a say is always spoken"

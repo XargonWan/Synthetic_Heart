@@ -191,19 +191,24 @@ async def test_karada_presence_reaches_transports_and_a_late_client() -> None:
 
 
 class FakeVox:
-    def __init__(self, ok: bool = True) -> None:
+    def __init__(self, ok: bool = True, duration: float = 1.5, delays: list[float] | None = None) -> None:
         self.calls: list[dict[str, Any]] = []
         self.timelines: list[tuple[Any, ...]] = []
         self.ok = ok
+        self.duration = duration
+        self.delays = list(delays or [])  # how long the n-th synthesis takes
 
     def _schedule_expression_timeline(self, events: Any, clean: str, path: Any, duration: Any) -> None:
         self.timelines.append((len(events), clean, path, duration))
 
     async def speak(self, text: str, **kw: Any) -> dict[str, Any]:
+        n = len(self.calls)
         self.calls.append({"text": text, **kw})
+        if n < len(self.delays):
+            await asyncio.sleep(self.delays[n])
         if not self.ok:
             return {"status": "skipped", "reason": "vox_disabled"}
-        return {"status": "success", "audio_path": "/tmp/vox_1.wav", "audio_duration_s": 1.5,
+        return {"status": "success", "audio_path": f"/tmp/vox_{n + 1}.wav", "audio_duration_s": self.duration,
                 "lipsync_data": {"v": [1]}}
 
 
@@ -552,3 +557,86 @@ async def test_a_known_verb_the_mod_did_not_declare_is_refused_here(karada: Fake
     res = await conn.act("inspect", {"target": "tv"})
     assert res.ok is False and res.detail == "not_available: inspect"
     assert ws.sent == [], "it never reaches the room to fail there"
+
+
+async def test_a_long_reply_is_voiced_sentence_by_sentence_and_its_text_waits_for_the_first(
+    monkeypatch: pytest.MonkeyPatch, karada: FakeKarada
+) -> None:
+    """The voice used to come after the text because the WHOLE reply was synthesized first. Now the first sentence is
+    on its way while the next is still being made, and the text goes out with it, not before."""
+    from core import core_initializer
+
+    # sentence 1 takes 0.1 s, sentence 2 takes 0.6 s: the text must not wait for the second.
+    vox = FakeVox(duration=0.05, delays=[0.1, 0.6])
+    monkeypatch.setitem(core_initializer.PLUGIN_REGISTRY, "vox_plugin", vox)
+    conn, ws = await _connected()
+    task = asyncio.create_task(conn.act("say", {"text": "Ciao Jay, eccomi qui. Ho guardato la stanza con calma."}))
+    for _ in range(40):
+        if any(f.get("type") == "action" for f in ws.sent):
+            break
+        await asyncio.sleep(0.01)
+    action = next(f for f in ws.sent if f.get("type") == "action")
+    assert len(karada.audio) == 1, "the first clip is out before the text"
+    assert [c["text"] for c in vox.calls][0] == "Ciao Jay, eccomi qui."
+    assert len(vox.calls) == 2, "and the second sentence is already being made behind it"
+    await conn.handle_frame({"type": "action_result", "id": action["id"], "ok": True})
+    await task
+    await asyncio.gather(*list(conn._speech_tasks))
+    assert [a["text"] for a in karada.audio] == ["Ciao Jay, eccomi qui.", "Ho guardato la stanza con calma."]
+    assert action["payload"]["text"].startswith("Ciao Jay") and action["payload"]["text"].endswith("calma.")
+
+
+async def test_each_sentence_brings_its_own_expression_tags(monkeypatch: pytest.MonkeyPatch, karada: FakeKarada) -> None:
+    from core import core_initializer
+
+    vox = FakeVox(duration=0.05)
+    monkeypatch.setitem(core_initializer.PLUGIN_REGISTRY, "vox_plugin", vox)
+    conn, ws = await _connected()
+    await _say(conn, ws, "[em_smile:0.6]Che bella stanza, davvero. [em_sad:0.4]Peccato per il disordine qui.")
+    assert [t[1] for t in vox.timelines] == ["Che bella stanza, davvero.", "Peccato per il disordine qui."], vox.timelines
+    assert all(t[0] == 1 for t in vox.timelines), "one tag each, timed over its own clip"
+
+
+async def test_a_voice_that_is_too_slow_does_not_hold_the_text_for_ever(monkeypatch: pytest.MonkeyPatch, karada: FakeKarada) -> None:
+    from core import core_initializer
+    from plugins.rift_vessel.retroxr import retroxr as mod
+
+    monkeypatch.setattr(mod, "_SAY_HOLD_SEC", 0.2)
+    vox = FakeVox(duration=0.05, delays=[1.0])
+    monkeypatch.setitem(core_initializer.PLUGIN_REGISTRY, "vox_plugin", vox)
+    conn, ws = await _connected()
+    task = asyncio.create_task(conn.act("say", {"text": "Una frase lenta da sintetizzare."}))
+    for _ in range(40):
+        if any(f.get("type") == "action" for f in ws.sent):
+            break
+        await asyncio.sleep(0.01)
+    assert any(f.get("type") == "action" for f in ws.sent) and karada.audio == [], "the text went alone after the hold"
+    action = next(f for f in ws.sent if f.get("type") == "action")
+    await conn.handle_frame({"type": "action_result", "id": action["id"], "ok": True})
+    await task
+    await asyncio.gather(*list(conn._speech_tasks))
+    assert len(karada.audio) == 1, "and the voice still follows"
+
+
+async def test_an_early_first_prompt_keeps_the_introduction_open_until_they_are_out(karada: FakeKarada) -> None:
+    """With `hello.early_summon` the `summoned` event goes at the welcome; the presence must last until the `out` frame."""
+    from core.animation_handler import get_karada_state_server
+
+    conn, ws = await _connected({"room": "den", "early_summon": True})
+    server = get_karada_state_server()
+    await server.set_presence("summon", "test")
+    await conn._dispatch_event({"event_type": "summoned", "summary": "You are being summoned", "salience": 1.0})
+    await asyncio.sleep(0)
+    assert server.get_presence() == "summon", "the first prompt alone does not end the introduction"
+    await conn.handle_frame({"type": "out"})
+    assert server.get_presence() is None, "stepping out does"
+
+
+async def test_an_older_mod_still_ends_the_introduction_with_its_summoned_event(karada: FakeKarada) -> None:
+    from core.animation_handler import get_karada_state_server
+
+    conn, ws = await _connected({"room": "den"})
+    server = get_karada_state_server()
+    await server.set_presence("summon", "test")
+    await conn._dispatch_event({"event_type": "summoned", "summary": "You have just been summoned", "salience": 1.0})
+    assert server.get_presence() is None

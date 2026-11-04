@@ -17,6 +17,9 @@ Wire protocol (JSON text frames, protocol 1)::
     mod  -> synth   {"type": "hello", "protocol": 1, "room": "...", "capabilities": [...]}
     mod  -> synth   (a mod that was welcomed before adds "resume": "<session>" to its hello)
     synth-> mod     {"type": "welcome", "session": "...", "resumed": false, "assets": {...}}
+    mod  -> synth   {"type": "out"}              they stepped out of the capsule (with hello.early_summon the first
+                                                 prompt, the ``summoned`` event, goes at the welcome, and a greeting made
+                                                 for it is held by the mod until this moment)
     mod  -> synth   {"type": "bye"}              leaving on purpose: the session ends. A socket that just drops
                                                  does NOT end it: it waits out VESSEL_DISCONNECT_GRACE_SEC and a
                                                  hello with "resume" picks it up (a room change, a lost network)
@@ -72,6 +75,8 @@ def _queued_turns() -> int | str:
         return "?"
 
 
+# How long a `say` holds its text for the first sentence of its voice before the text goes alone.
+_SAY_HOLD_SEC = 8.0
 # How long the mod has to answer one action frame.
 _ACTION_TIMEOUT_SEC = 20.0
 # Verbs that take a while in the room (walking across it, a carry).
@@ -437,11 +442,18 @@ class RetroXRConnector(VesselConnectorBase):
     # Voice: in RetroXR she speaks as well as writes
     # ------------------------------------------------------------------
 
-    async def _speak(self, text: str) -> None:
-        """Synthesize ``text`` with Vox and hand it to Karada (every transport, the rift too).
+    async def _speak(self, text: str, first_ready: "asyncio.Event | None" = None) -> None:
+        """Synthesize ``text`` with Vox, sentence by sentence, and hand each clip to Karada (every transport, the rift too).
 
-        Karada then plays her TALK animation for the length of the clip and sends the audio
-        URL with lip-sync. Fully fail-safe: no voice engine means the line stays text.
+        The whole reply used to be synthesized before the first byte of it was heard, so a long answer's voice came
+        seconds after its text (the WebUI avatar streams per sentence and was heard first). Now the first sentence is
+        broadcast the moment it is ready while the next one synthesizes behind it, the clips are paced by their own
+        length (Karada's talk animation follows the last broadcast) and the mod plays them in order. Each sentence
+        carries its own ``[em_*]`` tags, so its face timeline starts with its clip.
+
+        ``first_ready`` is set when the first clip has been broadcast, or when there will be none (no voice engine, a
+        failure): :meth:`act` holds the text for it so that text and voice appear together. Fully fail-safe: no voice
+        engine means the line stays text.
         """
         try:
             from core.core_initializer import PLUGIN_REGISTRY
@@ -450,33 +462,60 @@ class RetroXRConnector(VesselConnectorBase):
             if vox is None or not hasattr(vox, "speak"):
                 log_debug(f"{LOG_PREFIX} no Vox plugin: the line stays text")
                 return
+            from core.animation_handler import get_karada_state_server
             from core.facial_expression_parser import parse_facial_expressions
 
-            clean, em_events = parse_facial_expressions(text)
-            result = await vox.speak(
-                text, interface_path=None, generate_only=True, allow_fallback=False
-            )
-            if not isinstance(result, dict) or result.get("status") != "success":
-                log_debug(f"{LOG_PREFIX} Vox did not speak: {result}")
-                return
-            from core.animation_handler import get_karada_state_server
+            try:
+                from plugins.vox_plugin.vox_plugin import _split_sentences
 
-            await get_karada_state_server().broadcast_audio(
-                audio_path=str(result["audio_path"]),
-                lipsync_data=result.get("lipsync_data"),
-                audio_duration_s=result.get("audio_duration_s"),
-                text=clean or text,
-            )
-            # Her face follows the [em_*] tags in what she said, as it does on the WebUI.
-            if em_events and hasattr(vox, "_schedule_expression_timeline"):
-                vox._schedule_expression_timeline(
-                    em_events, clean, None, result.get("audio_duration_s")
+                pieces = _split_sentences(text) or [text]
+            except Exception:  # pragma: no cover - the splitter is Vox's, whole text is the safe fallback
+                pieces = [text]
+            karada = get_karada_state_server()
+
+            async def synth(piece: str) -> Any:
+                try:
+                    return await vox.speak(piece, interface_path=None, generate_only=True, allow_fallback=False)
+                except Exception as exc:
+                    log_warning(f"{LOG_PREFIX} synthesizing a sentence failed: {exc}")
+                    return None
+
+            started = time.monotonic()
+            nxt: "asyncio.Task | None" = asyncio.create_task(synth(pieces[0]))
+            for i, piece in enumerate(pieces):
+                result = await nxt  # type: ignore[misc]
+                nxt = asyncio.create_task(synth(pieces[i + 1])) if i + 1 < len(pieces) else None
+                if not isinstance(result, dict) or result.get("status") != "success":
+                    log_debug(f"{LOG_PREFIX} Vox did not speak sentence {i + 1}/{len(pieces)}: {result}")
+                    continue
+                clean, em_events = parse_facial_expressions(piece)
+                duration = result.get("audio_duration_s")
+                await karada.broadcast_audio(
+                    audio_path=str(result["audio_path"]),
+                    lipsync_data=result.get("lipsync_data"),
+                    audio_duration_s=duration,
+                    text=clean or piece,
                 )
+                if i == 0:
+                    log_info(
+                        f"{LOG_PREFIX} first sentence of {len(pieces)} on its way after "
+                        f"{time.monotonic() - started:.1f}s"
+                    )
+                    if first_ready is not None:
+                        first_ready.set()
+                # Her face follows the [em_*] tags in what she said, as it does on the WebUI.
+                if em_events and hasattr(vox, "_schedule_expression_timeline"):
+                    vox._schedule_expression_timeline(em_events, clean, None, duration)
+                if nxt is not None and duration:
+                    await asyncio.sleep(float(duration))  # the next clip is already being made behind this one
         except Exception as exc:
             log_warning(f"{LOG_PREFIX} speaking failed: {exc}")
+        finally:
+            if first_ready is not None:
+                first_ready.set()
 
-    def _speak_in_background(self, text: str) -> None:
-        task = asyncio.get_running_loop().create_task(self._speak(text))
+    def _speak_in_background(self, text: str, first_ready: "asyncio.Event | None" = None) -> None:
+        task = asyncio.get_running_loop().create_task(self._speak(text, first_ready))
         self._speech_tasks.add(task)
         task.add_done_callback(self._speech_tasks.discard)
 
@@ -548,6 +587,10 @@ class RetroXRConnector(VesselConnectorBase):
             return
         if kind == "event":
             await self._dispatch_event(msg)
+            return
+        if kind == "out":
+            # They have stepped out of the Summoner: the introduction is over (the first prompt went at the welcome).
+            await self._release_summon()
             return
         if kind == "forget":
             # The pod's menu: clear what has been said. The mod clears its own log; this is Synth's.
@@ -646,7 +689,9 @@ class RetroXRConnector(VesselConnectorBase):
         if str(raw.get("event_type") or "") == "chat" and raw.get("actor"):
             self._chat_waiting_since = time.monotonic()
             log_info(f"{LOG_PREFIX} player chat in (queued turns: {_queued_turns()})")
-        if str(raw.get("event_type") or "") == "summoned":
+        if str(raw.get("event_type") or "") == "summoned" and not self._hello.get("early_summon"):
+            # A mod that sends the first prompt EARLY (``hello.early_summon``) says when they are out with an ``out``
+            # frame; an older one has no such frame, so its ``summoned`` event, sent once they are out, ends it.
             await self._release_summon()
         if self._on_event is None:
             return
@@ -697,7 +742,17 @@ class RetroXRConnector(VesselConnectorBase):
             payload["audio"] = True
             spoken = str(payload.get("text") or "").strip()
             if spoken:
-                self._speak_in_background(spoken)
+                # The text waits for the first sentence of the voice (a few seconds at most), so that what is
+                # written and what is heard arrive together instead of the voice trailing the text.
+                first_ready = asyncio.Event()
+                held = time.monotonic()
+                self._speak_in_background(spoken, first_ready)
+                try:
+                    await asyncio.wait_for(first_ready.wait(), timeout=_SAY_HOLD_SEC)
+                except asyncio.TimeoutError:
+                    log_warning(f"{LOG_PREFIX} the voice was not ready in {_SAY_HOLD_SEC:.0f}s: the text goes first")
+                else:
+                    log_info(f"{LOG_PREFIX} the text was held {time.monotonic() - held:.1f}s for its voice")
                 # The caption is what is said: no [em_*] tags in a speech bubble or the chat page.
                 try:
                     from core.facial_expression_parser import parse_facial_expressions
