@@ -204,7 +204,7 @@ The interface registers a *liveness probe* into the session manager (keeping
   ``has_active_session()`` reads **false**, so vessel elements are *frozen*
   (no new beats or perceptions enqueued; existing priorities untouched). The
   disconnect sweep retries the connection every tick for
-  ``VESSEL_DISCONNECT_GRACE_SEC`` seconds (default 30, clamped 5–3600). A
+  ``VESSEL_DISCONNECT_GRACE_SEC`` seconds (default 120, clamped 5–3600). A
   successful reconnection flips the connector live again → back to CONNECTED.
 * **ENDED** — the connection could not be restored within the grace window.
   The session is closed, flushed to a single diary entry, and **all queued

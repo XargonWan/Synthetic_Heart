@@ -3513,7 +3513,7 @@ class VesselInterface:
           vessel traffic for the world (via ``drop_vessel_queue_for_world`` in
           ``end_session``).
 
-        The grace window is ``VESSEL_DISCONNECT_GRACE_SEC`` (default 30s, clamped
+        The grace window is ``VESSEL_DISCONNECT_GRACE_SEC`` (default 120s, clamped
         5–3600) — long enough to absorb transient blips and retry. Fully
         guarded: any failure leaves the session untouched.
         """
@@ -3529,14 +3529,14 @@ class VesselInterface:
             grace = int(
                 config_registry.get_value(
                     "VESSEL_DISCONNECT_GRACE_SEC",
-                    30,
+                    120,
                     value_type=int,
                     group="vessel",
                     component="vessel",
                 )
             )
         except Exception:
-            grace = 30
+            grace = 120
         grace = max(5, min(3600, grace))
         now = asyncio.get_event_loop().time()
 

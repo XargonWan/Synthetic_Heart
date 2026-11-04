@@ -194,15 +194,16 @@ config_registry.get_value(
 )
 config_registry.get_value(
     "VESSEL_DISCONNECT_GRACE_SEC",
-    30,
+    120,
     value_type=int,
     label="Vessel Disconnect Grace (s)",
     description=(
-        "Short grace period after the world client/bridge drops before a still-"
-        "'active' Vessel session is force-closed. Distinct from the (much "
-        "longer) inactivity cooldown: this unblocks the message flow quickly "
-        "when the client simply disconnects, so autonomous beats stop "
-        "accumulating. Clamped to 5–3600."
+        "Grace period after the world client/bridge drops before a still-"
+        "'active' Vessel session is force-closed (default 2 minutes). The "
+        "session is FROZEN meanwhile (no beats, no perceptions, nothing "
+        "accumulates), so a long grace costs nothing and lets a client that "
+        "only blinked, or changed room, resume the same session. Distinct "
+        "from the (much longer) inactivity cooldown. Clamped to 5–3600."
     ),
     group="plugins",
     component="vessel_plugin",
