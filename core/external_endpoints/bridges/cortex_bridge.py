@@ -991,6 +991,17 @@ class ExternalCortexEngine(AIPluginBase):
             )
 
     @staticmethod
+    def _is_gateway_timeout(exc: Exception) -> bool:
+        """True for an HTTP 504/408 answer, i.e. the backend itself timed out."""
+        status = getattr(exc, "status_code", None)
+        if status is None:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status in (408, 504):
+            return True
+        msg = str(exc).lower()
+        return "gateway_timeout" in msg or "gateway timeout" in msg
+
+    @staticmethod
     def _is_retryable_exception(exc: Exception) -> bool:
         if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
             return True
@@ -1480,6 +1491,27 @@ class ExternalCortexEngine(AIPluginBase):
                     f"and {attempt} attempt(s)"
                 )
             except Exception as exc:
+                if self._is_gateway_timeout(exc):
+                    # The backend answered "my inference did not finish in time":
+                    # a timeout in everything but the exception type, so it must
+                    # open the circuit and obey retry_on_timeout. Counted as a
+                    # generic error it was retried three times at the full
+                    # gateway timeout each (~6 min), stalling the message queue.
+                    breaker.record_timeout()
+                    self._last_attempt_error = f"{type(exc).__name__}: {exc}"
+                    log_warning(
+                        f"[cortex_bridge:{self._endpoint.name}] gateway timeout "
+                        f"(attempt {attempt}/{max_retries}): {exc}"
+                    )
+                    if (
+                        retry_on_timeout
+                        and attempt < max_retries
+                        and not breaker.is_open
+                    ):
+                        delay = backoff * (2 ** (attempt - 1))
+                        await asyncio.sleep(delay)
+                        continue
+                    raise
                 if is_probe:
                     breaker.release_probe()
                 self._last_attempt_error = f"{type(exc).__name__}: {exc}"
