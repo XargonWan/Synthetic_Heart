@@ -19,6 +19,8 @@ Wire protocol (JSON text frames, protocol 1)::
     mod  -> synth   {"type": "event", "event_type": "chat", "summary": "...", "actor": "...",
                      "salience": 0.7, "data": {...}}
     mod  -> synth   {"type": "state", "state": {"position": {...}, "extra": {...}}}
+    mod  -> synth   {"type": "audio", "id": 3, "format": "wav", "data": "<base64>", "actor": "player"}
+    synth-> mod     {"type": "transcript", "id": 3, "ok": true, "text": "...", "reason": ""}
     synth-> mod     {"type": "action", "id": 7, "action": "say", "payload": {...}}
     mod  -> synth   {"type": "action_result", "id": 7, "ok": true, "detail": "", "data": {}}
 
@@ -30,7 +32,11 @@ core port; ``act`` refuses anything outside :data:`WORLD_VERBS` / the core set.
 from __future__ import annotations
 
 import asyncio
+import base64
 import itertools
+import os
+import tempfile
+import time
 from typing import Any, Dict
 
 from core.core_initializer import register_plugin
@@ -50,11 +56,25 @@ LOG_PREFIX = "[retroxr_connector]"
 ENVIRONMENT = "retroxr"
 PROTOCOL_VERSION = 1
 
+def _queued_turns() -> int | str:
+    """How many turns wait in the message queue (for the latency log; '?' when it cannot be read)."""
+    try:
+        from core import message_queue
+
+        return len(message_queue._queue._queue)  # type: ignore[union-attr]
+    except Exception:
+        return "?"
+
+
 # How long the mod has to answer one action frame.
 _ACTION_TIMEOUT_SEC = 20.0
 # Verbs that take a while in the room (walking across it, a carry).
 _LONG_VERBS = frozenset({"move", "follow", "pick_up", "put_down", "hand_over", "sit"})
 _LONG_ACTION_TIMEOUT_SEC = 90.0
+
+# Her ears: a clip the player recorded in the room (mod -> synth `audio` frame), read by Auris.
+_MAX_AUDIO_BYTES = 8 * 1024 * 1024
+_AUDIO_MIME = {"wav": "audio/wav", "ogg": "audio/ogg", "opus": "audio/ogg", "mp3": "audio/mpeg", "flac": "audio/flac"}
 
 # The core set (shared by every world) that makes sense inside a room.
 CORE_VERBS = frozenset({"say", "move", "look", "use", "follow", "unfollow", "status"})
@@ -207,6 +227,9 @@ class RetroXRConnector(VesselConnectorBase):
         self._karada = RiftKaradaTransport(self.send_frame, lambda: self.is_connected and self._welcomed)
         self._karada_registered = False
         self._speech_tasks: set[asyncio.Task] = set()
+        self._voice_tasks: set[asyncio.Task] = set()
+        # When the player's last chat arrived and has not been answered yet (for the latency log).
+        self._chat_waiting_since: float | None = None
         self._emotes: list[str] = []
         self.last_error = None
 
@@ -492,9 +515,97 @@ class RetroXRConnector(VesselConnectorBase):
         if kind == "event":
             await self._dispatch_event(msg)
             return
+        if kind == "audio":
+            # Transcribing takes a while: never inside the read loop, or the socket stops being read.
+            task = asyncio.create_task(self._hear(msg))
+            self._voice_tasks.add(task)
+            task.add_done_callback(self._voice_tasks.discard)
+            return
         log_debug(f"{LOG_PREFIX} ignored frame type {kind!r}")
 
+    async def _hear(self, msg: Dict[str, Any]) -> None:
+        """The player spoke to her: a clip from the mod becomes a normal ``chat`` event.
+
+        Auris reads it (whatever engine the player chose); the text then travels exactly as typed text does, so
+        salience, priority and history treat both alike. The mod is told the transcript (to show it in the chat page)
+        or why there is none, so a press on the mic is never answered with silence.
+        """
+        clip_id = msg.get("id")
+
+        async def _answer(ok: bool, text: str = "", reason: str = "") -> None:
+            await self.send_frame({"type": "transcript", "id": clip_id, "ok": ok, "text": text, "reason": reason})
+
+        fmt = str(msg.get("format") or "wav").lower()
+        mime = _AUDIO_MIME.get(fmt)
+        raw = msg.get("data")
+        if mime is None or not isinstance(raw, str) or not raw:
+            log_warning(f"{LOG_PREFIX} audio clip {clip_id!r} refused: format={fmt!r}, data={'yes' if raw else 'no'}")
+            await _answer(False, reason="bad_clip")
+            return
+        try:
+            audio = base64.b64decode(raw, validate=False)
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} audio clip {clip_id!r} is not base64: {exc}")
+            await _answer(False, reason="bad_clip")
+            return
+        if not audio or len(audio) > _MAX_AUDIO_BYTES:
+            log_warning(f"{LOG_PREFIX} audio clip {clip_id!r} refused: {len(audio)} bytes (max {_MAX_AUDIO_BYTES})")
+            await _answer(False, reason="too_long" if audio else "bad_clip")
+            return
+
+        try:
+            from core.core_initializer import PLUGIN_REGISTRY
+
+            auris = PLUGIN_REGISTRY.get("auris_plugin")
+        except Exception:  # pragma: no cover - defensive
+            auris = None
+        if auris is None or not hasattr(auris, "transcribe_audio"):
+            log_warning(f"{LOG_PREFIX} audio clip {clip_id!r}: no Auris plugin, nothing can hear it")
+            await _answer(False, reason="no_stt")
+            return
+
+        path = ""
+        try:
+            fd, path = tempfile.mkstemp(prefix="retroxr_voice_", suffix="." + fmt)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(audio)
+            started = time.monotonic()
+            result = await auris.transcribe_audio(path, mime)
+            text = str(getattr(result, "text", "") or "").strip()
+            log_info(
+                f"{LOG_PREFIX} clip {clip_id!r}: {len(audio)} bytes -> {len(text)} chars "
+                f"in {time.monotonic() - started:.1f}s (lang={getattr(result, 'language', None)!r})"
+            )
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} audio clip {clip_id!r}: transcription failed: {exc}")
+            await _answer(False, reason="stt_failed")
+            return
+        finally:
+            if path:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+        if not text:
+            await _answer(False, reason="nothing_heard")
+            return
+
+        actor = str(msg.get("actor") or "player")
+        await _answer(True, text=text)
+        await self._dispatch_event(
+            {
+                "event_type": "chat",
+                "summary": f"{actor}: {text}",
+                "actor": actor,
+                "salience": 1.0,
+                "data": {"message": text, "addressed": True, "via": "voice"},
+            }
+        )
+
     async def _dispatch_event(self, raw: Dict[str, Any]) -> None:
+        if str(raw.get("event_type") or "") == "chat" and raw.get("actor"):
+            self._chat_waiting_since = time.monotonic()
+            log_info(f"{LOG_PREFIX} player chat in (queued turns: {_queued_turns()})")
         if str(raw.get("event_type") or "") == "summoned":
             await self._release_summon()
         if self._on_event is None:
@@ -538,6 +649,9 @@ class RetroXRConnector(VesselConnectorBase):
             return VesselActionResult(ok=False, detail=f"not_available: {verb}")
 
         if verb == "say":
+            if self._chat_waiting_since is not None:
+                log_info(f"{LOG_PREFIX} answered the player after {time.monotonic() - self._chat_waiting_since:.1f}s")
+                self._chat_waiting_since = None
             # In RetroXR she speaks as well as writes, always: the text is the caption of the voice.
             payload = dict(payload or {})
             payload["audio"] = True

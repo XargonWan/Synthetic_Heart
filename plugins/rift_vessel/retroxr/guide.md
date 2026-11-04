@@ -29,12 +29,28 @@ anything outside its declared verbs.
 | mod → Synth | `state {state: {position, holding, extra}}` |
 | Synth → mod | `action {id, action, payload}` → mod answers `action_result {id, ok, detail, data}` |
 | mod → Synth | `request_assets {animations: [...]}` → Synth answers `assets {assets}` |
+| mod → Synth | `audio {id, format, data, actor}` (the player's voice, base64, `wav`/`ogg`/`mp3`/`flac`, 8 MB max) → Synth answers `transcript {id, ok, text, reason}` |
 
 `assets` describes the **body**: the active skin's VRM model and the animations the world
 named, resolved by name (`animations/vessel/<name>/`, then the Karada state folder, then
 the fallback skin). The mod downloads the files from `/skins/...` and uses
 `/api/karada/assets/manifest` to skip what it already has. Nothing is pushed unasked.
 See `plugins/rift_vessel/embodiment_assets.py`.
+
+## Hearing the player
+
+The chat page's mic records the player and sends one `audio` frame. The connector hands the clip to **Auris**
+(`auris_plugin.transcribe_audio`, whatever engine the player chose), answers the mod with `transcript` (`ok: false` and a
+`reason` of `no_stt` / `nothing_heard` / `too_long` / `stt_failed` / `bad_clip` when there are no words, so a press is
+never answered with silence) and then dispatches the text as an ordinary `chat` event (`actor` from the frame, `data.via =
+"voice"`): salience, priority and history treat it exactly like typed text. Transcribing never blocks the read loop.
+
+## Ambient events do not start a turn
+
+`sighting`, `proximity`, `status`... (`EPHEMERAL_EVENT_TYPES`) are recorded and enter the perception ring, and ride along
+with the NEXT real prompt (a chat, a routine's `*_done`, `summoned`, an idle beat). They never start an LLM turn of their
+own (`VESSEL_AMBIENT_TRIGGERS_TURN`, default off; on restores the old ~15 s batched turn). The latency from a player's
+chat to her answer is logged (`[retroxr_connector] answered the player after N s`, with the queue depth on arrival).
 
 ## Being summoned
 

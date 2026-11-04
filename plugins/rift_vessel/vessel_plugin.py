@@ -178,6 +178,21 @@ config_registry.get_value(
     advanced=True,
 )
 config_registry.get_value(
+    "VESSEL_AMBIENT_TRIGGERS_TURN",
+    False,
+    value_type=bool,
+    label="Ambient Events Start a Turn",
+    description=(
+        "Off (default): ambient telemetry from a world (sightings, someone walking up, status, "
+        "movement) is only recorded and rides along with the NEXT real prompt (player chat, a "
+        "routine's result, a beat); it never starts an LLM turn of its own. On: the old behaviour, "
+        "buffered and sent as one combined perception turn every ~15 s (costly)."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
     "VESSEL_DISCONNECT_GRACE_SEC",
     30,
     value_type=int,

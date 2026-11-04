@@ -429,3 +429,125 @@ def test_the_webui_mounts_a_plugin_router_without_knowing_the_plugin(monkeypatch
     with TestClient(Host.app).websocket_connect("/api/vessel/retroxr/ws") as ws:
         ws.send_json({"type": "not-a-hello"})
         assert ws.receive_json()["code"] == "bad_hello", "the mounted socket answers like the rift's own"
+
+
+# -- her ears: a clip the player recorded in the room -------------------------
+
+
+class FakeAuris:
+    """Stands in for the Auris plugin: records what it was given and answers with `text`."""
+
+    def __init__(self, text: str | None = "hello there", language: str | None = "en") -> None:
+        self.text = text
+        self.language = language
+        self.calls: list[tuple[str, str | None, bool, bytes]] = []
+
+    async def transcribe_audio(self, file_path: str, mime_type: str | None = None, engine_name: str | None = None) -> Any:
+        import os
+
+        existed = os.path.exists(file_path)
+        self.calls.append((file_path, mime_type, existed, Path(file_path).read_bytes() if existed else b""))
+        if self.text is None:
+            return None
+        from plugins.auris_base import AurisTranscriptResult
+
+        return AurisTranscriptResult(text=self.text, language=self.language)
+
+
+def _clip(data: bytes = b"RIFF....WAVEfake", **over: Any) -> dict[str, Any]:
+    import base64
+
+    msg = {"type": "audio", "id": 3, "format": "wav", "data": base64.b64encode(data).decode(), "actor": "player"}
+    msg.update(over)
+    return msg
+
+
+def _transcripts(ws: FakeSocket) -> list[dict[str, Any]]:
+    return [f for f in ws.sent if f.get("type") == "transcript"]
+
+
+async def test_a_spoken_clip_becomes_a_chat_event_and_the_mod_gets_the_transcript(monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.core_initializer import PLUGIN_REGISTRY
+
+    auris = FakeAuris("bring me the game boy")
+    monkeypatch.setitem(PLUGIN_REGISTRY, "auris_plugin", auris)
+    conn, ws, events = await _connected()
+    await conn._hear(_clip())
+
+    assert [e.event_type for e in events] == ["chat"]
+    assert events[0].summary == "player: bring me the game boy"
+    assert events[0].actor == "player" and events[0].data["via"] == "voice"
+    assert _transcripts(ws) == [{"type": "transcript", "id": 3, "ok": True, "text": "bring me the game boy", "reason": ""}]
+    path, mime, existed, body = auris.calls[0]
+    assert mime == "audio/wav" and existed and body == b"RIFF....WAVEfake", "Auris was not handed the clip as a real file"
+    import os
+
+    assert not os.path.exists(path), "the temporary clip was left on disk"
+
+
+async def test_with_no_auris_the_player_is_told_and_nothing_is_said_for_them(monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.core_initializer import PLUGIN_REGISTRY
+
+    monkeypatch.delitem(PLUGIN_REGISTRY, "auris_plugin", raising=False)
+    conn, ws, events = await _connected()
+    await conn._hear(_clip())
+    assert events == [], "a chat line was invented with no transcript"
+    assert _transcripts(ws)[0]["ok"] is False and _transcripts(ws)[0]["reason"] == "no_stt"
+
+
+@pytest.mark.parametrize("text", [None, "   "])
+async def test_a_clip_nothing_could_be_read_from_says_so(monkeypatch: pytest.MonkeyPatch, text: str | None) -> None:
+    from core.core_initializer import PLUGIN_REGISTRY
+
+    monkeypatch.setitem(PLUGIN_REGISTRY, "auris_plugin", FakeAuris(text))
+    conn, ws, events = await _connected()
+    await conn._hear(_clip())
+    assert events == []
+    assert _transcripts(ws)[0]["reason"] == "nothing_heard"
+
+
+async def test_bad_clips_are_refused_without_reaching_auris(monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.core_initializer import PLUGIN_REGISTRY
+    from plugins.rift_vessel.retroxr import retroxr as mod
+
+    auris = FakeAuris()
+    monkeypatch.setitem(PLUGIN_REGISTRY, "auris_plugin", auris)
+    monkeypatch.setattr(mod, "_MAX_AUDIO_BYTES", 8)
+    conn, ws, events = await _connected()
+    await conn._hear(_clip(format="exe"))
+    await conn._hear(_clip(data=b""))
+    await conn._hear(_clip(data=b"x" * 9))
+    await conn._hear({"type": "audio", "id": 4})
+    assert [t["reason"] for t in _transcripts(ws)] == ["bad_clip", "bad_clip", "too_long", "bad_clip"]
+    assert auris.calls == [] and events == []
+
+
+async def test_an_audio_frame_does_not_block_the_read_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """handle_frame hands the clip to a task and returns: the socket keeps being read while Auris works."""
+    from core.core_initializer import PLUGIN_REGISTRY
+
+    gate = asyncio.Event()
+
+    class Slow(FakeAuris):
+        async def transcribe_audio(self, *a: Any, **k: Any) -> Any:
+            await gate.wait()
+            return await super().transcribe_audio(*a, **k)
+
+    monkeypatch.setitem(PLUGIN_REGISTRY, "auris_plugin", Slow("later"))
+    conn, ws, events = await _connected()
+    await asyncio.wait_for(conn.handle_frame(_clip()), timeout=1.0)
+    assert events == [] and conn._voice_tasks, "the clip should still be in flight"
+    gate.set()
+    await asyncio.gather(*list(conn._voice_tasks))
+    assert [e.summary for e in events] == ["player: later"]
+
+
+async def test_the_chat_clock_stops_when_she_answers() -> None:
+    conn, ws, _ = await _connected()
+    await conn._dispatch_event({"event_type": "chat", "summary": "player: hi", "actor": "player"})
+    assert conn._chat_waiting_since is not None
+    task = asyncio.create_task(conn.act("say", {"text": "hello"}))
+    await asyncio.sleep(0.05)
+    assert conn._chat_waiting_since is None, "the latency clock kept running after she spoke"
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)

@@ -61,6 +61,21 @@ _RATE_LIMIT_SEC = 5.0
 _PERCEPTION_BATCH_SEC = 15.0
 _PERCEPTION_BATCH_MAX = 10
 
+
+def _ambient_triggers_turn() -> bool:
+    """Whether ambient telemetry (sightings, proximity, ...) may start an LLM turn of its own.
+
+    Default OFF: every such turn costs a full cognition pass for a line the next real prompt
+    already carries through the perception ring (the logs showed one turn every 20-30 s for lines
+    like "The cable is no longer there"). ON restores the old batched turn (`_PERCEPTION_BATCH_*`).
+    Fail-safe: any error reads as OFF.
+    """
+    try:
+        return bool(config_registry.get_value("VESSEL_AMBIENT_TRIGGERS_TURN", False, value_type=bool))
+    except Exception:
+        return False
+
+
 # Max length of a slugified world-identity token in the interface path.
 _MAX_WORLD_TOKEN_CHARS = 48
 
@@ -1056,6 +1071,15 @@ class VesselInterface:
             from plugins.rift_vessel.vessel_base import is_ephemeral_event
 
             if is_ephemeral_event(event_type) and event_type != "chat":
+                if not _ambient_triggers_turn():
+                    # Ambient telemetry never starts a turn of its own: it is already in the
+                    # perception ring (above) and rides along with the NEXT real prompt (a chat,
+                    # a routine's result, a beat). Nothing is buffered, nothing is enqueued.
+                    log_debug(
+                        f"[vessel_interface] ambient '{event_type}' absorbed, no turn "
+                        f"(path={interface_path}): {summary[:80]!r}"
+                    )
+                    return True
                 buf = self._pending_perceptions.setdefault(interface_path, [])
                 buf.append((summary, time.time(), environment))
                 if len(buf) >= _PERCEPTION_BATCH_MAX:
