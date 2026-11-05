@@ -14,10 +14,13 @@ Animations are looked up by NAME in the active skin, in this order:
 
 1. ``animations/vessel/<name>/``   -- the vessel namespace, shared by every world
 2. ``animations/<name>/``          -- a Karada state folder (``greet``, ``think``, ...)
-3. a loose clip at the top of ``animations/`` whose file name has a word that starts with the name
+3. a sub-animation filed under a state folder: ``animations/walk/turn_left/`` is ``turn_left``. The state
+   folder keeps its own clips in a sub-folder of the same name (``animations/walk/walk/Walking.fbx``), and
+   the other sub-folders are animations of their own, so ``walk`` is not handed the turns
+4. a loose clip at the top of ``animations/`` whose file name has a word that starts with the name
    (``Texting And Walking.fbx`` is a ``walk``): skins ship such files without a folder, and a body that
    cannot walk is worse than one that walks with a phone in its hand
-4. the same places in the fallback skin (``Rei``), as Karada itself falls back.
+5. the same places in the fallback skin (``Rei``), as Karada itself falls back.
 
 so an animation a world needs (walk, sit, pick_up) is added once to the skin and any
 other game can use it.
@@ -66,13 +69,32 @@ def _clip_entry(fbx: Path, skins_root: Path) -> Dict[str, Any]:
 
 
 def _clips_in(folder: Path, skins_root: Path) -> List[Dict[str, Any]]:
-    """Every clip under ``folder`` (variants live in sub-folders), sorted."""
+    """Every clip under ``folder`` (variants live in sub-folders), sorted.
+
+    A folder that holds a sub-folder of its own name (``walk/walk/``) keeps its clips there, with any loose
+    in it: its other sub-folders are animations of their own (``walk/turn_left/``), not variants of it.
+    """
     if not folder.is_dir():
         return []
-    files = sorted(
-        p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in _ANIM_SUFFIXES
-    )
+    own = folder / folder.name
+    if own.is_dir():
+        files = sorted(
+            p
+            for p in list(folder.glob("*")) + list(own.rglob("*"))
+            if p.is_file() and p.suffix.lower() in _ANIM_SUFFIXES
+        )
+    else:
+        files = sorted(
+            p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in _ANIM_SUFFIXES
+        )
     return [_clip_entry(p, skins_root) for p in files]
+
+
+def _nested_folders(base: Path, name: str) -> List[Path]:
+    """``animations/<state>/<name>/``: a sub-animation filed under a state (``walk/turn_left``), one level deep."""
+    if not base.is_dir():
+        return []
+    return [p / name for p in sorted(base.iterdir()) if p.is_dir() and p.name != VESSEL_NAMESPACE and (p / name).is_dir()]
 
 
 def _safe_name(name: str) -> bool:
@@ -112,6 +134,10 @@ def resolve_animation(
                     "namespace": VESSEL_NAMESPACE if folder.parent.name == VESSEL_NAMESPACE else "state",
                     "clips": clips,
                 }
+        for folder in _nested_folders(base, name):
+            clips = _clips_in(folder, skins_root)
+            if clips:
+                return {"name": name, "skin": skin_name, "namespace": "nested", "clips": clips}
         loose = _loose_clips(base, name, skins_root)
         if loose:
             return {"name": name, "skin": skin_name, "namespace": "loose", "clips": loose}

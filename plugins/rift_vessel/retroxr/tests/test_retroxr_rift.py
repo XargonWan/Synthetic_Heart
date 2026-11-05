@@ -274,6 +274,20 @@ async def test_animation_lookup_order(tmp_path: Path) -> None:
     assert embodiment_assets.resolve_animation("moonwalk", "Mine", tmp_path) is None
 
 
+async def test_turns_filed_under_walk_are_animations_of_their_own(tmp_path: Path) -> None:
+    # Rei's walk/ keeps Walking.fbx in walk/walk/ and the turns beside it: asking for walk must not hand over the turns.
+    _skin(tmp_path, "Rei", {"walk/walk": ["Walking.fbx"], "walk/turn_left": ["Left Turn.fbx"], "walk/turn_right": ["Right Turn.fbx"]})
+    walk = embodiment_assets.resolve_animation("walk", "Rei", tmp_path)
+    assert walk is not None and [c["file"] for c in walk["clips"]] == ["Walking.fbx"]
+    left = embodiment_assets.resolve_animation("turn_left", "Rei", tmp_path)
+    assert left is not None and left["namespace"] == "nested" and [c["file"] for c in left["clips"]] == ["Left Turn.fbx"]
+    assert [c["file"] for c in embodiment_assets.resolve_animation("turn_right", "Rei", tmp_path)["clips"]] == ["Right Turn.fbx"]
+    # a skin with a flat walk/ (Zero) is unchanged, and a variant folder is still a variant
+    _skin(tmp_path, "Zero", {"walk": ["Walking.fbx"], "idle/happy": ["Happy.fbx"], "idle": ["Idle.fbx"]})
+    assert [c["file"] for c in embodiment_assets.resolve_animation("walk", "Zero", tmp_path)["clips"]] == ["Walking.fbx"]
+    assert sorted(c["file"] for c in embodiment_assets.resolve_animation("idle", "Zero", tmp_path)["clips"]) == ["Happy.fbx", "Idle.fbx"]
+
+
 async def test_the_skins_folder_is_the_repositorys(tmp_path: Path) -> None:
     # It was `parent.parent` of core/ once, and moving the module under plugins/ silently pointed it at plugins/skins.
     assert embodiment_assets.SKINS_ROOT.name == "skins"
