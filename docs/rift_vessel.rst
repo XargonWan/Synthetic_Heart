@@ -62,6 +62,22 @@ Architecture
              ▼
         Connector.act → world
 
+Layer boundaries
+~~~~~~~~~~~~~~~~
+
+Three layers, each talking only to its neighbour (see ``AGENTS.md`` §5c):
+
+* **Core** (``core/``) — chain, queue, DB, dispatch. Knows no world or connector.
+* **Rift Vessel** (``plugins/rift_vessel/vessel_*.py``, ``interface/vessel_interface.py``)
+  — the only layer that touches the core chain. Connectors are reached only
+  through ``VesselConnectorBase`` and ``VESSEL_REGISTRY``.
+* **Rift adapter / world connector** (``plugins/rift_vessel/<world>/``) — talks
+  only to the Rift Vessel layer and its world bridge. It never enqueues messages,
+  never imports ``core.message_queue``, never touches the DB, and never imports
+  other plugins or adapters. Adapters are pluggable: each world is a self-contained
+  folder plus its ``<world>_vessel`` sub-plugin, and nothing outside that folder
+  depends on it.
+
 ==============================================  =============================================
 File                                            Role
 ==============================================  =============================================

@@ -5,7 +5,7 @@ import { FBXLoader } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/j
 import { VRM, VRMLoaderPlugin, VRMUtils } from 'https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3/lib/three-vrm.module.js';
 import { loadMixamoAnimation } from '/js/loadMixamoAnimation.js';
 import { mixamoVRMRigMap } from '/js/mixamoVRMRigMap.js';
-import { AnimationUtils } from '/js/AnimationUtils.js';
+import { AnimationUtils } from '/js/AnimationUtils.js?v=20261105-loop-rebase';
 
 import {
     initAnimationEngine,
@@ -17,7 +17,7 @@ import {
     setOnStateChange,
     setOnSectionChange,
     getAnimationTime,
-} from '/js/vrm-animation-engine.mjs?v=20260703-descriptor-facial';
+} from '/js/vrm-animation-engine.mjs?v=20261105-loop-rebase';
 
 
 // Module-scoped variables (initialized when the canvas is available)
@@ -4227,7 +4227,7 @@ class AnimationHandler {
 
                 // Only create loop section if it exists in the descriptor or is default 'think'
                 if (loopStart !== null && loopEnd !== null) {
-                    const loopClip = AnimationUtils.subclip(clip, `${clipKeyBase}_loop`, loopStart, loopEnd, fps);
+                    const loopClip = AnimationUtils.loopSubclip(clip, `${clipKeyBase}_loop`, loopStart, loopEnd, fps, descriptor?.loop?.crossfade_frames);
                     // Attach loop frame metadata so we can verify during playback
                     try {
                         loopClip._meta = loopClip._meta || {};
@@ -4721,7 +4721,7 @@ class AnimationHandler {
                             };
 
                             if (loopStart !== null && loopEnd !== null) {
-                                const loopClip = AnimationUtils.subclip(clip, `${specificKey}_loop`, loopStart, loopEnd, fps);
+                                const loopClip = AnimationUtils.loopSubclip(clip, `${specificKey}_loop`, loopStart, loopEnd, fps, descriptor?.loop?.crossfade_frames);
                                 // Attach loop frame metadata so we can verify during playback
                                 try {
                                     loopClip._meta = loopClip._meta || {};
