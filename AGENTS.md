@@ -164,6 +164,14 @@ The Rift Vessel has strict boundaries:
 6. Fast motor and survival reflexes use structural world state, not free-text goal parsing or keywords.
 7. Player conversation and autonomous perceptions remain separate context buffers.
 
+**Layer boundaries (explicit).** The Vessel stack has three layers. Each layer talks only to its neighbour:
+
+- **Core** (`core/`): the message chain, queue, validation, dispatch, DB, and shared services. Core knows no world, connector, or game. It must not import a world module such as `plugins/rift_vessel/minecraft/`, must not name a world in its logic, and must not carry world-specific configuration keys. Those belong to the world's own plugin namespace.
+- **Rift Vessel** (`plugins/rift_vessel/vessel_*.py`, `interface/vessel_interface.py`): the only layer that talks to the core chain. It accepts perceptions from connectors, applies salience filtering, enqueues normal messages on `core.message_queue`, and dispatches `vessel_*` actions through the chain's `run_actions`. It talks to a connector only through the `VesselConnectorBase` contract and the `VESSEL_REGISTRY`.
+- **Rift adapter / world connector** (`plugins/rift_vessel/<world>/`): talks only to the Rift Vessel layer and its world bridge. It may import `plugins/rift_vessel/vessel_base.py`, `core/vessel_registry.py`, and its own sibling modules. It must not import `core.message_queue`, enqueue messages, touch the chain or the DB, read `core.core_initializer` registries, call `core.variables_engine`, or import other plugins or other adapters. It reports through `WorldState`, `PerceptionEvent`, and `VesselActionResult`, and it receives instructions through `act`, `motor_step`, and the other contract methods.
+
+**Pluggability.** An adapter is pluggable: adding or removing a world means adding or removing its folder and its `<world>_vessel` sub-plugin. Nothing outside that folder may depend on it. A Rift Vessel core module must never hardcode a particular world's import path, such as a fixed `plugins.rift_vessel.minecraft.minecraft` entry. Discovery must go through a registry or a scan. An adapter must not be required for `core/` or the Rift Vessel core to import, start, or shut down.
+
 Before changing Vessel routing, autonomy, motorics, goals, session lifecycle, or message compaction, read the generated `Rift Vessel Embodiment Core` module under `docs/wiki/knowledge/en/` and any relevant source-facing documentation.
 
 ### Karada avatar state
