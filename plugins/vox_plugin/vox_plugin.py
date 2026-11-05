@@ -39,7 +39,10 @@ from core.ai_plugin_base import AIPluginBase
 from core.beat_utils import is_outbound_beat
 from core.app_paths import default_tts_output_dir, resolve_tts_output_dir
 from core.config_manager import config_registry
-from core.config import get_vox_language_override_async
+from core.config import (
+    get_vox_fallback_engines_async,
+    get_vox_language_override_async,
+)
 from core.core_initializer import register_plugin, INTERFACE_REGISTRY
 from core.facial_expression_parser import (
     FacialExpressionEvent,
@@ -138,6 +141,19 @@ config_registry.get_value(
     description=(
         "JSON map of ISO-639-1 language code -> {engine, model, voice} used "
         "to route TTS to a different engine/model/voice per detected language."
+    ),
+)
+config_registry.get_value(
+    "VOX_FALLBACK_ENGINES",
+    "[]",
+    value_type=str,
+    group="plugins",
+    component="vox_plugin",
+    hidden=True,
+    label="Vox fallback engines",
+    description=(
+        "Ordered JSON list of Vox engine names tried in turn when the active "
+        "engine is unavailable. If all fail, the reply is delivered as text only."
     ),
 )
 config_registry.get_value(
@@ -402,6 +418,36 @@ def is_vox_enabled() -> bool:
     return engine.strip().lower() != "disabled"
 
 
+# When every engine in the chain (active + fallbacks) has just failed, voice is
+# treated as unavailable for a short window: the ``send_as_voice`` flag is
+# withheld from the model (see ``is_vox_available``) so it knows replies will be
+# text-only, and the next window re-tries the chain.
+_VOX_UNAVAILABLE_COOLDOWN_S = 180.0
+_vox_unavailable_until: float = 0.0
+
+
+def _mark_vox_unavailable() -> None:
+    """Record that all Vox engines failed; voice is withheld for a cooldown."""
+    global _vox_unavailable_until
+    _vox_unavailable_until = time.monotonic() + _VOX_UNAVAILABLE_COOLDOWN_S
+
+
+def _mark_vox_available() -> None:
+    """Clear the unavailable state after a successful synthesis."""
+    global _vox_unavailable_until
+    _vox_unavailable_until = 0.0
+
+
+def is_vox_available() -> bool:
+    """True when Vox is enabled and its engines did not all fail recently."""
+    return is_vox_enabled() and time.monotonic() >= _vox_unavailable_until
+
+
+def is_vox_degraded() -> bool:
+    """True when Vox is enabled but every engine failed within the cooldown."""
+    return is_vox_enabled() and time.monotonic() < _vox_unavailable_until
+
+
 class VoxPlugin(AIPluginBase):
     """Core TTS + lip-sync plugin.  Interfaces and agents call ``speak()``."""
 
@@ -580,30 +626,13 @@ class VoxPlugin(AIPluginBase):
         else:
             name = engine_name or self._active_engine_name
 
-        # --- Load engine ---
-        try:
-            engine = VOX_REGISTRY.load_engine(name)
-        except ValueError as exc:
-            log_error(f"[vox_plugin] Cannot load engine '{name}': {exc}")
-            return await _fallback(merged_text or text)
-
-        # --- Emotional text preprocessing for capable engines ---
-        tts_text = clean
-        if em_events and getattr(engine, "supports_emotion_tags", lambda: False)():
-            try:
-                emotion_tuples = [
-                    (ev.position, ev.name, ev.intensity) for ev in em_events
-                ]
-                tts_text = engine.preprocess_emotional_text(clean, emotion_tuples)
-            except Exception as exc:
-                log_warning(f"[vox_plugin] preprocess_emotional_text failed: {exc}")
-
         # --- Generate audio ---
         # pass detected language hint to engine if available; engines may
         # ignore unexpected kwargs.
-        kwargs: dict[str, Any] = {}
+        base_kwargs: dict[str, Any] = {}
         if detected_lang:
-            kwargs["language"] = detected_lang
+            base_kwargs["language"] = detected_lang
+        kwargs: dict[str, Any] = dict(base_kwargs)
         # Only forward an explicit voice override; when absent the engine/bridge
         # resolves the configured voice through the normal Vox flow. This keeps
         # callers (e.g. radio) following the same voice as regular chat unless
@@ -630,34 +659,89 @@ class VoxPlugin(AIPluginBase):
         chunk_karada = await self._chunking_karada(
             generate_only, em_events, interface_path
         )
-        sentences = _split_sentences(tts_text) if chunk_karada else []
 
-        already_streamed = False
-        audio_bytes: bytes | None = None
-        if len(sentences) > 1:
-            audio_bytes = await self._speak_chunked(
-                sentences,
-                engine,
-                emotion,
-                kwargs,
-                chunk_karada,
-                lipsync_data=None,
-            )
-            already_streamed = audio_bytes is not None
-
-        if audio_bytes is None:
+        async def _synthesize_with(
+            engine_name_: str, engine_kwargs: dict[str, Any]
+        ) -> tuple[Any, bytes, bool] | None:
+            """Load *engine_name_* and synthesise; ``None`` when it cannot."""
             try:
-                audio_bytes = await asyncio.to_thread(
-                    engine.generate_tts, tts_text, emotion, **kwargs
-                )
+                candidate = VOX_REGISTRY.load_engine(engine_name_)
             except Exception as exc:
-                log_error(f"[vox_plugin] Engine '{name}' generation error: {exc}")
-                audio_bytes = None
-            already_streamed = False
+                log_error(f"[vox_plugin] Cannot load engine '{engine_name_}': {exc}")
+                return None
 
-        if not audio_bytes:
-            log_warning(f"[vox_plugin] Engine '{name}' returned no audio.")
+            # Emotional text preprocessing for capable engines.
+            tts_text = clean
+            if (
+                em_events
+                and getattr(candidate, "supports_emotion_tags", lambda: False)()
+            ):
+                try:
+                    emotion_tuples = [
+                        (ev.position, ev.name, ev.intensity) for ev in em_events
+                    ]
+                    tts_text = candidate.preprocess_emotional_text(
+                        clean, emotion_tuples
+                    )
+                except Exception as exc:
+                    log_warning(f"[vox_plugin] preprocess_emotional_text failed: {exc}")
+
+            sentences = _split_sentences(tts_text) if chunk_karada else []
+            streamed = False
+            audio: bytes | None = None
+            if len(sentences) > 1:
+                audio = await self._speak_chunked(
+                    sentences,
+                    candidate,
+                    emotion,
+                    engine_kwargs,
+                    chunk_karada,
+                    lipsync_data=None,
+                )
+                streamed = audio is not None
+
+            if audio is None:
+                try:
+                    audio = await asyncio.to_thread(
+                        candidate.generate_tts, tts_text, emotion, **engine_kwargs
+                    )
+                except Exception as exc:
+                    log_error(
+                        f"[vox_plugin] Engine '{engine_name_}' generation error: {exc}"
+                    )
+                    audio = None
+                streamed = False
+
+            if not audio:
+                log_warning(f"[vox_plugin] Engine '{engine_name_}' returned no audio.")
+                return None
+            return candidate, audio, streamed
+
+        synthesized = await _synthesize_with(name, kwargs)
+        if synthesized is None:
+            # The primary engine is unavailable: walk the configured fallback
+            # engines in order. They use their own configured model/voice, so
+            # the primary's per-call model/voice pins are not forwarded.
+            for fallback_name in await get_vox_fallback_engines_async():
+                if fallback_name == name:
+                    continue
+                log_warning(
+                    f"[vox_plugin] Engine '{name}' failed; trying fallback "
+                    f"engine '{fallback_name}'."
+                )
+                synthesized = await _synthesize_with(fallback_name, base_kwargs)
+                if synthesized is not None:
+                    name = fallback_name
+                    break
+
+        if synthesized is None:
+            # Every engine failed: deliver the text only and tell the Synth
+            # (the send_as_voice flag is withheld for a while, like vision).
+            _mark_vox_unavailable()
             return await _fallback(merged_text or text)
+
+        _mark_vox_available()
+        engine, audio_bytes, already_streamed = synthesized
 
         # --- Write to disk ---
         filename = f"vox_{int(time.time())}.wav"

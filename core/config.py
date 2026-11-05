@@ -4,6 +4,7 @@ import os
 import json
 import asyncio
 import time
+from typing import Any
 
 from core.variables_engine import register_exposed_var as _register_exposed_var
 
@@ -1168,6 +1169,51 @@ async def get_vox_language_override_async(language: str | None) -> dict | None:
     if engine == "disabled":
         return None
     return entry
+
+
+# ---------------------------------------------------------------------------
+# Vox fallback engines
+# ---------------------------------------------------------------------------
+# VOX_FALLBACK_ENGINES is an ordered JSON list of Vox engine names. When the
+# active engine (or a language override) cannot be loaded or produces no audio,
+# the engines below are tried in order; if all of them fail the reply is
+# delivered as text only (see VoxPlugin.speak).
+
+
+def parse_vox_fallback_engines(raw: object) -> list[str]:
+    """Normalise a ``VOX_FALLBACK_ENGINES`` value into an ordered, unique name list.
+
+    Accepts a JSON string or an already-decoded list. Blank names, ``disabled``
+    and duplicates are dropped; anything malformed yields an empty list.
+    """
+    try:
+        data: Any = json.loads(raw) if isinstance(raw, str) and raw.strip() else raw
+    except Exception as exc:
+        log_warning(f"[config] VOX_FALLBACK_ENGINES parse failed: {exc}")
+        return []
+    if not isinstance(data, list):
+        return []
+    names: list[str] = []
+    for item in data:
+        name = str(item or "").strip()
+        if name and name != "disabled" and name not in names:
+            names.append(name)
+    return names
+
+
+async def get_vox_fallback_engines_async() -> list[str]:
+    """Return the persisted, ordered Vox fallback engine names.
+
+    Reads the DB value directly (safe inside a running event loop, like
+    :func:`get_vox_language_override_async`). Only called on the failure path,
+    so no cache is needed.
+    """
+    try:
+        raw = await config_registry.get_persisted_value("VOX_FALLBACK_ENGINES", "[]")
+    except Exception as exc:
+        log_warning(f"[config] VOX_FALLBACK_ENGINES read failed: {exc}")
+        return []
+    return parse_vox_fallback_engines(raw)
 
 
 async def switch_active_cortex_engine(name: str, use_hot_swap: bool = True):

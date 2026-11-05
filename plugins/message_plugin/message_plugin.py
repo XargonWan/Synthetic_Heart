@@ -574,9 +574,9 @@ class MessagePlugin:
                 context.get("is_voice_input") or context.get("request_tts")
             )
             if _voice_input and not payload.get("send_as_voice"):
-                from plugins.vox_plugin import is_vox_enabled
+                from plugins.vox_plugin import is_vox_available
 
-                if is_vox_enabled():
+                if is_vox_available():
                     log_info(
                         "[message_plugin] Voice input detected — forcing "
                         "send_as_voice=true for spoken reply."

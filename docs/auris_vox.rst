@@ -137,6 +137,25 @@ Configuration (all WebUI-configurable):
      - ``{}``
      - JSON string of engine-specific settings forwarded at load time.
 
+Fallback engines
+~~~~~~~~~~~~~~~~
+
+A failing TTS engine never fails the turn.  ``VOX_FALLBACK_ENGINES`` is an
+ordered JSON list of engine names (``["fish-audio", "kitten"]``).  When the
+active engine cannot be loaded or produces no audio, ``VoxPlugin.speak()``
+tries each fallback in order; a fallback speaks with its own configured
+model / voice (the failed engine's per-call pins are not forwarded).  The
+**Engines → Vox → Fallback** row list edits it: ``＋`` adds a row, the arrows
+reorder, ``✕`` removes.
+
+If every engine fails, the reply is delivered as text only (when
+``VOX_FALLBACK_TO_TEXT`` is on, the default) and Vox is flagged unavailable
+for three minutes: ``send_as_voice`` is withheld from the action catalog (as
+for a disabled engine) and the Telegram / Discord / WebUI prompt tells the
+Synth that voice is unavailable so it can say so to the user.  The next
+successful synthesis clears the flag.  Callers that need audio only (the radio
+host, ``generate_only=True``) still receive an error result instead of text.
+
 Public API:
 
 .. code-block:: python
@@ -230,7 +249,7 @@ the internal threshold, no hint is supplied and the plugin continues as before.
 3. WAV/PCM file writing to ``VOX_OUTPUT_DIR``
 4. Optional lip-sync data extraction (``engine.get_lipsync_data()``)
 5. Audio dispatch to the originating interface (WebUI ``synth:tts-play``, Discord, Telegram)
-6. Text fallback when the engine fails
+6. Fallback engines, then text fallback when every engine fails
 
 No interface or other plugin should handle TTS audio files or dispatch lip-sync events directly.
 
@@ -269,6 +288,10 @@ Configuration (all WebUI-configurable):
    * - ``VOX_FALLBACK_TO_TEXT``
      - ``true``
      - When ``true``, sends a plain-text message if TTS generation fails.
+   * - ``VOX_FALLBACK_ENGINES``
+     - ``[]``
+     - Ordered JSON list of engine names tried in turn when the active engine
+       (or a language override) cannot be loaded or returns no audio.
 
 .. note::
 

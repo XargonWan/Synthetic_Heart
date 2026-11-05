@@ -166,6 +166,16 @@
                 </div>
                 <div class="components-list" id="components-vox-list"><div class="meta">Loading…</div></div>
 
+                <!-- Ordered fallback engines: tried in turn when the active engine is unavailable -->
+                <div style="margin-top:20px; padding-top:16px; border-top:1px dashed var(--border,#444);">
+                    <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
+                        <h4 style="margin:0; font-size:0.95rem; color:var(--text);">Fallback</h4>
+                        <button id="vox-add-fallback-btn" class="pill secondary" title="Add a fallback engine" style="padding:6px 12px; font-weight:600;">＋</button>
+                    </div>
+                    <div class="meta" style="margin-bottom:10px;">Engines tried in order when the active one is unavailable. If all of them fail the reply is delivered as text only.</div>
+                    <div id="vox-fallback-list" class="components-list"><div class="meta">No fallback engines configured.</div></div>
+                </div>
+
                 <!-- Per-language engine overrides -->
                 <div style="margin-top:20px; padding-top:16px; border-top:1px dashed var(--border,#444);">
                     <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">

@@ -2216,8 +2216,15 @@ class SynthWebUIInterface:
                     "optional": True,
                 }
 
+            description = f"Send a message to the {BRAND_NAME} browser client."
+            if not vox_on:
+                from core.optional_plugins import voice_unavailable_note
+
+                if voice_note := voice_unavailable_note():
+                    description += f" {voice_note}"
+
             return {
-                "description": f"Send a message to the {BRAND_NAME} browser client.",
+                "description": description,
                 "payload": payload,
             }
         if action_name == "message_mate_engine":
