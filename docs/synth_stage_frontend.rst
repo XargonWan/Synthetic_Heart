@@ -121,31 +121,47 @@ URL:
   an *Open classic WebUI* button linking to ``/``. No flag is needed — the
   classic WebUI is always served at the root path.
 
-API token gate
+Authentication
 --------------
 
-The Karada REST router (``/api/karada/*``), the audio endpoints
-(``/api/audio/upload``, ``/api/audio/stream``) and the ``/ws`` WebSocket can be
-protected with an optional bearer token. This is off by default (the classic
-WebUI has no auth layer today).
+The WebUI can be protected with one access token, enforced for **every** HTTP
+and WebSocket route (the classic UI, ``/api/*``, ``/ws``, ``/logs``, ``/stage``,
+uploads, media) by the ASGI middleware in :pyfile:`core/webui_auth.py`. It is
+**off by default**: with no configuration the WebUI is open, as it always was.
+Enable it before exposing the ports beyond a trusted network.
 
-Set the environment variable ``SYNTH_WEBUI_API_TOKEN`` to require a token on
-every request. When set, clients must present it as either:
+To turn it on, either set ``SYNTH_WEBUI_API_TOKEN`` (the gate is then on and that
+is the token) or set ``SYNTH_WEBUI_AUTH=enabled`` to have a random token
+generated.
 
-- ``Authorization: Bearer <token>`` header, or
-- ``?token=<token>`` query parameter (used by the WebSocket handshake).
+Where the token comes from once enabled:
 
-Stage stores the token client-side and attaches it to REST calls and the
-WebSocket connection automatically. See
-:pyfile:`core/karada_api.py` (``_configured_api_token`` /
-``_require_api_token``) for the implementation.
+- ``SYNTH_WEBUI_API_TOKEN`` in the environment, when set; otherwise
+- a random token generated on first request and stored (mode ``0600``) in
+  ``/config/.webui_token`` (container) or ``<data root>/.webui_token`` (native).
+  Read it with ``docker exec synth cat /config/.webui_token``.
+
+How clients present it (any one is enough):
+
+- a browser signs in once at ``/login``; this sets an HttpOnly,
+  ``SameSite=Strict`` session cookie, so the classic UI and Stage need no
+  changes. Cookie sessions also have their ``Origin`` checked on writes and
+  WebSocket upgrades;
+- ``Authorization: Bearer <token>`` header (scripts, integrations such as the
+  Mate Engine client);
+- ``?token=<token>`` query parameter (WebSocket handshakes, legacy clients).
+
+Unauthenticated browser navigations are redirected to ``/login``; API calls get
+``401``. Repeated failures from one address are throttled (``429``). Only
+``/login``, ``/logout``, ``/health`` and the Minecraft skin PNG used by
+SkinRestorer (``/api/plugins/minecraft_vessel/skin.png``) are public.
 
 .. note::
 
-   ``SYNTH_WEBUI_API_TOKEN`` is read from the environment, not the config
-   registry. Set it in your ``.env`` / compose environment. Comments must go on
-   their own line — inline ``#`` comments in ``.env`` values can be injected
-   verbatim by some IDE-launched shells.
+   The OpenAI/Ollama-compatible API on its own port is a separate surface; see
+   :doc:`api_endpoints`. ``SYNTH_WEBUI_API_TOKEN`` is read from the
+   environment, not the config registry. Comments in ``.env`` must go on their
+   own line.
 
 Live voice and barge-in
 ------------------------

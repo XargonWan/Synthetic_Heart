@@ -3,12 +3,31 @@ from __future__ import annotations
 import asyncio
 import itertools
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from core.config_manager import config_registry
 from core.logging_utils import log_debug, log_warning
 from core.variables_engine import register_exposed_var
+
+# Latched test-process marker. pytest sets ``PYTEST_CURRENT_TEST`` for the
+# duration of every test, and the test suite drives the real message chain, so
+# rows for its fixture chats (``telegram_bot/123``, ``synth_webui/42``) used to
+# land in a live store as ordinary runtime failures: the recovery loop then found
+# them at boot and ran a full turn for a chat that does not exist, and the health
+# views counted them. Once a test is seen, the whole process is a test process -
+# a background task started by a test can still write after that test's teardown,
+# when the variable is already gone.
+_TEST_PROCESS = False
+
+
+def _is_test_process() -> bool:
+    """True when this process is a test run (structural, never content-based)."""
+    global _TEST_PROCESS
+    if not _TEST_PROCESS and os.environ.get("PYTEST_CURRENT_TEST"):
+        _TEST_PROCESS = True
+    return _TEST_PROCESS
 
 
 register_exposed_var(
@@ -147,6 +166,9 @@ def build_failure_entry(
         normalized_metadata.setdefault(
             "correction_context", _sanitize_for_storage(correction_context)
         )
+
+    if not is_test and _is_test_process():
+        is_test = True
 
     if not is_test:
         interface_prefix = str(interface_path or "").lower()

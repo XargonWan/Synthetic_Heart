@@ -10,6 +10,7 @@ from collections.abc import Callable
 from typing import Optional, Dict, Any
 
 from core.ai_plugin_base import AIPluginBase
+from core.app_paths import agent_fs_roots
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.core_initializer import register_plugin
 from core.config_manager import config_registry
@@ -287,11 +288,15 @@ class AgentPlugin(AIPluginBase):
                 "external_effects": ["drone"],
                 "description": (
                     "Delegate a focused sub-task to an ephemeral sub-agent (a 'Drone'). "
-                    "The Drone runs its own bounded agentic loop with the available tools "
-                    "and returns a concise result. Use this to isolate a self-contained "
-                    "piece of work (research, a multi-step lookup, a scoped file inspection) "
-                    "so the main task stays clean. A Drone CANNOT spawn further Drones. "
-                    "Provide a clear, self-contained 'goal'."
+                    "The Drone runs its own bounded agentic loop with the available "
+                    "research/inspection tools and returns a concise result to YOU as this "
+                    "tool's output. Use this to isolate a self-contained piece of work "
+                    "(research, a multi-step lookup, a scoped file inspection) so the main "
+                    "task stays clean. A Drone CANNOT spawn further Drones and CANNOT send "
+                    "messages to any user-facing interface directly — it can only report "
+                    "findings back to you; only you decide if/when/how to reply to the user "
+                    "once you have gathered what you need. Provide a clear, self-contained "
+                    "'goal'."
                 ),
             },
             "resume_agent_task": {
@@ -326,23 +331,15 @@ class AgentPlugin(AIPluginBase):
         }
 
     def _allowed_roots(self) -> list[Path]:
-        """Return the filesystem roots the agent is allowed to read."""
-        roots_raw = os.getenv("AGENT_FS_ROOTS")
-        if roots_raw:
-            roots = [p.strip() for p in roots_raw.split(":") if p.strip()]
-        else:
-            roots = [
-                os.getenv("AGENT_FS_ROOT", "/app"),
-                os.getenv("SYNTH_LOG_DIR", "/app/logs"),
-            ]
+        """Return the filesystem roots the agent is allowed to read.
 
-        out: list[Path] = []
-        for root in roots:
-            try:
-                out.append(Path(root).resolve())
-            except Exception:
-                continue
-        return out
+        Delegates to :func:`core.app_paths.agent_fs_roots`, which defaults to the
+        application root rather than the container-only ``/app``. On Windows the
+        literal ``/app`` resolves to ``C:\\app``, which does not exist, so every
+        file tool used to run against an empty sandbox. ``AGENT_FS_ROOTS`` is
+        split on ``os.pathsep`` so a multi-root list also works on Windows.
+        """
+        return agent_fs_roots()
 
     def _resolve_safe_path(self, raw_path: str) -> tuple[Path | None, str | None]:
         """Resolve a user path and ensure it stays inside allowed roots."""
@@ -718,9 +715,7 @@ class AgentPlugin(AIPluginBase):
         payload = action.get("payload", {})
 
         if action_type == "agent_wait":
-            seconds = _safe_int(
-                payload.get("seconds"), 5, min_value=1, max_value=60
-            )
+            seconds = _safe_int(payload.get("seconds"), 5, min_value=1, max_value=60)
             await asyncio.sleep(seconds)
             return {
                 "status": "ok",
@@ -902,6 +897,21 @@ class AgentPlugin(AIPluginBase):
             parent_task_id = ctx.get("agent_task_id") or ctx.get("task_id")
 
             from core.agent_core import get_agent_loop_manager
+            from core.tool_registry import tool_registry
+            from core.message_registry import is_message_action
+
+            # Drones must never deliver a user-facing message on their own —
+            # they research and report back to the caller, which alone decides
+            # the final reply. Structural, registry-driven deny-list (matches
+            # on the `message_*`/`send_message` tool-name family via
+            # is_message_action, the same check used to route Fast vs Agent
+            # Lane) so any current or future message-capable interface is
+            # excluded automatically, no hardcoded name list to keep in sync.
+            drone_allowed_tools = {
+                name
+                for name in tool_registry.tool_names()
+                if not is_message_action(name)
+            }
 
             manager = get_agent_loop_manager()
             try:
@@ -912,6 +922,7 @@ class AgentPlugin(AIPluginBase):
                     parent_task_id=parent_task_id,
                     max_iterations=max_iterations,
                     original_message=original_message,
+                    allowed_tools=drone_allowed_tools,
                 )
             except Exception as exc:
                 log_error(f"[agent] spawn_drone failed: {exc}")

@@ -17,7 +17,7 @@
 - [ollama.json](file://providers/ollama.json)
 - [openai.json](file://providers/openai.json)
 - [openrouter.json](file://providers/openrouter.json)
-- [selenium_llm_engine.json](file://providers/selenium_llm_engine.json)
+- [zen_llm_engine.json](file://providers/zen_llm_engine.json)
 - [xai_grok.json](file://providers/xai_grok.json)
 - [compose_env_vars.rst](file://docs/compose_env_vars.rst)
 - [config_management.rst](file://docs/config_management.rst)
@@ -220,7 +220,7 @@ Workflow:
 Examples of provider categories:
 - LLM engines (OpenAI, Anthropic, Gemini, etc.)
 - Voice synthesis engines (Fish Audio, custom HTTP endpoints)
-- Specialized engines (Selenium-based LLM engine)
+- Specialized engines (Zen-based LLM engine)
 
 Best practices:
 - Keep secrets out of version control; use environment variables or secret managers.
@@ -233,7 +233,7 @@ Best practices:
 - [gemini.json](file://providers/gemini.json)
 - [custom.json](file://providers/custom.json)
 - [fish_audio.json](file://providers/fish_audio.json)
-- [selenium_llm_engine.json](file://providers/selenium_llm_engine.json)
+- [zen_llm_engine.json](file://providers/zen_llm_engine.json)
 - [xai_grok.json](file://providers/xai_grok.json)
 - [harmonyai.json](file://providers/harmonyai.json)
 - [ollama.json](file://providers/ollama.json)

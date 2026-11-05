@@ -452,3 +452,161 @@ async def test_drop_vessel_queue_for_world_removes_all_scope_items(monkeypatch):
     q._queue.clear()
     q._unfinished_tasks = 0
     q._finished.set()
+
+
+@pytest.mark.asyncio
+async def test_supervisor_reports_a_stalled_consumer(monkeypatch):
+    """A hung generation must be visible while it hangs, not only after a restart.
+
+    Regression (2026-09-22): the consumer task stays ALIVE for as long as a
+    stalled provider request allows, so the supervisor's ``task.done()`` check
+    saw a healthy consumer while every queued message sat behind it — the user's
+    messages were answered by nothing and synth.log said nothing at all. The
+    supervisor must now name the item that is stuck.
+    """
+    import asyncio
+
+    monkeypatch.setattr(message_queue, "_SUPERVISOR_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(message_queue, "_CONSUMER_STALL_WARN_SECONDS", 0.0)
+
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        message_queue,
+        "log_warning",
+        lambda message, *args, **kwargs: warnings.append(str(message)),
+    )
+
+    await message_queue.stop()
+    try:
+        await message_queue.run()
+
+        message_queue._note_item_in_flight(
+            {"chat_id": 4242, "interface": "telegram_bot"}
+        )
+
+        stalled: list[str] = []
+        for _ in range(40):
+            await asyncio.sleep(0.05)
+            stalled = [w for w in warnings if "4242" in w]
+            if stalled:
+                break
+
+        assert stalled, "a stalled consumer must be reported while it is stalled"
+        assert "stalled" in stalled[0]
+        assert "4242" in stalled[0]
+
+        # Once per item, not once per supervisor tick.
+        await asyncio.sleep(0.2)
+        assert len([w for w in warnings if "4242" in w]) == 1
+    finally:
+        message_queue._clear_item_in_flight()
+        await message_queue.stop()
+
+
+@pytest.mark.asyncio
+async def test_in_flight_clearing_silences_the_stall_report(monkeypatch):
+    """A turn that finished must never be reported as stalled."""
+
+    monkeypatch.setattr(message_queue, "_SUPERVISOR_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(message_queue, "_CONSUMER_STALL_WARN_SECONDS", 0.0)
+
+    message_queue._note_item_in_flight({"chat_id": 777, "interface": "grillo"})
+    assert message_queue._stalled_item_report() is not None
+
+    message_queue._clear_item_in_flight()
+    assert message_queue._stalled_item_report() is None
+
+
+# ---------------------------------------------------------------------------
+# The engine the user chose after startup
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_engine_is_loaded_on_demand_when_none_is_active(monkeypatch):
+    """An install that picks its engine after startup must still be able to answer.
+
+    The engine is loaded once during core init, and the first-run setup page asks the
+    user for one afterwards. Without this the queue dropped every message with a log
+    line: no reply, nothing on screen, and nothing the user would think to grep for.
+    """
+    state = {"plugin": None}
+    loaded: list[str] = []
+
+    def fake_get():
+        return state["plugin"]
+
+    async def fake_load(name, **kwargs):
+        loaded.append(name)
+        state["plugin"] = object()
+
+    async def fake_active(scope=None):
+        return "my-endpoint"
+
+    monkeypatch.setattr(message_queue.plugin_instance, "get_plugin", fake_get)
+    monkeypatch.setattr(message_queue.plugin_instance, "load_plugin", fake_load)
+    monkeypatch.setattr("core.config.get_active_cortex_engine", fake_active)
+
+    plugin = await message_queue.ensure_active_plugin("test")
+
+    assert plugin is state["plugin"], "the loaded plugin must be handed back"
+    assert loaded == ["my-endpoint"], "the configured engine must be loaded once"
+
+
+@pytest.mark.asyncio
+async def test_an_already_active_engine_is_not_reloaded(monkeypatch):
+    existing = object()
+    monkeypatch.setattr(message_queue.plugin_instance, "get_plugin", lambda: existing)
+
+    async def fake_load(name, **kwargs):  # pragma: no cover - must not run
+        raise AssertionError("an active engine was reloaded")
+
+    monkeypatch.setattr(message_queue.plugin_instance, "load_plugin", fake_load)
+
+    assert await message_queue.ensure_active_plugin("test") is existing
+
+
+@pytest.mark.asyncio
+async def test_a_failed_on_demand_load_returns_nothing_instead_of_raising(monkeypatch):
+    """Doubt in this helper must not take the queue down with it.
+
+    'anthropic' is the registry default and is not available on a fresh native
+    install, so this is the real failure this has to survive.
+    """
+    monkeypatch.setattr(message_queue.plugin_instance, "get_plugin", lambda: None)
+
+    async def fake_active(scope=None):
+        raise ValueError("Cortex engine 'anthropic' is not available")
+
+    monkeypatch.setattr("core.config.get_active_cortex_engine", fake_active)
+
+    assert await message_queue.ensure_active_plugin("test") is None
+
+
+@pytest.mark.asyncio
+async def test_an_unanswerable_message_is_reported_to_the_interface():
+    """Silence was the bug: the WebUI drew no bubble and no error at all."""
+    sent = []
+
+    class _Interface:
+        async def send_message(self, payload, original_message=None):
+            sent.append(payload)
+
+    message = SimpleNamespace(chat_id="webui_default")
+    await message_queue.notify_unanswerable(_Interface(), message, "synth_webui")
+
+    assert sent, "the user has to be told something"
+    assert sent[0]["interface_path"] == "synth_webui/webui_default"
+    assert "engine" in sent[0]["text"].lower()
+
+
+@pytest.mark.asyncio
+async def test_a_failing_notice_never_breaks_the_queue():
+    """This runs inside the queue's failure path, so it cannot raise."""
+
+    class _Broken:
+        async def send_message(self, payload, original_message=None):
+            raise RuntimeError("no websocket")
+
+    message = SimpleNamespace(chat_id="webui_default")
+    await message_queue.notify_unanswerable(_Broken(), message, "synth_webui")

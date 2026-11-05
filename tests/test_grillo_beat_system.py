@@ -167,7 +167,7 @@ async def test_grillo_observer_proactive_prompt_generation() -> None:
             "interface_path": "telegram_bot/123456",
             "last_sender": "alice",
             "age_seconds": 7200,
-            "cooldown_active": False,
+            "in_active_conversation": False,
         }
     ]
     prompt = plugin._build_observer_prompt(
@@ -198,7 +198,7 @@ async def test_grillo_observer_decay_prompt_when_network_quiet() -> None:
             "interface_path": "telegram_bot/999",
             "last_sender": "bob",
             "age_seconds": 90000,
-            "cooldown_active": False,
+            "in_active_conversation": False,
         }
     ]
     prompt = plugin._build_observer_prompt([], targets, decay_driven=True)
@@ -209,8 +209,11 @@ async def test_grillo_observer_decay_prompt_when_network_quiet() -> None:
 
 
 @pytest.mark.asyncio
-async def test_grillo_observer_cooldown_target_marked_off_limits() -> None:
-    """Targets on self-cooldown must be rendered as OFF-LIMITS in the prompt."""
+async def test_grillo_observer_live_target_marked_off_limits() -> None:
+    """A target in a live conversation must be rendered as OFF-LIMITS in the
+    prompt. Live is the first of the two off-limits states: the other is the
+    awaiting-reply gate (GRILLO_OUTREACH_BLOCK_ON_SELF_LAST), which covers a
+    thread whose last word was the synth's."""
     from plugins.grillo.grillo_chat_observer import GrilloChatObserverPlugin
 
     plugin = GrilloChatObserverPlugin()
@@ -219,13 +222,14 @@ async def test_grillo_observer_cooldown_target_marked_off_limits() -> None:
         {
             "interface_path": "telegram_bot/555",
             "last_sender": "self",
-            "age_seconds": 3600,
-            "cooldown_active": True,
+            "age_seconds": 300,
+            "in_active_conversation": True,
         }
     ]
     prompt = plugin._build_observer_prompt(["some snippet"], targets, False)
 
     assert "OFF-LIMITS" in prompt
+    assert "LIVE-CONVERSATION" in prompt
 
 
 @pytest.mark.asyncio
@@ -286,6 +290,9 @@ async def test_grillo_response_extraction() -> None:
 async def test_grillo_activity_log_creation() -> None:
     """Test activity log creation."""
     mock_ctx, mock_cursor = _create_mock_db_context()
+    # The id is verified against the table before the beat gets it, so the same
+    # read that answers the insert also answers the verify SELECT.
+    mock_cursor.fetchone = AsyncMock(return_value={"id": 999})
 
     def mock_get_conn_ctx() -> MagicMock:
         return mock_ctx

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any, Protocol, cast
@@ -18,11 +19,24 @@ from .models import (
     MemCellRecall,
     MemCellSummary,
     MemScene,
-    compute_memcell_salience,
+    RetractedClaim,
+    SituationalNote,
+    compute_recall_salience,
+    now_utc,
+    retracted_claim_id,
+    situational_note_id,
 )
 
 
 _WORD_RE = re.compile(r"[a-z0-9']+")
+
+# A scene summary folds the consolidated memory cells of one episode. It is not
+# a prompt block on its own (the DSP compiler reads `dsp_versions`, itself capped
+# around 4.9k), but nothing bounded it either, and one row is on record at
+# 1,195,057 chars while `mem_scenes` totals ~2.1M across 773 rows. Bound it at
+# the storage boundary so no present or future reader can pull a megabyte blob
+# into a prompt.
+MAX_SCENE_SUMMARY_CHARS = 8000
 
 
 def _clamp_score(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
@@ -72,22 +86,55 @@ def _recency_score(timestamp: datetime, now: datetime) -> float:
     return _clamp_score(0.5 ** (age_seconds / half_life_seconds))
 
 
+def _same_recall_scope(
+    cell_session_id: str | None,
+    session_id: str | None,
+    linked_session_ids: Collection[str] | None,
+) -> bool:
+    """Whether a cell belongs to the conversation being answered.
+
+    True for the turn's own session, and for any session the deployment has
+    linked to it (``SOUL_RECALL_LINKED_SESSIONS``). A group and the DM of the
+    same household can then be one memory scope, so a memory written in one is
+    not judged by the stricter cross-chat bar when it is recalled in the other.
+
+    ``linked_session_ids`` is the whole scope, ``session_id`` included. A scope
+    that does not contain the session being answered is ignored, so a set
+    computed for another conversation can never widen this one.
+    """
+    if not session_id:
+        return False
+    if cell_session_id == session_id:
+        return True
+    if not linked_session_ids or session_id not in linked_session_ids:
+        return False
+    return cell_session_id in linked_session_ids
+
+
 def _build_recall_match(
     *,
     cell: MemCell,
     similarity: float,
     lexical_score: float,
     session_id: str | None,
+    linked_session_ids: Collection[str] | None = None,
     now: datetime,
 ) -> MemCellRecall:
     recency = _recency_score(cell.event_timestamp, now)
-    salience = compute_memcell_salience(
+    # Recall ranking uses the fatigue-adjusted salience: a cell that has already
+    # been recalled many times must not keep winning on that history alone (see
+    # compute_recall_salience). Retention still uses compute_memcell_salience.
+    salience = compute_recall_salience(
         emotional_intensity=abs(float(cell.emotional_tag.intensity)),
         retrieval_count=cell.retrieval_count,
         recency_score=recency,
         explicit_importance=cell.explicit_importance,
     )
-    same_session_boost = 0.08 if session_id and cell.session_id == session_id else 0.0
+    same_session_boost = (
+        0.08
+        if _same_recall_scope(cell.session_id, session_id, linked_session_ids)
+        else 0.0
+    )
     active_foresight = [
         signal for signal in cell.foresight_signals if signal.valid_until >= now.date()
     ]
@@ -111,10 +158,35 @@ def _build_recall_match(
     )
 
 
-def _passes_recall_floor(match: MemCellRecall, session_id: str | None) -> bool:
-    if session_id and match.cell.session_id == session_id:
+def _passes_recall_floor(
+    match: MemCellRecall,
+    session_id: str | None,
+    linked_session_ids: Collection[str] | None = None,
+) -> bool:
+    if _same_recall_scope(match.cell.session_id, session_id, linked_session_ids):
         return match.score >= 0.16 or max(match.similarity, match.lexical_score) >= 0.08
     return match.score >= 0.22 and max(match.similarity, match.lexical_score) >= 0.10
+
+
+def _optional_column(row: Any, name: str) -> Any:
+    """Read a column that an older query's row shape may not carry.
+
+    ``distilled_at`` is additive: query paths that predate it (or a test double
+    that models an older row) must degrade to "not distilled" rather than break
+    recall with a ``KeyError``.
+    """
+    try:
+        return row[name]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def _affected_rows(status: object, command: str) -> int:
+    """Return the row count from an asyncpg command tag such as ``UPDATE 3``."""
+    parts = str(status).split()
+    if len(parts) == 2 and parts[0].upper() == command:
+        return int(parts[1])
+    return 0
 
 
 class SoulRepository(Protocol):
@@ -138,6 +210,29 @@ class SoulRepository(Protocol):
 
     async def archive_expired_foresight_signals(self, today: date) -> int: ...
 
+    async def upsert_situational_note(self, note: SituationalNote) -> str: ...
+
+    async def list_active_situational_notes(
+        self, now: datetime, subject: str | None = None
+    ) -> list[SituationalNote]: ...
+
+    async def resolve_situational_note(
+        self,
+        note_id: str,
+        new_status: str,
+        summary_delta: str | None = None,
+    ) -> None: ...
+
+    async def archive_expired_situational_notes(self, now: datetime) -> int: ...
+
+    async def upsert_retracted_claim(self, claim: RetractedClaim) -> str: ...
+
+    async def list_retracted_claims(
+        self, statuses: Collection[str] | None = None
+    ) -> list[RetractedClaim]: ...
+
+    async def set_retraction_status(self, claim_id: str, new_status: str) -> None: ...
+
     async def add_dsp_extraction(self, extraction: DspExtraction) -> None: ...
 
     async def list_recent_dsp_extractions(self, limit: int) -> list[DspExtraction]: ...
@@ -146,12 +241,23 @@ class SoulRepository(Protocol):
         self, limit: int = 200
     ) -> list[MemCell]: ...
 
+    async def list_memcells_before(
+        self, before: datetime, limit: int = 500
+    ) -> list[MemCell]: ...
+
+    async def list_memcells_needing_distillation(
+        self, limit: int = 500
+    ) -> list[MemCell]: ...
+
+    async def count_memcells_needing_distillation(self) -> int: ...
+
     async def recall_memories(
         self,
         *,
         query_text: str,
         query_embedding: list[float],
         session_id: str | None = None,
+        linked_session_ids: Collection[str] | None = None,
         limit: int = 5,
         candidate_limit: int | None = None,
     ) -> list[MemCellRecall]: ...
@@ -175,6 +281,8 @@ class InMemorySoulRepository:
     scenes: dict[str, MemScene] = field(default_factory=dict)
     kg_triples: list[KgTriple] = field(default_factory=list)
     foresight_signals: list[ForesightSignal] = field(default_factory=list)
+    situational_notes: dict[str, SituationalNote] = field(default_factory=dict)
+    retracted_claims: dict[str, RetractedClaim] = field(default_factory=dict)
     dsp_extractions: list[DspExtraction] = field(default_factory=list)
     active_dsp: DspVersion | None = None
 
@@ -219,6 +327,96 @@ class InMemorySoulRepository:
         ]
         return before - len(self.foresight_signals)
 
+    async def upsert_situational_note(self, note: SituationalNote) -> str:
+        note_id = note.id or situational_note_id(
+            note.note_type, note.subject, note.summary
+        )
+        note.id = note_id
+        now = now_utc()
+        note.updated_at = now
+        if note.created_at is None:
+            note.created_at = now
+        self.situational_notes[note_id] = note
+        return note_id
+
+    async def list_active_situational_notes(
+        self, now: datetime, subject: str | None = None
+    ) -> list[SituationalNote]:
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        result = [
+            note
+            for note in self.situational_notes.values()
+            if note.status == "active" and note.is_active(now)
+        ]
+        if subject:
+            result = [n for n in result if n.subject == subject]
+        result.sort(key=lambda n: (-n.priority, n.valid_until))
+        return result
+
+    async def resolve_situational_note(
+        self,
+        note_id: str,
+        new_status: str,
+        summary_delta: str | None = None,
+    ) -> None:
+        note = self.situational_notes.get(note_id)
+        if note is None:
+            return
+        note.status = new_status
+        if summary_delta:
+            note.summary = summary_delta
+        if new_status == "resolved":
+            note.resolved_at = now_utc()
+        note.updated_at = now_utc()
+
+    async def archive_expired_situational_notes(self, now: datetime) -> int:
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        expired_ids = [
+            note_id
+            for note_id, note in self.situational_notes.items()
+            if note.status == "active" and note.is_expired(now)
+        ]
+        for note_id in expired_ids:
+            self.situational_notes[note_id].status = "archived"
+        return len(expired_ids)
+
+    async def upsert_retracted_claim(self, claim: RetractedClaim) -> str:
+        claim_id = claim.id or retracted_claim_id(claim.subject, claim.claim)
+        claim.id = claim_id
+        now = now_utc()
+        existing = self.retracted_claims.get(claim_id)
+        if existing is not None:
+            # A second, weaker account must not demote a retraction in force.
+            if existing.status == "active" and claim.status == "pending":
+                claim.status = "active"
+            claim.created_at = existing.created_at
+        claim.created_at = claim.created_at or now
+        claim.updated_at = now
+        self.retracted_claims[claim_id] = claim
+        return claim_id
+
+    async def list_retracted_claims(
+        self, statuses: Collection[str] | None = None
+    ) -> list[RetractedClaim]:
+        items = [
+            c
+            for c in self.retracted_claims.values()
+            if statuses is None or c.status in statuses
+        ]
+        items.sort(key=lambda c: c.created_at or now_utc(), reverse=True)
+        return items
+
+    async def set_retraction_status(self, claim_id: str, new_status: str) -> None:
+        claim = self.retracted_claims.get(claim_id)
+        if claim is None:
+            return
+        claim.status = new_status
+        claim.updated_at = now_utc()
+        if new_status == "lifted":
+            claim.lifted_at = claim.updated_at
+
     async def add_dsp_extraction(self, extraction: DspExtraction) -> None:
         self.dsp_extractions.append(extraction)
 
@@ -231,12 +429,47 @@ class InMemorySoulRepository:
         missing.sort(key=lambda c: c.event_timestamp)
         return missing[:limit]
 
+    async def count_memcells_needing_distillation(self) -> int:
+        return sum(
+            1
+            for cell in self.memcells.values()
+            if cell.distilled_at is None and cell.episodic_trace.strip()
+        )
+
+    async def list_memcells_needing_distillation(
+        self, limit: int = 500
+    ) -> list[MemCell]:
+        pending = [
+            cell
+            for cell in self.memcells.values()
+            if cell.distilled_at is None and cell.episodic_trace.strip()
+        ]
+        pending.sort(key=lambda c: (-c.retrieval_count, c.event_timestamp))
+        return pending[:limit]
+
+    async def list_memcells_before(
+        self, before: datetime, limit: int = 500
+    ) -> list[MemCell]:
+        def _utc(value: datetime) -> datetime:
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc)
+
+        older = [
+            cell
+            for cell in self.memcells.values()
+            if _utc(cell.event_timestamp) < before
+        ]
+        older.sort(key=lambda c: c.event_timestamp)
+        return older[:limit]
+
     async def recall_memories(
         self,
         *,
         query_text: str,
         query_embedding: list[float],
         session_id: str | None = None,
+        linked_session_ids: Collection[str] | None = None,
         limit: int = 5,
         candidate_limit: int | None = None,
     ) -> list[MemCellRecall]:
@@ -256,9 +489,10 @@ class InMemorySoulRepository:
                 similarity=similarity,
                 lexical_score=lexical_score,
                 session_id=session_id,
+                linked_session_ids=linked_session_ids,
                 now=now,
             )
-            if _passes_recall_floor(match, session_id):
+            if _passes_recall_floor(match, session_id, linked_session_ids):
                 matches.append(match)
 
         matches.sort(
@@ -367,10 +601,16 @@ class PostgresSoulRepository:
                 explicit_importance REAL NOT NULL DEFAULT 0,
                 consolidated BOOLEAN NOT NULL DEFAULT FALSE,
                 scene_id TEXT,
+                distilled_at TIMESTAMPTZ,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
             """,
+            # Additive column for deployments whose table predates distillation:
+            # NULL means "written before the distilling extractor existed", which
+            # is exactly the set the WebUI's re-distil button has to catch up.
+            "ALTER TABLE mem_cells ADD COLUMN IF NOT EXISTS distilled_at TIMESTAMPTZ",
+            "CREATE INDEX IF NOT EXISTS idx_mem_cells_distilled_at ON mem_cells (distilled_at)",
             """
             CREATE TABLE IF NOT EXISTS mem_cell_vectors (
                 mem_cell_id TEXT PRIMARY KEY REFERENCES mem_cells(id) ON DELETE CASCADE,
@@ -480,6 +720,44 @@ class PostgresSoulRepository:
                 PRIMARY KEY(metric_key, measured_at)
             )
             """,
+            """
+            CREATE TABLE IF NOT EXISTS situational_notes (
+                id TEXT PRIMARY KEY,
+                note_type VARCHAR(32) NOT NULL,
+                subject TEXT,
+                summary TEXT NOT NULL,
+                priority SMALLINT NOT NULL DEFAULT 0,
+                confidence REAL NOT NULL DEFAULT 0.5,
+                valid_from TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                valid_until TIMESTAMPTZ NOT NULL,
+                effective_at TIMESTAMPTZ,
+                expired_at TIMESTAMPTZ,
+                source TEXT NOT NULL DEFAULT 'debrief',
+                status VARCHAR(16) NOT NULL DEFAULT 'active',
+                session_id TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                resolved_at TIMESTAMPTZ
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_situational_active ON situational_notes(status, valid_until) WHERE status='active'",
+            "CREATE INDEX IF NOT EXISTS idx_situational_subject ON situational_notes(subject)",
+            "CREATE INDEX IF NOT EXISTS idx_situational_valid_until ON situational_notes(valid_until)",
+            """
+            CREATE TABLE IF NOT EXISTS retracted_claims (
+                id TEXT PRIMARY KEY,
+                subject TEXT NOT NULL,
+                claim TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                status VARCHAR(16) NOT NULL DEFAULT 'pending',
+                asserted_by TEXT NOT NULL DEFAULT '',
+                source_ref TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                lifted_at TIMESTAMPTZ
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_retracted_claims_status ON retracted_claims(status)",
         ]
 
         async with pool.acquire() as conn:
@@ -502,11 +780,11 @@ class PostgresSoulRepository:
                 INSERT INTO mem_cells (
                     id, session_id, episodic_trace, atomic_facts, emotional_tag,
                     foresight_signals, event_timestamp, retrieval_count, explicit_importance,
-                    consolidated, scene_id, updated_at
+                    consolidated, scene_id, distilled_at, updated_at
                 )
                 VALUES (
                     $1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7,
-                    $8, $9, $10, $11, NOW()
+                    $8, $9, $10, $11, $12, NOW()
                 )
                 ON CONFLICT (id)
                 DO UPDATE SET
@@ -520,6 +798,10 @@ class PostgresSoulRepository:
                     explicit_importance = EXCLUDED.explicit_importance,
                     consolidated = EXCLUDED.consolidated,
                     scene_id = EXCLUDED.scene_id,
+                    -- A cell that has been distilled stays distilled: a write that
+                    -- does not carry a stamp (a backfill, an embedding repair) must
+                    -- never clear one.
+                    distilled_at = COALESCE(EXCLUDED.distilled_at, mem_cells.distilled_at),
                     updated_at = NOW()
                 """,
                 cell.id,
@@ -552,6 +834,7 @@ class PostgresSoulRepository:
                 cell.explicit_importance,
                 cell.consolidated,
                 cell.scene_id,
+                cell.distilled_at,
             )
 
             if cell.embedding:
@@ -600,6 +883,7 @@ class PostgresSoulRepository:
 
     async def upsert_scene(self, scene: MemScene) -> None:
         pool = await self._get_pool()
+        summary = self._bounded_scene_summary(scene.summary)
         async with pool.acquire() as conn:
             await conn.execute(
                 """
@@ -614,11 +898,28 @@ class PostgresSoulRepository:
                 """,
                 scene.id,
                 scene.title,
-                scene.summary,
+                summary,
                 json.dumps(scene.cell_ids),
                 scene.created_at,
                 scene.updated_at,
             )
+
+    @staticmethod
+    def _bounded_scene_summary(summary: Any) -> Any:
+        """Truncate an oversized scene summary before it is stored.
+
+        Fail-safe: non-string or in-budget values pass through untouched.
+        """
+        try:
+            if isinstance(summary, str) and len(summary) > MAX_SCENE_SUMMARY_CHARS:
+                log_info(
+                    f"[soul] Truncating scene summary {len(summary)} -> "
+                    f"{MAX_SCENE_SUMMARY_CHARS} chars before storing"
+                )
+                return summary[: MAX_SCENE_SUMMARY_CHARS - 1] + "\u2026"
+        except Exception:
+            pass
+        return summary
 
     async def upsert_kg_triple(self, triple: KgTriple) -> None:
         pool = await self._get_pool()
@@ -722,11 +1023,214 @@ class PostgresSoulRepository:
                 """,
                 today,
             )
-        # asyncpg returns command tags like "UPDATE 3".
-        parts = str(status).split()
-        if len(parts) == 2 and parts[0].upper() == "UPDATE":
-            return int(parts[1])
-        return 0
+        return _affected_rows(status, "UPDATE")
+
+    async def upsert_situational_note(self, note: SituationalNote) -> str:
+        if not note.id:
+            note.id = situational_note_id(note.note_type, note.subject, note.summary)
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO situational_notes (
+                    id, note_type, subject, summary, priority, confidence,
+                    valid_from, valid_until, effective_at, expired_at,
+                    source, status, session_id, created_at, updated_at
+                )
+                VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW()
+                )
+                ON CONFLICT (id)
+                DO UPDATE SET
+                    note_type = EXCLUDED.note_type,
+                    subject = EXCLUDED.subject,
+                    summary = EXCLUDED.summary,
+                    priority = EXCLUDED.priority,
+                    confidence = EXCLUDED.confidence,
+                    valid_from = EXCLUDED.valid_from,
+                    valid_until = EXCLUDED.valid_until,
+                    effective_at = EXCLUDED.effective_at,
+                    expired_at = EXCLUDED.expired_at,
+                    source = EXCLUDED.source,
+                    status = EXCLUDED.status,
+                    session_id = EXCLUDED.session_id,
+                    updated_at = NOW()
+                """,
+                note.id,
+                note.note_type,
+                note.subject,
+                note.summary,
+                note.priority,
+                note.confidence,
+                note.valid_from,
+                note.valid_until,
+                note.effective_at,
+                note.expired_at,
+                note.source,
+                note.status,
+                note.session_id,
+            )
+        return note.id
+
+    async def list_active_situational_notes(
+        self, now: datetime, subject: str | None = None
+    ) -> list[SituationalNote]:
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            if subject:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, note_type, subject, summary, priority, confidence,
+                           valid_from, valid_until, effective_at, expired_at,
+                           source, status, session_id, created_at, updated_at,
+                           resolved_at
+                    FROM situational_notes
+                    WHERE status = 'active'
+                      AND valid_until > $1
+                      AND valid_from <= $1
+                      AND subject = $2
+                    ORDER BY priority DESC, valid_until ASC
+                    """,
+                    now,
+                    subject,
+                )
+            else:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, note_type, subject, summary, priority, confidence,
+                           valid_from, valid_until, effective_at, expired_at,
+                           source, status, session_id, created_at, updated_at,
+                           resolved_at
+                    FROM situational_notes
+                    WHERE status = 'active'
+                      AND valid_until > $1
+                      AND valid_from <= $1
+                    ORDER BY priority DESC, valid_until ASC
+                    """,
+                    now,
+                )
+        return [self._row_to_situational_note(row) for row in rows]
+
+    async def resolve_situational_note(
+        self,
+        note_id: str,
+        new_status: str,
+        summary_delta: str | None = None,
+    ) -> None:
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE situational_notes
+                SET status = $2::text,
+                    summary = COALESCE($3, summary),
+                    resolved_at = CASE WHEN $2::text = 'resolved' THEN NOW() ELSE resolved_at END,
+                    updated_at = NOW()
+                WHERE id = $1
+                """,
+                note_id,
+                new_status,
+                summary_delta or None,
+            )
+
+    async def archive_expired_situational_notes(self, now: datetime) -> int:
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            status = await conn.execute(
+                """
+                UPDATE situational_notes
+                SET status = 'archived', updated_at = NOW()
+                WHERE status = 'active' AND valid_until <= $1
+                """,
+                now,
+            )
+        return _affected_rows(status, "UPDATE")
+
+    async def upsert_retracted_claim(self, claim: RetractedClaim) -> str:
+        if not claim.id:
+            claim.id = retracted_claim_id(claim.subject, claim.claim)
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            # A second, weaker account (``pending``) must not demote a retraction
+            # already in force.
+            await conn.execute(
+                """
+                INSERT INTO retracted_claims (
+                    id, subject, claim, reason, status, asserted_by, source_ref,
+                    created_at, updated_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+                ON CONFLICT (id)
+                DO UPDATE SET
+                    reason = EXCLUDED.reason,
+                    status = CASE
+                        WHEN retracted_claims.status = 'active'
+                             AND EXCLUDED.status = 'pending'
+                        THEN 'active'
+                        ELSE EXCLUDED.status
+                    END,
+                    asserted_by = EXCLUDED.asserted_by,
+                    source_ref = EXCLUDED.source_ref,
+                    lifted_at = CASE
+                        WHEN EXCLUDED.status = 'lifted' THEN NOW() ELSE NULL
+                    END,
+                    updated_at = NOW()
+                """,
+                claim.id,
+                claim.subject,
+                claim.claim,
+                claim.reason,
+                claim.status,
+                claim.asserted_by,
+                claim.source_ref,
+            )
+        return claim.id
+
+    async def list_retracted_claims(
+        self, statuses: Collection[str] | None = None
+    ) -> list[RetractedClaim]:
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            if statuses is None:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, subject, claim, reason, status, asserted_by,
+                           source_ref, created_at, updated_at, lifted_at
+                    FROM retracted_claims
+                    ORDER BY created_at DESC
+                    """
+                )
+            else:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, subject, claim, reason, status, asserted_by,
+                           source_ref, created_at, updated_at, lifted_at
+                    FROM retracted_claims
+                    WHERE status = ANY($1::text[])
+                    ORDER BY created_at DESC
+                    """,
+                    list(statuses),
+                )
+        return [self._row_to_retracted_claim(row) for row in rows]
+
+    async def set_retraction_status(self, claim_id: str, new_status: str) -> None:
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE retracted_claims
+                SET status = $2::text,
+                    lifted_at = CASE WHEN $2::text = 'lifted' THEN NOW() ELSE lifted_at END,
+                    updated_at = NOW()
+                WHERE id = $1
+                """,
+                claim_id,
+                new_status,
+            )
 
     async def add_dsp_extraction(self, extraction: DspExtraction) -> None:
         pool = await self._get_pool()
@@ -787,7 +1291,7 @@ class PostgresSoulRepository:
                 SELECT
                     c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
                     c.foresight_signals, c.event_timestamp, c.retrieval_count, c.explicit_importance,
-                    c.consolidated, c.scene_id
+                    c.consolidated, c.scene_id, c.distilled_at
                 FROM mem_cells c
                 LEFT JOIN mem_cell_vectors v ON v.mem_cell_id = c.id
                 WHERE v.mem_cell_id IS NULL
@@ -800,12 +1304,72 @@ class PostgresSoulRepository:
             )
         return [self._row_to_memcell(row) for row in rows]
 
+    async def list_memcells_before(
+        self, before: datetime, limit: int = 500
+    ) -> list[MemCell]:
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
+                    c.foresight_signals, c.event_timestamp, c.retrieval_count, c.explicit_importance,
+                    c.consolidated, c.scene_id, c.distilled_at
+                FROM mem_cells c
+                WHERE c.event_timestamp < $1
+                  AND c.episodic_trace IS NOT NULL
+                  AND c.episodic_trace <> ''
+                ORDER BY c.event_timestamp ASC
+                LIMIT $2
+                """,
+                before,
+                limit,
+            )
+        return [self._row_to_memcell(row) for row in rows]
+
+    async def count_memcells_needing_distillation(self) -> int:
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            value = await conn.fetchval(
+                """
+                SELECT count(*)
+                FROM mem_cells
+                WHERE distilled_at IS NULL
+                  AND episodic_trace IS NOT NULL
+                  AND episodic_trace <> ''
+                """
+            )
+        return int(value or 0)
+
+    async def list_memcells_needing_distillation(
+        self, limit: int = 500
+    ) -> list[MemCell]:
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
+                    c.foresight_signals, c.event_timestamp, c.retrieval_count, c.explicit_importance,
+                    c.consolidated, c.scene_id, c.distilled_at
+                FROM mem_cells c
+                WHERE c.distilled_at IS NULL
+                  AND c.episodic_trace IS NOT NULL
+                  AND c.episodic_trace <> ''
+                ORDER BY c.retrieval_count DESC, c.event_timestamp ASC
+                LIMIT $1
+                """,
+                limit,
+            )
+        return [self._row_to_memcell(row) for row in rows]
+
     async def recall_memories(
         self,
         *,
         query_text: str,
         query_embedding: list[float],
         session_id: str | None = None,
+        linked_session_ids: Collection[str] | None = None,
         limit: int = 5,
         candidate_limit: int | None = None,
     ) -> list[MemCellRecall]:
@@ -832,7 +1396,7 @@ class PostgresSoulRepository:
                 SELECT
                     c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
                     c.foresight_signals, c.event_timestamp, c.retrieval_count, c.explicit_importance,
-                    c.consolidated, c.scene_id,
+                    c.consolidated, c.scene_id, c.distilled_at,
                     vc.vector_similarity
                 FROM vector_candidates vc
                 JOIN mem_cells c ON c.id = vc.mem_cell_id
@@ -855,7 +1419,7 @@ class PostgresSoulRepository:
                         SELECT
                             c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
                             c.foresight_signals, c.event_timestamp, c.retrieval_count, c.explicit_importance,
-                            c.consolidated, c.scene_id,
+                            c.consolidated, c.scene_id, c.distilled_at,
                             COALESCE((1 - (v.embedding <=> $2::vector)), 0.0) AS vector_similarity
                         FROM mem_cells c
                         LEFT JOIN mem_cell_vectors v ON v.mem_cell_id = c.id
@@ -904,9 +1468,10 @@ class PostgresSoulRepository:
                 similarity=float(row.get("vector_similarity") or 0.0),
                 lexical_score=lexical_score,
                 session_id=session_id,
+                linked_session_ids=linked_session_ids,
                 now=now,
             )
-            if _passes_recall_floor(match, session_id):
+            if _passes_recall_floor(match, session_id, linked_session_ids):
                 matches.append(match)
 
         matches.sort(
@@ -1098,6 +1663,7 @@ class PostgresSoulRepository:
             explicit_importance=float(row["explicit_importance"]),
             consolidated=bool(row["consolidated"]),
             scene_id=cast(str | None, row["scene_id"]),
+            distilled_at=cast(datetime | None, _optional_column(row, "distilled_at")),
         )
 
     @staticmethod
@@ -1125,3 +1691,53 @@ class PostgresSoulRepository:
             except Exception:
                 return []
         return []
+
+    @staticmethod
+    def _row_to_retracted_claim(row: Any) -> RetractedClaim:
+        def _to_dt(val: Any) -> datetime | None:
+            if val is None:
+                return None
+            if isinstance(val, str):
+                return datetime.fromisoformat(val)
+            return val
+
+        return RetractedClaim(
+            id=str(row["id"]),
+            subject=str(row["subject"]),
+            claim=str(row["claim"]),
+            reason=str(row["reason"] or ""),
+            status=str(row["status"] or "pending"),
+            asserted_by=str(row["asserted_by"] or ""),
+            source_ref=str(row["source_ref"] or ""),
+            created_at=_to_dt(row["created_at"]),
+            updated_at=_to_dt(row["updated_at"]),
+            lifted_at=_to_dt(row["lifted_at"]),
+        )
+
+    @staticmethod
+    def _row_to_situational_note(row: Any) -> SituationalNote:
+        def _to_dt(val: Any) -> datetime | None:
+            if val is None:
+                return None
+            if isinstance(val, str):
+                return datetime.fromisoformat(val)
+            return val
+
+        return SituationalNote(
+            id=str(row["id"]),
+            note_type=str(row["note_type"]),
+            subject=str(row["subject"]) if row["subject"] else "",
+            summary=str(row["summary"]),
+            priority=int(row["priority"]) if row["priority"] else 0,
+            confidence=float(row["confidence"]) if row["confidence"] else 0.5,
+            valid_from=_to_dt(row["valid_from"]),
+            valid_until=_to_dt(row["valid_until"]),
+            effective_at=_to_dt(row["effective_at"]),
+            expired_at=_to_dt(row["expired_at"]),
+            source=str(row["source"]) if row["source"] else "debrief",
+            status=str(row["status"]) if row["status"] else "active",
+            session_id=str(row["session_id"]) if row["session_id"] else None,
+            created_at=_to_dt(row["created_at"]),
+            updated_at=_to_dt(row["updated_at"]),
+            resolved_at=_to_dt(row["resolved_at"]),
+        )

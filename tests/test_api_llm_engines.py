@@ -25,13 +25,13 @@ def test_cortex_login_endpoint_starts_flow():
     client = TestClient(webui.app)
 
     resp = client.post(
-        "/api/components/cortex/login", json={"name": "selenium_chatgpt"}
+        "/api/components/cortex/login", json={"name": "zen_chatgpt"}
     )
     assert resp.status_code == 422
     assert "no longer supported" in resp.json()["detail"].lower()
 
 
-def test_cortex_login_endpoint_errors_for_missing_or_non_selenium():
+def test_cortex_login_endpoint_errors_for_missing_or_non_zen():
     webui = SynthWebUIInterface(autostart=False)
     client = TestClient(webui.app)
 
@@ -39,7 +39,7 @@ def test_cortex_login_endpoint_errors_for_missing_or_non_selenium():
     resp = client.post("/api/components/cortex/login", json={"name": "no_such_engine"})
     assert resp.status_code == 422
 
-    # Load a non-selenium engine (manual) and try
+    # Load a non-zen engine (manual) and try
     registry = get_cortex_registry()
     try:
         manual = registry.load_engine("manual")

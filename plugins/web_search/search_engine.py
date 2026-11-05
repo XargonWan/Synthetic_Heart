@@ -25,6 +25,7 @@ from bs4 import BeautifulSoup
 
 from core.config_manager import config_registry
 from core.logging_utils import log_debug, log_info, log_warning
+from core.url_safety import safe_get
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -436,7 +437,7 @@ async def _fetch_page_text(url: str, max_chars: int) -> str:
 
     def _do_get() -> str:
         headers = {"User-Agent": _USER_AGENT}
-        response = requests.get(url, headers=headers, timeout=10)
+        response = safe_get(url, headers=headers, timeout=10)
         response.raise_for_status()
         return response.text
 
@@ -501,7 +502,7 @@ async def fetch_url_detailed(url: str, max_chars: int) -> dict[str, str]:
 
     def _do_get() -> tuple[int, str]:
         headers = {"User-Agent": _USER_AGENT}
-        response = requests.get(url, headers=headers, timeout=10)
+        response = safe_get(url, headers=headers, timeout=10)
         return response.status_code, response.text
 
     try:

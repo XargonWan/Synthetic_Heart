@@ -12,7 +12,7 @@ def test_switch_to_non_default_cortex_engine_via_components_endpoint(monkeypatch
     client = TestClient(webui.app)
 
     registry = get_cortex_registry()
-    target = "selenium_gemini"
+    target = "zen_gemini"
 
     # Try to ensure engine can be loaded in this environment; skip if not available
     try:

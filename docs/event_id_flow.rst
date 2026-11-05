@@ -170,7 +170,7 @@ Related Files
 - ``core/db.py`` - Database event marking
 - ``core/auto_response.py`` - Auto-response system for interface callbacks
 - ``plugins/terminal.py`` - Terminal plugin with auto-response integration
-- ``cortex/selenium_engine/selenium_chatgpt.py`` - Event_id usage
+- ``cortex/zen_engine/zen_chatgpt.py`` - Event_id usage
 
 .. note::
    Last updated: August 3, 2025

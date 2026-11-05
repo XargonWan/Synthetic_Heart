@@ -98,12 +98,14 @@ async def test_run_one_compaction_cycle_basic(monkeypatch):
     # Ensure active Cortex name resolves without DB access
     monkeypatch.setattr(
         "core.config.get_active_cortex_engine",
-        lambda *args, **kwargs: asyncio.sleep(0, result="selenium_chatgpt"),
+        lambda *args, **kwargs: asyncio.sleep(0, result="zen_chatgpt"),
     )
 
     # Run one cycle
     res = await p._run_one_compaction_cycle()
-    assert res is True
+    # The day-unit pass reports a counted summary (the WebUI panel reads it); the
+    # clustering path still returns True. Either way, a failed cycle returns False.
+    assert res is True or (isinstance(res, dict) and res.get("dry_run") is False)
 
 
 @pytest.mark.asyncio
@@ -191,8 +193,33 @@ async def test_tag_selection_fallback(monkeypatch):
     )
     monkeypatch.setattr(
         "core.config.get_active_cortex_engine",
-        lambda *args, **kwargs: asyncio.sleep(0, result="selenium_chatgpt"),
+        lambda *args, **kwargs: asyncio.sleep(0, result="zen_chatgpt"),
     )
 
     res = await p._run_one_compaction_cycle()
-    assert res is True
+    # The day-unit pass reports a counted summary (the WebUI panel reads it); the
+    # clustering path still returns True. Either way, a failed cycle returns False.
+    assert res is True or (isinstance(res, dict) and res.get("dry_run") is False)
+
+
+def test_confidence_label_is_coerced_to_a_number():
+    """The prompt asks for low/medium/high but the column is double precision.
+
+    Passing the label straight through made every `archived_memories` insert fail
+    ("invalid input for query argument $6: 'high' (must be real number, not
+    str)"), which aborted the cluster before the compacted memory was written, so
+    compaction produced nothing at all.
+    """
+    from plugins.grillo.grillo_compactor import _parse_confidence
+
+    assert _parse_confidence("high") == 0.9
+    assert _parse_confidence("MEDIUM") == 0.6
+    assert _parse_confidence("low") == 0.3
+    assert _parse_confidence(0.85) == 0.85
+    assert _parse_confidence("0.7") == 0.7
+    assert _parse_confidence(None) == 0.5
+    assert _parse_confidence("") == 0.5
+    assert _parse_confidence("banana") == 0.5
+    assert _parse_confidence(True) == 0.5
+    assert _parse_confidence(5) == 1.0
+    assert _parse_confidence(-3) == 0.0

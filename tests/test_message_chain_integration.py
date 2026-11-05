@@ -46,6 +46,7 @@ class TestMessageChainIntegration(unittest.IsolatedAsyncioTestCase):
             return_value={
                 "message_telegram_bot",
                 "message_synth_webui",
+                "send_message",
                 "tts_speak",
                 "audio_telegram_bot",
             },
@@ -211,6 +212,88 @@ class TestMessageChainIntegration(unittest.IsolatedAsyncioTestCase):
         called_actions = mock_run_actions.call_args[0][0]
         types = [a.get("type") for a in called_actions if isinstance(a, dict)]
         self.assertIn("tts_speak", types)
+        get_var_patcher.stop()
+
+    @patch("core.config_manager.config_registry.get_value")
+    @patch("core.transport_layer.run_corrector_middleware")
+    @patch("core.action_parser.run_actions")
+    async def test_unified_send_message_is_folded_into_the_voice_note(
+        self, mock_run_actions, mock_corrector, mock_get_value
+    ):
+        """A unified `send_message` reply must ride the voice note, not be sent twice.
+
+        Regression: ``send_message`` does not start with ``message_``, so the
+        message-action-type set built by the chain never contained it. The
+        standalone send_message was therefore dispatched alongside the
+        tts_speak, and when the TTS failed Vox's text-only fallback delivered
+        the SAME text a second time — the duplicate Telegram bubble — while
+        the voice note was never merged with its caption.
+        """
+        from core import message_chain
+
+        def fake_get_value(key, default=None, **kwargs):
+            if key == "CORRECTOR_RETRIES":
+                return 4
+            if key == "ACTIVE_VOX_ENGINE":
+                return "http"
+            return default
+
+        mock_get_value.side_effect = fake_get_value
+        mock_run_actions.return_value = {
+            "processed": [],
+            "failed_actions": [],
+            "errors": [],
+        }
+
+        class FakeVar:
+            def __init__(self, value):
+                self.value = value
+
+        def fake_get_var(name, default=None, **kwargs):
+            # A legacy configured list (no unified action) — the chain must add
+            # `send_message` itself.
+            if name == "MESSAGE_ACTION_TYPES":
+                return FakeVar(["message_synth_webui"])
+            return default
+
+        get_var_patcher = patch(
+            "core.config_manager.config_registry.get_var", new=fake_get_var
+        )
+        get_var_patcher.start()
+
+        json_text = '{"actions": [{"type": "send_message", "payload": {"text": "Hello","interface_path": "telegram_bot/5208932647"}}]}'
+        msg = SimpleNamespace(
+            chat_id=5208932647,
+            text=json_text,
+            from_cortex=True,
+            interface_path="telegram_bot/5208932647",
+        )
+
+        result = await message_chain.handle_incoming_message(
+            bot=MagicMock(),
+            message=msg,
+            text=json_text,
+            source="llm",
+            interface_path="telegram_bot/5208932647",
+            context={"is_voice_input": True},
+        )
+
+        self.assertEqual(result, message_chain.ACTIONS_EXECUTED)
+        mock_run_actions.assert_called_once()
+        called_actions = mock_run_actions.call_args[0][0]
+        types = [a.get("type") for a in called_actions if isinstance(a, dict)]
+        self.assertIn("tts_speak", types)
+        # The standalone text bubble must be gone: it rides on the voice note.
+        self.assertNotIn("send_message", types)
+        tts_payloads = [
+            a.get("payload")
+            for a in called_actions
+            if isinstance(a, dict) and a.get("type") == "tts_speak"
+        ]
+        self.assertTrue(
+            any(isinstance(p, dict) and p.get("__merged_text") for p in tts_payloads),
+            f"tts_speak should carry the merged caption, got {tts_payloads}",
+        )
         get_var_patcher.stop()
 
     @patch("core.config_manager.config_registry.get_value")

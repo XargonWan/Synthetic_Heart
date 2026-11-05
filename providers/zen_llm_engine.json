@@ -1,0 +1,19 @@
+{
+  "provider_id": "zen_llm_engine",
+  "display_name": "Zen LLM Engine",
+  "description": "Default SyntH component that automates browser-based AI interfaces (ChatGPT, Claude, Gemini web, etc.)",
+  "icon": "zen",
+  "protocol": "openai",
+  "base_url": "http://synth-zen-llm-engine:8000",
+  "base_url_locked": false,
+  "requires_api_key": false,
+  "api_key_placeholder": "",
+  "api_key_hint": "Zen LLM Engine must be running as a companion container. See https://github.com/XargonWan/zen-llm-engine",
+  "default_capabilities": { "cortex": true, "vox": false, "auris": false, "live": false, "vision": true },
+  "suggested_name": "zen-llm-engine",
+  "suggested_label": "Zen LLM Engine",
+  "extra_config": {
+    "timeout": 300
+  },
+  "sort_order": 60
+}

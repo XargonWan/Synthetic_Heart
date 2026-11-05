@@ -54,6 +54,19 @@ class RuntimeContext:
     voice_channel_id: str | None = None
     is_grillo_beat: bool = False
     beat_type: str | None = None
+    # Structural identity guard: set when the human's message opens by
+    # addressing Synth with its own name/alias (e.g. "Rekku, ..."). Weak
+    # models mirror that vocative back and address the USER as the synth;
+    # the rendered note re-anchors who is who right at the generation point.
+    addressee_note: str = ""
+    # Compact Reality Anchor line, built by ``core.prompt_engine`` from the same
+    # facts as the full ``[SYSTEM: REALITY ANCHOR]`` block, so the two cannot
+    # drift. Renderers place it on its own line directly above the current user
+    # turn: the full block rides in the system message, which on a long
+    # conversation sits thousands of characters away from the text being
+    # generated, so the authoritative date/time/season loses its grip exactly
+    # where it is needed. Empty when the turn carries no temporal facts.
+    reality_anchor: str = ""
 
 
 @dataclass

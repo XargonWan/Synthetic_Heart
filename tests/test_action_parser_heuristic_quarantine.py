@@ -12,7 +12,7 @@ async def test_heuristic_recovered_action_quarantined(monkeypatch):
     msg.from_cortex = True
 
     action = {
-        "type": "message_telegram_bot",
+        "type": "send_message",
         "payload": {"text": "Hello", "interface_path": "telegram_bot/-1"},
         "metadata": {"heuristic_recovery": True},
     }

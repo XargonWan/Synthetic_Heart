@@ -2,7 +2,7 @@
 """
 Stress test for Synth engines with long prompts and ramping concurrency.
 Tests:
-- 10 long prompts (3-4 chunks) to selenium-llm-engine (Gemini)
+- 10 long prompts (3-4 chunks) to zen-llm-engine (Gemini)
 - 10 long prompts to openrouter (ChatGPT)
 - 5 random prompts to other engines
 
@@ -165,10 +165,10 @@ async def main():
     all_results = {}
 
     # ============================================================
-    # TEST 1: 10 long prompts to selenium-llm-engine (Gemini)
+    # TEST 1: 10 long prompts to zen-llm-engine (Gemini)
     # ============================================================
     print("\n" + "=" * 70)
-    print("TEST 1: Selenium-llm-engine (Gemini Web) - 10 long prompts")
+    print("TEST 1: Zen-llm-engine (Gemini Web) - 10 long prompts")
     print("=" * 70)
 
     gemini_prompts = [generate_long_prompt(i) for i in range(10)]
@@ -176,9 +176,9 @@ async def main():
     gemini_delays = [30, 25, 20, 15, 10, 8, 5, 0, 0, 0]
 
     gemini_results = await run_test(
-        "selenium-llm-engine", gemini_prompts, gemini_delays, "Gemini Web"
+        "zen-llm-engine", gemini_prompts, gemini_delays, "Gemini Web"
     )
-    all_results["selenium-llm-engine"] = gemini_results
+    all_results["zen-llm-engine"] = gemini_results
 
     # ============================================================
     # TEST 2: 10 long prompts to openrouter (ChatGPT)

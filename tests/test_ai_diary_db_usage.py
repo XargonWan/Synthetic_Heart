@@ -460,3 +460,126 @@ async def test_update_diary_entry_archives_merged_source_rows(monkeypatch):
         )
     ]
     assert archived["ids"] == [41]
+
+
+async def test_update_diary_entry_keeps_fragments_written_after_the_merge_target(
+    monkeypatch,
+):
+    """A long day is merged in parts, so the target row is not always the newest.
+
+    The merged prose lands in the row named by ``id``; every row written *after*
+    that one belongs to a later part and must survive, otherwise merging the
+    beginning of a day would destroy the rest of it.
+    """
+    executed: list[tuple[str, tuple]] = []
+    archived: dict[str, object] = {}
+
+    async def fake_execute(query, params=()):
+        executed.append((query, params))
+        return None
+
+    async def fake_fetchall(query, params=()):
+        # Same day: two older fragments, the merge target, one later fragment.
+        return [{"id": 40}, {"id": 41}, {"id": 42}, {"id": 43}]
+
+    monkeypatch.setattr(ai_diary, "_execute", fake_execute)
+    monkeypatch.setattr(ai_diary, "_fetchall", fake_fetchall)
+
+    def fake_archive_diary_entries(entry_ids):
+        archived["ids"] = list(entry_ids)
+        return {"success": True, "archived_count": len(entry_ids)}
+
+    monkeypatch.setattr(ai_diary, "archive_diary_entries", fake_archive_diary_entries)
+
+    plugin = object.__new__(ai_diary.DiaryPlugin)
+    result = await plugin.execute_action(
+        {
+            "type": "update_diary_entry",
+            "payload": {"id": 42, "content": "merged prose of the morning"},
+        },
+        {},
+        None,
+        None,
+    )
+
+    assert result["success"] is True
+    assert archived["ids"] == [40, 41]
+    assert 42 not in archived["ids"] and 43 not in archived["ids"]
+
+
+async def test_update_diary_entry_part_merge_keeps_the_rest_of_the_day(monkeypatch):
+    """A part-merge writes the merged prose plus everything after the offset.
+
+    The consolidator sends a long day's earliest fragments only and passes
+    ``diary_merge_preserve_from``. The write must stitch the untouched remainder
+    back on, otherwise merging the start of a day would delete the rest of it.
+    """
+    executed: list[tuple[str, tuple]] = []
+    archived: dict[str, object] = {}
+    day_text = "MORNING FRAGMENT" + "\n\n---\n\n" + "AFTERNOON FRAGMENT"
+
+    async def fake_execute(query, params=()):
+        executed.append((query, params))
+        return None
+
+    async def fake_fetchall(query, params=()):
+        if "SELECT content FROM ai_diary" in query:
+            return [{"content": day_text}]
+        return [{"id": 51}]
+
+    monkeypatch.setattr(ai_diary, "_execute", fake_execute)
+    monkeypatch.setattr(ai_diary, "_fetchall", fake_fetchall)
+
+    def fake_archive_diary_entries(entry_ids):
+        archived["ids"] = list(entry_ids)
+        return {"success": True, "archived_count": len(entry_ids)}
+
+    monkeypatch.setattr(ai_diary, "archive_diary_entries", fake_archive_diary_entries)
+
+    cut = len("MORNING FRAGMENT")
+    plugin = object.__new__(ai_diary.DiaryPlugin)
+    result = await plugin.execute_action(
+        {
+            "type": "update_diary_entry",
+            "payload": {"id": 51, "content": "merged morning prose"},
+        },
+        {"diary_merge_preserve_from": cut},
+        None,
+        None,
+    )
+
+    assert result["success"] is True
+    written = executed[0][1][0]
+    assert written.startswith("merged morning prose")
+    assert "AFTERNOON FRAGMENT" in written
+    # The remainder is still marked as a fragment, so the day is offered again.
+    assert "\n\n---\n\n" in written
+
+
+async def test_update_diary_entry_part_merge_fails_closed_without_the_day(
+    monkeypatch,
+):
+    """If the day cannot be rebuilt, refuse: never write a partial merge blind."""
+
+    async def fake_execute(query, params=()):
+        raise AssertionError("no write may happen without the preserved remainder")
+
+    async def fake_fetchall(query, params=()):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(ai_diary, "_execute", fake_execute)
+    monkeypatch.setattr(ai_diary, "_fetchall", fake_fetchall)
+
+    plugin = object.__new__(ai_diary.DiaryPlugin)
+    result = await plugin.execute_action(
+        {
+            "type": "update_diary_entry",
+            "payload": {"id": 51, "content": "merged morning prose"},
+        },
+        {"diary_merge_preserve_from": 10},
+        None,
+        None,
+    )
+
+    assert result["success"] is False
+    assert "refusing" in result["error"]

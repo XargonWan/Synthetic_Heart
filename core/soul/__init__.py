@@ -18,11 +18,14 @@ from .models import (
     KgTriple,
     MemCell,
     MemScene,
+    SituationalNote,
     compute_memcell_salience,
 )
 from .repository import InMemorySoulRepository, PostgresSoulRepository, SoulRepository
+from .time_resolution import AbsoluteTimeResolver, TemporalRenderer
 
 __all__ = [
+    "AbsoluteTimeResolver",
     "DspExtraction",
     "DspVersion",
     "EmotionalEngine",
@@ -32,11 +35,13 @@ __all__ = [
     "EmotionalTag",
     "ForesightSignal",
     "InMemorySoulRepository",
-    "PostgresSoulRepository",
     "KgTriple",
     "MemCell",
     "MemScene",
+    "PostgresSoulRepository",
+    "SituationalNote",
     "SoulCompiler",
     "SoulRepository",
+    "TemporalRenderer",
     "compute_memcell_salience",
 ]

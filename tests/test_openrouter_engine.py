@@ -241,7 +241,7 @@ class TestSystemInstruction:
         }
         si = plugin._build_system_instruction(prompt)
         assert "CURRENT INTERFACE: telegram_bot" in si
-        assert "message_telegram_bot" in si
+        assert "send_message" in si
 
     def test_includes_verbose_instructions(self) -> None:
         plugin = self._make_plugin()

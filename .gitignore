@@ -121,3 +121,7 @@ memories/session
 frontend/scripts/voice-settings.png
 # Runtime-generated TTS audio
 res/synth_webui/static/audio/tts/
+
+# pgvector binaries vendored into the Windows installer by CI, not by hand;
+# installer/vendor/README.md explains where they come from.
+installer/vendor/pgvector/

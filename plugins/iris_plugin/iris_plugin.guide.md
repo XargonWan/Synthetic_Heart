@@ -18,4 +18,4 @@ engine registry (`core/iris_registry.py`).
 
 | Key | Purpose |
 |-----|---------|
-| `ACTIVE_IRIS_ENGINE` | Active vision engine (default `selenium-llm-engine`). |
+| `ACTIVE_IRIS_ENGINE` | Active vision engine (default `zen-llm-engine`). |

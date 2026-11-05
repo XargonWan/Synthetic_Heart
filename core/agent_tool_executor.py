@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from core.logging_utils import log_error, log_info
+from core.logging_utils import log_error, log_info, log_warning
 
 
 def _stringify_mcp_result(result: Any) -> str:
@@ -97,7 +97,7 @@ class AgentToolExecutor:
         arguments = arguments or {}
 
         if tool.is_external():
-            return await self._execute_mcp(tool, arguments)
+            return await self._execute_mcp(tool, arguments, context, original_message)
         return await self._execute_internal(tool, arguments, context, original_message)
 
     async def _execute_internal(
@@ -111,33 +111,37 @@ class AgentToolExecutor:
         from core.action_parser import run_action
 
         action = {"type": tool.name, "payload": arguments}
+        # The agent-tool marker is what tells a SELF-DELIVERING action (e.g.
+        # ``search_current_knowledge``) that it is being called as a pure tool
+        # inside the bounded loop: return the results to the loop and do NOT
+        # enqueue a separate user-facing delivery turn. It is set HERE, on the
+        # single choke point every agent tool call passes through, because the
+        # callers always hand over a populated turn context — a
+        # ``context or {default}`` expression never applies, so the marker was
+        # absent in practice and the guard that reads it could never fire
+        # (observed live: every agent-lane web search also sent the user a
+        # message). Marked in place so any key a downstream handler writes back
+        # onto the context stays visible to the caller.
+        if isinstance(context, dict):
+            context.setdefault("from_cortex", True)
+            context["agent_tool"] = True
+        else:
+            context = {"from_cortex": True, "agent_tool": True}
         try:
             log_info(f"[agent_tool_executor] Executing internal tool '{tool.name}'")
-            result = await run_action(
-                action,
-                context or {"from_cortex": True, "agent_tool": True},
-                None,
-                original_message,
-            )
-            # run_action now returns {"ok": bool, ...} for message-delivery
-            # actions dispatched through interfaces.  Propagate the real
-            # outcome instead of always claiming success.
-            if isinstance(result, dict) and "ok" in result:
-                ok = bool(result["ok"])
-                error = result.get("error")
-                return {
-                    "ok": ok,
-                    "tool": tool.name,
-                    "source": tool.source,
-                    "result": self._stringify_internal_result(result),
-                    "error": error,
-                }
+            result = await run_action(action, context, None, original_message)
+            # run_action returns {"ok": bool, ...} for message-delivery actions
+            # dispatched through interfaces; every other action returns its
+            # plugin's own result dict, which reports failure through its own
+            # vocabulary ({"status": "error", ...}). Both are read here so the
+            # loop's outcome is real instead of always claiming success.
+            ok, error = self._outcome(result)
             return {
-                "ok": True,
+                "ok": ok,
                 "tool": tool.name,
                 "source": tool.source,
                 "result": self._stringify_internal_result(result),
-                "error": None,
+                "error": error,
             }
         except Exception as exc:
             log_error(
@@ -152,10 +156,46 @@ class AgentToolExecutor:
             }
 
     async def _execute_mcp(
-        self, tool: Any, arguments: dict[str, Any]
+        self,
+        tool: Any,
+        arguments: dict[str, Any],
+        context: dict[str, Any] | None = None,
+        original_message: Any = None,
     ) -> dict[str, Any]:
-        """Invoke an external MCP tool via the client bridge."""
+        """Invoke an external MCP tool via the client bridge.
+
+        Goes through the same safety gate as internal actions, using the
+        ``security_level`` configured for the MCP server.
+        """
+        from core.action_safety import is_action_allowed_for_execution
         from core.mcp_bridge.client import mcp_client_bridge
+
+        # Agent tool calls are model-originated by definition.
+        gate_context = {**(context or {}), "from_cortex": True}
+        allowed, reason, _meta = is_action_allowed_for_execution(
+            {
+                "type": tool.name,
+                "payload": arguments,
+                # The operator's per-server ``security_level`` is the policy
+                # knob; the auto-added "mcp:<server>" effect marker is only a
+                # provenance tag and must not bump every tool to "medium".
+                "declared_metadata": {"security_level": tool.security_level},
+            },
+            gate_context,
+            original_message,
+        )
+        if not allowed:
+            log_warning(
+                f"[agent_tool_executor] MCP tool '{tool.name}' blocked by safety "
+                f"gate: {reason}"
+            )
+            return {
+                "ok": False,
+                "tool": tool.name,
+                "source": tool.source,
+                "result": "",
+                "error": f"Tool not permitted: {reason}",
+            }
 
         try:
             log_info(
@@ -179,6 +219,37 @@ class AgentToolExecutor:
                 "result": "",
                 "error": str(exc),
             }
+
+    @staticmethod
+    def _outcome(result: Any) -> tuple[bool, str | None]:
+        """Read the success/failure outcome of one dispatched internal action.
+
+        An explicit ``{"ok": bool}`` (returned by the message-delivery path) is
+        authoritative. Otherwise the action returned its plugin's own result
+        dict, which reports failure in its own vocabulary — ``{"status":
+        "error", "message": ...}`` or a non-empty ``error`` — and that must NOT
+        be reported as success: the loop renders this outcome to the model as
+        ``[tool:x] OK`` / ``[tool:x] ERROR: ...``, so treating "did not raise"
+        as success silently tells the model a failed tool worked (observed
+        live: ``hass_snapshot`` answering ``status: error`` on a camera that
+        returned no image, logged as ``ok=True``, after which the loop kept
+        re-issuing it and then went off to search the web instead). Anything
+        else counts as success.
+        """
+        if not isinstance(result, dict):
+            return True, None
+        if "ok" in result:
+            return bool(result["ok"]), result.get("error")
+        status = str(result.get("status") or "").strip().lower()
+        if status in {"error", "failed", "failure"}:
+            detail = (
+                result.get("message") or result.get("error") or result.get("reason")
+            )
+            return False, str(detail) if detail else None
+        error = result.get("error")
+        if isinstance(error, str) and error.strip():
+            return False, error.strip()
+        return True, None
 
     @staticmethod
     def _stringify_internal_result(result: Any) -> str:

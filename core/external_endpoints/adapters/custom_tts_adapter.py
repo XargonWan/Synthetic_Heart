@@ -134,7 +134,9 @@ class LegacyHttpTTSAdapter(BaseProtocolAdapter):
     # Probe / health
     # ------------------------------------------------------------------
 
-    async def probe_capabilities(self) -> dict[str, bool]:
+    async def probe_capabilities(
+        self, models: list[ModelInfo] | None = None
+    ) -> dict[str, bool]:
         return {"vox": True}
 
     async def health_check(self) -> bool:

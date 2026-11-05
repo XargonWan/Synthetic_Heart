@@ -1473,7 +1473,7 @@ class BioPlugin:
             )
             seen.add(uid)
 
-        chat_msgs = context_memory.get(message.chat_id, [])
+        chat_msgs = context_memory.get(getattr(message, "chat_id", None), [])
         for m in chat_msgs:
             uid = str(m.get("user_id"))
             if uid and uid not in seen:

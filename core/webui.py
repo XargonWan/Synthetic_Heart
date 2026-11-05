@@ -37,11 +37,23 @@ from fastapi import (
     Request,
     HTTPException,
 )
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Response
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    FileResponse,
+    Response,
+    RedirectResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from starlette.websockets import WebSocketState
 
 from core.core_initializer import register_interface
+from core import app_paths as _app_paths
+
+# Deployment-appropriate defaults (container vs native): resolved lazily so an
+# environment change made before the server is constructed still applies.
+_default_bind_host = _app_paths.default_bind_host
+_in_container = _app_paths.in_container
 from core.logging_utils import _LOG_FILE, log_debug, log_error, log_info, log_warning
 from core.config_manager import config_registry
 from core.variables_engine import register_exposed_var
@@ -57,6 +69,8 @@ from core.animation_handler import (
     set_karada_state_server,
 )
 from core.karada_ws_transport import WebSocketTransport
+from core import webui_auth
+from core.webui_auth import WebUIAuthMiddleware
 from core import animation_uploads
 import mimetypes
 
@@ -82,6 +96,49 @@ register_exposed_var(
     advanced=True,
 )
 LOG_PREFIX = "[synth_webui]"
+
+#: Hosts that count as "this machine". The first-run setup page is only ever
+#: offered to a local browser: redirecting a remote one would be confusing, and a
+#: fresh install is configured at the machine it was installed on.
+LOCAL_CLIENT_HOSTS = ("127.0.0.1", "::1", "localhost")
+
+
+def _endpoint_looks_configured(endpoint: object) -> bool:
+    """Whether an endpoint is one the user set up and that works.
+
+    A fresh database seeds an endpoint for the container build whose host exists
+    only inside Docker, with no API key and ``probe_status='never'``. Counting that
+    preset as "configured" retired the setup page on a clean install and left that
+    same preset as the only engine, so the first thing a new user met was an avatar
+    scene and a connection error.
+
+    Resolution was tried as a signal first and rejected: measured on a fresh Debian
+    VM, the container hostname *does* resolve, because a single-label name is
+    answered by the local resolver. The probe verdict the application already keeps
+    is the honest one - ``never`` and ``pending`` have not been shown to work,
+    ``failed`` has been shown not to, and only ``success`` means an engine that
+    answered. A key the user typed counts on its own, since it is their own
+    endpoint whatever its host resolves to.
+    """
+    if str(getattr(endpoint, "api_key", "") or "").strip():
+        return True
+    status = getattr(endpoint, "probe_status", None)
+    if status is None:
+        return True  # cannot tell: do not change behaviour on a guess
+    return str(status).strip().lower() == "success"
+
+
+def as_flag(raw: object) -> bool:
+    """Read a configuration value as a boolean, whatever type it arrives as.
+
+    The config table can hand back text, and ``bool("False")`` is ``True`` - which
+    would retire the setup page permanently on a brand-new install, silently.
+    """
+    if isinstance(raw, str):
+        return raw.strip().lower() in ("1", "true", "yes", "on")
+    return bool(raw)
+
+
 WEBUI_LOG = "webui"  # Log file name for WebUI (logs/webui.log)
 # Internal chat/component identifier used when interacting with the LLM and
 # action state manager. This must remain "webui" for compatibility with
@@ -99,7 +156,15 @@ _WEBUI_TOUCH_PRIORITY = 11
 _READ_ONLY_QUERY_RE = re.compile(r"^\s*(?:select|with)\b", re.IGNORECASE)
 _WRITE_QUERY_RE = re.compile(
     r"\b(?:insert|update|delete|drop|alter|create|truncate|replace|grant|"
-    r"revoke|merge|call|exec|execute|attach|detach|vacuum|pragma|set|copy)\b",
+    r"revoke|merge|call|exec|execute|attach|detach|vacuum|pragma|set|copy|into)\b",
+    re.IGNORECASE,
+)
+# Server-side file / admin helpers a read-only SELECT could still reach.
+_DANGEROUS_FUNC_RE = re.compile(
+    r"\b(?:pg_read_file|pg_read_binary_file|pg_ls_\w+|pg_stat_file|pg_file_\w+|"
+    r"pg_sleep\w*|pg_terminate_backend|pg_cancel_backend|pg_reload_conf|"
+    r"pg_logdir_ls|lo_\w+|dblink\w*|set_config|load_file|"
+    r"query_to_xml\w*|xmlparse|current_setting)\b",
     re.IGNORECASE,
 )
 
@@ -116,7 +181,7 @@ def _is_read_only_query(query: str) -> bool:
         return False
     if not _READ_ONLY_QUERY_RE.match(stripped):
         return False
-    if _WRITE_QUERY_RE.search(stripped):
+    if _WRITE_QUERY_RE.search(stripped) or _DANGEROUS_FUNC_RE.search(stripped):
         return False
     return True
 
@@ -246,14 +311,18 @@ class SynthWebUIInterface:
         # Runtime/configurable attributes with sensible defaults
         # Autostart can be disabled for tests/dev harnesses.
         self.autostart = bool(autostart)
-        self.host = _clean_env("SYNTH_WEBUI_HOST", "0.0.0.0") or "0.0.0.0"
+        self.host = _default_bind_host()
         self.log_level = os.getenv("SYNTH_WEBUI_LOG_LEVEL", "info")
         # TLS / HTTPS configuration
-        # By default expose the WebUI over HTTPS unless explicitly disabled.
-        # This makes the default developer experience minimal and secure.
+        # The container exposes HTTPS (SECURE_CONNECTION=1); a native install
+        # defaults to plain HTTP on loopback, so the first launch does not greet
+        # the user with a self-signed certificate warning. An explicit
+        # SYNTH_WEBUI_TLS / SECURE_CONNECTION always wins.
         tls_flag = _clean_env("SYNTH_WEBUI_TLS")
         if tls_flag is None:
-            tls_flag = _clean_env("SECURE_CONNECTION", "1")
+            tls_flag = _clean_env("SECURE_CONNECTION")
+        if tls_flag is None:
+            tls_flag = "1" if _in_container() else "0"
         self.tls_enabled = tls_flag == "1"
         self.tls_certfile = os.getenv("SYNTH_WEBUI_CERTFILE", None)
         self.tls_keyfile = os.getenv("SYNTH_WEBUI_KEYFILE", None)
@@ -390,7 +459,7 @@ class SynthWebUIInterface:
                     log_file=WEBUI_LOG,
                 )
             else:
-                self.attachments_dir = Path("/config") / "uploads"
+                self.attachments_dir = _app_paths.data_root() / "uploads"
                 log_info(
                     f"{LOG_PREFIX} Using default attachments directory: {self.attachments_dir}",
                     log_file=WEBUI_LOG,
@@ -471,29 +540,34 @@ class SynthWebUIInterface:
 
         # Ensure the root path always returns the rendered HTML directly.
         # In some deployment or hot-reload scenarios a previous handler may
-        # end up returning None (serialized as JSON null). Add a lightweight
-        # middleware that intercepts '/' and returns the rendered index to
-        # guarantee consistent behaviour.
+        # end up returning None (serialized as JSON null). This middleware
+        # guarantees HTML for '/'. It delegates to the real root handler rather
+        # than rendering a second, divergent copy of the page: a middleware runs
+        # BEFORE routing, so anything it answers itself makes the root route
+        # unreachable - including the first-run redirect that lives there. Serving
+        # the page here is precisely why a fresh install never saw the setup page.
         try:
             from starlette.middleware.base import BaseHTTPMiddleware
 
             class _IndexMiddleware(BaseHTTPMiddleware):
                 async def dispatch(inner_self, request, call_next):
                     if request.url.path == "/":
-                        log_info(
-                            f"{LOG_PREFIX} Index middleware intercepting root request"
-                        )
                         try:
-                            content = self._render_index()
-                            log_info(
-                                f"{LOG_PREFIX} Index middleware rendered length {len(content)}"
-                            )
-                            return HTMLResponse(content=content, media_type="text/html")
+                            response = await self.index(request)
                         except Exception as e:
                             log_error(
-                                f"{LOG_PREFIX} Index middleware failed to render index: {e}"
+                                f"{LOG_PREFIX} Index handler failed to render index: {e}"
                             )
                             raise
+                        if response is None:
+                            log_warning(
+                                f"{LOG_PREFIX} Root handler returned nothing; "
+                                "serving the rendered page directly"
+                            )
+                            response = HTMLResponse(
+                                content=self._render_index(), media_type="text/html"
+                            )
+                        return response
                     return await call_next(request)
 
             self.app.add_middleware(_IndexMiddleware)
@@ -775,6 +849,7 @@ class SynthWebUIInterface:
         self.app.get("/stats")(self.stats)
         self.app.get("/logs")(self.logs_page)
         self.app.get("/diary")(self.diary_page)
+        self.app.get("/setup")(self.setup_page)
         self.app.post("/api/log-console")(self.log_console_endpoint)
         self.app.websocket("/ws")(self.websocket_endpoint)
         self.app.websocket("/logs")(self.logs_ws_endpoint)
@@ -858,7 +933,7 @@ class SynthWebUIInterface:
         self.app.post("/api/config")(self.update_config_entry)
         # Cortex-aware endpoints
         self.app.post("/api/components/cortex")(self.set_cortex_engine)
-        # Login control for Selenium-based engines
+        # Login control for Zen-based engines
         self.app.post("/api/components/cortex/login")(self.cortex_login)
         # Model selection for cortex engines
         self.app.post("/api/components/cortex/model")(self.set_cortex_model)
@@ -917,6 +992,9 @@ class SynthWebUIInterface:
         self.app.delete("/api/goals/{goal_id}")(self.delete_goal)
         self.app.post("/api/goals/clear-abandoned")(self.clear_abandoned_goals)
         self.app.delete("/api/goals")(self.clear_all_goals)
+        # Operator surface for the memories tier: list/search + per-item delete.
+        self.app.get("/api/memories")(self.list_memories)
+        self.app.delete("/api/memories/{memory_id}")(self.delete_memory)
         self.app.post("/api/growth/current")(self.update_growth_current)
         self.app.post("/api/growth/revert")(self.revert_growth_state)
         # Per-item delete for History sub-tabs
@@ -933,6 +1011,22 @@ class SynthWebUIInterface:
         self.app.delete("/api/dead-targets/{target_id}")(self.delete_dead_target)
         self.app.get("/api/reason-trail")(self.list_reason_trail)
         self.app.delete("/api/reason-trail/{reason_id}")(self.delete_reason_trail)
+        # Manual SOUL memory maintenance: the re-distil pass behind the button in
+        # Settings. GET reports progress and how much is still unstamped, POST
+        # starts the pass in the background.
+        self.app.get("/api/soul/redistil")(self.soul_redistil_status)
+        self.app.post("/api/soul/redistil")(self.start_soul_redistil)
+        # Standing situational notes as editable text (Debrief Situational Notes
+        # component pane). GET renders them, PUT replaces them with the text.
+        self.app.get("/api/soul/situational-notes")(self.get_situational_notes)
+        self.app.put("/api/soul/situational-notes")(self.put_situational_notes)
+        # Retracted claims (what the trainer has said is false): list them, add
+        # one, and confirm / reject / lift / restore a stored one.
+        self.app.get("/api/soul/retractions")(self.get_retractions)
+        self.app.post("/api/soul/retractions")(self.post_retraction)
+        # On-demand run of the nightly memory compaction (Settings → Memory Compaction).
+        self.app.get("/api/grillo/compaction")(self.grillo_compaction_status)
+        self.app.post("/api/grillo/compaction")(self.start_grillo_compaction)
 
         # Agent tasks endpoints (Agentic Runtime persistence)
         self.app.get("/api/agent/tasks")(self.list_agent_tasks)
@@ -1108,6 +1202,11 @@ class SynthWebUIInterface:
             log_warning(
                 f"{LOG_PREFIX} Failed to add plugin dispatch middleware: {_mw_exc}"
             )
+
+        # Must stay the LAST add_middleware call: Starlette wraps later
+        # middleware around earlier ones, and the auth gate has to sit outside
+        # the index/plugin-dispatch middlewares that answer before routing.
+        self.app.add_middleware(WebUIAuthMiddleware)  # type: ignore[arg-type]
 
     # ------------------------------------------------------------------
     # Plugin extension API
@@ -1700,9 +1799,9 @@ class SynthWebUIInterface:
             )
 
         try:
-            from core.db import execute_query
+            from core.db import execute_read_only_query
 
-            rows = await execute_query(query)
+            rows = await execute_read_only_query(query)
             serialized = _serialize_query_rows(rows, limit)
             return JSONResponse(
                 {
@@ -2044,7 +2143,7 @@ class SynthWebUIInterface:
 
     @staticmethod
     def get_supported_actions() -> dict:
-        from plugins.vox_plugin import is_vox_enabled
+        from core.optional_plugins import is_vox_enabled
 
         vox_on = is_vox_enabled()
 
@@ -2079,7 +2178,7 @@ class SynthWebUIInterface:
     @staticmethod
     def get_prompt_instructions(action_name: str) -> dict:
         if action_name == "message_synth_webui":
-            from plugins.vox_plugin import is_vox_enabled
+            from core.optional_plugins import is_vox_enabled
 
             vox_on = is_vox_enabled()
 
@@ -2291,11 +2390,24 @@ class SynthWebUIInterface:
 </html>
 """
 
-    async def index(self):
-        log_info(f"{LOG_PREFIX} Index route called")
+    def _is_local_client(self, request: Request) -> bool:
+        """Whether *request* came from this machine."""
         try:
+            host = str(getattr(getattr(request, "client", None), "host", "") or "")
+        except Exception:
+            host = ""
+        return host in LOCAL_CLIENT_HOSTS
+
+    async def index(self, request: Request):
+        try:
+            # A brand-new native install lands on the setup page instead of an
+            # empty interface. Local requests only: a remote browser must never
+            # be redirected, and an install with any endpoint configured never is.
+            if self._is_local_client(request) and await self._first_run_pending():
+                log_info(f"{LOG_PREFIX} first run detected; redirecting to /setup")
+                return RedirectResponse(url="/setup", status_code=307)
+
             html = self._render_index()
-            log_info(f"{LOG_PREFIX} Rendered HTML length: {len(html)}")
             # Return the rendered HTML as an HTMLResponse. Keep this inside
             # the try-block so exceptions during rendering lead to a 500 and
             # we never fall through returning None.
@@ -3047,6 +3159,181 @@ class SynthWebUIInterface:
         html = self._render_diary()
         return HTMLResponse(content=html)
 
+    # ------------------------------------------------------------------
+    # First-run setup page
+    # ------------------------------------------------------------------
+    #
+    # A native install asks nothing at install time: the installer only makes
+    # the machine able to run SyntH. Who the persona is, where and when the
+    # household is, and which engine to think with are asked here, once, in the
+    # browser. It is a plain page over the existing config and endpoint APIs.
+    #
+    # The page is only *offered* (the root redirects to it) while the install
+    # looks untouched: no external endpoint of the user's own yet and
+    # SETUP_COMPLETED unset. An existing deployment never sees it, and "Skip for
+    # now" sets the flag so it cannot nag.
+
+    def _setup_completed(self) -> bool:
+        """Whether the first-run page has been dealt with."""
+        try:
+            raw = config_registry.get_var(
+                "SETUP_COMPLETED",
+                False,
+                label="Setup page completed",
+                description=(
+                    "Set once the first-run setup page has been finished or "
+                    "skipped. While it is false the WebUI root redirects to "
+                    "/setup when no external endpoint is configured yet."
+                ),
+                component="synth_webui",
+                hidden=True,
+            )
+        except Exception as exc:
+            log_info(
+                f"{LOG_PREFIX} could not read SETUP_COMPLETED ({exc}); "
+                "the setup page will not be offered"
+            )
+            return True  # never nag when we cannot read the flag
+        return as_flag(raw)
+
+    async def _first_run_pending(self) -> bool:
+        """True only when this install looks brand new.
+
+        An external endpoint counts as "already set up" only when it looks like the
+        user's own: it carries an API key, or the application's own probe has
+        recorded that it answered. A fresh native install seeds an endpoint for the
+        container build whose host exists only inside Docker, with no key and
+        probe_status='never', and counting that preset as "configured" retired this
+        page on a clean install while leaving it as the only engine, which then
+        answered nothing but a connection error.
+
+        Any doubt resolves to False, because a wrong redirect is worse than a
+        missing one. Declines stay silent on this hot path (it runs on every
+        `/` hit); the offered page and the redirect log instead.
+        """
+        if self._setup_completed():
+            return False
+        try:
+            from core.external_endpoints.registry import get_external_endpoint_registry
+
+            endpoints = await get_external_endpoint_registry().list_endpoints(
+                enabled_only=True
+            )
+        except Exception as exc:
+            log_info(
+                f"{LOG_PREFIX} setup page not offered: endpoints unreadable ({exc})"
+            )
+            return False
+        configured = [
+            endpoint for endpoint in endpoints if _endpoint_looks_configured(endpoint)
+        ]
+        if configured:
+            return False
+        if endpoints:
+            log_info(
+                f"{LOG_PREFIX} setup page offered: {len(endpoints)} enabled "
+                "endpoint(s) are shipped presets that have never answered a probe"
+            )
+        return True
+
+    async def setup_page(self, request: Request):
+        html = self._render_setup()
+        return HTMLResponse(content=html)
+
+    def _render_setup(self) -> str:
+        """Render the first-run page from ``webui_templates/setup.html``."""
+        import html as _html
+        import zoneinfo
+
+        template_path = Path(__file__).parent / "webui_templates" / "setup.html"
+        with open(template_path, "r", encoding="utf-8") as handle:
+            template = handle.read()
+
+        def value(key: str, default: str = "") -> str:
+            try:
+                raw = config_registry.get_value(key, default)
+            except Exception:
+                return default
+            return "" if raw is None else str(raw)
+
+        try:
+            from core.config import get_trainer_name
+
+            trainer = get_trainer_name() or ""
+        except Exception:
+            trainer = value("TRAINER_NAME", "")
+
+        synth_name = value("SYNTH_NAME", "SyntH") or "SyntH"
+        timezone_name = value("TZ", "UTC") or "UTC"
+        language = value("PROJECT_DEFAULT_LANGUAGE", "en") or "en"
+
+        # Timezone dropdown: every IANA zone, current one selected.
+        try:
+            zones = sorted(zoneinfo.available_timezones())
+        except Exception:
+            zones = [timezone_name]
+        tz_options = "".join(
+            f'<option value="{_html.escape(zone)}"'
+            f"{' selected' if zone == timezone_name else ''}>{_html.escape(zone)}</option>"
+            for zone in zones
+        )
+
+        # Language dropdown: the same catalogue the Vox UI uses.
+        try:
+            from core.languages import SUPPORTED_LANGUAGES
+
+            entries = sorted(
+                (
+                    {
+                        "code": str(item.get("code") or ""),
+                        "name": str(item.get("en") or ""),
+                    }
+                    for item in SUPPORTED_LANGUAGES
+                ),
+                key=lambda item: item["name"].lower(),
+            )
+        except Exception:
+            entries = [{"code": "en", "name": "English"}]
+        if not any(entry["code"] == language for entry in entries):
+            entries.insert(0, {"code": language, "name": language})
+        language_options = "".join(
+            f'<option value="{_html.escape(entry["code"])}"'
+            f"{' selected' if entry['code'] == language else ''}>"
+            f"{_html.escape(entry['name'])} ({_html.escape(entry['code'])})</option>"
+            for entry in entries
+            if entry["code"]
+        )
+
+        # Location suggestions, if the deployment has a list to offer.
+        try:
+            from core.time_zone_utils import get_suggested_locations
+
+            locations = [str(item) for item in (get_suggested_locations() or [])]
+        except Exception:
+            locations = []
+        location_options = "".join(
+            f'<option value="{_html.escape(item)}"></option>' for item in locations
+        )
+
+        accent = value("WEBUI_ACCENT_COLOR", "#6bfefe") or "#6bfefe"
+
+        replacements = {
+            "%%BRAND_NAME%%": BRAND_NAME,
+            "%%LOGO_URL%%": str(getattr(self, "logo_url", "/static/synth_logo_bg.png")),
+            "%%ACCENT%%": accent,
+            "%%SYNTH_NAME%%": _html.escape(synth_name),
+            "%%TRAINER_NAME%%": _html.escape(trainer),
+            "%%SYNTH_PROFILE%%": _html.escape(value("SYNTH_PROFILE", "")),
+            "%%LOCATION%%": _html.escape(value("PROMPT_LOCATION", "")),
+            "%%SCENE_NOTE%%": _html.escape(value("SCENE_NOTE", "")),
+            "%%TZ_OPTIONS%%": tz_options,
+            "%%LANGUAGE_OPTIONS%%": language_options,
+            "%%LOCATION_OPTIONS%%": location_options,
+        }
+        for token, replacement in replacements.items():
+            template = template.replace(token, replacement)
+        return template
+
     async def serve_template_section(self, section: str):
         """Serve modular template sections for dynamic loading."""
         try:
@@ -3231,13 +3518,7 @@ class SynthWebUIInterface:
     # WebSocket logic
     # ------------------------------------------------------------------
     async def websocket_endpoint(self, websocket: WebSocket):
-        from core.karada_api import _configured_api_token, _token_from_websocket
-
-        expected_token = _configured_api_token()
-        if (
-            expected_token is not None
-            and _token_from_websocket(websocket) != expected_token
-        ):
+        if not webui_auth.websocket_authorized(websocket):
             await websocket.close(code=4401, reason="Invalid or missing API token")
             return
 
@@ -3478,7 +3759,7 @@ class SynthWebUIInterface:
             candidates.append(Path(log_override).expanduser())
         candidates.extend(
             [
-                Path("/app/logs/synth.log"),
+                _app_paths.log_dir() / "synth.log",
                 Path.cwd() / "logs" / "synth.log",
                 Path.cwd() / "logs" / "dev" / "synth.log",
                 Path(_LOG_FILE),
@@ -4080,7 +4361,6 @@ class SynthWebUIInterface:
         """
         import asyncio as _asyncio
         from core.model_manager import MODEL_MANAGER
-        from core.vox_registry import VOX_REGISTRY
 
         lang = request.query_params.get("lang", "en")
 
@@ -4107,36 +4387,16 @@ class SynthWebUIInterface:
                 gender = vm.gender
                 break
 
-        # Import generator helper lazily to avoid circular imports
-        import inspect
+        # Import generator helpers lazily to avoid circular imports
+        from scripts.generate_model_samples import (
+            edge_fallback_sample,
+            vox_engine_sample,
+        )
 
         def _generate_fn(text: str, v: str | None) -> "bytes | None":
-            # Try VOX engine first
-            for engine_name in VOX_REGISTRY.get_available_engines():
-                try:
-                    engine = VOX_REGISTRY.load_engine(engine_name)
-                    if not hasattr(engine, "sample"):
-                        continue
-                    sig = inspect.signature(engine.sample)
-                    data: bytes | None = (
-                        engine.sample(text, v)
-                        if len(sig.parameters) == 2
-                        else engine.sample(v)
-                    )
-                    if data:
-                        return data
-                except Exception:
-                    continue
-            # edge-tts fallback with correct locale + gender
-            try:
-                from scripts.generate_model_samples import _edge_generate, _tweak_audio
-
-                data = _edge_generate(text, v, lang=lang, gender=gender)
-                if data:
-                    return _tweak_audio(data, v, lang)
-            except Exception:
-                pass
-            return None
+            return vox_engine_sample(text, v, model_id) or edge_fallback_sample(
+                text, v, lang, gender
+            )
 
         loop = _asyncio.get_event_loop()
         try:
@@ -4178,13 +4438,7 @@ class SynthWebUIInterface:
         - ``{"type": "vad",     "signal": "speech_start"|"speech_end"}`` — VAD events.
         - ``{"type": "error",   "detail": "..."}`` — error notification.
         """
-        from core.karada_api import _configured_api_token, _token_from_websocket
-
-        expected_token = _configured_api_token()
-        if (
-            expected_token is not None
-            and _token_from_websocket(websocket) != expected_token
-        ):
+        if not webui_auth.websocket_authorized(websocket):
             await websocket.close(code=4401, reason="Invalid or missing API token")
             return
 
@@ -5924,6 +6178,25 @@ class SynthWebUIInterface:
                     skin = "Rei"
         return JSONResponse({"skin": skin})
 
+    _SAFE_SKIN_NAME = re.compile(r"^\w[\w. -]*$")
+
+    @classmethod
+    def _skin_path(cls, skins_dir: Path, name: str) -> Path:
+        """Return ``skins_dir / name`` or raise 400 if it could escape ``skins_dir``.
+
+        ``Path(name).name`` is not enough: ``Path("..").name == ".."``.
+        """
+        if (
+            not isinstance(name, str)
+            or ".." in name
+            or not cls._SAFE_SKIN_NAME.fullmatch(name)
+        ):
+            raise HTTPException(status_code=400, detail="Invalid skin name")
+        candidate = skins_dir / name
+        if candidate.resolve().parent != skins_dir.resolve():
+            raise HTTPException(status_code=400, detail="Invalid skin name")
+        return candidate
+
     @staticmethod
     def _sanitize_vrm_filename(name: str) -> str:
         stem = Path(name or "avatar").stem
@@ -6026,7 +6299,7 @@ class SynthWebUIInterface:
                 # Attempt to load DB-backed values for all definitions and
                 # regenerate the exported list.
                 try:
-                    await config_registry.load_all_from_db()
+                    await config_registry.load_all_from_db(force=True)
                     definitions = config_registry.export_definitions()
                 except Exception:
                     # Non-fatal: if DB is not available just continue with
@@ -8870,6 +9143,115 @@ class SynthWebUIInterface:
             {"success": True, "deleted_count": result.get("deleted_count", 0)}
         )
 
+    async def list_memories(self, request: Request):
+        """Paginated memories list with optional content search.
+
+        Operator surface for the memories tier (see / forget one memory
+        instead of flipping ENABLE_MEMORIES). Envelope mirrors history_diary.
+        """
+        params = request.query_params
+
+        def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return default
+            return max(minimum, min(maximum, parsed))
+
+        page = _bounded_int(params.get("page"), default=1, minimum=1, maximum=1000)
+        per_page = _bounded_int(
+            params.get("per_page"), default=30, minimum=1, maximum=100
+        )
+        search = params.get("search", "").strip()
+        sort = params.get("sort", "desc")
+
+        try:
+            from core.db import get_conn_ctx
+
+            offset = (page - 1) * per_page
+            order = "DESC" if sort == "desc" else "ASC"
+            if search:
+                # Escape LIKE wildcards so the term matches literally.
+                escaped = (
+                    search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                )
+                where_clause = "WHERE content LIKE %s ESCAPE '\\'"
+                search_params: list = [f"%{escaped}%"]
+            else:
+                where_clause = ""
+                search_params = []
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        f"SELECT COUNT(*) FROM memories {where_clause}",
+                        search_params,
+                    )
+                    count_row = await cur.fetchone()
+                    total_count = count_row[0] if count_row else 0
+                    await cur.execute(
+                        f"SELECT id, created_at, content, author, source, tags, scope "
+                        f"FROM memories {where_clause} "
+                        f"ORDER BY created_at {order} LIMIT %s OFFSET %s",
+                        search_params + [per_page, offset],
+                    )
+                    rows = await cur.fetchall()
+
+            entries = []
+            for row in rows:
+                entries.append(
+                    {
+                        "id": row[0],
+                        "timestamp": self._dt_to_utc_iso(row[1]),
+                        "content": row[2],
+                        "author": row[3],
+                        "source": row[4],
+                        "tags": row[5],
+                        "scope": row[6],
+                    }
+                )
+
+            total_pages = (
+                (total_count + per_page - 1) // per_page if total_count > 0 else 1
+            )
+            return JSONResponse(
+                {
+                    "success": True,
+                    "entries": entries,
+                    "page": page,
+                    "per_page": per_page,
+                    "total_count": total_count,
+                    "total_pages": total_pages,
+                }
+            )
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to fetch memories: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def delete_memory(self, request: Request):
+        """Delete a single memories row by id."""
+        memory_id_raw = request.path_params.get("memory_id")
+        try:
+            memory_id = int(memory_id_raw)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"success": False, "error": "Invalid memory id"}, status_code=400
+            )
+        try:
+            from core.db import get_conn_ctx
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "DELETE FROM memories WHERE id = %s",
+                        (memory_id,),
+                    )
+                    deleted = getattr(cur, "rowcount", 0) or 0
+            return JSONResponse({"success": True, "deleted_count": deleted})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to delete memory: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
     async def clear_abandoned_goals(self, request: Request):
         """Delete every abandoned goal across all scopes (generic Goals view)."""
         del request
@@ -9139,7 +9521,7 @@ class SynthWebUIInterface:
             import recurring_ical_events
 
             from core.calendar_utils import build_calendar
-            from core.time_zone_utils import get_local_timezone
+            from core.time_zone_utils import format_day_month, get_local_timezone
 
             system_tz = get_local_timezone()
             window_start = _dt.now(tz=system_tz)
@@ -9192,11 +9574,11 @@ class SynthWebUIInterface:
                         continue
 
                     if all_day:
-                        label = f"{local_dt.strftime('%b %-d')} (all day)"
+                        label = f"{format_day_month(local_dt)} (all day)"
                     else:
                         tz_abbr = local_dt.strftime("%Z") or "local"
                         label = (
-                            f"{local_dt.strftime('%b %-d')}, "
+                            f"{format_day_month(local_dt)}, "
                             f"{local_dt.hour}:{local_dt.strftime('%M')} ({tz_abbr})"
                         )
 
@@ -10090,6 +10472,276 @@ class SynthWebUIInterface:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     # ------------------------------------------------------------------
+    # SOUL memory maintenance (manual re-distil pass)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _soul_plugin():
+        """Return the loaded SOUL plugin, or raise 503 when it is not there."""
+        from core.core_initializer import PLUGIN_REGISTRY
+
+        plugin = (
+            PLUGIN_REGISTRY.get("soul_plugin")
+            if isinstance(PLUGIN_REGISTRY, dict)
+            else None
+        )
+        if plugin is None or not hasattr(plugin, "start_redistil"):
+            raise HTTPException(status_code=503, detail="SOUL plugin is not available")
+        return plugin
+
+    async def soul_redistil_status(self):
+        """Report on the memory re-distil pass: running, progress, pending cells."""
+        try:
+            plugin = self._soul_plugin()
+            return JSONResponse({"success": True, **(await plugin.redistil_status())})
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to read re-distil status: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def start_soul_redistil(self, request: Request):
+        """Start the memory re-distil pass in the background.
+
+        The pass costs one model call per legacy memory and runs for minutes to
+        hours, so this only starts it; the caller polls GET for progress. An
+        optional ``{"limit": N}`` body bounds how many memories one press handles.
+        """
+        plugin = self._soul_plugin()
+        limit: int | None = None
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        if isinstance(payload, dict) and payload.get("limit") is not None:
+            try:
+                limit = int(payload["limit"])
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="limit must be an integer")
+        try:
+            return JSONResponse(
+                {"success": True, **(await plugin.start_redistil(limit=limit))}
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to start the re-distil pass: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # ------------------------------------------------------------------
+    # Situational notes, as editable text
+    # ------------------------------------------------------------------
+    async def _situational_notes_text(self, repository: Any) -> str:
+        from core.soul.models import now_utc
+        from core.soul.situational import render_notes_text
+
+        notes = await repository.list_active_situational_notes(now=now_utc())
+        return render_notes_text(notes)
+
+    async def get_situational_notes(self) -> JSONResponse:
+        """Render the notes currently standing for the human, one per line."""
+        repository = self._soul_plugin().get_repository()
+        try:
+            text = await self._situational_notes_text(repository)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to read situational notes: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return JSONResponse({"success": True, "text": text})
+
+    async def put_situational_notes(self, request: Request) -> JSONResponse:
+        """Make the standing notes match ``{"text": ...}``.
+
+        A line that does not parse rejects the whole text with 400 and changes
+        nothing; notes missing from the text are resolved, never deleted.
+        """
+        from core.soul.models import now_utc
+        from core.soul.situational import apply_notes_text
+
+        repository = self._soul_plugin().get_repository()
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        text = payload.get("text") if isinstance(payload, dict) else None
+        if not isinstance(text, str):
+            raise HTTPException(status_code=400, detail="text must be a string")
+        try:
+            counts = await apply_notes_text(repository, text, now=now_utc())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to save situational notes: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        log_info(f"{LOG_PREFIX} Situational notes edited from the WebUI: {counts}")
+        return JSONResponse(
+            {
+                "success": True,
+                "text": await self._situational_notes_text(repository),
+                **counts,
+            }
+        )
+
+    # ------------------------------------------------------------------
+    # Retracted claims
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _retraction_to_dict(claim: Any) -> dict[str, Any]:
+        def _iso(value: Any) -> str | None:
+            return value.isoformat() if hasattr(value, "isoformat") else None
+
+        return {
+            "id": claim.id,
+            "subject": claim.subject,
+            "claim": claim.claim,
+            "reason": claim.reason,
+            "status": claim.status,
+            "asserted_by": claim.asserted_by,
+            "source_ref": claim.source_ref,
+            "created_at": _iso(claim.created_at),
+            "updated_at": _iso(claim.updated_at),
+            "lifted_at": _iso(claim.lifted_at),
+        }
+
+    async def get_retractions(self) -> JSONResponse:
+        """List every stored retraction, newest first, whatever its status."""
+        repository = self._soul_plugin().get_repository()
+        try:
+            claims = await repository.list_retracted_claims()
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to read retractions: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return JSONResponse(
+            {
+                "success": True,
+                "retractions": [self._retraction_to_dict(c) for c in claims],
+            }
+        )
+
+    async def post_retraction(self, request: Request) -> JSONResponse:
+        """Add a retraction, or decide on a stored one.
+
+        ``{"subject": ..., "claim": ..., "reason": ...}`` adds one in force (the
+        operator speaks with the trainer's authority). ``{"id": ..., "action":
+        "confirm" | "reject" | "lift" | "restore"}`` decides on a stored one.
+        """
+        from core.soul.retraction_flow import apply_retractions, decide_retraction
+
+        repository = self._soul_plugin().get_repository()
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="a JSON object is required")
+        try:
+            if payload.get("id"):
+                claim = await decide_retraction(
+                    repository, str(payload["id"]), str(payload.get("action") or "")
+                )
+                if claim is None:
+                    raise HTTPException(status_code=404, detail="unknown retraction")
+                log_info(
+                    f"{LOG_PREFIX} Retraction {claim.id} -> {claim.status} (WebUI)"
+                )
+                return JSONResponse(
+                    {"success": True, "retraction": self._retraction_to_dict(claim)}
+                )
+            subject = str(payload.get("subject") or "").strip()
+            if not subject:
+                raise HTTPException(status_code=400, detail="subject is required")
+            outcome = await apply_retractions(
+                repository,
+                [
+                    {
+                        "subject": subject,
+                        "claim": str(payload.get("claim") or subject).strip(),
+                        "reason": str(payload.get("reason") or "").strip(),
+                    }
+                ],
+                trainer=True,
+                asserted_by="webui",
+                source_ref="webui",
+            )
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to save a retraction: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        log_info(f"{LOG_PREFIX} Retraction added from the WebUI: {outcome}")
+        return JSONResponse(
+            {
+                "success": True,
+                "stored": outcome.stored,
+                "retired_notes": outcome.retired_notes,
+                "abandoned_goals": outcome.abandoned_goals,
+                "discarded_proposal": outcome.discarded_proposal,
+            }
+        )
+
+    # ------------------------------------------------------------------
+    # Nightly compaction, on demand (Settings → Memory Compaction)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _compactor_plugin():
+        """Return the loaded Grillo compactor, or raise 503 when it is not there."""
+        from core.core_initializer import PLUGIN_REGISTRY
+
+        plugin = (
+            PLUGIN_REGISTRY.get("grillo_compactor")
+            if isinstance(PLUGIN_REGISTRY, dict)
+            else None
+        )
+        if plugin is None or not hasattr(plugin, "start_compaction_now"):
+            raise HTTPException(
+                status_code=503, detail="Grillo compactor is not available"
+            )
+        return plugin
+
+    async def grillo_compaction_status(self):
+        """Report on the on-demand compaction: running, last result, and the preview.
+
+        The preview is what a press would cost (days the archive already covers are
+        skipped), so nobody has to press to find out whether the pass would do anything.
+        """
+        try:
+            plugin = self._compactor_plugin()
+            return JSONResponse({"success": True, **(await plugin.compaction_status())})
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to read compaction status: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def start_grillo_compaction(self, request: Request):
+        """Start the nightly compaction pass now, in the background.
+
+        One model call per eligible diary day, so this only starts it; the caller polls
+        GET for progress and for the summary. An optional ``{"dry_run": true}`` body
+        reports what the pass would do without writing anything.
+        """
+        plugin = self._compactor_plugin()
+        dry_run = False
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            dry_run = bool(payload.get("dry_run", False))
+        try:
+            return JSONResponse(
+                {
+                    "success": True,
+                    **(await plugin.start_compaction_now(dry_run=dry_run)),
+                }
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to start the compaction pass: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # ------------------------------------------------------------------
     # Chat archive endpoints (filesystem-backed)
     # ------------------------------------------------------------------
     async def archive_chat(self, request: Request):
@@ -10494,9 +11146,10 @@ class SynthWebUIInterface:
         except Exception as exc:
             raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
 
-        log_debug(f"{LOG_PREFIX} update_config_entry received payload: {payload}")
-
         key = str(payload.get("key") or "").strip()
+        # Never log the value: config entries include API keys and passwords.
+        log_debug(f"{LOG_PREFIX} update_config_entry received key={key!r}")
+
         if not key:
             raise HTTPException(status_code=400, detail="Missing configuration key")
 
@@ -10504,7 +11157,6 @@ class SynthWebUIInterface:
             log_error(
                 f"{LOG_PREFIX} 'value' not in payload. Keys: {list(payload.keys())}"
             )
-            log_error(f"{LOG_PREFIX} Full payload: {payload}")
             raise HTTPException(status_code=400, detail="Missing configuration value")
 
         value = payload.get("value")
@@ -10864,10 +11516,9 @@ class SynthWebUIInterface:
             if not file or not getattr(file, "filename", None):
                 raise HTTPException(status_code=400, detail="No file uploaded")
 
-            # Storage root is configurable via env var; default to /config/storage
-            storage_root = Path(
-                os.getenv("SYNTH_EXPOSED_STORAGE_ROOT", "/config/storage")
-            )
+            # Storage root is resolved from the environment with a native-safe
+            # fallback (container: /config/storage, native: <app_root>/data/...)
+            storage_root = Path(_app_paths.exposed_storage_root())
             try:
                 storage_root.mkdir(parents=True, exist_ok=True)
             except Exception:
@@ -10955,9 +11606,7 @@ class SynthWebUIInterface:
             if not file_path.exists() or not file_path.is_file():
                 raise HTTPException(status_code=404, detail="Skin file not found")
 
-            storage_root = Path(
-                os.getenv("SYNTH_EXPOSED_STORAGE_ROOT", "/config/storage")
-            ).resolve()
+            storage_root = Path(_app_paths.exposed_storage_root()).resolve()
             file_path_resolved = file_path.resolve()
             try:
                 file_path_resolved.relative_to(storage_root)
@@ -11005,9 +11654,7 @@ class SynthWebUIInterface:
                 )
                 raise HTTPException(status_code=404, detail="Stored file not found")
 
-            storage_root = Path(
-                os.getenv("SYNTH_EXPOSED_STORAGE_ROOT", "/config/storage")
-            ).resolve()
+            storage_root = Path(_app_paths.exposed_storage_root()).resolve()
             try:
                 # Ensure the file is inside the storage root to avoid path escape
                 file_path_resolved = file_path.resolve()
@@ -12904,16 +13551,16 @@ class SynthWebUIInterface:
         )
 
     async def cortex_login(self, request: Request):
-        """Selenium-based login is no longer supported.
+        """Zen-based login is no longer supported.
 
-        The embedded Selenium engine has been removed. Use the external
-        selenium-llm-engine service and configure it as an external endpoint.
+        The embedded Zen engine has been removed. Use the external
+        zen-llm-engine service and configure it as an external endpoint.
         """
         raise HTTPException(
             status_code=422,
             detail=(
-                "Selenium-based login is no longer supported. "
-                "Use the external selenium-llm-engine endpoint."
+                "Zen-based login is no longer supported. "
+                "Use the external zen-llm-engine endpoint."
             ),
         )
 
@@ -13423,7 +14070,9 @@ class SynthWebUIInterface:
         if not self.tls_enabled:
             return
 
-        cert_dir = os.getenv("SYNTH_WEBUI_CERT_DIR", "/config/ssl")
+        # Resolved rather than defaulted to the container path: on a native
+        # install "C:\config\ssl" cannot be created, and TLS is on by default.
+        cert_dir = str(_app_paths.cert_dir())
         try:
             Path(cert_dir).mkdir(parents=True, exist_ok=True)
         except Exception as e:
@@ -14126,7 +14775,7 @@ class SynthWebUIInterface:
         Returns 201 with name if activated, 404 if no VRM found.
         """
         skins_dir = Path(__file__).resolve().parent.parent / "skins"
-        target_skin = skins_dir / Path(skin_name).name
+        target_skin = self._skin_path(skins_dir, skin_name)
         if not target_skin.exists() or not target_skin.is_dir():
             raise HTTPException(status_code=404, detail="Skin not found")
 
@@ -14269,7 +14918,7 @@ class SynthWebUIInterface:
             raise HTTPException(status_code=400, detail="Only .vrm files are accepted")
 
         skins_dir = Path(__file__).resolve().parent.parent / "skins"
-        skin_path = skins_dir / Path(skin_name).name
+        skin_path = self._skin_path(skins_dir, skin_name)
         if not skin_path.exists() or not skin_path.is_dir():
             raise HTTPException(status_code=404, detail="Skin not found")
 
@@ -14309,7 +14958,7 @@ class SynthWebUIInterface:
             )
 
         skins_dir = Path(__file__).resolve().parent.parent / "skins"
-        skin_path = skins_dir / Path(skin_name).name
+        skin_path = self._skin_path(skins_dir, skin_name)
         if not skin_path.exists() or not skin_path.is_dir():
             raise HTTPException(status_code=404, detail="Skin not found")
 
@@ -14333,7 +14982,7 @@ class SynthWebUIInterface:
         import tempfile
 
         skins_dir = Path(__file__).resolve().parent.parent / "skins"
-        skin_path = skins_dir / Path(skin_name).name
+        skin_path = self._skin_path(skins_dir, skin_name)
         if not skin_path.exists() or not skin_path.is_dir():
             raise HTTPException(status_code=404, detail="Skin not found")
 
@@ -14396,7 +15045,20 @@ class SynthWebUIInterface:
                 else:
                     root = Path(file.filename).stem
 
-                dest = skins_dir / root
+                # Every member must stay inside the (validated) root folder.
+                for member in names:
+                    parts = Path(member).parts
+                    if Path(member).is_absolute() or ".." in parts:
+                        raise HTTPException(
+                            status_code=400, detail="Invalid zip entry path"
+                        )
+                    if parts and parts[0] != root:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="Skin pack must contain a single top-level folder",
+                        )
+
+                dest = self._skin_path(skins_dir, root)
                 if dest.exists():
                     # Overwrite existing skin (except Rei)
                     if root == "Rei":
@@ -14453,15 +15115,15 @@ class SynthWebUIInterface:
         """Delete a skin folder. Rei is protected and cannot be deleted."""
         import shutil
 
-        safe_name = Path(skin_name).name
+        skins_dir = Path(__file__).resolve().parent.parent / "skins"
+        skin_path = self._skin_path(skins_dir, skin_name)
+        safe_name = skin_path.name
         if safe_name == "Rei":
             raise HTTPException(
                 status_code=403,
                 detail="The default skin 'Rei' cannot be deleted",
             )
 
-        skins_dir = Path(__file__).resolve().parent.parent / "skins"
-        skin_path = skins_dir / safe_name
         if not skin_path.exists() or not skin_path.is_dir():
             raise HTTPException(status_code=404, detail="Skin not found")
 

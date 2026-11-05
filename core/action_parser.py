@@ -40,6 +40,9 @@ register_action_safety_config()
 
 _retry_tracker = {}
 _STATIC_INJECTION_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+# A plugin whose static injection takes longer than this is named in the one aggregated
+# line `gather_static_injections` logs after its gather, instead of getting its own line.
+_SLOW_INJECTION_SEC = 0.1
 _GRILLO_ACTIVITY_MESSAGE_ID_RE = re.compile(r"^grillo_[a-z_]+_(\d+)$")
 
 
@@ -207,7 +210,7 @@ async def _maybe_record_grillo_outbound_message(
         if (
             not action_type
             or not isinstance(action_type, str)
-            or not action_type.startswith("message")
+            or not (action_type == "send_message" or action_type.startswith("message"))
         ):
             return
         if not isinstance(payload, dict):
@@ -475,11 +478,8 @@ def _get_builtin_interface_message_action_types() -> set[str]:
     """Return canonical built-in interface message action types."""
 
     return {
-        "message_telegram_bot",
-        "message_discord_bot",
+        "send_message",
         "message_synth_webui",
-        "message_matrix_chat",
-        "message_ollama_serve",
     }
 
 
@@ -538,7 +538,7 @@ def _normalize_text_field_alias(action_type: str, payload: dict) -> None:
     a full LLM correction call just to rename a key. Fixing it here avoids that
     wasted correction turn.
     """
-    if not action_type.startswith("message_"):
+    if action_type != "send_message" and not action_type.startswith("message_"):
         return
     if payload.get("text"):
         return
@@ -767,12 +767,56 @@ def _attempt_auto_fix(actions: list) -> bool:
     return modified
 
 
-def _validate_payload(action_type: str, payload: dict, errors: List[str]) -> None:
+def _resolve_validation_destination(payload: dict, original_message=None) -> str | None:
+    """Interface name a ``send_message`` payload is addressed to, or ``None``.
+
+    Resolution mirrors ``_dispatch_send_message``: an explicit
+    ``payload.interface_path`` wins (the synth is free to address any interface,
+    even from a turn that arrived on another one), otherwise the origin
+    conversation of the message being answered is used.
+
+    ``None`` means "could not be determined": validation then applies every
+    registered rule, so an undetermined destination can never silently
+    under-validate.
+    """
+    candidates = [
+        (payload or {}).get("interface_path") if isinstance(payload, dict) else None,
+        getattr(original_message, "interface_path", None),
+    ]
+    for candidate in candidates:
+        if not isinstance(candidate, str) or not candidate.strip():
+            continue
+        path = candidate.strip()
+        iface: str | None = None
+        try:
+            from core.interface_path_utils import parse_interface_path
+
+            parsed, _levels = parse_interface_path(path)
+            iface = parsed or None
+        except Exception:
+            iface = None
+        if not iface:
+            # Fall back to the leading segment so an unregistered-but-routable
+            # path still scopes validation sensibly.
+            iface = path.split("/", 1)[0] or None
+        if iface:
+            return iface
+    return None
+
+
+def _validate_payload(
+    action_type: str, payload: dict, errors: List[str], destination: str | None = None
+) -> None:
     """Validate payload using centralized validation registry and legacy plugin/interface validation.
 
     This function implements the new Dynamic Component Validation System that removes
     hardcoded validation rules from the corrector. Components register their validation
     rules dynamically, and this function applies them automatically.
+
+    ``destination`` is the interface the payload is addressed to (see
+    ``_resolve_validation_destination``); interface-scoped rules belonging to
+    other interfaces are skipped, so one interface's constraints cannot gate
+    another interface's traffic.
 
     See docs/validation_system.rst for complete documentation.
     """
@@ -782,7 +826,7 @@ def _validate_payload(action_type: str, payload: dict, errors: List[str]) -> Non
     try:
         validation_registry = get_validation_registry()
         registry_errors = validation_registry.validate_action_payload(
-            action_type, payload
+            action_type, payload, destination_interface=destination
         )
         if registry_errors:
             errors.extend(registry_errors)
@@ -962,7 +1006,14 @@ def validate_action(
         # Normalize payload before validation (convert string numbers to int)
         if payload:
             _normalize_payload(action_type, payload)
-        _validate_payload(action_type, payload or {}, errors)
+        _validate_payload(
+            action_type,
+            payload or {},
+            errors,
+            destination=_resolve_validation_destination(
+                payload or {}, original_message
+            ),
+        )
 
         if _is_restricted_action(action_type):
             mode = str(RESTRICT_ACTIONS).lower()
@@ -1199,6 +1250,9 @@ def _is_interface_message_action(action_type: str) -> bool:
     This function inspects the registered interfaces, preferring the interface's
     explicit metadata rather than hard-coded name checks.
     """
+    if action_type == "send_message":
+        # The unified action is by definition a user-facing message action.
+        return True
     try:
         # Map action to interface name
         iface_name = _load_interface_actions().get(action_type)
@@ -1249,6 +1303,198 @@ ACTIVE_CORTEX_ENGINE = None
 AVAILABLE_PLUGINS = []
 
 
+async def _dispatch_send_message(
+    action: Dict[str, Any], context: Dict[str, Any], bot, original_message
+) -> Dict[str, Any]:
+    """Unified dispatcher for the single ``send_message`` action.
+
+    Destination resolution order:
+
+    (a) explicit ``payload.interface_path`` (overrides everything);
+    (b) ``original_message.interface_path`` (reply-to-origin fallback);
+    (c) otherwise a structured failure: ``interface_path`` is required for
+        spontaneous messages.
+    """
+    payload = action.get("payload", {})
+    if not isinstance(payload, dict):
+        try:
+            payload = vars(payload)
+        except Exception:
+            payload = {}
+
+    interface_path = payload.get("interface_path")
+    iface_name = None
+
+    if isinstance(interface_path, str) and interface_path.strip():
+        try:
+            from core.interface_path_utils import parse_interface_path
+
+            parsed_iface, _levels = parse_interface_path(interface_path.strip())
+            iface_name = parsed_iface or None
+        except Exception as e:
+            log_warning(
+                f"[action_parser] Failed to parse interface_path {interface_path!r}: {e}"
+            )
+            # Fall through to registry prefix matching below.
+            for registered in INTERFACE_REGISTRY:
+                if interface_path.strip().startswith(f"{registered}/"):
+                    iface_name = registered
+                    break
+
+        # An explicit path that does not resolve to a *registered* interface is
+        # unusable: dispatch below would fail hard and (because an unregistered
+        # name is marked unfixable) drop the reply entirely. This happens in
+        # practice when the model echoes a prompt template token instead of a
+        # concrete path — e.g. "input.payload.current_chat.interface_path",
+        # which parses to a truthy, unregistered name and would otherwise
+        # short-circuit the reply-to-origin fallback. Treat it as "no usable
+        # path" so resolution continues at (b).
+        if iface_name and iface_name not in INTERFACE_REGISTRY:
+            log_warning(
+                f"[action_parser] ⚠️ send_message interface_path "
+                f"{interface_path!r} resolves to unregistered interface "
+                f"'{iface_name}'; ignoring it and using the originating "
+                "interface instead"
+            )
+            iface_name = None
+
+    if not iface_name:
+        origin_path = getattr(original_message, "interface_path", None)
+        if isinstance(origin_path, str) and origin_path.strip():
+            interface_path = origin_path.strip()
+            payload["interface_path"] = interface_path
+            try:
+                from core.interface_path_utils import parse_interface_path
+
+                parsed_iface, _levels = parse_interface_path(interface_path)
+                iface_name = parsed_iface or None
+            except Exception:
+                for registered in INTERFACE_REGISTRY:
+                    if interface_path.startswith(f"{registered}/"):
+                        iface_name = registered
+                        break
+
+    if not iface_name:
+        log_warning(
+            "[action_parser] send_message without interface_path on a "
+            "spontaneous turn - rejected"
+        )
+        return {
+            "ok": False,
+            "error": (
+                "payload.interface_path is required for a spontaneous "
+                "send_message (no incoming message to reply to)"
+            ),
+        }
+
+    interface = INTERFACE_REGISTRY.get(iface_name)
+
+    # Capability gate (fail-open): refuse only when the interface explicitly
+    # lacks the send_message capability.
+    if (
+        interface is not None
+        and _interface_capability_gate_enabled()
+        and not (_has_capability(interface, "send_message"))
+    ):
+        log_warning(
+            f"[action_parser] ⚠️ Interface '{iface_name}' lacks 'send_message' "
+            "capability; refusing to dispatch"
+        )
+        return {
+            "ok": False,
+            "error": f"interface '{iface_name}' lacks send_message capability",
+        }
+
+    if interface is None or not hasattr(interface, "send_message"):
+        log_error(
+            f"[action_parser] ❌ send_message: interface '{iface_name}' not available"
+        )
+        return {
+            "ok": False,
+            "error": f"interface '{iface_name}' is not available",
+            "available_interfaces": sorted(
+                n for n, i in INTERFACE_REGISTRY.items() if hasattr(i, "send_message")
+            ),
+            # A completely unregistered interface name (e.g. an internal
+            # pseudo-interface like "grillo" that was never registered via
+            # register_interface) can never start working by retrying the
+            # same action — unlike a real, registered interface (telegram_bot,
+            # discord_bot, matrix) failing on a bad chat_id/target, which
+            # fails later inside interface.send_message() itself and stays
+            # correctable. Marking this unfixable stops the selective
+            # correction loop (and the LLM-chain lock contention it causes)
+            # from retrying something that is structurally impossible.
+            "unfixable": True,
+        }
+
+    # Compute capability drops centrally so the LLM can acknowledge them in
+    # its own words on the next turn. Unsupported features are stripped from
+    # the payload before delivery.
+    try:
+        from core.message_registry import resolve_capability_drops
+
+        drops = resolve_capability_drops(interface, payload, iface_name)
+    except Exception:
+        drops = []
+    if any(d.get("feature") == "media" for d in drops):
+        payload.pop("media", None)
+    if any(d.get("feature") == "send_as_voice" for d in drops):
+        payload["send_as_voice"] = False
+
+    # Normalize text payloads to recover double-escaped sequences
+    try:
+        _maybe_unescape_text_in_payload(payload)
+    except Exception:
+        log_debug("[action_parser] Text unescape normalization failed (non-fatal)")
+    # System-written annotations never go out either: the model copied the age
+    # marker out of history and sent "[13 minutes earlier] …" to the DM on
+    # 2026-09-30 (chat_history_cache 7445 and 7512). Unlike the emotion tags
+    # below, a marker carries no brace, so this is not gated on "{".
+    _marker_text = payload.get("text")
+    if isinstance(_marker_text, str) and "earlier" in _marker_text:
+        try:
+            from core.history_engine import strip_leading_age_marker
+
+            payload["text"] = strip_leading_age_marker(_marker_text)
+        except Exception:
+            pass
+
+    # Strip emotion / meta tags from outbound text so they never leak to the
+    # end-user interface.
+    raw_text = payload.get("text")
+    if isinstance(raw_text, str) and "{" in raw_text:
+        try:
+            from plugins.emotion_manager import strip_emotion_tags
+
+            cleaned = strip_emotion_tags(raw_text)
+            if cleaned != raw_text:
+                payload["text"] = cleaned
+        except Exception:
+            pass
+
+    # Grillo beat bookkeeping (best-effort).
+    try:
+        await _maybe_record_grillo_outbound_message("send_message", payload, context)
+    except Exception:
+        pass
+
+    log_info(f"[action_parser] ✉️ Dispatching send_message to interface '{iface_name}'")
+    try:
+        result = interface.send_message(payload, original_message=original_message)
+        if inspect.iscoroutine(result):
+            result = await result
+        out: Dict[str, Any] = {"ok": bool(result), "result": result}
+        if drops:
+            out["capability_drops"] = drops
+        return out
+    except Exception as e:
+        log_error(
+            f"[action_parser] ❌ Error executing send_message via interface "
+            f"{iface_name}: {repr(e)}"
+        )
+        return {"ok": False, "error": str(e)}
+
+
 async def _handle_plugin_action(
     action: Dict[str, Any], context: Dict[str, Any], bot, original_message
 ):
@@ -1257,6 +1503,11 @@ async def _handle_plugin_action(
         log_warning("[action_parser] Action is missing a 'type'")
         return {"error": "Action is missing a 'type'"}
     iface_target = action.get("interface")
+
+    # Unified send_message: destination resolved from interface_path /
+    # original_message, dispatched to the owning interface directly.
+    if action_type == "send_message":
+        return await _dispatch_send_message(action, context, bot, original_message)
 
     log_info(
         f"[action_parser] 🎯 Handling action: type={action_type}, interface={iface_target}"
@@ -1335,6 +1586,17 @@ async def _handle_plugin_action(
                     log_debug(
                         "[action_parser] Text unescape normalization failed (non-fatal)"
                     )
+                # System-written annotations never go out: see the age-marker
+                # note on the send_message path above.
+                if isinstance(payload, dict):
+                    _marker_text2 = payload.get("text")
+                    if isinstance(_marker_text2, str) and "earlier" in _marker_text2:
+                        try:
+                            from core.history_engine import strip_leading_age_marker
+
+                            payload["text"] = strip_leading_age_marker(_marker_text2)
+                        except Exception:
+                            pass
                 # Strip emotion / meta tags from outbound text so they
                 # never leak to the end-user interface.
                 if isinstance(payload, dict):
@@ -1922,7 +2184,7 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
         return {"processed": [], "errors": [error_msg], "failed_actions": []}
 
     # Drop leaked Recon-schema entries before validation. A state-retaining
-    # browser engine (e.g. selenium-llm-engine) can echo the separate Recon
+    # browser engine (e.g. zen-llm-engine) can echo the separate Recon
     # call's JSON keys (tone_hint, agent_intent, language_hint, ...) back into
     # the main-pass ``actions`` array. Those keys are preflight metadata, not
     # executable actions; validating them yields "Unsupported type" errors that
@@ -1961,6 +2223,7 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
     failed_actions = []
     action_outputs: List[Dict[str, Any]] = []
     terminal_seen = False
+    capability_drops_collected: List[Dict[str, Any]] = []
 
     for idx, action in enumerate(actions):
         try:
@@ -1997,7 +2260,9 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
             if is_from_cortex and context.get("grillo_beat"):
                 try:
                     action_type = action.get("type") or ""
-                    if action_type.startswith("message"):
+                    if action_type == "send_message" or action_type.startswith(
+                        "message"
+                    ):
                         payload = action.get("payload") or {}
                         text = payload.get("text")
                         interface_path = payload.get("interface_path") or context.get(
@@ -2095,10 +2360,29 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
                             and isinstance(result.get("reason"), str)
                             else None
                         ),
+                        # Propagate structural "will never succeed" markers
+                        # from the dispatcher (e.g. _dispatch_send_message's
+                        # "interface is not registered at all" case) so
+                        # _request_selective_correction skips retrying them.
+                        "unfixable": bool(
+                            isinstance(result, dict) and result.get("unfixable")
+                        ),
                     }
                 )
             else:
                 processed_actions.append(action)
+                # Collect capability drops reported by successful dispatches
+                # (e.g. a send_message whose unsupported features were
+                # skipped). Reported back to the LLM via the prompt context.
+                if isinstance(result, dict) and result.get("capability_drops"):
+                    try:
+                        from core.capability_drops import collect_capability_drops
+
+                        capability_drops_collected = collect_capability_drops(
+                            capability_drops_collected + [result]
+                        )
+                    except Exception:
+                        pass
 
                 if action_type == "terminal" and isinstance(result, str):
                     terminal_seen = True
@@ -2251,6 +2535,7 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
         "errors": collected_errors,
         "failed_actions": failed_actions,
         "action_outputs": action_outputs,
+        "capability_drops": capability_drops_collected,
     }
 
 
@@ -2267,6 +2552,20 @@ def _action_result_error(result: Any) -> str | None:
         value = result.get("message") or result.get("detail")
         return str(value or "action failed")
     return None
+
+
+def _is_reply_delivery_type(action_type: Any) -> bool:
+    """True for action types that put the reply text in front of the person.
+
+    ``send_message`` is the unified delivery action (AGENTS.md §6) and the only
+    one a current prompt can emit; ``message_*`` are its legacy per-interface
+    predecessors, still accepted on replay. Callers use this to decide whether a
+    retry may send anything at all (a second delivery of the same reply is worse
+    than a skipped correction) and to recognise a delivered reply in a
+    correction context. Structural name match only; never inspects content.
+    """
+    name = str(action_type or "")
+    return name == "send_message" or name.startswith("message_")
 
 
 def _is_delivered_auto_tts_failure(failed_item: Any) -> bool:
@@ -2498,10 +2797,7 @@ def _generate_context_tags(
         context_tags.append("technical")
     if "event" in action_types:
         context_tags.append("scheduling")
-    if (
-        "speech_selenium_elevenlabs" in action_types
-        or "audio_telegram_bot" in action_types
-    ):
+    if "speech_zen_elevenlabs" in action_types or "audio_telegram_bot" in action_types:
         context_tags.append("audio")
 
     # Content-based analysis for specific topics
@@ -2727,6 +3023,53 @@ def get_action_plugin_instructions() -> dict[str, Any]:
     return instructions
 
 
+def _add_core_injections(injections: dict[str, Any]) -> dict[str, Any]:
+    """Add the core-sourced prompt blocks that no plugin owns.
+
+    The standing scene note (``SCENE_NOTE``) is deployment configuration rather
+    than a plugin's data, so it cannot arrive through ``get_static_injection()``
+    and must be merged here. It renders beside the ambient blocks (declared in
+    ``core.prompt_engine._PLUGIN_CONTEXT_BLOCKS``) on every route, which is what
+    makes it carry across turns the way the emotion state does.
+
+    An unset or blank value adds nothing, and any failure is contained so a bad
+    config can never cost the turn the rest of the injection dict.
+    """
+    try:
+        scene = str(
+            config_registry.get_value("SCENE_NOTE", "", value_type=str) or ""
+        ).strip()
+        if scene:
+            injections["scene"] = scene
+    except Exception as exc:  # pragma: no cover - config safety net
+        log_debug(f"[action_parser] core static injection skipped: {exc}")
+    return injections
+
+
+async def _add_retraction_injections(injections: dict[str, Any]) -> dict[str, Any]:
+    """Add the retraction blocks (known-false claims, pending confirmations).
+
+    Sourced from the SOUL store rather than a plugin's ``get_static_injection``
+    so they also ride when nothing else injects. Both lookups fail safe to an
+    empty block: a prompt is never lost to the store.
+    """
+    try:
+        from core.soul.retractions import (
+            get_known_false_claims_block,
+            get_pending_retractions_block,
+        )
+
+        known = await get_known_false_claims_block()
+        if known:
+            injections["known_false_claims"] = known
+        pending = await get_pending_retractions_block()
+        if pending:
+            injections["pending_retractions"] = pending
+    except Exception as exc:  # pragma: no cover - safety net
+        log_debug(f"[action_parser] retraction injections skipped: {exc}")
+    return injections
+
+
 async def gather_static_injections(message=None, context_memory=None):
     """Gathers static contextual data from all plugins that support 'static_inject'.
 
@@ -2741,6 +3084,11 @@ async def gather_static_injections(message=None, context_memory=None):
 
     tasks = []
     plugin_names = []
+    # Plugins that took longer than _SLOW_INJECTION_SEC. Reported once, aggregated,
+    # after the gather: per-plugin lines for every plugin over the threshold means one
+    # warning line per plugin per prompt build, which is most of them on a busy install
+    # and buries the one number that matters (the slowest contributor).
+    slow_injections: list = []
 
     for plugin in loaded_plugins:
         try:
@@ -2815,10 +3163,10 @@ async def gather_static_injections(message=None, context_memory=None):
                         return _stale_fallback("timeout")
 
                     duration = time.time() - start
-                    if duration > 0.1:
-                        log_info(
-                            f"[action_parser] ⚠️ get_static_injection() on {name} took {duration:.3f}s"
-                        )
+                    if duration > _SLOW_INJECTION_SEC:
+                        # Named in the aggregated line logged after the gather, so a
+                        # prompt build costs one timing line, not one per slow plugin.
+                        slow_injections.append((name, duration))
                     else:
                         log_debug(
                             f"[action_parser] ✅ get_static_injection() on {name} took {duration:.3f}s"
@@ -2845,9 +3193,12 @@ async def gather_static_injections(message=None, context_memory=None):
             log_error(f"[action_parser] Error preparing injection for {plugin}: {e}")
 
     if not tasks:
-        # Return empty dict if no injections
-        return {}
+        # No plugin supplies an injection this turn; the core-sourced blocks
+        # (the standing scene note) still ride, because they do not depend on a
+        # plugin being enabled.
+        return await _add_retraction_injections(_add_core_injections({}))
 
+    gather_start = time.time()
     log_debug(
         f"[action_parser] Running {len(tasks)} injections in parallel: {plugin_names}"
     )
@@ -2862,6 +3213,40 @@ async def gather_static_injections(message=None, context_memory=None):
                 )
     except Exception as e:
         log_error(f"[action_parser] Error in asyncio.gather results: {e}")
+
+    # One timing line per prompt build, naming the slowest contributors: the plugins
+    # themselves stay silent unless something is actually slow.
+    if slow_injections:
+        worst = sorted(slow_injections, key=lambda item: item[1], reverse=True)[:3]
+        shown = ", ".join(f"{name} {duration:.3f}s" for name, duration in worst)
+        log_info(
+            f"[action_parser] ⏱️ static injections: {len(tasks)} block(s) in "
+            f"{time.time() - gather_start:.2f}s; slowest: {shown}"
+        )
+
+    # A plugin block that replaces a built-in provider (the legacy key is
+    # declared in core.prompt_engine._PLUGIN_CONTEXT_BLOCKS) drops that provider's
+    # key HERE, so the superseded text never enters the injection dict at all:
+    # no renderer can pick it up, and the key list below tells the truth about
+    # what this turn actually carries. Without the replacement present nothing is
+    # touched and the built-in provider behaves exactly as before.
+    try:
+        from core.prompt_engine import _PLUGIN_CONTEXT_BLOCKS
+
+        for _pkey, _pheading, _plegacy in _PLUGIN_CONTEXT_BLOCKS:
+            if _plegacy and _pkey in injections and _plegacy in injections:
+                injections.pop(_plegacy, None)
+                log_info(
+                    f"[action_parser] plugin block '{_pkey}' supersedes "
+                    f"'{_plegacy}' at gather time"
+                )
+    except Exception as _super_exc:  # pragma: no cover - diagnostic only
+        log_debug(f"[action_parser] plugin block supersede skipped: {_super_exc}")
+
+    # Core-sourced blocks last, so the logged key list below is the truth about
+    # what this turn carries.
+    injections = _add_core_injections(injections)
+    injections = await _add_retraction_injections(injections)
 
     log_info(
         f"[action_parser] 📊 gather_static_injections() returning {len(injections)} keys: {list(injections.keys())}"
@@ -3047,7 +3432,10 @@ async def corrector_orchestrator(
                             already_present = any(
                                 isinstance(a, dict)
                                 and isinstance(a.get("type"), str)
-                                and a["type"].startswith("message_")
+                                and (
+                                    a["type"] == "send_message"
+                                    or a["type"].startswith("message_")
+                                )
                                 and isinstance(a.get("payload"), dict)
                                 and a["payload"].get("text") == value
                                 for a in actions
@@ -3286,10 +3674,19 @@ async def corrector_orchestrator(
                     )
                     return False
                 else:
-                    log_info(
-                        "[corrector_orchestrator] Corrected actions executed successfully - interrupting correction loop"
+                    # Neither processed nor errored: run_actions ran nothing (the
+                    # corrected actions were filtered out before dispatch). The
+                    # old branch reported SUCCESS here, which stopped the
+                    # correction loop and left the turn looking healthy with no
+                    # delivery at all (live 2026-09-21: the corrected
+                    # send_message never reached a run_action line, yet the chain
+                    # logged "3 successful, 0 failed" and the reply was lost).
+                    log_warning(
+                        "[corrector_orchestrator] corrected actions produced no "
+                        "processed result and no errors; not treating this as a "
+                        "successful delivery"
                     )
-                    return True
+                    return False
             except Exception as e:
                 log_warning(
                     f"[corrector_orchestrator] Failed to run actions after correction: {e}"

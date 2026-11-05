@@ -114,6 +114,27 @@ def test_execute_action_is_async():
 
 
 @pytest.mark.asyncio
+async def test_get_static_injection_handles_missing_chat_id():
+    """A message-like object without a chat_id attribute must not crash
+    static injection.
+
+    Regression guard: get_static_injection accessed ``message.chat_id``
+    directly, raising AttributeError for any message shape that omits it —
+    e.g. the synthetic SimpleNamespace core/agent_core.py builds for the
+    post-agent-loop Base Cortex re-voice step, which only carries
+    interface_path/text/sender_id/is_from_self.
+    """
+    from types import SimpleNamespace
+
+    plugin = BioPlugin()
+    message = SimpleNamespace(text="hello")
+
+    result = await plugin.get_static_injection(message, {})
+
+    assert result == {}
+
+
+@pytest.mark.asyncio
 async def test_async_full_request_never_uses_run_bridge(monkeypatch):
     """bio_full_request resolves targets via async helpers, not _run()."""
     _install_fake_db(monkeypatch, _bio_row())

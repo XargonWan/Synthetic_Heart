@@ -72,7 +72,7 @@ async def test_set_base_cortex_persists_to_config_table(monkeypatch):
     monkeypatch.setattr(db_module, "ensure_core_tables", fake_ensure_core_tables)
 
     # Persist a new base cortex via public API
-    await set_base_cortex("selenium_gemini")
+    await set_base_cortex("zen_gemini")
 
     # Ensure config table contains the entry
     async with db_module.get_conn_ctx() as conn:
@@ -81,7 +81,7 @@ async def test_set_base_cortex_persists_to_config_table(monkeypatch):
                 "SELECT value FROM config WHERE config_key = %s", ("BASE_CORTEX",)
             )
             row = await cur.fetchone()
-            assert row and row[0] == "selenium_gemini"
+            assert row and row[0] == "zen_gemini"
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,6 @@
 """Tests for the leaked Recon-schema action drop in ``run_actions``.
 
-A state-retaining browser engine (e.g. ``selenium-llm-engine``) can echo the
+A state-retaining browser engine (e.g. ``zen-llm-engine``) can echo the
 separate Recon call's JSON keys back into the main-pass ``actions`` array. Those
 keys (``tone_hint``, ``agent_intent``, ...) are preflight metadata, not
 executable actions, and would otherwise fail validation with "Unsupported type"

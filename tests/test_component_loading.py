@@ -150,8 +150,8 @@ class TestComponentLoading(unittest.TestCase):
             # Mock engine file discovery
             mock_file = MagicMock()
             mock_file.name = "test_engine.py"
-            mock_file.relative_to.return_value = "cortex/selenium_engine/test_engine"
-            mock_file.with_suffix.return_value = "cortex.selenium_engine.test_engine"
+            mock_file.relative_to.return_value = "cortex/zen_engine/test_engine"
+            mock_file.with_suffix.return_value = "cortex.zen_engine.test_engine"
             mock_rglob.return_value = [mock_file]
 
             # Mock module with PLUGIN_CLASS
@@ -266,6 +266,132 @@ class TestRequiredConfigVars(unittest.TestCase):
             missing,
             ["MATRIX_USER", "MATRIX_PASSWORD or MATRIX_ACCESS_TOKEN"],
         )
+
+
+class TestPluginRegistryDeduplication(unittest.TestCase):
+    """Regression coverage for the generic ``PLUGIN_CLASS`` loader step in
+    ``CoreInitializer._load_plugins``.
+
+    Some plugins (e.g. WeatherPlugin) self-register under their own preferred
+    name via a ``core_initializer.register_plugin(<name>, self)`` call inside
+    their own ``__init__``, which differs from the loader's generic
+    file-derived short name. Before the fix, the generic loader unconditionally
+    wrote the SAME instance into ``PLUGIN_REGISTRY`` a second time under that
+    generic name, so it appeared twice in ``PLUGIN_REGISTRY.values()`` (live
+    symptom: ``action_parser._plugins_for()`` reporting "2 supporting plugins"
+    for ``trigger_weather_report``, both entries the identical object). The
+    fix must not regress the common case: a plugin that does NOT self-register
+    still needs to land in ``PLUGIN_REGISTRY`` under its generic short name —
+    an earlier version of this fix accidentally dropped that assignment
+    entirely, which would have silently unregistered every plugin that relies
+    purely on the generic loader.
+    """
+
+    def setUp(self):
+        from core.core_initializer import PLUGIN_REGISTRY
+
+        self._registry_backup = dict(PLUGIN_REGISTRY)
+        PLUGIN_REGISTRY.clear()
+
+    def tearDown(self):
+        from core.core_initializer import PLUGIN_REGISTRY
+
+        PLUGIN_REGISTRY.clear()
+        PLUGIN_REGISTRY.update(self._registry_backup)
+
+    @patch("core.notifier.set_notifier")
+    def test_self_registering_plugin_is_not_double_listed(self, mock_set_notifier):
+        """A plugin that self-registers under a custom name during __init__
+        must appear exactly once in PLUGIN_REGISTRY.values(), not twice."""
+        import importlib
+        import pathlib
+        import types
+        from core.core_initializer import core_initializer, register_plugin
+
+        class SelfRegisteringPlugin:
+            display_name = "Self Registering Plugin"
+
+            def __init__(self):
+                register_plugin("custom_name", self)
+
+            def get_supported_action_types(self):
+                return []
+
+        fake_module = types.ModuleType("plugins.selfreg_plugin.selfreg_plugin")
+        fake_module.PLUGIN_CLASS = SelfRegisteringPlugin
+        fake_file = pathlib.Path("plugins/selfreg_plugin/selfreg_plugin.py").resolve()
+
+        def fake_rglob(self_path, pattern):
+            if self_path.name == "plugins":
+                return [fake_file]
+            return []
+
+        real_import_module = importlib.import_module
+
+        def fake_import_module(name, *a, **kw):
+            if name == "plugins.selfreg_plugin.selfreg_plugin":
+                return fake_module
+            return real_import_module(name, *a, **kw)
+
+        with (
+            patch("importlib.import_module", side_effect=fake_import_module),
+            patch.object(pathlib.Path, "rglob", fake_rglob),
+        ):
+            core_initializer._load_plugins()
+
+        from core.core_initializer import PLUGIN_REGISTRY
+
+        matches = [
+            v for v in PLUGIN_REGISTRY.values() if isinstance(v, SelfRegisteringPlugin)
+        ]
+        self.assertEqual(len(matches), 1, PLUGIN_REGISTRY)
+        self.assertIn("custom_name", PLUGIN_REGISTRY)
+        # The generic file-derived name must NOT also hold this instance.
+        self.assertNotIn("selfreg_plugin", PLUGIN_REGISTRY)
+
+    @patch("core.notifier.set_notifier")
+    def test_plain_plugin_still_registers_under_generic_name(self, mock_set_notifier):
+        """A plugin that does NOT self-register must still be registered by
+        the generic loader under its file-derived short name (regression: an
+        earlier version of the dedup fix accidentally dropped this
+        assignment for every plugin, self-registering or not)."""
+        import importlib
+        import pathlib
+        import types
+        from core.core_initializer import core_initializer
+
+        class PlainPlugin:
+            display_name = "Plain Plugin"
+
+            def get_supported_action_types(self):
+                return []
+
+        fake_module = types.ModuleType("plugins.plain_plugin.plain_plugin")
+        fake_module.PLUGIN_CLASS = PlainPlugin
+        fake_file = pathlib.Path("plugins/plain_plugin/plain_plugin.py").resolve()
+
+        def fake_rglob(self_path, pattern):
+            if self_path.name == "plugins":
+                return [fake_file]
+            return []
+
+        real_import_module = importlib.import_module
+
+        def fake_import_module(name, *a, **kw):
+            if name == "plugins.plain_plugin.plain_plugin":
+                return fake_module
+            return real_import_module(name, *a, **kw)
+
+        with (
+            patch("importlib.import_module", side_effect=fake_import_module),
+            patch.object(pathlib.Path, "rglob", fake_rglob),
+        ):
+            core_initializer._load_plugins()
+
+        from core.core_initializer import PLUGIN_REGISTRY
+
+        self.assertIn("plain_plugin", PLUGIN_REGISTRY)
+        self.assertIsInstance(PLUGIN_REGISTRY["plain_plugin"], PlainPlugin)
 
 
 if __name__ == "__main__":

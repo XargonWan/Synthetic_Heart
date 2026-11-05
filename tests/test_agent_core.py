@@ -388,8 +388,25 @@ from core.agent_core import (
         ("Error code: 429 - rate limit exceeded", {}, "rate_limited"),
         ("Error code: 503 - Service Unavailable", {}, "server_error"),
         ("ReadTimeout: timed out", {}, "timeout"),
+        (
+            "TimeoutError: LLM request timed out after 30s and 3 retry attempts",
+            {},
+            "timeout",
+        ),
         (None, {"timed_out": True}, "timeout"),
         (None, {"empty_body": True}, "empty"),
+        # Our own code crashing on a non-standard response body (live
+        # harmonyai agent-cortex failure, 2026-08-26).
+        (
+            "TypeError: 'NoneType' object is not subscriptable",
+            {},
+            "internal",
+        ),
+        (
+            "AttributeError: 'NoneType' object has no attribute 'content'",
+            {},
+            "internal",
+        ),
         ("something utterly strange happened", {}, "unknown"),
     ],
 )
@@ -406,6 +423,15 @@ def test_classify_engine_failure_error_beats_timeout_flag():
         "APIConnectionError: Connection error.", timed_out=True
     )
     assert kind == "connection"
+
+
+def test_classify_engine_failure_provider_error_wins_over_internal_marker():
+    """A provider error whose body merely mentions a type name stays a
+    provider kind — internal matching is prefix-based and runs last."""
+    kind, _ = classify_engine_failure(
+        "Error code: 503 - upstream raised TypeError while proxying"
+    )
+    assert kind == "server_error"
 
 
 def test_describe_engine_failure_without_diagnostics_is_honest():
@@ -526,9 +552,7 @@ async def test_offline_endpoint_timeout_surfaces_connection_error(monkeypatch):
             await _asyncio.sleep(30)  # wedged offline endpoint
         return ""
 
-    manager, notified = _install_agent_harness(
-        monkeypatch, hanging_primary, bridge
-    )
+    manager, notified = _install_agent_harness(monkeypatch, hanging_primary, bridge)
 
     result = await manager.run_agentic_turn(
         goal="do a thing",
@@ -673,7 +697,9 @@ async def test_repeatable_action_bypasses_identical_call_dedup(monkeypatch):
     async def fake_call_engine_direct(prompt, engine_name, cortex_scope="agent"):
         return call_json
 
-    monkeypatch.setattr(_agent_loop_manager, "_call_engine_direct", fake_call_engine_direct)
+    monkeypatch.setattr(
+        _agent_loop_manager, "_call_engine_direct", fake_call_engine_direct
+    )
 
     async def fake_persist(**kwargs):
         return 1
@@ -720,7 +746,9 @@ async def test_non_repeatable_action_still_deduped(monkeypatch):
     async def fake_call_engine_direct(prompt, engine_name, cortex_scope="agent"):
         return call_json
 
-    monkeypatch.setattr(_agent_loop_manager, "_call_engine_direct", fake_call_engine_direct)
+    monkeypatch.setattr(
+        _agent_loop_manager, "_call_engine_direct", fake_call_engine_direct
+    )
 
     async def fake_persist(**kwargs):
         return 1
@@ -736,9 +764,7 @@ async def test_non_repeatable_action_still_deduped(monkeypatch):
     monkeypatch.setattr(
         "core.agent_tool_executor.agent_tool_executor.execute", fake_execute
     )
-    monkeypatch.setattr(
-        agent_core_mod, "_repeatable_action_names", lambda: frozenset()
-    )
+    monkeypatch.setattr(agent_core_mod, "_repeatable_action_names", lambda: frozenset())
 
     await _agent_loop_manager.run_agentic_turn(
         goal="read it",
@@ -783,9 +809,7 @@ async def test_timeout_with_actions_composes_pause_message(monkeypatch):
     )
 
     async def fake_compose_pause_message(**kwargs):
-        return (
-            "I'm still on it — the download is queued, want me to keep waiting?"
-        )
+        return "I'm still on it — the download is queued, want me to keep waiting?"
 
     monkeypatch.setattr(
         _agent_loop_manager,
@@ -861,7 +885,7 @@ async def test_interim_message_cap_suppresses_reworded_duplicates(monkeypatch):
             {
                 "actions": [
                     {
-                        "type": "message_telegram_bot",
+                        "type": "send_message",
                         "payload": {
                             "text": f"update number {iteration['n']}",
                             "interface_path": "telegram_bot/1",
@@ -875,7 +899,9 @@ async def test_interim_message_cap_suppresses_reworded_duplicates(monkeypatch):
             }
         )
 
-    monkeypatch.setattr(_agent_loop_manager, "_call_engine_direct", fake_call_engine_direct)
+    monkeypatch.setattr(
+        _agent_loop_manager, "_call_engine_direct", fake_call_engine_direct
+    )
 
     async def fake_persist(**kwargs):
         return 1
@@ -885,7 +911,7 @@ async def test_interim_message_cap_suppresses_reworded_duplicates(monkeypatch):
     sent: list[tuple[str, str]] = []
 
     async def fake_execute(name, args, context=None, original_message=None):
-        if name == "message_telegram_bot":
+        if name == "send_message":
             sent.append((name, args.get("text")))
             return {"ok": True, "result": "sent"}
         return {"ok": True, "result": "done"}
@@ -935,14 +961,19 @@ async def test_interim_message_cap_zero_disables_interim_messages(monkeypatch):
                 "actions": [
                     {
                         "type": "message_telegram_bot",
-                        "payload": {"text": "status!", "interface_path": "telegram_bot/1"},
+                        "payload": {
+                            "text": "status!",
+                            "interface_path": "telegram_bot/1",
+                        },
                     },
                     {"type": "agent_read_file", "payload": {"path": "/tmp/x"}},
                 ]
             }
         )
 
-    monkeypatch.setattr(_agent_loop_manager, "_call_engine_direct", fake_call_engine_direct)
+    monkeypatch.setattr(
+        _agent_loop_manager, "_call_engine_direct", fake_call_engine_direct
+    )
 
     async def fake_persist(**kwargs):
         return 1
@@ -952,7 +983,7 @@ async def test_interim_message_cap_zero_disables_interim_messages(monkeypatch):
     sent: list[str] = []
 
     async def fake_execute(name, args, context=None, original_message=None):
-        if name == "message_telegram_bot":
+        if name == "send_message":
             sent.append(args.get("text"))
             return {"ok": True, "result": "sent"}
         return {"ok": True, "result": "done"}
@@ -970,6 +1001,101 @@ async def test_interim_message_cap_zero_disables_interim_messages(monkeypatch):
     assert sent == []
 
 
+@pytest.mark.asyncio
+async def test_interim_message_cap_is_scoped_per_destination(monkeypatch):
+    """A repeat message to the SAME interface_path is capped even when each
+    delivery sits ALONE in its own message-only iteration (no other tool call
+    to trip the old "only mixed iterations count" rule) — live incident: four
+    differently-worded weather replies delivered to the same Telegram chat,
+    one per message-only iteration. A DIFFERENT destination must still go
+    through unaffected, since a beat (e.g. the Grillo chat observer) may
+    legitimately reach out to several different conversations in one turn."""
+    from core.agent_core import _agent_loop_manager
+
+    iteration = {"n": 0}
+
+    async def fake_call_engine_direct(prompt, engine_name, cortex_scope="agent"):
+        iteration["n"] += 1
+        n = iteration["n"]
+        if n == 1:
+            # Establish real tool intent so this isn't the iteration-1
+            # "conversational reply" shortcut.
+            return json.dumps(
+                {
+                    "actions": [
+                        {"type": "agent_read_file", "payload": {"path": "/tmp/x"}}
+                    ]
+                }
+            )
+        if n in (2, 3):
+            # Two message-ONLY iterations to the SAME destination.
+            return json.dumps(
+                {
+                    "actions": [
+                        {
+                            "type": "send_message",
+                            "payload": {
+                                "text": f"weather update {n}",
+                                "interface_path": "telegram_bot/A",
+                            },
+                        }
+                    ]
+                }
+            )
+        # A different destination, reached out to for the first time.
+        return json.dumps(
+            {
+                "actions": [
+                    {
+                        "type": "send_message",
+                        "payload": {
+                            "text": "unrelated update for someone else",
+                            "interface_path": "telegram_bot/B",
+                        },
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(
+        _agent_loop_manager, "_call_engine_direct", fake_call_engine_direct
+    )
+
+    async def fake_persist(**kwargs):
+        return 1
+
+    monkeypatch.setattr(_agent_loop_manager, "_persist_agentic_turn", fake_persist)
+
+    sent: list[tuple[str, str]] = []
+
+    async def fake_execute(name, args, context=None, original_message=None):
+        if name == "send_message":
+            sent.append((args.get("interface_path"), args.get("text")))
+            return {"ok": True, "result": "sent"}
+        return {"ok": True, "result": "done"}
+
+    monkeypatch.setattr(
+        "core.agent_tool_executor.agent_tool_executor.execute", fake_execute
+    )
+
+    result = await _agent_loop_manager.run_agentic_turn(
+        goal="tell two chats what's new",
+        engine="fake-engine",
+        max_iterations=4,
+        timeout_seconds=30.0,
+    )
+
+    # Exactly one delivery reached "telegram_bot/A" (the repeat was
+    # suppressed) and the unrelated "telegram_bot/B" delivery went through
+    # untouched — the per-destination cap never blocks a different target.
+    targets_sent = [t for t, _ in sent]
+    assert targets_sent.count("telegram_bot/A") == 1, sent
+    assert targets_sent.count("telegram_bot/B") == 1, sent
+    assert sent[0] == ("telegram_bot/A", "weather update 2")
+    obs_dump = json.dumps(result["observations"], default=str)
+    assert "suppressed" in obs_dump
+
+
 # ---------------------------------------------------------------------------
 # Persona voiceover (final agent result re-voiced through the persona engine)
 # ---------------------------------------------------------------------------
@@ -981,12 +1107,16 @@ def _voiceover_harness(monkeypatch, engine_reply):
 
     calls: list[dict] = []
 
-    async def fake_engine(prompt, engine_name, cortex_scope="agent", *, native_tools=True):
+    async def fake_engine(
+        prompt, engine_name, cortex_scope="agent", *, native_tools=True
+    ):
         calls.append(
             {
                 "engine": engine_name,
                 "native_tools": native_tools,
-                "system": (prompt.get("input") or {}).get("payload", {}).get("system", ""),
+                "system": (prompt.get("input") or {})
+                .get("payload", {})
+                .get("system", ""),
                 "text": (prompt.get("input") or {}).get("payload", {}).get("text", ""),
             }
         )
@@ -999,7 +1129,9 @@ def _voiceover_harness(monkeypatch, engine_reply):
 
     monkeypatch.setattr("core.config.get_active_cortex_engine", fake_base_engine)
 
-    async def fake_build_prompt_request(message, context_memory, interface_name=None, **kw):
+    async def fake_build_prompt_request(
+        message, context_memory, interface_name=None, **kw
+    ):
         return {
             "input": {
                 "payload": {
@@ -1047,7 +1179,10 @@ async def test_persona_voiceover_unwraps_action_json(monkeypatch):
     )
     manager, _calls = _voiceover_harness(monkeypatch, reply)
     voiced = await manager.persona_voiceover(
-        "raw result", goal="g", context={"interface_path": "telegram_bot/1"}, message=None
+        "raw result",
+        goal="g",
+        context={"interface_path": "telegram_bot/1"},
+        message=None,
     )
     assert voiced == "Unwrapped styled reply"
 
@@ -1056,7 +1191,10 @@ async def test_persona_voiceover_unwraps_action_json(monkeypatch):
 async def test_persona_voiceover_failure_returns_empty(monkeypatch):
     manager, _calls = _voiceover_harness(monkeypatch, "")
     voiced = await manager.persona_voiceover(
-        "raw result", goal="g", context={"interface_path": "telegram_bot/1"}, message=None
+        "raw result",
+        goal="g",
+        context={"interface_path": "telegram_bot/1"},
+        message=None,
     )
     assert voiced == ""
 

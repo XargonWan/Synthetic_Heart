@@ -23,6 +23,22 @@
       </div>
     </article>
     <article class="card">
+      <h2>Memory Re-distillation</h2>
+      <p>Memories written before the distilling extractor existed hold the session transcript instead of distilled knowledge, which is what makes recall return raw conversation. This rewrites those memories in place, keeping their dates, retrieval counts and emotions. It costs one model call per memory and runs in the background, so the page stays usable and the counters below follow the progress. Memories that recall would never inject anyway, such as in-character roleplay or housekeeping sessions, are skipped without spending a call on them, and the status line reports how many will actually be distilled before you press it. Each memory is also given a bounded amount of time to rewrite: if a memory times out or fails, the status line says so and reports how many, and a memory that timed out is left untouched, so raising <em>Re-distil timeout per memory</em> in the advanced settings and pressing again retries only the ones that were cut off. Do that for a slow engine, such as one that drives a browser or a large local model.</p>
+      <div style="margin-top:0.6rem; display:flex; gap:0.75rem; align-items:center; flex-wrap:wrap;">
+        <button id="redistil-memcells" class="btn-ghost" type="button">Re-distil memories</button>
+        <span id="redistil-status" class="meta">Checking…</span>
+      </div>
+    </article>
+    <article class="card">
+      <h2>Memory Compaction</h2>
+      <p>Grillo summarises each past day of diary into one memory, so recall returns knowledge instead of whole days of transcript. It normally runs on its own schedule; this button runs exactly the same pass now, which is how you check it without waiting a night to find out. It costs one model call per eligible day, and days the archive already holds a memory for are skipped, so pressing it a second time costs nothing. The pass runs in the background and the line below follows it.</p>
+      <div style="margin-top:0.6rem; display:flex; gap:0.75rem; align-items:center; flex-wrap:wrap;">
+        <button id="run-compaction-now" class="btn-ghost" type="button">Run nightly compaction now</button>
+        <span id="compaction-status" class="meta">Checking…</span>
+      </div>
+    </article>
+    <article class="card">
       <h2>Notifications</h2>
       <p>Enable desktop notifications and audio cues whenever new messages arrive.</p>
       <label class="toggle">

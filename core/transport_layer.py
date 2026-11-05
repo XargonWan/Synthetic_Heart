@@ -40,7 +40,7 @@ AWAIT_RESPONSE_TIMEOUT = config_registry.get_var(
 
 # Dedicated, short timeout for a SINGLE corrector LLM call. The corrector runs
 # inside the single synchronous message-queue consumer, so a slow/uncancellable
-# engine (e.g. the stateful browser-driven selenium engine) hanging for the full
+# engine (e.g. the stateful browser-driven zen engine) hanging for the full
 # AWAIT_RESPONSE_TIMEOUT would starve every chat and beat. Each corrector attempt
 # is bounded by this value so a hung correction fails fast and releases the
 # consumer instead of blocking up to AWAIT_RESPONSE_TIMEOUT per attempt.
@@ -56,6 +56,20 @@ CORRECTOR_TIMEOUT_SEC = config_registry.get_var(
 
 
 # Helpers for sanitizing and extracting JSON from noisy LLM outputs
+
+
+def _is_message_action_name(action_type) -> bool:
+    """True for the unified send_message or any legacy message_* action."""
+    try:
+        from core.message_registry import is_message_action
+
+        return is_message_action(action_type)
+    except Exception:
+        return isinstance(action_type, str) and (
+            action_type == "send_message" or action_type.startswith("message_")
+        )
+
+
 def _remove_control_chars(s: str) -> str:
     """Remove non-printable control characters that commonly break JSON parsing.
     Keep common whitespace (\n, \r, \t)."""
@@ -858,6 +872,34 @@ def _pseudo_params_to_dict(raw: str) -> dict[str, Any]:
     return params
 
 
+_DIALECT_NAME_KEYS = ("tool", "name", "action")
+_DIALECT_PARAMS_KEYS = ("params", "arguments", "parameters", "input", "payload")
+
+
+def _flat_dialect_payload(text: str, tool_name: str) -> dict[str, Any]:
+    """Return the sibling fields of a flat ``{"action": NAME, ...fields}`` call.
+
+    Some models put the arguments next to the name key instead of inside a
+    params blob, e.g. ``{"action": "send_message", "interface_path": "...",
+    "content": "..."}``. Returns every field except the name key itself, or an
+    empty dict when ``text`` is not a single flat object for ``tool_name`` (any
+    params-style key means the nested forms handle it instead).
+    """
+    start = text.find("{")
+    if start == -1:
+        return {}
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(text[start:])
+    except ValueError:
+        return {}
+    if not isinstance(obj, dict):
+        return {}
+    name_key = next((k for k in _DIALECT_NAME_KEYS if obj.get(k) == tool_name), None)
+    if name_key is None or any(k in obj for k in _DIALECT_PARAMS_KEYS):
+        return {}
+    return {k: v for k, v in obj.items() if k != name_key}
+
+
 def _recover_tool_call_dialect(text: str) -> Optional[dict[str, Any]]:
     """Normalise an alternative tool-call dialect into the SyntH schema.
 
@@ -870,6 +912,7 @@ def _recover_tool_call_dialect(text: str) -> Optional[dict[str, Any]]:
         {"tool": "NAME", "params": ["query": "x", "limit": "5"]}
         [tool:NAME] {"params": ["query": "x"]}
         {"name": "NAME", "arguments": {...}}
+        {"action": "NAME", "field": "x", ...}
 
     Returned as ``{"actions": [{"type": NAME, "payload": {...}}]}`` when at
     least one tool call is recovered, else ``None``.
@@ -896,6 +939,8 @@ def _recover_tool_call_dialect(text: str) -> Optional[dict[str, Any]]:
             if not tool_name:
                 continue
             payload = _pseudo_params_to_dict(m.group(2) or "")
+            if m.group(2) is None:
+                payload = _flat_dialect_payload(text, tool_name)
             actions.append({"type": tool_name, "payload": payload})
 
         # Case B: the ``[tool:NAME] {...}`` pseudo-markup form. Only add it when
@@ -978,7 +1023,7 @@ def _attempt_recover_actions_from_text(
             candidates = [
                 action_type
                 for action_type in available_actions.keys()
-                if isinstance(action_type, str) and action_type.startswith("message_")
+                if _is_message_action_name(action_type)
             ]
         except Exception:
             candidates = []
@@ -1085,7 +1130,11 @@ def _attempt_recover_actions_from_text(
                 if ip_match:
                     interface_path = ip_match.group(1)
 
-                if candidate.startswith("message_") and not interface_path:
+                if (
+                    candidate != "send_message"
+                    and candidate.startswith("message_")
+                    and not interface_path
+                ):
                     continue
 
                 # Build recovered action and append
@@ -1532,6 +1581,20 @@ async def universal_send(interface_send_func, *args, text: str | None = None, **
         # Non-fatal: keep original text if recovery fails
         pass
 
+    # System-written age markers are stripped for the same reason (see
+    # RULE_ANNOTATIONS_ARE_NOT_PEOPLE): one reached the DM on 2026-09-30 after
+    # the model copied it out of history.
+    try:
+        if isinstance(text, str) and text and "earlier" in text:
+            from core.history_engine import strip_leading_age_marker
+
+            no_marker = strip_leading_age_marker(text)
+            if no_marker != text:
+                log_debug("[transport] Stripped an age marker from outbound text")
+                text = no_marker
+    except Exception:
+        pass
+
     # Strip emotion tags like {arousal 10, devotion 10} from outbound text.
     # The LLM embeds these for internal emotion state tracking but they
     # must never leak into user-visible messages.
@@ -1762,7 +1825,7 @@ async def universal_send(interface_send_func, *args, text: str | None = None, **
                     actions = [json_data]
 
             # Drop leaked Recon-schema entries. A state-retaining browser engine
-            # (e.g. selenium-llm-engine) can echo the separate Recon call's JSON
+            # (e.g. zen-llm-engine) can echo the separate Recon call's JSON
             # keys (tone_hint, agent_intent, language_hint, ...) back into the
             # main-pass ``actions`` array. Those keys are preflight metadata, not
             # executable actions; validating them yields "Unsupported type"
@@ -1948,7 +2011,7 @@ async def universal_send(interface_send_func, *args, text: str | None = None, **
                     for action in current_interface_actions:
                         action_type = str(action.get("type") or "")
                         payload = action.get("payload")
-                        if not action_type.startswith("message_") or not isinstance(
+                        if not _is_message_action_name(action_type) or not isinstance(
                             payload, dict
                         ):
                             continue
@@ -2464,7 +2527,7 @@ async def run_corrector_middleware(
             # turn used, not the global active engine. Otherwise a vessel turn
             # (scoped to the fast VESSEL_CORTEX) would be corrected against the
             # global BASE_CORTEX (e.g. the slow, stateful, uncancellable
-            # selenium browser engine), which hangs on the single consumer and
+            # zen browser engine), which hangs on the single consumer and
             # deadlocks every chat. Mirror the resolution used by
             # core/plugin_instance.py: derive_cortex_scope(context) ->
             # get_active_cortex_scope(scope) -> cortex registry. Purely
@@ -2665,7 +2728,7 @@ async def run_corrector_middleware(
                     delivered_message_types = [
                         str(t)
                         for t in successful_types
-                        if str(t).startswith("message_")
+                        if str(t) == "send_message" or str(t).startswith("message_")
                     ]
                     if delivered_message_types:
                         correction_message_text += (
@@ -2848,7 +2911,29 @@ async def run_corrector_middleware(
             # therefore produced ``message_vessel``, which is not registered;
             # a correction response was silently dropped even after the game
             # actions themselves had succeeded.
-            iface_label = originating_interface or "<interface>"
+            # Legacy display labels (whatever a caller put in
+            # context["interface"]) mapped to their REGISTERED interface ids.
+            # Mirrored inline, like the map in action_parser, to keep this path
+            # import-free. A display label would miss the canonical table below
+            # and fall through to ``message_<label>`` — an unregistered type the
+            # model then copies into its correction, so the reply is never
+            # delivered (live 2026-09-21, langfuse
+            # feca9072-0abe-46ef-90da-f1409723088e: the sender passed
+            # ``interface="telegram"`` and no interface_path, so the path-prefix
+            # override above had nothing to resolve and the legacy label
+            # survived).
+            _legacy_iface_labels = {
+                "telegram": "telegram_bot",
+                "discord": "discord_bot",
+                "matrix": "matrix_chat",
+                "fluxer": "fluxer_bot",
+                "webui": "synth_webui",
+            }
+            iface_label = (
+                _legacy_iface_labels.get(str(originating_interface or "").strip())
+                or originating_interface
+                or "<interface>"
+            )
             # Map the interface id to its registered message action type via the
             # canonical table (telegram_bot -> message_telegram_bot, ...). Blind
             # ``message_{iface_label}`` taught the model unregistered types (e.g.
@@ -2859,11 +2944,14 @@ async def run_corrector_middleware(
                 from core.message_chain import _INTERFACE_TO_MESSAGE_ACTION
 
                 correction_action_type = (
-                    _INTERFACE_TO_MESSAGE_ACTION.get(iface_label)
-                    or f"message_{iface_label}"
+                    _INTERFACE_TO_MESSAGE_ACTION.get(iface_label) or "send_message"
                 )
             except Exception:
-                correction_action_type = f"message_{iface_label}"
+                # Never invent a per-interface name: the unified action is
+                # registered for every chat interface (and for the WebUI/radio
+                # the canonical table above covers them), so an unregistered
+                # ``message_<label>`` is strictly worse than the shared verb.
+                correction_action_type = "send_message"
             # Build the example interface_path WITHOUT a trailing slash. The old
             # unconditional ``.../{thread or ''}`` produced e.g.
             # ``telegram_bot/5208932647/`` when ``thread_id`` was None, which the
@@ -3051,8 +3139,8 @@ async def run_corrector_middleware(
                     )
                     if parsed_json:
                         # Special-case enforcement for ollama_serve: if the original
-                        # interface was `ollama_serve`, make sure any `message_*`
-                        # actions are routed back to `message_ollama_serve` and
+                        # interface was `ollama_serve`, make sure any `send_message`
+                        # actions are routed back to the ollama_serve interface and
                         # their payload.interface_path points to `ollama_serve/...`.
                         if originating_interface == "ollama_serve" and isinstance(
                             parsed_json, dict
@@ -3064,17 +3152,19 @@ async def run_corrector_middleware(
                                     if not isinstance(act, dict):
                                         continue
                                     a_type = act.get("type", "")
-                                    # Rewrite any message_* target to message_ollama_serve
+                                    # Rewrite any message_* target to send_message
                                     if (
                                         a_type.startswith("message_")
-                                        and a_type != "message_ollama_serve"
+                                        and a_type != "send_message"
                                     ):
-                                        act["type"] = "message_ollama_serve"
+                                        act["type"] = "send_message"
                                         rewritten = True
 
                                     # Ensure payload.interface_path is an ollama_serve path
                                     payload = act.get("payload") or {}
-                                    if isinstance(payload, dict):
+                                    if isinstance(payload, dict) and act.get(
+                                        "type"
+                                    ) in ("send_message", "message_ollama_serve"):
                                         iface_path = payload.get("interface_path", "")
                                         if not iface_path.startswith("ollama_serve"):
                                             id_for_iface = chat_id or (
@@ -3087,7 +3177,7 @@ async def run_corrector_middleware(
                                             )
                                             rewritten = True
 
-                                        if act.get("type") == "message_ollama_serve":
+                                        if act.get("type") == "send_message":
                                             conversation_id = payload.get(
                                                 "conversation_id"
                                             )
@@ -3114,7 +3204,7 @@ async def run_corrector_middleware(
                                 # Serialize back to JSON string before returning
                                 corrected = json.dumps(parsed_json, ensure_ascii=False)
                                 log_info(
-                                    "[corrector_middleware] Rewrote corrected actions to 'message_ollama_serve' for originating interface 'ollama_serve'"
+                                    "[corrector_middleware] Rewrote corrected actions to 'send_message' for originating interface 'ollama_serve'"
                                 )
                                 # Return rewritten JSON immediately for ollama_serve origin
                                 return corrected
@@ -3249,7 +3339,17 @@ async def llm_to_interface(
         pass
 
     # Strip internal emotion tags from every incoming LLM message so the text
-    # remains clean for downstream processors and interface outputs.
+    # remains clean for downstream processors and interface outputs. System
+    # annotations (age markers) go the same way.
+    try:
+        from core.history_engine import strip_leading_age_marker
+
+        no_marker = strip_leading_age_marker(text)
+        if no_marker != text:
+            log_debug("[llm_to_interface] Stripped an age marker from LLM text")
+            text = no_marker
+    except Exception:
+        pass
     try:
         from plugins.emotion_manager import strip_emotion_tags
 

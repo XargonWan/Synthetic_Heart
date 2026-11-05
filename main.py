@@ -28,6 +28,16 @@ def _load_repo_env_defaults() -> None:
 
 _load_repo_env_defaults()
 
+# Adopt state that Docker-era builds wrote to the (on Windows, drive-relative)
+# container paths, BEFORE anything reads the secret file or the data root.
+# Fail-safe: it never raises and never blocks startup.
+try:
+    from core.legacy_state import run_startup_migration  # noqa: E402
+
+    run_startup_migration()
+except Exception:  # pragma: no cover - defensive, startup must continue
+    pass
+
 from core.db import init_db, test_connection, get_conn_ctx, _get_db_type  # noqa: E402
 
 # from core.blocklist import init_blocklist_table  # Now handled by blocklist plugin
@@ -222,6 +232,13 @@ async def initialize_database():
 
         await config_registry.persist_bootstrap_configs()
         log_debug("[main] Bootstrap configurations persisted")
+
+        # Ensure the bundled Zen LLM Engine companion endpoint is registered,
+        # and self-heal its base_url if it still points at the pre-rename
+        # "selenium-llm-engine" container hostname.
+        from core.external_endpoints.registry import ensure_default_zen_endpoint
+
+        await ensure_default_zen_endpoint()
 
         # NOTE: load_all_from_db() is called later in core_initializer.initialize_all()
         # after all variable registrations are complete. Do not call it here as it would
@@ -500,9 +517,11 @@ if __name__ == "__main__":
                         INTERFACE_REGISTRY,
                         PLUGIN_REGISTRY,
                     )
+
                     INTERFACE_REGISTRY.clear()
                     PLUGIN_REGISTRY.clear()
                     from core.cortex_registry import get_cortex_registry
+
                     get_cortex_registry()._engines.clear()
                     continue
                 finally:

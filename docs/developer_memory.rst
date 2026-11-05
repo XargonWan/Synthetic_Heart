@@ -42,7 +42,11 @@ the agent needs a deterministic starting point.
 Initial resources
 -----------------
 
-The D16 setup provisions this CodeGraph::
+Resources are per checkout: they live in the local SQLite database under
+``.tools/tencentdb-agent-memory/MemoryKnowledge/data``, so a fresh checkout
+starts empty and is provisioned once.
+
+The D16 setup provisioned::
 
     code_graph_id = cg-p22kpkhl
     wiki_id = wiki-7kop5yzt
@@ -50,9 +54,32 @@ The D16 setup provisions this CodeGraph::
     team_id = synth-development
     branch = feat/rift-vessel-new
 
-The D16 MCP adapter injects these IDs automatically. Agents can call the
-CodeGraph/Wiki tools with their normal query arguments; they do not need to
-know or repeat the IDs.
+The B17 setup provisioned::
+
+    code_graph_id = cg-us01ffca
+    wiki_id = wiki-ej45xqvj
+    service_id = synthetic-heart-dev
+    team_id = synth-development
+    branch = develop
+
+Provision a checkout with:
+
+1. the Knowledge Service running (launching the MCP server once is enough, or
+   start ``node node_modules/tsx/dist/cli.mjs workspace-entry.ts`` from
+   ``MemoryKnowledge`` with ``KNOWLEDGE_DATA_DIR``/``KNOWLEDGE_DB_PATH`` pointing
+   inside it);
+2. ``uv run python scripts/tencentdb_knowledge_sync.py`` — creates the Wiki and
+   writes the curated pages, printing the new ``wiki_id``;
+3. ``POST /v3/code-graph/create`` with ``repo_url`` and ``branch`` (header
+   ``x-tdai-service-id``), which starts the clone and index build; poll
+   ``POST /v3/code-graph/get`` until ``status`` is ``ready``.
+
+The launcher defaults to the D16 IDs, so a checkout holding its own resources
+must export ``TDAI_CODE_GRAPH_ID`` and ``TDAI_WIKI_ID`` (with
+``TDAI_SERVICE_ID``/``TDAI_TEAM_ID``) in the environment that launches it; the
+launcher forwards those to the MCP bridge. Agents can then call the
+CodeGraph/Wiki tools with their normal query arguments; they do not need to know
+or repeat the IDs.
 
 To create/refresh the curated Wiki pages from the repository's existing
 ``AGENTS.md`` and maintained documentation, run::

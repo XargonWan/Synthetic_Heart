@@ -27,6 +27,10 @@ if TYPE_CHECKING:
     from core.webui import SynthWebUIInterface
 
 
+# Animation files already warned about for a conflicting play_once flag.
+_PLAY_ONCE_WARNED: set[str] = set()
+
+
 class AnimationState(Enum):
     """Logical animation states that components can trigger."""
 
@@ -1490,7 +1494,10 @@ class KaradaStateServer:
         #  a structured animation that should execute its sections in order)
         if descriptor.get("play_once"):
             has_structured_sections = result["has_intro"] or result["has_outro"]
-            if has_structured_sections:
+            if has_structured_sections and animation_file not in _PLAY_ONCE_WARNED:
+                # Fires on every idle animation change; one warning per file is
+                # enough (it was ~2k identical lines per day).
+                _PLAY_ONCE_WARNED.add(animation_file)
                 log_warning(
                     f"[KaradaStateServer] Animation '{animation_file}' has both 'play_once' flag "
                     f"and structured sections (intro/outro). 'play_once' will be ignored because "

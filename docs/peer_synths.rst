@@ -61,6 +61,19 @@ When a message arrives in a Telegram group:
    **only for Telegram group messages** — private chats and all other
    interfaces are unaffected.
 
+.. note::
+
+   **Group messages are sent without Telegram Markdown parsing.**
+   ``*action*`` markers are consumed as bold markup whenever a ``parse_mode``
+   is set, and the parsed text is what another bot receives, so the markers
+   used to be stripped from every peer's copy of a line while the sender's own
+   store kept them: each instance remembered the other's actions as plain
+   speech. Group and supergroup ids are negative, so
+   ``telegram_parse_mode_for`` (``interface/message_send_utils.py``) sends
+   those chats with no parse mode and keeps ``Markdown`` for private chats. In
+   a group the markers are therefore visible exactly as typed, which is also
+   what both instances store.
+
 
 Bot-to-Bot Communication Mode (Required Telegram Setting)
 ------------------------------------------------------------

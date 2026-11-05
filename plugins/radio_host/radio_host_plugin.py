@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time as _time
 from collections import deque
 from datetime import datetime, timezone
@@ -10,6 +11,7 @@ from typing import Any
 
 
 from core.config_manager import config_registry
+from core.app_paths import app_root, persistent_media_dir, usable_container_dir
 from core.core_initializer import register_plugin
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.persona_manager import get_persona_manager
@@ -17,13 +19,39 @@ from core.variables_engine import register_exposed_var
 
 from pathlib import Path as _Path
 
+from core.media_url_utils import get_vox_output_dir
+
 from .azuracast_client import AzuraCastClient
 from .db import init_radio_tables, trim_old_audio
 from .jingle_injector import JingleInjector
 from .track_monitor import TrackMonitor
 
+
+def _resolve_audio_storage_dir() -> _Path:
+    """Resolve the banter-audio directory for both deployments.
+
+    The container path is only used when it is genuinely absolute and present
+    (``usable_container_dir``), so on Windows the drive-relative ``\\app`` — which
+    a Docker-era default would otherwise adopt, e.g. ``D:\\app`` — is ignored and
+    the directory lands inside the application root. ``SYNTH_RADIO_AUDIO_DIR``
+    overrides both.
+    """
+    override = os.environ.get("SYNTH_RADIO_AUDIO_DIR", "").strip()
+    if override:
+        return _Path(override).expanduser()
+    # The data volume, so the banter clips survive a container recreate. The
+    # image-layer paths below are only for deployments without that volume.
+    persistent = persistent_media_dir("radio_host")
+    if persistent:
+        return persistent
+    container_dir = _Path("/app/tmp_tts/radio_host")
+    if usable_container_dir(container_dir.parent):
+        return container_dir
+    return app_root() / "tmp_tts" / "radio_host"
+
+
 # Persistent directory for the last N banter audio files (for WebUI replay)
-AUDIO_STORAGE_DIR = _Path("/app/tmp_tts/radio_host")
+AUDIO_STORAGE_DIR = _resolve_audio_storage_dir()
 AUDIO_KEEP_COUNT = 30
 
 # On-the-fly de-announce generation runs through the async message-queue /
@@ -32,7 +60,7 @@ AUDIO_KEEP_COUNT = 30
 _ON_THE_FLY_POLL_TIMEOUT_S = 60.0
 # The winding-down on-the-fly generation runs as a background task (never
 # blocking the track monitor) and waits longer than the immediate-injection
-# poll above, because a slow LLM turn (e.g. selenium) routinely exceeds 60s
+# poll above, because a slow LLM turn (e.g. zen) routinely exceeds 60s
 # and the freshness guard makes a late, stale banter safe to skip.
 _ON_THE_FLY_BACKGROUND_TIMEOUT_S = 120.0
 _ON_THE_FLY_POLL_INTERVAL_S = 0.25
@@ -197,7 +225,7 @@ register_exposed_var(
     default=_ON_THE_FLY_BACKGROUND_TIMEOUT_S,
     value_type=float,
     ui_type="string",
-    description="How long (seconds) to wait for an on-the-fly LLM banter generation before giving up. The LLM turn (e.g. a slow selenium engine) can take well over a minute, so this is run in a background task and never blocks the track monitor. Stale banter is still safely skipped by the freshness guard.",
+    description="How long (seconds) to wait for an on-the-fly LLM banter generation before giving up. The LLM turn (e.g. a slow zen engine) can take well over a minute, so this is run in a background task and never blocks the track monitor. Stale banter is still safely skipped by the freshness guard.",
     scope="plugins",
     component="radio_host",
 )
@@ -1934,6 +1962,7 @@ class RadioHostPlugin:
             allowed_prefixes = (
                 _os.path.abspath(str(AUDIO_STORAGE_DIR)),
                 _os.path.abspath("res/synth_webui/static/audio/tts"),
+                _os.path.abspath(str(get_vox_output_dir())),
             )
             abs_path = _os.path.abspath(direct_path)
             for prefix in allowed_prefixes:

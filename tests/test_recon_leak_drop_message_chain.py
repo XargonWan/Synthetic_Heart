@@ -1,6 +1,6 @@
 """Tests for the Recon-schema leak drop-filter in core.message_chain.
 
-A state-retaining engine (e.g. the browser-driven selenium endpoint) can carry
+A state-retaining engine (e.g. the browser-driven zen endpoint) can carry
 Recon-pass priming into the immediately-following main pass, so the main pass
 echoes Recon-schema keys (``tone_hint``, ``agent_intent`` …) back inside its
 ``actions`` array. Those keys are never real actions and, if left in place,

@@ -41,9 +41,9 @@ This guide outlines the typical steps to run **Synthetic Heart** using Docker. s
 
 5. **Configure a Cortex (engine)**
    In the WebUI navigate to **Components** and select the desired Cortex
-   engine (for example: ``selenium_gemini`` or ``gemini_api``).
+   engine (for example: ``zen_gemini`` or ``gemini_api``).
 
-   -  If using a Selenium-driven Cortex (browser adapter), press the
+   -  If using a Zen-driven Cortex (browser adapter), press the
       **Login** button for that engine and complete the provider login flow in
       the browser window that opens.
    -  If using an API-based Cortex, enter the required API key or credentials
@@ -96,6 +96,6 @@ SyntH uses a zero-configuration approach where components are automatically disc
 
 - **Interfaces**: Chat platforms like Telegram, Discord, Reddit
 - **Plugins**: Action providers like terminal access, weather, file operations
-- **Cortex Engines**: categories of runtime engines (kinds: ``llm``, ``live``, ``agent``) such as ChatGPT (via Selenium), Gemini Live or Agent-based engines. Each engine can provide a short human-readable label at registration time (``ENGINE_LABEL`` or registry ``label``) to explain its intended use. **Note: Only Selenium ChatGPT (Legacy) is currently fully functional.**
+- **Cortex Engines**: categories of runtime engines (kinds: ``llm``, ``live``, ``agent``) such as ChatGPT (via Zen), Gemini Live or Agent-based engines. Each engine can provide a short human-readable label at registration time (``ENGINE_LABEL`` or registry ``label``) to explain its intended use. **Note: Only Zen ChatGPT (Legacy) is currently fully functional.**
 
 Simply place compatible Python files in the appropriate directories and restart - no manual registration required. This modular architecture ensures that functionality can be added or removed without modifying the core system.

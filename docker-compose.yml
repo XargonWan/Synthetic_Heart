@@ -101,13 +101,13 @@ services:
   #   networks:
   #     - synth_network
 
-  # Selenium‑LLM Engine, you can disable this if you want to use a different endpoint
+  # Zen LLM Engine, you can disable this if you want to use a different endpoint
   # such as an API provider or a local LLM running in another container
-  synth-selenium-llm-engine:
-    image: xargonwan/selenium-llm-engine:latest
-    # build: ../selenium-llm-engine
-    container_name: synth-selenium-llm-engine
-    hostname: synth-selenium-llm-engine
+  synth-zen-llm-engine:
+    image: xargonwan/zen-llm-engine:latest
+    # build: ../zen-llm-engine
+    container_name: synth-zen-llm-engine
+    hostname: synth-zen-llm-engine
     env_file:
       - .env
     environment:
@@ -116,8 +116,15 @@ services:
       - "14848:8000"  # API port
       - "3001:3001"   # webtop interface
     volumes:
-      - synth_selenium_data:/app/data
-      - synth_selenium_config:/config
+      - synth_zen_data:/app/data
+      - synth_zen_config:/config
+    # Docker's json-file driver is unbounded by default; this container's log had
+    # reached 34 MB with no rotation (single 1.6 MB lines included).
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
     networks:
       - synth_network
 
@@ -127,8 +134,8 @@ volumes:
   synth_data:
   synth_logs:
   synth_skins:
-  synth_selenium_data:
-  synth_selenium_config:
+  synth_zen_data:
+  synth_zen_config:
 
 networks:
   synth_network:

@@ -19,7 +19,7 @@
 - [tests/plugins/test_radio_host_plugin.py](file://tests/plugins/test_radio_host_plugin.py)
 - [tests/plugins/test_recon_agent_intent.py](file://tests/plugins/test_recon_agent_intent.py)
 - [tests/plugins/test_recon_language_evaluator.py](file://tests/plugins/test_recon_language_evaluator.py)
-- [tests/plugins/test_selenium_ttsfree.py](file://tests/plugins/test_selenium_ttsfree.py)
+- [tests/plugins/test_zen_ttsfree.py](file://tests/plugins/test_zen_ttsfree.py)
 - [tests/soul/test_compiler.py](file://tests/soul/test_compiler.py)
 - [tests/soul/test_emotion_engine.py](file://tests/soul/test_emotion_engine.py)
 - [tests/soul/test_soul_plugin.py](file://tests/soul/test_soul_plugin.py)

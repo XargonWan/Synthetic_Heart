@@ -71,7 +71,7 @@ Components
 - **POST** `/api/components/dev/toggle` – enable/disable development components at
   runtime (flag resets on restart).  Payload: ``{"enabled": true/false}``.
 - **POST** `/api/components/cortex` – switch the active Cortex engine. Payload: ``{"name": "<engine>"}``.
-- **POST** `/api/components/cortex/login` – begin/login flow for Selenium–based
+- **POST** `/api/components/cortex/login` – begin/login flow for Zen–based
   Cortex engines. Payload: ``{"name": "<engine>"}``.
 - **POST** `/api/components/run` – execute a component by name (used by the "Run
   now" button in the WebUI).

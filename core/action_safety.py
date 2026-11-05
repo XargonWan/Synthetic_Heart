@@ -126,8 +126,18 @@ def _get_declared_action_metadata(action_type: str) -> Dict[str, Any]:
     """Return declared metadata for an action type from core_initializer.actions_block"""
     try:
         actions = core_initializer.actions_block.get("available_actions", {})
-        info = actions.get(action_type, {})
-        return info
+        info = actions.get(action_type)
+        if info:
+            return info
+        # External MCP tools are not plugin actions: their declared level lives
+        # on the unified tool registry (taken from the server's config).
+        if action_type.startswith("mcp_"):
+            from core.tool_registry import tool_registry
+
+            tool = tool_registry.get_tool(action_type)
+            if tool is not None and tool.is_external():
+                return {"security_level": tool.security_level}
+        return {}
     except Exception as e:
         log_debug(
             f"[action_safety] Failed to get declared metadata for {action_type}: {e}"
@@ -158,7 +168,11 @@ def is_action_allowed_for_execution(
             )
 
         # 2) Determine declared security level
-        declared = _get_declared_action_metadata(action_type)
+        # A caller that already resolved the tool (e.g. the agent executor for
+        # an MCP tool) passes its declared metadata; otherwise look it up.
+        declared = action.get("declared_metadata") or _get_declared_action_metadata(
+            action_type
+        )
         declared_level = _coerce_level(
             str(declared.get("security_level") or declared.get("security") or "")
         )

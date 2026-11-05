@@ -60,6 +60,17 @@ class GrilloPlugin(AIPluginBase):
         return {}
 
     async def start(self):
+        # One Grillo startup per process. The plugin is started from more than one
+        # place (the loader's async queue, then CoreInitializer's explicit start),
+        # and everything below - beat discovery, the recovery loop, the scheduler
+        # task - is a once-per-process job. Only the scheduler used to be guarded,
+        # so every extra call logged "starting lightweight scheduler" and built
+        # another recovery plugin: that is how four recovery loops came to run at
+        # boot and recover the same failure four times.
+        if GrilloPlugin._scheduler_task and not GrilloPlugin._scheduler_task.done():
+            log_debug("[grillo] scheduler already running")
+            return
+
         self._running = True
         log_info("[grillo] starting lightweight scheduler")
         # Try to locate history_evaluator if available
@@ -90,15 +101,12 @@ class GrilloPlugin(AIPluginBase):
         try:
             from .grillo_llm_failure_recovery import GrilloLLMFailureRecoveryPlugin
 
-            self.recovery_plugin = GrilloLLMFailureRecoveryPlugin()
+            if getattr(self, "recovery_plugin", None) is None:
+                self.recovery_plugin = GrilloLLMFailureRecoveryPlugin()
             await self.recovery_plugin.start()
             log_info("[grillo] LLM-failure recovery plugin started")
         except Exception as e:
             log_warning(f"[grillo] Failed to start recovery plugin: {e}")
-
-        if GrilloPlugin._scheduler_task and not GrilloPlugin._scheduler_task.done():
-            log_debug("[grillo] scheduler already running")
-            return
 
         GrilloPlugin._scheduler_running = True
         GrilloPlugin._scheduler_task = asyncio.create_task(self._grillo_beat_loop())
@@ -433,6 +441,20 @@ class GrilloPlugin(AIPluginBase):
             from core import message_queue
 
             allowed_action_types = self._get_allowed_action_types_for_beat(beat_type)
+            # A beat plugin may need to hand the executor a decision it cannot
+            # put in the prompt itself, e.g. the diary consolidator saying how
+            # much of a day a part-merge covers so the write keeps the rest of
+            # it. Read once here, and clear it so it cannot ride a later beat.
+            pending_context: dict = {}
+            try:
+                beat_plugin = self.beat_plugins.get(beat_type)
+                pending = getattr(beat_plugin, "pending_beat_context", None)
+                if isinstance(pending, dict) and pending:
+                    pending_context = dict(pending)
+                    # Clear it so the handoff cannot ride a later beat.
+                    setattr(beat_plugin, "pending_beat_context", None)
+            except Exception as exc:
+                log_debug(f"[grillo] Beat context handoff skipped: {exc}")
             activity_log_id: Optional[int] = None
             try:
                 activity_log_id = await self.create_activity_log(
@@ -478,6 +500,7 @@ class GrilloPlugin(AIPluginBase):
                     "activity_log_id": activity_log_id,
                     "allowed_action_types": allowed_action_types,
                     "skip_history": True,
+                    **pending_context,
                 },
                 "priority": False,
             }
@@ -545,7 +568,36 @@ class GrilloPlugin(AIPluginBase):
                         elif row:
                             inserted_id = row[0]
                     await conn.commit()
-                    return inserted_id
+                    if not inserted_id:
+                        log_warning(
+                            f"[grillo] create_activity_log: no id for beat '{beat_type}' — "
+                            "the beat runs without an activity row"
+                        )
+                        return None
+                    # Verify the row really is there before handing the id to the beat.
+                    # The beat writes its response back BY ID, so a stale or never
+                    # committed id makes it overwrite another beat's row instead of
+                    # logging its own. Observed live: the 06:23 beat updated row 8907
+                    # and the 07:23 beat updated row 8910, both belonging to earlier
+                    # beats, while their own beats left no row at all.
+                    await cur.execute(
+                        "SELECT id FROM grillo_activity_log WHERE id = %s",
+                        (inserted_id,),
+                    )
+                    verify_row = await cur.fetchone()
+                    verified_id: Optional[int] = None
+                    if isinstance(verify_row, dict):
+                        verified_id = verify_row.get("id")
+                    elif verify_row:
+                        verified_id = verify_row[0]
+                    if not verified_id:
+                        log_warning(
+                            f"[grillo] create_activity_log: id {inserted_id} for beat "
+                            f"'{beat_type}' was not persisted — discarding it so the beat "
+                            "cannot overwrite another beat's row"
+                        )
+                        return None
+                    return int(verified_id)
         except Exception as e:
             log_error(f"[grillo] create_activity_log failed: {e}")
             return None

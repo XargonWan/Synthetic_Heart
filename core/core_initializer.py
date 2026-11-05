@@ -4,6 +4,7 @@ import os
 import importlib
 import inspect
 import asyncio
+import functools
 import json
 import threading
 from pathlib import Path
@@ -112,6 +113,37 @@ def derive_plugin_category(
         return "Recon"
 
     return "Various"
+
+
+def _instantiate_plugin_once(
+    plugin_class: Any, instances_by_class: dict[Any, Any], module_name: str
+) -> tuple[Any, bool]:
+    """Instantiate a plugin class once per discovery pass.
+
+    Discovery walks every file under ``plugins/``, so a shim module that
+    re-exports another plugin's class - ``plugins/grillo_plugin.py`` exports the
+    ``GrilloPlugin`` defined in ``plugins/grillo/grillo_impl.py`` - reaches the
+    same class twice. Building a second instance is not harmless: it is a second
+    object with its own state on which ``start()`` runs a second time. Observed
+    live: the Grillo core started four times at boot and built four LLM-failure
+    recovery loops, so one failed turn was recovered four times.
+
+    Returns ``(instance, created)``; the caller reuses the first instance and
+    registers it under the second module's name, which keeps every
+    ``PLUGIN_REGISTRY.get(<either name>)`` caller working against the one object.
+    """
+    existing = instances_by_class.get(plugin_class)
+    if existing is not None:
+        log_debug(
+            f"[core_initializer] {module_name} exports a plugin class already "
+            "instantiated by an earlier module; reusing that instance instead of "
+            "building a second one"
+        )
+        return existing, False
+
+    instance = plugin_class()
+    instances_by_class[plugin_class] = instance
+    return instance, True
 
 
 class CoreInitializer:
@@ -1171,6 +1203,11 @@ class CoreInitializer:
         # the load (Golden rule: removing any component must not break the rest).
         declared_dependencies: dict[str, list[str]] = {}
 
+        # One instance per plugin CLASS per pass: a shim module re-exports the
+        # class another module defines, so without this the same plugin is built
+        # (and started) twice. See _instantiate_plugin_once.
+        _instances_by_class: dict[Any, Any] = {}
+
         # If dev components are enabled, also scan dev directories
         if self._enable_dev_components:
             search_dirs.extend(["plugins_dev", "interface_dev"])
@@ -1294,13 +1331,44 @@ class CoreInitializer:
                         )
                         continue
 
-                    instance = plugin_class()
-
-                    # Register the plugin immediately after instantiation so it's available for action discovery
-                    PLUGIN_REGISTRY[plugin_short_name] = instance
-                    log_debug(
-                        f"[core_initializer] Plugin {module_name} registered in PLUGIN_REGISTRY as '{plugin_short_name}'"
+                    instance, created = _instantiate_plugin_once(
+                        plugin_class, _instances_by_class, module_name
                     )
+
+                    # Some plugins self-register under their own preferred name
+                    # via a `core_initializer.register_plugin(<name>, self)`
+                    # call inside their own `__init__` (a side effect of the
+                    # `plugin_class()` call above), where `<name>` differs from
+                    # this loader's generic file-derived `plugin_short_name`
+                    # (e.g. WeatherPlugin self-registers as "weather" while its
+                    # module file yields "weather_plugin"). Registering the
+                    # SAME instance a second time under `plugin_short_name`
+                    # does not create a second plugin, but it does make that
+                    # one instance appear twice in PLUGIN_REGISTRY.values() —
+                    # observed live: action_parser._plugins_for() reported "2
+                    # supporting plugins" for trigger_weather_report, both
+                    # entries the identical WeatherPlugin object. Skip the
+                    # generic registration when the instance is already present
+                    # under any key — an identity check, not a name comparison,
+                    # so it holds for every plugin using this self-registration
+                    # pattern (grep found ~28), not just WeatherPlugin.
+                    #
+                    if any(
+                        existing is instance for existing in PLUGIN_REGISTRY.values()
+                    ):
+                        log_debug(
+                            f"[core_initializer] Plugin {module_name} already "
+                            "self-registered under its own name during "
+                            f"__init__; skipping generic registration as "
+                            f"'{plugin_short_name}' to avoid double-listing "
+                            "the same instance"
+                        )
+                    else:
+                        # Register the plugin immediately after instantiation so it's available for action discovery
+                        PLUGIN_REGISTRY[plugin_short_name] = instance
+                        log_debug(
+                            f"[core_initializer] Plugin {module_name} registered in PLUGIN_REGISTRY as '{plugin_short_name}'"
+                        )
 
                     if hasattr(instance, "start"):
                         try:
@@ -1310,13 +1378,27 @@ class CoreInitializer:
                                 if not any(
                                     pending_name == module_name
                                     for pending_name, _ in self._pending_async_plugins
+                                ) and not any(
+                                    pending is instance
+                                    for _, pending in self._pending_async_plugins
                                 ):
                                     self._pending_async_plugins.append(
                                         (module_name, instance)
                                     )
-                                log_info(
-                                    f"[core_initializer] Queued async plugin for startup: {module_name}"
-                                )
+                                    log_info(
+                                        f"[core_initializer] Queued async plugin for startup: {module_name}"
+                                    )
+                                else:
+                                    # Say so: the log used to claim "queued" for
+                                    # every module whether or not it was, so a
+                                    # plugin re-exported by two module files
+                                    # looked like two queued plugins when only
+                                    # one was.
+                                    log_debug(
+                                        f"[core_initializer] {module_name} is the same "
+                                        "plugin instance as one already queued for "
+                                        "startup; not queuing it twice"
+                                    )
                             else:
                                 instance.start()
                                 log_info(
@@ -1637,10 +1719,16 @@ class CoreInitializer:
                 module = sys.modules.get(module_name) if module_name else None
                 if module and hasattr(module, "reload_interface"):
                     handler = getattr(module, "reload_interface")
-                    config_registry.register_reload_handler(interface_name, handler)
-                    log_info(
-                        f"[core_initializer] ✅ Reload handler registered for component: {interface_name}"
+                else:
+                    # No module-level handler: restart the live instance in
+                    # place so a changed token/endpoint still takes effect.
+                    handler = functools.partial(
+                        self._restart_interface_in_place, interface_name
                     )
+                config_registry.register_reload_handler(interface_name, handler)
+                log_info(
+                    f"[core_initializer] ✅ Reload handler registered for component: {interface_name}"
+                )
             except Exception as e:
                 log_error(
                     f"[core_initializer] Failed to register reload handler for {interface_name}: {e}"
@@ -1703,6 +1791,23 @@ class CoreInitializer:
             log_warning(
                 f"[core_initializer] Failed to register Cortex reload handlers: {e}"
             )
+
+    async def _restart_interface_in_place(self, interface_name: str) -> None:
+        """Stop and start a registered interface so it re-reads its configuration.
+
+        Used as the reload handler of interfaces that do not ship their own
+        ``reload_interface``. An interface the operator disabled stays stopped.
+        """
+        instance = INTERFACE_REGISTRY.get(interface_name)
+        if instance is None or not self._is_interface_enabled(interface_name):
+            return
+        log_info(f"[core_initializer] Restarting interface '{interface_name}'")
+        await self._teardown_interface_instance(instance)
+        start_fn = getattr(instance, "start", None)
+        if callable(start_fn):
+            # start() may run for the whole connection lifetime: don't await it.
+            task = asyncio.create_task(start_fn())
+            task.set_name(f"interface_{interface_name}")
 
     def _missing_required_config_vars(self, interface_instance: Any) -> List[str]:
         """Return the list of declared-required config keys that are absent.
@@ -2074,6 +2179,27 @@ class CoreInitializer:
                 ComponentStatus.SKIPPED,
                 details="Disabled from WebUI",
             )
+            # Self-registered alias (e.g. "radio_host" for module
+            # plugins.radio_host.radio_host_plugin): no component record
+            # exists under this name, so carry the module identity from
+            # the live instance. Without it, re-enable fails with
+            # unknown_plugin_module and the ghost card loses icon/guide.
+            ghost = self.components.get(plugin_short_name)
+            if ghost is not None:
+                try:
+                    import sys as _sys
+
+                    ghost_module = getattr(instance, "__module__", "") or ""
+                    ghost.module_name = ghost_module
+                    mod = _sys.modules.get(ghost_module) if ghost_module else None
+                    mod_file = getattr(mod, "__file__", None) if mod else None
+                    if mod_file:
+                        ghost.dir_path = str(Path(mod_file).parent)
+                        ghost.category = derive_plugin_category(
+                            ghost_module, ghost.dir_path
+                        )
+                except Exception:
+                    pass
 
         self._invalidate_action_caches()
         await self._build_actions_block()
@@ -2494,7 +2620,12 @@ class CoreInitializer:
         # so its start() (which launches the beat scheduler + recovery loop) must
         # be invoked explicitly here.
         try:
-            grillo = PLUGIN_REGISTRY.get("grillo_plugin")
+            # Try both names: the plugin's class is exported by two module files
+            # (`plugins/grillo/grillo_impl.py` and the `plugins/grillo_plugin.py`
+            # shim), and the loader registers whichever it reaches first.
+            grillo = PLUGIN_REGISTRY.get("grillo_plugin") or PLUGIN_REGISTRY.get(
+                "grillo_impl"
+            )
             if grillo is not None and hasattr(grillo, "start"):
                 # Guard against double-start (idempotent): GrilloPlugin exposes
                 # _running once its beat loop is active.
@@ -2973,6 +3104,27 @@ class CoreInitializer:
                     if actions
                     else "Plugin with no actions",
                 )
+                # Self-registered alias (e.g. "radio_host" for module
+                # plugins.radio_host.radio_host_plugin): carry the module
+                # identity so a later WebUI disable/enable round-trip can
+                # re-instantiate it (else unknown_plugin_module).
+                info = self.components.get(plugin_name)
+                if info is not None and plugin_obj is not None:
+                    try:
+                        import sys as _sys
+
+                        mod_name = getattr(plugin_obj, "__module__", "") or ""
+                        if mod_name and not info.module_name:
+                            info.module_name = mod_name
+                            mod = _sys.modules.get(mod_name)
+                            mod_file = getattr(mod, "__file__", None) if mod else None
+                            if mod_file:
+                                info.dir_path = str(Path(mod_file).parent)
+                                info.category = derive_plugin_category(
+                                    mod_name, info.dir_path
+                                )
+                    except Exception:
+                        pass
 
                 if actions:
                     log_info(
@@ -3220,6 +3372,19 @@ def register_interface(name: str, interface_obj: Any) -> None:
 
     INTERFACE_REGISTRY[name] = interface_obj
     log_debug(f"[core_initializer] Registered interface: {name}")
+
+    # Persist the structural capability set so the unified send_message
+    # dispatcher (and any future consumer) can query what each interface can
+    # deliver without re-introspecting the instance.
+    try:
+        from core.interface_capabilities import interface_capabilities as _derive_caps
+        from core.interfaces_registry import get_interface_registry
+
+        get_interface_registry().register_interface_capabilities(
+            name, _derive_caps(interface_obj)
+        )
+    except Exception as e:  # pragma: no cover - defensive
+        log_debug(f"[core_initializer] Capability storage for {name} failed: {e}")
 
     # Log detailed information about the interface loading
     log_debug(f"[core_initializer] Loading interface: {name}")

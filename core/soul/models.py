@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import math
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 
 
@@ -27,6 +29,79 @@ class ForesightSignal:
     priority: float = 0.5
 
 
+# Valid note types for SituationalNote.
+SITUATIONAL_NOTE_TYPES = ("EVENT", "STATE", "INTERVAL", "INSTANT")
+
+
+@dataclass(slots=True)
+class SituationalNote:
+    """Short-lived, time-sensitive user circumstance with a bounded validity window.
+
+    Unlike a MemCell (persistent memory) or a ForesightSignal (future-only,
+    date-level), a SituationalNote stores *absolute* timestamps for when a
+    circumstance was true (``valid_from``) and when it expires
+    (``valid_until``). Relative rendering ("today", "in 3 days") is a
+    presentation concern resolved at injection time via ``TemporalRenderer``.
+    """
+
+    id: str
+    note_type: str
+    subject: str
+    summary: str
+    valid_from: datetime | None
+    valid_until: datetime | None
+    priority: int = 0
+    confidence: float = 0.5
+    effective_at: datetime | None = None
+    expired_at: datetime | None = None
+    source: str = "debrief"
+    status: str = "active"
+    session_id: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    resolved_at: datetime | None = None
+
+    def is_active(self, now: datetime) -> bool:
+        """Return True when ``now`` falls within [valid_from, valid_until)."""
+        if self.valid_from and now < self.valid_from:
+            return False
+        if self.valid_until and now >= self.valid_until:
+            return False
+        return True
+
+    def is_expired(self, now: datetime) -> bool:
+        """Return True when the note has passed its validity window."""
+        if self.valid_until is None:
+            return False
+        return now >= self.valid_until
+
+
+# Lifecycle of a RetractedClaim. ``pending`` waits for the trainer, ``active``
+# is in force, ``lifted`` was withdrawn later and ``rejected`` was refused.
+RETRACTION_STATUSES = ("pending", "active", "lifted", "rejected")
+
+
+@dataclass(slots=True)
+class RetractedClaim:
+    """Something the persona believed or said that the human has said is false.
+
+    A SituationalNote expires on its own; a retraction does not. It stands until
+    someone lifts it, and every prompt and generator is told to treat ``claim``
+    as untrue. Rows are never deleted, only moved between statuses.
+    """
+
+    id: str
+    subject: str
+    claim: str
+    reason: str = ""
+    status: str = "pending"
+    asserted_by: str = ""
+    source_ref: str = ""
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    lifted_at: datetime | None = None
+
+
 @dataclass(slots=True)
 class MemCell:
     """Atomic episodic memory unit."""
@@ -43,6 +118,10 @@ class MemCell:
     explicit_importance: float = 0.0
     consolidated: bool = False
     scene_id: str | None = None
+    # Set by the compiler when a distilling extractor wrote this cell's content.
+    # NULL means the row predates distillation (raw transcript as the trace), which
+    # is the set the operator re-distil pass has to catch up.
+    distilled_at: datetime | None = None
 
 
 @dataclass(slots=True)
@@ -243,6 +322,51 @@ def compute_memcell_salience(
     )
 
 
+# Recall fatigue: how hard a cell's retrieval history pushes it DOWN the recall
+# ranking. Per extra (log) retrieval the cell loses a little of its salience, up
+# to a hard cap, so a cell that keeps coming back has to win on similarity,
+# emotion or recency instead of on inertia.
+#
+# Note the effective weight: salience is 20% of the final recall score, so a
+# penalty of 0.6 moves a cell by ~0.12 of that score. The first version
+# (0.05/0.15) moved it by 0.03, which was not enough to rotate the recalled set:
+# the same five transcript lines were injected turn after turn for days (one live
+# cell reached 663 retrievals) while 396 of 423 cells were never recalled at all.
+_RECALL_FATIGUE_PER_LOG = 0.12
+_RECALL_FATIGUE_MAX = 0.6
+
+
+def compute_recall_salience(
+    *,
+    emotional_intensity: float,
+    recency_score: float,
+    explicit_importance: float,
+    retrieval_count: int = 0,
+) -> float:
+    """Salience used to RANK what gets recalled into a prompt.
+
+    This deliberately drops the retrieval-count *bonus* of
+    :func:`compute_memcell_salience`. That bonus saturates at ten retrievals
+    while the count only ever grows, so recall rewarded its own past decisions
+    and a handful of cells were pinned into every prompt (two live cells had
+    been recalled 70 and 164 times), crowding out everything else. Being
+    recalled a lot is still evidence of usefulness for RETENTION, which is what
+    ``compute_memcell_salience`` keeps modelling for the curator; for recall it
+    is a reason to step back, so the term becomes a bounded fatigue penalty.
+    """
+
+    base = (
+        max(0.0, min(1.0, emotional_intensity)) * 0.4
+        + max(0.0, min(1.0, recency_score)) * 0.2
+        + max(0.0, min(1.0, explicit_importance)) * 0.1
+    )
+    fatigue = min(
+        _RECALL_FATIGUE_MAX,
+        _RECALL_FATIGUE_PER_LOG * math.log1p(max(int(retrieval_count), 0)),
+    )
+    return max(0.0, base - fatigue)
+
+
 def new_memcell_id(session_id: str, timestamp: datetime) -> str:
     """Build deterministic memcell id from session and timestamp."""
 
@@ -255,6 +379,89 @@ def new_scene_id(anchor: datetime) -> str:
 
     ts = anchor.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     return f"scene:{ts}"
+
+
+def situational_note_from_extraction(
+    *,
+    note_type: str,
+    subject: str,
+    summary: str,
+    priority: int = 0,
+    confidence: float = 0.5,
+    valid_from: datetime | None = None,
+    valid_until: datetime | None = None,
+    effective_at: datetime | None = None,
+    expired_at: datetime | None = None,
+    source: str = "debrief",
+    session_id: str | None = None,
+    now: datetime | None = None,
+    default_ttl_hours: int = 24,
+) -> "SituationalNote":
+    """Build a persistable note from extracted fields, normalising the window.
+
+    Every datetime is forced to UTC-aware, and a missing validity window falls
+    back to ``default_ttl_hours`` from ``now``. The id is deliberately left
+    empty: the repository derives a stable one from the circumstance so the same
+    note seen twice updates a single row instead of accumulating duplicates.
+    """
+
+    anchor = now or now_utc()
+    if anchor.tzinfo is None:
+        anchor = anchor.replace(tzinfo=timezone.utc)
+
+    def _utc(value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+    resolved_until = _utc(valid_until) or anchor + timedelta(hours=default_ttl_hours)
+    resolved_from = _utc(valid_from) or anchor
+
+    return SituationalNote(
+        id="",
+        note_type=note_type,
+        subject=subject,
+        summary=summary,
+        priority=priority,
+        confidence=confidence,
+        valid_from=resolved_from,
+        valid_until=resolved_until,
+        effective_at=_utc(effective_at),
+        expired_at=_utc(expired_at),
+        source=source,
+        status="active",
+        session_id=session_id,
+        created_at=anchor,
+        updated_at=anchor,
+        resolved_at=None,
+    )
+
+
+def situational_note_id(note_type: str, subject: str, summary: str) -> str:
+    """Build a stable id identifying one situational circumstance.
+
+    The id has to come from the circumstance itself rather than being generated
+    fresh: the debrief re-reads the same recent transcript on every run, so a
+    random id left ``ON CONFLICT (id) DO UPDATE`` unreachable and each compile
+    inserted another copy of a note the store already held. With a derived id
+    the second mention refreshes the existing row's validity window instead.
+    """
+
+    raw = "|".join(
+        str(part or "").strip().casefold() for part in (note_type, subject, summary)
+    )
+    return f"tsc-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:16]}"
+
+
+def retracted_claim_id(subject: str, claim: str) -> str:
+    """Build a stable id for one retraction.
+
+    Derived from the content, like :func:`situational_note_id`, so the debrief
+    re-reading the same transcript upserts one row instead of adding another.
+    """
+
+    raw = "|".join(str(part or "").strip().casefold() for part in (subject, claim))
+    return f"rtr-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:16]}"
 
 
 def now_utc() -> datetime:

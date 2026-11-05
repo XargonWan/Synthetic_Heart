@@ -136,6 +136,11 @@ RUN chmod +x /app/synth.sh
 # Copy application code (includes vendor packages)
 COPY . /app
 
+# Seed copy of the default skin: /app/skins is usually shadowed by a named
+# volume that starts empty, which 500s /api/skins (Rei is required) and stalls
+# the WebUI on "summoning". The s6 run script copies this into the volume.
+COPY skins/Rei /app/.skins-seed/Rei
+
 # Copy the pre-built SyntH Stage bundle from the Node build stage. Placed AFTER
 # `COPY . /app` so it is never clobbered; the host has no frontend/dist, this is
 # the sole source of it. With this present, core/webui.py mounts /stage.

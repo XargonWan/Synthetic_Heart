@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
@@ -32,6 +31,7 @@ from fastapi import (
 from fastapi.responses import JSONResponse
 
 from core.animation_handler import AnimationState
+from core import webui_auth
 from core.karada_transport import KaradaTransport
 from core.logging_utils import log_info, log_warning
 
@@ -39,37 +39,9 @@ if TYPE_CHECKING:
     from core.animation_handler import KaradaStateServer
 
 
-def _configured_api_token() -> Optional[str]:
-    """Optional bearer token gating ``/api/karada/*``.
-
-    Unset (default) means no auth — matches the rest of the WebUI surface,
-    which has no auth layer today. Set ``SYNTH_WEBUI_API_TOKEN`` to require
-    ``Authorization: Bearer <token>`` or ``?token=<token>`` on every request.
-    """
-    token = os.getenv("SYNTH_WEBUI_API_TOKEN", "").strip()
-    return token or None
-
-
-def _token_from_request(request: Request) -> Optional[str]:
-    auth = request.headers.get("authorization", "")
-    if auth.lower().startswith("bearer "):
-        return auth[7:].strip()
-    return request.query_params.get("token")
-
-
 async def _require_api_token(request: Request) -> None:
-    expected = _configured_api_token()
-    if expected is None:
-        return
-    if _token_from_request(request) != expected:
+    if not webui_auth.request_authorized(request):
         raise HTTPException(status_code=401, detail="Invalid or missing API token")
-
-
-def _token_from_websocket(websocket: WebSocket) -> Optional[str]:
-    auth = websocket.headers.get("authorization", "")
-    if auth.lower().startswith("bearer "):
-        return auth[7:].strip()
-    return websocket.query_params.get("token")
 
 
 # ---------------------------------------------------------------------------
@@ -376,11 +348,7 @@ def create_karada_router(
             Server → {"type": "model", ...}
             Client → {"type": "action", "action": "touch", ...}
         """
-        expected_token = _configured_api_token()
-        if (
-            expected_token is not None
-            and _token_from_websocket(websocket) != expected_token
-        ):
+        if not webui_auth.websocket_authorized(websocket):
             await websocket.close(code=4401, reason="Invalid or missing API token")
             return
 

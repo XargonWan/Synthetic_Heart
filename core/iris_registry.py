@@ -45,7 +45,7 @@ class IrisRegistry:
         """Register an Iris engine.
 
         Args:
-            name:         Short unique identifier (e.g. ``"selenium-llm-engine"``).
+            name:         Short unique identifier (e.g. ``"zen-llm-engine"``).
             module_path:  Dotted import path to the module containing ``ENGINE_CLASS``.
             capabilities: Optional dict of boolean capability flags.
             label:        Human-readable description shown in the WebUI.

@@ -261,7 +261,7 @@ class ReconWebSearchPlugin:
         # Phase 3: Deterministic link backstop. Weak recon models sometimes
         # return an empty check_website even when the user pasted an explicit
         # http(s) link and asked for it to be opened (observed with
-        # selenium-llm-engine). In that case the persona would promise a
+        # zen-llm-engine). In that case the persona would promise a
         # follow-up that never arrives, because no task is triggered. If the
         # recon LLM produced NO links, recover any explicit URLs literally
         # present in the user's message and treat them as check_website targets.

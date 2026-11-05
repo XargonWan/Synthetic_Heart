@@ -113,20 +113,6 @@ class GrilloWeeklyReviewPlugin:
             scope="grillo",
             component="grillo_weekly_review",
         )
-        register_exposed_var(
-            "GRILLO_WEEKLY_REVIEW_MEMORY_LIMIT",
-            label="Weekly Review Memory Recall",
-            default=20,
-            value_type=int,
-            ui_type="number",
-            description=(
-                "Max long-term memories recalled for the review (reserved for "
-                "a future memory-recall extension; kept for parity with the "
-                "growth beat)."
-            ),
-            scope="grillo",
-            component="grillo_weekly_review",
-        )
 
         self.enabled = bool(
             config_registry.get_value("GRILLO_WEEKLY_REVIEW_ENABLED", True)

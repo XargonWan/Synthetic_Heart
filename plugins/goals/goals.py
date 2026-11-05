@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import json
 import traceback
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
 from core.db import _get_db_type, get_conn_ctx
 from core.logging_utils import log_debug, log_error, log_info, log_warning
@@ -779,6 +779,44 @@ async def update_active_goal(
             f"{LOG_PREFIX} update_active_goal failed: {exc}\n{traceback.format_exc()}"
         )
         return {"status": "error", "message": str(exc)}
+
+
+async def abandon_goals_matching(matcher: Callable[[str], bool], note: str = "") -> int:
+    """Abandon every active goal whose text ``matcher`` accepts (fail-safe).
+
+    Scope-agnostic, unlike :func:`update_active_goal`: a retracted claim can
+    stand behind goals in any scope. The goal text and note are what the matcher
+    sees. Returns how many goals were abandoned; rows are kept, only their status
+    changes.
+    """
+    abandoned = 0
+    for goal in await list_all_goals(limit=500):
+        if goal.get("status") != STATUS_ACTIVE:
+            continue
+        text = f"{goal.get('description') or ''} {goal.get('note') or ''}"
+        if not matcher(text):
+            continue
+        try:
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "UPDATE goals SET status = %s, note = %s, "
+                        "updated_at = CURRENT_TIMESTAMP "
+                        "WHERE id = %s AND status = %s",
+                        (
+                            STATUS_ABANDONED,
+                            _clip(note, _MAX_NOTE_CHARS) or goal.get("note"),
+                            goal.get("id"),
+                            STATUS_ACTIVE,
+                        ),
+                    )
+                    await conn.commit()
+            abandoned += 1
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} abandon_goals_matching failed: {exc}")
+    if abandoned:
+        log_info(f"{LOG_PREFIX} abandoned {abandoned} goal(s) built on a false claim")
+    return abandoned
 
 
 def _row_to_goal(row: Any) -> Dict[str, Any] | None:

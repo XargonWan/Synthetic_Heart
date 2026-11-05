@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 _WEEKDAYS: tuple[str, ...] = (
     "monday",
@@ -133,3 +133,103 @@ class AbsoluteTimeResolver:
         out = re.sub(r"\b(\d+)\s+days\s+ago\b", _ago, out, flags=re.IGNORECASE)
         out = re.sub(r"\bin\s+(\d+)\s+days\b", _ahead, out, flags=re.IGNORECASE)
         return out
+
+
+@dataclass(slots=True)
+class TemporalRenderer:
+    """Render absolute datetimes as human-relative temporal phrases.
+
+    This is the dual of :class:`AbsoluteTimeResolver`: where the resolver turns
+    "tomorrow" → ``2026-04-18`` for storage, the renderer turns a stored
+    absolute timestamp back into "tomorrow" / "today" / "in 3 days" etc. at
+    injection time (relative to ``now``).
+
+    Storage is always absolute (timezone-aware); relative text is presentation.
+    """
+
+    now: datetime
+
+    def __post_init__(self) -> None:
+        if self.now.tzinfo is None:
+            self.now = self.now.replace(tzinfo=timezone.utc)
+
+    def render_relative(self, ts: datetime | None) -> str:
+        """Return a short human-relative phrase for ``ts`` relative to ``now``."""
+        if ts is None:
+            return "ongoing"
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        delta = ts - self.now
+
+        if abs(delta) < timedelta(minutes=5):
+            if delta >= timedelta(0):
+                return "in a few minutes"
+            return "just now"
+
+        if delta < timedelta(0):
+            return self._render_past(-delta)
+        return self._render_future(delta)
+
+    def _render_past(self, delta: timedelta) -> str:
+        days = delta.days
+        if days == 0:
+            seconds = delta.seconds
+            if seconds < 3600:
+                minutes = seconds // 60
+                if minutes < 1:
+                    return "just now"
+                if minutes == 1:
+                    return "a minute ago"
+                if minutes < 60:
+                    return f"{minutes} minutes ago"
+            hours = seconds // 3600
+            if hours == 1:
+                return "an hour ago"
+            if hours < 12:
+                return f"{hours} hours ago"
+            return "earlier today"
+        if days == 1:
+            return "yesterday"
+        if days <= 6:
+            return f"{days} days ago"
+        if days <= 13:
+            return "last week"
+        if days <= 30:
+            weeks = days // 7
+            if weeks == 1:
+                return "last week"
+            return f"{weeks} weeks ago"
+        return f"{days // 30} months ago"
+
+    def _render_future(self, delta: timedelta) -> str:
+        days = delta.days
+        if days == 0:
+            seconds = delta.seconds
+            if seconds < 3600:
+                minutes = seconds // 60
+                if minutes < 1:
+                    return "in a few minutes"
+                if minutes == 1:
+                    return "in a minute"
+                if minutes < 60:
+                    return f"in {minutes} minutes"
+            hours = seconds // 3600
+            if hours == 1:
+                return "in an hour"
+            if hours < 12:
+                return f"in {hours} hours"
+            return "later today"
+        if days == 1:
+            return "tomorrow"
+        if days <= 6:
+            return f"in {days} days"
+        if days <= 13:
+            return "next week"
+        if days <= 30:
+            weeks = days // 7
+            if weeks == 1:
+                return "next week"
+            return f"in {weeks} weeks"
+        if days <= 60:
+            return "next month"
+        return f"in {days // 30} months"

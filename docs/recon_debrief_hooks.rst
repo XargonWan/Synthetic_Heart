@@ -69,6 +69,66 @@ Debrief action-intent recovery
   canonical action parser with the original interface/chat context preserved,
   so validation, safety policy, and selective correction still apply.
 
+Debrief situational notes
+-------------------------
+- The situational-notes Debrief plugin extracts short-lived circumstances of
+  the human ("dentist tomorrow", "moving house this week") into the SOUL
+  ``situational_notes`` store, and retires the ones a turn shows have ended.
+- The plugin's pane in the WebUI (Components → Debrief Situational Notes)
+  shows the notes standing right now as editable text, one per line::
+
+    EVENT | dentist visit | 2026-10-03T08:00:00+00:00 -> 2026-10-03T12:00:00+00:00 | dentist at 10 on 2026-10-03
+
+  ``TYPE`` is ``EVENT``, ``STATE``, ``INTERVAL`` or ``INSTANT``; dates are
+  ISO 8601 (UTC when no offset is given), a blank start means now and a blank
+  end means 24 hours later. Lines starting with ``#`` are ignored.
+- **Save** makes the store match the text: an unchanged line keeps its note,
+  a changed window moves it, a new or reworded line is stored as a new note
+  (``source = 'webui'``), and a deleted line resolves its note (rows are never
+  deleted). A line that does not parse rejects the whole save and changes
+  nothing.
+- Only notes whose window has already started are listed; a note added with a
+  future start is stored but appears in the editor once it begins.
+- The editor talks to ``GET``/``PUT /api/soul/situational-notes`` and needs
+  the SOUL plugin; without it the pane reports the notes as unavailable.
+
+Retractions: teaching the persona that something is false
+---------------------------------------------------------
+A situational note expires by itself; a belief the human says is *false* ("that
+place does not exist", "forget it, it was a joke") must not. The same
+situational-notes debrief call also reports ``retracted`` and ``lifted`` and the
+SOUL store keeps them in ``retracted_claims`` (never deleted, only moved between
+statuses).
+
+- **Authority.** Only the human's own words can retract: what the persona
+  replied never counts, which is how a persona insisting on a claim used to
+  re-file it as a fresh note. A retraction from the trainer (``is_trainer`` on
+  the turn context, ``TRAINER_IDS``) is ``active`` at once. One from anyone else
+  is ``pending`` and changes nothing until the trainer confirms it; the persona
+  is told to ask the trainer, and the trainer's next message confirms
+  (``retracted`` again, same subject) or refuses (``lifted``, which rejects a
+  pending one so a stranger cannot raise it again).
+- **What it changes.** An active retraction retires the situational notes, the
+  active goals and the pending self-growth proposal that restate the claim, and
+  the debrief drops any later candidate note that restates it. Diary entries,
+  memories and scenes are history and are **not** modified.
+- **What every prompt sees.** The ``[Known false claims]`` block (and
+  ``[Retractions awaiting the trainer]``) is injected on the chat, beat and live
+  routes (``known_false_claims`` / ``pending_retractions`` in
+  ``core.prompt_engine._PLUGIN_CONTEXT_BLOCKS``, sourced by
+  ``core.action_parser._add_retraction_injections``). A diary line or memory that
+  still says otherwise therefore reads as a recorded mistake.
+- **Generators.** The self-growth rewrite/revision strips the claim's sentences
+  from its inputs, passes the block, and skips the cycle if the result still
+  restates the claim; the diary compactor and consolidator carry the block and
+  keep a mention as "wrongly believed X" instead of dropping the history.
+- **Operator control.** ``GET /api/soul/retractions`` lists every retraction;
+  ``POST /api/soul/retractions`` adds one in force (``{"subject", "claim",
+  "reason"}``) or decides on a stored one (``{"id", "action"}`` with ``confirm``,
+  ``reject``, ``lift`` or ``restore``).
+- Matching is deliberately blunt (token overlap, ``core/soul/retractions.py``):
+  it only ever retires a live row or labels one, never deletes.
+
 How Recon affects the main prompt
 ---------------------------------
 - Recon contributions are attached to ``context.recon`` during

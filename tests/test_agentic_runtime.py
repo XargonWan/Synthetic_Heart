@@ -62,6 +62,75 @@ async def test_executor_internal_dispatch(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_executor_reports_plugin_failure_as_not_ok(monkeypatch):
+    """A plugin failure dict must reach the loop as a failure.
+
+    Internal actions report failure through their own vocabulary
+    (``{"status": "error", "message": ...}``), not through an ``ok`` key, so
+    the loop rendered ``[tool:x] OK`` for tools that had just failed (observed
+    live: ``hass_snapshot`` on a camera that returned no image, after which the
+    loop kept re-issuing it and then searched the web instead).
+    """
+
+    async def fake_run_action(action, context, bot, original_message):
+        return {
+            "status": "error",
+            "message": "camera 'camera.outside_bajta' returned no image",
+        }
+
+    monkeypatch.setattr("core.action_parser.run_action", fake_run_action)
+
+    from core.tool_registry import tool_registry
+
+    tool_registry._tools.clear()
+    tool_registry.load_internal_actions(
+        {
+            "fake_snapshot": {
+                "schema": {"type": "object", "properties": {}},
+                "brief": "test",
+                "security_level": "low",
+                "external_effects": [],
+            }
+        }
+    )
+
+    try:
+        res = await agent_tool_executor.execute("fake_snapshot", {})
+        assert res["ok"] is False
+        assert "returned no image" in (res["error"] or "")
+        # The payload still reaches the model verbatim, so it can reason on it.
+        assert "returned no image" in res["result"]
+    finally:
+        tool_registry._tools.clear()
+
+
+@pytest.mark.parametrize(
+    ("result", "expected_ok"),
+    [
+        ({"ok": True, "result": "x"}, True),
+        ({"ok": False, "error": "denied"}, False),
+        ({"status": "ok", "count": 2}, True),
+        ({"status": "error", "message": "no image"}, False),
+        ({"error": "connection refused"}, False),
+        (None, True),
+        ("plain text", True),
+    ],
+)
+def test_executor_outcome_variants(result, expected_ok):
+    """``_outcome`` is the loop's only success signal: pin its vocabulary."""
+    ok, _error = agent_tool_executor._outcome(result)
+    assert ok is expected_ok
+
+
+def test_executor_outcome_carries_the_plugin_failure_message():
+    ok, error = agent_tool_executor._outcome(
+        {"status": "error", "message": "server_unreachable"}
+    )
+    assert ok is False
+    assert error == "server_unreachable"
+
+
+@pytest.mark.asyncio
 async def test_run_agentic_turn_completed(monkeypatch):
     """The loop ends when the model calls the attempt_completion sentinel."""
 
@@ -201,7 +270,7 @@ async def test_run_agentic_turn_message_is_actually_delivered(monkeypatch):
                     "actions": [
                         {"tool": "mcp_fs_read", "params": {"path": "/x"}},
                         {
-                            "tool": "message_telegram_bot",
+                            "tool": "send_message",
                             "params": {
                                 "interface_path": "telegram_bot/31321637",
                                 "text": "Hey, thinking of you.",
@@ -228,14 +297,14 @@ async def test_run_agentic_turn_message_is_actually_delivered(monkeypatch):
     )
     assert out["stop_reason"] == "completed"
     # The message action must have reached the executor, not just final_text.
-    assert "message_telegram_bot" in executed
+    assert "send_message" in executed
     # A tool_results observation must record the delivery.
     delivered = [
         o
         for o in out["observations"]
         if o.get("role") == "tool_results"
         and any(
-            isinstance(r, dict) and r.get("tool") == "message_telegram_bot"
+            isinstance(r, dict) and r.get("tool") == "send_message"
             for r in (o.get("content") or [])
         )
     ]
@@ -264,7 +333,7 @@ async def test_run_agentic_turn_failed_delivery_not_completed(monkeypatch):
                     "actions": [
                         {"tool": "mcp_fs_read", "params": {"path": "/x"}},
                         {
-                            "tool": "message_telegram_bot",
+                            "tool": "send_message",
                             "params": {
                                 "interface_path": "telegram_bot/31321637",
                                 "text": "This will fail to send.",
@@ -279,7 +348,7 @@ async def test_run_agentic_turn_failed_delivery_not_completed(monkeypatch):
 
     async def fake_execute(name, arguments, context=None, original_message=None):
         # The real tool succeeds; every message delivery attempt fails.
-        if name.startswith("message_"):
+        if name == "send_message" or name.startswith("message_"):
             return {"ok": False, "tool": name, "result": "", "error": "interface down"}
         return {"ok": True, "tool": name, "result": "ok", "error": None}
 
@@ -877,7 +946,7 @@ def test_seed_calls_extracts_bookkeeping_for_under_emission():
 
     actions = [
         {"type": "update_emotion_state", "payload": {"emotions": {"joy": 1.0}}},
-        {"type": "message_telegram_bot", "payload": {"text": "I'll do it!"}},
+        {"type": "send_message", "payload": {"text": "I'll do it!"}},
         {"type": "create_personal_diary_entry", "payload": {"content": "x"}},
     ]
     seeds = _seed_calls_for_under_emission(actions)
@@ -894,7 +963,7 @@ def test_seed_calls_empty_for_tool_batch():
     from core.agent_router import _seed_calls_for_under_emission
 
     actions = [
-        {"type": "message_telegram_bot", "payload": {"text": "on it"}},
+        {"type": "send_message", "payload": {"text": "on it"}},
         {"type": "mcp_fs_read", "payload": {"path": "/x"}},
     ]
     assert _seed_calls_for_under_emission(actions) == []
@@ -903,6 +972,12 @@ def test_seed_calls_empty_for_tool_batch():
 def test_seed_calls_empty_for_message_only():
     from core.agent_router import _seed_calls_for_under_emission
 
+    assert (
+        _seed_calls_for_under_emission(
+            [{"type": "send_message", "payload": {"text": "hi"}}]
+        )
+        == []
+    )
     assert (
         _seed_calls_for_under_emission([{"type": "message", "payload": {"text": "hi"}}])
         == []
@@ -917,8 +992,8 @@ def test_derive_goal_prefers_user_request_over_raw_llm_json():
     from core.agent_router import _derive_goal
 
     context = {
-        "goal": '{"actions": [{"type": "message_telegram_bot", "payload": {"text": "hi"}}]}',
-        "original_text": '{"actions": [{"type": "message_telegram_bot", "payload": {"text": "hi"}}]}',
+        "goal": '{"actions": [{"type": "send_message", "payload": {"text": "hi"}}]}',
+        "original_text": '{"actions": [{"type": "send_message", "payload": {"text": "hi"}}]}',
         "original_user_message": "read me this pdf into a voice note",
     }
     assert _derive_goal([], context) == "read me this pdf into a voice note"
@@ -931,11 +1006,11 @@ def test_derive_goal_skips_llm_response_json_when_no_user_text():
     from core.agent_router import _derive_goal
 
     context = {
-        "goal": '{"actions": [{"type": "message_telegram_bot", "payload": {"text": "hi"}}]}',
-        "original_text": '{"actions": [{"type": "message_telegram_bot", "payload": {"text": "hi"}}]}',
+        "goal": '{"actions": [{"type": "send_message", "payload": {"text": "hi"}}]}',
+        "original_text": '{"actions": [{"type": "send_message", "payload": {"text": "hi"}}]}',
     }
     goal = _derive_goal(
-        [{"type": "message_telegram_bot", "payload": {"text": "hi"}}],
+        [{"type": "send_message", "payload": {"text": "hi"}}],
         context,
     )
     assert goal == "Complete the user's request using the available tools."
@@ -1127,7 +1202,7 @@ def test_resume_allowed_rejects_poisoned_goal():
     from core.agent_router import _resume_allowed
 
     allowed, reason = _resume_allowed(
-        '{"actions": [{"type": "message_telegram_bot", "payload": {"text": "hi"}}]}',
+        '{"actions": [{"type": "send_message", "payload": {"text": "hi"}}]}',
         {},
     )
     assert allowed is False
@@ -1433,12 +1508,17 @@ async def test_run_agentic_turn_dedupes_identical_tool_calls(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_agentic_turn_ends_after_two_message_only_iterations(monkeypatch):
-    """Two consecutive message-only iterations end the turn with the reply.
+    """A second message-only iteration to the SAME destination is suppressed,
+    not delivered a second time; the turn only ends once the model properly
+    calls attempt_completion.
 
     Regression for the observed live run where the agent delivered an answer,
     was nudged to keep working, then re-issued the same file read 6 more times
-    and sent a second duplicate reply. A second consecutive message-only
-    iteration means the loop engine has no further tool intent.
+    and sent a SECOND, differently-worded reply to the same chat — the same
+    shape as the live incident (2026-09-13, four differently-worded weather
+    replies delivered to one Telegram chat in under a minute). A repeat
+    message-only iteration to a destination that already received one this
+    turn must never be treated as a fresh answer.
     """
 
     calls = []
@@ -1466,15 +1546,30 @@ async def test_run_agentic_turn_ends_after_two_message_only_iterations(monkeypat
                     ]
                 }
             )
+        if len(calls) == 3:
+            # A repeat to the SAME destination — must be suppressed, not
+            # delivered as a second answer.
+            return json.dumps(
+                {
+                    "actions": [
+                        {
+                            "type": "message_telegram_bot",
+                            "payload": {
+                                "interface_path": "telegram_bot/31321637",
+                                "text": "And one more thought on top of that.",
+                            },
+                        }
+                    ]
+                }
+            )
+        # Having been told the destination already has a reply, the model
+        # properly closes the turn instead of repeating itself again.
         return json.dumps(
             {
                 "actions": [
                     {
-                        "type": "message_telegram_bot",
-                        "payload": {
-                            "interface_path": "telegram_bot/31321637",
-                            "text": "And one more thought on top of that.",
-                        },
+                        "type": "attempt_completion",
+                        "payload": {"summary": "Shared my thoughts on the file."},
                     }
                 ]
             }
@@ -1482,7 +1577,11 @@ async def test_run_agentic_turn_ends_after_two_message_only_iterations(monkeypat
 
     monkeypatch.setattr("core.plugin_instance.handle_incoming_message", fake_handle)
 
+    delivered: list[str] = []
+
     async def fake_execute(name, arguments, context=None, original_message=None):
+        if name.startswith("message_"):
+            delivered.append(arguments.get("text"))
         return {
             "ok": True,
             "tool": name,
@@ -1497,12 +1596,14 @@ async def test_run_agentic_turn_ends_after_two_message_only_iterations(monkeypat
     out = await manager.run_agentic_turn(
         goal="give thoughts", max_iterations=10, timeout_seconds=30
     )
-    # Turn ended at the second consecutive message-only iteration, never
-    # nagging for more tools.
-    assert out["stop_reason"] == "model_done"
-    assert len(calls) == 3
-    # The messages were delivered through the executor, so final_text stays
-    # empty — a delivered message must never be re-sent as final_text.
-    assert out["final_text"] == ""
-    # The end-of-turn observation is the assistant's delivered reply marker.
-    assert out["observations"][-1].get("role") == "assistant"
+    # The turn only ends via the model's own explicit attempt_completion —
+    # the suppressed repeat never masquerades as a valid end-of-turn signal.
+    assert out["stop_reason"] == "completed"
+    assert len(calls) == 4
+    assert out["final_text"] == "Task complete: Shared my thoughts on the file."
+    # The repeat to the same destination was suppressed — it was never
+    # actually executed/delivered a second time, regardless of whether the
+    # rejected attempt is echoed back into an audit observation.
+    assert delivered == ["I read the file, here are my thoughts."]
+    obs_dump = json.dumps(out["observations"], default=str)
+    assert "suppressed" in obs_dump

@@ -73,10 +73,12 @@ async def handle_command_message(
         return None
 
     # Permission check - most commands require trainer privileges
+    # Fail closed: a caller that cannot say who is asking gets no commands.
     interface_registry = get_interface_registry()
-    if user_id and interface_id:
-        if not interface_registry.is_trainer(interface_id, user_id):
-            return "❌ Access denied. This command requires trainer privileges."
+    if user_id in (None, "") or not interface_id:
+        return "❌ Access denied. This command requires trainer privileges."
+    if not interface_registry.is_trainer(interface_id, user_id):
+        return "❌ Access denied. This command requires trainer privileges."
 
     try:
         # Pass interface context to commands that support it
@@ -665,7 +667,7 @@ async def cortex_command(*args) -> str:
 
     # Final step: switch via central helper.
     # use_hot_swap=True calls load_plugin() directly — much lighter than
-    # initialize_all() and avoids leaving selenium polling tasks hanging
+    # initialize_all() and avoids leaving zen polling tasks hanging
     # with driver=None when the old engine is torn down mid-request.
     try:
         from core.config import switch_active_cortex_engine
@@ -1122,10 +1124,15 @@ async def splitprompt_command(*args) -> str:
         # Lazy import to avoid cycles
         from core.config_manager import config_registry
 
-        key = "SELENIUM_DOUBLE_PROMPT"
+        key = "ZEN_DOUBLE_PROMPT"
+        legacy_key = "SELENIUM_DOUBLE_PROMPT"
 
         if not args:
-            val = config_registry.get_value(key, True)
+            val = config_registry.get_value(key)
+            if val is None:
+                val = config_registry.get_value(legacy_key)
+            if val is None:
+                val = True
             state = "enabled ✅" if bool(val) else "disabled ❌"
             return f"🔀 Double-prompt (PART1/PART2) is currently *{state}* (config: `{key}`)."
 

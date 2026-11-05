@@ -138,15 +138,20 @@ async def save_chat_message(
 
                 metadata_json = _json.dumps(metadata) if metadata else None
 
-                # Insert message with timestamp (always in UTC)
+                # Plain INSERT on both backends. The 5-second dedup check above
+                # is the double-logging guard; the old ON DUPLICATE KEY UPDATE
+                # relied on UNIQUE(interface_path, created_at), which existing
+                # Postgres tables don't carry, so the translated ON CONFLICT
+                # failed on every write (silently swallowed below).
+                # ponytail: no upsert dedup; re-add a unique index + upsert
+                # if same-instant duplicate rows ever materialise.
                 if timestamp:
                     await cur.execute(
                         """
                         INSERT INTO chat_history_cache 
                         (interface_path, sender_name, sender_id, message_text, metadata, created_at)
                         VALUES (%s, %s, %s, %s, %s, %s)
-                        ON DUPLICATE KEY UPDATE created_at=VALUES(created_at), metadata=VALUES(metadata)
-                    """,
+                        """,
                         (
                             interface_path,
                             sender_name,
@@ -161,9 +166,8 @@ async def save_chat_message(
                         """
                         INSERT INTO chat_history_cache 
                         (interface_path, sender_name, sender_id, message_text, metadata, created_at)
-                        VALUES (%s, %s, %s, %s, %s, UTC_TIMESTAMP())
-                        ON DUPLICATE KEY UPDATE created_at=UTC_TIMESTAMP(), metadata=VALUES(metadata)
-                    """,
+                        VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                        """,
                         (
                             interface_path,
                             sender_name,

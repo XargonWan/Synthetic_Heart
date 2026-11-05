@@ -339,31 +339,68 @@ class ExternalEndpointRegistry:
         models: list[str],
         models_metadata: list[dict] | None = None,
     ) -> None:
-        """Persist probe results and sync registries."""
+        """Persist probe results and sync registries.
+
+        A probe that collected nothing must not erase the last good state: an
+        empty model list would blank the WebUI's model selector, and an
+        all-false capability map would unregister the endpoint from the
+        subsystems it serves (``_sync_registries`` re-registers from that map,
+        so a transient provider error would silently drop e.g. a cortex engine).
+        Both are therefore only overwritten when the probe actually reported
+        something; ``probe_status`` always records the outcome.
+        """
         from core.db import get_conn_ctx
 
         await self._ensure()
 
         now = datetime.now(timezone.utc)
+        # A probe that reported nothing keeps the stored capabilities (an
+        # all-false map would unregister the endpoint from its subsystems).
+        keep_capabilities = not any(capabilities.values())
+        stored_capabilities: dict[str, bool] = {}
+        if keep_capabilities:
+            existing = await self.get_endpoint(endpoint_id)
+            stored_capabilities = existing.capabilities if existing else {}
+        capabilities_json = json.dumps(
+            stored_capabilities if keep_capabilities else capabilities
+        )
+
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(
-                    """
-                    UPDATE external_endpoints
-                    SET probe_status = %s, capabilities = %s, available_models = %s,
-                        models_metadata = %s, last_probe_at = %s, updated_at = %s
-                    WHERE id = %s
-                    """,
-                    (
-                        status,
-                        json.dumps(capabilities),
-                        json.dumps(models),
-                        json.dumps(models_metadata or []),
-                        now,
-                        now,
-                        endpoint_id,
-                    ),
-                )
+                if models:
+                    await cur.execute(
+                        """
+                        UPDATE external_endpoints
+                        SET probe_status = %s, capabilities = %s, available_models = %s,
+                            models_metadata = %s, last_probe_at = %s, updated_at = %s
+                        WHERE id = %s
+                        """,
+                        (
+                            status,
+                            capabilities_json,
+                            json.dumps(models),
+                            json.dumps(models_metadata or []),
+                            now,
+                            now,
+                            endpoint_id,
+                        ),
+                    )
+                else:
+                    await cur.execute(
+                        """
+                        UPDATE external_endpoints
+                        SET probe_status = %s, capabilities = %s,
+                            last_probe_at = %s, updated_at = %s
+                        WHERE id = %s
+                        """,
+                        (
+                            status,
+                            capabilities_json,
+                            now,
+                            now,
+                            endpoint_id,
+                        ),
+                    )
             try:
                 await conn.commit()
             except Exception:
@@ -371,12 +408,19 @@ class ExternalEndpointRegistry:
 
         ep = await self.get_endpoint(endpoint_id)
         if ep is not None:
-            # Auto-select the first available model when none has been set yet
+            # Choose a starting model when none has been set yet. An endpoint that
+            # lists a hundred and twenty models has no meaningful "first": the choice
+            # comes from ENDPOINT_MODEL_PREFERENCES (see model_choice), falling back
+            # to the endpoint's own first model.
             if status == "success" and models and ep.default_model is None:
-                await self._auto_set_default_model(endpoint_id, models[0])
-                ep = await self.get_endpoint(endpoint_id)
-                if ep is None:
-                    return
+                from core.external_endpoints.model_choice import select_default_model
+
+                chosen = select_default_model(models)
+                if chosen:
+                    await self._auto_set_default_model(endpoint_id, chosen)
+                    ep = await self.get_endpoint(endpoint_id)
+                    if ep is None:
+                        return
             await self._sync_registries(ep)
 
             # Auto-activate as cortex engine when no base cortex is set yet
@@ -473,6 +517,56 @@ class ExternalEndpointRegistry:
             except Exception:
                 pass
         log_debug(f"[ext_endpoints] Set default_model='{model}' for id={endpoint_id}")
+
+        # The runtime does not read this row for its model. Every chat turn resolves
+        # the scope model via get_active_cortex_scope() and re-applies it around the
+        # engine call (plugin_instance's scope_model_override), and that value is
+        # parsed out of the scope config keys, not from here. Updating only this row
+        # therefore left the engine on its previous model: observed live, a model set
+        # to 'deepseek-v4-1-flash' in the WebUI was still resolving as
+        # model='gemini-3-6-flash' on the very next prompt.
+        ep = await self.get_endpoint(endpoint_id)
+        if ep is not None:
+            await self._sync_scope_models(ep.engine_name(), model or None)
+
+    async def _sync_scope_models(self, engine_name: str, model: str | None) -> None:
+        """Point every cortex scope key that already names *engine_name* at *model*.
+
+        Only keys whose engine matches are rewritten, so the user's other scope
+        choices stand. An empty *model* clears the override, letting the endpoint's
+        own ``default_model`` apply. Fail-safe: a config hiccup here must not fail
+        the model change the user just made.
+        """
+        from core.config import (
+            config_registry,
+            parse_cortex_scope_value,
+            serialize_cortex_scope_value,
+        )
+
+        for key in (
+            "BASE_CORTEX",
+            "GRILLO_CORTEX",
+            "TRAINER_CORTEX",
+            "AGENT_CORTEX",
+            "LIVE_CORTEX",
+            "VESSEL_CORTEX",
+            "DSP_CORTEX",
+        ):
+            try:
+                configured_engine, current_model = parse_cortex_scope_value(
+                    config_registry.get_value(key, "")
+                )
+                if configured_engine != engine_name or current_model == model:
+                    continue
+                await config_registry.set_value(
+                    key, serialize_cortex_scope_value(engine_name, model)
+                )
+                log_info(
+                    f"[ext_endpoints] Scope {key} model set to '{model}' "
+                    f"for engine '{engine_name}'"
+                )
+            except Exception as exc:
+                log_warning(f"[ext_endpoints] Could not update scope {key}: {exc}")
 
     async def reload_endpoint(self, endpoint_id: int) -> ExternalEndpoint | None:
         """Re-read an endpoint from the DB and re-register it in all subsystems.
@@ -737,3 +831,85 @@ def get_external_endpoint_registry() -> ExternalEndpointRegistry:
     if _registry is None:
         _registry = ExternalEndpointRegistry()
     return _registry
+
+
+# ---------------------------------------------------------------------------
+# Zen LLM Engine bootstrap / self-heal
+# ---------------------------------------------------------------------------
+
+# Base URLs a Zen endpoint may have been persisted with under its pre-rename
+# container name ("selenium-llm-engine" -> "zen-llm-engine", see
+# providers/zen_llm_engine.json). These no longer resolve on the Docker
+# network once docker-compose.yml is updated to the new hostname, silently
+# leaving the endpoint with zero probed models.
+_LEGACY_ZEN_BASE_URLS = frozenset({"http://synth-selenium-llm-engine:8000"})
+
+
+async def ensure_default_zen_endpoint() -> None:
+    """Bootstrap the bundled Zen LLM Engine endpoint, and self-heal it.
+
+    Zen ships as a companion container alongside SyntH itself (see
+    ``docker-compose.yml``), so it should always be registered without a
+    manual wizard step. Two situations are handled here, both derived from
+    ``providers/zen_llm_engine.json``:
+
+    1. The registry is completely empty -> create it from the preset.
+       A user-deleted Zen stays deleted once other endpoints exist;
+       endpoints are never added behind a configured user.
+    2. A Zen endpoint exists but its ``base_url`` still points at the old
+       "selenium-llm-engine" container hostname from before the rename ->
+       correct it in place. Only an exact match against a known legacy URL
+       is corrected; a user-customized base_url is never touched.
+    """
+    try:
+        from core.external_endpoints.preset_registry import load_presets
+
+        zen_preset = next(
+            (p for p in load_presets() if p.get("provider_id") == "zen_llm_engine"),
+            None,
+        )
+        if zen_preset is None:
+            return  # preset file removed by the user — nothing to bootstrap
+
+        registry = get_external_endpoint_registry()
+        endpoints = await registry.list_endpoints()
+
+        suggested_name = zen_preset["suggested_name"]
+        correct_base_url = zen_preset["base_url"]
+
+        existing = next(
+            (
+                ep
+                for ep in endpoints
+                if ep.name in (suggested_name, "selenium-llm-engine")
+            ),
+            None,
+        )
+
+        if existing is None:
+            # Seed only on a fresh registry — a user-deleted Zen stays deleted.
+            if not endpoints:
+                await registry.add_endpoint(
+                    name=suggested_name,
+                    base_url=correct_base_url,
+                    protocol=zen_preset["protocol"],
+                    display_label=zen_preset["suggested_label"],
+                    extra_config=zen_preset.get("extra_config"),
+                    subsystem_map=zen_preset.get("default_capabilities"),
+                )
+                log_info(
+                    f"[ext_endpoints] Bootstrapped default '{suggested_name}' endpoint"
+                )
+            return
+
+        if (
+            existing.base_url in _LEGACY_ZEN_BASE_URLS
+            and existing.base_url != correct_base_url
+        ):
+            await registry.update_endpoint(existing.id, base_url=correct_base_url)
+            log_info(
+                f"[ext_endpoints] Corrected stale Zen base_url for endpoint "
+                f"id={existing.id}: {existing.base_url!r} -> {correct_base_url!r}"
+            )
+    except Exception as exc:
+        log_warning(f"[ext_endpoints] ensure_default_zen_endpoint failed: {exc}")

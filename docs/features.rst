@@ -24,12 +24,12 @@ Modular Architecture
 Adaptive Intelligence
 ---------------------
 
-synth supports multiple language model backends with seamless switching. **Note: Currently, only the Selenium ChatGPT (Legacy) engine is fully functional. Other engines are experimental and may not work reliably.**
+synth supports multiple language model backends with seamless switching. **Note: Currently, only the Zen ChatGPT (Legacy) engine is fully functional. Other engines are experimental and may not work reliably.**
 
-* ``selenium_chatgpt_legacy`` – Legacy browser-controlled ChatGPT (fully functional).
-* ``selenium_chatgpt`` – Browser-controlled ChatGPT for advanced interaction (experimental).
-* ``selenium_gemini`` – Browser-controlled Google Gemini with multimodal support (experimental).
-* ``selenium_grok`` – Browser-controlled xAI Grok with reasoning capabilities (experimental).
+* ``zen_chatgpt_legacy`` – Legacy browser-controlled ChatGPT (fully functional).
+* ``zen_chatgpt`` – Browser-controlled ChatGPT for advanced interaction (experimental).
+* ``zen_gemini`` – Browser-controlled Google Gemini with multimodal support (experimental).
+* ``zen_grok`` – Browser-controlled xAI Grok with reasoning capabilities (experimental).
 * ``manual`` – Human trainer input for debugging and development.
 
 **Runtime Engine Switching**
@@ -222,7 +222,7 @@ The diary plugin can be enabled/disabled dynamically:
 Each Cortex engine has its own configuration for diary integration:
 
 * **OpenAI**: Up to 2000 characters for diary content
-* **Selenium ChatGPT**: Up to 1500 characters
+* **Zen ChatGPT**: Up to 1500 characters
 * **Google CLI**: Up to 1200 characters
 * **Manual**: Up to 800 characters
 

@@ -148,7 +148,7 @@ def test_real_plugin_actions_follow_runtime_enablement(monkeypatch) -> None:
             {
                 "ACTIVE_VOX_ENGINE": "kitten",
                 "ACTIVE_AURIS_ENGINE": "vosk",
-                "ACTIVE_IRIS_ENGINE": "selenium-llm-engine",
+                "ACTIVE_IRIS_ENGINE": "zen-llm-engine",
             }
         )
 

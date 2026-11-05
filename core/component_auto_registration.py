@@ -126,6 +126,7 @@ def _register_actions_from_dict(
 
     for action_type, action_config in actions.items():
         required_fields = []
+        one_of_groups = None
 
         # Handle different formats of action configuration
         if isinstance(action_config, dict):
@@ -136,16 +137,21 @@ def _register_actions_from_dict(
                 # Check for alternative field names
                 required_fields = action_config.get("required", [])
 
+            one_of_groups = action_config.get("one_of") or action_config.get(
+                "one_of_groups"
+            )
+
         elif isinstance(action_config, (list, tuple)):
             # Some plugins might return a list of required fields directly
             required_fields = list(action_config)
 
-        # Only create rule if we have required fields
-        if required_fields:
+        # Only create a rule when the schema constrains anything
+        if required_fields or one_of_groups:
             rule = ValidationRule(
                 action_type=action_type,
                 required_fields=required_fields,
                 component_name=component_name,
+                one_of_groups=one_of_groups,
             )
             rules.append(rule)
 

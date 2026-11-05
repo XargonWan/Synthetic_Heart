@@ -344,3 +344,24 @@ def test_parser_adjacent_strings_leaves_key_value_pairs_untouched():
     payload = obj["actions"][0]["payload"]
     assert payload["text"] == "hello"
     assert payload["reply_to_message_id"] == "5"
+
+
+def test_parser_recovers_flat_tool_call_dialect_keeps_sibling_fields():
+    # Reproduces the daily weather report 😵: the model answered with the
+    # arguments next to the name key and a "JSON" prefix. The payload used to be
+    # recovered empty, so the message text was lost and the corrector looped.
+    raw = (
+        "JSON\n"
+        "{\n"
+        '  "action": "send_message",\n'
+        '  "interface_path": "telegram_bot/31321637",\n'
+        '  "content": "Buongiorno! Cielo nuvoloso, +13°C."\n'
+        "}"
+    )
+    obj = extract_json_from_text(raw)
+    assert obj is not None and isinstance(obj, dict)
+    actions = obj.get("actions", [])
+    assert len(actions) == 1
+    assert actions[0]["type"] == "send_message"
+    assert actions[0]["payload"]["interface_path"] == "telegram_bot/31321637"
+    assert actions[0]["payload"]["content"] == "Buongiorno! Cielo nuvoloso, +13°C."

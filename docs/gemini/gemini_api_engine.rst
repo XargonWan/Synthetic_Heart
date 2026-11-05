@@ -1,7 +1,7 @@
 Gemini API Engine
 =================
 
-The ``gemini_api`` module is the primary API-based Cortex engine for Synthetic Heart. Unlike the Selenium-based adapters that drive a browser session, this engine communicates directly with the `Google Gemini REST API <https://ai.google.dev/>`_ using HTTP requests and, optionally, the ``google-genai`` SDK for live media processing.
+The ``gemini_api`` module is the primary API-based Cortex engine for Synthetic Heart. Unlike the Zen-based adapters that drive a browser session, this engine communicates directly with the `Google Gemini REST API <https://ai.google.dev/>`_ using HTTP requests and, optionally, the ``google-genai`` SDK for live media processing.
 
 .. contents:: Table of Contents
    :depth: 3

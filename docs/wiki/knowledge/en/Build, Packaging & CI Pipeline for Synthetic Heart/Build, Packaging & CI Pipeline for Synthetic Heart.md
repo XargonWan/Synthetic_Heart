@@ -36,13 +36,13 @@ Synthetic Heart uses a multi-stage Docker build driven by GitHub Actions to prod
 
 **Local development and testing**
 - `run_tests.sh` installs `uv` if missing, runs `uv sync --frozen`, installs pytest extras, then executes `uv run run_tests.py`. It always exits 0 and writes a GitHub Actions summary when `GITHUB_STEP_SUMMARY` is set.
-- `docker-compose.yml` orchestrates three services: `synth` (builds from source or pulls a prebuilt image), `synth-db` (pgvector/postgres), and an optional `synth-selenium-llm-engine`. Persistent volumes cover config, skins, logs, and DB data. Environment variables drive DB connections, ports, and model/media directories.
+- `docker-compose.yml` orchestrates three services: `synth` (builds from source or pulls a prebuilt image), `synth-db` (pgvector/postgres), and an optional `synth-zen-llm-engine`. Persistent volumes cover config, skins, logs, and DB data. Environment variables drive DB connections, ports, and model/media directories.
 
 **CI/CD pipeline**
 - `.github/workflows/build-release.yml` triggers on pushes to `main`, `develop`, `fix/**`, `feat/**` and PRs against those branches. It:
   - Computes a SemVer tag via GitVersion (`GitVersion.yml` in ContinuousDelivery mode) and exposes it as `semver`.
   - Builds multi-arch images (`linux/amd64` on `ubuntu-latest`, `linux/arm64` on `ubuntu-24.04-arm`) using `docker/build-push-action@v6` with GH cache, pushing each architecture by digest.
-  - Runs unit tests, agent integration tests (with a MySQL service), and agent E2E tests (MySQL + Selenium Chrome).
+  - Runs unit tests, agent integration tests (with a MySQL service), and agent E2E tests (MySQL + Zen Chrome).
   - Runs `mypy . --strict`.
   - Assembles a multi-arch manifest from the digests, tagging with branch-derived tags (`latest`, `latest-develop`, `pr<N>-<semver>`, `<branch>-<semver>`).
   - Cleans up untagged images and PR tags older than two weeks via the Docker Hub API.

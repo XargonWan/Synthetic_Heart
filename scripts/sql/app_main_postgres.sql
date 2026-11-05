@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS memories (
     emotion_state TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_memories_created_at ON memories (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memories_dedupe ON memories (author, source, md5(content));
 
 CREATE TABLE IF NOT EXISTS emotion_state (
     id BIGSERIAL PRIMARY KEY,

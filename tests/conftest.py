@@ -39,6 +39,16 @@ _load_repo_env_defaults()
 
 
 @pytest.fixture(autouse=True)
+def _reset_llm_timeout_breakers():
+    """The per-endpoint timeout breaker is process-global; isolate tests."""
+    from core.external_endpoints import timeout_breaker
+
+    timeout_breaker._breakers.clear()
+    yield
+    timeout_breaker._breakers.clear()
+
+
+@pytest.fixture(autouse=True)
 def _reset_animation_handler_singleton():
     """Ensure tests don't leak KaradaStateServer singleton state across modules."""
     import core.animation_handler as ah
@@ -82,3 +92,34 @@ def _block_live_ai_diary_db(monkeypatch):
         )
 
     monkeypatch.setattr(ai_diary, "get_db", _blocked_get_db)
+
+
+@pytest.fixture
+def idle_eligible_target(monkeypatch):
+    """Pin one idle, eligible Grillo target so a beat run is deterministic.
+
+    Grillo's decay-driven runs speak only when there is somewhere to speak, and
+    the real target builder reads the live database: whether its newest
+    conversation looks live decides whether the beat enqueues at all. Tests that
+    exercise a beat's prompt, logging or routing would then pass or fail
+    depending on the operator's recent chat activity (live 2026-09-28: the
+    observer's activity-log test failed with an AssertionError while Dee was
+    mid-conversation and passed minutes later, with no code in between). This
+    pins an idle target so the behaviour under test decides the outcome.
+    """
+
+    def _apply(plugin, *, interface_path: str = "telegram_bot/1"):
+        async def fake_collect_targets(limit: int) -> list[dict]:
+            return [
+                {
+                    "interface_path": interface_path,
+                    "last_sender": "Scar",
+                    "eligible": True,
+                    "age_seconds": 7200.0,
+                    "in_active_conversation": False,
+                }
+            ]
+
+        monkeypatch.setattr(plugin, "_collect_eligible_targets", fake_collect_targets)
+
+    return _apply

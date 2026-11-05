@@ -304,7 +304,7 @@ class MinecraftConnector(VesselConnectorBase):
         self._named_target_arrival_ticks = 0
         # ``_goal_key`` of a numeric destination we have already **reached**.
         # A goal's numeric destination is chosen *once* by the slow will beat
-        # and stays static until the next beat (which, on the slow Selenium
+        # and stays static until the next beat (which, on the slow Zen
         # engine, can be minutes away). Without marking it consumed the motor
         # would: reach it → ``wander`` on arrival → the wander drifts a few
         # metres past ``_ARRIVAL_RADIUS`` → the same static destination reads as

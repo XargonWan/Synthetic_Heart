@@ -397,7 +397,7 @@ async def test_invalid_emotions_corrector_uses_full_run_action_signature(monkeyp
     monkeypatch.setattr(
         action_parser,
         "get_supported_action_types",
-        lambda: {"message_telegram_bot"},
+        lambda: {"send_message"},
     )
     monkeypatch.setattr(
         "core.transport_layer.extract_json_from_text",
@@ -414,12 +414,12 @@ async def test_invalid_emotions_corrector_uses_full_run_action_signature(monkeyp
     result = await message_chain.handle_incoming_message(
         bot=bot,
         message=msg,
-        text='{"actions":[{"type":"message_telegram_bot","payload":{"text":"hello","interface_path":"telegram_bot/123"}}]}',
+        text='{"actions":[{"type":"send_message","payload":{"text":"hello","interface_path":"telegram_bot/123"}}]}',
         source="llm",
         context={
             "chat_id": 123,
             "interface_path": "telegram_bot/123",
-            "allowed_action_types": ["message_telegram_bot"],
+            "allowed_action_types": ["send_message"],
         },
     )
 
@@ -432,7 +432,7 @@ async def test_invalid_emotions_corrector_uses_full_run_action_signature(monkeyp
     assert isinstance(context, dict)
     assert context["chat_id"] == 123
     assert context["interface_path"] == "telegram_bot/123"
-    assert context["allowed_action_types"] == ["message_telegram_bot"]
+    assert context["allowed_action_types"] == ["send_message"]
     assert context["from_cortex"] is True
     assert captured["action"] == {
         "type": "send_corrector_message",
@@ -525,12 +525,12 @@ async def test_normalize_message_unknown_obeys_supported_actions(monkeypatch):
     monkeypatch.setattr(
         action_parser,
         "get_supported_action_types",
-        lambda: set(["message_telegram_bot"]),
+        lambda: set(["send_message"]),
     )
 
     actions = [{"type": "message_unknown", "payload": {"text": "hi"}}]
     normalized = message_chain._normalize_message_unknown(actions, "telegram_bot/123")
-    assert normalized[0]["type"] == "message_telegram_bot"
+    assert normalized[0]["type"] == "send_message"
 
     # If target action is NOT supported, normalization should be skipped
     monkeypatch.setattr(
@@ -576,7 +576,7 @@ async def test_send_message_body_alias_is_normalized_before_validation(monkeypat
     monkeypatch.setattr(
         action_parser,
         "get_supported_action_types",
-        lambda: {"message_telegram_bot"},
+        lambda: {"send_message"},
     )
     monkeypatch.setattr(
         "core.transport_layer.run_corrector_middleware",
@@ -603,7 +603,7 @@ async def test_send_message_body_alias_is_normalized_before_validation(monkeypat
     assert result == message_chain.ACTIONS_EXECUTED
     assert captured["corrector_calls"] == 0
     assert captured["actions"] is not None
-    assert captured["actions"][0]["type"] == "message_telegram_bot"
+    assert captured["actions"][0]["type"] == "send_message"
     assert captured["actions"][0]["payload"]["text"] == "ping pong"
 
 
@@ -647,7 +647,7 @@ async def test_diary_entry_alias_is_normalized_before_validation(monkeypatch):
     monkeypatch.setattr(
         action_parser,
         "get_supported_action_types",
-        lambda: {"message_telegram_bot", "create_personal_diary_entry"},
+        lambda: {"send_message", "create_personal_diary_entry"},
     )
     monkeypatch.setattr(
         "core.transport_layer.run_corrector_middleware",
@@ -675,7 +675,7 @@ async def test_diary_entry_alias_is_normalized_before_validation(monkeypatch):
     assert captured["corrector_calls"] == 0
     assert captured["actions"] is not None
     assert [action["type"] for action in captured["actions"]] == [
-        "message_telegram_bot",
+        "send_message",
         "create_personal_diary_entry",
     ]
     assert captured["actions"][0]["payload"]["text"] == "ping pong"
@@ -725,7 +725,7 @@ async def test_diary_alias_is_normalized_before_validation(monkeypatch):
     monkeypatch.setattr(
         action_parser,
         "get_supported_action_types",
-        lambda: {"message_telegram_bot", "create_personal_diary_entry"},
+        lambda: {"send_message", "create_personal_diary_entry"},
     )
     monkeypatch.setattr(
         "core.transport_layer.run_corrector_middleware",
@@ -753,7 +753,7 @@ async def test_diary_alias_is_normalized_before_validation(monkeypatch):
     assert captured["corrector_calls"] == 0
     assert captured["actions"] is not None
     assert [action["type"] for action in captured["actions"]] == [
-        "message_telegram_bot",
+        "send_message",
         "create_personal_diary_entry",
     ]
     assert captured["actions"][1]["payload"]["interaction_summary"] == (
@@ -806,7 +806,7 @@ async def test_thought_action_is_folded_into_diary_payload(monkeypatch):
     monkeypatch.setattr(
         action_parser,
         "get_supported_action_types",
-        lambda: {"message_telegram_bot", "create_personal_diary_entry"},
+        lambda: {"send_message", "create_personal_diary_entry"},
     )
     monkeypatch.setattr(
         "core.transport_layer.run_corrector_middleware",
@@ -834,7 +834,7 @@ async def test_thought_action_is_folded_into_diary_payload(monkeypatch):
     assert captured["corrector_calls"] == 0
     assert captured["actions"] is not None
     assert [action["type"] for action in captured["actions"]] == [
-        "message_telegram_bot",
+        "send_message",
         "create_personal_diary_entry",
     ]
     assert captured["actions"][1]["payload"]["interaction_summary"] == (
@@ -919,7 +919,7 @@ async def test_corrector_forces_message_to_ollama_serve(monkeypatch):
     assert corrected is not None
     parsed, _ = extract_json_from_text(corrected, return_metadata=True)
     assert parsed is not None
-    assert parsed["actions"][0]["type"] == "message_ollama_serve"
+    assert parsed["actions"][0]["type"] == "send_message"
     assert parsed["actions"][0]["payload"]["interface_path"].startswith("ollama_serve/")
 
 
@@ -1064,7 +1064,7 @@ async def test_recovered_truncated_json_triggers_corrector_for_dropped_actions(
         parsed = {
             "actions": [
                 {
-                    "type": "message_telegram_bot",
+                    "type": "send_message",
                     "payload": {
                         "text": "hello",
                         "interface_path": "telegram_bot/42",
@@ -1102,7 +1102,7 @@ async def test_recovered_truncated_json_triggers_corrector_for_dropped_actions(
     monkeypatch.setattr(
         action_parser,
         "get_supported_action_types",
-        lambda: {"message_telegram_bot"},
+        lambda: {"send_message"},
     )
     monkeypatch.setattr(
         "core.action_parser.run_actions",
@@ -1126,7 +1126,7 @@ async def test_recovered_truncated_json_triggers_corrector_for_dropped_actions(
     )
 
     assert called["actions"] is not None
-    assert called["actions"][0]["type"] == "message_telegram_bot"
+    assert called["actions"][0]["type"] == "send_message"
     assert called["corrector"] >= 1
     assert called["fallback"] == 0
     assert result == message_chain.ACTIONS_EXECUTED
@@ -1315,7 +1315,9 @@ async def test_reactive_vessel_chat_inworld_say_suppresses_corrector(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_reactive_vessel_disconnect_suppresses_missing_reply_corrector(monkeypatch):
+async def test_reactive_vessel_disconnect_suppresses_missing_reply_corrector(
+    monkeypatch,
+):
     # Disconnect is a successful terminal lifecycle action. It removes the
     # world-specific say verb immediately, so demanding a spoken reply after it
     # would manufacture an action that is no longer valid.
@@ -1346,3 +1348,166 @@ async def test_reactive_vessel_disconnect_suppresses_missing_reply_corrector(mon
     assert not corrector_calls, (
         "a successful vessel_disconnect must not trigger a missing-reply correction"
     )
+
+
+def _retry_harness(monkeypatch, *, reply_delivered_by_tts: bool):
+    """Drive one correction retry and record the action types each pass dispatches.
+
+    Reproduces the 2026-09-28 double-send: the LLM answered with ``send_message``
+    plus a ``goal_update``; message_chain merged the send into the auto-injected
+    ``tts_speak`` (so the reply text went out with the voice note) and the
+    ``goal_update`` failed with ``no_active_goal``. The corrector then re-emitted
+    the whole reply, and the retry dispatched the ``send_message`` a second time.
+    """
+    dispatched: list[list[str]] = []
+    calls = {"n": 0}
+
+    first_pass = {
+        "actions": [
+            {
+                "type": "send_message",
+                "payload": {"text": "hello", "interface_path": "telegram_bot/123"},
+            },
+            {"type": "goal_update", "payload": {"note": "going well"}},
+        ]
+    }
+    # The model, asked to fix only the failed action, re-emits its whole reply.
+    corrected_pass = {
+        "actions": [
+            {
+                "type": "send_message",
+                "payload": {"text": "hello", "interface_path": "telegram_bot/123"},
+            },
+            {"type": "goal_update", "payload": {"goal_id": "g1", "note": "going well"}},
+        ]
+    }
+
+    def fake_extract_json(text, return_metadata=False):
+        calls["n"] += 1
+        return (first_pass if calls["n"] == 1 else corrected_pass, {})
+
+    successful = [
+        {"type": "update_emotion_state", "payload": {"emotions": {"love": 6.0}}},
+        {
+            "type": "create_personal_diary_entry",
+            "payload": {"interaction_summary": "x"},
+        },
+        {
+            "type": "tts_speak",
+            "payload": (
+                {"text": "hello", "__merged_text": "hello", "__auto_injected": True}
+                if reply_delivered_by_tts
+                else {"text": "hello", "__auto_injected": True}
+            ),
+        },
+    ]
+
+    async def fake_run_actions(actions, context, bot, original_message):
+        dispatched.append([a.get("type") for a in (actions or [])])
+        if len(dispatched) == 1:
+            # What action_parser._request_selective_correction records on the
+            # original message before it asks the model to repair the failures.
+            original_message.correction_context = {
+                "successful_types": [a["type"] for a in successful],
+                "successful_actions": successful,
+                "failed_actions": [
+                    {
+                        "action": {
+                            "type": "goal_update",
+                            "payload": {"note": "going well"},
+                        },
+                        "errors": ["no_active_goal"],
+                    }
+                ],
+            }
+            return {
+                "processed": list(successful),
+                "failed_actions": [
+                    {
+                        "action": {
+                            "type": "goal_update",
+                            "payload": {"note": "going well"},
+                        },
+                        "errors": ["no_active_goal"],
+                    }
+                ],
+                "errors": ["no_active_goal"],
+            }
+        return {
+            "processed": list(actions or []),
+            "failed_actions": [],
+            "errors": [],
+        }
+
+    async def fake_corrector(
+        text, bot=None, context=None, chat_id=None, thread_id=None
+    ):
+        return '{"actions":[{"type":"goal_update","payload":{"goal_id":"g1"}}]}'
+
+    monkeypatch.setattr(
+        action_parser,
+        "get_supported_action_types",
+        lambda: {"send_message", "goal_update", "tts_speak"},
+    )
+    monkeypatch.setattr(
+        "core.transport_layer.extract_json_from_text", fake_extract_json
+    )
+    monkeypatch.setattr("core.transport_layer.run_corrector_middleware", fake_corrector)
+    monkeypatch.setattr("core.action_parser.run_actions", fake_run_actions)
+    monkeypatch.setattr("core.persona_manager.get_persona_manager", lambda: None)
+    return dispatched
+
+
+@pytest.mark.asyncio
+async def test_a_reply_already_sent_with_the_voice_note_is_not_sent_again_on_retry(
+    monkeypatch,
+):
+    """The merged tts_speak delivered the reply, so the retry may not re-send it.
+
+    Live 2026-09-28 22:13-22:14: the human received the same 849-character reply
+    twice, 16 seconds apart, because the correction pass re-emitted the reply
+    text the merged voice note had already carried.
+    """
+    dispatched = _retry_harness(monkeypatch, reply_delivered_by_tts=True)
+
+    msg = SimpleNamespace(
+        chat_id=123, interface_path="telegram_bot/123", from_cortex=True
+    )
+    await message_chain.handle_incoming_message(
+        bot=None,
+        message=msg,
+        text='{"actions":[{"type":"send_message","payload":{"text":"hello"}}]}',
+        source="llm",
+        context={"chat_id": 123, "interface_path": "telegram_bot/123"},
+    )
+
+    assert len(dispatched) == 2, dispatched
+    assert "send_message" not in dispatched[1], (
+        "the reply was already delivered with the voice note; re-sending it is the duplicate"
+    )
+    assert dispatched[1] == ["goal_update"], dispatched
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_never_went_out_is_still_allowed_on_retry(monkeypatch):
+    """The suppression keys on a delivery that actually happened.
+
+    When nothing carried the reply (no message action succeeded and the
+    tts_speak holds no merged text), the re-emitted reply is the person's only
+    chance to hear anything, so it must go through.
+    """
+    dispatched = _retry_harness(monkeypatch, reply_delivered_by_tts=False)
+
+    msg = SimpleNamespace(
+        chat_id=123, interface_path="telegram_bot/123", from_cortex=True
+    )
+    await message_chain.handle_incoming_message(
+        bot=None,
+        message=msg,
+        text='{"actions":[{"type":"send_message","payload":{"text":"hello"}}]}',
+        source="llm",
+        context={"chat_id": 123, "interface_path": "telegram_bot/123"},
+    )
+
+    assert len(dispatched) == 2, dispatched
+    assert "send_message" in dispatched[1], dispatched

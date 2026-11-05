@@ -192,7 +192,7 @@ class IrisPlugin(AIPluginBase):
 
             # Sanity-check: reject responses that look like JSON action payloads
             # (e.g. {"actions": [...]}).  This happens when the vision engine is
-            # backed by a session-aware LLM (Gemini Web via selenium) that
+            # backed by a session-aware LLM (Gemini Web via zen) that
             # responds in the trained SyntH action schema instead of describing
             # the image in plain text.
             desc = result.description.strip() if result.description else ""

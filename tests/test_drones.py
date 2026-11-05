@@ -5,6 +5,8 @@ Covers:
 * Recursion guard: a Drone cannot spawn another Drone (handler + prompt filter).
 * Engine override: an explicit engine in the payload is forwarded to the loop.
 * Drone metadata is tagged on the persisted turn.
+* A generic Drone is never granted message_*/send_message tools (it must
+  report findings back to its caller, never deliver a message itself).
 """
 
 from typing import Any
@@ -29,10 +31,13 @@ async def test_spawn_drone_delegates_and_returns_final_text(monkeypatch):
         max_iterations=None,
         timeout_seconds=None,
         original_message=None,
+        allowed_tools=None,
+        cortex_scope="agent",
     ):
         captured["goal"] = goal
         captured["engine"] = engine
         captured["parent_task_id"] = parent_task_id
+        captured["allowed_tools"] = allowed_tools
         return {
             "iterations": 1,
             "observations": [],
@@ -42,6 +47,7 @@ async def test_spawn_drone_delegates_and_returns_final_text(monkeypatch):
         }
 
     from core.agent_core import get_agent_loop_manager
+    from core.tool_registry import tool_registry
 
     manager = get_agent_loop_manager()
     monkeypatch.setattr(manager, "run_drone", fake_run_drone)
@@ -59,6 +65,19 @@ async def test_spawn_drone_delegates_and_returns_final_text(monkeypatch):
     assert res["task_id"] == 4242
     assert captured["goal"] == "look up the config value"
     assert captured["parent_task_id"] == 7
+
+    # The Drone must never be handed a message-delivery tool: it can only
+    # report findings back through its own return value, never message a
+    # user-facing interface directly (see plugins/agent_plugin/agent_plugin.py
+    # spawn_drone handler).
+    allowed = captured["allowed_tools"]
+    assert allowed is not None
+    assert "send_message" not in allowed
+    assert not any(name.startswith("message_") for name in allowed)
+    # Sanity: the deny-list is structural (registry-driven), not an empty set
+    # that would also (incorrectly) strip every research tool away.
+    if "spawn_drone" in tool_registry.tool_names():
+        assert "spawn_drone" in allowed
 
 
 @pytest.mark.asyncio

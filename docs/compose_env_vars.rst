@@ -135,6 +135,11 @@ Prompt / runtime behavior:
 - ``UNIFIED_HISTORY``
 - ``ENABLE_RECON`` / ``ENABLE_DEBRIEF``
 - ``EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS``
+  (outer guard for one endpoint probe; defaults to 300)
+- ``EXTERNAL_ENDPOINT_PROBE_MODELS_TIMEOUT_SECONDS`` /
+  ``EXTERNAL_ENDPOINT_PROBE_CAPABILITIES_TIMEOUT_SECONDS`` /
+  ``EXTERNAL_ENDPOINT_PROBE_PING_TIMEOUT_SECONDS``
+  (per-step budgets inside that guard; default to 90 / 90 / 60)
 
 Generation / timeout tuning
 ---------------------------

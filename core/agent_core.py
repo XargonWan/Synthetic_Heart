@@ -198,7 +198,12 @@ _COMPLETION_TOOL = "attempt_completion"
 # are attempted (text sanitisation, deriving a missing target from the
 # already-present interface_path). The interface_path itself is NEVER modified —
 # doing so could deliver the message to a chat Synth never intended.
-_DELIVERY_ACTION_PREFIX = "message_"
+_DELIVERY_ACTIONS = ("send_message", "message_")
+
+
+def _is_delivery_action(name: str) -> bool:
+    """True for the unified send_message or any legacy message_* action."""
+    return name == "send_message" or name.startswith("message_")
 
 
 def _context_allowed_tools(context: dict[str, Any] | None) -> set[str] | None:
@@ -569,6 +574,20 @@ _ENGINE_FAILURE_SERVER_MARKERS = (
     "gateway timeout",
     "server error",
 )
+# Our own engine/adapter code raising while handling the call or its response
+# (e.g. ``TypeError: 'NoneType' object is not subscriptable`` on a non-standard
+# HTTP-200 body). The bridge records these verbatim as
+# ``f"{type(exc).__name__}: {exc}"``, so the Python type name leads the string;
+# match by prefix so provider text merely *mentioning* a type name still wins.
+_ENGINE_FAILURE_INTERNAL_MARKERS = (
+    "TypeError:",
+    "AttributeError:",
+    "KeyError:",
+    "IndexError:",
+    "NameError:",
+    "UnboundLocalError:",
+    "JSONDecodeError:",
+)
 
 # Failure kinds that cannot self-heal within a turn: retrying the same engine
 # (or burning the turn budget iterating) is pure waste, so the loop fails fast
@@ -602,6 +621,11 @@ _ENGINE_FAILURE_HINTS = {
         "the endpoint answered but returned an empty body — often a broken "
         "engine config (e.g. an invalid API key or model name)"
     ),
+    "internal": (
+        "our engine code hit an unexpected Python exception handling this "
+        "endpoint's response — often a non-standard reply shape; check the "
+        "logs and report it if reproducible"
+    ),
     "unknown": (
         "the engine failed without a specific error — check the endpoint "
         "config and logs"
@@ -618,7 +642,8 @@ def classify_engine_failure(
     """Classify an engine/cortex failure into ``(kind, operator_hint)``.
 
     ``kind`` is one of ``auth``, ``connection``, ``bad_request``,
-    ``rate_limited``, ``server_error``, ``timeout``, ``empty``, ``unknown``.
+    ``rate_limited``, ``server_error``, ``timeout``, ``empty``, ``internal``
+    (our own code crashed handling the call/response), ``unknown``.
     A recorded provider error wins over the timeout/empty flags: an offline
     endpoint typically surfaces to the loop as a hard timeout (the bridge's
     connection retries outlive the turn budget) while the bridge has already
@@ -642,6 +667,11 @@ def classify_engine_failure(
         for marker in _ENGINE_FAILURE_SERVER_MARKERS:
             if marker in lowered:
                 return "server_error", _ENGINE_FAILURE_HINTS["server_error"]
+        # Our own code crashing (recorded as "TypeName: message") — never
+        # misread as a provider-side problem.
+        for marker in _ENGINE_FAILURE_INTERNAL_MARKERS:
+            if lowered.startswith(marker.lower()):
+                return "internal", _ENGINE_FAILURE_HINTS["internal"]
         if "timeout" in lowered or "timed out" in lowered:
             return "timeout", _ENGINE_FAILURE_HINTS["timeout"]
     if timed_out:
@@ -709,9 +739,7 @@ def _engine_failure_from_diagnostics(engine_name: str | None) -> dict[str, Any] 
     return None
 
 
-def _describe_engine_failure(
-    failure: dict[str, Any] | None, engine: str | None
-) -> str:
+def _describe_engine_failure(failure: dict[str, Any] | None, engine: str | None) -> str:
     """Render a classified failure for logs/notifications, truthfully.
 
     When no diagnostics exist (e.g. the generic plugin path) the description
@@ -1548,15 +1576,24 @@ class AgentLoopManager:
         # must not spam the user on every iteration (observed live: one turn
         # sent three near-identical Telegram updates because each iteration
         # re-narrated the same status slightly differently — exact-text dedup
-        # can not catch that). At most ``AGENT_MAX_INTERIM_MESSAGES``
-        # successful mid-loop user-facing deliveries per turn; anything beyond
-        # is suppressed with an observation steering the model to finish and
-        # use attempt_completion for the final answer. Failed deliveries do
-        # not count against the cap (a retry must remain possible).
-        interim_messages_delivered = 0
+        # can not catch that; also observed: four distinct rewordings of a
+        # weather answer delivered to the SAME chat because each one landed on
+        # its own message-only iteration, which the older per-turn scalar
+        # counter never capped). At most ``AGENT_MAX_INTERIM_MESSAGES``
+        # successful mid-loop user-facing deliveries **per destination**
+        # (``interface_path``); anything beyond, to that SAME destination, is
+        # suppressed with an observation steering the model to finish and use
+        # attempt_completion for the final answer. Keyed per-target (not a
+        # single per-turn scalar) so a beat that legitimately reaches out to
+        # several DIFFERENT conversations in one turn (e.g. the Grillo chat
+        # observer's multi-target fan-out) is unaffected — only repeats to the
+        # SAME destination are capped. Failed deliveries do not count against
+        # the cap (a retry must remain possible).
+        interim_messages_delivered: dict[str, int] = {}
         try:
             max_interim_messages = max(
-                0, min(int(config_registry.get_var("AGENT_MAX_INTERIM_MESSAGES", 1)), 10)
+                0,
+                min(int(config_registry.get_var("AGENT_MAX_INTERIM_MESSAGES", 1)), 10),
             )
         except (TypeError, ValueError):
             max_interim_messages = 1
@@ -1692,7 +1729,7 @@ class AgentLoopManager:
             remaining_budget = max(1.0, timeout_seconds - elapsed)
             # Per-call timeout must respect the real engine budget, not an
             # arbitrary hardcoded cap. Browser-backed cortex engines (e.g.
-            # selenium-llm-engine) routinely need far longer than a few seconds
+            # zen-llm-engine) routinely need far longer than a few seconds
             # to produce a response; capping each call at 8s made every
             # iteration time out with an empty reply, so the whole agentic turn
             # returned nothing. Bound the per-call wait by the engine's own
@@ -1737,15 +1774,15 @@ class AgentLoopManager:
                 # the bridge has already recorded the underlying connection
                 # error on its earlier attempts (peek survives the cancellation
                 # because the bridge writes it before its retry sleep).
-                bridge_error = (
-                    _peek_engine_diagnostics(engine) or {}
-                ).get("error")
+                bridge_error = (_peek_engine_diagnostics(engine) or {}).get("error")
                 timeout_detail = (
                     f"engine call timed out at iteration {i} "
                     f"after {per_call_timeout:.1f}s"
                 )
                 if bridge_error:
-                    timeout_detail = f"{timeout_detail}; last engine error: {bridge_error}"
+                    timeout_detail = (
+                        f"{timeout_detail}; last engine error: {bridge_error}"
+                    )
                 kind, hint = classify_engine_failure(bridge_error, timed_out=True)
                 engine_failure = {
                     "kind": kind,
@@ -1764,8 +1801,7 @@ class AgentLoopManager:
                     "engine": engine,
                 }
                 log_error(
-                    f"[agent_core] Engine call failed at iteration {i} "
-                    f"({kind}): {exc}"
+                    f"[agent_core] Engine call failed at iteration {i} ({kind}): {exc}"
                 )
                 observations.append(
                     {
@@ -1820,7 +1856,9 @@ class AgentLoopManager:
                         )
                         fallback_text = await _call_with_hard_timeout(
                             self._call_engine_direct(prompt, engine, cortex_scope),
-                            timeout=max(2.0, min(engine_timeout, remaining_after_primary)),
+                            timeout=max(
+                                2.0, min(engine_timeout, remaining_after_primary)
+                            ),
                         )
                     except asyncio.TimeoutError:
                         fallback_text = ""
@@ -1890,8 +1928,7 @@ class AgentLoopManager:
                     except Exception as base_exc:
                         # The safety net must never kill the turn itself.
                         log_warning(
-                            f"[agent_core] Base Cortex fallback call raised: "
-                            f"{base_exc}"
+                            f"[agent_core] Base Cortex fallback call raised: {base_exc}"
                         )
                         base_text = ""
                     if base_text and base_text.strip():
@@ -2075,7 +2112,19 @@ class AgentLoopManager:
                     if not isinstance(args, dict):
                         args = {}
                     text = str(args.get("text") or args.get("content") or "").strip()
-                    is_delivery = mc_name.startswith(_DELIVERY_ACTION_PREFIX)
+                    is_delivery = _is_delivery_action(mc_name)
+                    # The destination this specific call targets. Falls back to
+                    # the turn's own originating conversation (the same
+                    # fallback ``core.message_registry`` documents for a reply
+                    # with no explicit ``interface_path``: it auto-routes to
+                    # the origin conversation), then to a shared bucket so an
+                    # unresolvable target still gets capped rather than
+                    # silently bypassing the per-target damper below.
+                    target_key = (
+                        str(args.get("interface_path") or "").strip()
+                        or str((context or {}).get("interface_path") or "").strip()
+                        or "__unresolved_target__"
+                    )
                     # Non-delivery speech actions are only captured; delivery
                     # actions are collected once they pass the dedup + interim
                     # cap below (a suppressed message must not be hoisted into
@@ -2091,7 +2140,7 @@ class AgentLoopManager:
                     # is deprecated and is excluded from the loop's tool set);
                     # any stray non-message speech action (radio_speak) stays
                     # captured as text only.
-                    if mc_name.startswith(_DELIVERY_ACTION_PREFIX):
+                    if _is_delivery_action(mc_name):
                         # Cross-iteration dedup: never re-send text already
                         # delivered earlier in THIS turn (the model re-emitting
                         # the same reply instead of completing → 3x voice notes).
@@ -2112,25 +2161,34 @@ class AgentLoopManager:
                                 }
                             )
                             continue
-                        # Interim-message damper: the cap for THIS turn is
+                        # Interim-message damper: the cap for THIS destination is
                         # already spent — suppress the re-worded update and
-                        # steer the model toward completing properly. Only a
-                        # MIXED iteration (message + further tool calls) is an
-                        # interim update; a message-ONLY iteration is the
-                        # model's answer channel (two consecutive message-only
-                        # iterations end the turn as model_done) and must stay
-                        # deliverable. The suppressed text is NOT hoisted into
-                        # final_text (the pause composer or attempt_completion
-                        # own the closing message).
-                        if (
-                            interim_messages_delivered >= max_interim_messages
-                            and tool_calls
-                        ):
+                        # steer the model toward completing properly. Scoped per
+                        # ``target_key`` (not the whole turn), and applied
+                        # regardless of whether this is a mixed or a
+                        # message-only iteration: a message-only iteration is
+                        # still legitimately the model's answer channel the
+                        # FIRST time it reaches a given destination, but a
+                        # repeat to that SAME destination is never a fresh
+                        # answer — it is the loop re-narrating something it
+                        # already delivered (observed live: four differently
+                        # worded weather replies to the same chat, each one
+                        # alone in its own message-only iteration, which the
+                        # old "only mixed iterations count" rule let straight
+                        # through). A different destination starts at 0 and is
+                        # unaffected — this must never block a beat that
+                        # genuinely reaches out to several different
+                        # conversations in one turn. The suppressed text is NOT
+                        # hoisted into final_text (the pause composer or
+                        # attempt_completion own the closing message).
+                        target_delivered = interim_messages_delivered.get(target_key, 0)
+                        if target_delivered >= max_interim_messages:
                             log_info(
-                                f"[agent_core] Iteration {i}: suppressing interim "
-                                f"message '{mc_name}' — cap of "
-                                f"{max_interim_messages} mid-task message(s) "
-                                "already delivered this turn"
+                                f"[agent_core] Iteration {i}: suppressing repeat "
+                                f"message '{mc_name}' to '{target_key}' — "
+                                f"{target_delivered} message(s) already "
+                                "delivered there this turn (cap "
+                                f"{max_interim_messages})"
                             )
                             observations.append(
                                 {
@@ -2141,15 +2199,17 @@ class AgentLoopManager:
                                             "tool": mc_name,
                                             "ok": True,
                                             "result": (
-                                                "suppressed: the user was "
-                                                f"already updated {interim_messages_delivered} "
-                                                "time(s) this turn — do not send "
-                                                "more interim status messages. "
-                                                "Keep working silently and "
-                                                "deliver the final answer via "
-                                                f"{_COMPLETION_TOOL} (or tell "
-                                                "the user you need more time "
-                                                "in that final message)."
+                                                "suppressed: you already sent "
+                                                f"{target_delivered} message(s) to "
+                                                "this same destination this turn — "
+                                                "do not repeat or rephrase the same "
+                                                "answer again. If there is nothing "
+                                                "NEW to add, call "
+                                                f"{_COMPLETION_TOOL} now. If you "
+                                                "genuinely have something new for a "
+                                                "DIFFERENT conversation, target "
+                                                "that conversation's own "
+                                                "interface_path instead."
                                             ),
                                             "error": None,
                                         }
@@ -2184,7 +2244,9 @@ class AgentLoopManager:
                         delivered_ok = bool(exec_result.get("ok"))
                         if delivered_ok:
                             delivered_message_ok = True
-                            interim_messages_delivered += 1
+                            interim_messages_delivered[target_key] = (
+                                interim_messages_delivered.get(target_key, 0) + 1
+                            )
                             delivered_text = str(
                                 args.get("text") or args.get("content") or ""
                             ).strip()
@@ -2384,9 +2446,7 @@ class AgentLoopManager:
                     and bool(raw_text.strip())
                     and (
                         int(_meta.get("error_count") or 0) > 0
-                        or raw_text.lstrip().lower().startswith(
-                            ("<html", "<!doctype")
-                        )
+                        or raw_text.lstrip().lower().startswith(("<html", "<!doctype"))
                     )
                 )
                 if _malformed:
@@ -2556,9 +2616,7 @@ class AgentLoopManager:
                 # missing target) and re-execute BEFORE bothering the model. The
                 # interface_path is never touched, so the retry can only reach
                 # the exact destination the model already chose.
-                if not exec_result.get("ok") and str(name).startswith(
-                    _DELIVERY_ACTION_PREFIX
-                ):
+                if not exec_result.get("ok") and _is_delivery_action(str(name)):
                     fixed_args, changed = _programmatic_delivery_fix(args)
                     if changed:
                         log_info(
@@ -2591,7 +2649,7 @@ class AgentLoopManager:
                 # monologue structure leaked into a user-facing message. This is
                 # non-blocking — the message is already delivered — but a WARNING
                 # makes the leak visible in logs for later prompt tuning.
-                if str(name).startswith(_DELIVERY_ACTION_PREFIX):
+                if _is_delivery_action(str(name)):
                     delivered_text = args.get("text") or args.get("content")
                     leak_signals = _looks_like_internal_monologue(
                         delivered_text if isinstance(delivered_text, str) else ""
@@ -2677,10 +2735,7 @@ class AgentLoopManager:
         # ``pending`` (a raw ``timeout`` persists as ``failed``) and the
         # router's garbage-output guard (which only suppresses ``timeout``
         # with ZERO actions) lets it through.
-        if (
-            stop_reason == "timeout"
-            and not str(final_text or "").strip()
-        ):
+        if stop_reason == "timeout" and not str(final_text or "").strip():
             actions_executed = 0
             for obs in observations:
                 if isinstance(obs, dict) and obs.get("role") == "tool_results":
@@ -2734,6 +2789,38 @@ class AgentLoopManager:
                 }
             )
             stop_reason = "delivery_failed"
+
+        # Observability: a burst of delivery failures within one turn — even
+        # when the turn otherwise ends normally because a DIFFERENT message
+        # got through — previously left no trace outside raw logs. Live
+        # incident that surfaced this: ~186 failed ``message_telegram_bot``
+        # retries with an empty/malformed payload inside one turn, invisible
+        # to ``list_llm_failures``. Best-effort and fire-and-forget: logging
+        # here must never affect the turn's own outcome.
+        if len(delivery_failures) > 2:
+            try:
+                from core.llm_failure_log import (
+                    build_failure_entry,
+                    record_failure_entry,
+                )
+
+                entry = build_failure_entry(
+                    reason=(
+                        f"{len(delivery_failures)} outbound message delivery "
+                        "attempt(s) failed within one agent turn: "
+                        f"{', '.join(sorted(set(delivery_failures)))}"
+                    ),
+                    stage="agent_delivery",
+                    interface_path=(context or {}).get("interface_path"),
+                    engine=engine,
+                    failure_code="agent_delivery_storm",
+                    metadata={"goal": goal, "attempts": len(delivery_failures)},
+                )
+                await record_failure_entry(entry)
+            except Exception as exc:
+                log_debug(
+                    f"[agent_core] Could not record delivery-failure-storm entry: {exc}"
+                )
 
         result: Dict[str, Any] = {
             "iterations": len(observations),
@@ -2977,7 +3064,7 @@ class AgentLoopManager:
             # would mistake that for a corrector payload (it keys off
             # ``system_message``), discarding the real GOAL/TOOLS/system text and
             # emitting an almost-empty prompt. External web-driven engines (e.g.
-            # selenium-llm-engine) then pad that empty prompt with their own
+            # zen-llm-engine) then pad that empty prompt with their own
             # canvas/JSON boilerplate. Passing explicit role-separated messages to
             # ``generate_response`` bypasses _build_messages entirely and delivers
             # the actual agentic prompt.
@@ -3107,6 +3194,7 @@ class AgentLoopManager:
                 interface_path=interface_path,
                 text=instruction,
                 sender_id=getattr(message, "sender_id", None),
+                chat_id=getattr(message, "chat_id", None),
                 is_from_self=False,
             )
             prompt = await build_prompt_request(
@@ -3396,8 +3484,8 @@ class AgentLoopManager:
             '"arguments": {"path": "C:/x.pdf"}}}]}\n'
             "You may list several entries inside one tool_calls array.\n"
             "VOICE/AUDIO REPLIES: to answer with your spoken voice, call "
-            "message_telegram_bot (or the matching message_* action) with "
-            "send_as_voice=true and put the full spoken reply in 'text'.\n"
+            "send_message with send_as_voice=true and put the full spoken reply "
+            "in 'text'.\n"
             "Work like a careful engineer: break the goal into steps and keep "
             "calling tools to gather information, verify assumptions and make "
             "progress until the goal is genuinely achieved. Do NOT stop and give "

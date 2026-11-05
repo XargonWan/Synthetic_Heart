@@ -14,6 +14,7 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from core.logging_utils import log_debug, log_info, log_warning, log_error
+from core.app_paths import agent_fs_roots
 from core.json_utils import (
     dumps as json_dumps,
     redact_multimodal_for_logging,
@@ -85,8 +86,16 @@ def _compute_prompt_signature(prompt_for_engine: Any) -> str | None:
     """Return a short, bounded fingerprint of a prompt for the cached-safe-response store.
 
     Best-effort: any failure returns ``None`` (which disables caching for the
-    turn). Only a bounded prefix of the serialized prompt is hashed so large
-    prompts never cost a full re-serialization on the hot path.
+    turn). Only bounded head/tail windows of the serialized prompt are hashed
+    so large prompts never cost a full re-serialization on the hot path.
+    Hashing both ends (not just the prefix) matters because the shared
+    boilerplate (persona, history, memories, static injections) tends to sit
+    at the front of the prompt while the part that actually varies between
+    turns — the current message / beat instructions — is usually appended
+    near the end; hashing the prefix alone let two structurally different
+    prompts collide on the same signature (paired with the cache key now also
+    including ``interface_path`` in core/cortex_fallback.py, this closes both
+    sides of that collision).
     """
     try:
         import hashlib
@@ -97,7 +106,11 @@ def _compute_prompt_signature(prompt_for_engine: Any) -> str | None:
             blob = prompt_for_engine.encode("utf-8", "replace")
         else:
             blob = json_dumps(prompt_for_engine).encode("utf-8", "replace")
-        return hashlib.sha256(blob[:8192]).hexdigest()[:16]
+        window = 8192
+        sample = (
+            blob[:window] if len(blob) <= window * 2 else blob[:window] + blob[-window:]
+        )
+        return hashlib.sha256(sample).hexdigest()[:16]
     except Exception:
         return None
 
@@ -264,7 +277,7 @@ async def load_plugin(
                     )
                 except asyncio.TimeoutError:
                     # Prefer to avoid force-cancelling an in-progress LLM response here;
-                    # rely on the engine's own waiting/recovery logic (Selenium already
+                    # rely on the engine's own waiting/recovery logic (Zen already
                     # implements robust wait/retry). Log and proceed with the hotswap
                     # without cancelling the worker task to prevent premature stop.
                     log_warning(
@@ -716,8 +729,13 @@ async def handle_incoming_message(
                             parts.append(f"language: {iris_result.language}")
                         if iris_result.confidence is not None:
                             parts.append(f"confidence: {iris_result.confidence:.2f}")
+                        media_label = (
+                            "Sticker"
+                            if getattr(iris_result, "is_sticker", False)
+                            else "Image"
+                        )
                         description_block = (
-                            "[Image the user just shared with you — this is what "
+                            f"[{media_label} the user just shared with you — this is what "
                             "you can see in it right now: " + " | ".join(parts) + "]"
                         )
                         if original_text:
@@ -762,6 +780,8 @@ async def handle_incoming_message(
                                         "iris_cached_path": iris_result.cached_path,
                                         "iris_cached_mime": _cached_mime,
                                     }
+                                    if getattr(iris_result, "is_sticker", False):
+                                        update_meta["iris_is_sticker"] = True
                                 from core.chat_context_manager import (
                                     update_message_in_context,
                                 )
@@ -781,9 +801,9 @@ async def handle_incoming_message(
                             log_warning(
                                 f"[plugin_instance] Could not persist Iris description to history: {exc}"
                             )
-                    except Exception as exc:
+                    except Exception:
                         log_warning(
-                            f"[plugin_instance] Could not append Iris description to message text: {exc}"
+                            "[plugin_instance] Could not append Iris description to message text: {exc}"
                         )
 
                 # Strip image/video base64 data from attachments so the Cortex
@@ -859,7 +879,7 @@ async def handle_incoming_message(
             # A delivery turn is enqueued as a JSON string ({system_message,
             # allowed_action_types}) and parsed successfully above, so it BYPASSES
             # build_prompt_request — the prior allowed_action_types allowlist was
-            # therefore never applied to the action catalog the weak selenium model
+            # therefore never applied to the action catalog the weak zen model
             # saw, and it re-emitted the producing action (e.g.
             # search_current_knowledge) in a loop. Here we rebuild the delivery
             # turn as a PromptRequest whose tool_declarations are message_* only;
@@ -1115,6 +1135,7 @@ async def handle_incoming_message(
                     scope=_scope,
                     call_engine=_call_engine,
                     prompt_signature=_prompt_signature,
+                    interface_path=getattr(message, "interface_path", None),
                 )
             except Exception as _fb_exc:
                 # The wrapper is fail-open and only propagates the primary
@@ -1677,6 +1698,7 @@ async def _extract_image_data_from_message(message, interface_name: str):
 def _build_unviewable_media_placeholder(
     mime_type: str | None,
     reason: str = "unavailable",
+    is_sticker: bool = False,
 ) -> str:
     """Build a text placeholder informing the Cortex that media was received but not analysed.
 
@@ -1684,7 +1706,14 @@ def _build_unviewable_media_placeholder(
         mime_type: MIME type of the attachment (e.g. ``"image/png"``).
         reason:    Why the vision analysis could not run.
                    Typical values: ``"disabled"``, ``"unavailable"``, ``"error"``.
+        is_sticker: Whether the attachment is a sticker.
     """
+    if is_sticker:
+        return (
+            "The user sent a sticker that could not be analysed. "
+            "Acknowledge that a sticker was shared and that you cannot "
+            "see its content right now."
+        )
     media_label = mime_type or "media file"
     return (
         f"The user sent a {media_label} attachment. "
@@ -1784,6 +1813,7 @@ async def _describe_attachment_images_with_iris(
         return None
 
     first_media_mime_type = None
+    first_media_is_sticker = False
     for attachment in attachments:
         mime_type = str(
             attachment.get("mime_type")
@@ -1793,6 +1823,7 @@ async def _describe_attachment_images_with_iris(
         )
         if mime_type.startswith(("image/", "video/")):
             first_media_mime_type = mime_type
+            first_media_is_sticker = bool(attachment.get("is_sticker"))
             break
 
     if first_media_mime_type is None:
@@ -1808,8 +1839,11 @@ async def _describe_attachment_images_with_iris(
             )
             return IrisResult(
                 description=_build_unviewable_media_placeholder(
-                    first_media_mime_type, reason="unavailable"
-                )
+                    first_media_mime_type,
+                    reason="unavailable",
+                    is_sticker=first_media_is_sticker,
+                ),
+                is_sticker=first_media_is_sticker,
             )
         # Refresh config before reading _active_engine_name so we get the
         # DB-loaded value rather than the hard-coded startup default ("disabled").
@@ -1824,8 +1858,11 @@ async def _describe_attachment_images_with_iris(
             log_info(f"[plugin_instance] Iris skip: active engine is '{active_engine}'")
             return IrisResult(
                 description=_build_unviewable_media_placeholder(
-                    first_media_mime_type, reason="disabled"
-                )
+                    first_media_mime_type,
+                    reason="disabled",
+                    is_sticker=first_media_is_sticker,
+                ),
+                is_sticker=first_media_is_sticker,
             )
         log_info(
             f"[plugin_instance] Iris active engine: '{active_engine}', processing {len(attachments)} attachment(s)"
@@ -1834,8 +1871,11 @@ async def _describe_attachment_images_with_iris(
         log_debug(f"[plugin_instance] Iris plugin lookup failed: {exc}")
         return IrisResult(
             description=_build_unviewable_media_placeholder(
-                first_media_mime_type, reason="unavailable"
-            )
+                first_media_mime_type,
+                reason="unavailable",
+                is_sticker=first_media_is_sticker,
+            ),
+            is_sticker=first_media_is_sticker,
         )
 
     for attachment in attachments:
@@ -1915,9 +1955,45 @@ async def _describe_attachment_images_with_iris(
             log_info(
                 f"[plugin_instance] Iris: calling describe_media for {mime_type} ({len(image_bytes)} bytes)"
             )
+            attachment_is_sticker = bool(attachment.get("is_sticker"))
+            effective_prompt = prompt
+            if attachment_is_sticker:
+                sticker_meta = attachment.get("media_metadata", {})
+                is_thumb = bool(sticker_meta.get("thumbnail"))
+                viewable = bool(sticker_meta.get("viewable", True))
+
+                if not viewable:
+                    effective_prompt = (
+                        "A user shared a sticker that cannot be displayed as a "
+                        "static image. Acknowledge that you cannot see the "
+                        "visual content and do not describe or assume anything "
+                        "about it."
+                    )
+                else:
+                    size_note = (
+                        (
+                            " This is a small thumbnail/preview of a Telegram "
+                            "sticker, so fine details may be unclear."
+                        )
+                        if is_thumb
+                        else ""
+                    )
+                    effective_prompt = (
+                        "This is a Telegram sticker image. Stickers are often "
+                        "small, simple, or stylized. Describe ONLY the most "
+                        "prominent, clearly visible elements: main subject, "
+                        "background color, and any obvious objects or text. "
+                        "If any detail is not clearly visible, say 'unclear' "
+                        "instead of guessing or inventing details. Do NOT "
+                        "assume the sticker depicts the synth or the user. "
+                        "Do NOT add details that are not present in the "
+                        "image.{size}"
+                    ).format(size=size_note)
+                base_prompt = prompt or getattr(iris, "_default_prompt", "") or ""
+                effective_prompt = base_prompt + "\n\n" + effective_prompt
             try:
                 result = await asyncio.wait_for(
-                    iris.describe_media(analysis_path, mime_type, prompt),
+                    iris.describe_media(analysis_path, mime_type, effective_prompt),
                     timeout=120.0,
                 )
             except asyncio.TimeoutError:
@@ -1929,8 +2005,13 @@ async def _describe_attachment_images_with_iris(
                 # Record the durable cache location on the result so callers can
                 # persist it into chat-history metadata for re-inspection.
                 result.cached_path = cached_path
+                result.is_sticker = attachment_is_sticker
                 log_info(
                     f"[plugin_instance] Iris: got description ({len(result.description)} chars)"
+                )
+                log_debug(
+                    f"[plugin_instance] Iris description for {mime_type}: "
+                    f"{result.description[:500]}..."
                 )
                 return result
             log_info(
@@ -1949,8 +2030,9 @@ async def _describe_attachment_images_with_iris(
 
     return IrisResult(
         description=_build_unviewable_media_placeholder(
-            first_media_mime_type, reason="error"
-        )
+            first_media_mime_type, reason="error", is_sticker=first_media_is_sticker
+        ),
+        is_sticker=first_media_is_sticker,
     )
 
 
@@ -2031,9 +2113,9 @@ def _persist_attachments_to_sandbox(attachments: list[dict]) -> list[str]:
 
     roots_raw = os.getenv("AGENT_FS_ROOTS") or ""
     if roots_raw.strip():
-        roots = [p.strip() for p in roots_raw.split(":") if p.strip()]
+        roots = [p.strip() for p in roots_raw.split(os.pathsep) if p.strip()]
     else:
-        roots = [os.getenv("AGENT_FS_ROOT", "/app")]
+        roots = [str(agent_fs_roots()[0])] if agent_fs_roots() else []
     if not roots:
         return []
 

@@ -686,11 +686,11 @@ class XaiGrokPlugin(AIPluginBase):
 
         interface_to_action = {
             "synth_webui": "message_synth_webui",
-            "telegram_bot": "message_telegram_bot",
-            "discord_bot": "message_discord_bot",
-            "ollama_serve": "message_ollama_serve",
+            "telegram_bot": "send_message",
+            "discord_bot": "send_message",
+            "ollama_serve": "send_message",
         }
-        message_action = interface_to_action.get(interface, f"message_{interface}")
+        message_action = interface_to_action.get(interface, "send_message")
 
         is_grillo = interface == "grillo" or (
             isinstance(prompt_dict, dict) and prompt_dict.get("grillo_beat")

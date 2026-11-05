@@ -24,11 +24,11 @@ if [ ! -e /tmp/.X11-unix/X1 ]; then
         mkdir -p /tmp/.X11-unix
         touch /tmp/.X11-unix/X1
     else
-        echo "[S6 synth] Proceeding without X11 socket (GUI/selenium may fail)."
+        echo "[S6 synth] Proceeding without X11 socket (GUI/zen may fail)."
     fi
 fi
 
-# Set DISPLAY environment variable for X11 applications (including Chromium/Selenium)
+# Set DISPLAY environment variable for X11 applications (including Chromium/Zen)
 export DISPLAY=:1
 
 echo "[S6 synth] Avvio Synthetic Heart..."

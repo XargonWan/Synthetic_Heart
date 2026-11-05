@@ -1,6 +1,13 @@
 # plugins/rift_vessel/vessel_plugin.py
 """Vessel — core Rift Vessel plugin.
 
+History: a smaller flat copy of this plugin (``plugins/vessel_plugin.py`` with
+``plugins/vessel_base.py`` and ``plugins/vessels/``) registered the same
+``vessel_plugin`` key and was still imported at startup. It was removed in
+commit 24addefa. If something that used to live there is missed, recover it with
+``git log --diff-filter=D --oneline -- plugins/vessel_plugin.py`` and
+``git show 24addefa^:plugins/vessel_plugin.py``.
+
 Exposes SyntH's embodiment actions and routes them to the active world
 connector via the Vessel registry. The Vessel itself is *infrastructure*: the
 active game owns the concrete actions, so the exposed names are namespaced per

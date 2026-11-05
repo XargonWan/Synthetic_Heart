@@ -22,6 +22,23 @@ cortex to weave them into a dream, and writes the entry to the diary. When Recon
 is enabled it can pull in external material. Discovery is automatic via the
 plugin registry.
 
+## How the dream reaches the model
+
+`get_static_injection()` puts the dream in the prompt as the `todays_dream`
+block, from the dream's own 05:00 run until `GRILLO_DREAM_INJECT_UNTIL`. The
+core renderer prints it under a `[Today's dream]` heading on every ordinary chat
+and beat prompt (`_PLUGIN_CONTEXT_BLOCKS` in `core/prompt_engine.py`); a key no
+renderer consumes never reaches the model, so a plugin block that must be seen
+has to be declared there.
+
+The dream text itself is read from the beat's own action envelope - the
+`create_personal_diary_entry` payload's `content`, which is what the dream turn
+wrote. The row's `diary_entry_id` is audit linkage only: it points at whichever
+diary row existed when the action was dispatched, which in practice can be an
+unrelated interaction diary written hours later. A dream row with no readable
+dream in its envelope therefore injects nothing rather than substituting that
+diary text.
+
 ## Configuration
 
 | Key | Purpose |

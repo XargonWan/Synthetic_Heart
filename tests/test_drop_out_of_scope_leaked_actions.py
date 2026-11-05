@@ -1,6 +1,6 @@
 """Tests for ``core.message_chain._drop_out_of_scope_leaked_actions``.
 
-A state-retaining external engine (e.g. the browser-driven selenium endpoint)
+A state-retaining external engine (e.g. the browser-driven zen endpoint)
 keeps the conversation history across turns, so on a plain chat turn it can echo
 an action it was only offered on an earlier Vessel turn (e.g.
 ``vessel_minecraft_collect_block``) even though the current scoped prompt never

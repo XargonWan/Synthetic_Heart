@@ -1,5 +1,6 @@
 import asyncio
 import functools
+import http.client
 import json
 import time
 import urllib.parse
@@ -27,6 +28,10 @@ WEATHER_FETCH_TIMEOUT_SECONDS = 15
 DEFAULT_WEATHER_UNAVAILABLE = (
     "Meteo non disponibile al momento, riprova tra qualche minuto."
 )
+# wttr.in is known to rate-limit/reset connections for requests that look
+# like anonymous bot traffic (e.g. the default "Python-urllib/x.y" UA), so a
+# descriptive User-Agent is sent to reduce dropped-connection errors.
+WEATHER_REQUEST_USER_AGENT = "SyntheticHeart-WeatherPlugin/1.0"
 # Owner marker for the persistent daily-report scheduled event. The weather
 # plugin owns these events: on config change it clears all of them and creates
 # a fresh one, and it dispatches them itself (routing to the configured
@@ -386,11 +391,14 @@ class WeatherPlugin:
                     return
 
                 try:
+                    request = urllib.request.Request(
+                        url, headers={"User-Agent": WEATHER_REQUEST_USER_AGENT}
+                    )
                     response = await loop.run_in_executor(
                         self._executor,
                         functools.partial(
                             urllib.request.urlopen,
-                            url,
+                            request,
                             timeout=WEATHER_FETCH_TIMEOUT_SECONDS,
                         ),
                     )
@@ -431,6 +439,22 @@ class WeatherPlugin:
                         continue
                     self._cached_weather = (
                         f"{location}: ⚠️ Cannot reach weather service (timed out)"
+                    )
+                    return
+                except http.client.HTTPException as e:
+                    # http.client raises these (e.g. RemoteDisconnected when
+                    # wttr.in resets the connection mid-response) directly out
+                    # of h.getresponse(); urllib.request does not wrap them in
+                    # URLError. Same transient-network handling as above:
+                    # retry, then degrade gracefully without a full traceback.
+                    log_warning(
+                        f"[weather_plugin] Connection error fetching weather: {e}"
+                    )
+                    if attempt < MAX_WEATHER_FETCH_RETRIES:
+                        await asyncio.sleep(1)
+                        continue
+                    self._cached_weather = (
+                        f"{location}: ⚠️ Cannot reach weather service (connection reset)"
                     )
                     return
                 except RuntimeError as e:

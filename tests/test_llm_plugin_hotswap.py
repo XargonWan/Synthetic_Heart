@@ -21,18 +21,18 @@ class _FakeManualPlugin:
         self.cleanup = Mock()
 
 
-class _FakeSeleniumPlugin:
-    __module__ = "cortex.selenium_engine.selenium_chatgpt"
+class _FakeZenPlugin:
+    __module__ = "cortex.zen_engine.zen_chatgpt"
 
     def __init__(self):
         self.start = AsyncMock()
 
 
 class _FakeRegistry:
-    def __init__(self, manual_plugin=None, selenium_plugin=None):
+    def __init__(self, manual_plugin=None, zen_plugin=None):
         self._engines = {
             "manual": manual_plugin or _FakeManualPlugin(),
-            "selenium_chatgpt": selenium_plugin or _FakeSeleniumPlugin(),
+            "zen_chatgpt": zen_plugin or _FakeZenPlugin(),
         }
 
     def get_engine(self, name):
@@ -80,9 +80,9 @@ async def test_cortex_plugin_hotswap_from_manual_to_manual():
 async def test_cortex_plugin_hotswap_cleanup():
     """Test that plugin cleanup is called during hotswap."""
     manual_plugin = _FakeManualPlugin()
-    selenium_plugin = _FakeSeleniumPlugin()
+    zen_plugin = _FakeZenPlugin()
     registry = _FakeRegistry(
-        manual_plugin=manual_plugin, selenium_plugin=selenium_plugin
+        manual_plugin=manual_plugin, zen_plugin=zen_plugin
     )
 
     with patch("core.plugin_instance.get_cortex_registry", return_value=registry):
@@ -91,7 +91,7 @@ async def test_cortex_plugin_hotswap_cleanup():
         initial_plugin = get_plugin()
 
         # Now trigger a hotswap by loading a different plugin
-        await load_plugin("selenium_chatgpt")
+        await load_plugin("zen_chatgpt")
 
         # Cleanup should have been called
         initial_plugin.cleanup.assert_called_once()
@@ -101,9 +101,9 @@ async def test_cortex_plugin_hotswap_cleanup():
 async def test_cortex_plugin_worker_task_waiting():
     """Test that hotswap waits for worker task completion."""
     manual_plugin = _FakeManualPlugin()
-    selenium_plugin = _FakeSeleniumPlugin()
+    zen_plugin = _FakeZenPlugin()
     registry = _FakeRegistry(
-        manual_plugin=manual_plugin, selenium_plugin=selenium_plugin
+        manual_plugin=manual_plugin, zen_plugin=zen_plugin
     )
 
     with patch("core.plugin_instance.get_cortex_registry", return_value=registry):
@@ -126,13 +126,13 @@ async def test_cortex_plugin_worker_task_waiting():
 
         mock_task.side_effect = task_completion
 
-        await load_plugin("selenium_chatgpt")
+        await load_plugin("zen_chatgpt")
 
         # Cleanup should have been called after waiting
         initial_plugin.cleanup.assert_called_once()
 
         # We must NOT force-cancel an ongoing worker task on hotswap timeouts —
-        # rely on the engine's own waiting logic instead (Selenium handles streaming)
+        # rely on the engine's own waiting logic instead (Zen handles streaming)
         mock_task.cancel.assert_not_called()
 
 
@@ -148,7 +148,7 @@ async def test_hotswap_raises_if_start_fails_when_ensured():
             raise Exception("startboom")
 
         mock_new_plugin = Mock()
-        mock_new_plugin.__class__.__module__ = "cortex.selenium_engine.selenium_chatgpt"
+        mock_new_plugin.__class__.__module__ = "cortex.zen_engine.zen_chatgpt"
         mock_new_plugin.start = failing_start
 
         mock_registry_instance.load_engine = Mock(return_value=mock_new_plugin)
@@ -157,5 +157,5 @@ async def test_hotswap_raises_if_start_fails_when_ensured():
         with pytest.raises(Exception):
             # ensure_started=True should await start and propagate
             await load_plugin(
-                "selenium_chatgpt", ensure_started=True, start_timeout=1.0
+                "zen_chatgpt", ensure_started=True, start_timeout=1.0
             )

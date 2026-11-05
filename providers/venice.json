@@ -1,0 +1,17 @@
+{
+  "provider_id": "venice",
+  "display_name": "Venice AI",
+  "description": "Privacy-first OpenAI-compatible API with text, vision, image and audio models (api.venice.ai)",
+  "icon": "venice",
+  "protocol": "openai",
+  "base_url": "https://api.venice.ai/api/v1",
+  "base_url_locked": true,
+  "requires_api_key": true,
+  "api_key_placeholder": "VENICE_API_KEY",
+  "api_key_hint": "Create a key at https://venice.ai/settings/api and paste it here.",
+  "default_capabilities": { "cortex": true, "vox": false, "auris": false, "live": false, "vision": true },
+  "suggested_name": "Venice",
+  "suggested_label": "Venice",
+  "extra_config": {},
+  "sort_order": 120
+}

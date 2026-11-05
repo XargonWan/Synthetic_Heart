@@ -63,6 +63,35 @@ def _is_thread_or_chat_not_found(error_message: str) -> bool:
     return "thread not found" in lowered or "chat not found" in lowered
 
 
+def _is_stale_reply_target(error_message: str) -> bool:
+    """True when ``reply_to_message_id`` points at a message Telegram cannot quote.
+
+    The original message may be missing/deleted (or the id may never have
+    existed — e.g. the model put the *chat* id in ``reply_to``), making the
+    reply reference permanently undeliverable. Like a stale thread id this is a
+    data problem, not a connectivity issue: no chat-wide cooldown must be set,
+    and ``send_with_thread_fallback`` retries without the reply reference.
+
+    Telegram's canonical wording is "Message to be replied not found", but the
+    same condition reaches us with other wordings, and an unmatched wording
+    used to escalate: the text was handed to the corrector and the user's reply
+    was lost entirely (live incident 2026-09-17 06:57Z). Any "repl..." +
+    "not found" pair counts. Kept deliberately narrow — unrelated BadRequests
+    such as "Message is too long" must keep raising.
+    """
+    lowered = (error_message or "").lower()
+    if "message to be replied not found" in lowered:
+        return True
+    return "not found" in lowered and "repl" in lowered
+
+
+def _is_stale_identifier_error(error_message: str) -> bool:
+    """True for any stale Telegram identifier (thread/chat/reply target)."""
+    return _is_thread_or_chat_not_found(error_message) or _is_stale_reply_target(
+        error_message
+    )
+
+
 def _get_telegram_trainer_id() -> int | None:
     """Resolve the Telegram trainer id from config for failure alerts."""
     try:
@@ -276,14 +305,15 @@ async def _send_with_retry(
                         int(seconds) if seconds else DEFAULT_COOLDOWN_SECONDS
                     )
                     _CHAT_COOLDOWNS[chat_id] = cooldown
-                elif isinstance(e, NetworkError) and not _is_thread_or_chat_not_found(
+                elif isinstance(e, NetworkError) and not _is_stale_identifier_error(
                     error_message
                 ):
                     # BadRequest is a NetworkError subclass in python-telegram-bot,
-                    # but "thread/chat not found" is a stale-id data problem, not a
-                    # connectivity issue — don't cooldown the whole chat for it, since
-                    # the caller (send_with_thread_fallback) retries immediately without
-                    # the thread and would otherwise walk straight into this cooldown.
+                    # but stale thread/chat/reply-target ids are data problems, not
+                    # connectivity issues — don't cooldown the whole chat for them,
+                    # since send_with_thread_fallback retries immediately without
+                    # the offending identifier and would otherwise walk straight
+                    # into this cooldown.
                     _CHAT_COOLDOWNS[chat_id] = time.time() + DEFAULT_COOLDOWN_SECONDS
             except Exception:
                 pass
@@ -318,7 +348,7 @@ async def _send_with_retry(
                             )
                         elif isinstance(
                             e2, NetworkError
-                        ) and not _is_thread_or_chat_not_found(str(e2)):
+                        ) and not _is_stale_identifier_error(str(e2)):
                             _CHAT_COOLDOWNS[chat_id] = (
                                 time.time() + DEFAULT_COOLDOWN_SECONDS
                             )
@@ -469,6 +499,53 @@ async def safe_edit(
         raise last_error
 
 
+def _record_stale_reply_drop(interface_path: str | None) -> None:
+    """Record a capability drop so Synth learns the reply target vanished.
+
+    Follows the established capability-drops pattern (core/capability_drops.py):
+    a structured record is remembered for this conversation and the prompt
+    engine renders it as an informational block on the NEXT turn, so Synth can
+    acknowledge the limitation in its own words. Never raises — notification
+    must never break delivery.
+    """
+    try:
+        if not interface_path:
+            return
+        from core.capability_drops import DROP_REPLY, make_drop, remember_drops
+
+        remember_drops(
+            interface_path,
+            [
+                make_drop(
+                    DROP_REPLY,
+                    "the replied-to message no longer exists on Telegram; "
+                    "your reply was delivered without the quote reference",
+                    "telegram",
+                )
+            ],
+        )
+        log_debug(
+            f"[telegram_utils] stale-reply capability drop recorded for {interface_path}"
+        )
+    except Exception as exc:
+        log_debug(f"[telegram_utils] stale-reply drop recording skipped: {exc}")
+
+
+def telegram_parse_mode_for(chat_id: int | str) -> str | None:
+    """Return the Telegram ``parse_mode`` to use when sending to *chat_id*.
+
+    Group and supergroup ids are negative, and a group is the only kind of chat
+    where another SyntH instance may be reading. Telegram consumes ``*action*``
+    markers as bold markup whenever a parse_mode is set, and the plain text the
+    peer instance receives then contains no markers at all, so each instance
+    remembered the other's physical actions as plain speech while keeping its
+    own. Measured 2026-09-27: a 1,579-character line carrying 6 asterisks
+    arrived at the peer as 1,573 characters with none. Private chats keep
+    Markdown, so ``*action*`` still renders as bold there.
+    """
+    return None if str(chat_id).startswith("-") else "Markdown"
+
+
 async def send_with_thread_fallback(
     bot,
     chat_id: int | str,
@@ -479,6 +556,7 @@ async def send_with_thread_fallback(
     fallback_chat_id: int | None = None,
     fallback_thread_id: int | None = None,
     fallback_reply_to_message_id: int | None = None,
+    interface_path: str | None = None,
     **kwargs,
 ) -> object | None:
     """Send a Telegram message with automatic thread fallback.
@@ -489,7 +567,25 @@ async def send_with_thread_fallback(
     provided ``thread_id`` and falls back to sending without it if the
     thread does not exist.  If ``fallback_chat_id`` is provided it will then try
     sending to that chat using the accompanying fallback parameters.
+
+    ``interface_path`` is optional routing metadata (never forwarded to the
+    Telegram API): when the reply target turns out to be deleted, a structured
+    capability drop is recorded under it so Synth learns about the degraded
+    delivery on its next turn.
     """
+    if interface_path is None:
+        # These helpers are Telegram-bound; synthesise the canonical path so
+        # every caller (e.g. scheduled events) still gets drop reporting.
+        try:
+            from core.interface_path_utils import build_interface_path
+
+            interface_path = build_interface_path(
+                "telegram_bot",
+                str(chat_id),
+                str(thread_id) if thread_id else None,
+            )
+        except Exception:
+            interface_path = f"telegram_bot/{chat_id}"
 
     global _BOT_NONE_WARNED, _LAST_BOT_NONE_LOG_TIME
     if bot is None:
@@ -552,77 +648,110 @@ async def send_with_thread_fallback(
     if reply_to_message_id is not None:
         send_kwargs["reply_to_message_id"] = reply_to_message_id
 
-    try:
-        log_debug(
-            f"[telegram_utils] send_with_thread_fallback calling cortex_response_send chat_id={chat_id} send_kwargs={send_kwargs}"
-        )
-        message = await cortex_response_send(
-            bot,
-            chat_id,
-            text,
-            **send_kwargs,
-        )
-        if message is not None:
-            log_info(
-                f"[telegram_utils] Message sent to {chat_id}"
-                f" (thread: {thread_id}, reply_message_id: {reply_to_message_id})"
-            )
-        else:
-            log_warning(
-                f"[telegram_utils] Message to {chat_id} queued/skipped due to cooldown or error"
-                f" (thread: {thread_id}, reply_message_id: {reply_to_message_id})"
-            )
-        log_debug(f"[telegram_utils] cortex_response_send returned: {repr(message)}")
-        return message
-    except Exception as e:
-        # On network/flood errors, set a cooldown for this chat
+    # Bounded degradation ladder: each rung strips one stale identifier and
+    # retries. A deleted/purged original message makes ``reply_to_message_id``
+    # permanently undeliverable ("Message to be replied not found") — the text
+    # must still go out, so the reply reference is dropped first (thread kept);
+    # a stale thread id is dropped on the next rung. Unknown errors are logged
+    # as ERROR and re-raised.
+    last_error: Exception | None = None
+    dropped_stale_reply = False
+    for _attempt in range(4):
         try:
-            if isinstance(e, RetryAfter):
-                seconds = getattr(e, "retry_after", None) or getattr(
-                    e, "retry_after_seconds", None
-                )
-                _CHAT_COOLDOWNS[chat_id] = time.time() + (
-                    int(seconds) if seconds else DEFAULT_COOLDOWN_SECONDS
-                )
-            elif isinstance(e, NetworkError):
-                _CHAT_COOLDOWNS[chat_id] = time.time() + DEFAULT_COOLDOWN_SECONDS
-        except Exception:
-            pass
-
-        error_message = str(e)
-        if "chat not found" in error_message.lower():
-            log_error(
-                f"[telegram_utils] send_with_thread_fallback caught error: {repr(e)}"
-            )
-            log_error(
-                f"[telegram_utils] Failed to send to {chat_id} (thread {thread_id}): {repr(e)}"
-            )
-            raise
-
-        if thread_id and "thread not found" in error_message.lower():
-            # Don't log as ERROR since this is expected behavior - thread fallback is normal
             log_debug(
-                f"[telegram_utils] send_with_thread_fallback caught thread error: {repr(e)}"
+                f"[telegram_utils] send_with_thread_fallback calling cortex_response_send chat_id={chat_id} send_kwargs={send_kwargs}"
             )
-            log_warning(
-                f"[telegram_utils] Thread {thread_id} not found; retrying without thread"
+            message = await cortex_response_send(
+                bot,
+                chat_id,
+                text,
+                **send_kwargs,
             )
-            send_kwargs.pop("message_thread_id", None)
-            message = await cortex_response_send(bot, chat_id, text, **send_kwargs)
             if message is not None:
-                log_info(f"[telegram_utils] Message sent to {chat_id} without thread")
-            else:
-                log_warning(
-                    f"[telegram_utils] Message to {chat_id} queued/failed (cooldown or other error)"
+                log_info(
+                    f"[telegram_utils] Message sent to {chat_id}"
+                    f" (thread: {thread_id}, reply_message_id: {reply_to_message_id})"
                 )
+            else:
+                # ``None`` means "not sent": the message was either queued on a
+                # chat cooldown or handled/blocked by the corrector. The old
+                # wording blamed a cooldown unconditionally, which hid a lost
+                # reply behind a queueing message (live 2026-09-21: no cooldown
+                # line existed anywhere in the log for either loss).
+                log_warning(
+                    f"[telegram_utils] Message to {chat_id} not sent (queued on "
+                    f"cooldown, handled by the corrector, or a failed send)"
+                    f" (thread: {thread_id}, reply_message_id: {reply_to_message_id})"
+                )
+            log_debug(
+                f"[telegram_utils] cortex_response_send returned: {repr(message)}"
+            )
+            if dropped_stale_reply:
+                _record_stale_reply_drop(interface_path)
             return message
+        except Exception as e:
+            last_error = e
+            # On network/flood errors, set a cooldown for this chat; stale
+            # identifiers are data problems handled by the ladder below.
+            try:
+                if isinstance(e, RetryAfter):
+                    seconds = getattr(e, "retry_after", None) or getattr(
+                        e, "retry_after_seconds", None
+                    )
+                    _CHAT_COOLDOWNS[chat_id] = time.time() + (
+                        int(seconds) if seconds else DEFAULT_COOLDOWN_SECONDS
+                    )
+                elif isinstance(e, NetworkError) and not _is_stale_identifier_error(
+                    str(e)
+                ):
+                    _CHAT_COOLDOWNS[chat_id] = time.time() + DEFAULT_COOLDOWN_SECONDS
+            except Exception:
+                pass
 
-        # Log as error for all other cases
-        log_error(f"[telegram_utils] send_with_thread_fallback caught error: {repr(e)}")
-        log_error(
-            f"[telegram_utils] Failed to send to {chat_id} (thread {thread_id}): {repr(e)}"
-        )
-        raise
+            error_message = str(e)
+            lowered = error_message.lower()
+            if "chat not found" in lowered:
+                log_error(
+                    f"[telegram_utils] send_with_thread_fallback caught error: {repr(e)}"
+                )
+                log_error(
+                    f"[telegram_utils] Failed to send to {chat_id} (thread {thread_id}): {repr(e)}"
+                )
+                raise
+
+            dropped: str | None = None
+            if (
+                _is_stale_reply_target(error_message)
+                and "reply_to_message_id" in send_kwargs
+            ):
+                send_kwargs.pop("reply_to_message_id")
+                dropped = "reply_to_message_id"
+                dropped_stale_reply = True
+                log_warning(
+                    "[telegram_utils] Reply target no longer exists; retrying without reply_to_message_id"
+                )
+            elif (
+                thread_id
+                and "thread not found" in lowered
+                and "message_thread_id" in send_kwargs
+            ):
+                send_kwargs.pop("message_thread_id")
+                dropped = "message_thread_id"
+                log_warning(
+                    f"[telegram_utils] Thread {thread_id} not found; retrying without thread"
+                )
+
+            if dropped is None:
+                log_error(
+                    f"[telegram_utils] send_with_thread_fallback caught error: {repr(e)}"
+                )
+                log_error(
+                    f"[telegram_utils] Failed to send to {chat_id} (thread {thread_id}): {repr(e)}"
+                )
+                raise
+    if last_error is not None:
+        raise last_error
+    return None
 
     if fallback_chat_id and fallback_chat_id != chat_id:
         fallback_kwargs = {**kwargs}
@@ -650,6 +779,104 @@ async def send_with_thread_fallback(
         except Exception as fallback_error:
             log_error(f"[telegram_utils] Final fallback failed: {fallback_error}")
     return None
+
+
+# Legacy display labels must never reach the corrector's prompt builders: they
+# map the interface through ``message_chain._INTERFACE_TO_MESSAGE_ACTION``,
+# whose keys are REGISTERED ids (``telegram_bot``). A display label misses that
+# lookup and falls through to ``message_<label>``, so the required-format
+# example taught the model the unregistered ``message_telegram`` plus a
+# malformed ``telegram/<id>`` path; the model copied both verbatim, the
+# corrected action was rejected and the reply was never delivered (live
+# 2026-09-21, langfuse feca9072-0abe-46ef-90da-f1409723088e).
+_INTERFACE_DISPLAY_ALIASES: dict[str, str] = {"telegram": "telegram_bot"}
+
+# Field names from the action schema. A REAL action envelope keeps its keys even
+# when its punctuation is mangled, so their presence is what separates broken
+# JSON from ordinary prose that merely opens with ``{``.
+_ACTION_ENVELOPE_KEYS: tuple[str, ...] = (
+    '"actions"',
+    "'actions'",
+    "actions:",
+    '"type"',
+    "'type'",
+    "type:",
+    '"payload"',
+    "'payload'",
+    "payload:",
+    '"action"',
+    "'action'",
+    "action:",
+)
+
+
+def _looks_like_action_envelope(text: str) -> bool:
+    """Whether unparseable text is a broken ACTION payload rather than a message.
+
+    A reply that opens with ``{`` is not automatically malformed JSON: this
+    persona writes physical actions in braces, so ``{the crack lands hard and I
+    buck forward...}`` and ``{I bounce, quick and filthy}`` are ordinary message
+    text. Treating that as broken JSON diverted the whole reply into the
+    corrector, which answered with an action instead of the text, so the reply
+    never reached the chat while every log line looked healthy (live
+    2026-09-21: langfuse feca9072-0abe-46ef-90da-f1409723088e and
+    b822895b-b87d-43f8-b535-2bbe9c3d31c7; last delivery to that chat 11:24:34).
+
+    Structural test only: the head must carry a JSON key or one of the action
+    schema's own field names. No natural-language matching.
+    """
+    head = text.lstrip()[:400].lower()
+    if not head.startswith(("{", "[")):
+        return False
+    return any(key in head for key in _ACTION_ENVELOPE_KEYS)
+
+
+async def _record_delivery_failure(
+    reason: str,
+    *,
+    chat_id: int | str | None,
+    interface_path: str | None,
+    kwargs: dict,
+    text: str | None,
+) -> None:
+    """Best-effort delivery failure record. Never raises, never blocks a send.
+
+    A reply that vanishes with no row anywhere is undiagnosable, which is exactly
+    how the two 2026-09-21 losses had to be reconstructed from traces plus logs.
+    """
+    try:
+        from core.llm_failure_log import build_failure_entry, record_failure_entry
+
+        entry = build_failure_entry(
+            reason=reason,
+            stage="delivery",
+            failure_code="delivery_failed",
+            interface_path=interface_path,
+            chat_id=chat_id,
+            thread_id=kwargs.get("thread_id") if isinstance(kwargs, dict) else None,
+            content_preview=(text or "")[:280],
+            metadata={"sender": "cortex_response_send"},
+        )
+        await record_failure_entry(entry)
+    except Exception as exc:
+        log_debug(f"[telegram_utils] delivery failure record skipped: {exc}")
+
+
+def _resolve_sender_interface_id(kwargs: dict) -> str:
+    """Registered interface id for a corrector context built by this sender.
+
+    Structural: the ``interface_path`` prefix when the caller supplied one
+    (normalising a legacy display label to its registered id), otherwise this
+    module's own interface — this module *is* the Telegram sender, so its id is
+    a known constant rather than something to guess.
+    """
+    for key in ("interface_path", "path"):
+        raw = kwargs.get(key)
+        if isinstance(raw, str) and raw.strip():
+            prefix = raw.strip().split("/")[0].strip()
+            if prefix:
+                return _INTERFACE_DISPLAY_ALIASES.get(prefix, prefix)
+    return "telegram_bot"
 
 
 async def cortex_response_send(
@@ -757,13 +984,15 @@ async def cortex_response_send(
         json_data = extract_json_from_text(text)
         if json_data:
             log_debug(f"[cortex_response_send] JSON parsed successfully: {json_data}")
-        elif text.lstrip().startswith(("{", "[")):
-            # Text genuinely starts with a JSON-like structure but failed to
-            # parse — route through the corrector to attempt recovery.
-            # NOTE: We intentionally do NOT match on braces *anywhere* in the
-            # text (e.g. emotion tags like ``{happy 10}`` or markdown) — only
-            # text that *starts* with ``{`` or ``[`` is treated as potential
-            # malformed JSON.
+        elif _looks_like_action_envelope(text):
+            # Text genuinely starts with a JSON-like structure AND carries
+            # action-schema keys, so it is a broken action payload — route
+            # through the corrector to attempt recovery.
+            # NOTE: we intentionally do NOT match on braces *anywhere* in the
+            # text (e.g. emotion tags like ``{happy 10}`` or markdown); the
+            # envelope check keeps it to text that *starts* with ``{``/``[`` AND
+            # looks like an action, because this persona writes physical actions
+            # in braces and a leading ``{`` alone is ordinary prose.
             log_debug(
                 f"[cortex_response_send] Text starts with JSON-like content but failed to parse: {text[:200]}..."
             )
@@ -779,9 +1008,14 @@ async def cortex_response_send(
                 message.date = datetime.utcnow()
                 message.from_cortex = True
 
-                current_interface = "telegram"
+                current_interface = _resolve_sender_interface_id(kwargs)
                 corrector_context = {
                     "interface": current_interface,
+                    # The structural path, so the corrector resolves the
+                    # interface from its prefix instead of trusting the label
+                    # above — which is what broke the routing example.
+                    "interface_path": kwargs.get("interface_path")
+                    or f"{current_interface}/{chat_id}",
                     "original_chat_id": chat_id,
                     "original_thread_id": kwargs.get("thread_id"),
                     "original_text": text[:500] if text else "",
@@ -798,10 +1032,30 @@ async def cortex_response_send(
                     log_debug(
                         "[cortex_response_send] corrector_orchestrator executed actions; not forwarding text"
                     )
+                    # The reply TEXT is not forwarded: delivery was delegated to
+                    # the corrected actions. Recorded so a missing "Message sent"
+                    # line is explainable instead of invisible.
+                    await _record_delivery_failure(
+                        "reply text not forwarded; delivery delegated to the "
+                        "corrector's corrected actions",
+                        chat_id=chat_id,
+                        interface_path=kwargs.get("interface_path")
+                        or f"{current_interface}/{chat_id}",
+                        kwargs=kwargs,
+                        text=text,
+                    )
                     return
                 elif orchestrator_result is False:
                     log_warning(
                         "[cortex_response_send] corrector_orchestrator blocked message"
+                    )
+                    await _record_delivery_failure(
+                        "corrector_orchestrator blocked the message",
+                        chat_id=chat_id,
+                        interface_path=kwargs.get("interface_path")
+                        or f"{current_interface}/{chat_id}",
+                        kwargs=kwargs,
+                        text=text,
                     )
                     return None
                 else:
@@ -810,10 +1064,27 @@ async def cortex_response_send(
                     log_warning(
                         "[cortex_response_send] corrector_orchestrator returned None on JSON-like text; blocking to prevent invalid send"
                     )
+                    await _record_delivery_failure(
+                        "corrector_orchestrator declined; blocked instead of "
+                        "sending unparseable JSON",
+                        chat_id=chat_id,
+                        interface_path=kwargs.get("interface_path")
+                        or f"{current_interface}/{chat_id}",
+                        kwargs=kwargs,
+                        text=text,
+                    )
                     return None
 
             except Exception as e:
                 log_debug(f"[cortex_response_send] corrector_orchestrator failed: {e}")
+                await _record_delivery_failure(
+                    f"corrector path raised {type(e).__name__}: {e}",
+                    chat_id=chat_id,
+                    interface_path=kwargs.get("interface_path")
+                    or f"{current_interface}/{chat_id}",
+                    kwargs=kwargs,
+                    text=text,
+                )
                 return None
         else:
             log_debug(
@@ -852,8 +1123,16 @@ async def cortex_response_send(
                     msg_obj.thread_id = kwargs.get("thread_id")
                     msg_obj.from_cortex = True
 
+                    # Same canonical-interface rule as the unparseable-JSON path
+                    # above: a legacy display label here made the correction's
+                    # routing example teach an unregistered action.
+                    _extra_keys_iface = _resolve_sender_interface_id(kwargs)
+                    _extra_keys_iface_path = kwargs.get("interface_path") or (
+                        f"{_extra_keys_iface}/{chat_id}"
+                    )
                     corr_ctx = {
-                        "interface": "telegram",
+                        "interface": _extra_keys_iface,
+                        "interface_path": _extra_keys_iface_path,
                         "original_chat_id": chat_id,
                         "original_thread_id": kwargs.get("thread_id"),
                         "original_text": text[:500] if text else "",
@@ -869,20 +1148,50 @@ async def cortex_response_send(
                             log_debug(
                                 "[cortex_response_send] corrector handled extra keys; not forwarding text"
                             )
+                            await _record_delivery_failure(
+                                "reply text not forwarded; delivery delegated to "
+                                "the corrector's corrected actions",
+                                chat_id=chat_id,
+                                interface_path=_extra_keys_iface_path,
+                                kwargs=kwargs,
+                                text=text,
+                            )
                             return
                         elif corr_res is False:
                             log_warning(
                                 "[cortex_response_send] corrector blocked message due to extra keys"
+                            )
+                            await _record_delivery_failure(
+                                "corrector_orchestrator blocked the message",
+                                chat_id=chat_id,
+                                interface_path=_extra_keys_iface_path,
+                                kwargs=kwargs,
+                                text=text,
                             )
                             return None
                         else:
                             log_warning(
                                 "[cortex_response_send] corrector declined; blocking message"
                             )
+                            await _record_delivery_failure(
+                                "corrector_orchestrator declined; blocked instead "
+                                "of sending unparseable JSON",
+                                chat_id=chat_id,
+                                interface_path=_extra_keys_iface_path,
+                                kwargs=kwargs,
+                                text=text,
+                            )
                             return None
                     except Exception as e:
                         log_warning(
                             f"[cortex_response_send] corrector invocation failed: {e}"
+                        )
+                        await _record_delivery_failure(
+                            f"corrector path raised {type(e).__name__}: {e}",
+                            chat_id=chat_id,
+                            interface_path=_extra_keys_iface_path,
+                            kwargs=kwargs,
+                            text=text,
                         )
                         return None
                 actions = json_data["actions"]
@@ -1025,11 +1334,16 @@ async def cortex_response_send(
         # Return the last sent message (if any) to allow callers to track trainer-side message ids
         return last_sent
     except Exception as e:
-        # Log as WARNING if it's a thread error (will be handled by fallback), ERROR otherwise
+        # Log as WARNING if it's a stale identifier (handled by the caller's
+        # fallback ladder), ERROR otherwise
         error_msg = str(e).lower()
-        if "thread not found" in error_msg or "message thread not found" in error_msg:
+        if (
+            "thread not found" in error_msg
+            or "message thread not found" in error_msg
+            or _is_stale_reply_target(error_msg)
+        ):
             log_warning(
-                f"[cortex_response_send] Thread error (will retry without thread): {repr(e)}"
+                f"[cortex_response_send] Stale identifier error (will retry without it): {repr(e)}"
             )
         else:
             log_error(f"[cortex_response_send] Failed to send text chunks: {repr(e)}")

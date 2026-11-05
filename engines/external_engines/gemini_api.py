@@ -1040,11 +1040,11 @@ class GeminiAPIPlugin(AIPluginBase):
         # Map interface to the correct message action type
         interface_to_action = {
             "synth_webui": "message_synth_webui",
-            "telegram_bot": "message_telegram_bot",
-            "discord_bot": "message_discord_bot",
-            "ollama_serve": "message_ollama_serve",
+            "telegram_bot": "send_message",
+            "discord_bot": "send_message",
+            "ollama_serve": "send_message",
         }
-        message_action = interface_to_action.get(interface, f"message_{interface}")
+        message_action = interface_to_action.get(interface, "send_message")
 
         is_grillo = interface == "grillo" or (
             isinstance(prompt_dict, dict) and prompt_dict.get("grillo_beat")
@@ -2027,11 +2027,11 @@ class GeminiAPIPlugin(AIPluginBase):
         # If still no interface, try to extract from action_type_hint
         if not interface:
             action_hint = system_message.get("action_type_hint", "")
-            if "message_telegram_bot" in action_hint:
+            if "send_message" in action_hint or "message_" in action_hint:
                 interface = "telegram_bot"
-            elif "message_discord_bot" in action_hint:
+            elif "discord" in action_hint:
                 interface = "discord_bot"
-            elif "message_synth_webui" in action_hint:
+            elif "synth_webui" in action_hint:
                 interface = "synth_webui"
             else:
                 interface = "synth_webui"  # Final fallback
@@ -2084,11 +2084,11 @@ Do NOT include any message_* actions.
         # Map interface to the correct message action type
         interface_to_action = {
             "synth_webui": "message_synth_webui",
-            "telegram_bot": "message_telegram_bot",
-            "discord_bot": "message_discord_bot",
-            "ollama_serve": "message_ollama_serve",
+            "telegram_bot": "send_message",
+            "discord_bot": "send_message",
+            "ollama_serve": "send_message",
         }
-        message_action = interface_to_action.get(interface, f"message_{interface}")
+        message_action = interface_to_action.get(interface, "send_message")
 
         # Build a focused correction prompt
         correction_prompt = f"CORRECTION REQUIRED\n\nError: {error_message}\n\n"

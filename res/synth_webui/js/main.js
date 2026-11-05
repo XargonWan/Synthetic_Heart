@@ -1332,6 +1332,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         return;
                     }
                     list.forEach((item) => {
+                        // Edited in its component pane, not a stored setting.
+                        if (item.ui_type === 'situational-notes') return;
                         const row = document.createElement('div');
                         row.className = 'config-row';
 
@@ -3272,14 +3274,14 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 modelPicker.style.display = 'none';
                             }
                         }
-                        const isSeleniumKind = String(kind || '').toLowerCase().includes('selenium');
+                        const isZenKind = String(kind || '').toLowerCase().includes('zen');
                         if (engineLoginBtn) {
-                            engineLoginBtn.style.display = isSeleniumKind ? '' : 'none';
+                            engineLoginBtn.style.display = isZenKind ? '' : 'none';
                             engineLoginBtn.disabled = !active || !active.loaded;
                             engineLoginBtn.textContent = active && active.logged_in ? 'Logged' : 'Login';
                         }
                         if (engineLoginWarning) {
-                            engineLoginWarning.style.display = isSeleniumKind ? 'block' : 'none';
+                            engineLoginWarning.style.display = isZenKind ? 'block' : 'none';
                         }
                         if (engineLoginWarningUrl) {
                             const loginUrl = active ? (active.login_url || active.service_url || '') : '';
@@ -3287,7 +3289,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         }
                         if (engineLoginWarningSelkies) {
                             engineLoginWarningSelkies.textContent = 'https://{host}:{port}';
-                            if (isSeleniumKind) {
+                            if (isZenKind) {
                                 resolveSelkiesLoginUrl().then((url) => {
                                     engineLoginWarningSelkies.textContent = url;
                                 }).catch(() => {});
@@ -3515,6 +3517,76 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             sel.disabled = !editable;
                             sel.addEventListener('change', () => saveCfg(sel.value, sel));
                             inputEl = sel;
+                        } else if (ci.ui_type === 'situational-notes') {
+                            // Live SOUL notes, not a config value: loaded from and
+                            // saved to /api/soul/situational-notes, never /api/config.
+                            const wrap = document.createElement('div');
+                            wrap.style.cssText = 'display:flex; flex-direction:column; gap:6px; max-width:900px; width:100%;';
+                            const ta = document.createElement('textarea');
+                            ta.rows = 10;
+                            ta.spellcheck = false;
+                            ta.style.cssText = 'width:100%; padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:6px; font-family:monospace; font-size:0.82rem; resize:vertical; white-space:pre; overflow-x:auto;';
+                            ta.value = 'Loading…';
+                            ta.disabled = true;
+                            const bar = document.createElement('div');
+                            bar.style.cssText = 'display:flex; align-items:center; gap:8px;';
+                            const saveBtn = document.createElement('button');
+                            saveBtn.type = 'button';
+                            saveBtn.textContent = 'Save';
+                            saveBtn.disabled = true;
+                            const reloadBtn = document.createElement('button');
+                            reloadBtn.type = 'button';
+                            reloadBtn.className = 'btn-ghost';
+                            reloadBtn.textContent = 'Reload';
+                            const status = document.createElement('span');
+                            status.className = 'meta';
+                            bar.appendChild(saveBtn);
+                            bar.appendChild(reloadBtn);
+                            bar.appendChild(status);
+                            wrap.appendChild(ta);
+                            wrap.appendChild(bar);
+
+                            const notesUrl = (window.__getApiBase ? window.__getApiBase() : '') + '/api/soul/situational-notes';
+                            const readError = async (r) => {
+                                try { const j = await r.json(); return j.detail || ('HTTP ' + r.status); } catch (e) { return 'HTTP ' + r.status; }
+                            };
+                            const loadNotes = async () => {
+                                ta.disabled = true; saveBtn.disabled = true;
+                                status.textContent = '';
+                                try {
+                                    const r = await fetch(notesUrl);
+                                    if (!r.ok) throw new Error(await readError(r));
+                                    const out = await r.json();
+                                    ta.value = out.text || '';
+                                    ta.disabled = false; saveBtn.disabled = false;
+                                } catch (e) {
+                                    ta.value = '';
+                                    status.textContent = 'Notes unavailable: ' + e.message;
+                                }
+                            };
+                            saveBtn.addEventListener('click', async () => {
+                                ta.disabled = true; saveBtn.disabled = true;
+                                try {
+                                    const r = await fetch(notesUrl, {
+                                        method: 'PUT',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ text: ta.value })
+                                    });
+                                    if (!r.ok) throw new Error(await readError(r));
+                                    const out = await r.json();
+                                    ta.value = out.text || '';
+                                    status.textContent = `Saved: ${out.added} added, ${out.updated} updated, ${out.removed} retired.`;
+                                    window.showToast && window.showToast('Situational notes saved', false);
+                                } catch (e) {
+                                    status.textContent = 'Not saved: ' + e.message;
+                                    window.showToast && window.showToast('Save failed: ' + e.message, true);
+                                } finally {
+                                    ta.disabled = false; saveBtn.disabled = false;
+                                }
+                            });
+                            reloadBtn.addEventListener('click', loadNotes);
+                            loadNotes();
+                            inputEl = wrap;
                         } else if (ci.ui_type === 'textarea' || (ci.value_type === 'json' && ci.ui_type !== 'tags')) {
                             const ta = document.createElement('textarea');
                             ta.rows = 3;
@@ -3706,7 +3778,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         return row;
                     };
 
-                    const renderDetailsList = (items, container) => {
+                    function renderDetailsList(items, container) {
                         container.innerHTML = '';
                         if (!items || !items.length) {
                             const empty = document.createElement('div');
@@ -3998,7 +4070,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                             container.appendChild(details);
                         });
-                    };
+                    }
 
                     // ── Two-column plugins renderer (banner list + detail pane) ────
                     // Minimal, dependency-free Markdown → HTML for guide.md content.
@@ -6598,6 +6670,275 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             }
                         });
                     }
+
+                    // ── Memory re-distillation ────────────────────────────────
+                    // Memories written before the distilling extractor existed hold
+                    // the session transcript instead of distilled knowledge. The
+                    // pass costs one model call per memory, so it runs in the
+                    // background on the server and this polls for progress.
+                    const redistilBtn = document.getElementById('redistil-memcells');
+                    const redistilStatus = document.getElementById('redistil-status');
+                    if (redistilBtn && !window.__synth_redistil_wired) {
+                        window.__synth_redistil_wired = true;
+                        const existingTimer = window.__synth_redistil_timer;
+                        if (existingTimer) {
+                            window.clearTimeout(existingTimer);
+                            window.__synth_redistil_timer = null;
+                        }
+
+                        const stillToDistil = (state) => (
+                            state && typeof state.pending === 'number' ? state.pending : null
+                        );
+
+                        // A pass that times out or fails has to SAY so. With a slow
+                        // engine (one driving a browser, or a large local model) the
+                        // counters can sit still for minutes, and silence there is
+                        // indistinguishable from a healthy run in progress.
+                        const REDISTIL_WARN = '#d08b2c';
+                        const redistilWarn = (state) => {
+                            const timedOut = (state && state.timed_out) || 0;
+                            const failed = (state && state.failed) || 0;
+                            if (!timedOut && !failed) return '';
+                            const seconds = (state && state.cell_timeout) || 0;
+                            const parts = [];
+                            if (timedOut) parts.push(`${timedOut} timed out after ${seconds}s each`);
+                            if (failed) parts.push(`${failed} failed`);
+                            const advice = timedOut
+                                ? ' Raise "Re-distil timeout per memory" for a slow engine, then press again: only the memories that were cut off are retried.'
+                                : ' Press again to retry just those.';
+                            return ` ${parts.join(' and ')}.${advice}`;
+                        };
+
+                        const paintRedistil = (state) => {
+                            if (!redistilStatus) return;
+                            const problems = ((state && state.timed_out) || 0)
+                                + ((state && state.failed) || 0);
+                            redistilStatus.style.color =
+                                (problems || (state && state.error)) ? REDISTIL_WARN : '';
+                            const pending = stillToDistil(state);
+                            const running = !!(state && state.running);
+                            redistilBtn.disabled = running;
+                            if (running) {
+                                const total = (state && state.total) || 0;
+                                const done = (state && state.inspected) || 0;
+                                const rewritten = (state && state.rewritten) || 0;
+                                const working = total
+                                    ? `Working: ${done} of ${total} memories checked, ${rewritten} rewritten…`
+                                    : 'Working: starting the pass…';
+                                redistilStatus.textContent = working + redistilWarn(state);
+                                return;
+                            }
+                            if (state && state.error) {
+                                redistilStatus.textContent = `Pass failed: ${state.error}`;
+                                return;
+                            }
+                            if (state && state.finished_at) {
+                                const unused = (state && state.skipped_unusable) || 0;
+                                const timedOut = (state && state.timed_out) || 0;
+                                const summary = `Last pass: ${state.rewritten || 0} rewritten, ${state.skipped || 0} left unchanged, ${state.failed || 0} failed${timedOut ? `, ${timedOut} timed out` : ''}.`;
+                                const saved = unused
+                                    ? ` ${unused} skipped as never recalled, so no model call was spent on them.`
+                                    : '';
+                                const tail = pending
+                                    ? `${summary}${saved} ${pending} still to distil.`
+                                    : `${summary}${saved}`;
+                                redistilStatus.textContent = tail + redistilWarn(state);
+                                if (pending === 0) redistilBtn.disabled = true;
+                                return;
+                            }
+                            const workable = state && typeof state.workable === 'number'
+                                ? state.workable
+                                : null;
+                            if (pending === null) {
+                                redistilStatus.textContent = 'Ready.';
+                            } else if (pending === 0) {
+                                redistilStatus.textContent = 'Every memory is already distilled.';
+                                redistilBtn.disabled = true;
+                            } else if (workable === 0) {
+                                redistilStatus.textContent = `${pending} memories are unstamped, but recall would never inject them, so there is nothing worth distilling.`;
+                                redistilBtn.disabled = true;
+                            } else if (workable === null) {
+                                redistilStatus.textContent = `${pending} memories still hold raw transcript. Press to distil.`;
+                            } else {
+                                redistilStatus.textContent = `${pending} memories still hold raw transcript. One press will distil ${workable} of them, one model call each.`;
+                            }
+                        };
+
+                        const pollRedistil = async () => {
+                            let state = null;
+                            try {
+                                const response = await fetch('/api/soul/redistil');
+                                const payload = await response.json().catch(() => ({}));
+                                if (response.ok && payload.success) state = payload;
+                                else if (redistilStatus) {
+                                    redistilStatus.textContent = 'Memory maintenance unavailable.';
+                                    return;
+                                }
+                            } catch (error) {
+                                if (redistilStatus) redistilStatus.textContent = 'Memory maintenance unavailable.';
+                                return;
+                            }
+                            paintRedistil(state);
+                            if (state && state.running) {
+                                window.__synth_redistil_timer = window.setTimeout(pollRedistil, 5000);
+                            }
+                        };
+
+                        const existingState = window.__synth_redistil_state;
+                        if (existingState) paintRedistil(existingState);
+                        pollRedistil();
+
+                        redistilBtn.addEventListener('click', async () => {
+                            redistilBtn.disabled = true;
+                            if (redistilStatus) redistilStatus.textContent = 'Starting…';
+                            try {
+                                const response = await fetch('/api/soul/redistil', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({}),
+                                });
+                                const payload = await response.json().catch(() => ({}));
+                                if (!response.ok || !payload.success) {
+                                    throw new Error(payload.detail || payload.error || `HTTP ${response.status}`);
+                                }
+                                if (payload.started === false && payload.reason === 'already_running') {
+                                    try { if (window.showToast) window.showToast('A re-distil pass is already running.', false); } catch (e) { /* ignore */ }
+                                } else {
+                                    try { if (window.showToast) window.showToast('Re-distilling memories in the background.', false); } catch (e) { /* ignore */ }
+                                }
+                                paintRedistil(payload);
+                                window.__synth_redistil_timer = window.setTimeout(pollRedistil, 3000);
+                            } catch (error) {
+                                const message = error && error.message ? error.message : 'Could not start the pass';
+                                if (redistilStatus) redistilStatus.textContent = `Could not start: ${message}`;
+                                try { if (window.showToast) window.showToast(`Re-distil failed to start: ${message}`, true); } catch (e) { /* ignore */ }
+                                redistilBtn.disabled = false;
+                            }
+                        });
+                    }
+                    // ── Memory compaction ─────────────────────────────────────
+                    // Grillo's nightly pass turns each past day of diary into one
+                    // memory. Running it by hand is how the pass gets checked without
+                    // waiting for the next night: one model call per eligible day, run
+                    // in the background on the server, so this polls for progress and
+                    // for the summary of what the pass actually did.
+                    const compactBtn = document.getElementById('run-compaction-now');
+                    const compactStatus = document.getElementById('compaction-status');
+                    if (compactBtn && !window.__synth_compaction_wired) {
+                        window.__synth_compaction_wired = true;
+                        if (window.__synth_compaction_timer) {
+                            window.clearTimeout(window.__synth_compaction_timer);
+                            window.__synth_compaction_timer = null;
+                        }
+
+                        const COMPACT_WARN = '#d08b2c';
+
+                        const compactPreviewLine = (state) => {
+                            const preview = (state && state.preview) || {};
+                            if (typeof preview.days !== 'number') return '';
+                            const considered = preview.days;
+                            const covered = typeof preview.covered === 'number' ? preview.covered : 0;
+                            const remaining = typeof preview.remaining === 'number'
+                                ? preview.remaining
+                                : Math.max(0, considered - covered);
+                            const stored = typeof preview.stored_days === 'number' ? preview.stored_days : null;
+                            if (!considered) {
+                                if (stored === 0) return 'No diary days are stored yet.';
+                                return stored === null
+                                    ? 'Nothing is old enough to compact yet.'
+                                    : `Nothing is old enough to compact yet (${stored} day(s) stored).`;
+                            }
+                            if (!remaining) {
+                                return `All ${considered} day(s) the pass would consider already have a memory, so it would spend no model calls.`;
+                            }
+                            return `${considered} day(s) to consider, ${covered} of them already compacted. A pass would summarise up to ${remaining}, one model call each.`;
+                        };
+
+                        const compactResultLine = (summary) => {
+                            if (!summary) return '';
+                            const parts = [`${summary.persisted || 0} day(s) summarised`];
+                            if (summary.left_unchanged) parts.push(`${summary.left_unchanged} left unchanged`);
+                            if (summary.skipped_covered) parts.push(`${summary.skipped_covered} skipped as already compacted`);
+                            if (summary.errors) parts.push(`${summary.errors} failed`);
+                            const calls = summary.model_calls || 0;
+                            return `Last pass: ${parts.join(', ')}, ${calls} model call(s).`;
+                        };
+
+                        const paintCompaction = (state) => {
+                            if (!compactStatus) return;
+                            const summary = state && state.summary;
+                            const problems = (summary && summary.errors) || 0;
+                            compactStatus.style.color =
+                                (problems || (state && state.error)) ? COMPACT_WARN : '';
+                            compactBtn.disabled = !!(state && state.running);
+                            if (state && state.running) {
+                                compactStatus.textContent = state.dry_run
+                                    ? 'Checking what the pass would do…'
+                                    : 'Running the nightly compaction now, one model call per day. This can take a few minutes…';
+                                return;
+                            }
+                            if (state && state.error) {
+                                compactStatus.textContent = `Pass failed: ${state.error}`;
+                                return;
+                            }
+                            if (summary) {
+                                compactStatus.textContent =
+                                    `${compactResultLine(summary)} ${compactPreviewLine(state)}`.trim();
+                                return;
+                            }
+                            compactStatus.textContent = compactPreviewLine(state) || 'Ready.';
+                        };
+
+                        const pollCompaction = async () => {
+                            let state = null;
+                            try {
+                                const response = await fetch('/api/grillo/compaction');
+                                const payload = await response.json().catch(() => ({}));
+                                if (response.ok && payload.success) state = payload;
+                                else if (compactStatus) {
+                                    compactStatus.textContent = 'Compaction status unavailable.';
+                                    return;
+                                }
+                            } catch (error) {
+                                if (compactStatus) compactStatus.textContent = 'Compaction status unavailable.';
+                                return;
+                            }
+                            paintCompaction(state);
+                            if (state && state.running) {
+                                window.__synth_compaction_timer = window.setTimeout(pollCompaction, 5000);
+                            }
+                        };
+
+                        compactBtn.addEventListener('click', async () => {
+                            compactBtn.disabled = true;
+                            if (compactStatus) compactStatus.textContent = 'Starting…';
+                            try {
+                                const response = await fetch('/api/grillo/compaction', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({}),
+                                });
+                                const payload = await response.json().catch(() => ({}));
+                                if (!response.ok || !payload.success) {
+                                    throw new Error(payload.detail || payload.error || `HTTP ${response.status}`);
+                                }
+                                if (payload.started === false && payload.reason === 'already_running') {
+                                    try { if (window.showToast) window.showToast('A compaction pass is already running.', false); } catch (e) { /* ignore */ }
+                                } else {
+                                    try { if (window.showToast) window.showToast('Running the nightly compaction now, in the background.', false); } catch (e) { /* ignore */ }
+                                }
+                                paintCompaction(payload);
+                                window.__synth_compaction_timer = window.setTimeout(pollCompaction, 3000);
+                            } catch (error) {
+                                const message = error && error.message ? error.message : 'Could not start the pass';
+                                if (compactStatus) compactStatus.textContent = `Could not start: ${message}`;
+                                try { if (window.showToast) window.showToast(`Compaction failed to start: ${message}`, true); } catch (e) { /* ignore */ }
+                                compactBtn.disabled = false;
+                            }
+                        });
+
+                        pollCompaction();
+                    }
                     initNotifications();
                     window.__synth_settings_initialized = true;
                 }
@@ -6909,7 +7250,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         listEl.innerHTML = '';
                         if (!models.length) {
                             const emptyMsg = sub === 'iris'
-                                ? 'Iris has no locally-managed models — vision runs through external endpoints only (e.g. selenium-llm-engine). Configure it in the External Engines section.'
+                                ? 'Iris has no locally-managed models — vision runs through external endpoints only (e.g. zen-llm-engine). Configure it in the External Engines section.'
                                 : 'No locally-managed models available for this subsystem.';
                             listEl.innerHTML = '<div class="meta">' + emptyMsg + '</div>';
                             return;

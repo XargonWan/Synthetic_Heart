@@ -596,7 +596,7 @@ class DebriefActionIntentPlugin:
                 '→ [{"type": "schedule_message", "payload": {"text": "...", "send_in": "1 day"}}]\n\n'
                 'User: "Check and let me know"\n'
                 f'{synth_name}: "Ok, I will check and let you know."\n'
-                '→ [{"type": "message_telegram_bot", "payload": {"text": "...", "interface_path": "..."}}]\n\n'
+                '→ [{"type": "send_message", "payload": {"text": "...", "interface_path": "..."}}]\n\n'
                 'User: "I need a reminder for the meeting"\n'
                 f'{synth_name}: "Perfect, I have set the reminder for the meeting."\n'
                 '→ [{"type": "schedule_message", "payload": {"text": "Meeting reminder", "send_in": "..."}}]\n\n'
@@ -666,7 +666,7 @@ class DebriefActionIntentPlugin:
                 timeout=120,
             )
         except Exception as e:
-            log_warning(f"[debrief_action_intent] LLM generation failed: {e}")
+            log_warning(f"[debrief_action_intent] LLM generation failed: {e!r}")
             return None
 
         action_types = set(minified_actions.keys())

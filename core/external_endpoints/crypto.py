@@ -4,8 +4,16 @@
 The encryption key is resolved in this order:
 1. ``SYNTH_SECRET_KEY`` environment variable (arbitrary string; derived via
    PBKDF2HMAC so the user does not need to supply a raw Fernet key).
-2. A persisted random key in ``/config/.synth_secret`` (auto-generated on
-   first use, survives container restarts via a mounted volume).
+2. ``SYNTH_SECRET_FILE``, when set.
+3. The resolved data root (``core.app_paths.data_root()``), which is where a
+   native install keeps it and where ``core.legacy_state`` adopts an existing
+   secret from an older, container-path-based run.
+4. The genuine container path ``/config/.synth_secret``.
+5. ``~/.synthetic_heart/.synth_secret`` as a last resort.
+
+Existing file wins over creating a new one at every step: a key must never be
+regenerated while an old one still exists, or the stored endpoint keys become
+undecryptable.
 
 Neither plain-text keys nor the raw Fernet key are ever stored in the DB.
 """
@@ -19,27 +27,40 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet
 
+from core.app_paths import data_root
+
 
 def _resolve_secret_file() -> Path:
-    """Resolve where the Fernet key should be persisted.
-
-    Priority:
-    1. ``SYNTH_SECRET_FILE`` environment override.
-    2. Container-style ``/config/.synth_secret`` when writable.
-    3. User-local fallback ``~/.synthetic_heart/.synth_secret`` for native runs.
-    """
+    """Resolve where the Fernet key is persisted (see the module docstring)."""
 
     override = os.environ.get("SYNTH_SECRET_FILE", "").strip()
     if override:
         return Path(override).expanduser()
 
-    container_path = Path("/config/.synth_secret")
+    home_path = Path.home() / ".synthetic_heart" / ".synth_secret"
+
+    # An order that always prefers an existing file. The container path is
+    # checked by existence rather than by writability: on Windows it is
+    # drive-relative ("\config"), so "can I create it?" is not the question.
+    candidates = [
+        data_root() / ".synth_secret",
+        Path("/config/.synth_secret"),
+        home_path,
+    ]
+
+    for candidate in candidates:
+        try:
+            if candidate.exists():
+                return candidate
+        except OSError:
+            continue
+
+    preferred = candidates[0]
     try:
-        container_path.parent.mkdir(parents=True, exist_ok=True)
-        return container_path
+        preferred.parent.mkdir(parents=True, exist_ok=True)
+        return preferred
     except OSError:
-        # Native/Windows fallback where /config is not writable.
-        return Path.home() / ".synthetic_heart" / ".synth_secret"
+        return home_path
 
 
 _SECRET_FILE = _resolve_secret_file()

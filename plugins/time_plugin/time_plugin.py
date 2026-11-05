@@ -1,8 +1,7 @@
-from datetime import datetime, timezone
+from datetime import datetime
 
 from core.time_zone_utils import (
     get_local_timezone,
-    format_dual_time,
     get_local_location,
 )
 from core.core_initializer import register_plugin
@@ -29,13 +28,19 @@ class TimePlugin:
         }
 
     def get_static_injection(self) -> dict:
+        # The prompt carries the household's own clock and nothing else. The
+        # dual local+UTC rendering (``format_dual_time``) is right where an
+        # operator compares two clocks, but in a prompt it hands the model a
+        # second clock and a zone name it can quote back at the user, and until
+        # an environment plugin publishes the house timezone it reads
+        # "21:05 UTC (21:05 UTC)". Bare local ``HH:MM`` is what the Reality
+        # Anchor renders as "10:52 PM".
         tz = get_local_timezone()
         now_local = datetime.now(tz)
-        now_utc = now_local.astimezone(timezone.utc)
         return {
             "location": get_local_location(),
             "date": now_local.strftime("%Y-%m-%d"),
-            "time": format_dual_time(now_utc),
+            "time": now_local.strftime("%H:%M"),
         }
 
 

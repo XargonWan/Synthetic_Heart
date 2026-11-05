@@ -1,7 +1,49 @@
 import asyncio
+import http.client
 import time
+import urllib.request
 from fastapi.testclient import TestClient
 import pytest
+
+
+@pytest.mark.asyncio
+async def test_fetch_weather_data_handles_remote_disconnected(monkeypatch):
+    """A mid-response connection reset from wttr.in (http.client.RemoteDisconnected)
+    must be retried and degrade gracefully, not fall through to the generic
+    except-Exception branch.
+
+    Regression guard: RemoteDisconnected is raised directly by
+    http.client.HTTPConnection.getresponse() and urllib.request never wraps it
+    in urllib.error.URLError, so it used to be caught only by the catch-all
+    handler and log a full ERROR traceback on every retry.
+    """
+    from plugins.weather_plugin import WeatherPlugin
+
+    plugin = WeatherPlugin()
+
+    captured_requests = []
+
+    def fake_urlopen(request, timeout=None):
+        captured_requests.append(request)
+        raise http.client.RemoteDisconnected(
+            "Remote end closed connection without response"
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    await plugin._fetch_weather_data()
+
+    # Other auto-registered WeatherPlugin instances may run their own
+    # background fetch concurrently against this same patched urlopen, so
+    # only the instance-scoped cache state (not a global call count) is a
+    # reliable assertion here — see test_weather_plugin_scheduler_starts
+    # above for the same reasoning.
+    assert plugin._cached_weather is not None
+    assert "connection reset" in plugin._cached_weather.lower()
+    assert captured_requests
+    # wttr.in rate-limits/resets requests carrying the default urllib UA, so
+    # every attempt must identify itself with a descriptive User-Agent.
+    assert all(req.get_header("User-agent") for req in captured_requests)
 
 
 @pytest.mark.asyncio

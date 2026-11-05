@@ -743,8 +743,8 @@ async def test_vox_plugin_dispatch_to_various_interfaces(monkeypatch, tmp_path):
             calls["discord_bot"] = payload
 
     class DummyTelegram:
-        async def execute_action(self, action, context, bot, original_message):
-            calls["telegram_bot"] = action
+        async def send_message(self, payload):
+            calls["telegram_bot"] = payload
 
     # Generic interface for fallback case
     class DummyGeneric:
@@ -786,7 +786,8 @@ async def test_vox_plugin_dispatch_to_various_interfaces(monkeypatch, tmp_path):
     )
     assert "discord_bot" in calls
     assert calls["discord_bot"]["interface_path"] == "discord_bot/1/2"
-    assert calls["discord_bot"]["audio"].endswith("test.wav")
+    assert calls["discord_bot"]["media"][0].endswith("test.wav")
+    assert calls["discord_bot"]["text"] == "yo"
 
     # telegram_bot branch
     await plugin._dispatch(
@@ -798,10 +799,15 @@ async def test_vox_plugin_dispatch_to_various_interfaces(monkeypatch, tmp_path):
         original_message=None,
     )
     assert "telegram_bot" in calls
-    assert calls["telegram_bot"]["type"] == "audio_telegram_bot"
-    assert calls["telegram_bot"]["payload"]["audio"].endswith("test.wav")
+    # Unified delivery: the audio rides in `media` with the caption in `text`.
+    # The legacy `audio_telegram_bot` action must NOT be used — it was deleted
+    # in the unified send_message refactor, so dispatching it silently dropped
+    # the voice note on Telegram.
+    assert calls["telegram_bot"]["interface_path"] == "telegram_bot/12345"
+    assert calls["telegram_bot"]["media"][0].endswith("test.wav")
+    assert calls["telegram_bot"]["text"] == "sup"
 
-    # generic fallback branch (mystery_bot)
+    # generic branch (mystery_bot): the same unified payload
     await plugin._dispatch(
         audio_path=audio_file,
         interface_path="mystery_bot/foo",
@@ -811,11 +817,10 @@ async def test_vox_plugin_dispatch_to_various_interfaces(monkeypatch, tmp_path):
         original_message=None,
     )
     assert "generic" in calls
-    # generic sends two messages: first with audio, second with text
     generic_calls = calls["generic"]
-    assert isinstance(generic_calls, list) and len(generic_calls) >= 2
-    assert generic_calls[0].get("audio", "").endswith("test.wav")
-    assert generic_calls[1].get("text") == "hey there"
+    assert len(generic_calls) == 1
+    assert generic_calls[0]["media"][0].endswith("test.wav")
+    assert generic_calls[0]["text"] == "hey there"
 
 
 # ---------------------------------------------------------------------------

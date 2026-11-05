@@ -13,7 +13,7 @@ Quick summary (for users)
   model, or agentic runtime) that produces responses and/or executes actions.
 - How to switch? — Use the Web UI **Components** page or the ``/cortex`` command.
 - Common kinds: ``llm`` (chat-style models), ``live`` (low-latency audio/video
-  sessions), ``agent`` (action-capable runtimes), and legacy Selenium-based
+  sessions), ``agent`` (action-capable runtimes), and legacy Zen-based
   drivers.
 
 User-facing notes
@@ -41,7 +41,7 @@ This section explains the Cortex types you can *use* and how to configure them
 from the Web UI (Components) — developer details belong in the Developer
 Guide (linked below).
 
-Selenium (browser-driven) — what & how
+Zen (browser-driven) — what & how
 -------------------------------------
 
 - What it is: a browser-automation connector that drives web UIs (ChatGPT,
@@ -50,13 +50,13 @@ Selenium (browser-driven) — what & how
   features.
 - Configure (user steps):
 
-  1. Open `Web UI → Components` and find the Selenium engine (examples:
-     ``selenium_chatgpt``, ``selenium_gemini``, ``selenium_grok``).
+  1. Open `Web UI → Components` and find the Zen engine (examples:
+     ``zen_chatgpt``, ``zen_gemini``, ``zen_grok``).
   2. Click **Enable**, then click **Login** and follow the displayed URL
      (the page shows a Selkies login URL such as ``https://{host}:{port}``).
   3. Complete the interactive browser login; the component will show
      **Logged** when done.
-- Do I need to login? Yes — Selenium cortexes require an interactive login
+- Do I need to login? Yes — Zen cortexes require an interactive login
   (no API key).
 - Common settings: model selectors like ``CHATGPT_MODEL`` or ``GEMINI_MODEL``
   can be edited in the component settings.
@@ -124,7 +124,7 @@ Quick FAQ
   non-developers). You can also set env vars in your deployment (``.env-dev``)
   for advanced setups.
 - Do I need API keys? — Depends on the Cortex: **Gemini API / Live** need
-  ``GEMINI_API_KEY``; **Selenium** needs an interactive login (no API key).
+  ``GEMINI_API_KEY``; **Zen** needs an interactive login (no API key).
 - How do I verify it works? — Components shows status (Loaded / Logged);
   ask the persona a question or run the Quickstart examples.
 

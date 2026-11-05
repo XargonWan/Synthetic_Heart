@@ -13,9 +13,10 @@ import base64
 import contextlib
 import copy
 import json
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from core.ai_plugin_base import AIPluginBase
+from core.external_endpoints import timeout_breaker
 from core.external_endpoints.models import EndpointProtocol
 from core.logging_utils import log_debug, log_warning
 
@@ -31,7 +32,7 @@ _LOCAL_MAX_TOKENS_DEFAULT = 4096
 
 # Hard downstream character budget for the fully assembled OpenAI-style messages
 # sent to an endpoint, enforced by ``_clamp_messages_to_char_budget``. Kept
-# safely below the ``selenium-llm-engine`` 32000-char chunking threshold so the
+# safely below the ``zen-llm-engine`` 32000-char chunking threshold so the
 # chunking path — and its "reply only OK" protocol contamination / empty-actions
 # garbling — is never triggered, regardless of how large the injected action
 # catalog is.
@@ -40,8 +41,8 @@ _LOCAL_MAX_TOKENS_DEFAULT = 4096
 # each message (``_message_content_len``), but the payload the endpoint actually
 # receives is the role-separated serialization of those messages, which is
 # meaningfully larger (role labels, JSON framing/escaping, chat-template glue).
-# Measured LIVE (2026-07-28) on the selenium-llm-engine: a content-sum clamped to
-# exactly 27000 chars produced a real selenium prompt of 32232 chars — i.e.
+# Measured LIVE (2026-07-28) on the zen-llm-engine: a content-sum clamped to
+# exactly 27000 chars produced a real zen prompt of 32232 chars — i.e.
 # ~5200 chars of serialization/template overhead — which STILL exceeded the
 # 32000 limit and triggered 2-part chunking (garbled request → empty
 # ``{"actions": []}`` → corrector loop → "😵" fallback). The overhead is far
@@ -898,14 +899,17 @@ class ExternalCortexEngine(AIPluginBase):
                 return
 
             # Drop message_* actions that belong to other interfaces — the
-            # model only needs the one matching its current interface.
+            # model only needs the one matching its current interface. The
+            # unified send_message is interface-agnostic and always kept.
             _rtx = getattr(prompt_request, "runtime_ctx", None)
             _iface: str = str(getattr(_rtx, "interface_name", "") or "").strip()
             if _iface:
                 names = {
                     n
                     for n in names
-                    if not n.startswith("message_") or n == f"message_{_iface}"
+                    if n == "send_message"
+                    or not n.startswith("message_")
+                    or n == f"message_{_iface}"
                 }
 
             # Drop animation/visual actions when no animation client is connected.
@@ -987,6 +991,17 @@ class ExternalCortexEngine(AIPluginBase):
             )
 
     @staticmethod
+    def _is_gateway_timeout(exc: Exception) -> bool:
+        """True for an HTTP 504/408 answer, i.e. the backend itself timed out."""
+        status = getattr(exc, "status_code", None)
+        if status is None:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status in (408, 504):
+            return True
+        msg = str(exc).lower()
+        return "gateway_timeout" in msg or "gateway timeout" in msg
+
+    @staticmethod
     def _is_retryable_exception(exc: Exception) -> bool:
         if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
             return True
@@ -1047,6 +1062,51 @@ class ExternalCortexEngine(AIPluginBase):
             )
         except Exception:
             return 1800.0
+
+    def _get_max_request_timeout(self) -> float:
+        """Hard ceiling for a caller-supplied request timeout.
+
+        A caller may pass its own budget (the debrief asks for 120 s, the agent
+        loop passes its per-call budget). Unbounded, such a budget re-introduces
+        the multi-minute wedge the per-endpoint cap exists to bound, so every
+        caller value is clamped to this. Raise ``LLM_MAX_REQUEST_TIMEOUT_SEC``
+        for a deliberately slow local engine.
+        """
+        try:
+            from core.config_manager import config_registry
+
+            return float(
+                config_registry.get_value(
+                    "LLM_MAX_REQUEST_TIMEOUT_SEC", 120, value_type=int
+                )
+            )
+        except Exception:
+            return 120.0
+
+    def _resolve_request_timeout(self, caller_timeout: Any = None) -> float:
+        """Resolve the timeout used for ONE request, guard included.
+
+        Precedence: the caller's own budget → per-endpoint
+        ``extra_config["timeout"]`` → ``LLM_GENERATION_TIMEOUT_SEC``. A caller
+        value is clamped to ``LLM_MAX_REQUEST_TIMEOUT_SEC``, and an unusable one
+        (zero, negative, non-numeric) falls back to the endpoint default.
+
+        Both the adapter kwarg and the ``asyncio.wait_for`` guard use the
+        returned value. Until this existed the guard always used the endpoint
+        default, so a caller that asked for MORE than the endpoint allowed was
+        silently cut at the endpoint's value (the debrief's 120 s became the
+        endpoint's cap).
+        """
+        fallback = self._get_request_timeout()
+        if caller_timeout is None:
+            return fallback
+        try:
+            value = float(caller_timeout)
+        except (TypeError, ValueError):
+            return fallback
+        if value <= 0:
+            return fallback
+        return max(1.0, min(value, self._get_max_request_timeout()))
 
     def _tool_api_kwargs(self, prompt: Any) -> dict[str, Any]:
         """Build adapter kwargs derived from a typed PromptRequest.
@@ -1284,12 +1344,35 @@ class ExternalCortexEngine(AIPluginBase):
         self._last_response_metadata = {}
         self._last_attempt_error = None
         max_retries, backoff = self._get_retry_settings()
-        request_timeout = self._get_request_timeout()
+        # A caller may bring its own budget (the debrief asks for 120 s, recon
+        # passes RECON_TIMEOUT). It is honoured up to the ceiling so the
+        # endpoint's default can no longer silently cut a caller that needs
+        # longer, while no caller can wedge a turn for minutes.
+        caller_timeout = extra_request_kwargs.get("timeout")
+        if caller_timeout is None:
+            caller_timeout = prompt_extra_kwargs.get("timeout")
+        request_timeout = self._resolve_request_timeout(caller_timeout)
         retry_on_timeout = self._retry_on_timeout()
         retry_on_empty = self._retry_on_empty()
+        breaker = timeout_breaker.get_breaker(self._endpoint.name)
         attempt = 0
         while True:
             attempt += 1
+            allowed, is_probe = breaker.acquire()
+            if not allowed:
+                self._last_attempt_error = (
+                    "TimeoutError: endpoint unresponsive (circuit open)"
+                )
+                raise TimeoutError(
+                    f"LLM endpoint '{self._endpoint.name}' is unresponsive after "
+                    f"{breaker.consecutive} consecutive timeouts; failing fast "
+                    f"(next probe in {breaker.retry_in():.0f}s)"
+                )
+            attempt_timeout = (
+                min(request_timeout, timeout_breaker.PROBE_TIMEOUT_SEC)
+                if is_probe
+                else request_timeout
+            )
             try:
                 extra_kwargs = self._extra_api_kwargs()
                 extra_kwargs.update(prompt_extra_kwargs)
@@ -1308,13 +1391,14 @@ class ExternalCortexEngine(AIPluginBase):
                 _eb = extra_kwargs.get("extra_body")
                 if isinstance(_eb, dict) and _eb.get("grammar"):
                     extra_kwargs.pop("response_format", None)
-                extra_kwargs.setdefault("timeout", request_timeout)
+                extra_kwargs["timeout"] = attempt_timeout
                 chat_resp = await asyncio.wait_for(
                     self._adapter.chat_completion(
                         msg_list, model=model, **extra_kwargs
                     ),
-                    timeout=request_timeout,
+                    timeout=attempt_timeout,
                 )
+                breaker.record_success()
                 response_content = chat_resp.content
                 adapter_response_metadata = getattr(
                     self._adapter,
@@ -1377,15 +1461,24 @@ class ExternalCortexEngine(AIPluginBase):
                         response_metadata[key] = value
                 self._last_response_metadata = response_metadata
                 return response_content
+            except asyncio.CancelledError:
+                if is_probe:
+                    breaker.release_probe()
+                raise
             except asyncio.TimeoutError:
+                breaker.record_timeout()
                 self._last_attempt_error = (
-                    f"TimeoutError: LLM request timed out after {request_timeout}s"
+                    f"TimeoutError: LLM request timed out after {attempt_timeout}s"
                 )
                 log_warning(
                     f"[cortex_bridge:{self._endpoint.name}] generate_response timed out "
-                    f"after {request_timeout}s (attempt {attempt}/{max_retries})"
+                    f"after {attempt_timeout}s (attempt {attempt}/{max_retries})"
                 )
-                should_retry = retry_on_timeout and attempt < max_retries
+                # An open circuit means the backend is wedged: retrying would
+                # only wait out another full timeout.
+                should_retry = (
+                    retry_on_timeout and attempt < max_retries and not breaker.is_open
+                )
                 if should_retry:
                     delay = backoff * (2 ** (attempt - 1))
                     log_warning(
@@ -1394,10 +1487,33 @@ class ExternalCortexEngine(AIPluginBase):
                     await asyncio.sleep(delay)
                     continue
                 raise TimeoutError(
-                    f"LLM request timed out after {request_timeout}s "
-                    f"and {max_retries} retry attempts"
+                    f"LLM request timed out after {attempt_timeout}s "
+                    f"and {attempt} attempt(s)"
                 )
             except Exception as exc:
+                if self._is_gateway_timeout(exc):
+                    # The backend answered "my inference did not finish in time":
+                    # a timeout in everything but the exception type, so it must
+                    # open the circuit and obey retry_on_timeout. Counted as a
+                    # generic error it was retried three times at the full
+                    # gateway timeout each (~6 min), stalling the message queue.
+                    breaker.record_timeout()
+                    self._last_attempt_error = f"{type(exc).__name__}: {exc}"
+                    log_warning(
+                        f"[cortex_bridge:{self._endpoint.name}] gateway timeout "
+                        f"(attempt {attempt}/{max_retries}): {exc}"
+                    )
+                    if (
+                        retry_on_timeout
+                        and attempt < max_retries
+                        and not breaker.is_open
+                    ):
+                        delay = backoff * (2 ** (attempt - 1))
+                        await asyncio.sleep(delay)
+                        continue
+                    raise
+                if is_probe:
+                    breaker.release_probe()
                 self._last_attempt_error = f"{type(exc).__name__}: {exc}"
                 should_retry = attempt < max_retries and self._is_retryable_exception(
                     exc
@@ -1720,6 +1836,12 @@ class ExternalCortexEngine(AIPluginBase):
         that salience for ordinary JSON-protocol turns. Native-tool turns
         declare the contract via tools (``supports_tool_calling`` True) and are
         skipped.
+
+        A multimodal turn carries its current turn as a content-part list
+        (``image_url`` / ``input_audio`` / ``text``) rather than a plain string,
+        so the reminder goes on the trailing text part of that list — otherwise
+        an image turn loses the format anchor the text path gets and answers in
+        prose, forcing a correction round-trip on every picture.
         """
         try:
             if getattr(prompt, "supports_tool_calling", True):
@@ -1729,9 +1851,19 @@ class ExternalCortexEngine(AIPluginBase):
             last = messages[-1]
             if not isinstance(last, dict) or last.get("role") != "user":
                 return
-            content = last.get("content")
+            content: Any = last.get("content")
             if isinstance(content, str):
                 last["content"] = content + _JSON_FORMAT_REMINDER
+            elif isinstance(content, list):
+                parts: list[Any] = content
+                for raw_part in reversed(parts):
+                    if not isinstance(raw_part, dict):
+                        continue
+                    part = cast("dict[str, Any]", raw_part)
+                    if part.get("type") == "text" and isinstance(part.get("text"), str):
+                        part["text"] = part["text"] + _JSON_FORMAT_REMINDER
+                        return
+                parts.append({"type": "text", "text": _JSON_FORMAT_REMINDER.lstrip()})
         except Exception as exc:
             log_debug(f"[cortex_bridge] format reminder skip: {exc}")
 

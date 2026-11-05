@@ -20,14 +20,14 @@ tool selection and execution are handled centrally by the unified tool registry
 and the agent tool executor (see :doc:`agentic_tools`), not by per-engine
 methods.
 
-Selenium Plugin Architecture
+Zen Plugin Architecture
 -----------------------------
 
-The Selenium-based LLM engines follow a standardized architecture to minimize code duplication and ensure consistent behavior across different browser-based services like ChatGPT, Grok, and Gemini.
+The Zen-based LLM engines follow a standardized architecture to minimize code duplication and ensure consistent behavior across different browser-based services like ChatGPT, Grok, and Gemini.
 
 **Core Design**
 
-The architecture is built around a shared base class ``SeleniumLLMBase`` that handles common functionality:
+The architecture is built around a shared base class ``ZenLLMBase`` that handles common functionality:
 
 - **Driver Management**: Centralized browser driver lifecycle and configuration
 - **Workflow Standardization**: Consistent prompt sending and response waiting logic
@@ -36,7 +36,7 @@ The architecture is built around a shared base class ``SeleniumLLMBase`` that ha
 
 **Standardized Methods**
 
-All Selenium engines inherit these core methods from ``SeleniumLLMBase``:
+All Zen engines inherit these core methods from ``ZenLLMBase``:
 
 +------------------+------------------------------------------------+-----------------+
 | Method           | Purpose                                        | Override?       |
@@ -63,18 +63,18 @@ The base class implements a robust response extraction system:
 3. **Text Extraction**: Try ``.text`` first, fallback to ``textContent`` attribute
 4. **Stabilization**: Wait for response text to stop changing before returning
 
-**Adding New Selenium Engines**
+**Adding New Zen Engines**
 
 To add support for a new browser-based LLM service:
 
-1. **Create Plugin File**: Extend ``SeleniumLLMBase`` in ``llm_engines/``
+1. **Create Plugin File**: Extend ``ZenLLMBase`` in ``llm_engines/``
 2. **Implement Required Methods**: Provide service-specific selectors and logic
 3. **Define Response Selectors**: Return CSS selectors for response extraction
 4. **Test Integration**: Verify with real service and adjust selectors as needed
 
 **Response Choice Handling**
 
-Some LLM services (like ChatGPT) offer users multiple response versions. The Selenium architecture automatically handles this:
+Some LLM services (like ChatGPT) offer users multiple response versions. The Zen architecture automatically handles this:
 
 - **Automatic Detection**: Checks for choice buttons using service-specific selectors
 - **First Choice Selection**: Automatically selects the first available option
@@ -85,10 +85,10 @@ Some LLM services (like ChatGPT) offer users multiple response versions. The Sel
 
 .. code-block:: python
 
-   from core.selenium_llm_base import SeleniumLLMBase
+   from core.zen_llm_base import ZenLLMBase
    
-   class SeleniumGrokPlugin(SeleniumLLMBase):
-       display_name = "Selenium Grok"
+   class ZenGrokPlugin(ZenLLMBase):
+       display_name = "Zen Grok"
        
        def __init__(self, notify_fn=None):
            grok_config = {
@@ -109,7 +109,7 @@ Some LLM services (like ChatGPT) offer users multiple response versions. The Sel
 Authentication and Guest Mode
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Selenium-based LLM plugins can function in guest mode (without user authentication), but this comes with limitations:
+Zen-based LLM plugins can function in guest mode (without user authentication), but this comes with limitations:
 
 - **Character Limits**: Guest mode typically has significantly reduced character limits compared to authenticated sessions, making SyntH appear less intelligent due to truncated prompts and responses
 - **Recommended Setup**: Use a logged-in account through the webui (``http://<host>:5006``) for full functionality and higher character limits
@@ -124,15 +124,15 @@ Available Engines
 
 **Stable Engines:**
 
-* ``selenium_chatgpt_legacy`` – Legacy version of the ChatGPT Selenium engine. For backward compatibility only; consider migrating to the standardized ``selenium_chatgpt`` engine.
+* ``zen_chatgpt_legacy`` – Legacy version of the ChatGPT Zen engine. For backward compatibility only; consider migrating to the standardized ``zen_chatgpt`` engine.
 
-**Standardized Selenium Engines:**
+**Standardized Zen Engines:**
 
-All Selenium-based LLM engines now follow a consistent architecture for reliability and maintainability:
+All Zen-based LLM engines now follow a consistent architecture for reliability and maintainability:
 
-* ``selenium_chatgpt`` – Drive a browser-based ChatGPT session. Supports GPT-4, GPT-3.5-Turbo, and other OpenAI models with automatic response choice handling and large prompt support (up to 100k characters).
-* ``selenium_grok`` – Browser-controlled xAI Grok with 128k token context window. Supports Grok and Grok Vision models for advanced reasoning and vision capabilities.
-* ``selenium_gemini`` – Browser-controlled Google Gemini with multiple model support (Gemini 2.5 Flash, 1.5 Pro). Supports up to 500k characters for Pro models with multimodal capabilities.
+* ``zen_chatgpt`` – Drive a browser-based ChatGPT session. Supports GPT-4, GPT-3.5-Turbo, and other OpenAI models with automatic response choice handling and large prompt support (up to 100k characters).
+* ``zen_grok`` – Browser-controlled xAI Grok with 128k token context window. Supports Grok and Grok Vision models for advanced reasoning and vision capabilities.
+* ``zen_gemini`` – Browser-controlled Google Gemini with multiple model support (Gemini 2.5 Flash, 1.5 Pro). Supports up to 500k characters for Pro models with multimodal capabilities.
 
 **Other Engines:**
 
@@ -148,13 +148,13 @@ The ``manual`` engine forwards all prompts to a human trainer instead of an AI m
 - **No Configuration**: Works immediately without API keys or external dependencies
 - **Trainer Feedback**: Responses are sent back through the normal message flow
 
-Selenium ChatGPT Engine
+Zen ChatGPT Engine
 -----------------------
 
-The ``selenium_chatgpt`` engine controls a real ChatGPT browser session using the standardized Selenium architecture:
+The ``zen_chatgpt`` engine controls a real ChatGPT browser session using the standardized Zen architecture:
 
-- **Standardized Architecture**: Built on ``SeleniumLLMBase`` for consistent behavior across all Selenium engines
-- **Full Browser Control**: Uses Selenium to interact with ChatGPT web interface
+- **Standardized Architecture**: Built on ``ZenLLMBase`` for consistent behavior across all Zen engines
+- **Full Browser Control**: Uses Zen to interact with ChatGPT web interface
 - **Response Choice Handling**: Automatically selects first response when ChatGPT offers multiple options
 - **Enhanced Prompt Limits**: Supports prompts up to 128,000 characters
 - **Captcha Handling**: Manual intervention required for initial setup and captchas
@@ -201,16 +201,16 @@ The engine uses these CSS selectors for response extraction (tried in order):
 - **Choice Handling**: Check logs for "Checking for response choice buttons" messages
 - **Login Issues**: Ensure the browser window at ``http://<host>:5006`` has completed login
 
-Selenium Gemini Engine
+Zen Gemini Engine
 ----------------------
 
-The ``selenium_gemini`` engine controls a Google Gemini browser session using the standardized Selenium architecture:
+The ``zen_gemini`` engine controls a Google Gemini browser session using the standardized Zen architecture:
 
-- **Standardized Architecture**: Built on ``SeleniumLLMBase`` for consistent behavior
+- **Standardized Architecture**: Built on ``ZenLLMBase`` for consistent behavior
 - **Model Support**: Gemini 2.5 Flash, 2.0 Flash, 1.5 Flash, 1.5 Pro with automatic limit detection
 - **Multimodal**: Supports image inputs and analysis
 - **Character Limits**: Up to 500k characters for Pro models
-- **Browser Control**: Uses Selenium for web interface interaction
+- **Browser Control**: Uses Zen for web interface interaction
 - **Response Extraction**: Robust selector-based text extraction
 
 **Configuration:**
@@ -223,18 +223,18 @@ The ``selenium_gemini`` engine controls a Google Gemini browser session using th
 
 1. Access ``http://<host>:5006`` to sign in to your Google account
 2. Complete any authentication challenges
-3. Switch to this engine with ``/cortex selenium_gemini`` (deprecated alias: ``/llm selenium_gemini``)
+3. Switch to this engine with ``/cortex zen_gemini`` (deprecated alias: ``/llm zen_gemini``)
 
-Selenium Grok Engine
+Zen Grok Engine
 --------------------
 
-The ``selenium_grok`` engine controls an xAI Grok browser session using the standardized Selenium architecture:
+The ``zen_grok`` engine controls an xAI Grok browser session using the standardized Zen architecture:
 
-- **Standardized Architecture**: Built on ``SeleniumLLMBase`` for consistent behavior
+- **Standardized Architecture**: Built on ``ZenLLMBase`` for consistent behavior
 - **Advanced Reasoning**: Access to Grok's reasoning capabilities
 - **Vision Support**: Grok Vision Beta for image analysis
 - **Large Context**: Up to 128k tokens context window
-- **Browser-Based**: Selenium-driven interaction with web interface
+- **Browser-Based**: Zen-driven interaction with web interface
 - **Response Extraction**: Robust selector-based text extraction
 
 **Configuration:**
@@ -247,7 +247,7 @@ The ``selenium_grok`` engine controls an xAI Grok browser session using the stan
 
 1. Access ``http://<host>:5006`` to log in to X/Grok
 2. Complete login and any authentication challenges
-3. Switch to this engine with ``/cortex selenium_grok`` (deprecated alias: ``/llm selenium_grok``)
+3. Switch to this engine with ``/cortex zen_grok`` (deprecated alias: ``/llm zen_grok``)
 
 Engine Registration and Discovery
 ---------------------------------
@@ -319,17 +319,17 @@ Creating a new LLM engine requires extending ``AIPluginBase`` and implementing t
    # Required: Export the engine class
    PLUGIN_CLASS = MyEngine
 
-Developing Selenium Engines
+Developing Zen Engines
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-For browser-based LLM services, extend ``SeleniumLLMBase`` instead of ``AIPluginBase``:
+For browser-based LLM services, extend ``ZenLLMBase`` instead of ``AIPluginBase``:
 
 .. code-block:: python
 
-   from core.selenium_llm_base import SeleniumLLMBase
+   from core.zen_llm_base import ZenLLMBase
    
-   class SeleniumMyService(SeleniumLLMBase):
-       display_name = "Selenium MyService"
+   class ZenMyService(ZenLLMBase):
+       display_name = "Zen MyService"
        
        def __init__(self, notify_fn=None):
            config = {
@@ -377,7 +377,7 @@ If your service offers multiple response options, override ``_get_response_choic
            "div.options button:first-child",  # Fallback
        ]
 
-**Testing Selenium Engines:**
+**Testing Zen Engines:**
 
 1. **Manual Testing**: Run container in non-headless mode to observe browser interaction
 2. **Selector Testing**: Check logs for "Trying response selector" messages
@@ -442,7 +442,7 @@ Best Practices
 **Security**
     Never log API keys or sensitive authentication data.
 
-**Selenium-Specific Best Practices:**
+**Zen-Specific Best Practices:**
 
 **Selector Robustness**
     Provide multiple CSS selectors with fallbacks for response extraction.
@@ -459,21 +459,21 @@ Best Practices
 **Login State Management**
     Regularly verify authentication status and handle re-authentication gracefully.
 
-For complete examples, examine ``llm_engines/selenium_chatgpt.py`` (standardized architecture), ``llm_engines/selenium_gemini.py``, or ``llm_engines/selenium_grok.py`` in the repository.
+For complete examples, examine ``llm_engines/zen_chatgpt.py`` (standardized architecture), ``llm_engines/zen_gemini.py``, or ``llm_engines/zen_grok.py`` in the repository.
 
-Tutorial: Creating a New Selenium LLM Plugin
+Tutorial: Creating a New Zen LLM Plugin
 ==============================================
 
-This tutorial walks through creating a new Selenium-based LLM plugin from scratch, using the standardized ``SeleniumLLMBase`` architecture. We'll create a plugin for a hypothetical service called "MyLLM".
+This tutorial walks through creating a new Zen-based LLM plugin from scratch, using the standardized ``ZenLLMBase`` architecture. We'll create a plugin for a hypothetical service called "MyLLM".
 
 Step 1: Create the Plugin File
 -------------------------------
 
-Create a new file ``llm_engines/selenium_myllm.py``:
+Create a new file ``llm_engines/zen_myllm.py``:
 
 .. code-block:: python
 
-   from core.selenium_llm_base import SeleniumLLMBase
+   from core.zen_llm_base import ZenLLMBase
    
    # Configuration constants
    SERVICE_URL = "https://myllm.example.com"
@@ -488,8 +488,8 @@ Create a new file ``llm_engines/selenium_myllm.py``:
        "default": 50000
    }
    
-   class SeleniumMyLLMPlugin(SeleniumLLMBase):
-       display_name = "Selenium MyLLM"
+   class ZenMyLLMPlugin(ZenLLMBase):
+       display_name = "Zen MyLLM"
        
        def __init__(self, notify_fn=None):
            """Initialize the MyLLM plugin."""
@@ -590,7 +590,7 @@ Create a new file ``llm_engines/selenium_myllm.py``:
            ]
    
    # Required: Export the plugin class
-   PLUGIN_CLASS = SeleniumMyLLMPlugin
+   PLUGIN_CLASS = ZenMyLLMPlugin
 
 Step 2: Implement Service-Specific Logic
 -----------------------------------------
@@ -633,7 +633,7 @@ Override methods as needed for your service:
 Web UI: Login flow endpoint
 ---------------------------
 
-The Web UI provides an API to initiate an interactive login flow for Selenium-based
+The Web UI provides an API to initiate an interactive login flow for Zen-based
 LLM engines. This is intended to start a browser session (Selkies/Chromium) so a
 user can authenticate via the service's web interface.
 
@@ -643,18 +643,18 @@ Endpoint:
 
 Request JSON:
 
-``{ "name": "selenium_chatgpt" }``
+``{ "name": "zen_chatgpt" }``
 
 Typical success response (acknowledgement, non-blocking):
 
-``{ "status": "ok", "name": "selenium_chatgpt", "action": "started", "logged_in": false }``
+``{ "status": "ok", "name": "zen_chatgpt", "action": "started", "logged_in": false }``
 
 Notes:
 
 - The login flow is started asynchronously and the endpoint returns immediately.
 - Selkies availability is checked as a best-effort; absence does not prevent
     the flow from proceeding where possible, but a helpful error will be returned
-    if the engine is not Selenium-based or not loaded.
+    if the engine is not Zen-based or not loaded.
 - The client (Web UI) may poll ``GET /api/components`` to detect updates to
     the engine's ``login_state`` and ``logged_in`` fields.
 
@@ -702,7 +702,7 @@ Step 4: Test the Plugin
 
    .. code-block:: text
 
-      /llm selenium_myllm
+      /llm zen_myllm
 
 3. **Monitor logs for selector attempts:**
 
@@ -735,9 +735,9 @@ The base class logs selector attempts. Check logs for:
 
 .. code-block:: text
 
-   [selenium_base] Trying prompt selector: textarea#specific-id
-   [selenium_base] Found prompt area with selector: textarea#specific-id
-   [selenium_base] Trying response selector: div.assistant-message
+   [zen_base] Trying prompt selector: textarea#specific-id
+   [zen_base] Found prompt area with selector: textarea#specific-id
+   [zen_base] Trying response selector: div.assistant-message
 
 **Browser Inspection:**
 
@@ -747,7 +747,7 @@ Run in non-headless mode to inspect elements:
 
    # In docker-compose-dev.yml, set headless: false temporarily
    environment:
-     - SELENIUM_HEADLESS=false
+      - ZEN_HEADLESS=false
 
 Step 6: Add Configuration Variables
 ------------------------------------
@@ -763,7 +763,7 @@ Add configuration variables in ``core/config.py`` or use the web UI:
        label="MyLLM Model",
        description="Default model for MyLLM service",
        group="llm",
-       component="selenium_myllm"
+       component="zen_myllm"
    )
 
 Step 7: Document the Plugin
@@ -775,15 +775,15 @@ Update this documentation file to include your new plugin in the "Available Engi
 
 .. code-block:: rst
 
-   Selenium MyLLM Engine
+   Zen MyLLM Engine
    ---------------------
 
-   The ``selenium_myllm`` engine controls a MyLLM browser session:
+   The ``zen_myllm`` engine controls a MyLLM browser session:
 
-   - **Standardized Architecture**: Built on ``SeleniumLLMBase``
+   - **Standardized Architecture**: Built on ``ZenLLMBase``
    - **Model Support**: Standard, Premium, and Enterprise models
    - **Character Limits**: Up to 1M characters for Enterprise
-   - **Browser Control**: Selenium-driven web interface interaction
+   - **Browser Control**: Zen-driven web interface interaction
 
    Configuration:
 

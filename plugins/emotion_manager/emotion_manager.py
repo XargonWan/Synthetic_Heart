@@ -230,6 +230,7 @@ class EmotionManager(PluginBase):
     def __init__(self, config=None):
         super().__init__(config)
         self._decay_threshold = 0.1  # Emotions below this are removed
+        self._decay_task: Optional["asyncio.Task[None]"] = None
 
     def get_metadata(self) -> dict:
         """Return declarative plugin metadata (see PluginBase.get_metadata)."""
@@ -363,8 +364,22 @@ class EmotionManager(PluginBase):
         # Sync once at startup
         await self.sync_emotions_from_all_sources()
 
-        # Start background decay loop
-        asyncio.create_task(self._decay_loop())
+        # Start background decay loop. The handle is kept: asyncio only holds
+        # tasks weakly (a dropped one can be garbage-collected mid-run), and a
+        # second start() must not leave two loops decaying the same emotions.
+        if self._decay_task is not None and not self._decay_task.done():
+            self._decay_task.cancel()
+        self._decay_task = asyncio.create_task(self._decay_loop())
+
+    async def stop(self) -> None:
+        """Cancel the background decay loop."""
+        task, self._decay_task = self._decay_task, None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     async def _decay_loop(self):
         """Background loop to decay emotions periodically."""

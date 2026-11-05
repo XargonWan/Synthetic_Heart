@@ -17,6 +17,15 @@ weighted-selects a beat type and asks the matching beat sub-plugin to build a
 prompt. Beat sub-plugins are discovered dynamically through the plugin
 registry — adding a new one is enough to make it available.
 
+The plugin is started more than once during boot (the loader's async queue, then
+`CoreInitializer`'s explicit start), so `start()` is a once-per-process job:
+after the first call it returns immediately. Beat discovery, the beat scheduler
+and the LLM-failure recovery loop all live above that guard, because building any
+of them a second time duplicates work — four unguarded startup runs used to build
+four recovery loops and recover one failed turn four times. The plugin class is
+also loaded from two module files (this one and the `plugins/grillo_plugin.py`
+shim), which the loader now collapses to a single instance.
+
 ## Beat types
 
 Each beat sub-plugin lives in its own sub-folder under `plugins/grillo/` with a

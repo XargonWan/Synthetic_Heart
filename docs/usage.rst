@@ -10,7 +10,7 @@ Usage Overview
 synth operates as a modular AI persona with multiple LLM backends. You can
 switch engines on the fly using the ``/cortex`` command in your preferred chat
 platform. Supported modes include ``manual``, ``openai_chatgpt`` and
-``selenium_chatgpt``.
+``zen_chatgpt``.
 
 Message forwarding is automatic when synth is mentioned or receives a private
 message. The ``event`` plugin stores reminders in the configured database and
@@ -41,7 +41,7 @@ synth automatically discovers and loads components at startup:
 **Available Cortex Engines**
     - ``openai_chatgpt``: OpenAI API integration
     - ``google_cli``: Google Gemini via CLI
-    - ``selenium_chatgpt``: Browser-based ChatGPT
+    - ``zen_chatgpt``: Browser-based ChatGPT
     - ``manual``: Human trainer input
 
 Runtime Commands

@@ -1338,7 +1338,7 @@ class VesselInterface:
                 # Structural signal for the queue: a human speaking to Synth
                 # in-world must outrank Synth's own autonomous perceptions
                 # (will beats / sightings) that share the same ``vessel/<world>``
-                # scope and are produced faster than a slow (e.g. Selenium)
+                # scope and are produced faster than a slow (e.g. Zen)
                 # engine can consume them — otherwise the player chat starves
                 # behind an ever-growing will-beat backlog. Set only for a real
                 # player chat; every synthetic perception leaves it False.
@@ -2955,7 +2955,7 @@ class VesselInterface:
         # Defer en-route sighting perceptions while a player is actively present.
         # The body still moves (motor_step above needs no LLM), but each sighting
         # is enqueued as an AMBIENT cognition perception on the shared
-        # ``vessel/<world>`` scope. On a slow vessel cortex (e.g. Selenium) the
+        # ``vessel/<world>`` scope. On a slow vessel cortex (e.g. Zen) the
         # single consumer can spend the whole turn draining these autonomous
         # perceptions, so a HIGH player chat that arrives while one is in-flight
         # waits behind it — an isolated test (motor/sightings silenced) got an

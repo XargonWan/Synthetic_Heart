@@ -479,7 +479,7 @@ def get_registered_recon_keys() -> set[str]:
     These keys are the schema of the *separate* Recon LLM call — they are never
     valid main-pass actions.
 
-    State-retaining browser engines (e.g. ``selenium-llm-engine``) can leak the
+    State-retaining browser engines (e.g. ``zen-llm-engine``) can leak the
     Recon call's JSON schema into the immediately following main-pass response,
     so the main pass emits an ``actions`` array made entirely of these recon
     keys. Callers use this set to structurally drop such leaked entries before

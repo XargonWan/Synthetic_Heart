@@ -53,8 +53,21 @@ class TestCommandRegistry(unittest.IsolatedAsyncioTestCase):
         with patch(
             "core.command_registry.cortex_command", new=AsyncMock(return_value="ok")
         ):
-            res = await handle_command_message("/cortex_live manual")
+            with patch(
+                "core.interfaces_registry.InterfaceRegistry.is_trainer",
+                return_value=True,
+            ):
+                res = await handle_command_message(
+                    "/cortex_live manual", user_id="1", interface_id="telegram_bot"
+                )
             self.assertEqual(res, "ok")
+
+    async def test_commands_fail_closed_without_identity(self):
+        """No user/interface id -> denied, not silently allowed."""
+        res = await handle_command_message("/help")
+        self.assertIn("Access denied", res)
+        res = await handle_command_message("/help", user_id="1")
+        self.assertIn("Access denied", res)
 
 
 if __name__ == "__main__":

@@ -14,9 +14,9 @@ def ensure_default_cortexs():
     # Keep existing registrations but add minimal fallbacks if missing
     reg._engine_meta.setdefault("manual", {"cortex": "llm_provider"})
     reg._engine_modules.setdefault("manual", "cortex.llm_provider.manual")
-    reg._engine_meta.setdefault("selenium_chatgpt", {"cortex": "selenium_engine"})
+    reg._engine_meta.setdefault("zen_chatgpt", {"cortex": "zen_engine"})
     reg._engine_modules.setdefault(
-        "selenium_chatgpt", "cortex.selenium_engine.selenium_chatgpt"
+        "zen_chatgpt", "cortex.zen_engine.zen_chatgpt"
     )
     yield
 
@@ -35,7 +35,7 @@ async def test_switch_active_cortex_notifies_on_success():
         patch(
             "core.config.config_registry.get_value",
             side_effect=lambda key, default="": (
-                "selenium_chatgpt" if key == "BASE_CORTEX" else default
+                "zen_chatgpt" if key == "BASE_CORTEX" else default
             ),
         ),
         patch("core.notifier.notify_trainer") as mock_notify,
@@ -154,7 +154,7 @@ async def test_cortex_command_lists_engines():
         ),
         patch(
             "core.config.list_available_cortexs",
-            return_value=["llm_provider", "selenium_engine"],
+            return_value=["llm_provider", "zen_engine"],
         ),
         patch("core.config.list_available_cortex_engines") as mock_list_engines,
         patch("core.config.config_registry") as mock_reg,
@@ -172,9 +172,9 @@ async def test_cortex_command_lists_engines():
         def _list(kind=None):
             if kind == "llm_provider":
                 return ["manual", "gpt"]
-            if kind == "selenium_engine":
-                return ["selenium_gemini"]
-            return ["manual", "gpt", "selenium_gemini"]
+            if kind == "zen_engine":
+                return ["zen_gemini"]
+            return ["manual", "gpt", "zen_gemini"]
 
         mock_list_engines.side_effect = _list
         res = await command_registry.cortex_command()
@@ -182,9 +182,9 @@ async def test_cortex_command_lists_engines():
         assert "grillo override: `grillo_engine`" in res
         assert "trainer override: `trainer_engine`" in res
         assert "llm_provider:" in res
-        assert "selenium_engine:" in res
+        assert "zen_engine:" in res
         assert "`llm_provider/manual`" in res
-        assert "`selenium_engine/selenium_gemini`" in res
+        assert "`zen_engine/zen_gemini`" in res
         # default config should not show any live override when not set
         assert "live override" not in res
 
@@ -243,10 +243,10 @@ async def test_cortex_command_ambiguous_shortname():
     mock_reg = Mock()
     mock_reg._engine_meta = {
         "gemini_live": {"cortex": "llm_provider"},
-        "selenium_gemini": {"cortex": "selenium_engine"},
+        "zen_gemini": {"cortex": "zen_engine"},
     }
     mock_reg.get_available_engines = Mock(
-        return_value=["gemini_live", "selenium_gemini"]
+        return_value=["gemini_live", "zen_gemini"]
     )
 
     with (
@@ -256,17 +256,17 @@ async def test_cortex_command_ambiguous_shortname():
         ),
         patch(
             "core.config.list_available_cortexs",
-            return_value=["llm_provider", "selenium_engine"],
+            return_value=["llm_provider", "zen_engine"],
         ),
         patch(
             "core.config.list_available_cortex_engines",
-            return_value=["gemini_live", "selenium_gemini"],
+            return_value=["gemini_live", "zen_gemini"],
         ),
     ):
         res = await command_registry.cortex_command("gemini")
         assert "Found multiple matching engines for 'gemini'" in res
         assert "/cortex llm_provider/gemini_live" in res
-        assert "/cortex selenium_engine/selenium_gemini" in res
+        assert "/cortex zen_engine/zen_gemini" in res
 
 
 @pytest.mark.asyncio
@@ -375,12 +375,12 @@ async def test_cortex_trainer_command_sets_override():
         patch("core.config.set_scope_cortex", new=AsyncMock()) as mock_set,
         patch(
             "core.command_registry._resolve_cortex_choice",
-            new=AsyncMock(return_value="selenium_gemini"),
+            new=AsyncMock(return_value="zen_gemini"),
         ),
     ):
-        res = await command_registry.cortex_trainer_command("selenium_gemini")
-        mock_set.assert_awaited_with("trainer", "selenium_gemini")
-        assert "override for trainer updated to `selenium_gemini`" in res
+        res = await command_registry.cortex_trainer_command("zen_gemini")
+        mock_set.assert_awaited_with("trainer", "zen_gemini")
+        assert "override for trainer updated to `zen_gemini`" in res
 
     help_text = await command_registry.cortex_trainer_command()
     assert "/cortex_trainer <kind>/<engine>" in help_text
@@ -399,9 +399,9 @@ async def test_switch_active_cortex_notifies_on_start_failure(monkeypatch):
         raise Exception("start-failed")
 
     mock_registry = Mock()
-    mock_registry.get_available_engines = Mock(return_value=["selenium_chatgpt"])
+    mock_registry.get_available_engines = Mock(return_value=["zen_chatgpt"])
     mock_plugin = Mock()
-    mock_plugin.__class__.__module__ = "cortex.selenium_engine.selenium_chatgpt"
+    mock_plugin.__class__.__module__ = "cortex.zen_engine.zen_chatgpt"
     mock_plugin.start = failing_start
     mock_registry.load_engine = Mock(return_value=mock_plugin)
 
@@ -415,7 +415,7 @@ async def test_switch_active_cortex_notifies_on_start_failure(monkeypatch):
 
     with patch("core.notifier.notify_trainer") as mock_notify:
         with pytest.raises(Exception):
-            await switch_active_cortex_engine("selenium_chatgpt", use_hot_swap=True)
+            await switch_active_cortex_engine("zen_chatgpt", use_hot_swap=True)
 
         mock_notify.assert_called()
         args = mock_notify.call_args[0]
@@ -482,9 +482,9 @@ async def test_load_plugin_ensures_start_propagates(monkeypatch):
         raise Exception("startboom")
 
     mock_registry = Mock()
-    mock_registry.get_available_engines = Mock(return_value=["selenium_chatgpt"])
+    mock_registry.get_available_engines = Mock(return_value=["zen_chatgpt"])
     mock_plugin = Mock()
-    mock_plugin.__class__.__module__ = "cortex.selenium_engine.selenium_chatgpt"
+    mock_plugin.__class__.__module__ = "cortex.zen_engine.zen_chatgpt"
     mock_plugin.start = failing_start
     mock_registry.load_engine = Mock(return_value=mock_plugin)
 
@@ -501,4 +501,4 @@ async def test_load_plugin_ensures_start_propagates(monkeypatch):
     plugin_module.plugin = None
 
     with pytest.raises(Exception):
-        await load_plugin("selenium_chatgpt", ensure_started=True, start_timeout=1.0)
+        await load_plugin("zen_chatgpt", ensure_started=True, start_timeout=1.0)

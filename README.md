@@ -200,7 +200,25 @@ The project ships with an **OpenAI-compatible API**. It mirrors the standard Ope
    <img src="docs/res/quickstart.png" alt="SyntH Quickstart Screenshot" width="700" />
 </div>
 
-### Option A: Docker (Recommended)
+### Option A: One-click install (Recommended)
+
+**Windows** — download `SyntH-Setup-<version>.exe` from the releases page and run
+it. No administrator rights, nothing to answer, no console windows. It sets up
+its own PostgreSQL, its own Python, and shortcuts, then opens a setup page in
+your browser where you tell it who you are and which AI service to use.
+
+**Linux** — one command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/XargonWan/Synthetic_Heart/develop/install.sh | bash
+```
+
+It installs PostgreSQL (with pgvector) and ffmpeg from your distribution, sets
+everything up in your home folder, and leaves a `synth` command behind.
+
+Both paths are documented in [docs/installation.rst](docs/installation.rst).
+
+### Option B: Docker
 
 1.  Clone this repository or simply download the `docker-compose.yml` and the `skins` folder (see the note below).
 2.  **[OPTIONAL]** Copy `.env.example` to `.env` to customize the deployment. The example file is trimmed to common deployment overrides; use `docs/compose_env_vars.rst` if you need the full advanced env reference.
@@ -257,42 +275,36 @@ Migration notes:
 - IDs are deterministic (`legacy:<table>:<id>`), so reruns are safe (upsert behavior)
 - The script uses `SOUL_POSTGRES_DSN` for the destination and `DB_*` values for legacy MariaDB source
 
-### Option B: Windows Native (with `uv`)
+### Option C: From source, on any platform
 
-> [!WARNING]
-> **DATABASE SETUP REQUIRED**
-> Database setup is **not automated** on Windows native environments. You must install PostgreSQL locally, create the application database, and configure the `DB_*` connection values in your `.env` file before running the application.
+Database setup is automated: `scripts/bootstrap.py` finds or creates a
+PostgreSQL server, creates the database, writes `.env`, and picks free ports.
+Install [uv](https://docs.astral.sh/uv/) first (it also provides Python).
 
-For the fastest development experience on Windows, we recommend using **uv**. It handles Python installation, virtual environments, and dependencies automatically.
+```bash
+git clone https://github.com/XargonWan/Synthetic_Heart.git
+cd Synthetic_Heart
+uv sync
+uv run --no-project python scripts/bootstrap.py
+uv run --no-project python scripts/start_synth.py
+```
 
-1.  **Install uv** (if not installed):
-    ```powershell
-    pip install uv
-    ```
-2.  **Clone the repository** (preserves LF line endings on Windows to avoid script issues in Docker) and enter the folder:
-    ```powershell
-    git clone -c core.autocrlf=false https://github.com/XargonWan/Synthetic_Heart.git
-    cd Synthetic_Heart
-    ```
-3.  **Configure `.env` and Database:**
-   - Install PostgreSQL.
-   - Create a database for Synthetic Heart.
-    - Copy `.env.example` to `.env` and update the `DB_*` connection strings to match your local setup.
-4.  **Sync Dependencies:**
-    ```powershell
-    # This creates the environment and installs all packages instantly
-    uv sync
-    ```
-5.  **Run the App:**
-    ```powershell
-    uv run main.py
-    ```
+`start_synth.py` runs SyntH without a console window, waits for the WebUI, and
+opens it. `scripts/healthcheck.py` tells you whether an instance is up.
 
 ---
 
 ### First Run Setup
-1.  **Access the WebUI:** Navigate to `https://localhost:8000` (Accept the self-signed certificate warning if prompted).
-2.  **Select Engine:** Go to **Components** and select your desired Cortex kind + engine.
+
+**One-click installs** land on the setup page automatically and ask for the
+persona, your name, timezone, language and AI provider. Nothing else is needed.
+
+**Docker and from-source installs** start with an empty configuration:
+1.  **Access the WebUI:** `https://localhost:8000` for Docker (accept the
+    self-signed certificate warning), or the address printed by
+    `start_synth.py` otherwise.
+2.  **Select Engine:** go to **Components** and select your desired Cortex kind
+    and engine, then add the API key there.
 
 > **Note on Skins:** The `skins` folder is optional if you do not intend to edit them. If you skip downloading it, ensure the volume mapping for `./skins` is commented out in your compose file, otherwise, an empty folder will override the built-in skins.
 
@@ -300,7 +312,7 @@ For the fastest development experience on Windows, we recommend using **uv**. It
 
 Then you might want to edit the following settings on the WebUI -> Settings:
 - Default Location: your location, so the synth knows where they are, useful for the weather for example
-- Timezone: (if you didn´t do via compose) with your timezone, useful to make the synth aware of what time is actually in your place
+- Timezone: with your timezone, useful to make the synth aware of what time is actually in your place
 - Trainer Name: your name, else the synth don't know who you are
 - Synth Name: The name of the Synth. To not be mistaken with the name of the skin, that is just a name given to the skin but itś not set as the synth name. A Symnth can be called Kotone and have the skin of Rei for example.
 - Synth Profile: A description of how your synth is, written in second person, check the default one.

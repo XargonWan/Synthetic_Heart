@@ -612,7 +612,7 @@ has elapsed, and Synth has **no active goal or a goal with no step plan**
    immediately and resumes normal autonomy on the freshly-committed goal.
 
 **Known tension (by design).** Clearing the queue removes only *pending* items —
-a reflection turn still cannot run until the in-flight (possibly slow selenium)
+a reflection turn still cannot run until the in-flight (possibly slow zen)
 turn drains, so this fixes queue *order*, not consumer *starvation*. The
 reflection pause **complements** the goal-expander Drone; both are kept. It is
 keyword-free and fully guarded; the pure prompt and config helpers

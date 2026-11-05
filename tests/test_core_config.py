@@ -17,15 +17,29 @@ def test_aiomysql_import_fails(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
-    # Ensure a fresh import of core.config (remove cached module)
-    if "core.config" in sys.modules:
-        del sys.modules["core.config"]
+    # A fresh import of core.config (without the cached module) proves the import
+    # survives a missing aiomysql. The cached module object is PUT BACK before
+    # returning: dropping it for good orphans the object every already-imported
+    # module holds a reference to, so a later test that patches ``core.config``
+    # patches a module that live imports no longer resolve. That leak made
+    # tests/test_prompt_instruction_budget.py read the live trainer name instead
+    # of its own patched one in a full-suite run (and only there).
+    cached_config = sys.modules.get("core.config")
+    sys.modules.pop("core.config", None)
+    try:
+        import core.config as conf
 
-    import core.config as conf
-
-    # aiomysql should be set but None (or at least import didn't raise)
-    assert hasattr(conf, "aiomysql")
-    assert conf.aiomysql is None
+        # aiomysql should be set but None (or at least import didn't raise)
+        assert hasattr(conf, "aiomysql")
+        assert conf.aiomysql is None
+    finally:
+        if cached_config is not None:
+            sys.modules["core.config"] = cached_config
+            _pkg = sys.modules.get("core")
+            if _pkg is not None:
+                # The submodule import rebound this attribute to the fresh
+                # module; point it back at the canonical object too.
+                setattr(_pkg, "config", cached_config)
 
 
 def test_list_available_cortexs_uses_registry(monkeypatch):
@@ -201,7 +215,16 @@ def test_log_chat_loader_is_reentrant_safe(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_get_active_cortex_engine_repairs_stale_base_for_scope(monkeypatch):
+async def test_get_active_cortex_engine_refuses_invented_fallback_for_stale_base(
+    monkeypatch,
+):
+    """A stale BASE_CORTEX with no configured stand-in must raise, not invent.
+
+    ``CortexRegistry.get_default_engine()`` returns whichever engine module
+    sorts first in registration order. Substituting that pick -- and persisting
+    it -- is what rewrote BASE_CORTEX to a keyless 'anthropic' and left it there
+    for months. The resolver may only use engines the operator configured.
+    """
     from core import config as conf
     import core.config_manager as cm
 
@@ -228,10 +251,61 @@ async def test_get_active_cortex_engine_repairs_stale_base_for_scope(monkeypatch
         "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
     )
 
-    engine = await conf.get_active_cortex_engine("grillo")
+    with pytest.raises(ValueError, match="not available"):
+        await conf.get_active_cortex_engine("grillo")
 
-    assert engine == "anthropic"
-    set_value.assert_awaited_once_with("BASE_CORTEX", "anthropic")
+    # The operator's (broken) choice must survive: nothing is overwritten.
+    set_value.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_active_cortex_engine_keyless_anthropic_without_sibling_raises(
+    monkeypatch,
+):
+    """BASE_CORTEX stuck at keyless 'anthropic' with no sibling override.
+
+    The 2026-07-01 fix recovers by copying a sibling scope's engine, but that
+    only works when TRAINER_CORTEX or GRILLO_CORTEX is set. With both at
+    'Default' the old code fell back to 'anthropic' again and -- since
+    ``base == fallback`` -- persisted nothing, so it silently returned a
+    guaranteed-broken engine on every turn and left no trace in the DB.
+    """
+    from core import config as conf
+    import core.config_manager as cm
+
+    class FakeRegistry:
+        def get_available_engines(self):
+            # A configured, enabled external endpoint is registered alongside
+            # the keyless built-in.
+            return ["anthropic", "my-endpoint"]
+
+        def get_default_engine(self):
+            return "anthropic"
+
+    values = {
+        "BASE_CORTEX": "anthropic",
+        "TRAINER_CORTEX": "Default",
+        "GRILLO_CORTEX": "Default",
+        "ANTHROPIC_API_KEY": "",
+    }
+    set_value = AsyncMock()
+
+    monkeypatch.setattr(
+        cm.config_registry,
+        "get_value",
+        lambda key, default=None: values.get(key, default),
+    )
+    monkeypatch.setattr(cm.config_registry, "set_value", set_value)
+    monkeypatch.setattr(
+        "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
+    )
+
+    with pytest.raises(ValueError, match="not available"):
+        await conf.get_active_cortex_engine(None)
+
+    # Must not silently answer with the keyless engine, and must not guess at
+    # 'my-endpoint' either -- picking for the operator is how this started.
+    set_value.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -341,10 +415,10 @@ async def test_get_active_cortex_engine_override_to_noncortex_endpoint_falls_bac
 
     class FakeRegistry:
         def get_available_engines(self):
-            return ["selenium-llm-engine"]
+            return ["zen-llm-engine"]
 
         def get_default_engine(self):
-            return "selenium-llm-engine"
+            return "zen-llm-engine"
 
     class FakeEndpoint:
         # Auto-probe found no cortex capability (the honest signal the resolver
@@ -362,7 +436,7 @@ async def test_get_active_cortex_engine_override_to_noncortex_endpoint_falls_bac
             return [FakeEndpoint()]
 
     values = {
-        "BASE_CORTEX": "selenium-llm-engine",
+        "BASE_CORTEX": "zen-llm-engine",
         "AGENT_CORTEX": "logfare-mykey",
     }
     set_value = AsyncMock()
@@ -386,7 +460,7 @@ async def test_get_active_cortex_engine_override_to_noncortex_endpoint_falls_bac
 
     engine = await conf.get_active_cortex_engine("agent")
 
-    assert engine == "selenium-llm-engine"
+    assert engine == "zen-llm-engine"
     set_value.assert_any_await("AGENT_CORTEX", "Default")
 
 
@@ -486,10 +560,10 @@ async def test_get_active_cortex_engine_registered_noncortex_endpoint_falls_back
     class FakeRegistry:
         def get_available_engines(self):
             # logfare-mykey IS registered here -- the primary-path gap.
-            return ["selenium-llm-engine", "logfare-mykey"]
+            return ["zen-llm-engine", "logfare-mykey"]
 
         def get_default_engine(self):
-            return "selenium-llm-engine"
+            return "zen-llm-engine"
 
     class FakeEndpoint:
         # The endpoint is explicitly not configured for Cortex, so it must not
@@ -507,7 +581,7 @@ async def test_get_active_cortex_engine_registered_noncortex_endpoint_falls_back
             return [FakeEndpoint()]
 
     values = {
-        "BASE_CORTEX": "selenium-llm-engine",
+        "BASE_CORTEX": "zen-llm-engine",
         "AGENT_CORTEX": "logfare-mykey",
     }
     set_value = AsyncMock()
@@ -530,7 +604,7 @@ async def test_get_active_cortex_engine_registered_noncortex_endpoint_falls_back
 
     engine = await conf.get_active_cortex_engine("agent")
 
-    assert engine == "selenium-llm-engine"
+    assert engine == "zen-llm-engine"
     set_value.assert_any_await("AGENT_CORTEX", "Default")
 
 

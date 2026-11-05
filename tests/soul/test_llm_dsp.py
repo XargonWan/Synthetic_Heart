@@ -268,3 +268,127 @@ async def test_extract_empty_transcript_skips_engine() -> None:
     assert result.user_facts == []
     assert result.user_preferences == []
     assert not engine.prompts
+
+
+@pytest.mark.asyncio
+async def test_extract_prompt_carries_the_speaker_attribution_rules() -> None:
+    """The live profile said the HUMAN is "also called Bee" and an android.
+
+    Both belong to the persona: the transcript labels the speakers, so the
+    extractor is told which lines may become user facts and which may not.
+    """
+    engine = FakeEngine(
+        response='{"user_facts": [], "user_preferences": [], "ai_self_facts": []}'
+    )
+    extractor = LlmDspExtractor(resolve_engine=lambda: _resolve_to(engine))
+
+    await extractor.extract_dsp(
+        transcript="Scar: Bee is you, 2b my nickname for you is Bee",
+        current_date=date(2026, 9, 18),
+    )
+
+    instructions = engine.prompts[0]["instructions"]
+    assert "SPEAKER ATTRIBUTION" in instructions
+    assert "belongs to the PERSONA" in instructions
+    assert "never describe the user as an android" in instructions
+    assert "extract NOTHING rather than guessing" in instructions
+    # The rule must not cost the profile the human's own name (it did: the first
+    # live rewrite dropped "Scar" entirely).
+    assert "The human's own name IS a user fact" in instructions
+
+
+@pytest.mark.asyncio
+async def test_builder_prompts_remove_persona_attributes_from_the_profile() -> None:
+    engine = FakeEngine(response='{"biography": "Some biography."}')
+    builder = LlmDspBuilder(resolve_engine=lambda: _resolve_to(engine))
+
+    await builder.build_initial(extractions=_twice("User works on SynthHeart"))
+    assert (
+        "ATTRIBUTION: this profile describes the HUMAN"
+        in engine.prompts[0]["instructions"]
+    )
+
+    engine.prompts.clear()
+    await builder.build_update(
+        current_dsp="<user_profile>User is a male-identifying android called Bee.</user_profile>",
+        extractions=_twice("User works on SynthHeart"),
+    )
+    assert (
+        "ATTRIBUTION: this profile describes the HUMAN"
+        in engine.prompts[0]["instructions"]
+    )
+
+
+# ---------------------------------------------------------------------------
+# The compiler is told who is who
+# ---------------------------------------------------------------------------
+
+DECLARED_IDENTITY = (
+    "Scar (also called Scarlet) - he/him, the human, my husband; "
+    "2D (called Dee) - she/her, the persona, me"
+)
+
+
+@pytest.mark.asyncio
+async def test_build_prompts_carry_the_declared_identities() -> None:
+    """The COMPILER needs the declaration too (live 2026-09-22).
+
+    One pass' extraction swapped the two roles (the persona's own lines read as
+    the human's), that pass was the newest evidence, and the compiler resolved
+    the contradiction the wrong way: the standing profile was rewritten as "Dee
+    goes by the name Scar and is a grown woman", giving the human the persona's
+    name and gender. The compiler is the only stage that decides which name and
+    gender the profile carries, so it has to be able to rule that day out.
+    """
+    engine = FakeEngine(response='{"biography": "Some biography."}')
+    builder = LlmDspBuilder(
+        resolve_engine=lambda: _resolve_to(engine),
+        speaker_identity=DECLARED_IDENTITY,
+    )
+
+    await builder.build_initial(extractions=_twice("User works on SynthHeart"))
+    instructions = engine.prompts[0]["instructions"]
+    assert DECLARED_IDENTITY in instructions
+    assert "WHO IS WHO IS DECLARED, NOT GUESSED" in instructions
+    assert "is AUTHORITATIVE" in instructions
+
+    engine.prompts.clear()
+    await builder.build_update(
+        current_dsp=(
+            "<user_profile>Dee goes by the name Scar and is a grown woman."
+            "</user_profile>"
+        ),
+        extractions=_twice("User works on SynthHeart"),
+    )
+    assert DECLARED_IDENTITY in engine.prompts[0]["instructions"]
+
+
+@pytest.mark.asyncio
+async def test_build_prompts_are_unchanged_without_a_declaration() -> None:
+    """An undeclared deployment keeps the previous prompts exactly."""
+    engine = FakeEngine(response='{"biography": "Some biography."}')
+    builder = LlmDspBuilder(resolve_engine=lambda: _resolve_to(engine))
+
+    await builder.build_initial(extractions=_twice("User works on SynthHeart"))
+
+    instructions = engine.prompts[0]["instructions"]
+    assert "WHO IS WHO IS DECLARED" not in instructions
+    assert "SPEAKER IDENTITY" not in instructions
+
+
+@pytest.mark.asyncio
+async def test_extract_prompt_names_the_persona_own_lines() -> None:
+    """A line labelled "<name> (the persona)" can never become a user fact."""
+    engine = FakeEngine(
+        response='{"user_facts": [], "user_preferences": [], "ai_self_facts": []}'
+    )
+    extractor = LlmDspExtractor(resolve_engine=lambda: _resolve_to(engine))
+
+    await extractor.extract_dsp(
+        transcript='[2026-09-22T20:49:00+00:00] 2D (the persona): "come back here"',
+        current_date=date(2026, 9, 22),
+    )
+
+    instructions = engine.prompts[0]["instructions"]
+    assert "'<name> (the persona)'" in instructions
+    assert "never the human's" in instructions
