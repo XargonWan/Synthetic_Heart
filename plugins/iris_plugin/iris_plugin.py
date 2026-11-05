@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from core.ai_plugin_base import AIPluginBase
+from core.config import get_iris_fallback_engines_async
 from core.config_manager import config_registry
 from core.core_initializer import register_plugin
 from core.iris_registry import IRIS_REGISTRY
@@ -77,6 +78,19 @@ config_registry.get_value(
     group="plugins",
     component="iris_plugin",
     hidden=True,
+)
+config_registry.get_value(
+    "IRIS_FALLBACK_ENGINES",
+    "[]",
+    value_type=str,
+    group="plugins",
+    component="iris_plugin",
+    hidden=True,
+    label="Iris fallback engines",
+    description=(
+        "Ordered JSON list of Iris engine names tried in turn when the active "
+        "engine is unavailable or returns no description."
+    ),
 )
 config_registry.get_value(
     "IRIS_DEFAULT_MODEL",
@@ -160,31 +174,62 @@ class IrisPlugin(AIPluginBase):
         effective_model = model if model is not None else self._default_model or None
         name = engine_name or self._active_engine_name
 
+        result = await self._describe_with(
+            name, file_path, mime_type, effective_prompt, effective_model
+        )
+        if result is None and engine_name is None:
+            # The active engine is unavailable or gave nothing usable: walk the
+            # configured fallback engines in order. They use their own default
+            # model, so the active engine's model pin is not forwarded.
+            for fallback_name in await get_iris_fallback_engines_async():
+                if fallback_name == name:
+                    continue
+                log_warning(
+                    f"[iris_plugin] Engine '{name}' failed; trying fallback "
+                    f"engine '{fallback_name}'."
+                )
+                result = await self._describe_with(
+                    fallback_name, file_path, mime_type, effective_prompt, None
+                )
+                if result is not None:
+                    name = fallback_name
+                    break
+        if result is None:
+            return None
+
+        log_info(
+            f"[iris_plugin] Vision analysis via '{name}': "
+            f"{result.description[:80]!r} (lang={result.language!r})"
+        )
+        return result
+
+    async def _describe_with(
+        self,
+        name: str,
+        file_path: str,
+        mime_type: str | None,
+        prompt: str,
+        model: str | None,
+    ) -> IrisResult | None:
+        """Run one engine; ``None`` when it cannot be loaded or gives no usable text."""
         try:
             engine = IRIS_REGISTRY.load_engine(name)
-        except ValueError as exc:
+        except Exception as exc:
             log_error(f"[iris_plugin] Cannot load engine '{name}': {exc}")
             return None
 
         try:
             kwargs: dict[str, str] = {}
-            if effective_model is not None:
-                kwargs["model"] = effective_model
+            if model is not None:
+                kwargs["model"] = model
 
             if asyncio.iscoroutinefunction(engine.describe_image):
                 result: IrisResult | None = await engine.describe_image(
-                    file_path,
-                    mime_type,
-                    effective_prompt,
-                    **kwargs,
+                    file_path, mime_type, prompt, **kwargs
                 )
             else:
                 result = await asyncio.to_thread(
-                    engine.describe_image,
-                    file_path,
-                    mime_type,
-                    effective_prompt,
-                    **kwargs,
+                    engine.describe_image, file_path, mime_type, prompt, **kwargs
                 )
 
             if result is None:
@@ -210,10 +255,6 @@ class IrisPlugin(AIPluginBase):
                 except (ValueError, TypeError):
                     pass  # Not valid JSON — keep the response as-is
 
-            log_info(
-                f"[iris_plugin] Vision analysis via '{name}': "
-                f"{result.description[:80]!r} (lang={result.language!r})"
-            )
             return result
         except Exception as exc:
             log_error(f"[iris_plugin] Vision analysis error ({name}): {exc}")

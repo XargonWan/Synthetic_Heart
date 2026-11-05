@@ -17,6 +17,7 @@ from typing import Any
 
 from core.ai_plugin_base import AIPluginBase
 from core.auris_registry import AURIS_REGISTRY
+from core.config import get_auris_fallback_engines_async
 from core.config_manager import config_registry
 from core.core_initializer import register_plugin
 from core.logging_utils import log_error, log_info, log_warning
@@ -38,6 +39,19 @@ config_registry.get_value(
     group="plugins",
     component="auris_plugin",
     hidden=True,
+)
+config_registry.get_value(
+    "AURIS_FALLBACK_ENGINES",
+    "[]",
+    value_type=str,
+    group="plugins",
+    component="auris_plugin",
+    hidden=True,
+    label="Auris fallback engines",
+    description=(
+        "Ordered JSON list of Auris engine names tried in turn when the active "
+        "engine is unavailable or returns no transcription."
+    ),
 )
 config_registry.get_value(
     "AURIS_ENGINE_SETTINGS",
@@ -147,9 +161,49 @@ class AurisPlugin(AIPluginBase):
             return None
 
         name = engine_name or self._active_engine_name
+        result = await self._transcribe_with(name, file_path, mime_type)
+        if result is None and engine_name is None:
+            # The active engine is unavailable or heard nothing: walk the
+            # configured fallback engines in order.
+            for fallback_name in await get_auris_fallback_engines_async():
+                if fallback_name == name:
+                    continue
+                log_warning(
+                    f"[auris_plugin] Engine '{name}' failed; trying fallback "
+                    f"engine '{fallback_name}'."
+                )
+                result = await self._transcribe_with(
+                    fallback_name, file_path, mime_type
+                )
+                if result is not None:
+                    name = fallback_name
+                    break
+        if result is None:
+            return None
+
+        # If the engine did not identify the spoken language, fall back to
+        # text-based detection using lingua-language-detector so that
+        # downstream components (e.g. Vox engines) always receive a language
+        # hint even when acoustic detection is unavailable.
+        if result.language is None:
+            result = AurisTranscriptResult(
+                text=result.text,
+                language=self._detect_language_from_text(result.text),
+            )
+
+        log_info(
+            f"[auris_plugin] Transcription via '{name}': "
+            f"{result.text[:80]!r} (lang={result.language!r})"
+        )
+        return result
+
+    async def _transcribe_with(
+        self, name: str, file_path: str, mime_type: str | None
+    ) -> AurisTranscriptResult | None:
+        """Run one engine; ``None`` when it cannot be loaded or fails."""
         try:
             engine = AURIS_REGISTRY.load_engine(name)
-        except ValueError as exc:
+        except Exception as exc:
             log_error(f"[auris_plugin] Cannot load engine '{name}': {exc}")
             return None
 
@@ -157,32 +211,8 @@ class AurisPlugin(AIPluginBase):
             import inspect
 
             if inspect.iscoroutinefunction(engine.transcribe):
-                result: AurisTranscriptResult | None = await engine.transcribe(
-                    file_path, mime_type
-                )
-            else:
-                result = await asyncio.to_thread(
-                    engine.transcribe, file_path, mime_type
-                )
-
-            if result is None:
-                return None
-
-            # If the engine did not identify the spoken language, fall back to
-            # text-based detection using lingua-language-detector so that
-            # downstream components (e.g. Vox engines) always receive a language
-            # hint even when acoustic detection is unavailable.
-            if result.language is None:
-                result = AurisTranscriptResult(
-                    text=result.text,
-                    language=self._detect_language_from_text(result.text),
-                )
-
-            log_info(
-                f"[auris_plugin] Transcription via '{name}': "
-                f"{result.text[:80]!r} (lang={result.language!r})"
-            )
-            return result
+                return await engine.transcribe(file_path, mime_type)
+            return await asyncio.to_thread(engine.transcribe, file_path, mime_type)
         except Exception as exc:
             log_error(f"[auris_plugin] Transcription error ({name}): {exc}")
             return None

@@ -137,25 +137,6 @@ Configuration (all WebUI-configurable):
      - ``{}``
      - JSON string of engine-specific settings forwarded at load time.
 
-Fallback engines
-~~~~~~~~~~~~~~~~
-
-A failing TTS engine never fails the turn.  ``VOX_FALLBACK_ENGINES`` is an
-ordered JSON list of engine names (``["fish-audio", "kitten"]``).  When the
-active engine cannot be loaded or produces no audio, ``VoxPlugin.speak()``
-tries each fallback in order; a fallback speaks with its own configured
-model / voice (the failed engine's per-call pins are not forwarded).  The
-**Engines → Vox → Fallback** row list edits it: ``＋`` adds a row, the arrows
-reorder, ``✕`` removes.
-
-If every engine fails, the reply is delivered as text only (when
-``VOX_FALLBACK_TO_TEXT`` is on, the default) and Vox is flagged unavailable
-for three minutes: ``send_as_voice`` is withheld from the action catalog (as
-for a disabled engine) and the Telegram / Discord / WebUI prompt tells the
-Synth that voice is unavailable so it can say so to the user.  The next
-successful synthesis clears the flag.  Callers that need audio only (the radio
-host, ``generate_only=True``) still receive an error result instead of text.
-
 Public API:
 
 .. code-block:: python
@@ -291,7 +272,8 @@ Configuration (all WebUI-configurable):
    * - ``VOX_FALLBACK_ENGINES``
      - ``[]``
      - Ordered JSON list of engine names tried in turn when the active engine
-       (or a language override) cannot be loaded or returns no audio.
+       (or a language override) cannot be loaded or returns no audio
+       (see *Fallback engines* below).
 
 .. note::
 
@@ -352,6 +334,47 @@ ISO-639-1 list, then choose engine → model → voice exactly as for the defaul
 engine.  The selection is persisted to ``VOX_LANGUAGE_OVERRIDES`` via
 ``POST /api/config``.  A read-only ``GET /api/languages`` endpoint serves the
 language catalogue used to populate the combo box.
+
+Fallback engines
+~~~~~~~~~~~~~~~~
+
+A failing engine never fails the turn.  Every media route keeps an ordered
+JSON list of engine names that the backend tries, in order, when the active
+engine is unavailable:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Config key
+     - Behaviour when the active engine fails
+   * - ``VOX_FALLBACK_ENGINES``
+     - ``VoxPlugin.speak()`` tries each engine; a fallback speaks with its own
+       model / voice (the failed engine's per-call pins are not forwarded).
+   * - ``AURIS_FALLBACK_ENGINES``
+     - ``AurisPlugin.transcribe_audio()`` tries each engine until one
+       transcribes (an explicit ``engine_name`` argument is never replaced).
+   * - ``IRIS_FALLBACK_ENGINES``
+     - ``IrisPlugin.describe_media()`` tries each engine until one returns a
+       usable description; the active engine's model pin is not forwarded.
+   * - ``CORTEX_FALLBACK_ENGINES``
+     - ``core.cortex_fallback`` tries ``CORTEX_FALLBACK_ENGINE`` first and then
+       each listed engine, each under ``CORTEX_FALLBACK_TIMEOUT_SEC``, when the
+       primary returns nothing or times out.
+
+The **Engines** tab shows a *Fallback* row list under each route (``＋`` adds a
+row, the arrows reorder, ``✕`` removes); the Vue voice settings offer it for
+Vox and Auris.
+
+If every Vox engine fails, the reply is delivered as text only (when
+``VOX_FALLBACK_TO_TEXT`` is on, the default) and Vox is flagged unavailable
+for three minutes: ``send_as_voice`` is withheld from the action catalog (as
+for a disabled engine) and the Telegram / Discord / WebUI prompt tells the
+Synth that voice is unavailable so it can say so to the user.  The next
+successful synthesis clears the flag.  Callers that need audio only (the radio
+host, ``generate_only=True``) still receive an error result instead of text.
+If every Auris or Iris engine fails the caller falls back to its existing
+placeholder text, so the turn still reaches the Synth.
 
 Public API:
 

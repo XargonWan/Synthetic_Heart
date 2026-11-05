@@ -311,6 +311,20 @@ CORTEX_FALLBACK_ENGINE = config_registry.get_var(
     component="cortex",
 )
 
+CORTEX_FALLBACK_ENGINES = config_registry.get_var(
+    "CORTEX_FALLBACK_ENGINES",
+    "[]",
+    label="Cortex Fallback Engines",
+    description=(
+        "Ordered JSON list of engine registry names tried after "
+        "CORTEX_FALLBACK_ENGINE when the primary cortex returns empty/whitespace "
+        "or times out."
+    ),
+    group="core",
+    component="cortex",
+    hidden=True,
+)
+
 CORTEX_LOCAL_ENGINES = config_registry.get_var(
     "CORTEX_LOCAL_ENGINES",
     "zen-llm-engine",
@@ -1172,16 +1186,21 @@ async def get_vox_language_override_async(language: str | None) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# Vox fallback engines
+# Ordered fallback engines (Vox, Auris, Iris, Cortex)
 # ---------------------------------------------------------------------------
-# VOX_FALLBACK_ENGINES is an ordered JSON list of Vox engine names. When the
-# active engine (or a language override) cannot be loaded or produces no audio,
-# the engines below are tried in order; if all of them fail the reply is
-# delivered as text only (see VoxPlugin.speak).
+# <ROUTE>_FALLBACK_ENGINES is an ordered JSON list of engine names. When the
+# active engine of a route cannot be loaded or yields nothing, the engines
+# below are tried in order (see VoxPlugin.speak, AurisPlugin.transcribe_audio,
+# IrisPlugin.describe_media and core.cortex_fallback).
+
+VOX_FALLBACK_ENGINES_KEY = "VOX_FALLBACK_ENGINES"
+AURIS_FALLBACK_ENGINES_KEY = "AURIS_FALLBACK_ENGINES"
+IRIS_FALLBACK_ENGINES_KEY = "IRIS_FALLBACK_ENGINES"
+CORTEX_FALLBACK_ENGINES_KEY = "CORTEX_FALLBACK_ENGINES"
 
 
-def parse_vox_fallback_engines(raw: object) -> list[str]:
-    """Normalise a ``VOX_FALLBACK_ENGINES`` value into an ordered, unique name list.
+def parse_fallback_engines(raw: object) -> list[str]:
+    """Normalise a ``*_FALLBACK_ENGINES`` value into an ordered, unique name list.
 
     Accepts a JSON string or an already-decoded list. Blank names, ``disabled``
     and duplicates are dropped; anything malformed yields an empty list.
@@ -1189,7 +1208,7 @@ def parse_vox_fallback_engines(raw: object) -> list[str]:
     try:
         data: Any = json.loads(raw) if isinstance(raw, str) and raw.strip() else raw
     except Exception as exc:
-        log_warning(f"[config] VOX_FALLBACK_ENGINES parse failed: {exc}")
+        log_warning(f"[config] fallback engines parse failed: {exc}")
         return []
     if not isinstance(data, list):
         return []
@@ -1201,19 +1220,39 @@ def parse_vox_fallback_engines(raw: object) -> list[str]:
     return names
 
 
-async def get_vox_fallback_engines_async() -> list[str]:
-    """Return the persisted, ordered Vox fallback engine names.
+async def get_fallback_engines_async(key: str) -> list[str]:
+    """Return the persisted, ordered fallback engine names stored under *key*.
 
     Reads the DB value directly (safe inside a running event loop, like
-    :func:`get_vox_language_override_async`). Only called on the failure path,
+    :func:`get_vox_language_override_async`). Only called on failure paths,
     so no cache is needed.
     """
     try:
-        raw = await config_registry.get_persisted_value("VOX_FALLBACK_ENGINES", "[]")
+        raw = await config_registry.get_persisted_value(key, "[]")
     except Exception as exc:
-        log_warning(f"[config] VOX_FALLBACK_ENGINES read failed: {exc}")
+        log_warning(f"[config] {key} read failed: {exc}")
         return []
-    return parse_vox_fallback_engines(raw)
+    return parse_fallback_engines(raw)
+
+
+def parse_vox_fallback_engines(raw: object) -> list[str]:
+    """Vox flavour of :func:`parse_fallback_engines`."""
+    return parse_fallback_engines(raw)
+
+
+async def get_vox_fallback_engines_async() -> list[str]:
+    """Return the persisted Vox fallback engines."""
+    return await get_fallback_engines_async(VOX_FALLBACK_ENGINES_KEY)
+
+
+async def get_auris_fallback_engines_async() -> list[str]:
+    """Return the persisted Auris fallback engines."""
+    return await get_fallback_engines_async(AURIS_FALLBACK_ENGINES_KEY)
+
+
+async def get_iris_fallback_engines_async() -> list[str]:
+    """Return the persisted Iris fallback engines."""
+    return await get_fallback_engines_async(IRIS_FALLBACK_ENGINES_KEY)
 
 
 async def switch_active_cortex_engine(name: str, use_hot_swap: bool = True):

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import sys
 from types import SimpleNamespace
@@ -519,3 +519,52 @@ def _mock_auris_cfg(active_engine: str = "gemini"):
         return mapping.get(key, default)
 
     return _side_effect
+
+
+@pytest.mark.asyncio
+async def test_auris_plugin_transcribe_tries_fallback_engines_in_order() -> None:
+    """A failing active engine hands over to the first fallback that transcribes."""
+    from core.auris_registry import AurisRegistry
+    from plugins.auris_base import AurisEngineBase, AurisTranscriptResult
+
+    calls: list[str] = []
+
+    class Engine(AurisEngineBase):
+        def __init__(self, label: str, text: str | None) -> None:
+            self.label = label
+            self.text = text
+
+        def transcribe(
+            self, file_path: str, mime_type: str | None = None
+        ) -> AurisTranscriptResult | None:
+            calls.append(self.label)
+            if self.label == "boom":
+                raise RuntimeError("engine down")
+            if self.text is None:
+                return None
+            return AurisTranscriptResult(text=self.text, language="en")
+
+    registry = AurisRegistry()
+    for label, text in (("primary", None), ("boom", None), ("good", "heard you")):
+        registry._engine_modules[label] = f"{label}_mod"
+        registry._instances[label] = Engine(label, text)
+
+    from plugins.auris_plugin import AurisPlugin
+
+    plugin = AurisPlugin.__new__(AurisPlugin)
+    plugin._active_engine_name = "primary"
+    plugin._engine_settings = {}
+
+    with (
+        patch("plugins.auris_plugin.AURIS_REGISTRY", registry),
+        patch(
+            "plugins.auris_plugin.get_auris_fallback_engines_async",
+            new=AsyncMock(return_value=["primary", "boom", "missing", "good"]),
+        ),
+        patch("os.path.exists", return_value=True),
+        patch.object(plugin, "refresh_config"),
+    ):
+        result = await plugin.transcribe_audio("/tmp/fake.wav")
+
+    assert result is not None and result.text == "heard you"
+    assert calls == ["primary", "boom", "good"]
