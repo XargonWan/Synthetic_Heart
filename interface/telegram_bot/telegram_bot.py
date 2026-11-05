@@ -2387,6 +2387,11 @@ class TelegramInterface:
             important_notes.append(
                 "send_as_voice defaults to false. Only reply with voice when the user explicitly requested audio or sent you a voice message; when you do, keep using send_message with your full reply in 'text' and add send_as_voice=true - do NOT emit a separate audio action."
             )
+        else:
+            from core.optional_plugins import voice_unavailable_note
+
+            if voice_note := voice_unavailable_note():
+                important_notes.append(voice_note)
 
         return {
             "description": "Send a message via Telegram bot",

@@ -703,6 +703,127 @@ async def test_vox_plugin_fallback_on_engine_failure() -> None:
     assert result["reason"] == "tts_failed_fallback_sent"
 
 
+def test_parse_vox_fallback_engines_normalises() -> None:
+    from core.config import parse_vox_fallback_engines
+
+    assert parse_vox_fallback_engines('["a", "b", "a", "", "disabled"]') == ["a", "b"]
+    assert parse_vox_fallback_engines(["x", "y"]) == ["x", "y"]
+    assert parse_vox_fallback_engines("{not json") == []
+    assert parse_vox_fallback_engines('{"a": 1}') == []
+    assert parse_vox_fallback_engines("") == []
+
+
+def _fallback_plugin(active: str):
+    from plugins.vox_plugin import VoxPlugin
+
+    plugin = VoxPlugin.__new__(VoxPlugin)
+    plugin._active_engine_name = active
+    plugin._engine_settings = {}
+    plugin._fallback_to_text = True
+    plugin._sentence_chunking_enabled = False
+    plugin._output_dir = Path("/tmp/vox_test")
+    plugin._output_dir.mkdir(parents=True, exist_ok=True)
+    return plugin
+
+
+@pytest.mark.asyncio
+async def test_vox_plugin_speak_tries_fallback_engines_in_order() -> None:
+    """A failing active engine hands over to the first working fallback."""
+    from core.vox_registry import VoxRegistry
+    from plugins.vox_base import VoxEngineBase
+    import plugins.vox_plugin as vox_mod
+
+    calls: list[tuple[str, dict]] = []
+
+    class Engine(VoxEngineBase):
+        def __init__(self, label: str, audio: bytes | None) -> None:
+            self.label = label
+            self.audio = audio
+
+        @property
+        def output_format(self) -> str:
+            return "wav"
+
+        def generate_tts(self, text, emotion=None, **kw):
+            calls.append((self.label, kw))
+            return self.audio
+
+    wav = b"RIFF" + b"\x00" * 36
+    reg = VoxRegistry()
+    for label, audio in (("primary", None), ("fb1", None), ("fb2", wav)):
+        reg._engine_modules[label] = f"{label}_mod"
+        reg._instances[label] = Engine(label, audio)
+
+    plugin = _fallback_plugin("primary")
+    with (
+        patch("plugins.vox_plugin.VOX_REGISTRY", reg),
+        patch.object(
+            vox_mod,
+            "get_vox_fallback_engines_async",
+            new=AsyncMock(return_value=["primary", "fb1", "fb2"]),
+        ),
+        patch.object(plugin, "_dispatch", new=AsyncMock(return_value=None)),
+        patch.object(plugin, "refresh_config"),
+    ):
+        result = await plugin.speak(
+            "Hello Synth", interface_path="synth_webui/s1", voice="pinned"
+        )
+
+    assert result["status"] == "success"
+    assert [c[0] for c in calls] == ["primary", "fb1", "fb2"]
+    # The primary's pinned voice is not forwarded to the fallbacks.
+    assert calls[0][1].get("voice") == "pinned"
+    assert "voice" not in calls[1][1] and "voice" not in calls[2][1]
+    assert vox_mod.is_vox_available() or not vox_mod.is_vox_enabled()
+
+
+@pytest.mark.asyncio
+async def test_vox_plugin_all_engines_failing_degrades_to_text_and_flags_unavailable() -> (
+    None
+):
+    """When every engine fails the text is sent and voice is withheld a while."""
+    from core.vox_registry import VoxRegistry
+    from plugins.vox_base import VoxEngineBase
+    import plugins.vox_plugin as vox_mod
+
+    class Bad(VoxEngineBase):
+        def generate_tts(self, text, emotion=None, **kw):
+            raise RuntimeError("engine down")
+
+    reg = VoxRegistry()
+    for label in ("primary", "fb1"):
+        reg._engine_modules[label] = f"{label}_mod"
+        reg._instances[label] = Bad()
+
+    plugin = _fallback_plugin("primary")
+    sent = AsyncMock(
+        return_value={"status": "error", "reason": "tts_failed_fallback_sent"}
+    )
+    try:
+        with (
+            patch("plugins.vox_plugin.VOX_REGISTRY", reg),
+            patch.object(
+                vox_mod,
+                "get_vox_fallback_engines_async",
+                new=AsyncMock(return_value=["fb1", "missing-engine"]),
+            ),
+            patch.object(plugin, "_send_fallback", new=sent),
+            patch.object(plugin, "refresh_config"),
+        ):
+            result = await plugin.speak("test", interface_path="synth_webui/s1")
+
+        assert result["reason"] == "tts_failed_fallback_sent"
+        sent.assert_awaited_once()
+        with patch.object(vox_mod, "is_vox_enabled", return_value=True):
+            assert vox_mod.is_vox_available() is False
+            assert vox_mod.is_vox_degraded() is True
+        vox_mod._mark_vox_available()
+        with patch.object(vox_mod, "is_vox_enabled", return_value=True):
+            assert vox_mod.is_vox_available() is True
+    finally:
+        vox_mod._mark_vox_available()
+
+
 # ---------------------------------------------------------------------------
 # Additional dispatch tests to confirm interfaces are passive
 # ---------------------------------------------------------------------------
