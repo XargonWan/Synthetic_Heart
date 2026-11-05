@@ -337,6 +337,29 @@ class VesselConnectorBase(ABC):
         """
         return None
 
+    def idle_ready_since(self) -> float | None:
+        """When the body became ready for idle beats, as ``time.monotonic()``; ``None`` = not yet (optional).
+
+        The idle beat's clock starts here, so a body still being introduced (RetroXR: climbing out of the
+        capsule) is not asked what it wants before it can do anything. Default: ready since always.
+        """
+        return 0.0
+
+    async def idle_intention(self) -> "dict[str, Any] | None":
+        """The aim Synth set herself and has not finished (``description``, ``note``), or ``None`` (optional).
+
+        Handed to her in the idle prompt so a quiet moment continues from it. Default: this world keeps none.
+        """
+        return None
+
+    def idle_journal(self) -> "list[tuple[float, str]]":
+        """What the body did lately, oldest first: ``(time.monotonic() stamp, plain text)`` (optional).
+
+        Handed back to Synth in the idle prompt as facts ("3 min ago: looked at the TV"), and counted by
+        the interface to tell whether a beat ended in an action. Must never raise. Default: nothing.
+        """
+        return []
+
     async def get_world_state(self) -> WorldState | None:
         """Return the current :class:`WorldState`, or ``None`` if unavailable.
 

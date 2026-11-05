@@ -7,6 +7,7 @@ No DB, no LLM, no RetroXR: the mod is a fake socket, Karada and Vox are stubs.
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -327,7 +328,9 @@ def _cfg(values: dict[str, Any]):
 def test_idle_prompt_describes_and_asks_and_allows_doing_nothing() -> None:
     p = vessel_beat.build_idle_prompt("retroxr", "- a TV, 2 m")
     assert "nobody is talking to you" in p and "- a TV, 2 m" in p and "What do you want to do?" in p
-    assert "do nothing" in p, "not acting is an explicit option: she is never forced"
+    assert "stay where you are" in p, "not acting is still a choice: she is never forced"
+    assert "nobody asked for it" in p, "what she does is hers, not a task for a requester"
+    assert "must" not in p.lower(), "a description and a question, never an order"
     assert "(nothing you can make out)" in vessel_beat.build_idle_prompt("retroxr", "  ")
 
 
@@ -343,7 +346,7 @@ def test_idle_beat_waits_for_the_interval_and_for_the_player_to_be_quiet() -> No
 def test_idle_beat_config_is_clamped_and_defaults_on() -> None:
     assert vessel_beat.is_idle_beat_enabled(_cfg({})) is True
     assert vessel_beat.is_idle_beat_enabled(_cfg({"VESSEL_IDLE_BEAT_ENABLED": False})) is False
-    assert vessel_beat.resolve_idle_interval(_cfg({})) == 90
+    assert vessel_beat.resolve_idle_interval(_cfg({})) == 40
     assert vessel_beat.resolve_idle_interval(_cfg({"VESSEL_IDLE_BEAT_INTERVAL_SEC": 1})) == 20
     assert vessel_beat.resolve_idle_interval(_cfg({"VESSEL_IDLE_BEAT_INTERVAL_SEC": 10**6})) == 3600
     assert vessel_beat.resolve_idle_quiet_sec(_cfg({})) == 45
@@ -396,7 +399,7 @@ async def test_idle_beat_asks_what_she_wants_to_do(iface) -> None:
 
 async def test_idle_beat_waits_until_the_engine_has_rested(iface, monkeypatch: pytest.MonkeyPatch) -> None:
     """A turn nobody asked for must not run while a person could be waiting: the engine must have been free for a
-    whole interval (the queue's own clock), not merely 90 s since the last beat was ENQUEUED."""
+    few seconds (the queue's own clock), not merely 40 s since the last beat was ENQUEUED."""
     from core import message_queue
 
     vi, reg, sent = iface
@@ -404,10 +407,10 @@ async def test_idle_beat_waits_until_the_engine_has_rested(iface, monkeypatch: p
     monkeypatch.setattr(message_queue, "consumer_idle_seconds", lambda: 0.0)  # a turn in flight / queued
     await vi._maybe_run_idle_beat()
     assert sent == [], "a beat was started on a busy engine"
-    monkeypatch.setattr(message_queue, "consumer_idle_seconds", lambda: 30.0)  # free, but only for 30 s of 90
+    monkeypatch.setattr(message_queue, "consumer_idle_seconds", lambda: 5.0)  # free, but only for 5 s of 12
     await vi._maybe_run_idle_beat()
-    assert sent == [], "a beat was started before the engine had rested for the interval"
-    monkeypatch.setattr(message_queue, "consumer_idle_seconds", lambda: 95.0)
+    assert sent == [], "a beat was started before the engine had rested"
+    monkeypatch.setattr(message_queue, "consumer_idle_seconds", lambda: 15.0)
     await vi._maybe_run_idle_beat()
     assert len(sent) == 1
 
@@ -529,7 +532,8 @@ def _plugin_in_retroxr(monkeypatch: pytest.MonkeyPatch, verbs: list[str] | None)
 def test_only_what_the_mod_can_do_is_offered(monkeypatch: pytest.MonkeyPatch) -> None:
     plugin, _ = _plugin_in_retroxr(monkeypatch, ["say", "move", "look", "status", "emote", "look_at", "inspect", "follow", "unfollow"])
     offered = {n.removeprefix("vessel_retroxr_") for n in plugin.get_supported_actions() if n.startswith("vessel_retroxr_")}
-    assert offered == {"say", "move", "look", "status", "emote", "look_at", "inspect", "follow", "unfollow"}
+    assert offered == {"say", "move", "look", "status", "emote", "look_at", "inspect", "follow", "unfollow",
+                       "set_goal", "update_goal"}, "her own aims are always hers to keep"
     # what a RetroXR body cannot do is not on offer, and neither is the Minecraft way of looking around
     for gone in ("attack", "respawn", "use", "observe", "pick_up", "put_down", "hand_over", "sit", "touch"):
         assert gone not in offered, gone
@@ -540,7 +544,7 @@ def test_a_mod_that_says_nothing_is_offered_very_little(monkeypatch: pytest.Monk
     """An old mod declares no verbs: better to offer five that work than thirteen that mostly do not."""
     plugin, _ = _plugin_in_retroxr(monkeypatch, None)
     offered = {n.removeprefix("vessel_retroxr_") for n in plugin.get_supported_actions() if n.startswith("vessel_retroxr_")}
-    assert offered == {"say", "move", "look", "status", "emote"}
+    assert offered == {"say", "move", "look", "status", "emote", "set_goal", "update_goal"}
 
 
 def test_other_worlds_still_offer_every_core_verb(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -640,3 +644,375 @@ async def test_an_older_mod_still_ends_the_introduction_with_its_summoned_event(
     await server.set_presence("summon", "test")
     await conn._dispatch_event({"event_type": "summoned", "summary": "You have just been summoned", "salience": 1.0})
     assert server.get_presence() is None
+
+
+# -- the beat is paced, remembers, and says why it did not start -------------
+
+
+def test_the_interval_is_quick_on_arrival_settles_stretches_and_springs_back() -> None:
+    iv = vessel_beat.adaptive_idle_interval
+    base, arrive, window, top = 40, 20, 180, 180
+    assert iv(base, arrive, window, top, since_ready=30, idle_streak=0) == 20, "just arrived: quick"
+    assert iv(base, arrive, window, top, since_ready=600, idle_streak=0) == 40, "settled"
+    assert iv(base, arrive, window, top, since_ready=600, idle_streak=3) == 40, "three quiet beats are free"
+    assert iv(base, arrive, window, top, since_ready=600, idle_streak=4) == 60, "then it stretches"
+    assert iv(base, arrive, window, top, since_ready=600, idle_streak=5) == 90
+    assert iv(base, arrive, window, top, since_ready=600, idle_streak=40) == top, "never past the cap"
+    assert iv(base, arrive, window, top, since_ready=600, idle_streak=6, novelty=True) == 20, (
+        "a change around her brings the next ask forward, however quiet she has been"
+    )
+    assert iv(15, 20, window, top, since_ready=0, idle_streak=0) == 15, "the arrival pace is never slower than base"
+
+
+def test_the_idle_config_has_sane_clamps() -> None:
+    assert vessel_beat.resolve_idle_arrival_interval(_cfg({})) == 20
+    assert vessel_beat.resolve_idle_arrival_interval(_cfg({"VESSEL_IDLE_BEAT_ARRIVAL_INTERVAL_SEC": 1})) == 10
+    assert vessel_beat.resolve_idle_arrival_window(_cfg({})) == 180
+    assert vessel_beat.resolve_idle_max_interval(_cfg({})) == 180
+    assert vessel_beat.resolve_idle_engine_rest_sec(_cfg({})) == 12
+    assert vessel_beat.resolve_idle_engine_rest_sec(_cfg({"VESSEL_IDLE_BEAT_ENGINE_REST_SEC": "x"})) == 12
+
+
+def test_the_idle_prompt_carries_facts_not_orders() -> None:
+    p = vessel_beat.build_idle_prompt(
+        "retroxr", "- a TV, 2 m", recent=[(240, "watch Game Boy Color"), (20, 'said "hi"')], still_seconds=420,
+        changes=["a NES was put down near you"],
+    )
+    assert "Since you last looked, this changed:\n- a NES was put down near you" in p
+    assert "- 4 min ago: watch Game Boy Color" in p and "- 20 s ago: said \"hi\"" in p
+    assert "standing still for 7 minutes" in p
+    assert "You have not done anything yet." not in p
+    fresh = vessel_beat.build_idle_prompt("retroxr", "- a TV, 2 m", recent=[], still_seconds=5)
+    assert "You have not done anything yet." in fresh
+    assert "standing still" not in fresh, "five seconds is not worth saying"
+    bare = vessel_beat.build_idle_prompt("retroxr", "- a TV, 2 m")
+    assert "What you did lately" not in bare and "Since you last looked" not in bare
+
+
+async def test_nothing_is_described_until_her_eyes_have_reported() -> None:
+    conn, _ = await _connected()
+    assert conn.describe_surroundings() is None, "no state yet: 'nothing near you' would be a lie (it cost the first beat)"
+    assert conn.idle_ready_since() is None
+
+
+async def test_she_is_ready_to_be_asked_once_she_is_out(karada: FakeKarada) -> None:
+    conn, _ = await _connected()
+    await conn.handle_frame({"type": "state", "state": {"extra": {"entities": []}}})
+    assert conn.idle_ready_since() is None, "she is still in the capsule"
+    await conn.handle_frame({"type": "out"})
+    ready = conn.idle_ready_since()
+    assert ready is not None and abs(ready - time.monotonic()) < 5
+
+
+async def test_a_session_with_no_out_frame_is_ready_a_little_after_it_attached(karada: FakeKarada) -> None:
+    """A resumed session / an older mod sends no ``out``: she must not wait for ever."""
+    conn, _ = await _connected()
+    await conn.handle_frame({"type": "state", "state": {"extra": {"entities": []}}})
+    assert conn.idle_ready_since() is None
+    conn._attached_at = time.monotonic() - 100
+    assert conn.idle_ready_since() is not None
+
+
+async def test_what_she_did_is_kept_for_the_prompt(karada: FakeKarada) -> None:
+    conn, _ = await _connected()
+    conn._journal_action("inspect", {"target": "Game Boy Color"}, VesselActionResult(ok=True))
+    conn._journal_action("move", {"target": "TV"}, VesselActionResult(ok=False, detail="no_way_round"))
+    conn._journal_action("status", {}, VesselActionResult(ok=True))
+    conn._journal_action("say", {"text": "hello"}, VesselActionResult(ok=True))
+    await conn._dispatch_event({"event_type": "search_done", "summary": "You found the NES behind the pod."})
+    await conn._dispatch_event({"event_type": "sighting", "summary": "a TV was switched on"})
+    texts = [t for _, t in conn.idle_journal()]
+    assert texts == [
+        "inspect Game Boy Color",
+        "move TV (did not work: no_way_round)",
+        'said "hello"',
+        "You found the NES behind the pod.",
+    ], "status is a read, a sighting is something that happened TO her, a *_done is hers"
+
+
+async def test_the_journal_is_bounded_and_ends_with_the_session(karada: FakeKarada) -> None:
+    conn, _ = await _connected()
+    for n in range(40):
+        conn._note(f"thing {n}")
+    assert len(conn.idle_journal()) == 12 and conn.idle_journal()[-1][1] == "thing 39"
+    conn._note("x" * 500)
+    assert len(conn.idle_journal()[-1][1]) == 110
+    await conn.disconnect()
+    assert conn.idle_journal() == []
+
+
+class _Ready(_Conn):
+    """A connector with a readiness clock and a journal she can add to."""
+
+    def __init__(self, ready: float | None, text: str | None = "- a TV, 2 m") -> None:
+        super().__init__(idle=True, text=text)
+        self.ready = ready
+        self.journal: list[tuple[float, str]] = []
+
+    def idle_ready_since(self) -> float | None:
+        return self.ready
+
+    def idle_journal(self) -> list[tuple[float, str]]:
+        return list(self.journal)
+
+
+@pytest.fixture
+def rested(monkeypatch: pytest.MonkeyPatch):
+    """The engine has been free for a long time (and can be told otherwise)."""
+    from core import message_queue
+
+    state = {"free": 100.0}
+    monkeypatch.setattr(message_queue, "consumer_idle_seconds", lambda: state["free"])
+    return state
+
+
+async def test_no_beat_before_she_is_out_and_the_first_one_waits_the_arrival_pace(iface, rested) -> None:
+    vi, reg, sent = iface
+    conn = _Ready(ready=None)
+    reg._instances["retroxr"] = conn
+    await vi._maybe_run_idle_beat()
+    assert sent == [], "still in the capsule: nothing to ask"
+    now = asyncio.get_event_loop().time()
+    conn.ready = now - 5
+    await vi._maybe_run_idle_beat()
+    assert sent == [], "5 s out of 20: too soon (it used to ask in the same second as the connect)"
+    conn.ready = now - 25
+    await vi._maybe_run_idle_beat()
+    assert len(sent) == 1 and "- a TV, 2 m" in sent[0]["summary"]
+
+
+async def test_a_beat_that_ends_in_nothing_stretches_the_next_and_an_action_resets_it(iface, rested) -> None:
+    vi, reg, sent = iface
+    now = asyncio.get_event_loop().time()
+    conn = _Ready(ready=now - 10_000)  # long settled: the interval is 40 s
+    reg._instances["retroxr"] = conn
+    streaks: list[int] = []
+    for n in range(6):
+        vi._last_idle_beat_at = now - 10_000 + n  # long ago: due now
+        await vi._maybe_run_idle_beat()
+        assert len(sent) == n + 1
+        streaks.append(vi._idle_streak)
+        # its turn ends (the engine is free), and she did nothing
+        await vi._maybe_run_idle_beat()
+    assert streaks == [0, 1, 2, 3, 4, 5], streaks
+    vi._idle_streak = 5
+    vi._last_idle_beat_at = now - 70  # 70 s ago: past 40, short of the 90 that streak 5 asks
+    before = len(sent)
+    await vi._maybe_run_idle_beat()
+    assert len(sent) == before, "five quiet beats in a row: it asks less often"
+    conn.journal.append((asyncio.get_event_loop().time(), "inspect TV"))
+    vi._idle_pending = True
+    vi._last_idle_beat_at = now - 70
+    conn.journal[-1] = (now - 60, "inspect TV")
+    await vi._maybe_run_idle_beat()
+    assert vi._idle_streak == 0, "she did something after the last ask: the pace is back"
+    assert len(sent) == before + 1
+
+
+async def test_the_prompt_says_what_she_did_and_how_long_she_has_been_still(iface, rested) -> None:
+    vi, reg, sent = iface
+    now = asyncio.get_event_loop().time()
+    conn = _Ready(ready=now - 10_000)
+    conn.journal = [(now - 500, "watch Game Boy Color")]
+    reg._instances["retroxr"] = conn
+    await vi._maybe_run_idle_beat()
+    assert "- 8 min ago: watch Game Boy Color" in sent[0]["summary"]
+    assert "standing still for 8 minutes" in sent[0]["summary"]
+
+
+async def test_a_change_around_her_brings_the_ask_forward_and_is_told(iface, rested, monkeypatch: pytest.MonkeyPatch) -> None:
+    vi, reg, sent = iface
+    now = asyncio.get_event_loop().time()
+    conn = _Ready(ready=now - 10_000)
+    reg._instances["retroxr"] = conn
+    vi._idle_seen_ready = conn.ready  # the arrival is already behind us
+    vi._idle_streak = 6  # a long run of nothing: the interval is stretched
+    vi._last_idle_beat_at = now - 30
+    await vi._maybe_run_idle_beat()
+    assert sent == [], "30 s after the last ask with a stretched interval: nothing yet"
+    # the REAL event path, with the database stubbed out: the hook must sit before the salience filter, which
+    # drops nearly every sighting (rate limit), or a change would never count
+    class _Manager:
+        async def start_session(self, *a: Any, **k: Any) -> str:
+            return "s1"
+
+        async def record_experience(self, *a: Any, **k: Any) -> None:
+            pass
+
+    async def no_log(*a: Any, **k: Any) -> None:
+        pass
+
+    monkeypatch.setattr("interface.vessel_interface.get_vessel_session_manager", lambda: _Manager())
+    monkeypatch.setattr(vi, "_log_activity", no_log)
+    monkeypatch.setattr(vi, "_is_salient", lambda *a, **k: False)
+    await vi.on_world_event("retroxr", "sighting", "a NES was put down near you")
+    assert vi._idle_novelty == ["a NES was put down near you"], "counted although it was not salient"
+    monkeypatch.setattr("interface.vessel_interface.get_vessel_session_manager", lambda: SimpleNamespace(
+        has_active_session=lambda: True))
+    await vi._maybe_run_idle_beat()
+    assert len(sent) == 1 and "- a NES was put down near you" in sent[0]["summary"]
+    await vi._maybe_run_idle_beat()
+    assert len(sent) == 1
+    assert vi._idle_novelty == [], "told once"
+
+
+async def test_a_new_arrival_starts_the_clock_and_the_streak_again(iface, rested) -> None:
+    vi, reg, sent = iface
+    now = asyncio.get_event_loop().time()
+    conn = _Ready(ready=now - 10_000)
+    reg._instances["retroxr"] = conn
+    vi._idle_streak = 9
+    await vi._maybe_run_idle_beat()
+    conn.ready = now - 1  # a second session in the same process
+    await vi._maybe_run_idle_beat()
+    assert vi._idle_streak == 0 and vi._idle_pending is False
+    assert len(sent) == 1, "and the new arrival is not asked in its first second"
+
+
+async def test_a_player_who_cut_the_beat_short_does_not_count_against_her(iface, rested) -> None:
+    vi, reg, sent = iface
+    now = asyncio.get_event_loop().time()
+    conn = _Ready(ready=now - 10_000)
+    reg._instances["retroxr"] = conn
+    await vi._maybe_run_idle_beat()
+    assert len(sent) == 1
+    vi._last_player_activity_at = asyncio.get_event_loop().time() + 1
+    await vi._maybe_run_idle_beat()
+    assert vi._idle_streak == 0 and vi._idle_pending is False
+
+
+async def test_every_reason_for_holding_a_beat_is_logged(iface, rested, caplog: pytest.LogCaptureFixture) -> None:
+    vi, reg, sent = iface
+    logged: list[str] = []
+    import interface.vessel_interface as vi_mod
+
+    orig = vi_mod.log_info
+    vi_mod.log_info = lambda m, *a, **k: logged.append(str(m))
+    try:
+        reg._instances["retroxr"] = _Ready(ready=None)
+        await vi._maybe_run_idle_beat()
+        now = asyncio.get_event_loop().time()
+        reg._instances["retroxr"] = _Ready(ready=now - 10_000)
+        rested["free"] = 2.0
+        await vi._maybe_run_idle_beat()
+    finally:
+        vi_mod.log_info = orig
+    assert any("Idle beat held (not_ready)" in m for m in logged), logged
+    assert any("Idle beat held (engine_busy)" in m and "2s of the 12s" in m for m in logged), logged
+
+
+# -- her own aims: kept by Synth, never sent to the mod ------------------------
+
+
+class _FakeGoals:
+    """Stands in for plugins.goals.goals (a database)."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple, dict]] = []
+        self.active: dict[str, Any] | None = None
+
+    async def set_goal(self, description: str, *a: Any, **kw: Any) -> dict[str, Any]:
+        self.calls.append(("set", (description, *a), kw))
+        self.active = {"description": description, "note": kw.get("note")}
+        return {"status": "ok", "message": "goal set"}
+
+    async def update_active_goal(self, **kw: Any) -> dict[str, Any]:
+        self.calls.append(("update", (), kw))
+        return {"status": "ok", "message": "goal updated"}
+
+    async def get_active_goal(self, **kw: Any) -> dict[str, Any] | None:
+        self.calls.append(("get", (), kw))
+        return self.active
+
+
+@pytest.fixture
+def goals(monkeypatch: pytest.MonkeyPatch) -> _FakeGoals:
+    import importlib
+
+    store = importlib.import_module("plugins.goals.goals")
+    fake = _FakeGoals()
+    monkeypatch.setattr(store, "set_goal", fake.set_goal)
+    monkeypatch.setattr(store, "update_active_goal", fake.update_active_goal)
+    monkeypatch.setattr(store, "get_active_goal", fake.get_active_goal)
+    return fake
+
+
+async def test_her_aims_are_kept_in_the_goals_store_and_never_sent_to_the_mod(karada: FakeKarada, goals: _FakeGoals) -> None:
+    conn, ws = await _connected()
+    res = await conn.act("set_goal", {"description": "find out what is in this room", "note": "start with the shelf"})
+    assert res.ok is True
+    kind, args, kw = goals.calls[0]
+    assert args[0] == "find out what is in this room"
+    assert (kw["scope"], kw["game"], kw["world"]) == ("vessel", "retroxr", "none"), "one house, one set of aims"
+    assert kw["note"] == "start with the shelf"
+    res = await conn.act("update_goal", {"note": "got through the shelf", "status": "done"})
+    assert res.ok is True and goals.calls[1][2]["status"] == "done"
+    assert ws.sent == [], "what she wants is not something her body does: nothing reaches the room"
+    assert (await conn.idle_intention() or {}).get("description") == "find out what is in this room"
+
+
+async def test_an_aim_needs_words_and_a_broken_store_is_an_answer_not_a_crash(karada: FakeKarada, goals: _FakeGoals, monkeypatch: pytest.MonkeyPatch) -> None:
+    conn, ws = await _connected()
+    res = await conn.act("set_goal", {"note": "x"})
+    assert res.ok is False and "description" in (res.detail or "") and goals.calls == []
+    res = await conn.act("set_goal", {"goal": "an alias a weaker model might use"})
+    assert res.ok is True and goals.calls[0][1][0] == "an alias a weaker model might use"
+
+    import importlib
+
+    store = importlib.import_module("plugins.goals.goals")
+
+    async def boom(*a: Any, **k: Any) -> Any:
+        raise RuntimeError("no database")
+
+    monkeypatch.setattr(store, "set_goal", boom)
+    monkeypatch.setattr(store, "get_active_goal", boom)
+    res = await conn.act("set_goal", {"description": "keep going"})
+    assert res.ok is False and "no database" in (res.detail or "")
+    assert await conn.idle_intention() is None, "no store, no aim: the beat still asks"
+    assert ws.sent == []
+
+
+async def test_a_closed_rift_still_keeps_no_aims_it_cannot_act_on(goals: _FakeGoals) -> None:
+    res = await RetroXRConnector().act("set_goal", {"description": "x"})
+    assert res.ok is True or res.detail == "rift_closed"  # kept either way; never a crash
+
+
+def test_the_idle_prompt_offers_her_aim_back_as_hers() -> None:
+    with_aim = vessel_beat.build_idle_prompt(
+        "retroxr", "- a TV, 2 m", intention={"description": "watch the whole of Sonic", "note": "got to the second zone"}
+    )
+    assert "your own aim: watch the whole of Sonic" in with_aim
+    assert "Your last note on it: got to the second zone" in with_aim
+    assert "vessel_retroxr_update_goal" in with_aim and "vessel_retroxr_set_goal" in with_aim
+    assert "must" not in with_aim.lower()
+    without = vessel_beat.build_idle_prompt("retroxr", "- a TV, 2 m")
+    assert "You have no aim of your own at the moment." in without
+    assert "Nobody assigns it." in without and "must" not in without.lower()
+    assert "your own aim:" not in without
+
+
+async def test_the_beat_hands_her_current_aim_to_the_prompt(iface, rested) -> None:
+    vi, reg, sent = iface
+
+    class Conn(_Ready):
+        async def idle_intention(self) -> dict[str, Any]:
+            return {"description": "tidy the shelf", "note": None}
+
+    now = asyncio.get_event_loop().time()
+    reg._instances["retroxr"] = Conn(ready=now - 10_000)
+    await vi._maybe_run_idle_beat()
+    assert "your own aim: tidy the shelf" in sent[0]["summary"]
+
+
+async def test_a_store_that_fails_does_not_stop_the_beat(iface, rested) -> None:
+    vi, reg, sent = iface
+
+    class Conn(_Ready):
+        async def idle_intention(self) -> dict[str, Any]:
+            raise RuntimeError("database gone")
+
+    now = asyncio.get_event_loop().time()
+    reg._instances["retroxr"] = Conn(ready=now - 10_000)
+    await vi._maybe_run_idle_beat()
+    assert len(sent) == 1 and "You have no aim of your own" in sent[0]["summary"]

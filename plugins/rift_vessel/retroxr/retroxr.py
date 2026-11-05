@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import collections
 import itertools
 import os
 import tempfile
@@ -77,6 +78,11 @@ def _queued_turns() -> int | str:
 
 # How long a `say` holds its text for the first sentence of its voice before the text goes alone.
 _SAY_HOLD_SEC = 8.0
+#: What she did lately, kept for the idle prompt: how many entries, and how long each may be.
+_JOURNAL_MAX = 12
+_JOURNAL_TEXT_MAX = 110
+#: A resumed session gets no ``out`` frame: she counts as ready this long after the mod attached.
+_RESUME_READY_SEC = 45.0
 # How long the mod has to answer one action frame.
 _ACTION_TIMEOUT_SEC = 20.0
 # Verbs that take a while in the room (walking across it, a carry).
@@ -210,6 +216,45 @@ WORLD_VERBS: Dict[str, Dict[str, Any]] = {
 }
 
 
+def _goal_store() -> Any:
+    """The generic Goals plugin's module. (``plugins/goals/__init__.py`` swaps the package for the module in
+    ``sys.modules``, so ``from plugins.goals import goals`` is an ImportError: import it by name.)"""
+    import importlib
+
+    return importlib.import_module("plugins.goals.goals")
+
+
+# Verbs of Synth's own, never sent to the mod: they keep what she WANTS (the generic Goals plugin, scope
+# ``vessel`` / ``retroxr``), not what her body does. Always offered, whatever the mod declared.
+LOCAL_VERBS: Dict[str, Dict[str, Any]] = {
+    "set_goal": {
+        "description": (
+            "Decide, in your own words, something you want to do here for a while, and keep it in mind: look "
+            "closely at a machine, find out what is in the room, watch a game, tidy up, keep the player company. "
+            "Nobody gives you this and nothing is on a list: it is only what you feel like doing. Put it in "
+            "'description'. It stays your aim until you finish it or change your mind, so your next quiet moment "
+            "starts from it instead of from nothing. Choosing a new one lets go of the old."
+        ),
+        "required_fields": ["description"],
+        "optional_fields": ["note"],
+        "security_level": "low",
+    },
+    "update_goal": {
+        "description": (
+            "Look back at the aim you set yourself: jot a 'note' on how it is going in your own words, set "
+            "'status' to 'done' when you feel you have done it or 'abandoned' if you have lost interest. You are "
+            "the judge of your own progress."
+        ),
+        "required_fields": [],
+        "optional_fields": ["note", "status"],
+        "security_level": "low",
+    },
+}
+
+#: Her aims are kept per game, not per room: one house, one set of things she wants.
+GOAL_SCOPE = {"scope": "vessel", "game": "retroxr", "world": "none"}
+
+
 #: What a mod that says nothing about it (an old one) is taken to do.
 DEFAULT_DECLARED = frozenset({"say", "move", "look", "status", "emote"})
 
@@ -251,6 +296,11 @@ class RetroXRConnector(VesselConnectorBase):
         # disconnect grace (VESSEL_DISCONNECT_GRACE_SEC) instead of ending, so a room change or a blip can resume.
         self.session_token: str | None = None
         self.paused = False
+        # When she became ready to be asked what she wants (see ``idle_ready_since``), what she did lately, and
+        # when the mod attached (a resumed session gets no ``out`` frame: the idle beat falls back to this).
+        self._idle_ready_at: float | None = None
+        self._attached_at: float | None = None
+        self._journal: "collections.deque[tuple[float, str]]" = collections.deque(maxlen=_JOURNAL_MAX)
 
     # ------------------------------------------------------------------
     # Socket ownership (driven by the route in plugins/rift_vessel/retroxr/api.py)
@@ -322,6 +372,8 @@ class RetroXRConnector(VesselConnectorBase):
         self._on_event = on_event
         self._connected = True
         self.paused = False
+        self._idle_ready_at = None
+        self._attached_at = time.monotonic()
         await self._register_karada()
         log_info(
             f"{LOG_PREFIX} embodied (room={self._hello.get('room')!r}, "
@@ -332,6 +384,8 @@ class RetroXRConnector(VesselConnectorBase):
     async def disconnect(self) -> None:
         self.paused = False
         self.session_token = None
+        self._journal.clear()
+        self._idle_ready_at = None
         ws = self._ws
         self._unregister_karada()
         self.detach_socket()
@@ -421,6 +475,9 @@ class RetroXRConnector(VesselConnectorBase):
 
     async def _release_summon(self) -> None:
         """She has arrived (or the rift closed): she is no longer being introduced."""
+        if self._idle_ready_at is None and self.is_connected:
+            self._idle_ready_at = time.monotonic()
+            log_info(f"{LOG_PREFIX} she is out and ready to be asked what she wants to do")
         try:
             from core.animation_handler import get_karada_state_server
 
@@ -523,9 +580,27 @@ class RetroXRConnector(VesselConnectorBase):
     # The idle beat: what is around her
     # ------------------------------------------------------------------
 
+    def idle_ready_since(self) -> float | None:
+        """When she was out of the capsule and could be asked what she wants (``time.monotonic()``), else ``None``."""
+        if not self.is_connected or not self._state:
+            return None
+        if self._idle_ready_at is not None:
+            return self._idle_ready_at
+        if self._attached_at is not None and time.monotonic() - self._attached_at >= _RESUME_READY_SEC:
+            # No ``out`` frame came (a resumed session, an older mod): count from when the mod attached.
+            return self._attached_at + _RESUME_READY_SEC
+        return None
+
+    def idle_journal(self) -> "list[tuple[float, str]]":
+        return list(self._journal)
+
     def describe_surroundings(self) -> str | None:
         """What she can see around her, in words, for "what do you want to do?"."""
         if not self.is_connected:
+            return None
+        if not self._state:
+            # Her eyes have reported nothing yet: "you cannot see the player, there is nothing near you" would be a
+            # lie told to the model (it wasted the first beat, 2026-11-04), so there is nothing to ask about.
             return None
         st = self._state or {}
         entities = [e for e in ((st.get("extra") or {}).get("entities") or []) if isinstance(e, dict)]
@@ -689,6 +764,9 @@ class RetroXRConnector(VesselConnectorBase):
         if str(raw.get("event_type") or "") == "chat" and raw.get("actor"):
             self._chat_waiting_since = time.monotonic()
             log_info(f"{LOG_PREFIX} player chat in (queued turns: {_queued_turns()})")
+        if str(raw.get("event_type") or "").endswith("_done"):
+            # A routine she started has ended (search/explore/watch/bring...): that is part of what she did.
+            self._note(str(raw.get("summary") or raw.get("event_type")))
         if str(raw.get("event_type") or "") == "summoned" and not self._hello.get("early_summon"):
             # A mod that sends the first prompt EARLY (``hello.early_summon``) says when they are out with an ``out``
             # frame; an older one has no such frame, so its ``summoned`` event, sent once they are out, ends it.
@@ -721,7 +799,73 @@ class RetroXRConnector(VesselConnectorBase):
     # ------------------------------------------------------------------
 
     async def act(self, action: str, payload: Dict[str, Any]) -> VesselActionResult:
+        result = await self._act(action, payload)
+        self._journal_action(str(action or ""), payload, result)
+        return result
+
+    def _note(self, text: str) -> None:
+        """Remember one thing she did (or that happened to her routine) for the idle prompt."""
+        text = " ".join(str(text or "").split())
+        if text:
+            self._journal.append((time.monotonic(), text[:_JOURNAL_TEXT_MAX]))
+
+    def _journal_action(self, verb: str, payload: Dict[str, Any] | None, result: VesselActionResult) -> None:
+        """Journal a verb she chose. ``status`` reads a number and is not something she did."""
+        if verb == "status":
+            return
+        payload = payload if isinstance(payload, dict) else {}
+        if verb == "say":
+            what = f'said "{str(payload.get("text") or "").strip()}"'
+        else:
+            target = str(payload.get("target") or payload.get("name") or "").strip()
+            what = f"{verb} {target}".strip()
+        if not result.ok:
+            what += f" (did not work: {result.detail or 'no reason given'})"
+        self._note(what)
+
+    async def _act_goal(self, verb: str, payload: Dict[str, Any] | None) -> VesselActionResult:
+        """``set_goal`` / ``update_goal``: what she wants, kept in the generic Goals plugin (never sent to the mod)."""
+        payload = payload if isinstance(payload, dict) else {}
+        try:
+            goal_store = _goal_store()
+
+            if verb == "set_goal":
+                description = ""
+                for key in ("description", "goal", "goal_text", "objective", "intention"):
+                    if isinstance(payload.get(key), str) and payload[key].strip():
+                        description = payload[key].strip()
+                        break
+                if not description:
+                    log_warning(f"{LOG_PREFIX} set_goal refused: no description in {sorted(payload)}")
+                    return VesselActionResult(ok=False, detail="set_goal requires a free-text description")
+                result = await goal_store.set_goal(
+                    description, self.session_token, note=payload.get("note"), **GOAL_SCOPE
+                )
+            else:
+                result = await goal_store.update_active_goal(
+                    note=payload.get("note"), status=payload.get("status"), **GOAL_SCOPE
+                )
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} {verb} failed: {exc}")
+            return VesselActionResult(ok=False, detail=f"goals_unavailable: {exc}")
+        ok = result.get("status") == "ok"
+        log_info(f"{LOG_PREFIX} {verb} -> {'ok' if ok else 'refused'} ({result.get('message') or ''})")
+        return VesselActionResult(ok=ok, detail=result.get("message") or ("goal updated" if ok else "refused"), data=result)
+
+    async def idle_intention(self) -> Dict[str, Any] | None:
+        """The aim she set herself and has not finished, for the idle prompt (``None`` when she has none)."""
+        try:
+            goal_store = _goal_store()
+
+            return await goal_store.get_active_goal(**GOAL_SCOPE)
+        except Exception as exc:
+            log_debug(f"{LOG_PREFIX} idle_intention unavailable: {exc}")
+            return None
+
+    async def _act(self, action: str, payload: Dict[str, Any]) -> VesselActionResult:
         verb = str(action or "")
+        if verb in LOCAL_VERBS:
+            return await self._act_goal(verb, payload)
         if verb not in CORE_VERBS and verb not in WORLD_VERBS:
             # The body never plays: nothing outside the declared verbs reaches the room.
             log_warning(f"{LOG_PREFIX} refused unknown verb {verb!r}")
@@ -811,7 +955,9 @@ class RetroXRConnector(VesselConnectorBase):
 
     def get_world_actions(self) -> Dict[str, Dict[str, Any]]:
         declared = self.declared_verbs()
-        return {verb: dict(schema) for verb, schema in WORLD_VERBS.items() if verb in declared}
+        actions = {verb: dict(schema) for verb, schema in WORLD_VERBS.items() if verb in declared}
+        actions.update({verb: dict(schema) for verb, schema in LOCAL_VERBS.items()})
+        return actions
 
     def describe_capabilities(self) -> Dict[str, Any]:
         return {

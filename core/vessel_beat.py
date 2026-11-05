@@ -1581,13 +1581,85 @@ def is_idle_beat_enabled(config_get: Any) -> bool:
         return True
 
 
-def resolve_idle_interval(config_get: Any, default: int = 90) -> int:
-    """Seconds between idle beats, clamped to [20, 3600]. Fail-safe: ``default``."""
+def resolve_idle_interval(config_get: Any, default: int = 40) -> int:
+    """Seconds between idle beats once settled, clamped to [20, 3600]. Fail-safe: ``default``."""
     try:
         value = int(config_get("VESSEL_IDLE_BEAT_INTERVAL_SEC", default))
     except Exception:
         return default
     return max(20, min(3600, value))
+
+
+def resolve_idle_arrival_interval(config_get: Any, default: int = 20) -> int:
+    """Seconds between idle beats right after she arrives, [10, 600]. Fail-safe: ``default``."""
+    try:
+        value = int(config_get("VESSEL_IDLE_BEAT_ARRIVAL_INTERVAL_SEC", default))
+    except Exception:
+        return default
+    return max(10, min(600, value))
+
+
+def resolve_idle_arrival_window(config_get: Any, default: int = 180) -> int:
+    """How long after she arrives the faster arrival interval lasts, [0, 3600]. Fail-safe: ``default``."""
+    try:
+        value = int(config_get("VESSEL_IDLE_BEAT_ARRIVAL_WINDOW_SEC", default))
+    except Exception:
+        return default
+    return max(0, min(3600, value))
+
+
+def resolve_idle_max_interval(config_get: Any, default: int = 180) -> int:
+    """The longest the interval grows to when beat after beat ends in nothing, [20, 3600]."""
+    try:
+        value = int(config_get("VESSEL_IDLE_BEAT_MAX_INTERVAL_SEC", default))
+    except Exception:
+        return default
+    return max(20, min(3600, value))
+
+
+def resolve_idle_engine_rest_sec(config_get: Any, default: int = 12) -> int:
+    """Seconds the engine must have been free before an idle beat starts, [0, 600].
+
+    A beat nobody asked for must not run while a person could be waiting, but the rest asked for is a
+    few seconds, not the whole interval: with a 40 s interval a rest of one interval means it never starts.
+    """
+    try:
+        value = int(config_get("VESSEL_IDLE_BEAT_ENGINE_REST_SEC", default))
+    except Exception:
+        return default
+    return max(0, min(600, value))
+
+
+#: Beats in a row that ended in nothing before the interval starts to stretch.
+IDLE_FREE_STREAK = 3
+#: How much each further quiet beat stretches it.
+IDLE_BACKOFF = 1.5
+
+
+def adaptive_idle_interval(
+    base: float,
+    arrival_interval: float,
+    arrival_window: float,
+    max_interval: float,
+    since_ready: float,
+    idle_streak: int,
+    novelty: bool = False,
+) -> float:
+    """Pure: the interval to wait before the next idle beat.
+
+    Quick while she has just arrived (``arrival_interval`` for ``arrival_window`` seconds), ``base`` once
+    settled, stretched by ``IDLE_BACKOFF`` for every beat past ``IDLE_FREE_STREAK`` that ended in no action
+    (never past ``max_interval``), and cut back to the arrival pace when something around her changed
+    (``novelty``): a change is a reason to ask early, never an instruction. Structural, no text.
+    """
+    interval = arrival_interval if since_ready < arrival_window else base
+    interval = min(interval, base)
+    extra = int(idle_streak) - IDLE_FREE_STREAK
+    if extra > 0:
+        interval = min(max_interval, interval * (IDLE_BACKOFF**extra))
+    if novelty:
+        interval = min(interval, arrival_interval)
+    return float(interval)
 
 
 def resolve_idle_quiet_sec(config_get: Any, default: int = 45) -> int:
@@ -1617,23 +1689,83 @@ def idle_beat_due(
     return True
 
 
-def build_idle_prompt(world: str, surroundings: str) -> str:
-    """The idle turn: what is around you, and an open question. Keyword-free.
+def format_age(seconds: float) -> str:
+    """"just now", "40 s ago", "3 min ago", "2 h ago": for the facts in the idle prompt."""
+    seconds = max(0.0, float(seconds))
+    if seconds < 10:
+        return "just now"
+    if seconds < 90:
+        return f"{int(round(seconds / 10.0)) * 10} s ago"
+    if seconds < 3600:
+        return f"{int(round(seconds / 60.0))} min ago"
+    return f"{seconds / 3600.0:.1f} h ago"
 
-    ``surroundings`` is the connector's own description (objects with where they are, who
-    is near). Nothing is asked of Synth: not acting is an explicit option.
+
+def format_span(seconds: float) -> str:
+    """"40 seconds", "7 minutes", "1.5 hours": a length of time."""
+    seconds = max(0.0, float(seconds))
+    if seconds < 90:
+        return f"{int(round(seconds / 10.0)) * 10} seconds"
+    if seconds < 3600:
+        return f"{int(round(seconds / 60.0))} minutes"
+    return f"{seconds / 3600.0:.1f} hours"
+
+
+def build_idle_prompt(
+    world: str,
+    surroundings: str,
+    recent: "list[tuple[float, str]] | None" = None,
+    still_seconds: float | None = None,
+    changes: "list[str] | None" = None,
+    intention: "dict | None" = None,
+) -> str:
+    """The idle turn: what is around you, what you did lately, and an open question. Keyword-free.
+
+    ``surroundings`` is the connector's own description (objects with where they are, who is near).
+    ``recent`` is what she did lately as ``(age in seconds, what)``, newest last; ``still_seconds`` how long
+    she has done nothing; ``changes`` what changed around her since the last beat. All are FACTS: nothing
+    here tells her what to do, and staying where she is stays one of the choices. ``intention`` is the aim she
+    set herself (``description``, ``note``): offered back as hers to keep, change or let go, never as a task. What she does is hers and
+    unasked: there is no requester to report to.
     """
     text = str(surroundings or "").strip()
-    return "\n".join(
-        [
-            f"You are in the world '{world}' and nobody is talking to you right now.",
+    lines = [
+        f"You are in the world '{world}' and nobody is talking to you right now.",
+        "",
+        "This is what is around you:",
+        text if text else "(nothing you can make out)",
+    ]
+    if changes:
+        lines += ["", "Since you last looked, this changed:"] + [f"- {c}" for c in changes if str(c).strip()]
+    if recent:
+        lines += ["", "What you did lately:"] + [f"- {format_age(age)}: {what}" for age, what in recent]
+    elif still_seconds is not None:
+        lines += ["", "You have not done anything yet."]
+    if still_seconds is not None and still_seconds >= 60:
+        lines.append(f"You have been standing still for {format_span(still_seconds)}.")
+    prefix = f"vessel_{world}_"
+    desc = str((intention or {}).get("description") or "").strip()
+    if desc:
+        lines += ["", f"Something you set out to do, your own aim: {desc}"]
+        note = str((intention or {}).get("note") or "").strip()
+        if note:
+            lines.append(f"Your last note on it: {note}")
+        lines.append(
+            f"You can keep at it, note how it is going or call it done or let it go (`{prefix}update_goal`), or "
+            f"choose another (`{prefix}set_goal`)."
+        )
+    else:
+        lines += [
             "",
-            "This is what is around you:",
-            text if text else "(nothing you can make out)",
-            "",
-            "What do you want to do? Nothing is expected of you. You can look at or go to "
-            "something, handle an object, say something out loud, change what you are "
-            "doing, or just stay as you are. Do only what you can really do here; if you "
-            "would rather do nothing, do nothing.",
+            "You have no aim of your own at the moment. If something draws you, you can make it yours "
+            f"(`{prefix}set_goal`): a few words on what you want to do here. Nobody assigns it.",
         ]
-    )
+    lines += [
+        "",
+        "What do you want to do? This time is yours and whatever you do is your own choice: nobody asked "
+        "for it, so there is no one to report it to as if it were a task (if you tell the player about "
+        "it, you are only sharing). You can look at or go to something, handle an object, say something "
+        "out loud, or change what you are doing. You can also stay where you are: that is one choice "
+        "among the others, and how long you stay is up to you. Do only what you can really do here.",
+    ]
+    return "\n".join(lines)

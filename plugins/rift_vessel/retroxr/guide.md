@@ -79,18 +79,39 @@ voice engine: the line stays text.
 
 ## When nobody is talking to her
 
-She is never scripted. `uses_idle_beat` makes the Vessel send an **idle beat** every
-`VESSEL_IDLE_BEAT_INTERVAL_SEC` (90 s) once no player has spoken for `VESSEL_IDLE_BEAT_QUIET_SEC` (45 s):
-the connector's `describe_surroundings()` (the player and the objects near her, where, whether a machine is
-on, what she holds, which animations she has) and the question *what do you want to do?*, with doing nothing
-as an explicit answer. She decides. It is an ordinary vessel perception: **AMBIENT (4), above background work
-(G.R.I.L.L.O. 2) and below every human; a player's chat is HIGH (8), prunes pending ones and postpones the
-next** (`tests/test_vessel_retroxr_body.py` pins all of this). A world with `uses_idle_beat` gets no will,
-action, goal or reflection beat: those push a bot toward a goal.
+She is never scripted. `uses_idle_beat` makes the Vessel send an **idle beat** (2026-11-05, "the puppet" fix):
+
+- **When it starts.** Not before she is out of the capsule and her eyes have reported (`idle_ready_since()`: the
+  mod's `out` frame, or 45 s after a resumed session attached; `describe_surroundings()` is `None` until the first
+  `state`). The first beat used to fire in the second of the connect, with "you cannot see the player, there is
+  nothing near you", and was wasted.
+- **How often** (`adaptive_idle_interval`, pure): `VESSEL_IDLE_BEAT_ARRIVAL_INTERVAL_SEC` (20 s) for the first
+  `VESSEL_IDLE_BEAT_ARRIVAL_WINDOW_SEC` (180 s), then `VESSEL_IDLE_BEAT_INTERVAL_SEC` (40 s); after three beats in a
+  row that ended in no action it stretches x1.5 per beat up to `VESSEL_IDLE_BEAT_MAX_INTERVAL_SEC` (180 s); a
+  `sighting` (something changed in the room) brings it back to the arrival pace. Held while a player spoke in the last
+  `VESSEL_IDLE_BEAT_QUIET_SEC` (45 s) and until the engine has been free `VESSEL_IDLE_BEAT_ENGINE_REST_SEC` (12 s;
+  it was a whole interval, which a long turn kept from ever happening). **Trade-off: a chat that arrives while a beat's
+  turn is running waits for that turn (about one LLM turn).**
+- **What she is told** (facts, never orders): the connector's description, what changed since last time, the last five
+  things she did (`idle_journal()`: her verbs and her routines' `*_done`) and for how long she has stood still, and the
+  aim she set herself. Staying put is one choice among the others; what she does is hers and unasked.
+- **Her own aims** (`set_goal` / `update_goal`, `LOCAL_VERBS`): Synth's, never sent to the mod, kept by the generic Goals
+  plugin under scope `vessel` / `retroxr` / `none` (one house, one set of aims; the WebUI Goals view lists them). One
+  active at a time; `idle_intention()` hands it back to the next beat. There is no goal expander, debrief or
+  "you MUST set a goal" here, on purpose.
+- **Every reason a beat did not start is logged at INFO** (`Idle beat held (not_ready | engine_busy | player_active |
+  last_beat_running | nothing_to_describe)`, once a minute per reason) and so is the outcome of each
+  (`Idle beat outcome ...: acted (...) | did nothing (streak N) | cut short by the player`). A silent puppet should
+  never again need a debugger.
+
+It is an ordinary vessel perception: **AMBIENT (4), above background work (G.R.I.L.L.O. 2) and below every human; a
+player's chat is HIGH (8), prunes pending ones and postpones the next** (`tests/test_vessel_retroxr_body.py` pins all of
+this). A world with `uses_idle_beat` gets no will, action, goal or reflection beat: those push a bot toward a goal.
 
 ## Verbs
 
 Core set: `say`, `move`, `look`, `use`, `follow`, `unfollow`, `status`.
+Her own aims (Synth-side, not the mod's): `set_goal`, `update_goal`.
 RetroXR: `look_at`, `touch`, `pick_up`, `put_down`, `hand_over`, `sit`, `emote`, `inspect`, and the ones she does ON HER OWN
 once asked: `search`, `explore`, `watch`, `bring`, `stop`.
 

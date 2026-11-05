@@ -187,6 +187,14 @@ class VesselInterface:
         # are paced independently — see core.vessel_beat and AGENTS.md §5c.
         self._last_will_beat_at: float = 0.0
         self._last_idle_beat_at: float = 0.0
+        # Idle beat bookkeeping: when the body last became ready (a new arrival resets the rest), whether the last
+        # beat's outcome is still unread, how many beats in a row ended in no action (the interval stretches), what
+        # changed around her since (a reason to ask sooner), and when each hold reason was last logged.
+        self._idle_seen_ready: float = -1.0
+        self._idle_pending: bool = False
+        self._idle_streak: int = 0
+        self._idle_novelty: list[str] = []
+        self._idle_hold_logged: dict[str, float] = {}
         self._last_motor_tick_at: float = 0.0
         # Action beat (the middle "concrete-doing" cognition turn that maps the
         # free-text goal onto a real verb — gather/craft/place — since the
@@ -1026,6 +1034,11 @@ class VesselInterface:
             summary=summary,
             metadata=activity_metadata,
         )
+
+        # A change in the room of a body that is asked what it wants is a reason to ask sooner, whether or not the
+        # event is salient enough to be a turn of its own (a sighting rarely is: 15 were dropped in 10 s).
+        if event_type == "sighting" and self._uses_idle_beat(environment):
+            self._note_idle_novelty(summary)
 
         if not self._is_salient(event_type, summary):
             log_debug(
@@ -2022,15 +2035,35 @@ class VesselInterface:
         connector = self._connected_connector(world)
         return bool(connector is not None and getattr(connector, "uses_idle_beat", False))
 
+    def _idle_hold(self, key: str, message: str, every: float = 60.0) -> None:
+        """Log why an idle beat did NOT start, at INFO, at most once per ``every`` seconds per reason.
+
+        A beat that silently never fires is the costliest kind to diagnose (the user saw a puppet and the only
+        trace was a DEBUG line): the reason and the values that decided it are what a log must carry.
+        """
+        now = time.monotonic()
+        if now - self._idle_hold_logged.get(key, -1e9) >= every:
+            self._idle_hold_logged[key] = now
+            log_info(f"[vessel_interface] Idle beat held ({key}): {message}")
+
+    def _note_idle_novelty(self, summary: str) -> None:
+        """Remember that something changed around a body that is asked what it wants (a reason to ask sooner)."""
+        text = " ".join(str(summary or "").split())
+        if text and text not in self._idle_novelty:
+            self._idle_novelty.append(text[:160])
+            del self._idle_novelty[:-5]
+
     async def _maybe_run_idle_beat(self) -> None:
         """Ask Synth what she wants to do, when nobody is talking to her (slow, LLM).
 
-        For connectors with ``uses_idle_beat``: every ``VESSEL_IDLE_BEAT_INTERVAL_SEC`` (default
-        90 s), if no player has spoken for ``VESSEL_IDLE_BEAT_QUIET_SEC`` (default 45 s), hand
-        her the connector's :meth:`describe_surroundings` and ask. She decides; doing nothing is
-        allowed. It is an ordinary vessel perception, ranked AMBIENT: above background work
-        such as G.R.I.L.L.O. (BACKGROUND), below every human, and a player's chat prunes it. Fully
-        guarded; never raises.
+        For connectors with ``uses_idle_beat``: once the body is ready (``idle_ready_since``: out of the
+        capsule, eyes reporting), every ``adaptive_idle_interval`` seconds (``VESSEL_IDLE_BEAT_INTERVAL_SEC``,
+        quicker just after she arrives or when something around her changed, stretched when beat after beat
+        ends in nothing), if no player has spoken for ``VESSEL_IDLE_BEAT_QUIET_SEC`` and the engine has been
+        free for ``VESSEL_IDLE_BEAT_ENGINE_REST_SEC``, hand her the connector's :meth:`describe_surroundings`,
+        what she did lately and what changed, and ask. She decides; staying put is allowed. It is an ordinary
+        vessel perception, ranked AMBIENT: above background work such as G.R.I.L.L.O. (BACKGROUND), below every
+        human, and a player's chat prunes it. Every reason it does not start is logged. Fully guarded; never raises.
         """
         try:
             from core import vessel_beat
@@ -2064,27 +2097,88 @@ class VesselInterface:
             return
 
         now = asyncio.get_event_loop().time()
-        if not vessel_beat.idle_beat_due(
-            now,
-            self._last_idle_beat_at,
-            vessel_beat.resolve_idle_interval(_cfg),
-            self._last_player_activity_at,
-            vessel_beat.resolve_idle_quiet_sec(_cfg),
-        ):
-            return
 
-        # A beat nobody asked for must not make a person wait: only start one when the engine has had nothing to
-        # do for a whole interval. Without this a 90 s turn and a 90 s interval kept it busy for ever, and a chat
-        # always arrived behind a running beat (a "ciao" waited 4+ minutes, 2026-11-04).
+        # Is the body ready to be asked? (A connector that says nothing is ready since always.)
+        try:
+            ready_fn = getattr(connector, "idle_ready_since", None)
+            ready = ready_fn() if callable(ready_fn) else 0.0
+        except Exception as exc:
+            log_warning(f"[vessel_interface] idle_ready_since failed for '{world}': {exc}")
+            return
+        if ready is None:
+            self._idle_hold("not_ready", f"'{world}' is not out and looking yet")
+            return
+        if ready > self._idle_seen_ready:
+            # A new arrival (or the first look): the rest of the bookkeeping belongs to the last one.
+            self._idle_seen_ready = ready
+            self._last_idle_beat_at = 0.0
+            self._idle_pending = False
+            self._idle_streak = 0
+            self._idle_novelty = []
+            log_info(f"[vessel_interface] Idle beat clock for '{world}' starts now (ready since {ready:.0f})")
+
+        try:
+            journal_fn = getattr(connector, "idle_journal", None)
+            journal = list(journal_fn()) if callable(journal_fn) else []
+        except Exception as exc:
+            log_debug(f"[vessel_interface] idle_journal failed for '{world}': {exc}")
+            journal = []
+
         try:
             from core import message_queue
 
             rested = message_queue.consumer_idle_seconds()
         except Exception:  # pragma: no cover - defensive
             rested = float("inf")
-        if rested < vessel_beat.resolve_idle_interval(_cfg):
-            log_debug(
-                f"[vessel_interface] Idle beat for '{world}' held: the engine has been free for only {rested:.0f}s"
+        rest_needed = vessel_beat.resolve_idle_engine_rest_sec(_cfg)
+
+        # What the last beat came to, once its turn is over (the engine is free again): she did something, or
+        # she did not. A player who spoke since cut it short, which says nothing about her.
+        if self._idle_pending:
+            if rested < 3:
+                self._idle_hold("last_beat_running", f"the last beat's turn is still running (engine free {rested:.0f}s)")
+                return
+            acted = [text for stamp, text in journal if stamp >= self._last_idle_beat_at]
+            if self._last_player_activity_at > self._last_idle_beat_at:
+                outcome = "cut short by the player"
+            elif acted:
+                self._idle_streak = 0
+                outcome = f"acted ({'; '.join(acted[-3:])})"
+            else:
+                self._idle_streak += 1
+                outcome = f"did nothing (streak {self._idle_streak})"
+            self._idle_pending = False
+            log_info(f"[vessel_interface] Idle beat outcome for '{world}': {outcome}")
+
+        novelty = bool(self._idle_novelty)
+        since_ready = max(0.0, now - ready) if ready > 0 else float("inf")
+        interval = vessel_beat.adaptive_idle_interval(
+            vessel_beat.resolve_idle_interval(_cfg),
+            vessel_beat.resolve_idle_arrival_interval(_cfg),
+            vessel_beat.resolve_idle_arrival_window(_cfg),
+            vessel_beat.resolve_idle_max_interval(_cfg),
+            since_ready,
+            self._idle_streak,
+            novelty=novelty,
+        )
+        anchor = max(self._last_idle_beat_at, ready)
+        quiet_sec = vessel_beat.resolve_idle_quiet_sec(_cfg)
+        if not vessel_beat.idle_beat_due(
+            now, anchor, interval, self._last_player_activity_at, quiet_sec
+        ):
+            if now - anchor >= interval:
+                self._idle_hold(
+                    "player_active",
+                    f"a player spoke {now - self._last_player_activity_at:.0f}s ago (quiet window {quiet_sec}s)",
+                )
+            return
+
+        # A beat nobody asked for must not make a person wait: only start one when the engine has had nothing to
+        # do for a few seconds. (It used to be a whole interval, which a 90 s turn and a 90 s interval kept busy for
+        # ever: a chat waited 4+ minutes behind a running beat, 2026-11-04.)
+        if rested < rest_needed:
+            self._idle_hold(
+                "engine_busy", f"the engine has been free for only {rested:.0f}s of the {rest_needed}s asked", every=30.0
             )
             return
 
@@ -2094,15 +2188,37 @@ class VesselInterface:
             log_warning(f"[vessel_interface] describe_surroundings failed for '{world}': {exc}")
             return
         if not surroundings:
+            self._idle_hold("nothing_to_describe", f"'{world}' described nothing")
             return
         interface_path = self._decision_interface_path(world)
         if interface_path is None:
+            self._idle_hold("no_path", f"no interface path for '{world}'")
             return
+
+        recent = [(max(0.0, now - stamp), text) for stamp, text in journal[-5:]]
+        if journal:
+            still = max(0.0, now - journal[-1][0])
+        else:
+            still = since_ready if since_ready != float("inf") else None
+        intention = None
+        try:
+            intention_fn = getattr(connector, "idle_intention", None)
+            intention = await intention_fn() if callable(intention_fn) else None
+        except Exception as exc:
+            log_debug(f"[vessel_interface] idle_intention failed for '{world}': {exc}")
+        changes = list(self._idle_novelty)
+        self._idle_novelty = []
         self._last_idle_beat_at = now
-        log_info(f"[vessel_interface] Idle beat for '{world}': asking what she wants to do")
+        self._idle_pending = True
+        log_info(
+            f"[vessel_interface] Idle beat for '{world}': asking what she wants to do "
+            f"(interval {interval:.0f}s, streak {self._idle_streak}, still "
+            f"{'?' if still is None else f'{still:.0f}s'}, {len(recent)} recent, {len(changes)} changed, "
+            f"{'an aim' if intention else 'no aim'})"
+        )
         await self._enqueue_perception(
             interface_path=interface_path,
-            summary=vessel_beat.build_idle_prompt(world, surroundings),
+            summary=vessel_beat.build_idle_prompt(world, surroundings, recent, still, changes, intention),
             environment=world,
             event_type="idle_beat",
         )

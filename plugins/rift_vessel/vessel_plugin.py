@@ -323,10 +323,57 @@ config_registry.get_value(
 )
 config_registry.get_value(
     "VESSEL_IDLE_BEAT_INTERVAL_SEC",
-    90,
+    40,
     value_type=int,
     label="Idle Beat Interval (s)",
-    description="Seconds between idle beats (clamped 20-3600).",
+    description=(
+        "Seconds between idle beats once she has settled (clamped 20-3600). The interval is adaptive: quicker "
+        "just after she arrives or when something around her changed, longer when several beats in a row "
+        "ended in no action."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_IDLE_BEAT_ARRIVAL_INTERVAL_SEC",
+    20,
+    value_type=int,
+    label="Idle Beat Interval After Arrival (s)",
+    description="Seconds between idle beats while she has only just arrived, and after a change around her (clamped 10-600).",
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_IDLE_BEAT_ARRIVAL_WINDOW_SEC",
+    180,
+    value_type=int,
+    label="Idle Beat Arrival Window (s)",
+    description="How long after she arrives the quicker arrival interval lasts (clamped 0-3600).",
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_IDLE_BEAT_MAX_INTERVAL_SEC",
+    180,
+    value_type=int,
+    label="Idle Beat Longest Interval (s)",
+    description="The most the interval stretches to when beat after beat ends in no action (clamped 20-3600).",
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_IDLE_BEAT_ENGINE_REST_SEC",
+    12,
+    value_type=int,
+    label="Idle Beat Engine Rest (s)",
+    description=(
+        "Seconds the engine must have been free before an idle beat starts, so a turn nobody asked for does not "
+        "run while a person could be waiting (clamped 0-600)."
+    ),
     group="plugins",
     component="vessel_plugin",
     advanced=True,
