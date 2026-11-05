@@ -185,25 +185,54 @@ def test_the_release_job_consumes_the_artifact_the_build_produces() -> None:
     assert "needs.prepare.outputs.version" in uploaded
 
 
-def test_every_push_releases_but_a_pull_request_does_not() -> None:
-    """The release cycle: a push publishes v<version>; a pull request only builds."""
+def test_only_main_and_develop_release_and_a_pull_request_does_not() -> None:
+    """main makes valid releases, develop the rolling pre-release, nothing else a release."""
     condition = str(_job("release").get("if", ""))
     assert "pull_request" in condition and "!=" in condition
-    assert "refs/tags" not in condition and "publish_release" not in condition
+    assert "github.ref_name == 'main'" in condition
+    assert "github.ref_name == 'develop'" in condition
+    assert "feat" not in condition and "refs/tags" not in condition
     # Writing a release needs contents: write; the build jobs only read.
     assert _job("release")["permissions"]["contents"] == "write"
     assert _job("prepare")["permissions"]["contents"] == "read"
 
 
-def test_the_release_is_tagged_with_the_version_and_a_branch_is_a_prerelease() -> None:
+def test_main_is_a_valid_release_and_develop_is_not() -> None:
     publish = _step("release", "Publish")["with"]
-    assert publish["tag_name"] == "v${{ needs.prepare.outputs.version }}"
+    # Only main is a release; the pre-release flag is on for every other branch that gets here.
     assert publish["prerelease"] == "${{ github.ref_name != 'main' }}"
+    assert publish["make_latest"] == "${{ github.ref_name == 'main' }}"
+    assert publish["tag_name"] == "${{ env.RELEASE_TAG }}"
     assert publish["body_path"] == "RELEASE.md"
     # The notes are ours, from the commits: GitHub's own generator must stay off.
     assert not publish.get("generate_release_notes")
     notes = _step("release", "Release notes")["run"]
     assert "scripts/release_notes.py" in notes and ".github/release-header.md" in notes
+
+
+def test_the_release_tag_is_the_version_on_main_and_fixed_on_develop() -> None:
+    expression = _job("release")["env"]["RELEASE_TAG"]
+    assert "format('v{0}', needs.prepare.outputs.version)" in expression
+    assert "'latest-develop'" in expression
+    # It must not look like a version, or version.py would count it as a release.
+    assert not re.fullmatch(r"v\d+\.\d+\.\d+", "latest-develop")
+
+
+def test_the_rolling_pre_release_is_deleted_before_it_is_made_again() -> None:
+    """A tag that exists is never moved, and the assets are named after the version."""
+    step = _step("release", "Remove the previous rolling pre-release")
+    assert step["if"] == "github.ref_name != 'main'"
+    assert "gh release delete" in step["run"] and "--cleanup-tag" in step["run"]
+    steps = [x.get("name") for x in _job("release")["steps"]]
+    assert steps.index(step["name"]) < steps.index("Publish")
+    # main's releases are kept: the step must never be able to run there.
+    assert "main" in step["if"]
+
+
+def test_pushes_to_the_rolling_release_do_not_overlap() -> None:
+    group = _job("release")["concurrency"]
+    assert group["cancel-in-progress"] is False
+    assert "github.ref_name" in group["group"]
 
 
 def test_the_notes_see_the_whole_history_and_its_tags() -> None:

@@ -177,8 +177,10 @@ Releasing
 ---------
 
 Nobody has to build the installer to hand it out: every push builds it in CI
-(``.github/workflows/build-release.yml``) and attaches it, with a ``SHA256SUMS``, to
-the release that push publishes. See :ref:`releases` for how the version and the
+(``.github/workflows/build-release.yml``). A push to ``main`` attaches it, with a
+``SHA256SUMS``, to a release ``v<version>``; a push to ``develop`` attaches it to the
+rolling ``latest-develop`` pre-release; on any other branch it stays a workflow
+artifact for 30 days. See :ref:`releases` for how the version and the
 release notes are decided. Nothing is published unless the executable is a whole
 one: the job refuses to attach a file under 20 MB.
 

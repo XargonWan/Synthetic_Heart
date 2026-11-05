@@ -1,14 +1,19 @@
 name: "Synthetic Heart - Release"
 
-# Every push publishes the images and a release, tagged with the version scripts/version.py
-# computes from the conventional commits. On main that is the plain version (1.31.0) plus
-# "latest"; on any other branch the version carries the branch name (1.31.0-feat-retroxr) and
-# never "latest", so a branch can be tried without touching what main users pull. Pull
-# requests only build, to catch breakage.
-# The release is v<version> (it tags the commit, which is what the next release counts
-# from), carries the Windows installer, and is marked as a pre-release on a branch other than
-# main. Its body is written by scripts/release_notes.py from the commits since the previous
-# release. See docs/contributing.rst ("Releases").
+# Every push publishes the images, tagged with the version scripts/version.py computes from
+# the conventional commits. On main that is the plain version (1.31.0) plus "latest"; on any
+# other branch the version carries the branch name (1.31.0-feat-retroxr) and never "latest",
+# so a branch can be tried without touching what main users pull. Pull requests only build,
+# to catch breakage.
+# Releases are another matter, and only two branches have them:
+#   main     a valid release v<version> with the Windows installer. The tag it creates is what
+#            the next release counts its version and notes from.
+#   develop  one rolling pre-release, tag latest-develop, deleted and made again on every push
+#            so it always holds the newest installer and nothing older. It is never "latest" and
+#            its tag is not a vX.Y.Z, so it never counts as a release.
+# Any other branch publishes no release (its installer stays a workflow artifact).
+# The body is written by scripts/release_notes.py from the commits since the previous release.
+# See docs/contributing.rst ("Releases").
 
 on:
   push:
@@ -388,19 +393,26 @@ jobs:
           retention-days: 30
 
   release:
-    # Every push publishes a release v<version> with the installer this run built. The tag it
-    # creates is what the next release's notes and version count from. A pull request only
-    # builds. The images are published by `manifest`, which a fork skips (no Docker Hub
-    # secret); the release waits for it but does not need it.
+    # main publishes v<version>; develop republishes the rolling pre-release. Nothing else
+    # does, and a pull request only builds. The images are published by `manifest`, which a
+    # fork skips (no Docker Hub secret); the release waits for it but does not need it.
     if: >-
       ${{ !cancelled()
       && github.event_name != 'pull_request'
+      && (github.ref_name == 'main' || github.ref_name == 'develop')
       && needs.windows-installer.result == 'success'
       && (needs.manifest.result == 'success' || needs.manifest.result == 'skipped') }}
     needs: [prepare, windows-installer, manifest]
     runs-on: ubuntu-latest
+    # Two pushes in a row must not delete and recreate the same release at once.
+    concurrency:
+      group: release-${{ github.ref_name }}
+      cancel-in-progress: false
     permissions:
       contents: write
+    env:
+      # The tag of the release: the version for main, a fixed name for the rolling one.
+      RELEASE_TAG: ${{ github.ref_name == 'main' && format('v{0}', needs.prepare.outputs.version) || 'latest-develop' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -438,17 +450,35 @@ jobs:
 
       - name: Release notes
         run: |
+          cp .github/release-header.md header.md
+          if [ "${{ github.ref_name }}" != "main" ]; then
+            {
+              echo '> **Rolling pre-release.** This is the newest build of `develop`, replaced on every push. It is not a stable release: use it to try what is coming, and expect it to break.'
+              echo
+              cat .github/release-header.md
+            } > header.md
+          fi
           python3 scripts/release_notes.py --repo "${{ github.repository }}" --version "${{ needs.prepare.outputs.version }}" \
-            --header .github/release-header.md --body RELEASE.md
+            --header header.md --body RELEASE.md
+
+      - name: Remove the previous rolling pre-release
+        # Its assets are named after the version, so updating it in place would pile them up,
+        # and a tag that already exists is never moved. Deleting both lets the next step make
+        # the release again at this commit.
+        if: github.ref_name != 'main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
 
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ needs.prepare.outputs.version }}
+          tag_name: ${{ env.RELEASE_TAG }}
           target_commitish: ${{ github.sha }}
-          name: Synthetic Heart v${{ needs.prepare.outputs.version }}
+          name: ${{ github.ref_name == 'main' && format('Synthetic Heart v{0}', needs.prepare.outputs.version) || format('Synthetic Heart develop (v{0})', needs.prepare.outputs.version) }}
           draft: false
           prerelease: ${{ github.ref_name != 'main' }}
+          make_latest: ${{ github.ref_name == 'main' }}
           body_path: RELEASE.md
           files: |
             dist/*.exe
