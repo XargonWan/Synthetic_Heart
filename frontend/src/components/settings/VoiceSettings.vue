@@ -3,6 +3,8 @@ import type { SpeakerInfo, VoiceEngineInfo } from '@/services/voice-config'
 
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
+import FallbackEngineList from './FallbackEngineList.vue'
+
 import {
   fetchAurisModels,
   fetchConfigValues,
@@ -331,6 +333,13 @@ onUnmounted(stopPreview)
 function engineLabel(engine: VoiceEngineInfo): string {
   return engine.display_name || engine.name
 }
+
+// Selectable fallback engines: real engines only, never the disabled/inline pseudo-engines.
+function fallbackChoices(list: VoiceEngineInfo[]): Array<{ name: string, label: string }> {
+  return list
+    .filter(e => e.name !== 'disabled' && e.name !== 'inline')
+    .map(e => ({ name: e.name, label: engineLabel(e) }))
+}
 </script>
 
 <template>
@@ -403,6 +412,13 @@ function engineLabel(engine: VoiceEngineInfo): string {
             </option>
           </select>
         </template>
+
+        <FallbackEngineList
+          route="VOX"
+          :engines="fallbackChoices(voxEngines)"
+          :active="activeVox"
+          :disabled="busy"
+        />
 
         <!-- Per-language engine overrides -->
         <div class="mt-3 flex flex-col gap-1.5 border-t border-white/10 pt-3">
@@ -548,6 +564,12 @@ function engineLabel(engine: VoiceEngineInfo): string {
           </select>
           <span v-else class="text-[11px] text-white/30">No models available</span>
         </div>
+        <FallbackEngineList
+          route="AURIS"
+          :engines="fallbackChoices(aurisEngines)"
+          :active="activeAuris"
+          :disabled="busy"
+        />
       </div>
 
       <p v-if="!voxEngines.length && !aurisEngines.length && !error" class="text-xs text-white/40">

@@ -1018,3 +1018,62 @@ async def test_describe_sticker_attachment_with_disabled_engine_returns_sticker_
     assert result.is_sticker is True
     assert "sticker" in result.description.lower()
     assert "could not be analysed" in result.description.lower()
+
+
+@pytest.mark.asyncio
+async def test_iris_plugin_describe_tries_fallback_engines_in_order(tmp_path) -> None:
+    """A failing active engine hands over to the next one that describes."""
+    from unittest.mock import AsyncMock
+
+    from core.iris_registry import IrisRegistry
+    from plugins.iris_base import IrisEngineBase, IrisResult
+    from plugins.iris_plugin import IrisPlugin
+
+    calls: list[tuple[str, str | None]] = []
+
+    class Engine(IrisEngineBase):
+        def __init__(self, label: str, description: str | None) -> None:
+            self.label = label
+            self.description = description
+
+        def describe_image(
+            self,
+            file_path: str,
+            mime_type: str | None = None,
+            prompt: str | None = None,
+            model: str | None = None,
+        ) -> IrisResult | None:
+            calls.append((self.label, model))
+            if self.description is None:
+                return None
+            return IrisResult(description=self.description, language="en")
+
+    reg = IrisRegistry()
+    reg.register_instance(
+        "primary", Engine("primary", None), label="P", capabilities={"vision": True}
+    )
+    reg.register_instance(
+        "fb", Engine("fb", "a red cat"), label="F", capabilities={"vision": True}
+    )
+
+    plugin = IrisPlugin.__new__(IrisPlugin)
+    plugin._active_engine_name = "primary"
+    plugin._default_prompt = "Describe."
+    plugin._default_model = "pinned-model"
+
+    image = tmp_path / "pic.jpg"
+    image.write_bytes(b"fake")
+
+    with (
+        patch("plugins.iris_plugin.IRIS_REGISTRY", reg),
+        patch(
+            "plugins.iris_plugin.get_iris_fallback_engines_async",
+            new=AsyncMock(return_value=["primary", "fb"]),
+        ),
+        patch.object(plugin, "refresh_config"),
+    ):
+        result = await plugin.describe_media(str(image), "image/jpeg")
+
+    assert result is not None and result.description == "a red cat"
+    # The active engine's model pin is not forwarded to the fallback.
+    assert calls == [("primary", "pinned-model"), ("fb", None)]

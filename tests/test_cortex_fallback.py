@@ -434,3 +434,51 @@ async def test_primary_non_timeout_exception_propagates(
     # A non-timeout primary failure is the primary's own outcome and must not
     # trigger the fallback (per spec: only empty/whitespace or TimeoutError).
     assert calls == ["primary"]
+
+
+# ---------------------------------------------------------------------------
+# Ordered fallback chain (CORTEX_FALLBACK_ENGINE then CORTEX_FALLBACK_ENGINES)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_fallback_engines_orders_and_dedupes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_config(
+        monkeypatch,
+        {
+            "CORTEX_FALLBACK_ENGINE": "legacy",
+            "CORTEX_FALLBACK_ENGINES": '["a", "legacy", "b", "disabled", "a"]',
+        },
+    )
+    assert cf.resolve_fallback_engines() == ["legacy", "a", "b"]
+
+
+def test_resolve_fallback_engines_empty_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_config(monkeypatch, {})
+    assert cf.resolve_fallback_engines() == []
+
+
+async def test_fallback_list_is_tried_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_config(
+        monkeypatch,
+        {"CORTEX_FALLBACK_ENGINES": '["first", "second", "third"]'},
+    )
+    calls: list[str] = []
+
+    async def call_engine(name: str) -> str:
+        calls.append(name)
+        return "ok from second" if name == "second" else ""
+
+    result = await cf.run_cortex_with_fallback(
+        engine_name="primary",
+        scope=None,
+        call_engine=call_engine,
+        prompt_signature="sig",
+    )
+    assert result == "ok from second"
+    assert calls == ["primary", "first", "second"]

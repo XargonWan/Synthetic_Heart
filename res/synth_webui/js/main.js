@@ -6111,128 +6111,139 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     }
                     loadVoxLanguageOverrides();
 
-                    // ── Vox fallback engines (ordered; tried when the active engine fails) ──
-                    const voxFallbackList = document.getElementById('vox-fallback-list');
-                    const voxFallbackAddBtn = document.getElementById('vox-add-fallback-btn');
-                    let voxFallbackEngines = [];
+                    // ── Ordered fallback engines per route (Vox / Auris / Iris / Cortex) ──
+                    // Each route keeps an ordered JSON list of engine names under
+                    // <ROUTE>_FALLBACK_ENGINES; the backend tries them in turn when
+                    // the active engine is unavailable.
+                    function setupFallbackEngineList({ configKey, engineSelectId, listId, addBtnId }) {
+                        const listEl = document.getElementById(listId);
+                        const addBtn = document.getElementById(addBtnId);
+                        if (!listEl) return;
+                        let engines = [];
 
-                    function voxFallbackEngineOptions() {
-                        const src = document.getElementById('vox-engine-select');
-                        return src
-                            ? Array.from(src.options).filter(o => o.value && o.value !== 'disabled')
-                            : [];
-                    }
+                        const engineOptions = () => {
+                            const src = document.getElementById(engineSelectId);
+                            return src
+                                ? Array.from(src.options).filter(o => o.value && o.value !== 'disabled' && o.value !== 'inline')
+                                : [];
+                        };
 
-                    async function saveVoxFallbackEngines() {
-                        try {
-                            const r = await fetch('/api/config', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ key: 'VOX_FALLBACK_ENGINES', value: JSON.stringify(voxFallbackEngines) })
-                            });
-                            if (!r.ok) throw new Error('HTTP ' + r.status);
-                        } catch (e) {
-                            console.error('[synth_webui] failed to save VOX_FALLBACK_ENGINES', e);
-                            window.showToast && window.showToast('Failed to save fallback engines', true);
-                        }
-                    }
-
-                    function renderVoxFallbackEngines() {
-                        if (!voxFallbackList) return;
-                        if (!voxFallbackEngines.length) {
-                            voxFallbackList.innerHTML = '<div class="meta">No fallback engines configured.</div>';
-                            return;
-                        }
-                        voxFallbackList.innerHTML = '';
-                        const options = voxFallbackEngineOptions();
-                        voxFallbackEngines.forEach((name, idx) => {
-                            const row = document.createElement('div');
-                            row.style.cssText = 'display:flex; gap:8px; align-items:center; margin-bottom:6px;';
-                            const order = document.createElement('span');
-                            order.className = 'meta';
-                            order.textContent = (idx + 1) + '.';
-                            const sel = document.createElement('select');
-                            sel.style.minWidth = '220px';
-                            options.forEach(o => {
-                                const opt = document.createElement('option');
-                                opt.value = o.value;
-                                opt.textContent = o.textContent;
-                                sel.appendChild(opt);
-                            });
-                            if (name && !options.some(o => o.value === name)) {
-                                const opt = document.createElement('option');
-                                opt.value = name;
-                                opt.textContent = name + ' (unavailable)';
-                                sel.appendChild(opt);
+                        async function save() {
+                            try {
+                                const r = await fetch('/api/config', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ key: configKey, value: JSON.stringify(engines) })
+                                });
+                                if (!r.ok) throw new Error('HTTP ' + r.status);
+                            } catch (e) {
+                                console.error('[synth_webui] failed to save ' + configKey, e);
+                                window.showToast && window.showToast('Failed to save fallback engines', true);
                             }
-                            sel.value = name;
-                            sel.addEventListener('change', async () => {
-                                voxFallbackEngines[idx] = sel.value;
-                                await saveVoxFallbackEngines();
-                            });
-                            const mkBtn = (label, title, onClick, disabled) => {
-                                const b = document.createElement('button');
-                                b.type = 'button';
-                                b.className = 'pill secondary';
-                                b.title = title;
-                                b.textContent = label;
-                                b.style.cssText = 'padding:4px 10px; font-weight:600;';
-                                b.disabled = !!disabled;
-                                b.addEventListener('click', onClick);
-                                return b;
-                            };
-                            const move = async (delta) => {
-                                const to = idx + delta;
-                                [voxFallbackEngines[idx], voxFallbackEngines[to]] = [voxFallbackEngines[to], voxFallbackEngines[idx]];
-                                renderVoxFallbackEngines();
-                                await saveVoxFallbackEngines();
-                            };
-                            row.append(
-                                order,
-                                sel,
-                                mkBtn('↑', 'Try earlier', () => move(-1), idx === 0),
-                                mkBtn('↓', 'Try later', () => move(1), idx === voxFallbackEngines.length - 1),
-                                mkBtn('✕', 'Remove', async () => {
-                                    voxFallbackEngines.splice(idx, 1);
-                                    renderVoxFallbackEngines();
-                                    await saveVoxFallbackEngines();
-                                })
-                            );
-                            voxFallbackList.appendChild(row);
-                        });
-                    }
-
-                    async function loadVoxFallbackEngines() {
-                        try {
-                            const r = await fetch('/api/config');
-                            const cfg = r.ok ? await r.json() : {};
-                            const items = Array.isArray(cfg.items) ? cfg.items : [];
-                            const item = items.find(i => i.key === 'VOX_FALLBACK_ENGINES');
-                            const parsed = (item && item.value) ? JSON.parse(item.value) : [];
-                            voxFallbackEngines = Array.isArray(parsed) ? parsed.map(String) : [];
-                        } catch (e) {
-                            console.error('[synth_webui] failed to load VOX_FALLBACK_ENGINES', e);
-                            voxFallbackEngines = [];
                         }
-                        renderVoxFallbackEngines();
-                    }
 
-                    if (voxFallbackAddBtn && !voxFallbackAddBtn.dataset.bound) {
-                        voxFallbackAddBtn.addEventListener('click', async () => {
-                            const used = new Set(voxFallbackEngines);
-                            const active = (document.getElementById('vox-engine-select') || {}).value;
-                            const next = voxFallbackEngineOptions().find(o => !used.has(o.value) && o.value !== active);
-                            if (!next) {
-                                window.showToast && window.showToast('No other Vox engine available to add', true);
+                        function render() {
+                            if (!engines.length) {
+                                listEl.innerHTML = '<div class="meta">No fallback engines configured.</div>';
                                 return;
                             }
-                            voxFallbackEngines.push(next.value);
-                            renderVoxFallbackEngines();
-                            await saveVoxFallbackEngines();
-                        });
-                        voxFallbackAddBtn.dataset.bound = '1';
+                            listEl.innerHTML = '';
+                            const options = engineOptions();
+                            engines.forEach((name, idx) => {
+                                const row = document.createElement('div');
+                                row.style.cssText = 'display:flex; gap:8px; align-items:center; margin-bottom:6px;';
+                                const order = document.createElement('span');
+                                order.className = 'meta';
+                                order.textContent = (idx + 1) + '.';
+                                const sel = document.createElement('select');
+                                sel.style.minWidth = '220px';
+                                options.forEach(o => {
+                                    const opt = document.createElement('option');
+                                    opt.value = o.value;
+                                    opt.textContent = o.textContent;
+                                    sel.appendChild(opt);
+                                });
+                                if (name && !options.some(o => o.value === name)) {
+                                    const opt = document.createElement('option');
+                                    opt.value = name;
+                                    opt.textContent = name + ' (unavailable)';
+                                    sel.appendChild(opt);
+                                }
+                                sel.value = name;
+                                sel.addEventListener('change', async () => {
+                                    engines[idx] = sel.value;
+                                    await save();
+                                });
+                                const mkBtn = (label, title, onClick, disabled) => {
+                                    const b = document.createElement('button');
+                                    b.type = 'button';
+                                    b.className = 'pill secondary';
+                                    b.title = title;
+                                    b.textContent = label;
+                                    b.style.cssText = 'padding:4px 10px; font-weight:600;';
+                                    b.disabled = !!disabled;
+                                    b.addEventListener('click', onClick);
+                                    return b;
+                                };
+                                const move = async (delta) => {
+                                    const to = idx + delta;
+                                    [engines[idx], engines[to]] = [engines[to], engines[idx]];
+                                    render();
+                                    await save();
+                                };
+                                row.append(
+                                    order,
+                                    sel,
+                                    mkBtn('↑', 'Try earlier', () => move(-1), idx === 0),
+                                    mkBtn('↓', 'Try later', () => move(1), idx === engines.length - 1),
+                                    mkBtn('✕', 'Remove', async () => {
+                                        engines.splice(idx, 1);
+                                        render();
+                                        await save();
+                                    })
+                                );
+                                listEl.appendChild(row);
+                            });
+                        }
+
+                        async function load() {
+                            try {
+                                const r = await fetch('/api/config');
+                                const cfg = r.ok ? await r.json() : {};
+                                const items = Array.isArray(cfg.items) ? cfg.items : [];
+                                const item = items.find(i => i.key === configKey);
+                                const parsed = (item && item.value) ? JSON.parse(item.value) : [];
+                                engines = Array.isArray(parsed) ? parsed.map(String) : [];
+                            } catch (e) {
+                                console.error('[synth_webui] failed to load ' + configKey, e);
+                                engines = [];
+                            }
+                            render();
+                        }
+
+                        if (addBtn && !addBtn.dataset.bound) {
+                            addBtn.addEventListener('click', async () => {
+                                const used = new Set(engines);
+                                const active = (document.getElementById(engineSelectId) || {}).value;
+                                const next = engineOptions().find(o => !used.has(o.value) && o.value !== active);
+                                if (!next) {
+                                    window.showToast && window.showToast('No other engine available to add', true);
+                                    return;
+                                }
+                                engines.push(next.value);
+                                render();
+                                await save();
+                            });
+                            addBtn.dataset.bound = '1';
+                        }
+                        load();
                     }
-                    loadVoxFallbackEngines();
+                    [
+                        { configKey: 'VOX_FALLBACK_ENGINES', engineSelectId: 'vox-engine-select', listId: 'vox-fallback-list', addBtnId: 'vox-add-fallback-btn' },
+                        { configKey: 'AURIS_FALLBACK_ENGINES', engineSelectId: 'auris-engine-select', listId: 'auris-fallback-list', addBtnId: 'auris-add-fallback-btn' },
+                        { configKey: 'IRIS_FALLBACK_ENGINES', engineSelectId: 'iris-engine-select', listId: 'iris-fallback-list', addBtnId: 'iris-add-fallback-btn' },
+                        { configKey: 'CORTEX_FALLBACK_ENGINES', engineSelectId: 'cortex-engine-select', listId: 'cortex-fallback-list', addBtnId: 'cortex-add-fallback-btn' },
+                    ].forEach(setupFallbackEngineList);
 
                     // ── Vosk model selector (replaces the old language selector) ──
                     // The user now picks the MODEL directly via #auris-vosk-model-select

@@ -6,9 +6,10 @@ three-stage degradation ladder so that an empty or timed-out primary generation
 never leaves the persona silent when a usable alternative exists:
 
     Stage 0 (primary)    — call the resolved engine; return on success.
-    Stage 1 (local)      — if the primary returned empty/whitespace or raised
-                           ``TimeoutError``, retry once on ``CORTEX_FALLBACK_ENGINE``
-                           under a shorter ``CORTEX_FALLBACK_TIMEOUT_SEC`` budget.
+    Stage 1 (fallbacks)  — if the primary returned empty/whitespace or raised
+                           ``TimeoutError``, try ``CORTEX_FALLBACK_ENGINE`` and then
+                           each ``CORTEX_FALLBACK_ENGINES`` entry in order, each under
+                           a shorter ``CORTEX_FALLBACK_TIMEOUT_SEC`` budget.
     Stage 2 (cached/safe)— if still no good text, replay a previously cached good
                            response for ``(engine_name, prompt_signature)`` when
                            ``CORTEX_CACHED_RESPONSE_ENABLED``; otherwise re-raise the
@@ -83,12 +84,33 @@ def resolve_fallback_engine() -> str | None:
         return None
 
 
+def resolve_fallback_engines() -> list[str]:
+    """Return the ordered fallback chain: ``CORTEX_FALLBACK_ENGINE`` then the list.
+
+    The single legacy key keeps its first place; ``CORTEX_FALLBACK_ENGINES`` (a
+    JSON list edited in the WebUI) follows. Duplicates and ``disabled`` are
+    dropped. Never raises.
+    """
+    try:
+        from core.config import parse_fallback_engines
+
+        chain: list[str] = []
+        single = resolve_fallback_engine()
+        if single:
+            chain.append(single)
+        listed = parse_fallback_engines(
+            _get_config_value("CORTEX_FALLBACK_ENGINES", "[]")
+        )
+        chain.extend(name for name in listed if name not in chain)
+        return chain
+    except Exception:
+        return []
+
+
 def is_local_engine(name: str) -> bool:
     """Return True when *name* is listed in ``CORTEX_LOCAL_ENGINES`` (case-insensitive)."""
     try:
-        raw = str(
-            _get_config_value("CORTEX_LOCAL_ENGINES", "zen-llm-engine") or ""
-        )
+        raw = str(_get_config_value("CORTEX_LOCAL_ENGINES", "zen-llm-engine") or "")
         local = {token.strip().lower() for token in raw.split(",") if token.strip()}
         return str(name or "").strip().lower() in local
     except Exception:
@@ -228,29 +250,31 @@ async def run_cortex_with_fallback(
             set_cached_response(key, str(primary_text))
         return primary_text
 
-    # Stage 1 — local fallback engine (only for empty/whitespace or timeout).
-    fallback_engine = resolve_fallback_engine()
-    if _fallback_enabled() and fallback_engine and fallback_engine != engine_name:
-        try:
-            fallback_text = await _call_with_timeout(
-                call_engine, fallback_engine, resolve_fallback_timeout()
-            )
-        except Exception as exc:
-            log_warning(
-                f"[cortex_fallback] Fallback engine {fallback_engine!r} failed "
-                f"(scope={scope!r}): {exc}"
-            )
-            fallback_text = None
-        if _is_good_text(fallback_text):
-            log_info(
-                f"[cortex_fallback] Primary engine {engine_name!r} produced no "
-                f"good text (scope={scope!r}); served by fallback engine "
-                f"{fallback_engine!r}"
-            )
-            key = _prompt_key(engine_name, prompt_signature, interface_path)
-            if key is not None and _cached_enabled():
-                set_cached_response(key, str(fallback_text))
-            return fallback_text
+    # Stage 1 — fallback engines, in order (only for empty/whitespace or timeout).
+    if _fallback_enabled():
+        for fallback_engine in resolve_fallback_engines():
+            if fallback_engine == engine_name:
+                continue
+            try:
+                fallback_text = await _call_with_timeout(
+                    call_engine, fallback_engine, resolve_fallback_timeout()
+                )
+            except Exception as exc:
+                log_warning(
+                    f"[cortex_fallback] Fallback engine {fallback_engine!r} failed "
+                    f"(scope={scope!r}): {exc}"
+                )
+                fallback_text = None
+            if _is_good_text(fallback_text):
+                log_info(
+                    f"[cortex_fallback] Primary engine {engine_name!r} produced no "
+                    f"good text (scope={scope!r}); served by fallback engine "
+                    f"{fallback_engine!r}"
+                )
+                key = _prompt_key(engine_name, prompt_signature, interface_path)
+                if key is not None and _cached_enabled():
+                    set_cached_response(key, str(fallback_text))
+                return fallback_text
 
     # Stage 2 — cached/safe response.
     if _cached_enabled():
