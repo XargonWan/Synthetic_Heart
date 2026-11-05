@@ -427,6 +427,11 @@ Backend
 
 2. Optionally add a JSON descriptor alongside an FBX file named ``<animation>.fbx.json``
     to describe ``intro``, ``loop`` and ``outro`` frame ranges or a ``play_once`` flag.
+    A loop may set ``crossfade_frames`` (e.g. ``"loop": {"start_frame": 49, "end_frame": 70,
+    "crossfade_frames": 8}``) to bake a seamless wrap: the last N frames are cross-faded into
+    the first N, so a loop whose last pose differs from its first no longer jumps on every cycle.
+    Pick a loop range that stays inside the held pose and does not include the start of the
+    outro motion.
 
 3. The backend will dynamically discover available animations. Plugins may also:
 

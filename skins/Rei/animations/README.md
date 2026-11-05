@@ -70,6 +70,7 @@ Each `.fbx` animation file should have an optional adjacent descriptor `.fbx.jso
 **Timing Fields:**
 - `intro`: Optional intro section with `start_frame` and `end_frame` (plays once at animation start)
 - `loop`: Main looping section with `start_frame` and `end_frame` (repeats while animation is active)
+  - `loop.crossfade_frames` (optional, default 0): bakes a seamless wrap by cross-fading the last N frames of the loop into its first N frames (the loop gets N frames shorter). Use it when the loop's last pose does not match its first; a hard cut at the wrap shows as a visible jerk. Keep the loop range inside the part of the clip that actually holds the pose — it must not include the first frames of the outro motion.
 - `outro`: Optional outro section (plays once when transitioning away)
 - `fps`: Frames per second of the FBX (default: 30)
 - `play_once`: If true, animation plays once and does not loop (good for transitions)

@@ -6,10 +6,11 @@
   },
   "loop": {
     "start_frame": 49,
-    "end_frame": 79
+    "end_frame": 70,
+    "crossfade_frames": 8
   },
   "outro": {
-    "start_frame": 79,
+    "start_frame": 70,
     "end_frame": 126
   },
   "expressions": [
