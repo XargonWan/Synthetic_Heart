@@ -55,7 +55,12 @@ async function change(index: number, name: string): Promise<void> {
 async function move(index: number, delta: number): Promise<void> {
   const to = index + delta
   const list = [...fallbacks.value]
-  ;[list[index], list[to]] = [list[to], list[index]]
+  const a = list[index]
+  const b = list[to]
+  if (a === undefined || b === undefined)
+    return
+  list[index] = b
+  list[to] = a
   fallbacks.value = list
   await persist()
 }
