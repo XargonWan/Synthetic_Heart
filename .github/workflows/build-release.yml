@@ -1,5 +1,15 @@
 name: "Synthetic Heart - Release"
 
+# Every push publishes the images and a release, tagged with the version scripts/version.py
+# computes from the conventional commits. On main that is the plain version (1.31.0) plus
+# "latest"; on any other branch the version carries the branch name (1.31.0-feat-retroxr) and
+# never "latest", so a branch can be tried without touching what main users pull. Pull
+# requests only build, to catch breakage.
+# The release is v<version> (it tags the commit, which is what the next release counts
+# from), carries the Windows installer, and is marked as a pre-release on a branch other than
+# main. Its body is written by scripts/release_notes.py from the commits since the previous
+# release. See docs/contributing.rst ("Releases").
+
 on:
   push:
     branches:
@@ -7,8 +17,6 @@ on:
       - "develop"
       - "fix/**"
       - "feat/**"
-    tags:
-      - "v*"
   pull_request:
     branches:
       - "main"
@@ -16,11 +24,6 @@ on:
       - "fix/**"
       - "feat/**"
   workflow_dispatch:
-    inputs:
-      publish_release:
-        description: "Attach the Windows installer to a GitHub Release"
-        type: boolean
-        default: false
 
 jobs:
   prepare:
@@ -28,43 +31,15 @@ jobs:
     permissions:
       contents: read
     outputs:
-      semver: ${{ steps.gitversion.outputs.majorMinorPatch }}
-      version: ${{ steps.version.outputs.version }}
+      version: ${{ steps.gv.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-      - name: Install GitVersion
-        uses: gittools/actions/gitversion/setup@v0.9.14
-        with:
-          versionSpec: '5.x'
-      - name: Determine version with GitVersion
-        id: gitversion
-        uses: gittools/actions/gitversion/execute@v0.9.14
-        with:
-          useConfigFile: true
-      # The installer needs one version, and two sources can disagree about it: a tag
-      # is a person stating what this build is called, while GitVersion guesses the
-      # next version from the commits. On a tag push the tag wins, so a release can
-      # never be tagged v1.0.16 and hand out SyntH-Setup-1.1.0.exe.
-      - name: Decide the version this run builds
-        id: version
-        run: |
-          set -euo pipefail
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            version="${GITHUB_REF_NAME#v}"
-          else
-            version="${{ steps.gitversion.outputs.majorMinorPatch }}"
-          fi
-          case "$version" in
-            [0-9]*.[0-9]*.[0-9]*) ;;
-            *)
-              echo "::error::$version from ${GITHUB_REF_NAME} is not a semantic version"
-              exit 1
-              ;;
-          esac
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "ref ${GITHUB_REF_NAME} -> SyntH-Setup-$version.exe"
+          fetch-depth: 0 # the version script needs the full history and its tags
+      # One source for the version: the conventional commits since the last release tag.
+      # Every consumer below (image tags, installer name, release tag) reads this output.
+      - id: gv
+        run: python3 scripts/version.py
 
   build-images:
     needs: prepare
@@ -103,7 +78,7 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           build-args: |
-            GITVERSION_TAG=${{ needs.prepare.outputs.semver }}
+            GITVERSION_TAG=${{ needs.prepare.outputs.version }}
           outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,push=true
           provenance: false
           sbom: false
@@ -237,21 +212,21 @@ jobs:
       - name: Compute image tags
         id: meta
         env:
-          SEMVER: ${{ needs.prepare.outputs.semver }}
+          VERSION: ${{ needs.prepare.outputs.version }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REF_NAME: ${{ github.ref_name }}
         run: |
           IMAGE_NAME="$IMAGE_NAME"
+          # The version already carries the branch name when it is not main's.
           tags=""
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-            tags="$IMAGE_NAME:pr$PR_NUMBER-$SEMVER"
+            tags="$IMAGE_NAME:pr$PR_NUMBER-$VERSION"
           elif [ "$REF_NAME" = "main" ]; then
-            tags="$IMAGE_NAME:$SEMVER,$IMAGE_NAME:latest"
+            tags="$IMAGE_NAME:$VERSION,$IMAGE_NAME:latest"
           elif [ "$REF_NAME" = "develop" ]; then
-            tags="$IMAGE_NAME:develop-$SEMVER,$IMAGE_NAME:latest-develop"
+            tags="$IMAGE_NAME:$VERSION,$IMAGE_NAME:latest-develop"
           else
-            sanitized=$(echo "$REF_NAME" | tr '/' '-')
-            tags="$IMAGE_NAME:$sanitized-$SEMVER"
+            tags="$IMAGE_NAME:$VERSION"
           fi
           echo "tags=$tags" >> "$GITHUB_OUTPUT"
           echo "Generated tags: $tags"
@@ -413,21 +388,24 @@ jobs:
           retention-days: 30
 
   release:
-    # The step that was missing: every push already builds the installer and leaves it
-    # as a workflow artifact, where it expires and nobody can find it. This attaches
-    # that same executable to a GitHub Release.
-    #
-    # Only for a version tag (v1.0.16) or a manual run that asked for it: a release on
-    # every push to develop would be noise. A manual run has no tag yet, so the release
-    # creates v<version> at the commit the run was dispatched on.
+    # Every push publishes a release v<version> with the installer this run built. The tag it
+    # creates is what the next release's notes and version count from. A pull request only
+    # builds. The images are published by `manifest`, which a fork skips (no Docker Hub
+    # secret); the release waits for it but does not need it.
     if: >-
-      startsWith(github.ref, 'refs/tags/v')
-      || (github.event_name == 'workflow_dispatch' && inputs.publish_release)
-    needs: [prepare, windows-installer]
+      ${{ !cancelled()
+      && github.event_name != 'pull_request'
+      && needs.windows-installer.result == 'success'
+      && (needs.manifest.result == 'success' || needs.manifest.result == 'skipped') }}
+    needs: [prepare, windows-installer, manifest]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the notes need the full history and its tags
+
       - name: Fetch the installer this run built
         uses: actions/download-artifact@v4
         with:
@@ -458,14 +436,21 @@ jobs:
           # leaves a plain `sha256sum -c SHA256SUMS` working.
           (cd dist && sha256sum -- *.exe > SHA256SUMS && cat SHA256SUMS)
 
+      - name: Release notes
+        run: |
+          python3 scripts/release_notes.py --repo "${{ github.repository }}" --version "${{ needs.prepare.outputs.version }}" \
+            --header .github/release-header.md --body RELEASE.md
+
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', needs.prepare.outputs.version) }}
-          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', needs.prepare.outputs.version) }}
+          tag_name: v${{ needs.prepare.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: Synthetic Heart v${{ needs.prepare.outputs.version }}
+          draft: false
+          prerelease: ${{ github.ref_name != 'main' }}
+          body_path: RELEASE.md
           files: |
             dist/*.exe
             dist/SHA256SUMS
           fail_on_unmatched_files: true
-          generate_release_notes: true
-          prerelease: ${{ contains(github.ref_name, '-') }}

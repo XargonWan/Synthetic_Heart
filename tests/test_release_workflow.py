@@ -2,9 +2,10 @@
 
 The Windows installer cannot be built on this machine's CI budget, and a workflow
 cannot be run here at all, so the parts of it that *can* be executed are executed:
-the two shell steps that decide which version is published and whether the file about
-to be published is a whole installer. Both are extracted from the workflow file and
-run as written, so a retyped copy cannot drift away from what CI runs.
+the shell steps that decide which image tags are pushed and whether the file about
+to be published is a whole installer. They are extracted from the workflow file and
+run as written, so a retyped copy cannot drift away from what CI runs. The version
+itself comes from ``scripts/version.py``, tested in ``test_release_cycle.py``.
 
 Also asserted structurally: the release job consumes exactly the artifact name the
 installer job produces. That mismatch is the one that would silently publish nothing.
@@ -77,44 +78,45 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _run_version_step(
-    tmp_path: Path, ref_type: str, ref_name: str, gitversion: str = "1.1.0"
-) -> subprocess.CompletedProcess:
-    script = _step("prepare", "Decide the version this run builds")["run"]
-    return _run_bash(
+def _run_tags_step(
+    tmp_path: Path, version: str, ref_name: str, event: str = "push"
+) -> str:
+    script = _step("manifest", "Compute image tags")["run"]
+    result = _run_bash(
         script,
         tmp_path,
-        {"GITHUB_REF_TYPE": ref_type, "GITHUB_REF_NAME": ref_name},
-        values={"steps.gitversion.outputs.majorMinorPatch": gitversion},
+        {
+            "IMAGE_NAME": "me/synth",
+            "VERSION": version,
+            "REF_NAME": ref_name,
+            "PR_NUMBER": "7",
+            "GITHUB_EVENT_NAME": event,
+        },
     )
-
-
-# --------------------------------------------------------------------------- version
-
-
-def test_a_tag_decides_the_version_not_gitversion(tmp_path: Path) -> None:
-    """Tagging v1.0.16 must publish SyntH-Setup-1.0.16.exe, not GitVersion's guess.
-
-    GitVersion computes the *next* version from the commits, so on develop it can
-    easily be 1.1.0 while the person tagging said 1.0.16.
-    """
-    result = _run_version_step(tmp_path, "tag", "v1.0.16")
     assert result.returncode == 0, result.stderr
-    assert (tmp_path / "out.txt").read_text() == "version=1.0.16\n"
+    return (tmp_path / "out.txt").read_text().strip().removeprefix("tags=")
 
 
-def test_a_branch_uses_gitversions_version(tmp_path: Path) -> None:
-    result = _run_version_step(tmp_path, "branch", "develop")
-    assert result.returncode == 0, result.stderr
-    assert (tmp_path / "out.txt").read_text() == "version=1.1.0\n"
+# --------------------------------------------------------------------------- tags
 
 
-def test_a_tag_that_is_not_a_version_stops_the_build(tmp_path: Path) -> None:
-    """The repository has tags called 'checkpoint' and 'legacy'."""
-    result = _run_version_step(tmp_path, "tag", "vcheckpoint")
-    assert result.returncode != 0
-    assert "not a semantic version" in result.stdout + result.stderr
-    assert not (tmp_path / "out.txt").exists()
+def test_main_publishes_the_plain_version_and_latest(tmp_path: Path) -> None:
+    assert _run_tags_step(tmp_path, "1.2.3", "main") == "me/synth:1.2.3,me/synth:latest"
+
+
+def test_develop_publishes_its_version_and_latest_develop(tmp_path: Path) -> None:
+    tags = _run_tags_step(tmp_path, "1.3.0-develop", "develop")
+    assert tags == "me/synth:1.3.0-develop,me/synth:latest-develop"
+
+
+def test_a_branch_never_gets_latest(tmp_path: Path) -> None:
+    tags = _run_tags_step(tmp_path, "1.3.0-feat-x", "feat/x")
+    assert tags == "me/synth:1.3.0-feat-x"
+
+
+def test_a_pull_request_is_tagged_apart(tmp_path: Path) -> None:
+    tags = _run_tags_step(tmp_path, "1.3.0-feat-x", "7/merge", "pull_request")
+    assert tags == "me/synth:pr7-1.3.0-feat-x"
 
 
 # --------------------------------------------------------------------------- publish
@@ -183,14 +185,39 @@ def test_the_release_job_consumes_the_artifact_the_build_produces() -> None:
     assert "needs.prepare.outputs.version" in uploaded
 
 
-def test_the_release_only_happens_for_a_tag_or_a_manual_ask() -> None:
-    """A release per push to develop would be noise."""
+def test_every_push_releases_but_a_pull_request_does_not() -> None:
+    """The release cycle: a push publishes v<version>; a pull request only builds."""
     condition = str(_job("release").get("if", ""))
-    assert "refs/tags/v" in condition
-    assert "workflow_dispatch" in condition and "publish_release" in condition
+    assert "pull_request" in condition and "!=" in condition
+    assert "refs/tags" not in condition and "publish_release" not in condition
     # Writing a release needs contents: write; the build jobs only read.
     assert _job("release")["permissions"]["contents"] == "write"
     assert _job("prepare")["permissions"]["contents"] == "read"
+
+
+def test_the_release_is_tagged_with_the_version_and_a_branch_is_a_prerelease() -> None:
+    publish = _step("release", "Publish")["with"]
+    assert publish["tag_name"] == "v${{ needs.prepare.outputs.version }}"
+    assert publish["prerelease"] == "${{ github.ref_name != 'main' }}"
+    assert publish["body_path"] == "RELEASE.md"
+    # The notes are ours, from the commits: GitHub's own generator must stay off.
+    assert not publish.get("generate_release_notes")
+    notes = _step("release", "Release notes")["run"]
+    assert "scripts/release_notes.py" in notes and ".github/release-header.md" in notes
+
+
+def test_the_notes_see_the_whole_history_and_its_tags() -> None:
+    """A shallow checkout has no previous release tag and would list everything."""
+    for job in ("prepare", "release"):
+        checkout = _job(job)["steps"][0]
+        assert checkout["with"]["fetch-depth"] == 0, job
+
+
+def test_the_release_waits_for_the_images_without_needing_them() -> None:
+    """`manifest` is skipped on a fork; a skipped need must not skip the release."""
+    release = _job("release")
+    assert "manifest" in release["needs"]
+    assert "skipped" in str(release["if"]) and "!cancelled()" in str(release["if"])
 
 
 def test_the_release_carries_the_installer_and_its_checksum() -> None:
@@ -199,12 +226,14 @@ def test_the_release_carries_the_installer_and_its_checksum() -> None:
     assert _step("release", "Publish")["with"]["fail_on_unmatched_files"] is True
 
 
-def test_the_workflow_runs_on_version_tags() -> None:
+def test_the_workflow_runs_on_pushes_not_on_tags() -> None:
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     # PyYAML reads the bare `on:` key as the boolean True, which is a YAML 1.1 wart.
     triggers = workflow.get("on", workflow.get(True))
-    assert "v*" in triggers["push"].get("tags", []), "a version tag must start a build"
-    assert "publish_release" in triggers["workflow_dispatch"]["inputs"]
+    # The release creates the tag itself; a pushed tag would start a second build of it.
+    assert "tags" not in triggers["push"]
+    assert "develop" in triggers["push"]["branches"]
+    assert "main" in triggers["push"]["branches"]
 
 
 def test_the_installer_version_is_the_one_that_was_decided() -> None:
