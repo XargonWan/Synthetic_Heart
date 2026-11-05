@@ -404,13 +404,13 @@ async def test_idle_beat_waits_until_the_engine_has_rested(iface, monkeypatch: p
 
     vi, reg, sent = iface
     reg._instances["retroxr"] = _Conn(idle=True)
-    monkeypatch.setattr(message_queue, "consumer_idle_seconds", lambda: 0.0)  # a turn in flight / queued
+    monkeypatch.setattr(message_queue, "consumer_idle_seconds", lambda **_kw: 0.0)  # a turn in flight / queued
     await vi._maybe_run_idle_beat()
     assert sent == [], "a beat was started on a busy engine"
-    monkeypatch.setattr(message_queue, "consumer_idle_seconds", lambda: 5.0)  # free, but only for 5 s of 12
+    monkeypatch.setattr(message_queue, "consumer_idle_seconds", lambda **_kw: 5.0)  # free, but only for 5 s of 12
     await vi._maybe_run_idle_beat()
     assert sent == [], "a beat was started before the engine had rested"
-    monkeypatch.setattr(message_queue, "consumer_idle_seconds", lambda: 15.0)
+    monkeypatch.setattr(message_queue, "consumer_idle_seconds", lambda **_kw: 15.0)
     await vi._maybe_run_idle_beat()
     assert len(sent) == 1
 
@@ -762,7 +762,7 @@ def rested(monkeypatch: pytest.MonkeyPatch):
     from core import message_queue
 
     state = {"free": 100.0}
-    monkeypatch.setattr(message_queue, "consumer_idle_seconds", lambda: state["free"])
+    monkeypatch.setattr(message_queue, "consumer_idle_seconds", lambda **_kw: state["free"])
     return state
 
 

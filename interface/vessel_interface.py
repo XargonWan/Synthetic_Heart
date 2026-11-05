@@ -1455,6 +1455,10 @@ class VesselInterface:
                 # this world so it runs unobstructed. Set only for the
                 # damage-appraisal perception; everything else leaves it False.
                 _vessel_appraisal=is_appraisal,
+                # Structural signal for the queue: the idle beat ranks at the
+                # human-chat band (GENERAL) so it alternates with chat instead
+                # of starving behind it. Set only for ``idle_beat`` perceptions.
+                _vessel_idle_beat=(event_type == "idle_beat"),
                 chat=SimpleNamespace(
                     id=interface_path,
                     type="vessel",
@@ -2139,7 +2143,7 @@ class VesselInterface:
         try:
             from core import message_queue
 
-            rested = message_queue.consumer_idle_seconds()
+            rested = message_queue.consumer_idle_seconds(ignore_queued=True)
         except Exception:  # pragma: no cover - defensive
             rested = float("inf")
         rest_needed = vessel_beat.resolve_idle_engine_rest_sec(_cfg)

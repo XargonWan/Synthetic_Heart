@@ -155,19 +155,22 @@ def _clear_item_in_flight() -> None:
     _last_item_finished_at = time.monotonic()
 
 
-def consumer_idle_seconds() -> float:
+def consumer_idle_seconds(*, ignore_queued: bool = False) -> float:
     """How long the consumer has had nothing to do: 0.0 while an item is in flight or anything is queued,
     ``inf`` if it has never finished one (nothing ran yet).
 
     Lets a producer of OPTIONAL work (an autonomous beat) wait until the engine has really rested, so a human's
     message never lands behind a turn nobody asked for: a heap orders what runs NEXT, it cannot pull a running
     generation back (Zen cannot be cancelled at all).
+
+    ``ignore_queued=True`` disregards items waiting in the queue (only an in-flight turn counts as busy), for
+    callers whose work is queued FIFO behind chat anyway and must not be held back by that backlog.
     """
     if _in_flight_label:
         return 0.0
     queue = _queue
     try:
-        if queue is not None and queue.qsize() > 0:
+        if not ignore_queued and queue is not None and queue.qsize() > 0:
             return 0.0
     except Exception:  # pragma: no cover - defensive
         return 0.0
@@ -1180,6 +1183,11 @@ async def enqueue(
         # survival reflex already reacted mechanically, this is the deliberate
         # combat/social appraisal on top. Prunes stale autonomous beats too.
         "vessel_appraisal": bool(getattr(message, "_vessel_appraisal", False)),
+        # Structural marker: the rift idle beat (set by the vessel interface for
+        # ``event_type == "idle_beat"``). Ranked at the same band as human chat
+        # (GENERAL) so it alternates with Telegram in FIFO order instead of
+        # starving behind it.
+        "vessel_idle_beat": bool(getattr(message, "_vessel_idle_beat", False)),
     }
 
     global _counter
@@ -1237,6 +1245,15 @@ async def enqueue(
             _drop_stale_vessel_perceptions(chat_id)
         except Exception as _prune_exc:  # pragma: no cover - defensive
             log_debug(f"[QUEUE] Vessel perception prune skipped: {_prune_exc}")
+    elif interface == "vessel" and item.get("vessel_idle_beat"):
+        # Rift idle beat (RetroXR "person in a room"). Same band as ordinary chat
+        # so the two alternate FIFO; a fresh beat still supersedes stale queued
+        # beats for this world so they cannot pile up.
+        priority_val = PRIORITY_GENERAL
+        try:
+            _supersede_pending_vessel_beats(chat_id)
+        except Exception as _idle_exc:  # pragma: no cover - defensive
+            log_debug(f"[QUEUE] Vessel idle-beat supersede skipped: {_idle_exc}")
     elif interface == "vessel":
         # Synth's own autonomous perception/will-beat: ranked BELOW any human
         # chat. A fresh beat supersedes older queued ones for the same world so
