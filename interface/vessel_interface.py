@@ -194,6 +194,13 @@ class VesselInterface:
         self._idle_pending: bool = False
         self._idle_streak: int = 0
         self._idle_novelty: list[str] = []
+        # How long a beat's turn takes (a running mean): a walk is sized to last until the next prompt.
+        try:
+            from plugins.rift_vessel.exploration import LatencyMeter
+
+            self._turn_latency: Any = LatencyMeter()
+        except Exception:  # pragma: no cover - defensive
+            self._turn_latency = None
         self._idle_hold_logged: dict[str, float] = {}
         self._last_motor_tick_at: float = 0.0
         # Action beat (the middle "concrete-doing" cognition turn that maps the
@@ -1039,6 +1046,11 @@ class VesselInterface:
         # event is salient enough to be a turn of its own (a sighting rarely is: 15 were dropped in 10 s).
         if event_type == "sighting" and self._uses_idle_beat(environment):
             self._note_idle_novelty(summary)
+        # The result of something she chose (a walk, a search) is a prompt of its own: it stands for the next idle beat,
+        # and what she does about it is read like any beat's outcome.
+        if event_type.endswith("_done") and self._uses_idle_beat(environment):
+            self._last_idle_beat_at = asyncio.get_event_loop().time()
+            self._idle_pending = True
 
         if not self._is_salient(event_type, summary):
             log_debug(
@@ -2148,7 +2160,22 @@ class VesselInterface:
                 self._idle_streak += 1
                 outcome = f"did nothing (streak {self._idle_streak})"
             self._idle_pending = False
+            if self._turn_latency is not None and rested != float("inf") and not outcome.startswith("cut short"):
+                turn = (now - rested) - self._last_idle_beat_at
+                if turn > 0:
+                    self._turn_latency.observe(turn)
             log_info(f"[vessel_interface] Idle beat outcome for '{world}': {outcome}")
+
+        # A walk she chose is going on: its own result is the next prompt, so no beat meanwhile.
+        try:
+            busy_fn = getattr(connector, "idle_busy", None)
+            busy = bool(busy_fn()) if callable(busy_fn) else False
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[vessel_interface] idle_busy failed for '{world}': {exc}")
+            busy = False
+        if busy:
+            self._idle_hold("body_busy", f"'{world}' is on a walk of its own: its result is the next prompt")
+            return
 
         novelty = bool(self._idle_novelty)
         since_ready = max(0.0, now - ready) if ready > 0 else float("inf")
@@ -2210,11 +2237,28 @@ class VesselInterface:
         self._idle_novelty = []
         self._last_idle_beat_at = now
         self._idle_pending = True
+        # If she chooses to go for a walk, it should last until the NEXT prompt: the wait to the next beat plus the
+        # turn that answers it.
+        budget = None
+        try:
+            from plugins.rift_vessel import exploration
+
+            if getattr(connector, "explores", False) and self._turn_latency is not None:
+                budget = exploration.explore_budget(
+                    interval,
+                    self._turn_latency.value(),
+                    exploration.resolve_explore_min(_cfg),
+                    exploration.resolve_explore_max(_cfg),
+                )
+                connector.set_explore_budget(budget)
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[vessel_interface] explore budget failed for '{world}': {exc}")
         log_info(
             f"[vessel_interface] Idle beat for '{world}': asking what she wants to do "
             f"(interval {interval:.0f}s, streak {self._idle_streak}, still "
             f"{'?' if still is None else f'{still:.0f}s'}, {len(recent)} recent, {len(changes)} changed, "
-            f"{'an aim' if intention else 'no aim'})"
+            f"{'an aim' if intention else 'no aim'}"
+            f"{'' if budget is None else f', a walk would last {budget:.0f}s'})"
         )
         await self._enqueue_perception(
             interface_path=interface_path,

@@ -379,6 +379,26 @@ config_registry.get_value(
     advanced=True,
 )
 config_registry.get_value(
+    "VESSEL_EXPLORE_MIN_SEC",
+    20,
+    value_type=int,
+    label="Explore Walk, Shortest (s)",
+    description="A walk she chooses (explore) is sized to last until the next prompt; never shorter than this (5-600).",
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_EXPLORE_MAX_SEC",
+    180,
+    value_type=int,
+    label="Explore Walk, Longest (s)",
+    description="A walk she chooses (explore) is sized to last until the next prompt; never longer than this (10-1800).",
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
     "VESSEL_IDLE_BEAT_QUIET_SEC",
     45,
     value_type=int,

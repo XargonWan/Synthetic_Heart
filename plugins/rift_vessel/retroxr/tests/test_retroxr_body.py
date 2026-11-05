@@ -533,7 +533,7 @@ def test_only_what_the_mod_can_do_is_offered(monkeypatch: pytest.MonkeyPatch) ->
     plugin, _ = _plugin_in_retroxr(monkeypatch, ["say", "move", "look", "status", "emote", "look_at", "inspect", "follow", "unfollow"])
     offered = {n.removeprefix("vessel_retroxr_") for n in plugin.get_supported_actions() if n.startswith("vessel_retroxr_")}
     assert offered == {"say", "move", "look", "status", "emote", "look_at", "inspect", "follow", "unfollow",
-                       "set_goal", "update_goal"}, "her own aims are always hers to keep"
+                       "set_goal", "update_goal", "explore"}, "her own aims and her walks are always hers"
     # what a RetroXR body cannot do is not on offer, and neither is the Minecraft way of looking around
     for gone in ("attack", "respawn", "use", "observe", "pick_up", "put_down", "hand_over", "sit", "touch"):
         assert gone not in offered, gone
@@ -544,7 +544,7 @@ def test_a_mod_that_says_nothing_is_offered_very_little(monkeypatch: pytest.Monk
     """An old mod declares no verbs: better to offer five that work than thirteen that mostly do not."""
     plugin, _ = _plugin_in_retroxr(monkeypatch, None)
     offered = {n.removeprefix("vessel_retroxr_") for n in plugin.get_supported_actions() if n.startswith("vessel_retroxr_")}
-    assert offered == {"say", "move", "look", "status", "emote", "set_goal", "update_goal"}
+    assert offered == {"say", "move", "look", "status", "emote", "set_goal", "update_goal", "explore"}
 
 
 def test_other_worlds_still_offer_every_core_verb(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1016,3 +1016,235 @@ async def test_a_store_that_fails_does_not_stop_the_beat(iface, rested) -> None:
     reg._instances["retroxr"] = Conn(ready=now - 10_000)
     await vi._maybe_run_idle_beat()
     assert len(sent) == 1 and "You have no aim of your own" in sent[0]["summary"]
+
+
+# -- explore: the core decides the route, the body answers one question at a time ----------
+
+
+class FakeMod(FakeSocket):
+    """A mod that answers every action frame, the way the real one answers a survey, a walk and a look."""
+
+    def __init__(self, conn: RetroXRConnector, script) -> None:
+        super().__init__()
+        self.conn = conn
+        self.script = script
+        self.walks = 0
+
+    async def send_json(self, payload: dict[str, Any]) -> None:
+        await super().send_json(payload)
+        if payload.get("type") != "action":
+            return
+        ok, detail, data = self.script(self, payload["action"], payload.get("payload") or {})
+        asyncio.get_event_loop().call_soon(
+            lambda: asyncio.ensure_future(
+                self.conn.handle_frame({"type": "action_result", "id": payload["id"], "ok": ok, "detail": detail, "data": data})
+            )
+        )
+
+
+def _room_script(max_walks: int = 6):
+    """A room: two reachable stops, then nothing new. A walk moves the body to where it was told."""
+    state = {"at": {"x": 0.0, "y": 0.0, "z": 0.0}}
+
+    def script(mod: FakeMod, verb: str, payload: dict[str, Any]):
+        if verb == "survey":
+            if mod.walks >= max_walks:
+                return True, "", {"position": state["at"], "candidates": [], "pois": [], "hazards": []}
+            return True, "", {
+                "position": state["at"], "heading": 0.0,
+                "candidates": [{"pos": {"x": 4.0 + mod.walks * 3, "y": 0.0, "z": 2.0}, "cost": 4.5, "seen": False}],
+                # in sight until she has gone up to it (the core drops a thing it has studied)
+                "pois": [{"name": "Game Boy Color", "pos": {"x": 6.0, "y": 0.0, "z": -3.0}, "cost": 7.0, "area": "den"}],
+                "hazards": [{"pos": {"x": -2.0, "y": 0.0, "z": 0.0}, "radius": 0.9, "kind": "obstacle"}],
+            }
+        if verb == "move":
+            mod.walks += 1
+            state["at"] = {"x": payload["x"], "y": payload["y"], "z": payload["z"]}
+            return True, "arrived", {"position": state["at"]}
+        if verb == "look_around":
+            return True, "", {"saw": [{"name": f"thing {mod.walks}", "area": "den"}]}
+        return True, "ok", {}
+
+    return script
+
+
+async def _explorer(script, verbs: list[str], on_event) -> tuple[RetroXRConnector, FakeMod]:
+    conn = RetroXRConnector()
+    mod = FakeMod(conn, script)
+    conn.attach_socket(mod, {"room": "den", "verbs": verbs})
+    assert await conn.connect({}, on_event) is True
+    await conn.handle_frame({"type": "state", "state": {"position": {"x": 0.0, "y": 0.0, "z": 0.0}, "extra": {"entities": []}}})
+    return conn, mod
+
+
+async def _finish(conn: RetroXRConnector) -> None:
+    task = conn._explore_state()["task"]
+    await asyncio.wait_for(task, 10)
+
+
+async def test_explore_is_hers_the_mod_is_asked_one_thing_at_a_time(karada: FakeKarada) -> None:
+    events: list[Any] = []
+    conn, mod = await _explorer(_room_script(), ["say", "move", "stop", "inspect", "survey", "look_around"], events.append)
+    conn._explore_state()["policy"].rng.seed(4)   # a fixed walk: which place comes first is a draw
+    conn.set_explore_budget(60)
+    res = await conn.act("explore", {})
+    assert res.ok is True and "going for a walk of about 60 seconds" in (res.detail or "")
+    assert conn.idle_busy() is True
+    await _finish(conn)
+    assert conn.idle_busy() is False
+    verbs = [f["action"] for f in mod.sent if f.get("type") == "action"]
+    assert verbs[0] == "survey" and "look_around" in verbs[:3], verbs
+    moves = [f["payload"] for f in mod.sent if f.get("action") == "move"]
+    assert moves and all(m["free"] is True for m in moves), "no leash: the walk asks the mod to leave it off"
+    surveys = [f["payload"] for f in mod.sent if f.get("action") == "survey"]
+    assert surveys[0]["viewpoints"] == [] and len(surveys[-1]["viewpoints"]) >= 2, "she tells the body where she has looked from"
+    assert len(events) == 1 and events[0].event_type == "explore_done"
+    d = events[0].data
+    assert d["stopped_because"] == "nothing_left" and d["legs"] >= 2
+    assert {x["name"] for x in d["discovered"]} >= {"Game Boy Color"}, d
+    assert any(x["area"] == "den" for x in d["discovered"])
+    assert any("explore" in t for _, t in conn.idle_journal()), "and it counts as something she did"
+
+
+async def test_the_model_cannot_ask_for_the_internal_verbs_and_is_never_offered_them(karada: FakeKarada) -> None:
+    conn, mod = await _explorer(_room_script(), ["say", "survey", "look_around"], lambda e: None)
+    assert "survey" not in conn.get_world_actions() and "look_around" not in conn.get_world_actions()
+    for verb in ("survey", "look_around"):
+        res = await conn.act(verb, {})
+        assert res.ok is False and res.detail == f"unknown_verb: {verb}"
+    assert mod.sent == []
+
+
+async def test_without_a_survey_from_the_mod_the_walk_is_blind_but_still_a_walk(karada: FakeKarada) -> None:
+    events: list[Any] = []
+
+    def script(mod, verb, payload):
+        if verb == "move":
+            mod.walks += 1
+            return False, "no_way_round: nothing leads from here toward it", {"position": {"x": 0.0, "y": 0.0, "z": 0.0}}
+        return True, "ok", {}
+
+    conn, mod = await _explorer(script, ["say", "move"], events.append)
+    conn.set_explore_budget(5)
+    await conn.act("explore", {})
+    await _finish(conn)
+    verbs = {f["action"] for f in mod.sent if f.get("type") == "action"}
+    assert "survey" not in verbs and "look_around" not in verbs, verbs
+    assert events[0].data["stopped_because"] == "blocked" and mod.walks == 3, "three failed walks and she gives up"
+
+
+async def test_a_person_speaking_stops_the_walk_and_does_not_make_a_second_prompt(karada: FakeKarada) -> None:
+    events: list[Any] = []
+    gate = asyncio.Event()
+
+    def script(mod, verb, payload):
+        return _room_script(max_walks=99)(mod, verb, payload)
+
+    conn, mod = await _explorer(script, ["say", "move", "stop", "survey", "look_around"], events.append)
+    conn.set_explore_budget(120)
+    await conn.act("explore", {})
+    await asyncio.sleep(0.01)
+    await conn._dispatch_event({"event_type": "chat", "actor": "player", "summary": "player: ehi", "data": {}})
+    await _finish(conn)
+    assert conn.idle_busy() is False
+    assert [e.event_type for e in events] == ["chat"], "the chat is the next prompt; the walk's end tells the model nothing"
+    assert any(f.get("action") == "stop" for f in mod.sent), "the body was told to stop walking now"
+    assert any("interrupted" in t for _, t in conn.idle_journal())
+
+
+async def test_a_dropped_rift_stops_the_walk_and_a_closed_one_will_not_start_it(karada: FakeKarada) -> None:
+    events: list[Any] = []
+    conn, mod = await _explorer(_room_script(max_walks=99), ["move", "survey", "look_around"], events.append)
+    conn.set_explore_budget(120)
+    await conn.act("explore", {})
+    await asyncio.sleep(0.01)
+    conn.pause_socket()
+    await _finish(conn)
+    assert conn.idle_busy() is False
+    assert events == [], "a rift that dropped is not a walk that ended: nobody is there to be told, and it must not be an error"
+    res = await conn.act("explore", {})
+    assert res.ok is False and res.detail == "rift_closed"
+
+
+# -- the interface: the walk is sized to the next prompt and holds the beat ----------------
+
+
+class _Walker(_Ready):
+    def __init__(self, ready: float | None) -> None:
+        super().__init__(ready)
+        self.explores = True
+        self.busy = False
+        self.budget: float | None = None
+
+    def idle_busy(self) -> bool:
+        return self.busy
+
+    def set_explore_budget(self, seconds: float) -> None:
+        self.budget = seconds
+
+
+async def test_a_walk_is_sized_to_the_next_prompt(iface, rested) -> None:
+    vi, reg, sent = iface
+    now = asyncio.get_event_loop().time()
+    conn = _Walker(ready=now - 10_000)
+    reg._instances["retroxr"] = conn
+    await vi._maybe_run_idle_beat()
+    assert len(sent) == 1
+    # interval 40 s (settled) + a turn that has not been measured yet (the 25 s guess)
+    assert conn.budget == pytest.approx(65.0, abs=0.5), conn.budget
+
+
+async def test_how_long_a_turn_takes_is_measured_and_the_next_walk_follows_it(iface, rested) -> None:
+    vi, reg, sent = iface
+    now = asyncio.get_event_loop().time()
+    conn = _Walker(ready=now - 10_000)
+    reg._instances["retroxr"] = conn
+    await vi._maybe_run_idle_beat()
+    # the turn took 12 s: the engine became free 12 s after the ask, and has been free for 15 s of the 27 since
+    vi._last_idle_beat_at = now - 27
+    rested["free"] = 15.0
+    await vi._maybe_run_idle_beat()
+    assert vi._turn_latency.samples == 1 and 11.0 < vi._turn_latency.value() < 13.0, vi._turn_latency.value()
+    vi._last_idle_beat_at = 0.0
+    await vi._maybe_run_idle_beat()
+    assert conn.budget == pytest.approx(40.0 + vi._turn_latency.value(), abs=0.5)
+
+
+async def test_no_beat_while_a_walk_is_going_its_result_is_the_next_prompt(iface, rested, caplog) -> None:
+    vi, reg, sent = iface
+    now = asyncio.get_event_loop().time()
+    conn = _Walker(ready=now - 10_000)
+    conn.busy = True
+    reg._instances["retroxr"] = conn
+    await vi._maybe_run_idle_beat()
+    assert sent == [], "she is on a walk"
+    conn.busy = False
+    await vi._maybe_run_idle_beat()
+    assert len(sent) == 1
+
+
+async def test_the_end_of_a_walk_counts_as_the_beat_it_replaces(iface, rested, monkeypatch: pytest.MonkeyPatch) -> None:
+    vi, reg, sent = iface
+    now = asyncio.get_event_loop().time()
+    conn = _Walker(ready=now - 10_000)
+    reg._instances["retroxr"] = conn
+
+    class _Manager:
+        async def start_session(self, *a: Any, **k: Any) -> str:
+            return "s1"
+
+        async def record_experience(self, *a: Any, **k: Any) -> None:
+            pass
+
+    async def no_log(*a: Any, **k: Any) -> None:
+        pass
+
+    monkeypatch.setattr("interface.vessel_interface.get_vessel_session_manager", lambda: _Manager())
+    monkeypatch.setattr(vi, "_log_activity", no_log)
+    monkeypatch.setattr(vi, "_is_salient", lambda *a, **k: False)
+    vi._last_idle_beat_at = now - 500
+    vi._idle_pending = False
+    await vi.on_world_event("retroxr", "explore_done", "You went for a walk")
+    assert vi._idle_pending is True and now - 5 < vi._last_idle_beat_at <= asyncio.get_event_loop().time()
+    await vi.on_world_event("retroxr", "chat", "someone said hi")
+    assert vi._last_idle_beat_at >= now - 5, "only a *_done does it"

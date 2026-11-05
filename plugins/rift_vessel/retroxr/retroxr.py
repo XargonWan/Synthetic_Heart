@@ -52,6 +52,18 @@ from core.core_initializer import register_plugin
 from core.logging_utils import log_debug, log_info, log_warning
 from core.plugin_base import PluginBase
 from core.vessel_registry import register_vessel_connector
+from plugins.rift_vessel.exploration import (
+    Candidate,
+    ExplorerMixin,
+    Hazard,
+    LookResult,
+    Probe,
+    Vec,
+    WalkResult,
+    as_vec,
+    explore_schema,
+    flat_dist,
+)
 from plugins.rift_vessel.karada_bridge import RiftKaradaTransport
 from plugins.rift_vessel.vessel_base import (
     PerceptionCallback,
@@ -125,15 +137,6 @@ WORLD_VERBS: Dict[str, Dict[str, Any]] = {
             "when something is not in what is around you, instead of guessing where it is."
         ),
         "required_fields": ["target"],
-        "optional_fields": [],
-        "security_level": "low",
-    },
-    "explore": {
-        "description": (
-            "Look around the room from a few places (turning all the way round, walking between them). You "
-            "are told afterwards what you saw. Use it when you want to know what is here."
-        ),
-        "required_fields": [],
         "optional_fields": [],
         "security_level": "low",
     },
@@ -251,6 +254,18 @@ LOCAL_VERBS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# `explore` is Synth's own too, since 2026-11-05: the core decides where to go and when to stop
+# (plugins/rift_vessel/exploration.py) and asks the body for one thing at a time. Offered as every world offers it.
+LOCAL_VERBS["explore"] = explore_schema(
+    "You stop for a few seconds at things you have not looked at yet; the walk is not limited to the part of the room "
+    "you can see from here."
+)
+
+# Verbs the CORE sends the mod to build a walk. They are never offered to the model and never accepted from it:
+# `survey` answers what can be walked to and what is out of sight, `look_around` turns on the spot and names what comes
+# into view. The mod declares them in `hello.verbs`; without `survey` the walk is blind (see ExplorationPolicy).
+INTERNAL_VERBS = frozenset({"survey", "look_around"})
+
 #: Her aims are kept per game, not per room: one house, one set of things she wants.
 GOAL_SCOPE = {"scope": "vessel", "game": "retroxr", "world": "none"}
 
@@ -259,10 +274,11 @@ GOAL_SCOPE = {"scope": "vessel", "game": "retroxr", "world": "none"}
 DEFAULT_DECLARED = frozenset({"say", "move", "look", "status", "emote"})
 
 
-class RetroXRConnector(VesselConnectorBase):
+class RetroXRConnector(ExplorerMixin, VesselConnectorBase):
     """Rift Vessel connector for the RetroXR room, over the mod's WebSocket."""
 
     display_name = "RetroXR"
+    EXPLORE_WORLD = ENVIRONMENT
     # She is a person in a room, not a bot with goals: when nobody is talking to her she is
     # told what is around her and asked what she wants to do (core.vessel_beat idle beat).
     uses_idle_beat = True
@@ -300,6 +316,8 @@ class RetroXRConnector(VesselConnectorBase):
         # when the mod attached (a resumed session gets no ``out`` frame: the idle beat falls back to this).
         self._idle_ready_at: float | None = None
         self._attached_at: float | None = None
+        # Where the body was at the last probe / walk (exploration measures a leg from it).
+        self._explore_pos: Vec | None = None
         self._journal: "collections.deque[tuple[float, str]]" = collections.deque(maxlen=_JOURNAL_MAX)
 
     # ------------------------------------------------------------------
@@ -320,6 +338,7 @@ class RetroXRConnector(VesselConnectorBase):
     def pause_socket(self) -> None:
         """The socket dropped without a goodbye: let go of it but keep the session (see ``paused``)."""
         self.paused = True
+        self.cancel_explore("the rift dropped", silent=True)
         self.detach_socket()
         log_info(f"{LOG_PREFIX} socket lost: the session {self.session_token} waits for the mod to come back")
 
@@ -386,6 +405,7 @@ class RetroXRConnector(VesselConnectorBase):
         self.session_token = None
         self._journal.clear()
         self._idle_ready_at = None
+        self.reset_exploration()
         ws = self._ws
         self._unregister_karada()
         self.detach_socket()
@@ -762,6 +782,8 @@ class RetroXRConnector(VesselConnectorBase):
 
     async def _dispatch_event(self, raw: Dict[str, Any]) -> None:
         if str(raw.get("event_type") or "") == "chat" and raw.get("actor"):
+            # A person talking to her ends a walk at its next safe point: they are the next prompt, not the walk's end.
+            self.cancel_explore("the player spoke", silent=True)
             self._chat_waiting_since = time.monotonic()
             log_info(f"{LOG_PREFIX} player chat in (queued turns: {_queued_turns()})")
         if str(raw.get("event_type") or "").endswith("_done"):
@@ -864,6 +886,11 @@ class RetroXRConnector(VesselConnectorBase):
 
     async def _act(self, action: str, payload: Dict[str, Any]) -> VesselActionResult:
         verb = str(action or "")
+        if verb == "explore":
+            if not self.is_connected:
+                return VesselActionResult(ok=False, detail="rift_closed")
+            started = self.start_explore(payload)
+            return VesselActionResult(ok=bool(started["ok"]), detail=started["detail"], data=started["data"])
         if verb in LOCAL_VERBS:
             return await self._act_goal(verb, payload)
         if verb not in CORE_VERBS and verb not in WORLD_VERBS:
@@ -905,6 +932,12 @@ class RetroXRConnector(VesselConnectorBase):
                 except Exception:  # pragma: no cover - defensive
                     pass
 
+        return await self._roundtrip(verb, payload)
+
+    async def _roundtrip(self, verb: str, payload: Dict[str, Any] | None, timeout: float | None = None) -> VesselActionResult:
+        """Send one action frame to the mod and wait for its answer."""
+        if not self.is_connected:
+            return VesselActionResult(ok=False, detail="rift_closed")
         action_id = next(self._ids)
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
@@ -926,13 +959,97 @@ class RetroXRConnector(VesselConnectorBase):
             log_warning(f"{LOG_PREFIX} send failed for {verb!r}: {exc}")
             return VesselActionResult(ok=False, detail="rift_closed")
 
-        timeout = _LONG_ACTION_TIMEOUT_SEC if verb in _LONG_VERBS else _ACTION_TIMEOUT_SEC
+        if timeout is None:
+            timeout = _LONG_ACTION_TIMEOUT_SEC if verb in _LONG_VERBS else _ACTION_TIMEOUT_SEC
         try:
             return await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.TimeoutError:
             self._pending.pop(action_id, None)
             log_warning(f"{LOG_PREFIX} {verb!r} not answered in {timeout:.0f}s")
             return VesselActionResult(ok=False, detail="timeout")
+
+    # ------------------------------------------------------------------
+    # Exploration: what the core asks of a body (plugins/rift_vessel/exploration.py)
+    # ------------------------------------------------------------------
+
+    def mod_supports(self, verb: str) -> bool:
+        """Did the mod declare ``verb`` (also the INTERNAL ones, which ``declared_verbs`` leaves out)?"""
+        raw = self._hello.get("verbs")
+        return isinstance(raw, list) and verb in raw
+
+    def _body_position(self) -> Vec | None:
+        return as_vec((self._state or {}).get("position"))
+
+    async def explore_probe(self, viewpoints, max_candidates):  # type: ignore[override]
+        if not self.is_connected:
+            return None
+        here = self._body_position()
+        if not self.mod_supports("survey"):
+            if here is None:
+                return None
+            self._explore_pos = here
+            # Blind: the mod cannot say what can be walked to, so the core makes places up and a failed walk marks them.
+            return Probe(position=here, heading=None, candidates=None)
+        res = await self._roundtrip(
+            "survey", {"viewpoints": [list(v) for v in viewpoints], "max": int(max_candidates)}, timeout=_ACTION_TIMEOUT_SEC
+        )
+        if not res.ok:
+            log_warning(f"{LOG_PREFIX} survey failed: {res.detail}")
+            return None
+        d = res.data or {}
+        position = as_vec(d.get("position")) or here
+        if position is None:
+            return None
+        self._explore_pos = position
+        cands, pois, hazards = [], [], []
+        for c in d.get("candidates") or []:
+            p = as_vec(c.get("pos")) if isinstance(c, dict) else None
+            if p is not None:
+                cands.append(Candidate(pos=p, cost=float(c.get("cost") or 0.0), seen=bool(c.get("seen"))))
+        for c in d.get("pois") or []:
+            p = as_vec(c.get("pos")) if isinstance(c, dict) else None
+            if p is not None and c.get("name"):
+                pois.append(Candidate(pos=p, cost=float(c.get("cost") or 0.0), seen=bool(c.get("seen")), kind="poi",
+                                      name=str(c["name"]), area=c.get("area")))
+        for h in d.get("hazards") or []:
+            p = as_vec(h.get("pos")) if isinstance(h, dict) else None
+            if p is not None:
+                hazards.append(Hazard(pos=p, radius=float(h.get("radius") or 0.8), kind=str(h.get("kind") or "obstacle")))
+        heading = d.get("heading")
+        return Probe(position=position, heading=float(heading) if isinstance(heading, (int, float)) else None,
+                     candidates=cands, pois=pois, hazards=hazards)
+
+    async def explore_walk(self, pos, timeout):  # type: ignore[override]
+        before = self._explore_pos or self._body_position()
+        res = await self._roundtrip(
+            "move", {"x": pos[0], "y": pos[1], "z": pos[2], "free": True}, timeout=max(10.0, float(timeout) + 5.0)
+        )
+        after = as_vec((res.data or {}).get("position"))
+        moved = flat_dist(before, after) if before is not None and after is not None else 0.0
+        if after is not None:
+            self._explore_pos = after
+        return WalkResult(ok=bool(res.ok), detail=str(res.detail or ""), position=after, moved=moved)
+
+    async def explore_look(self, seconds):  # type: ignore[override]
+        if not self.mod_supports("look_around"):
+            await self.explore_sleep(min(float(seconds), 6.0))
+            return LookResult(saw=[])
+        res = await self._roundtrip("look_around", {"seconds": float(seconds)}, timeout=float(seconds) + 25.0)
+        saw = []
+        for item in (res.data or {}).get("saw") or []:
+            if isinstance(item, dict) and item.get("name"):
+                saw.append({"name": str(item["name"]), "area": item.get("area")})
+        return LookResult(saw=saw)
+
+    async def explore_study(self, poi):  # type: ignore[override]
+        if not self.mod_supports("inspect") or not poi.name:
+            return True
+        res = await self._roundtrip("inspect", {"target": poi.name})
+        return bool(res.ok)
+
+    async def explore_halt(self):  # type: ignore[override]
+        if self.is_connected and self.mod_supports("stop"):
+            await self._roundtrip("stop", {}, timeout=5.0)
 
     # ------------------------------------------------------------------
     # World state and capabilities

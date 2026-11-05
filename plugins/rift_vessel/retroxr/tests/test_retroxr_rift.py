@@ -172,10 +172,12 @@ def test_what_she_does_on_her_own_is_not_ambient_telemetry() -> None:
 
 
 def test_the_verbs_she_does_on_her_own_have_schemas() -> None:
-    from plugins.rift_vessel.retroxr.retroxr import WORLD_VERBS
+    from plugins.rift_vessel.retroxr.retroxr import LOCAL_VERBS, WORLD_VERBS
 
-    for verb in ("search", "explore", "watch", "bring", "stop", "pick_up", "put_down", "hand_over"):
+    for verb in ("search", "watch", "bring", "stop", "pick_up", "put_down", "hand_over"):
         assert verb in WORLD_VERBS and WORLD_VERBS[verb]["description"]
+    # `explore` is Synth's own now (the core decides the route): the mod no longer has a verb of that name to offer
+    assert "explore" not in WORLD_VERBS and LOCAL_VERBS["explore"]["description"]
     assert WORLD_VERBS["search"]["required_fields"] == ["target"]
     assert WORLD_VERBS["bring"]["required_fields"] == ["target"]
 

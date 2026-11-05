@@ -108,10 +108,24 @@ It is an ordinary vessel perception: **AMBIENT (4), above background work (G.R.I
 player's chat is HIGH (8), prunes pending ones and postpones the next** (`tests/test_vessel_retroxr_body.py` pins all of
 this). A world with `uses_idle_beat` gets no will, action, goal or reflection beat: those push a bot toward a goal.
 
+## `explore` (2026-11-05)
+
+The core's walk, not the mod's: `explore` is a Synth-side verb (`LOCAL_VERBS`, like `set_goal`), the mod no longer has one
+to offer. The connector asks the mod two internal verbs that the model is never offered and never accepted from it
+(`INTERNAL_VERBS`, declared in `hello.verbs`): **`survey`** (what can be walked to, with the length of each way, which of
+the viewpoints has a line of sight to each place, the things in sight as places to go up to, and what to keep clear of) and
+**`look_around`** (turn on the spot for N seconds and name what came into view). Legs are the ordinary `move` with `free: true`:
+no 6 m leash from the Summoner, the floor under every cell checked instead (a cell with no floor within 0.3 m is a hole),
+the player kept 0.9 m off (less if they already stand nearer) and anything rolling 0.7 m, the way ahead checked every 0.4 s for
+2 m and planned round before they reach it. A mod without `survey` gives a blind walk (places made up by the core). `stop`
+now also ends a walk in progress. A person talking interrupts a walk at its next safe point; a dropped rift cancels it
+quietly. Budget: the interface sets it before each idle beat (`set_explore_budget`).
+
 ## Verbs
 
 Core set: `say`, `move`, `look`, `use`, `follow`, `unfollow`, `status`.
 Her own aims (Synth-side, not the mod's): `set_goal`, `update_goal`.
+Her walks (Synth-side, the core's): `explore`.
 RetroXR: `look_at`, `touch`, `pick_up`, `put_down`, `hand_over`, `sit`, `emote`, `inspect`, and the ones she does ON HER OWN
 once asked: `search`, `explore`, `watch`, `bring`, `stop`.
 

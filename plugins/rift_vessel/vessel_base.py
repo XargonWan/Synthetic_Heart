@@ -337,6 +337,18 @@ class VesselConnectorBase(ABC):
         """
         return None
 
+    # Exploration (see plugins/rift_vessel/exploration.py): a connector that mixes in ``ExplorerMixin`` really
+    # walks; the others answer these two for the interface and do nothing.
+    explores: bool = False
+
+    def set_explore_budget(self, seconds: float) -> None:
+        """The interface tells the body how long a walk should last: until the next prompt. Default: ignored."""
+        return None
+
+    def idle_busy(self) -> bool:
+        """Is the body busy with something that will end in a prompt of its own (a walk)? Default: no."""
+        return False
+
     def idle_ready_since(self) -> float | None:
         """When the body became ready for idle beats, as ``time.monotonic()``; ``None`` = not yet (optional).
 
