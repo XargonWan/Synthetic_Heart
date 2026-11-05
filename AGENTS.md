@@ -856,11 +856,13 @@ Container rebuild:
 docker compose up -d --build
 ```
 
-Development deployment, when that file/environment exists:
+Development deployment (builds Synth from `.` and Zen from `../zen-llm-engine`). `docker-compose-dev.yml` is an override: always pass it after `docker-compose.yml`:
 
 ```bash
-docker compose -f docker-compose-dev.yml --env-file .env-dev up -d --build
+docker compose -f docker-compose.yml -f docker-compose-dev.yml up -d --build
 ```
+
+Add `--env-file .env-dev` when a separate development environment file exists.
 
 Do not delete logs before collecting evidence for a bug. Clear generated logs only when explicitly required and after preserving relevant diagnostics.
 
