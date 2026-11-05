@@ -208,9 +208,12 @@ WORLD_VERBS: Dict[str, Dict[str, Any]] = {
     },
     "inspect": {
         "description": (
-            "Turn to an object or machine near you and look at it closely: you are told what it "
-            "is, whether it is switched on, how far it is and where. Give its name as it appears "
-            "in what is around you. Walk closer first with move (target = its name) to be near it."
+            "Go over to an object or machine and look at it closely, the way a person would: you walk up "
+            "to it, and if it is small enough to lift (a cartridge, a console, a tape) you pick it up and "
+            "study it in your hands; if it is too big or fixed (a TV, a wardrobe) you stand in front of it. "
+            "You are told afterwards what it is and whether it is switched on, and whether you are holding "
+            "it now (put_down or hand_over when you are done with it; looking closely at a second thing sets "
+            "the first one down). Give its name as it appears in what is around you."
         ),
         "required_fields": ["target"],
         "optional_fields": [],
@@ -1042,9 +1045,11 @@ class RetroXRConnector(ExplorerMixin, VesselConnectorBase):
         return LookResult(saw=saw)
 
     async def explore_study(self, poi):  # type: ignore[override]
-        if not self.mod_supports("inspect") or not poi.name:
+        # A look, not an `inspect`: that one now walks up to a thing and picks it up as a routine of its own, which would
+        # fight the walk this is a stop of.
+        if not self.mod_supports("look_at") or not poi.name:
             return True
-        res = await self._roundtrip("inspect", {"target": poi.name})
+        res = await self._roundtrip("look_at", {"target": poi.name})
         return bool(res.ok)
 
     async def explore_halt(self):  # type: ignore[override]
