@@ -352,6 +352,30 @@ async def test_describe_assets_points_at_the_skins_persona_not_the_models_folder
     assert body["persona"] == {"url": "/skins/Rei/persona.json"}
 
 
+async def test_assets_name_the_current_persona(monkeypatch) -> None:
+    """The welcome's assets carry the persona's name, so the mod labels the chat with it instead of a fixed word."""
+    import core.persona_manager as pm
+
+    class _Persona:
+        name = "Rei"
+
+    class _Manager:
+        def get_current_persona(self):
+            return _Persona()
+
+    monkeypatch.setattr(pm, "get_persona_manager", lambda: _Manager())
+    body = await RetroXRConnector().get_embodiment_assets([])
+    assert body["name"] == "Rei"
+
+
+async def test_assets_have_no_name_without_a_persona(monkeypatch) -> None:
+    import core.persona_manager as pm
+
+    monkeypatch.setattr(pm, "get_persona_manager", lambda: None)
+    body = await RetroXRConnector().get_embodiment_assets([])
+    assert "name" not in body, "no persona: the mod falls back to its own word"
+
+
 # -- the socket --------------------------------------------------------------
 
 

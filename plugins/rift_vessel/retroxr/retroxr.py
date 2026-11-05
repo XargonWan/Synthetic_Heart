@@ -1111,7 +1111,24 @@ class RetroXRConnector(ExplorerMixin, VesselConnectorBase):
             self._emotes = sorted((body or {}).get("animations", {}).keys())
         except Exception:  # pragma: no cover - defensive
             pass
+        # Who they are called: the current persona's name, so the mod's chat can label their lines with it
+        # (absent when no persona is loaded: the mod then says "SyntH").
+        persona_name = self._persona_name()
+        if body is not None and persona_name:
+            body["name"] = persona_name
         return body
+
+    @staticmethod
+    def _persona_name() -> str:
+        """The current persona's name, or "" when there is none (never raises)."""
+        try:
+            from core.persona_manager import get_persona_manager
+
+            persona = get_persona_manager().get_current_persona()
+            return str(getattr(persona, "name", "") or "").strip()
+        except Exception as exc:  # pragma: no cover - defensive
+            log_warning(f"{LOG_PREFIX} could not read the persona name: {exc}")
+            return ""
 
 
 CONNECTOR_CLASS = RetroXRConnector

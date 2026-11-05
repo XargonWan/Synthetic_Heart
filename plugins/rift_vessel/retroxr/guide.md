@@ -31,7 +31,8 @@ anything outside its declared verbs.
 | mod → Synth | `request_assets {animations: [...]}` → Synth answers `assets {assets}` |
 | mod → Synth | `audio {id, format, data, actor}` (the player's voice, base64, `wav`/`ogg`/`mp3`/`flac`, 8 MB max) → Synth answers `transcript {id, ok, text, reason}` |
 
-`assets` describes the **body**: the active skin's VRM model and the animations the world
+`assets` carries `name`, what the current persona is called (absent with no persona; the mod's chat labels
+their lines with it), and describes the **body**: the active skin's VRM model and the animations the world
 named, resolved by name (`animations/vessel/<name>/`, then the Karada state folder, then
 the fallback skin). The mod downloads the files from `/skins/...` and uses
 `/api/karada/assets/manifest` to skip what it already has. Nothing is pushed unasked.
