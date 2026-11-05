@@ -55,7 +55,6 @@ skins/2B/persona.json
 skins/Rekku
 skins/temp
 !skins/temp/README.md
-docker-compose-*.yml
 backups/
 SyntH_main
 TODO*.md

@@ -8,6 +8,10 @@
 
 **Validation.** `tests/test_release_cycle.py` runs both scripts as processes against throwaway repositories; `tests/test_release_workflow.py` runs the image-tag and installer-vetting steps extracted from the workflow and asserts the release job's shape. Not verified here: a real run on GitHub (Windows runner, Docker Hub, `softprops/action-gh-release`).
 
+### feat(docker): `docker-compose-dev.yml` override builds Synth and Zen from local sources  <!-- 2026-11-05 -->
+
+`docker compose -f docker-compose.yml -f docker-compose-dev.yml up -d --build` now builds `synth` from this checkout (`.`) and `synth-zen-llm-engine` from the sibling `../zen-llm-engine`, instead of pulling the published images. The override only sets `image` (local `synthetic_heart:dev` / `zen-llm-engine:dev` tags, so the published `xargonwan/*` images are never overwritten) and `build`; everything else is inherited from `docker-compose.yml`. Documented in `docs/installation.rst` and `README.md`; the development command in `AGENTS.md` §11 previously passed the dev file alone, which cannot work for an override. Checked with `docker compose config` on the host: the merged build contexts resolve to this checkout and the sibling `zen-llm-engine`; no image build was run.
+
 ### feat(engines): ordered fallback engines for Auris, Iris and Cortex too  <!-- 2026-11-05 -->
 
 The Vox fallback list now exists on every route: `AURIS_FALLBACK_ENGINES` (`AurisPlugin.transcribe_audio`), `IRIS_FALLBACK_ENGINES` (`IrisPlugin.describe_media`; the active engine's model pin is not forwarded) and `CORTEX_FALLBACK_ENGINES` (tried by `core.cortex_fallback` after the legacy single `CORTEX_FALLBACK_ENGINE`, each under `CORTEX_FALLBACK_TIMEOUT_SEC`). The Engines tab shows one *Fallback* row list per route (shared widget in `main.js`), and the Vue voice settings gained it for Vox and Auris. When every Auris/Iris engine fails the callers keep using their existing placeholder text. Live engines have no fallback list yet; the Vue frontend change is untested (no `node_modules` in this checkout).

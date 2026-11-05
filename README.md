@@ -235,6 +235,11 @@ Both paths are documented in [docs/installation.rst](docs/installation.rst).
 
 4.  Connect to the WebUI via HTTPS (default port is **8000**): `https://localhost:8000`.
 
+    > **For Developers:** to build the images from your local checkouts (Synth from `.`, Zen from `../zen-llm-engine`) instead of pulling the published ones, add the dev override:
+    > ```bash
+    > docker compose -f docker-compose.yml -f docker-compose-dev.yml up -d --build
+    > ```
+
 #### Database runtime and automatic migration
 
 The Docker stack now runs the main Synthetic Heart runtime on **PostgreSQL** by default.
