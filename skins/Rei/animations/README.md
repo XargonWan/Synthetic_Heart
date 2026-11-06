@@ -23,6 +23,11 @@ The system defines these logical animation states (the first four are the conver
 - **Gaming** (`gaming/`): playing with a controller. `Gaming-sitting.fbx` was captured seated, so its descriptor says
   `"mask": "upper_body"` (below): a client with a body shows only what the back, arms and hands do, whether she stands,
   walks or sits. A client that cannot layer plays the whole clip, seated.
+- **Give** (`give/`): holding something out in both hands to someone (palms up, cupped, forearms level). `Give.fbx` is a layer
+  too (`"mask": "upper_body"`): the arms come up over the intro (0.5 s), then the pose is held and repeats (`loop`, whose two
+  ends are the same pose); there is no outro, a layer is taken off by cross-fading back. It is made, not captured: see
+  `tools/make_give_clip.py` (it writes new curves into a Mixamo FBX of the skin, because an FBX exported from Blender has other
+  bone frames and paths and does nothing on the skeleton the mod shares between clips).
 
 When multiple files are specified for a state, one is randomly selected each time the animation plays.
 
