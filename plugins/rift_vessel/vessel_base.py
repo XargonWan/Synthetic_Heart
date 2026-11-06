@@ -328,6 +328,16 @@ class VesselConnectorBase(ABC):
     # wastes a turn on (a RetroXR body offered ``attack`` and ``observe`` answered neither).
     core_verbs: "frozenset[str] | None" = None
 
+    # Descriptions this world gives some core verbs in place of the generic ones (``{verb: text}``; ``{world}`` is
+    # filled in). The generic text is written for any world and reads like Minecraft: a world whose ``follow`` takes no
+    # target, say, says so here instead of promising one. Optional; empty means the generic text for every verb.
+    core_verb_descriptions: "Dict[str, str]" = {}
+
+    # ``combine`` (put one thing into/onto another: a cartridge into a console) is an OPT-IN core verb: a world gets it
+    # only by listing ``"combine"`` in ``core_verbs``. The connector then receives ``act("combine", {"target": ...,
+    # "item": ... (optional: default what the body holds), "how": ... (optional free words)})`` and answers like any
+    # other verb; what really happens is the world's own (a Minecraft connector would map it to crafting).
+
     def describe_surroundings(self) -> str | None:
         """Describe what is around the body, for the idle beat (optional).
 

@@ -1915,6 +1915,18 @@ class VesselPlugin(AIPluginBase):
             "optional_fields": ["target"],
             "security_level": "low",
         },
+        "combine": {
+            "description": (
+                "Put one thing into, onto or together with another in the {world} world: "
+                "for example a cartridge into a console, or a key into a lock. Provide "
+                "the 'target' (the thing it goes into or onto) and, when it is not "
+                "what you are holding, the 'item'. 'how' is optional free words for "
+                "the way (put in, set on, attach). You are told afterwards what came of it."
+            ),
+            "required_fields": ["target"],
+            "optional_fields": ["item", "how"],
+            "security_level": "low",
+        },
         "attack": {
             "description": (
                 "Attack a target in the {world} world through your Vessel — a "
@@ -2095,6 +2107,32 @@ class VesselPlugin(AIPluginBase):
             if verb not in self._ACTION_VERBS and isinstance(schema, dict)
         }
 
+    # Core verbs a world gets only when its connector LISTS them in ``core_verbs``. The others are offered to every
+    # world that does not restrict itself (``core_verbs=None``); a verb added to the core later must not appear in
+    # worlds that never heard of it (Minecraft has no ``combine``: it crafts).
+    _OPT_IN_CORE_VERBS: frozenset[str] = frozenset({"combine"})
+
+    @staticmethod
+    def _core_verb_descriptions_for(world: str) -> dict[str, str]:
+        """Descriptions ``world``'s connector gives some core verbs in place of the generic ones (``{}`` for none).
+
+        The generic text is written for any world (and reads like Minecraft); a connector that knows better says so.
+        Fail-safe: any trouble reading it means the generic text.
+        """
+        if not world or world == "vessel":
+            return {}
+        try:
+            raw = getattr(
+                VESSEL_REGISTRY.load_connector(world), "core_verb_descriptions", None
+            )
+        except Exception:
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        return {
+            str(k): str(v) for k, v in raw.items() if isinstance(v, str) and v.strip()
+        }
+
     @staticmethod
     def _core_verbs_for(world: str) -> "frozenset[str] | None":
         """The core verbs ``world``'s connector implements, or ``None`` for all of them.
@@ -2177,14 +2215,20 @@ class VesselPlugin(AIPluginBase):
         # namespaced by the connected world, plus a plain disconnect.
         prefix = f"vessel_{connected}_"
         implemented = self._core_verbs_for(connected)
+        described = self._core_verb_descriptions_for(connected)
         for verb, schema in self._ACTION_VERBS.items():
             if verb in ("connect", "disconnect"):
                 continue
             # Only the verbs this world can really do (a connector that implements a few says so).
             if implemented is not None and verb not in implemented:
                 continue
+            # A verb the core added later is for the worlds that say they have it, not for "all of them".
+            if implemented is None and verb in self._OPT_IN_CORE_VERBS:
+                continue
             entry = dict(schema)
-            entry["description"] = entry["description"].format(world=connected)
+            entry["description"] = described.get(verb, entry["description"]).format(
+                world=connected
+            )
             # Gameplay verbs only matter on a Vessel turn — tag them so the
             # per-turn scope gate keeps them out of ordinary chat prompts while
             # they stay registered/callable in-world.
@@ -2323,6 +2367,7 @@ class VesselPlugin(AIPluginBase):
             "move",
             "look",
             "use",
+            "combine",
             "attack",
             "follow",
             "unfollow",
