@@ -1007,6 +1007,7 @@ class SynthWebUIInterface:
         self.app.get("/api/history/chat")(self.history_chat)
         self.app.get("/api/log-failures")(self.list_log_failures)
         self.app.delete("/api/log-failures/{failure_id}")(self.delete_log_failure)
+        self.app.get("/api/stats")(self.stats_overview)
         self.app.get("/api/dead-targets")(self.list_dead_targets)
         self.app.delete("/api/dead-targets/{target_id}")(self.delete_dead_target)
         self.app.get("/api/reason-trail")(self.list_reason_trail)
@@ -1234,6 +1235,20 @@ class SynthWebUIInterface:
         self._plugin_api_routes[path] = handler
         log_info(
             f"{LOG_PREFIX} Plugin API route registered: {path}",
+            log_file=WEBUI_LOG,
+        )
+
+    def register_plugin_router(self, router: Any, name: str = "") -> None:
+        """Mount a FastAPI ``APIRouter`` a plugin owns (an HTTP or WebSocket endpoint).
+
+        ``register_plugin_api_route`` only serves JSON on GET; a plugin that needs more, such as a
+        WebSocket a game connects to, brings its own router and mounts it here, so the core knows
+        nothing about the plugin. The router must do its own authorisation for a WebSocket (see
+        ``webui_auth.websocket_authorized``).
+        """
+        self.app.include_router(router)
+        log_info(
+            f"{LOG_PREFIX} Plugin router mounted: {name or router}",
             log_file=WEBUI_LOG,
         )
 
@@ -2591,6 +2606,17 @@ class SynthWebUIInterface:
         uptime = int((datetime.now(timezone.utc) - self.start_time).total_seconds())
         return JSONResponse({"uptime": uptime, "sessions": len(self.connections)})
 
+    @staticmethod
+    def _turns_today() -> int | None:
+        """Turns the engine ran today (the statistics registry's count); None when it cannot be read."""
+        try:
+            from core import stats_registry
+
+            registry = stats_registry.get_stats()
+            return registry.count("turns.ok") + registry.count("turns.failed")
+        except Exception:
+            return None
+
     async def about_summary(self) -> JSONResponse:
         """Return lightweight About tab metadata (uptime, system, and component counts)."""
         uptime = int((datetime.now(timezone.utc) - self.start_time).total_seconds())
@@ -2620,7 +2646,7 @@ class SynthWebUIInterface:
                 "uptime": uptime,
                 "sessions": sessions,
                 "components": components_count,
-                "messages_today": None,
+                "messages_today": self._turns_today(),
                 "version": version,
                 "python": python_version,
                 "platform": platform_label,
@@ -3664,7 +3690,12 @@ class SynthWebUIInterface:
                 # 4) Face values (emotions)
                 face = full_state.get("face_values", {})
                 if face:
-                    await websocket.send_json({"type": "vrm_face", "values": face})
+                    # Weights resolved per skin, as every later frame is (a raw emotion state here and
+                    # resolved ones after would flip the face at the first refresh).
+                    resolve = getattr(self.animation_handler, "resolve_face_values", None)
+                    await websocket.send_json(
+                        {"type": "vrm_face", "values": resolve(face) if callable(resolve) else face}
+                    )
 
                 # 5) If no animation is set yet, start idle
                 if not anim.get("descriptor") and self.persona_manager:
@@ -10387,6 +10418,29 @@ class SynthWebUIInterface:
         except Exception as exc:
             log_error(f"{LOG_PREFIX} Failed to delete log failure {failure_id}: {exc}")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def stats_overview(self, request: Request):
+        """Return the stat server's report (Logs > Stats): the sections that plugins and the core registered, each with
+        the blocks that have data in the chosen period (``?period=1h|24h|3d|7d|14d|all``, or the older ``?days=N``)."""
+        try:
+            from core import stats_registry
+
+            period = stats_registry.Period.parse(
+                request.query_params.get("period"), request.query_params.get("days")
+            )
+            report = stats_registry.get_stats().report(period)
+            report["periods"] = [
+                {"key": key, "label": choice[0]}
+                for key, choice in stats_registry.Period.CHOICES.items()
+            ]
+            report["uptime"] = int(
+                (datetime.now(timezone.utc) - self.start_time).total_seconds()
+            )
+            report["success"] = True
+            return JSONResponse(report)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to build the statistics: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
     async def list_dead_targets(self, request: Request):
         """Return the dead-delivery-target registry (Logs > Dead Targets)."""

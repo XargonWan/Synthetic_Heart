@@ -12,6 +12,7 @@ external-endpoint bridges — no local model is bundled.
 
 from __future__ import annotations
 
+from core import stats_registry
 import asyncio
 import base64
 import hashlib
@@ -204,6 +205,23 @@ class IrisPlugin(AIPluginBase):
         return result
 
     async def _describe_with(
+        self,
+        name: str,
+        file_path: str,
+        mime_type: str | None,
+        prompt: str,
+        model: str | None,
+    ) -> IrisResult | None:
+        """:meth:`_describe_raw`, timed per engine for the Stats page (``None`` counts as a failure)."""
+        with stats_registry.track_engine("iris", name) as call:
+            outcome = await self._describe_raw(
+                name, file_path, mime_type, prompt, model
+            )
+            if outcome is None:
+                call.fail()
+            return outcome
+
+    async def _describe_raw(
         self,
         name: str,
         file_path: str,

@@ -20,6 +20,7 @@ without configuration changes.
 
 from __future__ import annotations
 
+from core import stats_registry
 import asyncio
 import importlib
 import io
@@ -660,7 +661,7 @@ class VoxPlugin(AIPluginBase):
             generate_only, em_events, interface_path
         )
 
-        async def _synthesize_with(
+        async def _synthesize_raw(
             engine_name_: str, engine_kwargs: dict[str, Any]
         ) -> tuple[Any, bytes, bool] | None:
             """Load *engine_name_* and synthesise; ``None`` when it cannot."""
@@ -716,6 +717,16 @@ class VoxPlugin(AIPluginBase):
                 log_warning(f"[vox_plugin] Engine '{engine_name_}' returned no audio.")
                 return None
             return candidate, audio, streamed
+
+        async def _synthesize_with(
+            engine_name_: str, engine_kwargs: dict[str, Any]
+        ) -> tuple[Any, bytes, bool] | None:
+            """:func:`_synthesize_raw`, timed per engine for the Stats page (no audio counts as a failure)."""
+            with stats_registry.track_engine("vox", engine_name_) as call:
+                outcome = await _synthesize_raw(engine_name_, engine_kwargs)
+                if outcome is None:
+                    call.fail()
+                return outcome
 
         synthesized = await _synthesize_with(name, kwargs)
         if synthesized is None:

@@ -40,6 +40,12 @@ class AnimationState(Enum):
     WRITE = "write"
     TALK = "talk"
     SKIN_CHANGE = "skin_change"
+    # Postures and activities of a body that has legs and hands to use. On the WebUI each plays its own
+    # clip like any state; an embodied client (RetroXR) can do more with the descriptor's ``mask``.
+    SIT = "sit"  # sitting down (a chair, a sofa; bed variants live in sit/bed/)
+    CROUCH = "crouch"  # crouching, e.g. to reach something on the floor (its play_once clip stands her up)
+    GAMING = "gaming"  # playing a game with a controller: the clip moves the upper body only (mask)
+    GIVE = "give"  # holding something out in both hands to someone: the upper body only (mask), tools/make_give_clip.py
 
 
 AnimationStateChangedCallback = Callable[
@@ -52,6 +58,10 @@ AnimationStateChangedCallback = Callable[
 # Higher = more important, cannot be interrupted by lower priority animations
 ANIMATION_STATE_PRIORITIES = {
     AnimationState.IDLE: 0,  # Idle - lowest priority
+    AnimationState.SIT: 1,  # Postures give way to everything that talks or thinks
+    AnimationState.CROUCH: 1,
+    AnimationState.GAMING: 2,
+    AnimationState.GIVE: 2,
     AnimationState.WRITE: 3,  # Writing - low priority
     AnimationState.TALK: 5,  # Talking - medium priority
     AnimationState.THINK: 10,  # Thinking - highest priority, cannot be interrupted
@@ -187,6 +197,11 @@ class KaradaStateServer:
         # periodic state refresh so every viewer of the shared avatar converges
         # on the same expression. ``None`` means no expression override active.
         self._current_expression: Optional[Dict[str, Any]] = None
+        # Presence: ``"summon"`` while a world is introducing her into itself (a Rift Vessel
+        # connecting), ``None`` otherwise. It is not an animation: the WebUI avatar goes on
+        # doing what it does. An embodied client (RetroXR) holds back her think/write poses
+        # while she is arriving. Any vessel may use it.
+        self._presence: Optional[str] = None
 
         # Priority registration: maps state names to their priority values.
         # Starts from ANIMATION_STATE_PRIORITIES and can be extended at runtime.
@@ -301,6 +316,57 @@ class KaradaStateServer:
     # Face / expression helpers
     # ------------------------------------------------------------------
 
+    def _emotion_presets(self) -> Dict[str, Dict[str, float]]:
+        """The active skin's ``emotions`` from its persona.json: emotion name -> logical blendshape targets.
+
+        Every skin defines its own (one is more "sad" than another, a ``happy`` is a different smile), which is why
+        the SERVER turns an emotion into weights and not each client. {} when there is no persona or no section.
+        """
+        try:
+            import sys
+
+            pm_mod = sys.modules.get("core.persona_manager")
+            pm = pm_mod.get_persona_manager() if pm_mod and hasattr(pm_mod, "get_persona_manager") else None
+            current = getattr(pm, "_current_persona", None) if pm else None
+            name = getattr(current, "name", None) if current else None
+            if not name:
+                return {}
+            data = pm._load_persona_json(name)
+            emotions = data.get("emotions") if isinstance(data, dict) else None
+            if not isinstance(emotions, dict):
+                return {}
+            return {
+                str(k): {str(t): float(w) for t, w in v.items()}
+                for k, v in emotions.items()
+                if isinstance(v, dict)
+            }
+        except Exception as exc:  # pragma: no cover - best effort
+            log_debug(f"[KaradaStateServer] no emotion presets: {exc}")
+            return {}
+
+    def resolve_face_values(self, values: Dict[str, float]) -> Dict[str, float]:
+        """What clients are sent for ``values`` (an emotion state): blendshape weights, resolved per skin.
+
+        ``happy: 0.65`` becomes the skin's own ``{mouth_smile: 0.25, eyes_smile: 0.2}`` scaled by 0.65; the same
+        target from two emotions keeps the stronger. A name the persona has no preset for (a raw blendshape or an
+        emotion this skin does not define) goes through unchanged. The authoritative emotion state
+        (``_current_face_values``) is never touched.
+        """
+        presets = self._emotion_presets()
+        if not presets:
+            return dict(values)
+        out: Dict[str, float] = {}
+        for name, value in values.items():
+            preset = presets.get(name)
+            if preset is None:
+                out[name] = max(out.get(name, 0.0), float(value))
+                continue
+            for target, weight in preset.items():
+                scaled = float(weight) * float(value)
+                if scaled > 0.0001:
+                    out[target] = max(out.get(target, 0.0), scaled)
+        return {k: round(v, 4) for k, v in out.items()}
+
     async def set_face_values(self, values: Dict[str, float]) -> None:
         """Broadcast raw face values to all connected clients.
 
@@ -333,13 +399,35 @@ class KaradaStateServer:
 
         if not self._has_any_transport():
             return
-        payload = {"type": "vrm_face", "values": dict(self._current_face_values)}
+        payload = {"type": "vrm_face", "values": self.resolve_face_values(self._current_face_values)}
         for transport in self._transports:
             try:
                 await transport.broadcast_face(payload)
             except Exception as exc:  # pragma: no cover - best effort
                 log_warning(
                     f"[KaradaStateServer] failed to broadcast face_values via {type(transport).__name__}: {exc}"
+                )
+
+    PRESENCE_SUMMON = "summon"
+
+    def get_presence(self) -> Optional[str]:
+        """``"summon"`` while she is being introduced into a world, else ``None``."""
+        return self._presence
+
+    async def set_presence(self, name: Optional[str], source: str = "") -> None:
+        """Set (or clear, with ``None``) her presence and tell every transport."""
+        name = str(name).strip() or None if name is not None else None
+        if name == self._presence:
+            return
+        self._presence = name
+        log_info(f"[KaradaStateServer] presence -> {name or 'idle'} ({source or 'unknown'})")
+        payload = {"type": "vrm_presence", "state": name or "idle"}
+        for transport in list(self._transports):
+            try:
+                await transport.broadcast_presence(payload)
+            except Exception as exc:  # pragma: no cover - best effort
+                log_warning(
+                    f"[KaradaStateServer] failed to broadcast presence via {type(transport).__name__}: {exc}"
                 )
 
     async def clear_face_values(self) -> None:
@@ -934,6 +1022,8 @@ class KaradaStateServer:
         # client renders the same face as everyone else.
         if self._current_expression:
             state["expression"] = dict(self._current_expression)
+        if self._presence:
+            state["presence"] = self._presence
         return state
 
     async def set_vrm_model(
@@ -2538,7 +2628,7 @@ class KaradaStateServer:
         active expression override (or a clear if none is active) so all
         clients converge on the same shared-avatar face.
         """
-        face_payload = {"type": "vrm_face", "values": dict(self._current_face_values)}
+        face_payload = {"type": "vrm_face", "values": self.resolve_face_values(self._current_face_values)}
         expr_payload = (
             dict(self._current_expression)
             if self._current_expression

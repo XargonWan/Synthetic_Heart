@@ -220,7 +220,7 @@ The interface registers a *liveness probe* into the session manager (keeping
   ``has_active_session()`` reads **false**, so vessel elements are *frozen*
   (no new beats or perceptions enqueued; existing priorities untouched). The
   disconnect sweep retries the connection every tick for
-  ``VESSEL_DISCONNECT_GRACE_SEC`` seconds (default 30, clamped 5–3600). A
+  ``VESSEL_DISCONNECT_GRACE_SEC`` seconds (default 120, clamped 5–3600). A
   successful reconnection flips the connector live again → back to CONNECTED.
 * **ENDED** — the connection could not be restored within the grace window.
   The session is closed, flushed to a single diary entry, and **all queued
@@ -491,6 +491,66 @@ command is sent, and a failed/ignored command never breaks the session.
    In that case set it to the SyntH host's VPN/public IP and verify with
    ``curl -I http://<synth-host-ip>:<port>/api/config/MINECRAFT_SKIN_FILE/file``
    (must return ``200``), then reconnect the Vessel to re-run the skin command.
+
+RetroXR
+-------
+
+``plugins/rift_vessel/retroxr/retroxr.py`` is the second connector, for the
+`RetroXR <https://github.com/RetroXR/RetroXR>`_ VR retro-gaming room. It inverts
+Minecraft's direction: there is no bridge to start. The RetroXR mod
+``xenu.synth_rift`` opens a WebSocket to ``/api/vessel/retroxr/ws`` (same token
+gate as the WebUI) when the player switches on the *Synthetic Heart Rift
+Summoner*, and that socket is the embodiment. ``plugins/rift_vessel/retroxr/api.py``
+does the handshake and calls ``VesselPlugin.connect_world("retroxr")``, so the
+session, recap and autonomy beats are the ones every world uses; leaving the
+socket calls ``disconnect_world``. The wire protocol is in
+``plugins/rift_vessel/retroxr/guide.md``.
+
+**The body never plays.** ``act`` refuses any verb outside the core set
+(``say move look use follow unfollow status combine``) and the RetroXR verbs
+(``look_at touch pick_up put_down hand_over sit emote inspect operate``, and the
+ones she does on her own: ``search explore watch bring stop``); nothing writes
+input to a console.
+
+Hands and following
+~~~~~~~~~~~~~~~~~~~
+
+She holds one thing at a time. ``put_down`` sets it down where her hands are or,
+with a ``target``, on the flat top of that thing, and says where it ended up.
+``hand_over`` and ``bring`` take her to the player with the thing held out in both
+hands (the ``give`` animation of the skin) for ``seconds`` (her choice, 3 to 60;
+30 by default); ``say`` is what she says as she does it. A thing the player does
+not take stays in her hands: she is told so, and what to do with it is her
+decision. ``combine`` (see below) puts a cartridge or a tape into a machine, and
+``operate`` works the machine. ``follow`` is always the player; when she cannot
+keep up she is told once (``follow_lost``).
+
+``combine``: one core verb for every world
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``combine {target, item?, how?}`` puts one thing into, onto or together with
+another (a cartridge into a console, a key into a lock). It is an **opt-in** core
+verb: ``VesselPlugin._OPT_IN_CORE_VERBS``. A world gets it only when its
+connector lists ``"combine"`` in ``core_verbs``; a world that restricts nothing
+(``core_verbs = None``, Minecraft) is not offered it, so a verb added to the core
+later does not appear in worlds that never heard of it. The connector receives
+``act("combine", {...})`` and does what its world does (a Minecraft connector would
+map it to crafting). A connector can also give some core verbs a description of
+its own (``core_verb_descriptions``): RetroXR says that ``follow`` takes no target,
+where the generic text promises one.
+
+Embodiment assets
+~~~~~~~~~~~~~~~~~
+
+Until RetroXR a Vessel never sent a model or an animation to its world. A world
+that draws Synth itself can now ask: ``VesselConnectorBase.get_embodiment_assets``
+(optional, default ``None``) returns the active skin's VRM and the animations the
+world named, resolved by :mod:`core.embodiment_assets` from the Karada skins:
+``animations/vessel/<name>/`` first (a namespace any world shares), then the
+Karada state folder, then the fallback skin ``Rei``. The world downloads the
+files from ``/skins/...`` and skips what it already holds through
+``/api/karada/assets/manifest``. Nothing is pushed unasked, and the avatar of the
+WebUI (Karada's global ``AnimationState``) is never touched by a world's body.
 
 Commands
 --------

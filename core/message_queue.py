@@ -10,7 +10,7 @@ from typing import Any, cast
 import traceback
 from types import SimpleNamespace
 
-from core import plugin_instance, rate_limit
+from core import plugin_instance, rate_limit, stats_registry
 from core.beat_utils import is_outbound_beat
 from core.logging_utils import log_debug, log_error, log_warning, log_info
 from core.mention_utils import is_message_for_bot
@@ -123,6 +123,11 @@ _CONSUMER_STALL_WARN_SECONDS = 300.0
 _in_flight_label: str | None = None
 _in_flight_started_at: float = 0.0
 _in_flight_reported: bool = False
+# What the statistics say of the item in flight: its interface and kind, and whether its turn failed.
+_in_flight_meta: dict[str, str] = {}
+_in_flight_failed: bool = False
+# When the consumer last finished an item (monotonic); None until it has finished one.
+_last_item_finished_at: float | None = None
 
 
 def _item_label(item: dict[str, Any] | None) -> str:
@@ -139,17 +144,90 @@ def _item_label(item: dict[str, Any] | None) -> str:
 
 def _note_item_in_flight(item: dict[str, Any] | None) -> None:
     """Record the item the consumer is now working on."""
-    global _in_flight_label, _in_flight_started_at, _in_flight_reported
+    global \
+        _in_flight_label, \
+        _in_flight_started_at, \
+        _in_flight_reported, \
+        _in_flight_meta, \
+        _in_flight_failed
     _in_flight_label = _item_label(item)
     _in_flight_started_at = time.monotonic()
     _in_flight_reported = False
+    _in_flight_failed = False
+    try:
+        data = item if isinstance(item, dict) else {}
+        path = str(data.get("interface_path") or "")
+        if data.get("vessel_player_chat"):
+            kind = "vessel_chat"
+        elif data.get("vessel_reflection") or data.get("vessel_appraisal"):
+            kind = "vessel_reflection"
+        elif path.startswith("vessel"):
+            kind = "vessel"
+        else:
+            kind = "chat"
+        _in_flight_meta = {
+            "interface": str(data.get("interface") or "unknown"),
+            "kind": kind,
+        }
+        enqueued_at = data.get("timestamp")
+        if enqueued_at is not None:
+            stats_registry.observe(
+                "turn.wait_seconds",
+                max(0.0, time.time() - float(enqueued_at)),
+                **_in_flight_meta,
+            )
+        stats_registry.gauge("queue.depth", _get_queue().qsize())
+    except Exception:  # pragma: no cover - a statistic never blocks a turn
+        pass
+
+
+def _note_turn_failed() -> None:
+    """The item in flight did not get a turn through (an error or a timeout): the statistics count it as failed."""
+    global _in_flight_failed
+    _in_flight_failed = True
 
 
 def _clear_item_in_flight() -> None:
     """Clear the in-flight item once its handling block has finished."""
-    global _in_flight_label, _in_flight_reported
+    global _in_flight_label, _in_flight_reported, _last_item_finished_at
+    try:
+        if _in_flight_label:
+            meta = dict(_in_flight_meta)
+            stats_registry.incr(
+                "turns.failed" if _in_flight_failed else "turns.ok", **meta
+            )
+            stats_registry.observe(
+                "turn.seconds", time.monotonic() - _in_flight_started_at, **meta
+            )
+    except Exception:  # pragma: no cover
+        pass
     _in_flight_label = None
     _in_flight_reported = False
+    _last_item_finished_at = time.monotonic()
+
+
+def consumer_idle_seconds(*, ignore_queued: bool = False) -> float:
+    """How long the consumer has had nothing to do: 0.0 while an item is in flight or anything is queued,
+    ``inf`` if it has never finished one (nothing ran yet).
+
+    Lets a producer of OPTIONAL work (an autonomous beat) wait until the engine has really rested, so a human's
+    message never lands behind a turn nobody asked for: a heap orders what runs NEXT, it cannot pull a running
+    generation back (Zen cannot be cancelled at all).
+
+    ``ignore_queued=True`` disregards items waiting in the queue (only an in-flight turn counts as busy), for
+    callers whose work is queued FIFO behind chat anyway and must not be held back by that backlog.
+    """
+    if _in_flight_label:
+        return 0.0
+    queue = _queue
+    try:
+        if not ignore_queued and queue is not None and queue.qsize() > 0:
+            return 0.0
+    except Exception:  # pragma: no cover - defensive
+        return 0.0
+    if _last_item_finished_at is None:
+        return float("inf")
+    return max(0.0, time.monotonic() - _last_item_finished_at)
 
 
 def _stalled_item_report() -> tuple[str, float] | None:
@@ -1156,6 +1234,11 @@ async def enqueue(
         # survival reflex already reacted mechanically, this is the deliberate
         # combat/social appraisal on top. Prunes stale autonomous beats too.
         "vessel_appraisal": bool(getattr(message, "_vessel_appraisal", False)),
+        # Structural marker: the rift idle beat (set by the vessel interface for
+        # ``event_type == "idle_beat"``). Ranked at the same band as human chat
+        # (GENERAL) so it alternates with Telegram in FIFO order instead of
+        # starving behind it.
+        "vessel_idle_beat": bool(getattr(message, "_vessel_idle_beat", False)),
     }
 
     global _counter
@@ -1213,6 +1296,15 @@ async def enqueue(
             _drop_stale_vessel_perceptions(chat_id)
         except Exception as _prune_exc:  # pragma: no cover - defensive
             log_debug(f"[QUEUE] Vessel perception prune skipped: {_prune_exc}")
+    elif interface == "vessel" and item.get("vessel_idle_beat"):
+        # Rift idle beat (RetroXR "person in a room"). Same band as ordinary chat
+        # so the two alternate FIFO; a fresh beat still supersedes stale queued
+        # beats for this world so they cannot pile up.
+        priority_val = PRIORITY_GENERAL
+        try:
+            _supersede_pending_vessel_beats(chat_id)
+        except Exception as _idle_exc:  # pragma: no cover - defensive
+            log_debug(f"[QUEUE] Vessel idle-beat supersede skipped: {_idle_exc}")
     elif interface == "vessel":
         # Synth's own autonomous perception/will-beat: ranked BELOW any human
         # chat. A fresh beat supersedes older queued ones for the same world so
@@ -2269,8 +2361,10 @@ async def _consumer_loop() -> None:
                                             processing_task.result()
                                         )
                                     except Exception as exc:
+                                        _note_turn_failed()
                                         response_future.set_exception(exc)
                                 elif timed_out:
+                                    _note_turn_failed()
                                     response_future.set_exception(
                                         asyncio.TimeoutError(
                                             f"Message processing timed out after {timeout_seconds}s"
@@ -2328,6 +2422,7 @@ async def _consumer_loop() -> None:
                                 f"[QUEUE] Error checking pending queue for chat {chat_id}: {pending_e}"
                             )
             except Exception as e:  # pragma: no cover - plugin may misbehave
+                _note_turn_failed()
                 log_error(
                     f"[ERROR] Failed to process message from chat {final['chat_id']}: {e}\n{traceback.format_exc()}",
                 )

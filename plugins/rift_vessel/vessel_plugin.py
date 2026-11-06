@@ -178,16 +178,32 @@ config_registry.get_value(
     advanced=True,
 )
 config_registry.get_value(
+    "VESSEL_AMBIENT_TRIGGERS_TURN",
+    False,
+    value_type=bool,
+    label="Ambient Events Start a Turn",
+    description=(
+        "Off (default): ambient telemetry from a world (sightings, someone walking up, status, "
+        "movement) is only recorded and rides along with the NEXT real prompt (player chat, a "
+        "routine's result, a beat); it never starts an LLM turn of its own. On: the old behaviour, "
+        "buffered and sent as one combined perception turn every ~15 s (costly)."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
     "VESSEL_DISCONNECT_GRACE_SEC",
-    30,
+    120,
     value_type=int,
     label="Vessel Disconnect Grace (s)",
     description=(
-        "Short grace period after the world client/bridge drops before a still-"
-        "'active' Vessel session is force-closed. Distinct from the (much "
-        "longer) inactivity cooldown: this unblocks the message flow quickly "
-        "when the client simply disconnects, so autonomous beats stop "
-        "accumulating. Clamped to 5–3600."
+        "Grace period after the world client/bridge drops before a still-"
+        "'active' Vessel session is force-closed (default 2 minutes). The "
+        "session is FROZEN meanwhile (no beats, no perceptions, nothing "
+        "accumulates), so a long grace costs nothing and lets a client that "
+        "only blinked, or changed room, resume the same session. Distinct "
+        "from the (much longer) inactivity cooldown. Clamped to 5–3600."
     ),
     group="plugins",
     component="vessel_plugin",
@@ -285,6 +301,143 @@ config_registry.get_value(
         "direct address gets swallowed by the 'you are alone' prompt and Synth "
         "seems to ignore the player. Set to 0 to disable the deferral. Only "
         "used when Autonomous In-World Play is enabled."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_IDLE_BEAT_ENABLED",
+    True,
+    value_type=bool,
+    label="Idle Beat (\"what do you want to do?\")",
+    description=(
+        "For worlds whose body is a person in a room (RetroXR): when nobody has talked to "
+        "Synth for a while, she is told what is around her and asked what she wants to do. "
+        "She decides; doing nothing is allowed. Ranked below any player chat and above "
+        "background work."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_IDLE_BEAT_INTERVAL_SEC",
+    40,
+    value_type=int,
+    label="Idle Beat Interval (s)",
+    description=(
+        "Seconds she is left alone, counted from when her last turn AND her body were done (not from when the last "
+        "beat started), before the next idle beat, once she has settled (clamped 20-3600). After a beat that ended "
+        "in an action the shorter 'Idle Beat Gap After An Action' applies instead. The interval is adaptive: quicker "
+        "just after she arrives or when something around her changed, longer when several beats in a row "
+        "ended in no action."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_IDLE_BEAT_ARRIVAL_INTERVAL_SEC",
+    20,
+    value_type=int,
+    label="Idle Beat Interval After Arrival (s)",
+    description="Seconds between idle beats while she has only just arrived, and after a change around her (clamped 10-600).",
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_IDLE_BEAT_ARRIVAL_WINDOW_SEC",
+    180,
+    value_type=int,
+    label="Idle Beat Arrival Window (s)",
+    description="How long after she arrives the quicker arrival interval lasts (clamped 0-3600).",
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_IDLE_BEAT_MAX_INTERVAL_SEC",
+    180,
+    value_type=int,
+    label="Idle Beat Longest Interval (s)",
+    description="The most the interval stretches to when beat after beat ends in no action (clamped 20-3600).",
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_IDLE_BEAT_ENGINE_REST_SEC",
+    3,
+    value_type=int,
+    label="Idle Beat Engine Rest (s)",
+    description=(
+        "Seconds the engine must have been free before an idle beat starts, so a turn nobody asked for does not "
+        "run while a person could be waiting (clamped 0-600). Short on purpose: it is dead time after every turn."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_IDLE_BEAT_ACTIVE_GAP_SEC",
+    "auto",
+    value_type=str,
+    label="Idle Beat Gap After An Action (s or auto)",
+    description=(
+        "How long to wait, after she and her body have finished, before asking again when her last beat ended in an "
+        "action. 'auto' (default) works it out from the Stats page's measurements: the engine is busy with her turns "
+        "about 70% of the time, so a 40 s turn waits ~17 s and a 15 s turn ~6 s, and a beat may go out a little before "
+        "her body is done when the model's answer cannot arrive sooner. Until enough turns are measured it is 10 s. "
+        "A number (3-120) fixes it."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_TICK_SEC",
+    "auto",
+    value_type=str,
+    label="Scheduler Tick (s or auto)",
+    description=(
+        "How often the Vessel scheduler looks at the idle beat when every connected world is an idle-beat world "
+        "(RetroXR). 'auto' (default) sleeps until the next beat falls due and looks every 1.5 s while it waits for the "
+        "engine, her body or the queue, so a beat is never late by a tick. A number (0.5-30) fixes it. Worlds with "
+        "the fast motor tick (Minecraft) keep VESSEL_MOTOR_INTERVAL_SEC."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_EXPLORE_MIN_SEC",
+    20,
+    value_type=int,
+    label="Explore Walk, Shortest (s)",
+    description="A walk she chooses (explore) is sized to last until the next prompt; never shorter than this (5-600).",
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_EXPLORE_MAX_SEC",
+    180,
+    value_type=int,
+    label="Explore Walk, Longest (s)",
+    description="A walk she chooses (explore) is sized to last until the next prompt; never longer than this (10-1800).",
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_IDLE_BEAT_QUIET_SEC",
+    45,
+    value_type=int,
+    label="Idle Beat Quiet Window (s)",
+    description=(
+        "Seconds after a player last spoke before the world counts as idle (clamped 0-3600)."
     ),
     group="plugins",
     component="vessel_plugin",
@@ -967,6 +1120,37 @@ class VesselPlugin(AIPluginBase):
         log_info("[vessel_plugin] Initialized.")
 
     # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    async def start(self) -> None:
+        """Mount the endpoints the world connectors own (the RetroXR rift socket)."""
+        self._mount_task = asyncio.get_running_loop().create_task(self._mount_world_routes())
+
+    async def _mount_world_routes(self) -> None:
+        """A world game connects TO Synth, so its socket must be there before any rift is open. The WebUI may
+        not be up yet when this plugin starts: wait for it, quietly, and give up after a minute."""
+        try:
+            from plugins.rift_vessel.retroxr.api import create_retroxr_router
+        except Exception as exc:  # the sub-plugin was removed: nothing to mount
+            log_debug(f"[vessel_plugin] no RetroXR rift socket: {exc}")
+            return
+        for _ in range(30):
+            try:
+                from core.webui import synth_webui_interface
+
+                if synth_webui_interface is not None:
+                    synth_webui_interface.register_plugin_router(
+                        create_retroxr_router(), "RetroXR rift socket /api/vessel/retroxr/ws"
+                    )
+                    return
+            except Exception as exc:
+                log_warning(f"[vessel_plugin] RetroXR rift socket failed to mount (non-fatal): {exc}")
+                return
+            await asyncio.sleep(2.0)
+        log_warning("[vessel_plugin] the WebUI never came up: the RetroXR rift socket is not mounted")
+
+    # ------------------------------------------------------------------
     # Connector discovery
     # ------------------------------------------------------------------
 
@@ -979,6 +1163,7 @@ class VesselPlugin(AIPluginBase):
         """
         builtin = [
             "plugins.rift_vessel.minecraft.minecraft",
+            "plugins.rift_vessel.retroxr.retroxr",
         ]
         for module_path in builtin:
             try:
@@ -1730,6 +1915,18 @@ class VesselPlugin(AIPluginBase):
             "optional_fields": ["target"],
             "security_level": "low",
         },
+        "combine": {
+            "description": (
+                "Put one thing into, onto or together with another in the {world} world: "
+                "for example a cartridge into a console, or a key into a lock. Provide "
+                "the 'target' (the thing it goes into or onto) and, when it is not "
+                "what you are holding, the 'item'. 'how' is optional free words for "
+                "the way (put in, set on, attach). You are told afterwards what came of it."
+            ),
+            "required_fields": ["target"],
+            "optional_fields": ["item", "how"],
+            "security_level": "low",
+        },
         "attack": {
             "description": (
                 "Attack a target in the {world} world through your Vessel — a "
@@ -1910,6 +2107,46 @@ class VesselPlugin(AIPluginBase):
             if verb not in self._ACTION_VERBS and isinstance(schema, dict)
         }
 
+    # Core verbs a world gets only when its connector LISTS them in ``core_verbs``. The others are offered to every
+    # world that does not restrict itself (``core_verbs=None``); a verb added to the core later must not appear in
+    # worlds that never heard of it (Minecraft has no ``combine``: it crafts).
+    _OPT_IN_CORE_VERBS: frozenset[str] = frozenset({"combine"})
+
+    @staticmethod
+    def _core_verb_descriptions_for(world: str) -> dict[str, str]:
+        """Descriptions ``world``'s connector gives some core verbs in place of the generic ones (``{}`` for none).
+
+        The generic text is written for any world (and reads like Minecraft); a connector that knows better says so.
+        Fail-safe: any trouble reading it means the generic text.
+        """
+        if not world or world == "vessel":
+            return {}
+        try:
+            raw = getattr(
+                VESSEL_REGISTRY.load_connector(world), "core_verb_descriptions", None
+            )
+        except Exception:
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        return {
+            str(k): str(v) for k, v in raw.items() if isinstance(v, str) and v.strip()
+        }
+
+    @staticmethod
+    def _core_verbs_for(world: str) -> "frozenset[str] | None":
+        """The core verbs ``world``'s connector implements, or ``None`` for all of them.
+
+        Fail-safe: any trouble reading it means all of them (the historic behaviour).
+        """
+        if not world or world == "vessel":
+            return None
+        try:
+            allowed = getattr(VESSEL_REGISTRY.load_connector(world), "core_verbs", None)
+        except Exception:
+            return None
+        return frozenset(allowed) if allowed is not None else None
+
     def _world_extra_verbs(self) -> dict[str, dict[str, Any]]:
         """Backward-compatible wrapper reading extras for the active world."""
         return self._world_extra_verbs_for(self._action_world())
@@ -1977,11 +2214,21 @@ class VesselPlugin(AIPluginBase):
         # Connected: expose the world's verbs (core set minus connect) + extras,
         # namespaced by the connected world, plus a plain disconnect.
         prefix = f"vessel_{connected}_"
+        implemented = self._core_verbs_for(connected)
+        described = self._core_verb_descriptions_for(connected)
         for verb, schema in self._ACTION_VERBS.items():
             if verb in ("connect", "disconnect"):
                 continue
+            # Only the verbs this world can really do (a connector that implements a few says so).
+            if implemented is not None and verb not in implemented:
+                continue
+            # A verb the core added later is for the worlds that say they have it, not for "all of them".
+            if implemented is None and verb in self._OPT_IN_CORE_VERBS:
+                continue
             entry = dict(schema)
-            entry["description"] = entry["description"].format(world=connected)
+            entry["description"] = described.get(verb, entry["description"]).format(
+                world=connected
+            )
             # Gameplay verbs only matter on a Vessel turn — tag them so the
             # per-turn scope gate keeps them out of ordinary chat prompts while
             # they stay registered/callable in-world.
@@ -2120,6 +2367,7 @@ class VesselPlugin(AIPluginBase):
             "move",
             "look",
             "use",
+            "combine",
             "attack",
             "follow",
             "unfollow",

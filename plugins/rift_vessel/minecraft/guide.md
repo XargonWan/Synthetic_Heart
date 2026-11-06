@@ -98,6 +98,18 @@ key. Enable/disable the whole thing from the plugin card.
 | `MINECRAFT_SKIN_COMMAND_TEMPLATES` | *(empty)* | ✓ | Newline-separated list of chat commands tried in order at spawn. `{url}` / `{model}` are substituted. Empty tries both built-in provider syntaxes. |
 | `MINECRAFT_SKIN_COMMAND_TEMPLATE` | *(empty)* | ✓ | Legacy single-command override, kept for backward compatibility. Empty by default. |
 
+## `explore` (2026-11-05)
+
+Offered next to `wander` (which stays: the motor tick and a model that wants one hop still use it). `explore` is the
+core's walk (`plugins/rift_vessel/guide.md` "Exploration"): a chain of `goto` legs of 14-36 blocks (`GoalNearXZ`, range 3),
+sized to last until the next prompt, that **goes on the way it was going** (a trek, not a circle: 82% of legs continue
+the heading, against 67% without the habit), keeps 7+ blocks from hostile mobs, ends with `threat` when one comes close
+(the survival reflex deals with it, not the walk), and says afterwards what it came across (entities, blocks of interest).
+It is *blind*: the pathfinder says whether a place is reachable only by trying, so a `goto` that fails marks the place and
+three in a row end the walk. While it runs `motor_step` stands back (`deliberate_action_in_flight`) and someone else's
+chat interrupts it (the bot's own echo does not). It reads the bridge's `status` directly, never `get_world_state`: that
+read consumes the "took damage" delta. **No Minecraft server was available: this is tested against a fake bridge only.**
+
 ## Skin — how it works (important)
 
 **A real client-side skin upload is not possible for an offline-mode bot.** In

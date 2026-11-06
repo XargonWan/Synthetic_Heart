@@ -7433,6 +7433,10 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 const logsReasonTrailOutput = document.getElementById('logs-reason-trail-output');
                 const logsReasonTrailRefreshBtn = document.getElementById('logs-reason-trail-refresh');
                 const logsReasonTrailSearch = document.getElementById('logs-reason-trail-search');
+                const logsStatsOutput = document.getElementById('logs-stats-output');
+                const logsStatsRefreshBtn = document.getElementById('logs-stats-refresh');
+                const logsStatsDays = document.getElementById('logs-stats-days');
+                const logsStatsAuto = document.getElementById('logs-stats-auto');
                 const logsState = window.__synth_logs_state || {
                     currentSubtab: 'live',
                     failurePage: 1,
@@ -7446,6 +7450,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     loadingDeadTargets: false,
                     reasonTrailSearch: '',
                     loadingReasonTrail: false,
+                    loadingStats: false,
+                    statsTimer: null,
                 };
                 window.__synth_logs_state = logsState;
 
@@ -7528,8 +7534,109 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         loadReasonTrail();
                         return;
                     }
+                    if (nextSubtab === 'stats') {
+                        loadStats();
+                        return;
+                    }
                     applyFilters();
                 }
+
+                // ── Stats: the stat server's report (GET /api/stats) ──
+                // The page knows no plugin: it draws the sections (title + typed blocks) the server sends, and the
+                // server already left out everything with no data in the chosen period.
+                function statsSeconds(value) {
+                    const n = Number(value);
+                    if (value === null || value === undefined || !Number.isFinite(n)) return '–';
+                    return n >= 100 ? `${Math.round(n)} s` : `${n.toFixed(1)} s`;
+                }
+
+                function statsCard(item) {
+                    const value = item.kind === 'seconds' ? statsSeconds(item.value) : String(item.value);
+                    const sub = item.sub ? `<div class="lsc-label">${safeEscapeHtml(item.sub)}</div>` : '';
+                    return `<div class="logs-stat-card ${safeEscapeHtml(item.tone || '')}"><div class="lsc-value">${safeEscapeHtml(value)}</div><div class="lsc-label">${safeEscapeHtml(item.label)}</div>${sub}</div>`;
+                }
+
+                function renderStatsTimingTable(block) {
+                    const rows = block.rows || [];
+                    const hasFailed = rows.some((row) => row.failed !== undefined);
+                    const head = `<tr><th>${safeEscapeHtml(block.first || 'what')}</th><th>n</th>${hasFailed ? '<th>failed</th>' : ''}<th>mean</th><th>p50</th><th>p95</th><th>max</th><th>last</th></tr>`;
+                    const body = rows.map((row) => {
+                        const label = `<td>${safeEscapeHtml(row.label)}</td>`;
+                        if (!row.n) {
+                            return `<tr title="${safeEscapeHtml(row.hint || '')}">${label}<td>0</td><td colspan="${hasFailed ? 6 : 5}">no samples yet</td></tr>`;
+                        }
+                        const failed = hasFailed ? `<td>${row.failed === undefined ? '' : row.failed}</td>` : '';
+                        return `<tr title="${safeEscapeHtml(row.hint || '')}">${label}<td>${row.n}</td>${failed}<td>${statsSeconds(row.mean)}</td><td>${statsSeconds(row.p50)}</td><td>${statsSeconds(row.p95)}</td><td>${statsSeconds(row.max)}</td><td>${statsSeconds(row.last)}</td></tr>`;
+                    }).join('');
+                    return `<h4>${safeEscapeHtml(block.title || '')}</h4><table class="logs-stats-table"><thead>${head}</thead><tbody>${body}</tbody></table>`;
+                }
+
+                function renderStatsBlock(block) {
+                    switch (block.type) {
+                        case 'cards':
+                            return `<div class="logs-stats-cards">${(block.items || []).map(statsCard).join('')}</div>`;
+                        case 'timing_table':
+                            return renderStatsTimingTable(block);
+                        case 'counters':
+                            return `<p class="logs-stats-note">${safeEscapeHtml(block.title || '')}: ${(block.items || []).map((i) => `${safeEscapeHtml(i.label)} ${i.value}`).join(' · ')}</p>`;
+                        case 'note':
+                            return `<p class="logs-stats-note">${safeEscapeHtml(block.text || '')}</p>`;
+                        case 'day_table': {
+                            const head = `<tr><th>day</th>${(block.columns || []).map((c) => `<th>${safeEscapeHtml(c)}</th>`).join('')}</tr>`;
+                            const body = (block.rows || []).map((row) => `<tr><td>${safeEscapeHtml(row.day)}</td>${(row.values || []).map((v) => `<td>${v}</td>`).join('')}</tr>`).join('');
+                            return `<h4>${safeEscapeHtml(block.title || '')}</h4><table class="logs-stats-table"><thead>${head}</thead><tbody>${body}</tbody></table>`;
+                        }
+                        default:
+                            return '';
+                    }
+                }
+
+                function renderStats(payload) {
+                    if (!logsStatsOutput) return;
+                    const sections = payload.sections || [];
+                    if (!sections.length) {
+                        const label = (payload.period && payload.period.label) || 'this period';
+                        logsStatsOutput.innerHTML = `<div class="logs-empty-state">Nothing was counted in the ${safeEscapeHtml(label)}.</div>`;
+                        return;
+                    }
+                    logsStatsOutput.innerHTML = sections.map((section) => `
+                        <div class="logs-stats-section" data-stats-source="${safeEscapeHtml(section.source)}">
+                            <h3>${safeEscapeHtml(section.title)}</h3>
+                            ${(section.blocks || []).map(renderStatsBlock).join('')}
+                        </div>`).join('');
+                }
+
+                async function loadStats(silent) {
+                    if (!logsStatsOutput || logsState.loadingStats) return;
+                    logsState.loadingStats = true;
+                    if (!silent && !logsStatsOutput.querySelector('.logs-stats-section')) {
+                        logsStatsOutput.innerHTML = '<div class="logs-empty-state">Loading statistics...</div>';
+                    }
+                    try {
+                        const period = logsStatsDays ? logsStatsDays.value : '7d';
+                        const response = await fetch(`/api/stats?period=${encodeURIComponent(period)}`);
+                        const payload = await response.json();
+                        if (!response.ok || !payload.success) {
+                            throw new Error((payload && payload.error) || `HTTP ${response.status}`);
+                        }
+                        renderStats(payload);
+                    } catch (error) {
+                        console.error('[logs] failed to load statistics', error);
+                        logsStatsOutput.innerHTML = '<div class="logs-empty-state">Failed to load statistics.</div>';
+                    } finally {
+                        logsState.loadingStats = false;
+                    }
+                }
+
+                // The page may be set up again (its sections are rebuilt): the timer must watch the NEW elements.
+                if (logsState.statsTimer) {
+                    window.clearInterval(logsState.statsTimer);
+                }
+                logsState.statsTimer = window.setInterval(() => {
+                    if (logsState.currentSubtab === 'stats' && logsStatsAuto && logsStatsAuto.checked && !document.hidden) {
+                        loadStats(true);
+                    }
+                }, 10000);
 
                 function formatFailureDate(value) {
                     if (!value) return 'Unknown time';
@@ -7884,6 +7991,16 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 if (logsReasonTrailRefreshBtn) {
                     logsReasonTrailRefreshBtn.addEventListener('click', () => {
                         loadReasonTrail();
+                    });
+                }
+                if (logsStatsRefreshBtn) {
+                    logsStatsRefreshBtn.addEventListener('click', () => {
+                        loadStats();
+                    });
+                }
+                if (logsStatsDays) {
+                    logsStatsDays.addEventListener('change', () => {
+                        loadStats();
                     });
                 }
                 if (logsReasonTrailSearch) {
