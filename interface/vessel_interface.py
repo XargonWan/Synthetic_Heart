@@ -353,6 +353,12 @@ class VesselInterface:
         """Start the interface and its cooldown scheduler."""
         log_info("[vessel_interface] Starting Vessel interface...")
         self.is_enabled = True
+        try:
+            from core import vessel_stats
+
+            vessel_stats.register()  # its block on the Logs > Stats page, only while the interface runs
+        except Exception as exc:  # pragma: no cover - a statistic never blocks the interface
+            log_debug(f"[vessel_interface] stats section registration failed: {exc}")
         self.disabled_reason = None
         # Wire the connection-liveness probe into the session manager so
         # ``has_active_session()`` reflects the real 3-state connection model
@@ -729,6 +735,12 @@ class VesselInterface:
         sessions normally elsewhere.
         """
         log_info("[vessel_interface] Stopping Vessel interface...")
+        try:
+            from core import vessel_stats
+
+            vessel_stats.unregister()
+        except Exception:  # pragma: no cover
+            pass
         if self._scheduler_task is not None:
             self._scheduler_task.cancel()
             try:
