@@ -1,3 +1,9 @@
+### fix(retroxr): her hands line says what she holds, or that she holds nothing, and that she just let go  <!-- 2026-11-06 -->
+
+**Before.** The idle prompt ended the surroundings with "Your hands are empty." On 2026-11-06 she kept saying she still held the Game Boy "da ieri": yesterday's chat (the player had to tell her "ce l'hai in mano", her body state was not reported then) still said so, the mod had restarted empty-handed, and the one terse line lost against it.
+
+**Now.** `describe_hands` (`plugins/rift_vessel/retroxr/retroxr.py`) writes "You are holding X.", or "Your hands are empty: you are not holding anything.", or for 60 s after a hold ended "Your hands are empty: you just let go of X." (`_LET_GO_SEC`; then it is gone: the history keeps the record, the prompt does not). The release is read from the 1 s `state.holding` diff, and a new socket counts as letting go. Nothing is tracked for what she wears: the mod reports only `holding`.
+
 ### feat(stats,webui): a stat server that plugins register with, per-engine metrics and the average turn; Logs > Stats  <!-- 2026-11-06 -->
 
 **Before.** The Logs > Stats tab was written for the RetroXR idle beat: its sections and sentences lived in `main.js`, its pacing inputs sat on the page, and nothing said how long an engine took. A plugin that is off or not installed still had its place on the page.
