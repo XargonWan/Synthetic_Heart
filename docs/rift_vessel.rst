@@ -507,9 +507,37 @@ socket calls ``disconnect_world``. The wire protocol is in
 ``plugins/rift_vessel/retroxr/guide.md``.
 
 **The body never plays.** ``act`` refuses any verb outside the core set
-(``say move look use follow unfollow status``) and the RetroXR verbs
-(``look_at touch pick_up put_down hand_over sit emote inspect``); nothing
-writes input to a console.
+(``say move look use follow unfollow status combine``) and the RetroXR verbs
+(``look_at touch pick_up put_down hand_over sit emote inspect operate``, and the
+ones she does on her own: ``search explore watch bring stop``); nothing writes
+input to a console.
+
+Hands and following
+~~~~~~~~~~~~~~~~~~~
+
+She holds one thing at a time. ``put_down`` sets it down where her hands are or,
+with a ``target``, on the flat top of that thing, and says where it ended up.
+``hand_over`` and ``bring`` take her to the player with the thing held out in both
+hands (the ``give`` animation of the skin) for ``seconds`` (her choice, 3 to 60;
+30 by default); ``say`` is what she says as she does it. A thing the player does
+not take stays in her hands: she is told so, and what to do with it is her
+decision. ``combine`` (see below) puts a cartridge or a tape into a machine, and
+``operate`` works the machine. ``follow`` is always the player; when she cannot
+keep up she is told once (``follow_lost``).
+
+``combine``: one core verb for every world
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``combine {target, item?, how?}`` puts one thing into, onto or together with
+another (a cartridge into a console, a key into a lock). It is an **opt-in** core
+verb: ``VesselPlugin._OPT_IN_CORE_VERBS``. A world gets it only when its
+connector lists ``"combine"`` in ``core_verbs``; a world that restricts nothing
+(``core_verbs = None``, Minecraft) is not offered it, so a verb added to the core
+later does not appear in worlds that never heard of it. The connector receives
+``act("combine", {...})`` and does what its world does (a Minecraft connector would
+map it to crafting). A connector can also give some core verbs a description of
+its own (``core_verb_descriptions``): RetroXR says that ``follow`` takes no target,
+where the generic text promises one.
 
 Embodiment assets
 ~~~~~~~~~~~~~~~~~

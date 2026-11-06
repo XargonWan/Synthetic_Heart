@@ -26,7 +26,7 @@ anything outside its declared verbs.
 | mod → Synth | `hello {protocol, room, capabilities, animations}` (first frame) |
 | Synth → mod | `welcome {session, assets}` or `error {code, message}` |
 | mod → Synth | `event {event_type, summary, actor, salience, data}` |
-| mod → Synth | `state {state: {position, holding, extra}}`; `extra.body = {settled, busy, speaking}` says whether her body is done with what it was told to do (sent at once when `settled` changes; a mod that omits it counts as settled) |
+| mod → Synth | `state {state: {position, holding, extra}}`; `extra.body = {settled, busy, speaking}` says whether her body is done with what it was told to do (sent at once when `settled` changes; a mod that omits it counts as settled); `extra.following` says she is following the player (it is in her surroundings and in `WorldState.flags`) |
 | Synth → mod | `action {id, action, payload}` → mod answers `action_result {id, ok, detail, data}` |
 | mod → Synth | `request_assets {animations: [...]}` → Synth answers `assets {assets}` |
 | mod → Synth | `audio {id, format, data, actor}` (the player's voice, base64, `wav`/`ogg`/`mp3`/`flac`, 8 MB max) → Synth answers `transcript {id, ok, text, reason}` |
@@ -140,11 +140,29 @@ quietly. Budget: the interface sets it before each idle beat (`set_explore_budge
 
 ## Verbs
 
-Core set: `say`, `move`, `look`, `use`, `follow`, `unfollow`, `status`.
+Core set: `say`, `move`, `look`, `use`, `follow`, `unfollow`, `status`, and `combine` (an **opt-in** core verb: a world gets it only by
+listing it in its connector's `core_verbs`, see `docs/rift_vessel.rst`).
 Her own aims (Synth-side, not the mod's): `set_goal`, `update_goal`.
 Her walks (Synth-side, the core's): `explore`.
-RetroXR: `look_at`, `touch`, `pick_up`, `put_down`, `hand_over`, `sit`, `emote`, `inspect`, and the ones she does ON HER OWN
+RetroXR: `look_at`, `touch`, `pick_up`, `put_down`, `hand_over`, `sit`, `emote`, `inspect`, `operate`, and the ones she does ON HER OWN
 once asked: `search`, `explore`, `watch`, `bring`, `stop`.
+
+**Hands.** She holds one thing at a time, in both hands.
+- `put_down {target?}`: without a target it goes where her hands are (a table under them, else the floor); with a target (a table, a
+  shelf) she walks up and sets it on the flat top of that thing. The answer says where it ended up ("on the Desk", "on the floor"), or why
+  not (no flat top, nothing of that name) and that she still holds it.
+- `hand_over {seconds?, say?}` / `bring {target, seconds?, say?}`: she goes to the player and holds the thing out in both hands (the
+  `give` clip, `tools/make_give_clip.py`) for `seconds` (the model's choice, 3 to 60; 30 if none or not a number). `say` is what she says
+  as she does it: the connector speaks it through the same path as a `say` of hers and does not send it to the mod. **If the player does not take it she is
+  not made to put it down**: the result says they did not and that she still holds it, and what to do (keep it, set it on the table, try
+  again) is hers to decide in the turn that result starts.
+- `combine {target, item?, how?}`: one thing into another, as a cartridge into a console (`item` defaults to what she holds; a loose one is
+  fetched first). Reported as `combine_done`. Only the machine slot is built; anything else is answered with what can be combined.
+- `operate {interaction, target?, with?}`: switch a TV or a console on or off, volume, channel, rewind, eject, a cartridge in. Never a game.
+
+**Following.** `follow` is always the player (any `target` is ignored); `unfollow`, `stop`, or a walk of her own ends it, and a routine she is
+asked to do pauses it and she goes on after. When she cannot keep up she is told once, as an event `follow_lost {reason}`: `too_far` (the player is beyond
+how far she may go from where she came in) or `blocked` (no way to them). She is still following then.
 
 **Offered to her is what the mod declared**: `touch` and `sit` are in the schema but the mod does not build them, so she is not offered them.
 
@@ -156,7 +174,8 @@ see: about 180 degrees, within ~6 m, not hidden. Each entity's `name` is what a 
 name only what she has seen: for the rest she `search`es.
 
 `search`, `explore`, `watch`, `bring`, `pick_up`, `hand_over` return **at once** ("looking for X: you will be told what you find") and the mod
-sends the result later as an event (`search_done`, `explore_done`, `watch_done`, `pick_up_done`, `hand_over_done`, `bring_done`, with
+sends the result later as an event (`search_done`, `explore_done`, `watch_done`, `pick_up_done`, `put_down_done`, `hand_over_done`, `bring_done`,
+`combine_done`, `operate_done`, with
 `data.ok`), which is a turn of its own (they are not in `EPHEMERAL_EVENT_TYPES`). Meanwhile she is not asked anything. A `move` or
 `follow` replaces what she is doing.
 
