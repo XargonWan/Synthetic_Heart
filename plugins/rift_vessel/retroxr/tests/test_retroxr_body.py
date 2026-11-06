@@ -298,9 +298,41 @@ async def test_she_is_described_what_is_around_her(karada: FakeKarada) -> None:
     assert "The player is straight ahead, 2.4 m away." in text
     assert "Panasonic TV (switched on), ahead and to the left, 1.8 m" in text
     assert "NES (a nes machine, switched off), to your right, 2.1 m" in text
-    assert "Your hands are empty." in text
+    assert "Your hands are empty: you are not holding anything." in text
     # she is not scripted: this is a description, never an instruction
     assert "you must" not in text.lower() and "go to" not in text.lower()
+
+
+async def test_she_is_told_she_just_let_go_and_it_expires(karada: FakeKarada, monkeypatch) -> None:
+    from plugins.rift_vessel.retroxr import retroxr as mod
+
+    conn, _ = await _connected()
+    clock = [1000.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    await conn.handle_frame({"type": "state", "state": {"extra": {"entities": []}, "holding": "Game Boy Color"}})
+    assert "You are holding Game Boy Color." in (conn.describe_surroundings() or "")
+    await conn.handle_frame({"type": "state", "state": {"extra": {"entities": []}, "holding": ""}})
+    assert "you just let go of Game Boy Color." in (conn.describe_surroundings() or "")
+    clock[0] += mod._LET_GO_SEC + 1
+    text = conn.describe_surroundings() or ""
+    assert "Game Boy" not in text and "Your hands are empty: you are not holding anything." in text
+
+
+async def test_a_new_socket_means_she_let_go(karada: FakeKarada) -> None:
+    conn, _ = await _connected()
+    await conn.handle_frame({"type": "state", "state": {"extra": {"entities": []}, "holding": "cart"}})
+    conn.attach_socket(object(), {})
+    await conn.handle_frame({"type": "state", "state": {"extra": {"entities": []}, "holding": ""}})
+    assert "you just let go of cart." in (conn.describe_surroundings() or "")
+
+
+def test_describe_hands_is_pure() -> None:
+    from plugins.rift_vessel.retroxr.retroxr import describe_hands
+
+    assert describe_hands("a tape", "", None) == "You are holding a tape."
+    assert describe_hands("", "a tape", 5.0).endswith("you just let go of a tape.")
+    assert describe_hands("", "a tape", 600.0) == "Your hands are empty: you are not holding anything."
+    assert describe_hands("", "", None) == "Your hands are empty: you are not holding anything."
 
 
 async def test_nothing_to_describe_before_the_rift_is_open() -> None:

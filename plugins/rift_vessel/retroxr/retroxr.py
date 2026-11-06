@@ -101,6 +101,23 @@ _ACTION_TIMEOUT_SEC = 20.0
 # Verbs that take a while in the room (walking across it, a carry).
 _LONG_VERBS = frozenset({"move", "follow", "pick_up", "put_down", "hand_over", "sit"})
 _LONG_ACTION_TIMEOUT_SEC = 90.0
+#: How long "you just let go of X" stays in her prompt. Short on purpose: it says a hold ended, it is not a record
+#: (the history keeps that), and a prompt must not carry what happened ten minutes ago.
+_LET_GO_SEC = 60.0
+
+
+def describe_hands(holding: str, let_go: str, let_go_age: float | None) -> str:
+    """Pure: the line about her hands. What she holds, or that she holds nothing (and what she just let go of).
+
+    ``let_go`` is the last thing she held and ``let_go_age`` seconds since she let go of it; past ``_LET_GO_SEC``
+    (or with no such thing) the line says only that her hands are empty. A restart or an old history may say she
+    holds something: this line is the current fact, so an empty hand is said as "not holding anything".
+    """
+    if holding:
+        return f"You are holding {holding}."
+    if let_go and let_go_age is not None and let_go_age <= _LET_GO_SEC:
+        return f"Your hands are empty: you just let go of {let_go}."
+    return "Your hands are empty: you are not holding anything."
 
 # Her ears: a clip the player recorded in the room (mod -> synth `audio` frame), read by Auris.
 _MAX_AUDIO_BYTES = 8 * 1024 * 1024
@@ -299,6 +316,9 @@ class RetroXRConnector(ExplorerMixin, VesselConnectorBase):
         self._connect_settings: Dict[str, Any] = {}
         self._hello: Dict[str, Any] = {}
         self._state: Dict[str, Any] = {}
+        # What she held and when she let go of it (``time.monotonic()``): only to say "you just let go of X" briefly.
+        self._let_go: str = ""
+        self._let_go_at: float | None = None
         self._pending: Dict[int, asyncio.Future] = {}
         self._ids = itertools.count(1)
         self._send_lock = asyncio.Lock()
@@ -342,6 +362,8 @@ class RetroXRConnector(ExplorerMixin, VesselConnectorBase):
         """Adopt the mod's socket. Called BEFORE ``connect_world`` runs."""
         self._ws = ws
         self._hello = dict(hello or {})
+        # A hold does not survive a new socket (the mod starts empty-handed): she let go of it.
+        self._note_hands("")
         self._state = {}
         self._body_settled = True
         self._busy_since = None
@@ -630,6 +652,15 @@ class RetroXRConnector(ExplorerMixin, VesselConnectorBase):
     def idle_journal(self) -> "list[tuple[float, str]]":
         return list(self._journal)
 
+    def _note_hands(self, holding: str) -> None:
+        """Compare what she holds now with what the last state said: a hold that ended starts the "just let go" cue."""
+        before = str((self._state or {}).get("holding") or "")
+        if before and holding != before:
+            self._let_go, self._let_go_at = before, time.monotonic()
+        elif holding:
+            # Holding again (the same or something else): the old cue is over.
+            self._let_go, self._let_go_at = "", None
+
     def _note_body_state(self, state: Dict[str, Any]) -> None:
         """Read ``state.extra.body`` (``settled``): when she was busy and for how long, and when she was done."""
         extra = state.get("extra")
@@ -711,8 +742,8 @@ class RetroXRConnector(ExplorerMixin, VesselConnectorBase):
                 )
         else:
             lines.append("There is nothing else near you.")
-        holding = st.get("holding")
-        lines.append(f"You are holding {holding}." if holding else "Your hands are empty.")
+        age = None if self._let_go_at is None else time.monotonic() - self._let_go_at
+        lines.append(describe_hands(str(st.get("holding") or ""), self._let_go, age))
         if self._emotes:
             lines.append("Animations you can play: " + ", ".join(self._emotes) + ".")
         return "\n".join(lines)
@@ -738,6 +769,7 @@ class RetroXRConnector(ExplorerMixin, VesselConnectorBase):
         if kind == "state":
             state = msg.get("state")
             if isinstance(state, dict):
+                self._note_hands(str(state.get("holding") or ""))
                 self._state = state
                 self._note_body_state(state)
             return
