@@ -7,6 +7,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from core import stats_registry
 from core.config_manager import config_registry
 from core.logging_utils import log_debug, log_warning
 from core.variables_engine import register_exposed_var
@@ -479,6 +480,10 @@ async def record_failure_entry(
     normalized_entry = _normalize_entry_for_storage(entry)
     if is_test:
         normalized_entry["is_test"] = True
+    else:
+        stats_registry.incr(
+            "llm.failures", code=str(normalized_entry.get("failure_code") or "unknown")
+        )
     metadata_json = json.dumps(normalized_entry["metadata"], ensure_ascii=False)
 
     try:

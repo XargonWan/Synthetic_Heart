@@ -10,7 +10,7 @@ from typing import Any, cast
 import traceback
 from types import SimpleNamespace
 
-from core import plugin_instance, rate_limit
+from core import plugin_instance, rate_limit, stats_registry
 from core.beat_utils import is_outbound_beat
 from core.logging_utils import log_debug, log_error, log_warning, log_info
 from core.mention_utils import is_message_for_bot
@@ -123,6 +123,9 @@ _CONSUMER_STALL_WARN_SECONDS = 300.0
 _in_flight_label: str | None = None
 _in_flight_started_at: float = 0.0
 _in_flight_reported: bool = False
+# What the statistics say of the item in flight: its interface and kind, and whether its turn failed.
+_in_flight_meta: dict[str, str] = {}
+_in_flight_failed: bool = False
 # When the consumer last finished an item (monotonic); None until it has finished one.
 _last_item_finished_at: float | None = None
 
@@ -141,15 +144,63 @@ def _item_label(item: dict[str, Any] | None) -> str:
 
 def _note_item_in_flight(item: dict[str, Any] | None) -> None:
     """Record the item the consumer is now working on."""
-    global _in_flight_label, _in_flight_started_at, _in_flight_reported
+    global \
+        _in_flight_label, \
+        _in_flight_started_at, \
+        _in_flight_reported, \
+        _in_flight_meta, \
+        _in_flight_failed
     _in_flight_label = _item_label(item)
     _in_flight_started_at = time.monotonic()
     _in_flight_reported = False
+    _in_flight_failed = False
+    try:
+        data = item if isinstance(item, dict) else {}
+        path = str(data.get("interface_path") or "")
+        if data.get("vessel_player_chat"):
+            kind = "vessel_chat"
+        elif data.get("vessel_reflection") or data.get("vessel_appraisal"):
+            kind = "vessel_reflection"
+        elif path.startswith("vessel"):
+            kind = "vessel"
+        else:
+            kind = "chat"
+        _in_flight_meta = {
+            "interface": str(data.get("interface") or "unknown"),
+            "kind": kind,
+        }
+        enqueued_at = data.get("timestamp")
+        if enqueued_at is not None:
+            stats_registry.observe(
+                "turn.wait_seconds",
+                max(0.0, time.time() - float(enqueued_at)),
+                **_in_flight_meta,
+            )
+        stats_registry.gauge("queue.depth", _get_queue().qsize())
+    except Exception:  # pragma: no cover - a statistic never blocks a turn
+        pass
+
+
+def _note_turn_failed() -> None:
+    """The item in flight did not get a turn through (an error or a timeout): the statistics count it as failed."""
+    global _in_flight_failed
+    _in_flight_failed = True
 
 
 def _clear_item_in_flight() -> None:
     """Clear the in-flight item once its handling block has finished."""
     global _in_flight_label, _in_flight_reported, _last_item_finished_at
+    try:
+        if _in_flight_label:
+            meta = dict(_in_flight_meta)
+            stats_registry.incr(
+                "turns.failed" if _in_flight_failed else "turns.ok", **meta
+            )
+            stats_registry.observe(
+                "turn.seconds", time.monotonic() - _in_flight_started_at, **meta
+            )
+    except Exception:  # pragma: no cover
+        pass
     _in_flight_label = None
     _in_flight_reported = False
     _last_item_finished_at = time.monotonic()
@@ -2310,8 +2361,10 @@ async def _consumer_loop() -> None:
                                             processing_task.result()
                                         )
                                     except Exception as exc:
+                                        _note_turn_failed()
                                         response_future.set_exception(exc)
                                 elif timed_out:
+                                    _note_turn_failed()
                                     response_future.set_exception(
                                         asyncio.TimeoutError(
                                             f"Message processing timed out after {timeout_seconds}s"
@@ -2369,6 +2422,7 @@ async def _consumer_loop() -> None:
                                 f"[QUEUE] Error checking pending queue for chat {chat_id}: {pending_e}"
                             )
             except Exception as e:  # pragma: no cover - plugin may misbehave
+                _note_turn_failed()
                 log_error(
                     f"[ERROR] Failed to process message from chat {final['chat_id']}: {e}\n{traceback.format_exc()}",
                 )
