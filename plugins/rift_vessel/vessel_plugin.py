@@ -327,7 +327,9 @@ config_registry.get_value(
     value_type=int,
     label="Idle Beat Interval (s)",
     description=(
-        "Seconds between idle beats once she has settled (clamped 20-3600). The interval is adaptive: quicker "
+        "Seconds she is left alone, counted from when her last turn AND her body were done (not from when the last "
+        "beat started), before the next idle beat, once she has settled (clamped 20-3600). After a beat that ended "
+        "in an action the shorter 'Idle Beat Gap After An Action' applies instead. The interval is adaptive: quicker "
         "just after she arrives or when something around her changed, longer when several beats in a row "
         "ended in no action."
     ),
@@ -367,12 +369,43 @@ config_registry.get_value(
 )
 config_registry.get_value(
     "VESSEL_IDLE_BEAT_ENGINE_REST_SEC",
-    12,
+    3,
     value_type=int,
     label="Idle Beat Engine Rest (s)",
     description=(
         "Seconds the engine must have been free before an idle beat starts, so a turn nobody asked for does not "
-        "run while a person could be waiting (clamped 0-600)."
+        "run while a person could be waiting (clamped 0-600). Short on purpose: it is dead time after every turn."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_IDLE_BEAT_ACTIVE_GAP_SEC",
+    "auto",
+    value_type=str,
+    label="Idle Beat Gap After An Action (s or auto)",
+    description=(
+        "How long to wait, after she and her body have finished, before asking again when her last beat ended in an "
+        "action. 'auto' (default) works it out from the Stats page's measurements: the engine is busy with her turns "
+        "about 70% of the time, so a 40 s turn waits ~17 s and a 15 s turn ~6 s, and a beat may go out a little before "
+        "her body is done when the model's answer cannot arrive sooner. Until enough turns are measured it is 10 s. "
+        "A number (3-120) fixes it."
+    ),
+    group="plugins",
+    component="vessel_plugin",
+    advanced=True,
+)
+config_registry.get_value(
+    "VESSEL_TICK_SEC",
+    "auto",
+    value_type=str,
+    label="Scheduler Tick (s or auto)",
+    description=(
+        "How often the Vessel scheduler looks at the idle beat when every connected world is an idle-beat world "
+        "(RetroXR). 'auto' (default) sleeps until the next beat falls due and looks every 1.5 s while it waits for the "
+        "engine, her body or the queue, so a beat is never late by a tick. A number (0.5-30) fixes it. Worlds with "
+        "the fast motor tick (Minecraft) keep VESSEL_MOTOR_INTERVAL_SEC."
     ),
     group="plugins",
     component="vessel_plugin",

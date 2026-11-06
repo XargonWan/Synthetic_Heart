@@ -41,6 +41,7 @@ without a DB, a bridge, or an LLM. The scheduling/enqueue wiring lives in
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 # A short, human-readable cap so the synthetic beat prompt never bloats the
@@ -1617,7 +1618,7 @@ def resolve_idle_max_interval(config_get: Any, default: int = 180) -> int:
     return max(20, min(3600, value))
 
 
-def resolve_idle_engine_rest_sec(config_get: Any, default: int = 12) -> int:
+def resolve_idle_engine_rest_sec(config_get: Any, default: int = 3) -> int:
     """Seconds the engine must have been free before an idle beat starts, [0, 600].
 
     A beat nobody asked for must not run while a person could be waiting, but the rest asked for is a
@@ -1644,16 +1645,22 @@ def adaptive_idle_interval(
     since_ready: float,
     idle_streak: int,
     novelty: bool = False,
+    acted_last: bool = False,
+    active_gap: float | None = None,
 ) -> float:
-    """Pure: the interval to wait before the next idle beat.
+    """Pure: the interval to wait, counted from when she and her body were done, before the next idle beat.
 
     Quick while she has just arrived (``arrival_interval`` for ``arrival_window`` seconds), ``base`` once
     settled, stretched by ``IDLE_BACKOFF`` for every beat past ``IDLE_FREE_STREAK`` that ended in no action
     (never past ``max_interval``), and cut back to the arrival pace when something around her changed
-    (``novelty``): a change is a reason to ask early, never an instruction. Structural, no text.
+    (``novelty``): a change is a reason to ask early, never an instruction. When the last beat ended in an
+    action (``acted_last``) she is in motion, so the wait is the short ``active_gap`` (None: no such shortcut).
+    Structural, no text.
     """
     interval = arrival_interval if since_ready < arrival_window else base
     interval = min(interval, base)
+    if acted_last and active_gap is not None:
+        interval = min(interval, float(active_gap))
     extra = int(idle_streak) - IDLE_FREE_STREAK
     if extra > 0:
         interval = min(max_interval, interval * (IDLE_BACKOFF**extra))
@@ -1687,6 +1694,157 @@ def idle_beat_due(
     if quiet_sec > 0 and last_player_activity_at > 0 and now - last_player_activity_at < quiet_sec:
         return False
     return True
+
+
+# -- pacing: when to ask next ------------------------------------------------------------------------------------
+#
+# The beat used to count its interval from the START of the last beat and then add a fixed engine rest, so the real
+# cadence was "length of the turn + 12 s + a tick", whatever she was doing. It now counts from the moment she AND her
+# body were done (``idle_anchor``), and the wait can be worked out from how long the turns really took (``auto_pacing``,
+# fed by ``core.stats_registry``).
+
+#: The shortest wait after she finished, whatever the measurements say.
+MIN_GAP_SEC = 3.0
+#: The wait after an action while there is nothing to measure yet.
+FALLBACK_ACTIVE_GAP_SEC = 10.0
+#: Share of the time the engine may be busy with her own turns; the rest is left free for a person.
+AUTO_DUTY = 0.7
+#: Turns needed before the measurements are believed, and how old the newest may be (seconds).
+AUTO_MIN_SAMPLES = 5
+AUTO_MAX_AGE_SEC = 600.0
+#: How often the loop looks while the beat waits for the engine, the body or the queue; the longest it sleeps.
+POLL_WAITING_SEC = 1.5
+POLL_MAX_SEC = 10.0
+#: A body "not settled" for longer than this is taken as stuck, not as busy.
+BODY_BUSY_MAX_SEC = 60.0
+#: Weight of the newest wait when the auto wait moves (so a noisy turn does not make it jump).
+GAP_SMOOTHING = 0.3
+
+
+@dataclass(frozen=True)
+class Pacing:
+    """How the next idle beat is timed. ``mode``: ``auto`` (from the measurements), ``fallback`` (auto, but too few
+    or too old measurements: the static defaults) or ``manual`` (a number was configured)."""
+
+    gap: float
+    lead: float
+    mode: str
+    reason: str
+
+
+def parse_auto_or_number(raw: Any, lo: float, hi: float) -> float | None:
+    """``None`` for ``auto`` (or anything unreadable), else the number clamped to ``[lo, hi]``."""
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        value = float(raw)
+    else:
+        text = str(raw).strip().lower()
+        if not text or text == "auto":
+            return None
+        try:
+            value = float(text)
+        except ValueError:
+            return None
+    if value != value:
+        return None
+    return max(lo, min(hi, value))
+
+
+def resolve_idle_active_gap(config_get: Any) -> float | None:
+    """``VESSEL_IDLE_BEAT_ACTIVE_GAP_SEC``: ``None`` = auto, else seconds in [3, 120]."""
+    try:
+        return parse_auto_or_number(config_get("VESSEL_IDLE_BEAT_ACTIVE_GAP_SEC", "auto"), MIN_GAP_SEC, 120.0)
+    except Exception:
+        return None
+
+
+def resolve_tick(config_get: Any) -> float | None:
+    """``VESSEL_TICK_SEC``: ``None`` = auto (the loop sleeps until the next beat is due), else seconds in [0.5, 30]."""
+    try:
+        return parse_auto_or_number(config_get("VESSEL_TICK_SEC", "auto"), 0.5, 30.0)
+    except Exception:
+        return None
+
+
+def idle_anchor(last_beat_at: float, ready: float, turn_done_at: float, settled_since: float) -> float:
+    """Pure: when the interval starts counting: the latest of the last beat's start, her arrival, the end of the last
+    beat's turn and the moment her body was last done. (Counting from the beat's start made a turn longer than the
+    interval due the instant it ended.)"""
+    return max(float(last_beat_at), float(ready), float(turn_done_at), float(settled_since))
+
+
+def smooth_gap(previous: float | None, new: float, weight: float = GAP_SMOOTHING) -> float:
+    """Pure: the wait moves toward ``new`` by ``weight`` of the way (the first value is taken as is)."""
+    if previous is None:
+        return float(new)
+    return (1.0 - weight) * float(previous) + weight * float(new)
+
+
+def auto_pacing(
+    *,
+    turn: dict[str, Any] | None,
+    first_verb: dict[str, Any] | None,
+    active_gap_cfg: float | None,
+    base_interval: float,
+    duty: float = AUTO_DUTY,
+    min_samples: int = AUTO_MIN_SAMPLES,
+    max_age: float = AUTO_MAX_AGE_SEC,
+) -> Pacing:
+    """Pure: the wait after an action, and how early the next ask may go out.
+
+    ``turn`` / ``first_verb`` are timing summaries (``core.stats_registry``: ``count``, ``p50``, ``age``) of how long a
+    beat's turn took to finish and to deliver its first verb.
+
+    * a number in ``active_gap_cfg`` is the wait, as configured (clamped), and nothing is measured (``manual``);
+    * otherwise, with enough recent turns: the engine is to be busy with her turns ``duty`` of the time, so the wait is
+      ``p50 * (1/duty - 1)`` (a 40 s turn waits ~17 s, a 15 s turn ~6 s), never under ``MIN_GAP_SEC`` nor over
+      ``base_interval`` (``auto``);
+    * with too few or too old turns, ``FALLBACK_ACTIVE_GAP_SEC`` (``fallback``).
+
+    ``lead``: a beat may be asked while her body still has up to this long to go, because the verbs it brings only
+    arrive after the model has answered (``first_verb`` p50, at most the turn's own p50). Zero when not measured.
+    """
+    ceiling = max(MIN_GAP_SEC, float(base_interval))
+    if active_gap_cfg is not None:
+        gap = max(MIN_GAP_SEC, min(ceiling, float(active_gap_cfg)))
+        return Pacing(gap=gap, lead=0.0, mode="manual", reason=f"configured {gap:.0f}s")
+
+    def usable(summary: dict[str, Any] | None) -> bool:
+        return bool(summary) and int(summary.get("count", 0)) >= min_samples and float(summary.get("age", float("inf"))) <= max_age
+
+    if not usable(turn):
+        gap = max(MIN_GAP_SEC, min(ceiling, FALLBACK_ACTIVE_GAP_SEC))
+        return Pacing(gap=gap, lead=0.0, mode="fallback", reason="too few recent turns measured")
+    length = float(turn["p50"])  # type: ignore[index]
+    d = max(0.05, min(0.95, float(duty)))
+    gap = max(MIN_GAP_SEC, min(ceiling, length * (1.0 / d - 1.0)))
+    lead = 0.0
+    if usable(first_verb):
+        lead = max(0.0, min(length, float(first_verb["p50"])))  # type: ignore[index]
+    return Pacing(gap=gap, lead=lead, mode="auto", reason=f"turns take {length:.0f}s, duty {d:.0%}")
+
+
+def body_ready_for_ask(settled: bool, eta_settle: float | None, lead: float) -> bool:
+    """Pure: may the next beat be asked now? Yes when her body is done, or will be before the model could answer
+    (``eta_settle`` known and within ``lead``). An unknown ETA on a busy body waits."""
+    if settled:
+        return True
+    return eta_settle is not None and float(eta_settle) <= float(lead)
+
+
+def next_wake(now: float, due_at: float | None, waiting: bool, tick_cfg: float | None) -> float:
+    """Pure: seconds the scheduler loop may sleep before it looks at the idle beat again.
+
+    A configured ``tick_cfg`` is the answer. In auto, it sleeps until the beat is due (at most ``POLL_MAX_SEC``) and
+    looks every ``POLL_WAITING_SEC`` while the beat waits for the engine, the body or the queue. Never under 0.25 s."""
+    if tick_cfg is not None:
+        return float(tick_cfg)
+    if waiting or due_at is None:
+        return POLL_WAITING_SEC if waiting else POLL_MAX_SEC
+    return max(0.25, min(POLL_MAX_SEC, float(due_at) - float(now)))
 
 
 def format_age(seconds: float) -> str:

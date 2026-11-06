@@ -34,6 +34,7 @@ from typing import Any
 
 import aiomysql
 
+from core import stats_registry as stats
 from core.config_manager import config_registry
 from core.core_initializer import register_interface
 from core.db import get_conn_ctx
@@ -194,6 +195,15 @@ class VesselInterface:
         self._idle_pending: bool = False
         self._idle_streak: int = 0
         self._idle_novelty: list[str] = []
+        # Pacing (see core.vessel_beat.auto_pacing): when the last beat's turn ended, whether it ended in an action, the
+        # smoothed auto wait, the last pacing decision (the Stats page shows it), when the next beat falls due and
+        # whether it is waiting on the engine / body / queue (the scheduler loop sleeps accordingly).
+        self._idle_turn_done_at: float = 0.0
+        self._idle_acted_last: bool = False
+        self._idle_gap_smoothed: float | None = None
+        self._idle_pacing: dict[str, Any] = {}
+        self._idle_due_at: float | None = None
+        self._idle_waiting: bool = False
         # How long a beat's turn takes (a running mean): a walk is sized to last until the next prompt.
         try:
             from plugins.rift_vessel.exploration import LatencyMeter
@@ -1792,25 +1802,32 @@ class VesselInterface:
     def _resolve_tick_sec(self) -> float:
         """Sleep interval for the scheduler loop.
 
-        Returns the smaller of :data:`_TICK_SEC` and the configured motor
-        interval (clamped to at least :data:`_MIN_TICK_SEC`) so the fast
-        motorics layer can run at ``VESSEL_MOTOR_INTERVAL_SEC`` cadence instead
-        of being capped by the coarse fixed tick. Fully guarded — any failure
-        falls back to :data:`_TICK_SEC`.
+        A world with a fast motor tick (Minecraft) keeps the old rule: the smaller of :data:`_TICK_SEC` and the
+        configured motor interval (at least :data:`_MIN_TICK_SEC`). When every connected world is an idle-beat world
+        (RetroXR) there is no motor tick, and the loop sleeps until the next beat is due (``VESSEL_TICK_SEC`` = ``auto``)
+        or as long as configured; it looks every 1.5 s while the beat waits on the engine, the body or the queue.
+        Fully guarded; any failure falls back to :data:`_TICK_SEC`.
         """
         try:
             from core import vessel_beat
 
-            motor_interval = float(
-                vessel_beat.resolve_motor_interval(
-                    lambda key, default: config_registry.get_value(
-                        key, default, group="vessel", component="vessel"
-                    )
-                )
-            )
+            def _cfg(key: str, default: Any) -> Any:
+                return config_registry.get_value(key, default, group="vessel", component="vessel")
+
+            motor_interval = float(vessel_beat.resolve_motor_interval(_cfg))
         except Exception:
             return self._TICK_SEC
-        return max(self._MIN_TICK_SEC, min(self._TICK_SEC, motor_interval))
+        legacy = max(self._MIN_TICK_SEC, min(self._TICK_SEC, motor_interval))
+        try:
+            if self._has_non_idle_world():
+                return legacy
+            tick_cfg = vessel_beat.resolve_tick(_cfg)
+            wake = vessel_beat.next_wake(asyncio.get_event_loop().time(), self._idle_due_at, self._idle_waiting, tick_cfg)
+            if self._pending_perceptions:
+                wake = min(wake, 2.0)  # a batch of perceptions is flushed when its window ends
+            return max(0.25, min(30.0, wake))
+        except Exception:
+            return legacy
 
     async def _maybe_run_reflection(self) -> None:
         """Stop and think when Synth is playing without a real objective.
@@ -2069,6 +2086,74 @@ class VesselInterface:
             self._idle_novelty.append(text[:160])
             del self._idle_novelty[:-5]
 
+    @staticmethod
+    def _vessel_backlog(world: str) -> int:
+        """Turns of this world waiting in the message queue (the one being worked on is not counted). 0 when unknown."""
+        try:
+            from core import message_queue
+
+            prefix = f"vessel/{world}"
+            return sum(
+                1 for item in message_queue.snapshot_queue(limit=200) if str(item.get("interface_path", "")).startswith(prefix)
+            )
+        except Exception:
+            return 0
+
+    def _record_beat_outcome(self, connector: Any, outcome: str, turn_done: float) -> None:
+        """Statistics of a beat that has just been read: how it ended, how long the turn took, when its first verb came."""
+        try:
+            kind = "acted" if outcome.startswith("acted") else "cut_short" if outcome.startswith("cut short") else "did_nothing"
+            stats.incr(f"beat.{kind}")
+            if kind == "cut_short":
+                return
+            asked = self._last_idle_beat_at
+            if turn_done > asked > 0:
+                stats.observe("beat.ask_to_turn_done", turn_done - asked)
+            starts_fn = getattr(connector, "idle_act_starts", None)
+            starts = list(starts_fn()) if callable(starts_fn) else []
+            first = next((t for t in starts if t >= asked > 0), None)
+            if first is not None:
+                stats.observe("beat.ask_to_first_verb", max(0.0, first - asked))
+        except Exception as exc:  # pragma: no cover - a statistic never breaks a beat
+            log_debug(f"[vessel_interface] beat outcome stats failed: {exc}")
+
+    def _record_beat_phases(self, now: float, settled_since: float, pacing: Any, interval: float) -> None:
+        """Statistics and the ``[beat-timing]`` line of the beat about to be asked: how long each part of the last
+        cycle took (the numbers the auto pacing and the Stats page work from)."""
+        try:
+            previous_ask = self._last_idle_beat_at
+            turn_done = self._idle_turn_done_at
+            parts = []
+            if previous_ask > 0:
+                stats.observe("beat.cycle", now - previous_ask)
+                parts.append(f"cycle {now - previous_ask:.0f}s")
+            if turn_done > 0:
+                if settled_since > turn_done:
+                    stats.observe("beat.turn_done_to_settled", settled_since - turn_done)
+                    parts.append(f"turn-done->body-done {settled_since - turn_done:.0f}s")
+                waited = now - max(turn_done, settled_since)
+                stats.observe("beat.settled_to_next_ask", waited)
+                parts.append(f"done->asked {waited:.0f}s")
+            stats.incr("beat.asked")
+            log_info(
+                f"[vessel_interface] [beat-timing] {', '.join(parts) or 'first beat'} | pacing {pacing.mode}: wait {interval:.0f}s "
+                f"({pacing.reason}), lead {pacing.lead:.0f}s"
+            )
+        except Exception as exc:  # pragma: no cover
+            log_debug(f"[vessel_interface] beat phase stats failed: {exc}")
+
+    def _has_non_idle_world(self) -> bool:
+        """Is a connected world one whose fast motor tick needs the scheduler's cadence (it is not an idle-beat world)?"""
+        try:
+            from core.vessel_registry import VESSEL_REGISTRY
+
+            return any(
+                getattr(c, "is_connected", False) and not getattr(c, "uses_idle_beat", False)
+                for c in (getattr(VESSEL_REGISTRY, "_instances", {}) or {}).values()
+            )
+        except Exception:
+            return True
+
     async def _maybe_run_idle_beat(self) -> None:
         """Ask Synth what she wants to do, when nobody is talking to her (slow, LLM).
 
@@ -2091,6 +2176,8 @@ class VesselInterface:
                 key, default, group="vessel", component="vessel"
             )
 
+        self._idle_due_at = None
+        self._idle_waiting = False
         if not vessel_beat.is_idle_beat_enabled(_cfg):
             return
         if not get_vessel_session_manager().has_active_session():
@@ -2122,6 +2209,7 @@ class VesselInterface:
             log_warning(f"[vessel_interface] idle_ready_since failed for '{world}': {exc}")
             return
         if ready is None:
+            self._idle_waiting = True
             self._idle_hold("not_ready", f"'{world}' is not out and looking yet")
             return
         if ready > self._idle_seen_ready:
@@ -2131,6 +2219,9 @@ class VesselInterface:
             self._idle_pending = False
             self._idle_streak = 0
             self._idle_novelty = []
+            self._idle_turn_done_at = 0.0
+            self._idle_acted_last = False
+            self._idle_gap_smoothed = None
             log_info(f"[vessel_interface] Idle beat clock for '{world}' starts now (ready since {ready:.0f})")
 
         try:
@@ -2152,6 +2243,7 @@ class VesselInterface:
         # she did not. A player who spoke since cut it short, which says nothing about her.
         if self._idle_pending:
             if rested < 3:
+                self._idle_waiting = True
                 self._idle_hold("last_beat_running", f"the last beat's turn is still running (engine free {rested:.0f}s)")
                 return
             acted = [text for stamp, text in journal if stamp >= self._last_idle_beat_at]
@@ -2164,6 +2256,10 @@ class VesselInterface:
                 self._idle_streak += 1
                 outcome = f"did nothing (streak {self._idle_streak})"
             self._idle_pending = False
+            turn_done = (now - rested) if rested != float("inf") else now
+            self._idle_turn_done_at = turn_done
+            self._idle_acted_last = outcome.startswith("acted")
+            self._record_beat_outcome(connector, outcome, turn_done)
             if self._turn_latency is not None and rested != float("inf") and not outcome.startswith("cut short"):
                 turn = (now - rested) - self._last_idle_beat_at
                 if turn > 0:
@@ -2178,36 +2274,103 @@ class VesselInterface:
             log_debug(f"[vessel_interface] idle_busy failed for '{world}': {exc}")
             busy = False
         if busy:
+            self._idle_waiting = True
+            stats.incr("beat.hold", reason="walk")
             self._idle_hold("body_busy", f"'{world}' is on a walk of its own: its result is the next prompt")
             return
 
         novelty = bool(self._idle_novelty)
         since_ready = max(0.0, now - ready) if ready > 0 else float("inf")
+        # How long to wait after she (and her body) finished: measured from the last turns (auto), or as configured.
+        base_interval = float(vessel_beat.resolve_idle_interval(_cfg))
+        registry = stats.get_stats()
+        pacing = vessel_beat.auto_pacing(
+            turn=registry.timing("beat.ask_to_turn_done", max_age=vessel_beat.AUTO_MAX_AGE_SEC),
+            first_verb=registry.timing("beat.ask_to_first_verb", max_age=vessel_beat.AUTO_MAX_AGE_SEC),
+            active_gap_cfg=vessel_beat.resolve_idle_active_gap(_cfg),
+            base_interval=base_interval,
+        )
+        if pacing.mode == "auto":
+            self._idle_gap_smoothed = vessel_beat.smooth_gap(self._idle_gap_smoothed, pacing.gap)
+            gap = self._idle_gap_smoothed
+        else:
+            self._idle_gap_smoothed = None
+            gap = pacing.gap
         interval = vessel_beat.adaptive_idle_interval(
-            vessel_beat.resolve_idle_interval(_cfg),
+            base_interval,
             vessel_beat.resolve_idle_arrival_interval(_cfg),
             vessel_beat.resolve_idle_arrival_window(_cfg),
             vessel_beat.resolve_idle_max_interval(_cfg),
             since_ready,
             self._idle_streak,
             novelty=novelty,
+            acted_last=self._idle_acted_last,
+            active_gap=gap,
         )
-        anchor = max(self._last_idle_beat_at, ready)
+        try:
+            settled_fn = getattr(connector, "idle_settled_since", None)
+            settled_since = float(settled_fn()) if callable(settled_fn) else 0.0
+        except Exception:  # pragma: no cover - defensive
+            settled_since = 0.0
+        # The interval counts from when the last beat's turn AND her body were done, not from the beat's start.
+        anchor = vessel_beat.idle_anchor(self._last_idle_beat_at, ready, self._idle_turn_done_at, settled_since)
+        self._idle_due_at = anchor + interval
+        self._idle_pacing = {
+            "mode": pacing.mode,
+            "reason": pacing.reason,
+            "gap": round(gap, 1),
+            "lead": round(pacing.lead, 1),
+            "interval": round(interval, 1),
+            "base_interval": base_interval,
+            "streak": self._idle_streak,
+            "acted_last": self._idle_acted_last,
+        }
+        stats.info("beat.pacing", {**self._idle_pacing, "due_in": round(self._idle_due_at - now, 1)})
         quiet_sec = vessel_beat.resolve_idle_quiet_sec(_cfg)
         if not vessel_beat.idle_beat_due(
             now, anchor, interval, self._last_player_activity_at, quiet_sec
         ):
             if now - anchor >= interval:
+                self._idle_waiting = True
+                stats.incr("beat.hold", reason="player_active")
                 self._idle_hold(
                     "player_active",
                     f"a player spoke {now - self._last_player_activity_at:.0f}s ago (quiet window {quiet_sec}s)",
                 )
             return
 
+        # Her body: asked only when it is done, or will be before the model could answer (a clip still playing is
+        # not talked over; one that ends in a second does not make a whole turn wait).
+        try:
+            eta_fn = getattr(connector, "idle_body_eta", None)
+            eta = eta_fn() if callable(eta_fn) else 0.0
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[vessel_interface] idle_body_eta failed for '{world}': {exc}")
+            eta = 0.0
+        if not vessel_beat.body_ready_for_ask(eta == 0.0, eta, pacing.lead):
+            self._idle_waiting = True
+            stats.incr("beat.hold", reason="body_settling")
+            self._idle_hold(
+                "body_settling",
+                f"her body is still busy ({'end unknown' if eta is None else f'{eta:.0f}s to go'}, lead {pacing.lead:.0f}s)",
+                every=30.0,
+            )
+            return
+        # The queue: nothing of this world waiting already (a beat piled behind other turns only goes stale).
+        backlog = self._vessel_backlog(world)
+        stats.gauge("queue.vessel_backlog", backlog)
+        if backlog > 0:
+            self._idle_waiting = True
+            stats.incr("beat.hold", reason="queue_busy")
+            self._idle_hold("queue_busy", f"{backlog} turn(s) of '{world}' already wait in the queue", every=30.0)
+            return
+
         # A beat nobody asked for must not make a person wait: only start one when the engine has had nothing to
         # do for a few seconds. (It used to be a whole interval, which a 90 s turn and a 90 s interval kept busy for
         # ever: a chat waited 4+ minutes behind a running beat, 2026-11-04.)
         if rested < rest_needed:
+            self._idle_waiting = True
+            stats.incr("beat.hold", reason="engine_busy")
             self._idle_hold(
                 "engine_busy", f"the engine has been free for only {rested:.0f}s of the {rest_needed}s asked", every=30.0
             )
@@ -2239,6 +2402,7 @@ class VesselInterface:
             log_debug(f"[vessel_interface] idle_intention failed for '{world}': {exc}")
         changes = list(self._idle_novelty)
         self._idle_novelty = []
+        self._record_beat_phases(now, settled_since, pacing, interval)
         self._last_idle_beat_at = now
         self._idle_pending = True
         # If she chooses to go for a walk, it should last until the NEXT prompt: the wait to the next beat plus the
