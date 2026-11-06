@@ -99,7 +99,9 @@ _RESUME_READY_SEC = 45.0
 # How long the mod has to answer one action frame.
 _ACTION_TIMEOUT_SEC = 20.0
 # Verbs that take a while in the room (walking across it, a carry).
-_LONG_VERBS = frozenset({"move", "follow", "pick_up", "put_down", "hand_over", "sit"})
+_LONG_VERBS = frozenset(
+    {"move", "follow", "pick_up", "put_down", "hand_over", "sit", "combine", "operate"}
+)
 _LONG_ACTION_TIMEOUT_SEC = 90.0
 #: How long "you just let go of X" stays in her prompt. Short on purpose: it says a hold ended, it is not a record
 #: (the history keeps that), and a prompt must not carry what happened ten minutes ago.
@@ -124,7 +126,19 @@ _MAX_AUDIO_BYTES = 8 * 1024 * 1024
 _AUDIO_MIME = {"wav": "audio/wav", "ogg": "audio/ogg", "opus": "audio/ogg", "mp3": "audio/mpeg", "flac": "audio/flac"}
 
 # The core set (shared by every world) that makes sense inside a room.
-CORE_VERBS = frozenset({"say", "move", "look", "use", "follow", "unfollow", "status"})
+CORE_VERBS = frozenset(
+    {"say", "move", "look", "use", "follow", "unfollow", "status", "combine"}
+)
+
+#: What ``follow`` and ``unfollow`` are in a room, in place of the generic text (which promises a target and a failure).
+CORE_VERB_DESCRIPTIONS = {
+    "follow": (
+        "Follow the player around the {world} room: you keep walking to stay near them until you unfollow, stop, or "
+        "go somewhere on your own. No target is needed (it is always the player). You are told if you cannot keep "
+        "up: they are further than you may go from where you came in, or something is in the way."
+    ),
+    "unfollow": "Stop following the player. You stay where you are.",
+}
 
 # RetroXR's own verbs: bare names, exposed as ``vessel_retroxr_<verb>``.
 WORLD_VERBS: Dict[str, Dict[str, Any]] = {
@@ -171,15 +185,17 @@ WORLD_VERBS: Dict[str, Dict[str, Any]] = {
     "bring": {
         "description": (
             "Fetch an object for the player: find it (looking around if it is not in front of you), pick it up, "
-            "walk to the player and hold it out until they take it. You are told afterwards how it went: "
-            "brought, not found, or too heavy to carry."
+            "walk to the player and hold it out in both hands. 'seconds' is how long you hold it out (a few "
+            "seconds up to a minute; about half a minute if you give none) and 'say' is what you say as you do it, "
+            "in your own words. You are told afterwards how it went: brought and taken, brought and not taken "
+            "(you are still holding it), not found, or too heavy to carry."
         ),
         "required_fields": ["target"],
-        "optional_fields": [],
+        "optional_fields": ["seconds", "say"],
         "security_level": "low",
     },
     "stop": {
-        "description": "Stop what you are doing on your own (looking, fetching, watching).",
+        "description": "Stop what you are doing: walking, following, looking, fetching, watching.",
         "required_fields": [],
         "optional_fields": [],
         "security_level": "low",
@@ -195,18 +211,36 @@ WORLD_VERBS: Dict[str, Dict[str, Any]] = {
         "security_level": "low",
     },
     "put_down": {
-        "description": "Put down what you are holding, in front of you, on whatever is under your hands (a table, the floor).",
+        "description": (
+            "Let go of what you are holding. Without a target it goes in front of you, on whatever is under your "
+            "hands (a table, the floor). With a target (a table, a shelf, a seat) you walk up to it and set what you "
+            "hold on its top. You are told where it ended up, or why it could not be set there (you are still "
+            "holding it then)."
+        ),
         "required_fields": [],
         "optional_fields": ["target"],
         "security_level": "low",
     },
     "hand_over": {
         "description": (
-            "Walk to the player and hold what you are carrying out so they can take it; if they do not, "
-            "you put it down in front of them. You are told afterwards what happened."
+            "Walk to the player and hold what you are carrying out in both hands so they can take it. 'seconds' is "
+            "how long you hold it out (a few seconds up to a minute; about half a minute if you give none). 'say' is "
+            "what you say as you do it, in your own words. You are told afterwards whether they took it. If they do "
+            "not, you are still holding it: what to do then is yours to decide."
         ),
         "required_fields": [],
-        "optional_fields": [],
+        "optional_fields": ["seconds", "say"],
+        "security_level": "low",
+    },
+    "operate": {
+        "description": (
+            "Work a machine with your hands: switch a TV or a console on or off, turn its volume or channel, "
+            "rewind or eject a tape, put a cartridge or tape in. 'interaction' is what to do, in your own words "
+            "(turn on, volume up, eject); 'target' is the machine. You walk up to it first and are told what came "
+            "of it, read back from the machine. You cannot play a game with it."
+        ),
+        "required_fields": ["interaction"],
+        "optional_fields": ["target", "with"],
         "security_level": "low",
     },
     "sit": {
@@ -401,6 +435,8 @@ class RetroXRConnector(ExplorerMixin, VesselConnectorBase):
         if isinstance(raw, list):
             return frozenset(str(v) for v in raw) & (CORE_VERBS | frozenset(WORLD_VERBS))
         return DEFAULT_DECLARED
+
+    core_verb_descriptions = CORE_VERB_DESCRIPTIONS
 
     @property
     def core_verbs(self) -> frozenset[str]:  # type: ignore[override]
@@ -744,6 +780,8 @@ class RetroXRConnector(ExplorerMixin, VesselConnectorBase):
             lines.append("There is nothing else near you.")
         age = None if self._let_go_at is None else time.monotonic() - self._let_go_at
         lines.append(describe_hands(str(st.get("holding") or ""), self._let_go, age))
+        if (st.get("extra") or {}).get("following"):
+            lines.append("You are following the player.")
         if self._emotes:
             lines.append("Animations you can play: " + ", ".join(self._emotes) + ".")
         return "\n".join(lines)
@@ -879,8 +917,12 @@ class RetroXRConnector(ExplorerMixin, VesselConnectorBase):
             self.cancel_explore("the player spoke", silent=True)
             self._chat_waiting_since = time.monotonic()
             log_info(f"{LOG_PREFIX} player chat in (queued turns: {_queued_turns()})")
-        if str(raw.get("event_type") or "").endswith("_done"):
-            # A routine she started has ended (search/explore/watch/bring...): that is part of what she did.
+        if (
+            str(raw.get("event_type") or "").endswith("_done")
+            or str(raw.get("event_type") or "") == "follow_lost"
+        ):
+            # A routine she started has ended (search/explore/watch/bring...), or she lost the player she was following:
+            # that is part of what she did.
             self._note(str(raw.get("summary") or raw.get("event_type")))
         if str(raw.get("event_type") or "") == "summoned" and not self._hello.get("early_summon"):
             # A mod that sends the first prompt EARLY (``hello.early_summon``) says when they are out with an ``out``
@@ -934,6 +976,14 @@ class RetroXRConnector(ExplorerMixin, VesselConnectorBase):
         payload = payload if isinstance(payload, dict) else {}
         if verb == "say":
             what = f'said "{str(payload.get("text") or "").strip()}"'
+        elif verb == "combine":
+            item = str(payload.get("item") or payload.get("with") or "").strip()
+            target = str(payload.get("target") or payload.get("name") or "").strip()
+            what = (
+                f"combine {item} with {target}".replace("  ", " ").strip()
+                if item
+                else f"combine {target}".strip()
+            )
         else:
             target = str(payload.get("target") or payload.get("name") or "").strip()
             what = f"{verb} {target}".strip()
@@ -999,6 +1049,20 @@ class RetroXRConnector(ExplorerMixin, VesselConnectorBase):
             # Known, but this mod cannot do it: say so instead of letting the mod fail it.
             log_warning(f"{LOG_PREFIX} refused {verb!r}: the mod did not declare it")
             return VesselActionResult(ok=False, detail=f"not_available: {verb}")
+
+        if (
+            verb in ("hand_over", "bring")
+            and isinstance(payload, dict)
+            and "say" in payload
+        ):
+            # She speaks AS she does it: the words are hers (the model's), spoken through the same path as a ``say``
+            # of its own, while the body goes about the action. Nothing of it is sent to the mod.
+            payload = dict(payload)
+            spoken_with = str(payload.pop("say") or "").strip()
+            if spoken_with and "say" in self.declared_verbs():
+                task = asyncio.create_task(self.act("say", {"text": spoken_with}))
+                self._speech_tasks.add(task)
+                task.add_done_callback(self._speech_tasks.discard)
 
         if verb == "say":
             if self._chat_waiting_since is not None:
@@ -1169,7 +1233,11 @@ class RetroXRConnector(ExplorerMixin, VesselConnectorBase):
             health=None,
             position=st.get("position"),
             possible_actions=sorted(self.declared_verbs()),
-            flags={"connected": True, "holding": st.get("holding")},
+            flags={
+                "connected": True,
+                "holding": st.get("holding"),
+                "following": bool((st.get("extra") or {}).get("following")),
+            },
             extra=extra,
         )
 
