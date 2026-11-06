@@ -7433,6 +7433,10 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 const logsReasonTrailOutput = document.getElementById('logs-reason-trail-output');
                 const logsReasonTrailRefreshBtn = document.getElementById('logs-reason-trail-refresh');
                 const logsReasonTrailSearch = document.getElementById('logs-reason-trail-search');
+                const logsStatsOutput = document.getElementById('logs-stats-output');
+                const logsStatsRefreshBtn = document.getElementById('logs-stats-refresh');
+                const logsStatsDays = document.getElementById('logs-stats-days');
+                const logsStatsAuto = document.getElementById('logs-stats-auto');
                 const logsState = window.__synth_logs_state || {
                     currentSubtab: 'live',
                     failurePage: 1,
@@ -7446,6 +7450,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     loadingDeadTargets: false,
                     reasonTrailSearch: '',
                     loadingReasonTrail: false,
+                    loadingStats: false,
+                    statsTimer: null,
                 };
                 window.__synth_logs_state = logsState;
 
@@ -7528,8 +7534,228 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         loadReasonTrail();
                         return;
                     }
+                    if (nextSubtab === 'stats') {
+                        loadStats();
+                        return;
+                    }
                     applyFilters();
                 }
+
+                // ── Stats: counters per day, timings and the idle beat's pacing (GET /api/stats) ──
+                function statsNumber(value) {
+                    return Number.isFinite(Number(value)) ? Number(value) : 0;
+                }
+
+                function statsSeconds(value) {
+                    const n = Number(value);
+                    if (!Number.isFinite(n)) return '–';
+                    return n >= 100 ? `${Math.round(n)} s` : `${n.toFixed(1)} s`;
+                }
+
+                function statsCard(label, value, tone) {
+                    return `<div class="logs-stat-card ${tone || ''}"><div class="lsc-value">${safeEscapeHtml(String(value))}</div><div class="lsc-label">${safeEscapeHtml(label)}</div></div>`;
+                }
+
+                // Keys look like "name" or "name{a=1,b=2}": the bare ones are totals, the labelled ones their parts.
+                function statsLabelled(counters, name) {
+                    const out = [];
+                    const prefix = `${name}{`;
+                    Object.keys(counters || {}).forEach((key) => {
+                        if (key.startsWith(prefix) && key.endsWith('}')) {
+                            out.push([key.slice(prefix.length, -1), counters[key]]);
+                        }
+                    });
+                    return out.sort((a, b) => b[1] - a[1]);
+                }
+
+                function statsTimingRows(timings, names) {
+                    return names.map(([key, label, hint]) => {
+                        const t = (timings || {})[key];
+                        if (!t || !t.count) {
+                            return `<tr><td>${safeEscapeHtml(label)}</td><td>0</td><td colspan="4">no samples yet</td></tr>`;
+                        }
+                        return `<tr title="${safeEscapeHtml(hint || '')}"><td>${safeEscapeHtml(label)}</td><td>${t.count}</td><td>${statsSeconds(t.p50)}</td><td>${statsSeconds(t.p95)}</td><td>${statsSeconds(t.max)}</td><td>${statsSeconds(t.last)}</td></tr>`;
+                    }).join('');
+                }
+
+                function renderStats(payload) {
+                    if (!logsStatsOutput) return;
+                    const today = (payload.days || {})[payload.today] || {};
+                    const c = (name) => statsNumber(today[name]);
+                    const timings = payload.timings || {};
+                    const cfg = payload.config || {};
+                    const pacing = ((payload.info || {})['beat.pacing']) || null;
+
+                    const turnsOk = c('turns.ok');
+                    const turnsFailed = c('turns.failed');
+                    const turnsTotal = turnsOk + turnsFailed;
+                    const failRate = turnsTotal ? `${Math.round((turnsFailed / turnsTotal) * 100)}%` : '–';
+                    const verbsBad = c('vessel.verb.failed') + c('vessel.verb.timeout');
+                    const cards = [
+                        statsCard('turns done today', turnsTotal),
+                        statsCard('turns ok', turnsOk, 'good'),
+                        statsCard(`turns failed (${failRate})`, turnsFailed, turnsFailed ? 'bad' : ''),
+                        statsCard('LLM failures', c('llm.failures'), c('llm.failures') ? 'bad' : ''),
+                        statsCard('actions ok', c('actions.ok'), 'good'),
+                        statsCard('actions failed', c('actions.failed'), c('actions.failed') ? 'bad' : ''),
+                        statsCard('vessel verbs ok', c('vessel.verb.ok'), 'good'),
+                        statsCard('vessel verbs failed / timed out', verbsBad, verbsBad ? 'bad' : ''),
+                        statsCard('deliveries ok', c('delivery.ok'), 'good'),
+                        statsCard('deliveries failed', c('delivery.failed'), c('delivery.failed') ? 'bad' : ''),
+                        statsCard('idle beats asked', c('beat.asked')),
+                        statsCard('beats that led to an action', c('beat.acted'), 'good'),
+                        statsCard('beats that led to nothing', c('beat.did_nothing')),
+                    ].join('');
+
+                    const holds = statsLabelled(today, 'beat.hold')
+                        .map(([label, n]) => `${safeEscapeHtml(label.replace('reason=', ''))}: ${n}`).join(' · ') || 'none today';
+
+                    const gaugeQueue = (payload.gauges || {})['queue.depth'];
+                    const gaugeBacklog = (payload.gauges || {})['queue.vessel_backlog'];
+
+                    const pacingHtml = pacing ? `
+                        <p class="logs-stats-note">Now: <strong>${safeEscapeHtml(String(pacing.mode))}</strong> – ${safeEscapeHtml(String(pacing.reason || ''))}.
+                        Waits <strong>${statsSeconds(pacing.interval)}</strong> after she and her body are done
+                        (after an action: ${statsSeconds(pacing.gap)}; a beat may go out ${statsSeconds(pacing.lead)} before her body is done).
+                        Next due in ${statsSeconds(pacing.due_in)}.</p>`
+                        : '<p class="logs-stats-note">No idle beat has been timed yet (no RetroXR session in this run).</p>';
+
+                    const dayKeys = Object.keys(payload.days || {}).sort().reverse();
+                    const dayRows = dayKeys.map((day) => {
+                        const d = payload.days[day];
+                        return `<tr><td>${safeEscapeHtml(day)}</td><td>${statsNumber(d['turns.ok'])}</td><td>${statsNumber(d['turns.failed'])}</td><td>${statsNumber(d['llm.failures'])}</td><td>${statsNumber(d['vessel.verb.ok'])}</td><td>${statsNumber(d['vessel.verb.failed']) + statsNumber(d['vessel.verb.timeout'])}</td><td>${statsNumber(d['beat.acted'])}</td><td>${statsNumber(d['beat.did_nothing'])}</td></tr>`;
+                    }).join('');
+
+                    const verbRows = statsLabelled(today, 'vessel.verb.ok').map(([label, n]) => {
+                        const verb = label.replace('verb=', '');
+                        const failed = statsNumber(today[`vessel.verb.failed{verb=${verb}}`]) + statsNumber(today[`vessel.verb.timeout{verb=${verb}}`]);
+                        const t = timings[`vessel.verb.seconds{verb=${verb}}`];
+                        return `<tr><td>${safeEscapeHtml(verb)}</td><td>${n}</td><td>${failed}</td><td>${t ? statsSeconds(t.p50) : '–'}</td><td>${t ? statsSeconds(t.p95) : '–'}</td></tr>`;
+                    }).join('');
+
+                    const tickValue = cfg.tick === 'auto' ? 'auto' : String(cfg.tick);
+                    const gapValue = cfg.active_gap === 'auto' ? 'auto' : String(cfg.active_gap);
+
+                    logsStatsOutput.innerHTML = `
+                        <div class="logs-stats-cards">${cards}</div>
+
+                        <div class="logs-stats-section">
+                            <h3>Idle beat – where the time goes</h3>
+                            <table class="logs-stats-table">
+                                <thead><tr><th>phase</th><th>n</th><th>p50</th><th>p95</th><th>max</th><th>last</th></tr></thead>
+                                <tbody>${statsTimingRows(timings, [
+                                    ['beat.ask_to_first_verb', 'asked → first verb', 'how long the model took to answer'],
+                                    ['beat.ask_to_turn_done', 'asked → turn finished', 'the whole turn, debrief included: the input of the auto wait'],
+                                    ['beat.turn_done_to_settled', 'turn finished → body done', 'a clip or a voice still playing after the turn'],
+                                    ['beat.settled_to_next_ask', 'done → next ask', 'the dead time between two beats: what the pacing sets'],
+                                    ['beat.cycle', 'ask → next ask', 'the whole cycle'],
+                                    ['body.busy_seconds', 'body busy', 'how long her body is busy after a verb'],
+                                ])}</tbody>
+                            </table>
+                            ${pacingHtml}
+                            <p class="logs-stats-note">Beats held today – ${holds}.${gaugeQueue ? ` Queue now: ${statsNumber(gaugeQueue.value)}.` : ''}${gaugeBacklog ? ` Her turns waiting: ${statsNumber(gaugeBacklog.value)}.` : ''}</p>
+                        </div>
+
+                        <div class="logs-stats-section">
+                            <h3>Pacing settings</h3>
+                            <div class="log-controls logs-failure-controls">
+                                <label>Wait after an action (s, or auto)
+                                    <input type="text" id="logs-stats-gap" value="${safeEscapeHtml(gapValue)}" size="6" style="margin-left: 0.5rem;" />
+                                </label>
+                                <label>Scheduler tick (s, or auto)
+                                    <input type="text" id="logs-stats-tick" value="${safeEscapeHtml(tickValue)}" size="6" style="margin-left: 0.5rem;" />
+                                </label>
+                                <button id="logs-stats-save" type="button">Save</button>
+                                <span class="logs-archive-status">auto = from the timings above (engine busy ${Math.round((cfg.duty || 0.7) * 100)}% of the time, never under ${statsSeconds(cfg.min_gap)}, never over ${statsSeconds(cfg.interval)}).</span>
+                            </div>
+                        </div>
+
+                        <div class="logs-stats-section">
+                            <h3>Vessel verbs today</h3>
+                            <table class="logs-stats-table">
+                                <thead><tr><th>verb</th><th>ok</th><th>failed</th><th>p50</th><th>p95</th></tr></thead>
+                                <tbody>${verbRows || '<tr><td colspan="5">none today</td></tr>'}</tbody>
+                            </table>
+                        </div>
+
+                        <div class="logs-stats-section">
+                            <h3>Last days</h3>
+                            <table class="logs-stats-table">
+                                <thead><tr><th>day</th><th>turns ok</th><th>turns failed</th><th>LLM failures</th><th>verbs ok</th><th>verbs failed</th><th>beats → action</th><th>beats → nothing</th></tr></thead>
+                                <tbody>${dayRows || '<tr><td colspan="8">no data</td></tr>'}</tbody>
+                            </table>
+                        </div>`;
+
+                    const saveBtn = document.getElementById('logs-stats-save');
+                    if (saveBtn) {
+                        saveBtn.addEventListener('click', saveStatsPacing);
+                    }
+                }
+
+                async function saveStatsPacing() {
+                    const entries = [
+                        ['VESSEL_IDLE_BEAT_ACTIVE_GAP_SEC', document.getElementById('logs-stats-gap')],
+                        ['VESSEL_TICK_SEC', document.getElementById('logs-stats-tick')],
+                    ];
+                    try {
+                        for (const [key, input] of entries) {
+                            if (!input) continue;
+                            const value = String(input.value || '').trim().toLowerCase() || 'auto';
+                            if (value !== 'auto' && !Number.isFinite(Number(value))) {
+                                throw new Error(`${key}: "${value}" is neither a number nor "auto"`);
+                            }
+                            const response = await fetch('/api/config', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ key, value }),
+                            });
+                            if (!response.ok) {
+                                throw new Error((await response.text()) || `HTTP ${response.status}`);
+                            }
+                        }
+                        if (window.showToast) window.showToast('Pacing saved', false);
+                        loadStats(true);
+                    } catch (error) {
+                        console.error('[logs] failed to save the pacing', error);
+                        if (window.showToast) window.showToast(String(error.message || 'Failed to save the pacing'), true);
+                    }
+                }
+
+                async function loadStats(silent) {
+                    if (!logsStatsOutput || logsState.loadingStats) return;
+                    logsState.loadingStats = true;
+                    if (!silent && !logsStatsOutput.querySelector('.logs-stats-cards')) {
+                        logsStatsOutput.innerHTML = '<div class="logs-empty-state">Loading statistics...</div>';
+                    }
+                    try {
+                        const days = logsStatsDays ? logsStatsDays.value : '7';
+                        const response = await fetch(`/api/stats?days=${encodeURIComponent(days)}`);
+                        const payload = await response.json();
+                        if (!response.ok || !payload.success) {
+                            throw new Error((payload && payload.error) || `HTTP ${response.status}`);
+                        }
+                        // Do not redraw under the cursor while a setting is being typed.
+                        const typing = document.activeElement && document.activeElement.id && document.activeElement.id.startsWith('logs-stats-');
+                        if (!(silent && typing && document.activeElement.tagName === 'INPUT')) {
+                            renderStats(payload);
+                        }
+                    } catch (error) {
+                        console.error('[logs] failed to load statistics', error);
+                        logsStatsOutput.innerHTML = '<div class="logs-empty-state">Failed to load statistics.</div>';
+                    } finally {
+                        logsState.loadingStats = false;
+                    }
+                }
+
+                // The page may be set up again (its sections are rebuilt): the timer must watch the NEW elements.
+                if (logsState.statsTimer) {
+                    window.clearInterval(logsState.statsTimer);
+                }
+                logsState.statsTimer = window.setInterval(() => {
+                    if (logsState.currentSubtab === 'stats' && logsStatsAuto && logsStatsAuto.checked && !document.hidden) {
+                        loadStats(true);
+                    }
+                }, 10000);
 
                 function formatFailureDate(value) {
                     if (!value) return 'Unknown time';
@@ -7884,6 +8110,16 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 if (logsReasonTrailRefreshBtn) {
                     logsReasonTrailRefreshBtn.addEventListener('click', () => {
                         loadReasonTrail();
+                    });
+                }
+                if (logsStatsRefreshBtn) {
+                    logsStatsRefreshBtn.addEventListener('click', () => {
+                        loadStats();
+                    });
+                }
+                if (logsStatsDays) {
+                    logsStatsDays.addEventListener('change', () => {
+                        loadStats();
                     });
                 }
                 if (logsReasonTrailSearch) {

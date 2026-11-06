@@ -1007,6 +1007,7 @@ class SynthWebUIInterface:
         self.app.get("/api/history/chat")(self.history_chat)
         self.app.get("/api/log-failures")(self.list_log_failures)
         self.app.delete("/api/log-failures/{failure_id}")(self.delete_log_failure)
+        self.app.get("/api/stats")(self.stats_overview)
         self.app.get("/api/dead-targets")(self.list_dead_targets)
         self.app.delete("/api/dead-targets/{target_id}")(self.delete_dead_target)
         self.app.get("/api/reason-trail")(self.list_reason_trail)
@@ -2605,6 +2606,17 @@ class SynthWebUIInterface:
         uptime = int((datetime.now(timezone.utc) - self.start_time).total_seconds())
         return JSONResponse({"uptime": uptime, "sessions": len(self.connections)})
 
+    @staticmethod
+    def _turns_today() -> int | None:
+        """Turns the engine ran today (the statistics registry's count); None when it cannot be read."""
+        try:
+            from core import stats_registry
+
+            registry = stats_registry.get_stats()
+            return registry.count("turns.ok") + registry.count("turns.failed")
+        except Exception:
+            return None
+
     async def about_summary(self) -> JSONResponse:
         """Return lightweight About tab metadata (uptime, system, and component counts)."""
         uptime = int((datetime.now(timezone.utc) - self.start_time).total_seconds())
@@ -2634,7 +2646,7 @@ class SynthWebUIInterface:
                 "uptime": uptime,
                 "sessions": sessions,
                 "components": components_count,
-                "messages_today": None,
+                "messages_today": self._turns_today(),
                 "version": version,
                 "python": python_version,
                 "platform": platform_label,
@@ -10406,6 +10418,40 @@ class SynthWebUIInterface:
         except Exception as exc:
             log_error(f"{LOG_PREFIX} Failed to delete log failure {failure_id}: {exc}")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def stats_overview(self, request: Request):
+        """Return the statistics registry (Logs > Stats): counters per day, timings, gauges, the idle beat's pacing
+        and the settings that steer it."""
+        try:
+            from core import stats_registry, vessel_beat
+            from core.config_manager import config_registry
+
+            try:
+                days = int(request.query_params.get("days", "7"))
+            except (TypeError, ValueError):
+                days = 7
+
+            def _cfg(key: str, default: Any) -> Any:
+                return config_registry.get_value(key, default, group="vessel", component="vessel")
+
+            snapshot = stats_registry.get_stats().snapshot(days=days)
+            active_gap = vessel_beat.resolve_idle_active_gap(_cfg)
+            tick = vessel_beat.resolve_tick(_cfg)
+            snapshot["config"] = {
+                "tick": "auto" if tick is None else tick,
+                "active_gap": "auto" if active_gap is None else active_gap,
+                "interval": vessel_beat.resolve_idle_interval(_cfg),
+                "arrival_interval": vessel_beat.resolve_idle_arrival_interval(_cfg),
+                "engine_rest": vessel_beat.resolve_idle_engine_rest_sec(_cfg),
+                "duty": vessel_beat.AUTO_DUTY,
+                "min_gap": vessel_beat.MIN_GAP_SEC,
+            }
+            snapshot["uptime"] = int((datetime.now(timezone.utc) - self.start_time).total_seconds())
+            snapshot["success"] = True
+            return JSONResponse(snapshot)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to build the statistics: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
     async def list_dead_targets(self, request: Request):
         """Return the dead-delivery-target registry (Logs > Dead Targets)."""
