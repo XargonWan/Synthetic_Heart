@@ -26,7 +26,7 @@ anything outside its declared verbs.
 | mod → Synth | `hello {protocol, room, capabilities, animations}` (first frame) |
 | Synth → mod | `welcome {session, assets}` or `error {code, message}` |
 | mod → Synth | `event {event_type, summary, actor, salience, data}` |
-| mod → Synth | `state {state: {position, holding, extra}}` |
+| mod → Synth | `state {state: {position, holding, extra}}`; `extra.body = {settled, busy, speaking}` says whether her body is done with what it was told to do (sent at once when `settled` changes; a mod that omits it counts as settled) |
 | Synth → mod | `action {id, action, payload}` → mod answers `action_result {id, ok, detail, data}` |
 | mod → Synth | `request_assets {animations: [...]}` → Synth answers `assets {assets}` |
 | mod → Synth | `audio {id, format, data, actor}` (the player's voice, base64, `wav`/`ogg`/`mp3`/`flac`, 8 MB max) → Synth answers `transcript {id, ok, text, reason}` |
@@ -86,6 +86,21 @@ She is never scripted. `uses_idle_beat` makes the Vessel send an **idle beat** (
   mod's `out` frame, or 45 s after a resumed session attached; `describe_surroundings()` is `None` until the first
   `state`). The first beat used to fire in the second of the connect, with "you cannot see the player, there is
   nothing near you", and was wasted.
+- **Counted from the end, not the start.** The wait is measured from the latest of: the beat's start, her arrival, the end
+  of the beat's turn (the engine free again) and the moment her body was last `settled` (`idle_anchor`, pure). It used to
+  count from the start of the beat, so a turn longer than the interval was followed at once, plus a fixed 12 s rest.
+- **Her body is waited for, not talked over** (`idle_body_eta`): a beat is not asked while a clip or a voice plays, unless
+  the body will be done before the model could answer (`lead`, below). A body busy for over a minute is taken as stuck.
+  A walk (`explore`) still holds the beat outright: its result is the next prompt. The queue is not piled on either: no
+  beat while a turn of this world already waits in it.
+- **Auto pacing** (`auto_pacing`, pure; `VESSEL_IDLE_BEAT_ACTIVE_GAP_SEC` = `auto` by default, or a number of seconds).
+  After a beat that ended in an action the wait is worked out from the measured turns (`core/stats_registry.py`): the
+  engine is busy with her turns ~70% of the time, so `wait = p50(turn) x (1/0.7 - 1)` (40 s turn: ~17 s; 15 s: ~6 s), never
+  under 3 s nor over `VESSEL_IDLE_BEAT_INTERVAL_SEC`, smoothed so a noisy turn does not make it jump. `lead` = the median
+  time from the ask to her first verb: a beat may go out that much before her body is done. With fewer than 5 recent turns
+  it is 10 s. `VESSEL_TICK_SEC` (`auto` or seconds) is how often the scheduler looks: in `auto` it sleeps until the next beat
+  is due and looks every 1.5 s while it waits on the engine, the body or the queue. The Logs > Stats tab shows the measured
+  phases (`beat.*`), what the pacing decided now, and lets both settings be changed. Each beat also logs one `[beat-timing]` line.
 - **How often** (`adaptive_idle_interval`, pure): `VESSEL_IDLE_BEAT_ARRIVAL_INTERVAL_SEC` (20 s) for the first
   `VESSEL_IDLE_BEAT_ARRIVAL_WINDOW_SEC` (180 s), then `VESSEL_IDLE_BEAT_INTERVAL_SEC` (40 s); after three beats in a
   row that ended in no action it stretches x1.5 per beat up to `VESSEL_IDLE_BEAT_MAX_INTERVAL_SEC` (180 s); a

@@ -48,6 +48,7 @@ import tempfile
 import time
 from typing import Any, Dict
 
+from core import stats_registry as stats
 from core.core_initializer import register_plugin
 from core.logging_utils import log_debug, log_info, log_warning
 from core.plugin_base import PluginBase
@@ -213,7 +214,9 @@ WORLD_VERBS: Dict[str, Dict[str, Any]] = {
             "study it in your hands; if it is too big or fixed (a TV, a wardrobe) you stand in front of it. "
             "You are told afterwards what it is and whether it is switched on, and whether you are holding "
             "it now (put_down or hand_over when you are done with it; looking closely at a second thing sets "
-            "the first one down). Give its name as it appears in what is around you."
+            "the first one down). You can reach a good two metres, so a thing on a table is fine: you do "
+            "not need to be able to walk right up to it. If the result says you could not get within "
+            "reach, read why before trying again. Give its name as it appears in what is around you."
         ),
         "required_fields": ["target"],
         "optional_fields": [],
@@ -322,6 +325,14 @@ class RetroXRConnector(ExplorerMixin, VesselConnectorBase):
         # Where the body was at the last probe / walk (exploration measures a leg from it).
         self._explore_pos: Vec | None = None
         self._journal: "collections.deque[tuple[float, str]]" = collections.deque(maxlen=_JOURNAL_MAX)
+        # What her body is doing, from the mod's ``state`` frames (``extra.body``): the idle beat is not asked while
+        # an action still plays, and is asked early enough that its answer lands as the body is done. A mod that does
+        # not say counts as settled. ``_act_starts``: when each verb she chose began (``time.monotonic()``).
+        self._body_settled = True
+        self._busy_since: float | None = None
+        self._settled_since = 0.0
+        self._last_verb = ""
+        self._act_starts: "collections.deque[float]" = collections.deque(maxlen=32)
 
     # ------------------------------------------------------------------
     # Socket ownership (driven by the route in plugins/rift_vessel/retroxr/api.py)
@@ -332,6 +343,8 @@ class RetroXRConnector(ExplorerMixin, VesselConnectorBase):
         self._ws = ws
         self._hello = dict(hello or {})
         self._state = {}
+        self._body_settled = True
+        self._busy_since = None
         self.last_error = None
 
     def owns(self, ws: Any) -> bool:
@@ -617,6 +630,50 @@ class RetroXRConnector(ExplorerMixin, VesselConnectorBase):
     def idle_journal(self) -> "list[tuple[float, str]]":
         return list(self._journal)
 
+    def _note_body_state(self, state: Dict[str, Any]) -> None:
+        """Read ``state.extra.body`` (``settled``): when she was busy and for how long, and when she was done."""
+        extra = state.get("extra")
+        body = extra.get("body") if isinstance(extra, dict) else None
+        if not isinstance(body, dict) or "settled" not in body:
+            # A mod that does not say: never hold a beat for a body we cannot see.
+            self._body_settled = True
+            self._busy_since = None
+            return
+        settled = bool(body.get("settled"))
+        now = time.monotonic()
+        if settled and not self._body_settled:
+            if self._busy_since is not None:
+                stats.observe("body.busy_seconds", now - self._busy_since, verb=self._last_verb or "none")
+            self._busy_since = None
+            self._settled_since = now
+        elif not settled and self._body_settled:
+            self._busy_since = now
+        self._body_settled = settled
+
+    def idle_settled_since(self) -> float:
+        """When her body was last done with what it was doing (``time.monotonic()``; 0.0: not known)."""
+        return self._settled_since
+
+    def idle_body_eta(self) -> float | None:
+        """Seconds until her body is done: 0.0 when it is, an estimate from how long the last such verbs took, or
+        ``None`` when it is busy and that is not known. A body "busy" for over a minute is taken as stuck (0.0), so
+        a flag that never clears cannot freeze the beat."""
+        if self._body_settled:
+            return 0.0
+        from core.vessel_beat import BODY_BUSY_MAX_SEC
+
+        busy_for = time.monotonic() - (self._busy_since or time.monotonic())
+        if busy_for > BODY_BUSY_MAX_SEC:
+            return 0.0
+        seen = stats.get_stats().timing("body.busy_seconds", max_age=3600.0, verb=self._last_verb or "none")
+        if seen["count"] < 3:
+            return None
+        return max(0.0, float(seen["p50"]) - busy_for)
+
+    def idle_act_starts(self) -> "list[float]":
+        """When each verb she chose began (``time.monotonic()``), newest last: the idle beat times its first verb."""
+        return list(self._act_starts)
+
     def describe_surroundings(self) -> str | None:
         """What she can see around her, in words, for "what do you want to do?"."""
         if not self.is_connected:
@@ -682,6 +739,7 @@ class RetroXRConnector(ExplorerMixin, VesselConnectorBase):
             state = msg.get("state")
             if isinstance(state, dict):
                 self._state = state
+                self._note_body_state(state)
             return
         if kind == "event":
             await self._dispatch_event(msg)
@@ -824,6 +882,9 @@ class RetroXRConnector(ExplorerMixin, VesselConnectorBase):
     # ------------------------------------------------------------------
 
     async def act(self, action: str, payload: Dict[str, Any]) -> VesselActionResult:
+        if str(action or "") != "status":
+            self._act_starts.append(time.monotonic())
+            self._last_verb = str(action or "")
         result = await self._act(action, payload)
         self._journal_action(str(action or ""), payload, result)
         return result
@@ -964,12 +1025,17 @@ class RetroXRConnector(ExplorerMixin, VesselConnectorBase):
 
         if timeout is None:
             timeout = _LONG_ACTION_TIMEOUT_SEC if verb in _LONG_VERBS else _ACTION_TIMEOUT_SEC
+        asked = time.monotonic()
         try:
-            return await asyncio.wait_for(fut, timeout=timeout)
+            result = await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.TimeoutError:
             self._pending.pop(action_id, None)
             log_warning(f"{LOG_PREFIX} {verb!r} not answered in {timeout:.0f}s")
+            stats.incr("vessel.verb.timeout", verb=verb)
             return VesselActionResult(ok=False, detail="timeout")
+        stats.observe("vessel.verb.seconds", time.monotonic() - asked, verb=verb)
+        stats.incr("vessel.verb.ok" if result.ok else "vessel.verb.failed", verb=verb)
+        return result
 
     # ------------------------------------------------------------------
     # Exploration: what the core asks of a body (plugins/rift_vessel/exploration.py)

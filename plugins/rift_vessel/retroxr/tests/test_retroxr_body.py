@@ -368,10 +368,11 @@ class _Conn:
 
 @pytest.fixture
 def iface(monkeypatch: pytest.MonkeyPatch):
-    from core import vessel_session_manager as vsm
+    from core import stats_registry, vessel_session_manager as vsm
     from core.vessel_registry import VESSEL_REGISTRY
     from interface.vessel_interface import VesselInterface
 
+    stats_registry.reset_for_tests()  # the auto pacing reads the statistics: each test starts from none
     monkeypatch.setattr(vsm.vessel_session_manager, "has_active_session", lambda: True)
     monkeypatch.setattr("interface.vessel_interface.get_vessel_session_manager", lambda: vsm.vessel_session_manager)
     monkeypatch.setattr(VESSEL_REGISTRY, "_instances", {})
@@ -407,7 +408,7 @@ async def test_idle_beat_waits_until_the_engine_has_rested(iface, monkeypatch: p
     monkeypatch.setattr(message_queue, "consumer_idle_seconds", lambda **_kw: 0.0)  # a turn in flight / queued
     await vi._maybe_run_idle_beat()
     assert sent == [], "a beat was started on a busy engine"
-    monkeypatch.setattr(message_queue, "consumer_idle_seconds", lambda **_kw: 5.0)  # free, but only for 5 s of 12
+    monkeypatch.setattr(message_queue, "consumer_idle_seconds", lambda **_kw: 2.0)  # free, but only for 2 s of 3
     await vi._maybe_run_idle_beat()
     assert sent == [], "a beat was started before the engine had rested"
     monkeypatch.setattr(message_queue, "consumer_idle_seconds", lambda **_kw: 15.0)
@@ -669,8 +670,8 @@ def test_the_idle_config_has_sane_clamps() -> None:
     assert vessel_beat.resolve_idle_arrival_interval(_cfg({"VESSEL_IDLE_BEAT_ARRIVAL_INTERVAL_SEC": 1})) == 10
     assert vessel_beat.resolve_idle_arrival_window(_cfg({})) == 180
     assert vessel_beat.resolve_idle_max_interval(_cfg({})) == 180
-    assert vessel_beat.resolve_idle_engine_rest_sec(_cfg({})) == 12
-    assert vessel_beat.resolve_idle_engine_rest_sec(_cfg({"VESSEL_IDLE_BEAT_ENGINE_REST_SEC": "x"})) == 12
+    assert vessel_beat.resolve_idle_engine_rest_sec(_cfg({})) == 3
+    assert vessel_beat.resolve_idle_engine_rest_sec(_cfg({"VESSEL_IDLE_BEAT_ENGINE_REST_SEC": "x"})) == 3
 
 
 def test_the_idle_prompt_carries_facts_not_orders() -> None:
@@ -898,7 +899,7 @@ async def test_every_reason_for_holding_a_beat_is_logged(iface, rested, caplog: 
     finally:
         vi_mod.log_info = orig
     assert any("Idle beat held (not_ready)" in m for m in logged), logged
-    assert any("Idle beat held (engine_busy)" in m and "2s of the 12s" in m for m in logged), logged
+    assert any("Idle beat held (engine_busy)" in m and "2s of the 3s" in m for m in logged), logged
 
 
 # -- her own aims: kept by Synth, never sent to the mod ------------------------
@@ -1206,6 +1207,7 @@ async def test_how_long_a_turn_takes_is_measured_and_the_next_walk_follows_it(if
     await vi._maybe_run_idle_beat()
     assert vi._turn_latency.samples == 1 and 11.0 < vi._turn_latency.value() < 13.0, vi._turn_latency.value()
     vi._last_idle_beat_at = 0.0
+    vi._idle_turn_done_at = 0.0  # the interval counts from the end of the last turn: forget it to be due again
     await vi._maybe_run_idle_beat()
     assert conn.budget == pytest.approx(40.0 + vi._turn_latency.value(), abs=0.5)
 
@@ -1248,3 +1250,160 @@ async def test_the_end_of_a_walk_counts_as_the_beat_it_replaces(iface, rested, m
     assert vi._idle_pending is True and now - 5 < vi._last_idle_beat_at <= asyncio.get_event_loop().time()
     await vi.on_world_event("retroxr", "chat", "someone said hi")
     assert vi._last_idle_beat_at >= now - 5, "only a *_done does it"
+
+
+# ---------------------------------------------------------------------------
+# Pacing: counted from the end, her body waited for, the queue not piled on
+# ---------------------------------------------------------------------------
+
+
+class _Body(_Ready):
+    """A connector whose body can be busy (``eta``: None unknown, 0.0 done, else seconds to go)."""
+
+    def __init__(self, ready: float | None) -> None:
+        super().__init__(ready)
+        self.eta: float | None = 0.0
+        self.settled_since = 0.0
+        self.starts: list[float] = []
+
+    def idle_body_eta(self) -> float | None:
+        return self.eta
+
+    def idle_settled_since(self) -> float:
+        return self.settled_since
+
+    def idle_act_starts(self) -> list[float]:
+        return list(self.starts)
+
+
+async def test_a_turn_longer_than_the_interval_is_not_followed_at_once(iface, rested) -> None:
+    vi, reg, sent = iface
+    now = asyncio.get_event_loop().time()
+    conn = _Body(ready=now - 10_000)
+    reg._instances["retroxr"] = conn
+    await vi._maybe_run_idle_beat()
+    assert len(sent) == 1
+    # The turn took 70 s (longer than the 40 s interval) and ended 2 s ago, having done something.
+    vi._last_idle_beat_at = now - 72
+    conn.starts = [now - 50]
+    conn.journal = [(now - 30, "emote wave")]
+    rested["free"] = 2.0
+    await vi._maybe_run_idle_beat()
+    assert len(sent) == 1, "the beat's start was 72 s ago, but she finished 2 s ago: not due"
+    assert vi._idle_acted_last is False, "the outcome waits for the engine to rest 3 s"
+    rested["free"] = 4.0
+    await vi._maybe_run_idle_beat()
+    assert vi._idle_acted_last is True
+    assert len(sent) == 1, "acted: the wait is the short gap (10 s without measurements), counted from the turn's end"
+    vi._idle_turn_done_at = now - 11
+    rested["free"] = 11.0
+    await vi._maybe_run_idle_beat()
+    assert len(sent) == 2
+
+
+async def test_no_beat_while_her_body_is_still_busy_unless_it_will_be_done_in_time(iface, rested) -> None:
+    vi, reg, sent = iface
+    now = asyncio.get_event_loop().time()
+    conn = _Body(ready=now - 10_000)
+    conn.eta = None  # busy, end unknown
+    reg._instances["retroxr"] = conn
+    await vi._maybe_run_idle_beat()
+    assert sent == [], "a clip is still playing"
+    conn.eta = 30.0  # no measured lead (the first verb's time is unknown): wait for the body
+    await vi._maybe_run_idle_beat()
+    assert sent == []
+    conn.eta = 0.0
+    await vi._maybe_run_idle_beat()
+    assert len(sent) == 1
+
+
+async def test_the_lead_lets_a_beat_go_out_just_before_her_body_is_done(iface, rested) -> None:
+    from core import stats_registry
+
+    vi, reg, sent = iface
+    now = asyncio.get_event_loop().time()
+    conn = _Body(ready=now - 10_000)
+    reg._instances["retroxr"] = conn
+    for _ in range(6):  # six measured beats: the turn takes 40 s, its first verb 20 s after the ask
+        stats_registry.observe("beat.ask_to_turn_done", 40.0)
+        stats_registry.observe("beat.ask_to_first_verb", 20.0)
+    conn.eta = 30.0
+    await vi._maybe_run_idle_beat()
+    assert sent == [], "30 s to go, the first verb would come in 20 s"
+    conn.eta = 15.0
+    await vi._maybe_run_idle_beat()
+    assert len(sent) == 1, "done in 15 s, before the model can answer: ask now"
+
+
+async def test_no_beat_while_a_turn_of_this_world_already_waits_in_the_queue(iface, rested, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import message_queue
+
+    vi, reg, sent = iface
+    now = asyncio.get_event_loop().time()
+    reg._instances["retroxr"] = _Body(ready=now - 10_000)
+    waiting = [{"interface_path": "vessel/retroxr/root"}, {"interface_path": "telegram_bot/1"}]
+    monkeypatch.setattr(message_queue, "snapshot_queue", lambda limit=500: waiting)
+    await vi._maybe_run_idle_beat()
+    assert sent == [], "her own turn is already waiting"
+    waiting[:] = [{"interface_path": "telegram_bot/1"}]
+    await vi._maybe_run_idle_beat()
+    assert len(sent) == 1, "another world's queue is not hers"
+
+
+async def test_the_scheduler_sleeps_until_the_next_beat_is_due(iface, rested) -> None:
+    vi, reg, sent = iface
+    now = asyncio.get_event_loop().time()
+    reg._instances["retroxr"] = _Body(ready=now - 10_000)
+    await vi._maybe_run_idle_beat()
+    assert len(sent) == 1
+    rested["free"] = 100.0
+    await vi._maybe_run_idle_beat()  # the outcome is read: nothing happened, the next one falls due in 40 s
+    assert vi._idle_due_at is not None
+    wake = vi._resolve_tick_sec()
+    assert 1.0 <= wake <= 10.0, wake
+    vi._idle_waiting = True
+    assert vi._resolve_tick_sec() == vessel_beat.POLL_WAITING_SEC
+
+
+async def test_a_motor_world_keeps_the_motor_cadence(iface, rested) -> None:
+    vi, reg, sent = iface
+    reg._instances["minecraft"] = SimpleNamespace(is_connected=True, uses_idle_beat=False)
+    assert vi._resolve_tick_sec() == max(vi._MIN_TICK_SEC, min(vi._TICK_SEC, 3.0))
+
+
+def test_the_body_state_frames_tell_the_connector_when_she_is_busy_and_done(monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import stats_registry
+
+    stats_registry.reset_for_tests()
+    conn = RetroXRConnector()
+    clock = {"t": 1000.0}
+    monkeypatch.setattr("plugins.rift_vessel.retroxr.retroxr.time.monotonic", lambda: clock["t"])
+    busy = {"extra": {"body": {"settled": False, "busy": True, "speaking": False}}}
+    done = {"extra": {"body": {"settled": True, "busy": False, "speaking": False}}}
+    assert conn.idle_body_eta() == 0.0, "a body not yet seen is not held"
+    conn._last_verb = "emote"
+    conn._note_body_state(busy)
+    assert conn.idle_body_eta() is None, "busy, and no emote has been timed yet"
+    clock["t"] += 6.0
+    conn._note_body_state(done)
+    assert conn.idle_body_eta() == 0.0 and conn.idle_settled_since() == clock["t"]
+    for _ in range(3):  # three emotes of 6 s
+        clock["t"] += 5.0
+        conn._note_body_state(busy)
+        clock["t"] += 6.0
+        conn._note_body_state(done)
+    clock["t"] += 5.0
+    conn._note_body_state(busy)
+    clock["t"] += 2.0
+    assert conn.idle_body_eta() == pytest.approx(4.0, abs=0.1), "6 s typical, 2 s in"
+    clock["t"] += 100.0
+    assert conn.idle_body_eta() == 0.0, "busy for over a minute: stuck, not busy"
+
+
+def test_a_mod_that_does_not_report_its_body_is_never_waited_for() -> None:
+    conn = RetroXRConnector()
+    conn._note_body_state({"extra": {"entities": []}})
+    assert conn.idle_body_eta() == 0.0
+    conn._body_settled = False
+    conn._note_body_state({"extra": {"entities": []}})
+    assert conn._body_settled is True
