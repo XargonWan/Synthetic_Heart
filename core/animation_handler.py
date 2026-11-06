@@ -45,6 +45,7 @@ class AnimationState(Enum):
     SIT = "sit"  # sitting down (a chair, a sofa; bed variants live in sit/bed/)
     CROUCH = "crouch"  # crouching, e.g. to reach something on the floor (its play_once clip stands her up)
     GAMING = "gaming"  # playing a game with a controller: the clip moves the upper body only (mask)
+    GIVE = "give"  # holding something out in both hands to someone: the upper body only (mask), tools/make_give_clip.py
 
 
 AnimationStateChangedCallback = Callable[
@@ -60,6 +61,7 @@ ANIMATION_STATE_PRIORITIES = {
     AnimationState.SIT: 1,  # Postures give way to everything that talks or thinks
     AnimationState.CROUCH: 1,
     AnimationState.GAMING: 2,
+    AnimationState.GIVE: 2,
     AnimationState.WRITE: 3,  # Writing - low priority
     AnimationState.TALK: 5,  # Talking - medium priority
     AnimationState.THINK: 10,  # Thinking - highest priority, cannot be interrupted

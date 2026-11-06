@@ -59,9 +59,22 @@ def test_gaming_moves_the_upper_body_only(handler):
     assert _descriptor(REI_ANIMS / "gaming" / "Gaming-sitting.fbx.json")["mask"] == "upper_body"
 
 
+def test_give_holds_both_arms_out_with_the_upper_body_only(handler):
+    """The pose of handing something over (tools/make_give_clip.py): a layer, brought up once, then held and repeated."""
+    assert AnimationState("give").value == "give"
+    p = ANIMATION_STATE_PRIORITIES
+    assert 0 < p[AnimationState.GIVE] < p[AnimationState.WRITE]
+    assert "Give.fbx" in handler.get_animation_variants("give")["loop"]
+    d = _descriptor(REI_ANIMS / "give" / "Give.fbx.json")
+    assert d["mask"] == "upper_body"
+    assert d["intro"]["end_frame"] == d["loop"]["start_frame"], "the arms come up, then the pose is held: one run of frames"
+    assert d["loop"]["end_frame"] - d["loop"]["start_frame"] >= 30, "a held pose is longer than a second at 30 fps"
+    assert "outro" not in d and "play_once" not in d, "a layer loops until it is taken off; it has no way out of its own"
+
+
 def test_the_manifest_offers_the_new_states(handler):
     states = {e.get("state") for e in handler.get_animation_manifest()["animations"].values()}
-    assert {"sit", "crouch", "gaming"} <= states
+    assert {"sit", "crouch", "gaming", "give"} <= states
 
 
 def test_thinking_has_a_loop_that_closes_on_itself():
