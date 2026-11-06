@@ -10420,35 +10420,24 @@ class SynthWebUIInterface:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     async def stats_overview(self, request: Request):
-        """Return the statistics registry (Logs > Stats): counters per day, timings, gauges, the idle beat's pacing
-        and the settings that steer it."""
+        """Return the stat server's report (Logs > Stats): the sections that plugins and the core registered, each with
+        the blocks that have data in the chosen period (``?period=1h|24h|3d|7d|14d|all``, or the older ``?days=N``)."""
         try:
-            from core import stats_registry, vessel_beat
-            from core.config_manager import config_registry
+            from core import stats_registry
 
-            try:
-                days = int(request.query_params.get("days", "7"))
-            except (TypeError, ValueError):
-                days = 7
-
-            def _cfg(key: str, default: Any) -> Any:
-                return config_registry.get_value(key, default, group="vessel", component="vessel")
-
-            snapshot = stats_registry.get_stats().snapshot(days=days)
-            active_gap = vessel_beat.resolve_idle_active_gap(_cfg)
-            tick = vessel_beat.resolve_tick(_cfg)
-            snapshot["config"] = {
-                "tick": "auto" if tick is None else tick,
-                "active_gap": "auto" if active_gap is None else active_gap,
-                "interval": vessel_beat.resolve_idle_interval(_cfg),
-                "arrival_interval": vessel_beat.resolve_idle_arrival_interval(_cfg),
-                "engine_rest": vessel_beat.resolve_idle_engine_rest_sec(_cfg),
-                "duty": vessel_beat.AUTO_DUTY,
-                "min_gap": vessel_beat.MIN_GAP_SEC,
-            }
-            snapshot["uptime"] = int((datetime.now(timezone.utc) - self.start_time).total_seconds())
-            snapshot["success"] = True
-            return JSONResponse(snapshot)
+            period = stats_registry.Period.parse(
+                request.query_params.get("period"), request.query_params.get("days")
+            )
+            report = stats_registry.get_stats().report(period)
+            report["periods"] = [
+                {"key": key, "label": choice[0]}
+                for key, choice in stats_registry.Period.CHOICES.items()
+            ]
+            report["uptime"] = int(
+                (datetime.now(timezone.utc) - self.start_time).total_seconds()
+            )
+            report["success"] = True
+            return JSONResponse(report)
         except Exception as exc:
             log_error(f"{LOG_PREFIX} Failed to build the statistics: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)

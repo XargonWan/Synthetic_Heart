@@ -90,20 +90,22 @@ def test_clearing_with_nothing_in_flight_counts_nothing() -> None:
 
 def test_api_stats_shape(client: TestClient) -> None:
     stats_registry.incr("turns.ok", interface="vessel")
-    stats_registry.observe("beat.ask_to_turn_done", 40.0)
-    stats_registry.info("beat.pacing", {"mode": "auto", "gap": 17.0})
-    body = client.get("/api/stats?days=3").json()
+    stats_registry.observe("turn.seconds", 40.0, interface="vessel", kind="vessel")
+    body = client.get("/api/stats?period=3d").json()
     assert body["success"] is True
-    assert body["days"][body["today"]]["turns.ok"] == 1
-    assert body["timings"]["beat.ask_to_turn_done"]["p50"] == 40.0
-    assert body["info"]["beat.pacing"]["mode"] == "auto"
-    cfg = body["config"]
-    assert cfg["tick"] == "auto" and cfg["active_gap"] == "auto"
-    assert cfg["interval"] == 40 and cfg["engine_rest"] == 3
+    assert body["period"]["key"] == "3d"
+    assert {p["key"] for p in body["periods"]} >= {"1h", "24h", "7d", "all"}
+    turns = next(sec for sec in body["sections"] if sec["source"] == "core.turns")
+    cards = next(b for b in turns["blocks"] if b["type"] == "cards")["items"]
+    average = next(i for i in cards if i["label"] == "average turn")
+    assert average["value"] == 40.0
+    assert "config" not in body  # the pacing settings live in the vessel's settings now
 
 
-def test_api_stats_survives_a_bad_days_parameter(client: TestClient) -> None:
+def test_api_stats_survives_a_bad_period(client: TestClient) -> None:
+    assert client.get("/api/stats?period=banana").json()["period"]["key"] == "7d"
     assert client.get("/api/stats?days=banana").json()["success"] is True
+    assert client.get("/api/stats?days=3").json()["period"]["key"] == "3d"
 
 
 def test_about_summary_reports_the_turns_of_today(client: TestClient) -> None:
@@ -125,5 +127,8 @@ def test_the_logs_page_has_a_stats_tab_and_its_script() -> None:
     assert (
         "function loadStats" in js
         and "nextSubtab === 'stats'" in js
-        and "/api/stats" in js
+        and "/api/stats?period=" in js
     )
+    # The page draws whatever sections the server sends; it holds no plugin's pacing inputs any more.
+    assert "logs-stats-gap" not in js and "saveStatsPacing" not in js
+    assert 'value="all"' in html
