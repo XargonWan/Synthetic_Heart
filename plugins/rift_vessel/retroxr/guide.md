@@ -100,7 +100,8 @@ She is never scripted. `uses_idle_beat` makes the Vessel send an **idle beat** (
   time from the ask to her first verb: a beat may go out that much before her body is done. With fewer than 5 recent turns
   it is 10 s. `VESSEL_TICK_SEC` (`auto` or seconds) is how often the scheduler looks: in `auto` it sleeps until the next beat
   is due and looks every 1.5 s while it waits on the engine, the body or the queue. The Logs > Stats tab shows the measured
-  phases (`beat.*`), what the pacing decided now, and lets both settings be changed. Each beat also logs one `[beat-timing]` line.
+  phases (`beat.*`), and what the pacing decided now; the vessel registers that block itself (`core/vessel_stats.py`).
+  Both settings are changed in the Vessel's settings (advanced), not on the Stats page. Each beat also logs one `[beat-timing]` line.
 - **How often** (`adaptive_idle_interval`, pure): `VESSEL_IDLE_BEAT_ARRIVAL_INTERVAL_SEC` (20 s) for the first
   `VESSEL_IDLE_BEAT_ARRIVAL_WINDOW_SEC` (180 s), then `VESSEL_IDLE_BEAT_INTERVAL_SEC` (40 s); after three beats in a
   row that ended in no action it stretches x1.5 per beat up to `VESSEL_IDLE_BEAT_MAX_INTERVAL_SEC` (180 s); a
