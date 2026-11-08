@@ -192,6 +192,13 @@ begin
     guards against exactly that. No braces inside this comment: Inno comments
     do not nest, so an inner one would end the comment early. }
   LogPath := ExpandConstant('{%TEMP}\') + LogName;
+  if not FileExists(LogPath) then
+  begin
+    { The step died before it could write anything (usually the download or
+      the very first command), so the path below does not exist yet. Say that
+      plainly instead of sending the user hunting for a file that is not there. }
+    Detail := Detail + ' (No log file was written — setup failed before logging started. Check your connection and run the installer again.)';
+  end;
   MsgBox(Title + #13#10#13#10 + Detail + #13#10#13#10 +
     'The log is here:' + #13#10 + LogPath + #13#10#13#10 +
     'You can retry this step yourself from a terminal in:' + #13#10 + ExpandConstant('{app}'),

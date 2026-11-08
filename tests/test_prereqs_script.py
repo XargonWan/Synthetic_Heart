@@ -23,6 +23,21 @@ def script_text() -> str:
     return PREREQS.read_text(encoding="utf-8-sig")
 
 
+def test_uv_managed_python_is_prewarmed_before_bootstrap() -> None:
+    """A broken managed interpreter surfaces as a bare `uv run` exit code
+    before bootstrap.py ever starts — with no bootstrap log at all. That is
+    exactly what a live run produced. uv must be asked to provision Python
+    during prereqs, while failures still land in this log with a message."""
+    text = script_text()
+    assert "python install" in text, (
+        "Ensure-Uv must provision uv-managed Python, not just the uv binary"
+    )
+    assert "python find" in text, (
+        "a healthy interpreter must be verified first so a reinstall only "
+        "happens (with --force for orphaned shims) when it is actually broken"
+    )
+
+
 def test_unexpected_failures_are_logged_rather_than_swallowed() -> None:
     """`$ErrorActionPreference = 'Stop'` plus no trap is a silent exit code 1.
 
