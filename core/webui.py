@@ -14424,6 +14424,7 @@ class SynthWebUIInterface:
         const ws = new WebSocket(`${protocol}://${window.location.host}/logs`);
         const levels = {{ info: true, warning: true, error: true, debug: true }};
         const lines = [];
+        const MAX_LINES = 1000;
 
         const levelFromLine = (line) => {{
             const match = line.match(/\\[(INFO|WARNING|ERROR|DEBUG)\\]/i);
@@ -14449,6 +14450,9 @@ class SynthWebUIInterface:
 
         ws.addEventListener('message', (event) => {{
             lines.push(event.data);
+            // hard cap — a reconnect replays 200 lines and the feed
+            // never stops; uncapped this grew GBs of DOM overnight.
+            if (lines.length > MAX_LINES) lines.splice(0, lines.length - MAX_LINES);
             render();
         }});
     </script>
