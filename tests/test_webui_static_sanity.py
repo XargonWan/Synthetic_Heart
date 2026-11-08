@@ -123,3 +123,11 @@ def test_preset_apply_updates_visible_model_from_apply_response() -> None:
     apply_handler = text[apply_start:apply_end]
     assert "await loadComponentsSummary()" in apply_handler
     assert "syncAppliedEnginePreset(data)" in apply_handler
+
+
+def test_agent_tab_pollers_stop_on_leave() -> None:
+    """Revisiting the agent tab must not stack pollers; leaving stops them."""
+    agent = Path("res/synth_webui/js/agent.js").read_text(encoding="utf-8")
+    assert "stopAgentTab" in agent
+    hist = Path("res/synth_webui/js/history.js").read_text(encoding="utf-8")
+    assert "stopAgentTab" in hist
