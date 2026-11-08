@@ -104,11 +104,18 @@ export function loadMixamoAnimation( url, vrm ) {
 			const _quatA = new THREE.Quaternion();
 			const _vec3 = new THREE.Vector3();
 
-			// Adjust with reference to hips height.
+			// Adjust with reference to hips height. Prefer the rest-pose height
+			// cached at model load (vrm.userData.restHipsHeight): measuring
+			// here reads the CURRENT pose, which may be mid-animation when
+			// clips load lazily on state changes, producing a wrong scale
+			// that sinks the model's feet through the floor.
 			const motionHipsHeight = asset.getObjectByName( 'mixamorigHips' ).position.y;
-			const vrmHipsY = vrm.humanoid?.getNormalizedBoneNode( 'hips' ).getWorldPosition( _vec3 ).y;
-			const vrmRootY = vrm.scene.getWorldPosition( _vec3 ).y;
-			const vrmHipsHeight = Math.abs( vrmHipsY - vrmRootY );
+			let vrmHipsHeight = vrm.userData?.restHipsHeight;
+			if ( !( typeof vrmHipsHeight === 'number' && isFinite( vrmHipsHeight ) && vrmHipsHeight > 0 ) ) {
+				const vrmHipsY = vrm.humanoid?.getNormalizedBoneNode( 'hips' ).getWorldPosition( _vec3 ).y;
+				const vrmRootY = vrm.scene.getWorldPosition( _vec3 ).y;
+				vrmHipsHeight = Math.abs( vrmHipsY - vrmRootY );
+			}
 			const hipsPositionScale = vrmHipsHeight / motionHipsHeight;
 			
 			let processedBones = 0;
