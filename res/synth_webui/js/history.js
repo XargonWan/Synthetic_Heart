@@ -1941,6 +1941,19 @@ document.addEventListener('DOMContentLoaded', () => {
         }, true);
         window.__synth_history_delegated = true;
     }
+
+    // Live 12-hour clock toggle: re-render the visible history sub-tab so its
+    // timestamps pick up the new format without a page refresh. Hidden tabs
+    // re-render on next open/filter through the normal path.
+    window.refreshHistoryTimestamps = function() {
+        try {
+            const sub = historyState.currentSubTab;
+            if (!sub || sub === 'agent') return;
+            const panel = document.querySelector(`#subtab-${sub}`);
+            if (!panel || panel.offsetParent === null) return;
+            loadHistoryData(sub);
+        } catch (e) { /* ignore */ }
+    };
 });
 
 })();

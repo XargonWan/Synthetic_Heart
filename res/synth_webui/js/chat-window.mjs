@@ -114,7 +114,7 @@ function injectChatStyles() {
         .message-day .day-label { background: rgba(255,255,255,0.04); color: var(--text); padding: 0.35rem 0.8rem; border-radius: 999px; font-weight:600; font-size:0.9rem; }
         /* Message timestamp in bubble */
         .bubble { position: relative; padding: 1rem 1.2rem 1.8rem; }
-        .bubble-time { position: absolute; right: 8px; bottom: 6px; font-size: 0.75rem; color: var(--text-soft); opacity: 0.9; }
+        .bubble-time { position: absolute; right: 8px; bottom: 6px; font-size: 0.75rem; color: inherit; }
         /* Synth bubbles with attached TTS audio – click to replay */
         .bubble.synth.clickable-audio { cursor: pointer; }
         .bubble.synth.clickable-audio::after {
@@ -410,6 +410,32 @@ function safeEscapeHtml(text) {
     return div.innerHTML;
 }
 
+// Format a chat bubble timestamp honoring the 12-hour toggle. Reused by
+// window.refreshChatTimestamps so already-rendered messages update live.
+function formatBubbleTime(date) {
+    try {
+        const opts = { hour: 'numeric', minute: '2-digit' };
+        try {
+            if (window.SynthUtils && window.SynthUtils.is12Hour) opts.hour12 = !!window.SynthUtils.is12Hour();
+        } catch (e) { /* default locale behavior */ }
+        return date.toLocaleTimeString(undefined, opts);
+    } catch (e) {
+        const hh = date.getHours().toString().padStart(2,'0');
+        const mm = date.getMinutes().toString().padStart(2,'0');
+        return `${hh}:${mm}`;
+    }
+}
+
+window.refreshChatTimestamps = function() {
+    try {
+        document.querySelectorAll('.bubble-time[data-ts]').forEach((el) => {
+            const ms = Number(el.getAttribute('data-ts'));
+            if (!ms) return;
+            el.textContent = formatBubbleTime(new Date(ms));
+        });
+    } catch (e) { /* ignore */ }
+};
+
 function addTypingIndicator() {
     try {
         const messagesEl = document.getElementById('messages');
@@ -482,15 +508,7 @@ function appendMessage(container, sender, text, ts, attachments) {
     bubble.className = `bubble ${sender}`;
     const senderLabel = sender === 'synth' ? (window.SynthConfig && (window.SynthConfig.SYNTH_NAME || window.SynthConfig.BRAND_NAME) ? (window.SynthConfig.SYNTH_NAME || window.SynthConfig.BRAND_NAME) : 'SyntH') : 'You';
 
-    // Format time for the small timestamp
-    let timeText = '';
-    try {
-        timeText = dt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
-    } catch (e) {
-        const hh = dt.getHours().toString().padStart(2,'0');
-        const mm = dt.getMinutes().toString().padStart(2,'0');
-        timeText = `${hh}:${mm}`;
-    }
+    const timeText = formatBubbleTime(dt);
 
     // Use safe-escaped content and preserve newlines
     const escaped = safeEscapeHtml(text).replace(/\n/g, '<br>');
@@ -519,7 +537,7 @@ function appendMessage(container, sender, text, ts, attachments) {
             attachmentHtml = `<div class="bubble-attachments">${parts.join('')}</div>`;
         }
     }
-    bubble.innerHTML = `<div class="bubble-sender">${senderLabel}</div><div class="bubble-content">${escaped}</div>${attachmentHtml}<div class="bubble-time">${timeText}</div>`;
+    bubble.innerHTML = `<div class="bubble-sender">${senderLabel}</div><div class="bubble-content">${escaped}</div>${attachmentHtml}<div class="bubble-time" data-ts="${dt.getTime()}">${timeText}</div>`;
     wrapper.appendChild(bubble);
     container.appendChild(wrapper);
     // Scroll the actual scrollable ancestor (.synth-chat-body) to the bottom.
