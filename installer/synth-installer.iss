@@ -90,7 +90,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Messages]
 WelcomeLabel1=Welcome to the {#AppName} setup
-WelcomeLabel2=This installs {#AppName} for you and nothing else.%n%nIt sets up its own private PostgreSQL and Python environment inside your user folder, so it needs no administrator rights and changes nothing system-wide.%n%nWhen it finishes it opens a page in your browser where you tell it who you are and which AI service to use. Everything else is already done.%n%nClick Next to continue.
+WelcomeLabel2=This installs {#AppName} for you and nothing else.%n%nIt sets up its own private PostgreSQL and Python environment inside your user folder, so it needs no administrator rights and changes nothing system-wide.%n%nWhen it finishes it opens a page in your browser where you tell it who you are and which AI service to use. Everything else is already done.
 FinishedHeadingLabel=Setup is complete
 FinishedLabel=Setup has finished installing {#AppName}.%n%nIt is starting now and your browser will open the setup page. If it does not, use the {#AppShortName} shortcut in the Start Menu.
 ReadyLabel1={#AppName} is ready to install.

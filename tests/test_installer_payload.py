@@ -350,3 +350,17 @@ def test_the_uninstaller_stops_the_database_first(iss_text: str) -> None:
     """Windows will not delete a directory a running process holds open."""
     assert "--stop-cluster" in iss_text
     assert "start_synth.py" in iss_text and "--stop" in iss_text
+
+
+def test_the_wizard_is_not_told_to_click_next_twice(iss_text: str) -> None:
+    """Inno prints ClickNext under a page's own text, so writing it again duplicates it.
+
+    The welcome page ended with a hand-written "Click Next to continue." directly
+    above Inno's own "Click Next to continue, or Cancel to exit Setup." (Default.isl
+    carries it as ClickNext), so the page gave the same instruction twice.
+    """
+    messages = iss_text.split("[Messages]", 1)[1].split("\n[", 1)[0]
+    values = "\n".join(
+        line for line in messages.splitlines() if not line.lstrip().startswith(";")
+    )
+    assert "Click Next" not in values
