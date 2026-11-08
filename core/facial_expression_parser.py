@@ -4,8 +4,9 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
-# Pattern matches [em], [em_name], [em_name:0.5], [em:0.3]
-_EXPR = re.compile(r"\[em(?:_([a-z_]+))?(?::([0-9.]+))?\]")
+# Pattern matches [em], [em_name], [em_name:0.5], [em:0.3], [em:name:0.3]
+# (the model sometimes emits a colon instead of the underscore separator)
+_EXPR = re.compile(r"\[em(?:[_:]([a-z_]+))?[_:]?([0-9.]+)?\]")
 
 
 @dataclass

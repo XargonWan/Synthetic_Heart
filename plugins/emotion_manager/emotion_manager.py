@@ -88,8 +88,8 @@ _EMOTION_TAG_RE = re.compile(
 _META_TAG_RE = re.compile(r"\s*\{\s*meta\.\w+\s*[:=]\s*\w+\s*\}")
 
 # Facial expression tags used by WebUI/VRM animation guidance.
-# Matches: [em], [em_name], [em_name:0.5], [em:0.3]
-_FACIAL_TAG_RE = re.compile(r"\s*\[em(?:_[a-z_]+)?(?::[0-9.]+)?\]")
+# Matches: [em], [em_name], [em_name:0.5], [em:0.3], [em:name:0.3]
+_FACIAL_TAG_RE = re.compile(r"\s*\[em(?:[_:][a-z_]+)?[_:]?[0-9.]*\]")
 
 
 def strip_emotion_tags(text: str) -> str:
