@@ -7,6 +7,7 @@
                 <button class="logs-subnav-btn" type="button" data-logs-subtab="failures" aria-selected="false">LLM Failures</button>
                 <button class="logs-subnav-btn" type="button" data-logs-subtab="dead-targets" aria-selected="false">Dead Targets</button>
                 <button class="logs-subnav-btn" type="button" data-logs-subtab="reason-trail" aria-selected="false">Reason Trail</button>
+                <button class="logs-subnav-btn" type="button" data-logs-subtab="stats" aria-selected="false">Stats</button>
                 <button class="logs-subnav-btn" type="button" data-logs-subtab="archive" aria-selected="false">Archive &amp; Query</button>
             </nav>
         </div>
@@ -98,6 +99,27 @@
                 </div>
                 <div id="logs-dead-targets-output" class="logs-failures-output">
                     <div class="logs-empty-state">No dead delivery targets.</div>
+                </div>
+            </section>
+
+            <section class="logs-subpanel" id="logs-panel-stats" data-logs-subtab="stats">
+                <div class="log-controls logs-failure-controls">
+                    <button id="logs-stats-refresh" type="button">Refresh</button>
+                    <label>Period
+                        <select id="logs-stats-days" style="margin-left: 0.5rem; padding: 0.25rem 0.5rem;">
+                            <option value="1h">Last hour</option>
+                            <option value="24h">Last 24 hours</option>
+                            <option value="3d">Last 3 days</option>
+                            <option value="7d" selected="selected">Last 7 days</option>
+                            <option value="14d">Last 14 days</option>
+                            <option value="all">Everything kept (heavier)</option>
+                        </select>
+                    </label>
+                    <label><input type="checkbox" id="logs-stats-auto" checked="checked" /> Refresh every 10 s</label>
+                    <span class="logs-archive-status">Turns, engines and whatever each active plugin reports. Only what has data in the period is listed. Timings follow the period; counters are counted per day, so a period under a day shows today's.</span>
+                </div>
+                <div id="logs-stats-output" class="logs-failures-output">
+                    <div class="logs-empty-state">No statistics yet.</div>
                 </div>
             </section>
 
@@ -354,6 +376,47 @@
         font-size: 0.72rem;
         opacity: 0.85;
     }
+
+    .logs-stats-cards {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+        gap: 0.6rem;
+        margin-bottom: 1rem;
+    }
+
+    .logs-stat-card {
+        padding: 0.7rem 0.9rem;
+        border-radius: 12px;
+        background: rgba(12, 12, 20, 0.42);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .logs-stat-card .lsc-value { font-size: 1.5rem; font-weight: 600; }
+    .logs-stat-card .lsc-label { color: var(--text-soft); font-size: 0.78rem; }
+    .logs-stat-card.bad .lsc-value { color: #ff8a75; }
+    .logs-stat-card.good .lsc-value { color: #7fd6a6; }
+
+    .logs-stats-section { margin-bottom: 1.2rem; }
+    .logs-stats-section h3 { margin: 0 0 0.4rem 0; font-size: 0.95rem; }
+    .logs-stats-section h4 { margin: 0.7rem 0 0.3rem 0; font-size: 0.85rem; color: var(--text-soft); }
+
+    .logs-stats-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.85rem;
+        font-family: var(--mono, monospace);
+    }
+
+    .logs-stats-table th,
+    .logs-stats-table td {
+        padding: 0.3rem 0.6rem;
+        text-align: right;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .logs-stats-table th:first-child,
+    .logs-stats-table td:first-child { text-align: left; }
+    .logs-stats-note { color: var(--text-soft); font-size: 0.82rem; margin: 0.3rem 0; }
 
     .logs-query-hit.level-error .lqh-level { color: #ff8a75; }
     .logs-query-hit.level-warning .lqh-level { color: #ffcf6b; }

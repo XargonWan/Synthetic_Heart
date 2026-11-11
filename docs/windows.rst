@@ -160,8 +160,9 @@ Inno Setup 6 is required (``winget install JRSoftware.InnoSetup``).
    # Builds installer\Output\SyntH-Setup-<version>.exe
    .\installer\build_installer.ps1
 
-The version comes from GitVersion (``GitVersion.yml``); the script falls back to
-the newest git tag, then to ``0.0.0-dev``. CI passes the release version and
+Run by hand, the version comes from GitVersion (``GitVersion.yml``) when it is
+installed, else from the newest git tag, then ``0.0.0-dev``. CI passes the release
+version (``scripts/version.py``, see :ref:`releases`) and
 also builds the pgvector DLLs the installer vendors — see
 ``installer/vendor/README.md``. Add ``/DWithExampleSkins=1`` to include the
 example personas (about 80 MB of VRM models that the installer leaves out by
@@ -175,20 +176,12 @@ default):
 Releasing
 ---------
 
-Nobody has to build the installer to hand it out. Every push to ``develop`` or
-``main`` builds it in CI (``.github/workflows/build-release.yml``) and keeps it as
-a workflow artifact for 30 days; publishing it is a tag:
-
-.. code-block:: bash
-
-   git tag v1.0.16
-   git push origin v1.0.16
-
-The tag wins over GitVersion's guess at the next version, so the release is named
-``v1.0.16`` and carries ``SyntH-Setup-1.0.16.exe`` next to a ``SHA256SUMS``. A tag
-with a suffix (``v1.0.16-test``) is published as a pre-release. A run can also be
-started by hand from the Actions tab, ticking ``publish_release``, which creates the
-tag at the commit it runs on. Nothing is published unless the executable is a whole
+Nobody has to build the installer to hand it out: every push builds it in CI
+(``.github/workflows/build-release.yml``). A push to ``main`` attaches it, with a
+``SHA256SUMS``, to a release ``v<version>``; a push to ``develop`` attaches it to the
+rolling ``latest-develop`` pre-release; on any other branch it stays a workflow
+artifact for 30 days. See :ref:`releases` for how the version and the
+release notes are decided. Nothing is published unless the executable is a whole
 one: the job refuses to attach a file under 20 MB.
 
 

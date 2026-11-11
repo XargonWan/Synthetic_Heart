@@ -2,6 +2,7 @@
 
 from core.prompt_engine import build_prompt_request
 from core.cortex_registry import get_cortex_registry
+from core import stats_registry
 import asyncio
 import contextvars
 from contextlib import asynccontextmanager
@@ -1112,7 +1113,10 @@ async def handle_incoming_message(
                     instance = _fallback_reg.load_engine(engine_name)
                 if instance is None:
                     raise ValueError(f"Cortex engine {engine_name!r} is not registered")
-            with scope_model_override(instance, _scope_model):
+            with (
+                scope_model_override(instance, _scope_model),
+                stats_registry.scope(_scope),
+            ):
                 return await instance.handle_incoming_message(
                     bot, message, prompt_for_engine
                 )
@@ -1222,6 +1226,12 @@ async def handle_incoming_message(
 
             # Build context from the original message and context_memory if available
             llm_context = {}
+            # Which engine/model produced (or failed to produce) this turn, so a failure row and the
+            # per-engine statistics can name it instead of leaving the column empty.
+            if _primary_engine_name:
+                llm_context["engine"] = _primary_engine_name
+            if _scope_model:
+                llm_context["model"] = _scope_model
 
             # First, inherit from the original context_memory (which has interface_path from message_queue)
             if isinstance(context_memory_or_prompt, dict):

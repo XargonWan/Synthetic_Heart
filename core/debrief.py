@@ -1,3 +1,4 @@
+from core import stats_registry
 import asyncio
 from typing import Any, Dict, List
 from core.logging_utils import log_debug, log_info, log_warning
@@ -49,6 +50,7 @@ except Exception:
     pass
 
 
+@stats_registry.with_purpose("debrief")
 async def run_debrief(
     processed_actions: List[Dict],
     failed_actions: List[Dict],

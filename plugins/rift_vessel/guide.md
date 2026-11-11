@@ -54,6 +54,33 @@ Ownership is **hybrid**:
 | `unfollow` | Stop following |
 | `status` | Report the current world state |
 
+## Exploration (`explore`)
+
+One walk with no place in mind, for every world: the core decides WHERE to go and WHEN to stop
+(`plugins/rift_vessel/exploration.py`), the adapter answers one question at a time. A world opts in by mixing in
+`ExplorerMixin` and implementing four calls; `explore` then starts a background run, answers at once, and the result
+comes back as ONE `explore_done` event (prose worded in the core, so the model reads the same words in every world).
+
+| call | answers |
+|---|---|
+| `explore_probe(viewpoints, max)` | `Probe`: position, heading, `candidates` (places it already knows a way to, with the cost of the way, and whether any of the `viewpoints` has a line of sight to each), `pois` (things to go up to, with their `area`), `hazards` (the player, something moving, a hostile mob; kind `threat` also ends a leg). `candidates=None` means "I cannot list what is reachable": the core then makes places up and a walk that fails marks the place (a *blind* walk). |
+| `explore_walk(pos, timeout)` | `WalkResult(ok, detail, position, moved)`. Pathfinding is the engine's; the core only names the place. |
+| `explore_look(seconds)` | `LookResult(saw=[{name, area}])`: a pause at a stop, naming what came into view. |
+| `explore_study(poi)` / `explore_halt()` | optional: go up to a thing / stop walking now. |
+
+What the policy does: reachable places first (never "pick a point, find out afterwards"), a bonus for places it has not
+seen and things it has not studied, a penalty for the cost of the way and for going back where it has been, a little
+persistence of heading, a softmax with a temperature and now and then a choice from further down the list (the generator
+is injectable: tests seed it). A run lasts `budget` seconds: the interface sets it before every idle beat to the wait to
+the next beat plus how long a turn takes (`explore_budget`, `LatencyMeter`; `VESSEL_EXPLORE_MIN_SEC` 20 /
+`VESSEL_EXPLORE_MAX_SEC` 180), and chains legs (walk, look 1-4 s, walk) until it is spent, nothing is left to see, the way is
+shut (3 failed legs in a row), a threat comes close, or someone interrupts. A connector that tells people things through
+the idle beat holds the beat while a walk goes on (`idle_busy`); the walk's own result stands for the next beat.
+`Tuning` is per world (`EXPLORE_TUNING`): metres in a room are not blocks on a map.
+
+Skyrim (not built): the same contract. `pois[].area` is the room, so a body can list the objects of a house; `survey`
+needs a navmesh query for the reachable set instead of the physics grid RetroXR uses.
+
 ## Design constraints
 
 1. **No agentic tasks.** Actions map 1:1 to connector commands.

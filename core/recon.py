@@ -1,3 +1,4 @@
+from core import stats_registry
 import asyncio
 import json
 import threading
@@ -511,6 +512,7 @@ def get_registered_recon_keys() -> set[str]:
     return keys
 
 
+@stats_registry.with_purpose("recon")
 async def gather_recon_contributions(
     message=None,
     context_memory=None,
@@ -925,6 +927,7 @@ async def gather_recon_contributions(
     return dedup
 
 
+@stats_registry.with_purpose("recon")
 async def resolve_language(
     *,
     contributions: List[Dict[str, Any]],
@@ -1008,6 +1011,7 @@ async def resolve_language(
     return str(config_registry.get_value("PROJECT_DEFAULT_LANGUAGE", "en") or "en")
 
 
+@stats_registry.with_purpose("recon")
 async def resolve_tone(
     *,
     contributions: List[Dict[str, Any]],

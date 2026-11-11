@@ -13,6 +13,7 @@ Key features:
 
 from __future__ import annotations
 
+from core import stats_registry
 import asyncio
 import base64
 import copy
@@ -289,6 +290,7 @@ class XaiGrokPlugin(AIPluginBase):
         finally:
             self._current_request_meta = None
 
+    @stats_registry.tracked_engine("cortex", "xai_grok")
     async def generate_response(self, messages: Any) -> str:
         """Send prompt to xAI Grok and return the response text."""
         api_key = str(XAI_API_KEY).strip() if XAI_API_KEY else ""

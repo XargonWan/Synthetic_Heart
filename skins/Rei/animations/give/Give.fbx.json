@@ -1,0 +1,12 @@
+{
+  "fps": 30,
+  "mask": "upper_body",
+  "intro": {
+    "start_frame": 0,
+    "end_frame": 15
+  },
+  "loop": {
+    "start_frame": 15,
+    "end_frame": 75
+  }
+}

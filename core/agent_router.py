@@ -26,10 +26,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from core.logging_utils import log_debug, log_error, log_info, log_warning
+from core import stats_registry
 from core.config_manager import config_registry
 
 # Lane constants
@@ -367,6 +369,46 @@ def start_task_resume(
 
 
 async def _run_agent_turn_detached(
+    goal: str,
+    context: Dict[str, Any],
+    bot: Any,
+    message: Any,
+    *,
+    explicit_resume_id: int | None = None,
+    preplanned_calls: list[Dict[str, Any]] | None = None,
+    preplanned_then_loop: bool = False,
+) -> None:
+    """Run one agentic turn and count its time as a turn (``turn.seconds``, kind ``agent``).
+
+    The queue consumer's slot is freed as soon as the turn is scheduled, so the turn time the queue records never
+    includes an agent turn; without this the "average turn" of the Stats page would leave the longest ones out.
+    """
+    started = time.monotonic()
+    interface_path = (
+        str(context.get("interface_path") or "") if isinstance(context, dict) else ""
+    )
+    interface = interface_path.split("/", 1)[0] if interface_path else "agent"
+    with stats_registry.purpose("agent_round"), stats_registry.scope("agent"):
+        try:
+            await _run_agent_turn_detached_untimed(
+                goal,
+                context,
+                bot,
+                message,
+                explicit_resume_id=explicit_resume_id,
+                preplanned_calls=preplanned_calls,
+                preplanned_then_loop=preplanned_then_loop,
+            )
+        finally:
+            stats_registry.observe(
+                "turn.seconds",
+                time.monotonic() - started,
+                interface=stats_registry.clean_label(interface),
+                kind="agent",
+            )
+
+
+async def _run_agent_turn_detached_untimed(
     goal: str,
     context: Dict[str, Any],
     bot: Any,

@@ -59,6 +59,7 @@ getting started.
    dev_components
    api_endpoints
    logging
+   statistics
    agent_integration
    agentic_tools
    component_pattern

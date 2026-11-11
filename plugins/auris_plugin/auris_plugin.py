@@ -11,6 +11,7 @@ imports the built-in engines on startup.
 
 from __future__ import annotations
 
+from core import stats_registry
 import asyncio
 import os
 from typing import Any
@@ -198,6 +199,16 @@ class AurisPlugin(AIPluginBase):
         return result
 
     async def _transcribe_with(
+        self, name: str, file_path: str, mime_type: str | None
+    ) -> AurisTranscriptResult | None:
+        """:meth:`_transcribe_raw`, timed per engine for the Stats page (``None`` counts as a failure)."""
+        with stats_registry.track_engine("auris", name) as call:
+            outcome = await self._transcribe_raw(name, file_path, mime_type)
+            if outcome is None:
+                call.fail()
+            return outcome
+
+    async def _transcribe_raw(
         self, name: str, file_path: str, mime_type: str | None
     ) -> AurisTranscriptResult | None:
         """Run one engine; ``None`` when it cannot be loaded or fails."""

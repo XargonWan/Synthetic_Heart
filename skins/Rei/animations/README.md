@@ -8,12 +8,26 @@ The SyntH animation system automatically manages avatar animations throughout th
 
 ### Animation States
 
-The system defines four logical animation states:
+The system defines these logical animation states (the first four are the conversation's; `touch` and
+`skin_change` are reactions; `sit`, `crouch` and `gaming` are what a body with legs and hands is doing):
 
 - **Idle**: Default state when no activity is occurring (files: `Idle.fbx`, `Idle2.fbx`, `Happy Idle.fbx`)
 - **Think**: Triggered when a message is received (files: `Thinking.fbx`)
 - **Write**: Triggered when the LLM starts generating a response (files: `Texting While Standing.fbx`, `Texting.fbx`)
 - **Talk**: Can be triggered for speech output (files: `talking.fbx`)
+- **Sit** (`sit/`): sitting down. `sit/Sitting Idle.fbx` loops. A bed is not a chair: the legs-swinging clip sits in
+  `sit/bed/` (a sub-folder is a variant the rotation never picks, like `idle/happy/`) until something can say "on a bed".
+- **Crouch** (`crouch/`): crouching, e.g. to reach something on the floor. `Crouching Idle.fbx` loops;
+  `Crouch To Stand.fbx` is `play_once`, i.e. a **post** clip: how the state ENDS (a client that can plays it when the
+  state is left; the rotation never picks it).
+- **Gaming** (`gaming/`): playing with a controller. `Gaming-sitting.fbx` was captured seated, so its descriptor says
+  `"mask": "upper_body"` (below): a client with a body shows only what the back, arms and hands do, whether she stands,
+  walks or sits. A client that cannot layer plays the whole clip, seated.
+- **Give** (`give/`): holding something out in both hands to someone (palms up, cupped, forearms level). `Give.fbx` is a layer
+  too (`"mask": "upper_body"`): the arms come up over the intro (0.5 s), then the pose is held and repeats (`loop`, whose two
+  ends are the same pose); there is no outro, a layer is taken off by cross-fading back. It is made, not captured: see
+  `tools/make_give_clip.py` (it writes new curves into a Mixamo FBX of the skin, because an FBX exported from Blender has other
+  bone frames and paths and does nothing on the skeleton the mod shares between clips).
 
 When multiple files are specified for a state, one is randomly selected each time the animation plays.
 
@@ -75,6 +89,11 @@ Each `.fbx` animation file should have an optional adjacent descriptor `.fbx.jso
 - `fps`: Frames per second of the FBX (default: 30)
 - `play_once`: If true, animation plays once and does not loop (good for transitions)
 
+**Layer field:**
+- `mask`: `"upper_body"` = the clip drives only the spine up (back, neck, head, shoulders, arms, hands, fingers).
+  The hips and legs go on with whatever else is playing. Unknown values and clients that cannot layer ignore it and
+  play the whole clip. Posture (sitting, standing) and activity (playing, typing) are then two things, not one.
+
 **Facial Expression Fields:**
 - `lipsync`: Boolean flag (default: false). If true, animation is suitable for lip-sync synthesis
 - `expressions`: Array of expression objects with:
@@ -112,6 +131,27 @@ New: the WebUI now exposes a rich `eyesState` mechanism and a DOM event `synth_e
 **Implementation:**
  - Execution-time check in `_performBlink()`: skips blink if `eyes_closed > 0.5`
 - Frame-time monitoring in `applyExpressionsForFrame()`: monitors eye state every frame and auto-suspends/resumes loops
+
+### Making a clip loop (the `loop` window)
+
+A clip with `intro`/`loop`/`outro` plays its intro once, then repeats the **loop** window until the state changes.
+`intro.end_frame` = `loop.start_frame` and `loop.end_frame` = `outro.start_frame`: the three are one run of frames.
+
+A held pose is not a cycle: it **drifts** (Thinking's head is 4 degrees and its arm 3 away from where they were a second
+earlier). Cutting the window and repeating it steps by that much every repeat, and the mean angle over the bones hides it
+(0.7 deg/bone for a step of 4 on one bone): judge a window by its **worst bone**. Two ways to a smooth repeat:
+
+1. Find a window whose ends meet. `RetroXR/mods/xenu.synth_rift/tests/loop_scan.gd` prints a clip's speed profile (a held
+   pose is where it nearly stands still) and the best windows by length:
+   `godot --headless --path RetroXR --script res://mods/xenu.synth_rift/tests/loop_scan.gd -- clip.fbx 20 --within=40,90`
+2. When none does (Thinking: nothing better than 2 degrees), `"loop": {..., "blend_frames": N}` asks the client to build the
+   repeat: the window's last N frames are blended toward the N frames before its start, so its end IS its start. The
+   blend must come from a still part of the clip (not the arrival, which moves the arm 20 degrees). A client that does
+   not know the field cuts the window, as before.
+
+Thinking: held between frames ~46 and ~74; `loop` 54..74 with `blend_frames` 16 (a step of 0.37 deg per 30 fps frame at its
+worst; 43..73 over 12 frames was 2.8). A clip that is already a cycle (Walking, Sitting Idle, Gaming, Crouching Idle:
+first and last frame within 0.03 deg/bone) needs no window and no descriptor.
 
 ### Descriptor Notes
 
