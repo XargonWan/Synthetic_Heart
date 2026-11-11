@@ -361,8 +361,8 @@ Both servers are pre-configured for **Claude Code** (`.mcp.json`) and **VS Code 
 Here are the main improvements and integrations we plan to work on — contributions are welcome:
 
 - Multimodal persistence: allow SyntH to take video calls from the WebUI and stream their own video as a webcam, useful for those who wish to stream gameplays or just talk face to face, even on other applications
-- VR Support: meet your SyntH in a VR space
-- More games added: Now the Rift Vessels supports Minecraft, but other game plugins are planned to be added next
+- ~~VR Support: meet your SyntH in a VR space~~ [done](https://mod.io/g/retroxr/m/synthetic-heart-rift)
+- More games added: Now the Rift Vessels supports Minecraft and RetroXR, but other game plugins are planned to be added next
 - Extended goals support: the Synth will be able to use the goals system outside the gaming context for real life matters
 - Plugins store / repository: search and download new plugins and add community plugin repositories
 - Live2D models
