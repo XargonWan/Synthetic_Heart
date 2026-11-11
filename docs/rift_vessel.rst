@@ -998,6 +998,144 @@ Rift Vessel entity. The Minecraft connector lives in
   ``minecraft_vessel`` component (``MINECRAFT_BRIDGE_*``, ``MINECRAFT_SERVER_*``,
   ``MINECRAFT_BOT_USERNAME_OVERRIDE``, ``MINECRAFT_SKIN_*``).
 
+Skills and cross-world reuse
+----------------------------
+
+The Rift Vessel is not a collection of per-game integrations. It is a **shared
+base** whose purpose is to teach SyntH about many possible worlds and to give it
+**skills**. Every adapter *adds to* a growing skill set, so the effort needed for
+the Nth world is smaller than for the first. Anyone writing an adapter must
+therefore ask, for every capability they implement, *"would another game need
+this too?"* — "pick up an object" is not a Skyrim concept, it is a concept shared
+by almost every world.
+
+Skill, verb, world content
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Three things are easy to confuse and must be kept apart:
+
+* A **skill** is a capability expressed in world-neutral terms: collect an item,
+  travel to a place, fight a target, craft, capture a creature, drive a vehicle,
+  claim a base, follow a questline, look up the rules.
+* A **verb** is how a skill is exposed to cognition (``vessel_<world>_<verb>``).
+* **World content** is everything that belongs to one game: its item and entity
+  ids, recipes, maps, questline, wiki sources, special-creature tactics.
+
+The skill (mechanism plus a neutral verb contract) is what gets reused. The
+content is what each adapter supplies. The existing generic stores follow
+exactly this split: ``vessel_quests.py``, ``vessel_bases.py``,
+``vessel_combat_strategy.py`` and ``knowledge_client.py`` hold the mechanism in
+the Vessel layer, while each adapter registers its own questline, base shape,
+creature tactics and ``WikiSource``.
+
+Worked examples
+~~~~~~~~~~~~~~~
+
+If SyntH already plays Skyrim, Forza Horizon and Bayonetta, it already has item
+pickup, navigation, vehicles, melee and ranged combat and evasion. GTA is then
+mostly *world content* plus thin glue, not a new set of skills. Pokémon is
+different: it introduces **capture**, which none of those games have. Once
+capture exists as a shared skill, Lumen Tale and Cassette Beasts reuse it
+instead of reimplementing it.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 18 42 40
+
+   * - World
+     - Skills it needs
+     - Status when it is added
+   * - Skyrim
+     - collect, navigate, melee/ranged combat, craft, quests, knowledge
+     - Mostly shared; world content plus magic as a world-specific verb
+   * - Forza Horizon
+     - navigate, drive a vehicle, race/objectives
+     - Adds *vehicle*; navigation already shared
+   * - Bayonetta
+     - melee/ranged combat, evasion, objectives
+     - Almost entirely shared
+   * - GTA
+     - collect, navigate, vehicles, combat, objectives
+     - Almost entirely shared; content and glue only
+   * - Pokémon
+     - navigate, combat, **capture**, party management
+     - Adds *capture*
+   * - Lumen Tale, Cassette Beasts
+     - navigate, combat, capture, party management
+     - Reuse *capture*; only content is new
+
+"Almost entirely shared" refers to skills. Perception, control quirks and the
+bridge to each game still need adapter work. A skill transfers only as far as its
+contract is world-neutral.
+
+Three tiers
+~~~~~~~~~~~
+
+This extends the Scope rule in ``AGENTS.md`` §5c: the rule alone is binary
+(core or one game) and cannot place a skill shared by *several* games but not
+*most*, such as capture.
+
+1. **Universal core** — needed by nearly every world (``say``, ``move``,
+   ``look``, ``observe``, ``use``, ``attack``, ``follow``, goals, bases, quests,
+   knowledge). Lives on ``vessel_base`` / ``vessel_plugin`` as a core verb.
+2. **Shared skill** — needed by several worlds (capture, vehicles, crafting,
+   building, inventory and trade). The *mechanism* and the *verb contract*
+   (verb name, field names, structural result shape) are world-neutral and
+   belong to the Rift Vessel layer. An adapter opts in by declaring the skill in
+   the ``capabilities`` it passes to ``register_vessel_connector`` (and returns
+   from ``describe_capabilities()``); the registry can then answer which worlds
+   offer it (``VESSEL_REGISTRY.find_connector_by_capabilities``).
+3. **World-specific** — meaningful in one game only (a particular spell system,
+   a particular minigame). Stays in that adapter and is exposed through
+   ``get_world_actions()``.
+
+Rule of two
+~~~~~~~~~~~
+
+Do not promote a skill to the shared layer on speculation.
+
+* The **first** adapter that needs a tier-2 skill implements it inside its own
+  folder, but **behind the neutral contract**: a neutral verb name, structural
+  fields, no game nouns in names or signatures.
+* When a **second** world needs the same skill, promote the neutral parts into
+  the Rift Vessel layer; both adapters then shrink to content providers.
+  Adapters may not import each other, so duplicated logic across adapters is the
+  signal to promote — never copy code from one adapter into another.
+* Promotion is a deliberate refactor: run impact analysis on the symbols you move
+  and keep every adapter working while the other is absent.
+
+Checklist for a new adapter
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+1. **List the skills the game needs** before writing code, and classify each as
+   tier 1, 2 or 3 against the verbs and ``capabilities`` that already exist.
+2. **Reuse before inventing.** Use the existing verb or contract. Do not add a
+   game-flavoured synonym of one that exists.
+3. **Name by the action, not the game's noun**: ``collect``, not
+   ``pick_up_mushroom``; ``capture``, not ``throw_pokeball``; ``drive``, not
+   ``enter_car``.
+4. **Keep content out of the mechanism.** Ids, recipes, maps, questlines and
+   wiki sources are supplied by the adapter, like quests, bases, combat
+   strategies and ``WikiSource``.
+5. **Stay structural.** Never encode a skill with keyword or display-name
+   matching; use ids and state the connector reports.
+6. **Respect the spontaneity rule.** Skills are affordances. They are never a
+   scripted catalogue of objectives.
+7. **Declare capabilities** and document any new shared verb in this page and in
+   the adapter's ``guide.md``.
+8. **Prove pluggability.** The adapter must import and run with every other
+   adapter absent, and the neutral contract needs a test that does not depend on
+   the game.
+
+Anti-patterns
+~~~~~~~~~~~~~
+
+* A world name or world-specific id in a Rift Vessel core or shared module.
+* A ``skyrim_pickup`` verb that duplicates ``collect``.
+* Copying another adapter's code instead of promoting the shared part.
+* Promoting a skill to the shared layer after only one game needed it.
+* Treating "GTA is almost free" as "GTA needs no adapter work".
+
 Extending — new worlds
 ---------------------
 

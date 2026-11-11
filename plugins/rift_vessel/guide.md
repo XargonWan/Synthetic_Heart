@@ -37,6 +37,9 @@ Ownership is **hybrid**:
 * **World-specific verbs** — each connector may add its own (e.g. a future
   Minecraft `craft`/`mine`, Skyrim `cast_spell`/`sneak`) by overriding
   `get_world_actions()`; they appear under the same `vessel_<world>_` prefix.
+  Where a neutral shared-skill contract already exists (e.g. a verb another
+  world uses), reuse it instead of inventing a game-flavoured variant — see
+  `docs/rift_vessel.rst`, "Skills and cross-world reuse".
 
 | Verb (core set) | Purpose |
 |--------|---------|
