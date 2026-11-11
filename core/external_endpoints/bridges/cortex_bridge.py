@@ -8,6 +8,7 @@ to a built-in engine from the perspective of the SyntH core.
 
 from __future__ import annotations
 
+from core import stats_registry
 import asyncio
 import base64
 import contextlib
@@ -1311,6 +1312,7 @@ class ExternalCortexEngine(AIPluginBase):
             except Exception:
                 pass
 
+    @stats_registry.tracked_engine("cortex", lambda self: self._endpoint.name)
     async def generate_response(
         self,
         messages: list[dict[str, Any]] | Any,

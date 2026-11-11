@@ -34,6 +34,7 @@ from typing import Any
 
 import aiomysql
 
+from core import stats_registry as stats
 from core.config_manager import config_registry
 from core.core_initializer import register_interface
 from core.db import get_conn_ctx
@@ -60,6 +61,21 @@ _RATE_LIMIT_SEC = 5.0
 # bypass the batch and enqueue immediately.
 _PERCEPTION_BATCH_SEC = 15.0
 _PERCEPTION_BATCH_MAX = 10
+
+
+def _ambient_triggers_turn() -> bool:
+    """Whether ambient telemetry (sightings, proximity, ...) may start an LLM turn of its own.
+
+    Default OFF: every such turn costs a full cognition pass for a line the next real prompt
+    already carries through the perception ring (the logs showed one turn every 20-30 s for lines
+    like "The cable is no longer there"). ON restores the old batched turn (`_PERCEPTION_BATCH_*`).
+    Fail-safe: any error reads as OFF.
+    """
+    try:
+        return bool(config_registry.get_value("VESSEL_AMBIENT_TRIGGERS_TURN", False, value_type=bool))
+    except Exception:
+        return False
+
 
 # Max length of a slugified world-identity token in the interface path.
 _MAX_WORLD_TOKEN_CHARS = 48
@@ -171,6 +187,31 @@ class VesselInterface:
         # fast, prompt-less "motor tick" that steps the body toward the goal)
         # are paced independently — see core.vessel_beat and AGENTS.md §5c.
         self._last_will_beat_at: float = 0.0
+        self._last_idle_beat_at: float = 0.0
+        # Idle beat bookkeeping: when the body last became ready (a new arrival resets the rest), whether the last
+        # beat's outcome is still unread, how many beats in a row ended in no action (the interval stretches), what
+        # changed around her since (a reason to ask sooner), and when each hold reason was last logged.
+        self._idle_seen_ready: float = -1.0
+        self._idle_pending: bool = False
+        self._idle_streak: int = 0
+        self._idle_novelty: list[str] = []
+        # Pacing (see core.vessel_beat.auto_pacing): when the last beat's turn ended, whether it ended in an action, the
+        # smoothed auto wait, the last pacing decision (the Stats page shows it), when the next beat falls due and
+        # whether it is waiting on the engine / body / queue (the scheduler loop sleeps accordingly).
+        self._idle_turn_done_at: float = 0.0
+        self._idle_acted_last: bool = False
+        self._idle_gap_smoothed: float | None = None
+        self._idle_pacing: dict[str, Any] = {}
+        self._idle_due_at: float | None = None
+        self._idle_waiting: bool = False
+        # How long a beat's turn takes (a running mean): a walk is sized to last until the next prompt.
+        try:
+            from plugins.rift_vessel.exploration import LatencyMeter
+
+            self._turn_latency: Any = LatencyMeter()
+        except Exception:  # pragma: no cover - defensive
+            self._turn_latency = None
+        self._idle_hold_logged: dict[str, float] = {}
         self._last_motor_tick_at: float = 0.0
         # Action beat (the middle "concrete-doing" cognition turn that maps the
         # free-text goal onto a real verb — gather/craft/place — since the
@@ -312,6 +353,12 @@ class VesselInterface:
         """Start the interface and its cooldown scheduler."""
         log_info("[vessel_interface] Starting Vessel interface...")
         self.is_enabled = True
+        try:
+            from core import vessel_stats
+
+            vessel_stats.register()  # its block on the Logs > Stats page, only while the interface runs
+        except Exception as exc:  # pragma: no cover - a statistic never blocks the interface
+            log_debug(f"[vessel_interface] stats section registration failed: {exc}")
         self.disabled_reason = None
         # Wire the connection-liveness probe into the session manager so
         # ``has_active_session()`` reflects the real 3-state connection model
@@ -688,6 +735,12 @@ class VesselInterface:
         sessions normally elsewhere.
         """
         log_info("[vessel_interface] Stopping Vessel interface...")
+        try:
+            from core import vessel_stats
+
+            vessel_stats.unregister()
+        except Exception:  # pragma: no cover
+            pass
         if self._scheduler_task is not None:
             self._scheduler_task.cancel()
             try:
@@ -749,7 +802,14 @@ class VesselInterface:
         # so each session starts clean. The goals table is left untouched: a
         # goal survives across sessions by design. Guarded + fail-safe.
         try:
-            if interface_path:
+            if interface_path and self._connector_remembers_chat(environment):
+                # A world the vessel lives in (a room): its chat is still there next time, until the player
+                # clears it (forget_chat). The experience diary above is flushed as always.
+                log_debug(
+                    f"[vessel_interface] kept the chat of {interface_path} past session end "
+                    f"('{environment}' remembers its chat)"
+                )
+            elif interface_path:
                 from core.chat_context_manager import clear_chat_context
                 from core.chat_history_cache import clear_chat_history
 
@@ -769,6 +829,37 @@ class VesselInterface:
             summary=f"Left {environment} ({reason})",
         )
         self._sessions.pop(session_id, None)
+
+    def _connector_remembers_chat(self, environment: str) -> bool:
+        """Does the connector of ``environment`` keep its chat between sessions? (``remembers_chat``)"""
+        connector = self._connector_environments().get(environment)
+        return bool(getattr(connector, "remembers_chat", False)) if connector is not None else False
+
+    async def forget_chat(self, environment: str, world: Any = None) -> bool:
+        """Clear the remembered chat of ``environment`` (every tracked scope of it, and the scope ``world`` names).
+
+        The in-memory deques and the durable ``chat_history_cache`` both: what the player asked to forget must not
+        come back at the next restart. Goals and the experience diary are not touched.
+        """
+        paths: set[str] = set()
+        for path in self._sessions.values():
+            parts = path.split("/")
+            if len(parts) >= 2 and parts[0] == INTERFACE_NAME and parts[1] == environment:
+                paths.add(path)
+        paths.add(build_interface_path(INTERFACE_NAME, environment, _slugify_world_token(world)))
+        cleared = False
+        try:
+            from core.chat_context_manager import clear_chat_context
+            from core.chat_history_cache import clear_chat_history
+
+            for path in paths:
+                await clear_chat_history(path)
+                clear_chat_context(path)
+                cleared = True
+                log_info(f"[vessel_interface] chat forgotten at the player's request: {path}")
+        except Exception as exc:
+            log_warning(f"[vessel_interface] forget_chat failed for '{environment}': {exc}")
+        return cleared
 
     def _tracked_path_for_environment(self, environment: str) -> str | None:
         """Return the interface path of a tracked session for ``environment``.
@@ -917,6 +1008,15 @@ class VesselInterface:
         lost: it is carried on the enqueued message's ``from_user`` for
         attribution and mention detection.
         """
+        # A world may attach what its body SAW (``data["attachments"]``: ``{mime_type, data (base64), filename}``,
+        # the shape every interface's attachments take). The pictures go to the model with this turn and nowhere
+        # else: they are not written to the activity log, the experience record or the chat history, where a
+        # base64 frame would be a megabyte of noise per event.
+        attachments = [a for a in ((data or {}).get("attachments") or []) if isinstance(a, dict) and a.get("data")]
+        if attachments:
+            data = {k: v for k, v in (data or {}).items() if k != "attachments"}
+            data["attachments_count"] = len(attachments)
+
         # Prefer the path the open session was created with (so a perception
         # lands on the exact same ``vessel/<game>/<world>`` scope the will beat
         # and goals use); fall back to building one from the world token.
@@ -963,6 +1063,16 @@ class VesselInterface:
             summary=summary,
             metadata=activity_metadata,
         )
+
+        # A change in the room of a body that is asked what it wants is a reason to ask sooner, whether or not the
+        # event is salient enough to be a turn of its own (a sighting rarely is: 15 were dropped in 10 s).
+        if event_type == "sighting" and self._uses_idle_beat(environment):
+            self._note_idle_novelty(summary)
+        # The result of something she chose (a walk, a search) is a prompt of its own: it stands for the next idle beat,
+        # and what she does about it is read like any beat's outcome.
+        if event_type.endswith("_done") and self._uses_idle_beat(environment):
+            self._last_idle_beat_at = asyncio.get_event_loop().time()
+            self._idle_pending = True
 
         if not self._is_salient(event_type, summary):
             log_debug(
@@ -1046,6 +1156,15 @@ class VesselInterface:
             from plugins.rift_vessel.vessel_base import is_ephemeral_event
 
             if is_ephemeral_event(event_type) and event_type != "chat":
+                if not _ambient_triggers_turn():
+                    # Ambient telemetry never starts a turn of its own: it is already in the
+                    # perception ring (above) and rides along with the NEXT real prompt (a chat,
+                    # a routine's result, a beat). Nothing is buffered, nothing is enqueued.
+                    log_debug(
+                        f"[vessel_interface] ambient '{event_type}' absorbed, no turn "
+                        f"(path={interface_path}): {summary[:80]!r}"
+                    )
+                    return True
                 buf = self._pending_perceptions.setdefault(interface_path, [])
                 buf.append((summary, time.time(), environment))
                 if len(buf) >= _PERCEPTION_BATCH_MAX:
@@ -1065,6 +1184,7 @@ class VesselInterface:
             environment=environment,
             event_type=event_type,
             actor=entity,
+            attachments=attachments or None,
         )
         return True
 
@@ -1261,6 +1381,7 @@ class VesselInterface:
         allowed_actions: set[str] | None = None,
         world_state_context: dict[str, Any] | None = None,
         observation_followup: bool = False,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> None:
         """Wrap a perception as a normal message and enqueue it (Fast Lane).
 
@@ -1356,6 +1477,10 @@ class VesselInterface:
                 # this world so it runs unobstructed. Set only for the
                 # damage-appraisal perception; everything else leaves it False.
                 _vessel_appraisal=is_appraisal,
+                # Structural signal for the queue: the idle beat ranks at the
+                # human-chat band (GENERAL) so it alternates with chat instead
+                # of starving behind it. Set only for ``idle_beat`` perceptions.
+                _vessel_idle_beat=(event_type == "idle_beat"),
                 chat=SimpleNamespace(
                     id=interface_path,
                     type="vessel",
@@ -1367,6 +1492,9 @@ class VesselInterface:
                 entities=None,
                 reply_to_message=None,
             )
+            if attachments:
+                # What the world's body saw, for the model's vision (see on_world_event).
+                wrapped.attachments = attachments
             # A per-turn action restriction: when ``allowed_actions`` is given
             # (the dedicated goal beat), pass it as ``context_memory`` so the
             # prompt engine trims this turn's action catalog to exactly those
@@ -1651,6 +1779,9 @@ class VesselInterface:
                 # advances the connector's ``_last_health`` baseline), so any
                 # earlier beat that reads the world state would clear it.
                 await self._maybe_run_damage_appraisal()
+                # Idle: a world whose body is a person in a room is told what is around
+                # her and asked what she wants to do (the world never scripts her).
+                await self._maybe_run_idle_beat()
                 await self._maybe_run_reflection()
                 # Dedicated goal beat: when Synth has no goal at all, fire a
                 # turn that can ONLY set/update the goal (restricted allowlist),
@@ -1683,25 +1814,32 @@ class VesselInterface:
     def _resolve_tick_sec(self) -> float:
         """Sleep interval for the scheduler loop.
 
-        Returns the smaller of :data:`_TICK_SEC` and the configured motor
-        interval (clamped to at least :data:`_MIN_TICK_SEC`) so the fast
-        motorics layer can run at ``VESSEL_MOTOR_INTERVAL_SEC`` cadence instead
-        of being capped by the coarse fixed tick. Fully guarded — any failure
-        falls back to :data:`_TICK_SEC`.
+        A world with a fast motor tick (Minecraft) keeps the old rule: the smaller of :data:`_TICK_SEC` and the
+        configured motor interval (at least :data:`_MIN_TICK_SEC`). When every connected world is an idle-beat world
+        (RetroXR) there is no motor tick, and the loop sleeps until the next beat is due (``VESSEL_TICK_SEC`` = ``auto``)
+        or as long as configured; it looks every 1.5 s while the beat waits on the engine, the body or the queue.
+        Fully guarded; any failure falls back to :data:`_TICK_SEC`.
         """
         try:
             from core import vessel_beat
 
-            motor_interval = float(
-                vessel_beat.resolve_motor_interval(
-                    lambda key, default: config_registry.get_value(
-                        key, default, group="vessel", component="vessel"
-                    )
-                )
-            )
+            def _cfg(key: str, default: Any) -> Any:
+                return config_registry.get_value(key, default, group="vessel", component="vessel")
+
+            motor_interval = float(vessel_beat.resolve_motor_interval(_cfg))
         except Exception:
             return self._TICK_SEC
-        return max(self._MIN_TICK_SEC, min(self._TICK_SEC, motor_interval))
+        legacy = max(self._MIN_TICK_SEC, min(self._TICK_SEC, motor_interval))
+        try:
+            if self._has_non_idle_world():
+                return legacy
+            tick_cfg = vessel_beat.resolve_tick(_cfg)
+            wake = vessel_beat.next_wake(asyncio.get_event_loop().time(), self._idle_due_at, self._idle_waiting, tick_cfg)
+            if self._pending_perceptions:
+                wake = min(wake, 2.0)  # a batch of perceptions is flushed when its window ends
+            return max(0.25, min(30.0, wake))
+        except Exception:
+            return legacy
 
     async def _maybe_run_reflection(self) -> None:
         """Stop and think when Synth is playing without a real objective.
@@ -1773,6 +1911,9 @@ class VesselInterface:
 
         world, world_state = await self._read_active_world_state()
         if world is None or world_state is None:
+            return
+        # A world that is asked what she wants (the idle beat) has no reflection pause.
+        if self._uses_idle_beat(world):
             return
 
         # Structural trigger: reflect only when there is no real objective yet —
@@ -1881,6 +2022,9 @@ class VesselInterface:
         world, world_state = await self._read_active_world_state()
         if world is None or world_state is None:
             return
+        # A world that is asked what she wants (the idle beat) has no goal beats.
+        if self._uses_idle_beat(world):
+            return
 
         # Structural trigger: only when there is genuinely no active goal —
         # the case where committing one is imperative. Never inspects the goal's
@@ -1928,6 +2072,380 @@ class VesselInterface:
         if has_goal:
             return {f"vessel_{world}_update_goal"}
         return {f"vessel_{world}_set_goal", f"vessel_{world}_update_goal"}
+
+    def _uses_idle_beat(self, world: str | None) -> bool:
+        """Whether ``world``'s connector opted into the idle beat (and so has no will/action/goal beats)."""
+        if not world:
+            return False
+        connector = self._connected_connector(world)
+        return bool(connector is not None and getattr(connector, "uses_idle_beat", False))
+
+    def _idle_hold(self, key: str, message: str, every: float = 60.0) -> None:
+        """Log why an idle beat did NOT start, at INFO, at most once per ``every`` seconds per reason.
+
+        A beat that silently never fires is the costliest kind to diagnose (the user saw a puppet and the only
+        trace was a DEBUG line): the reason and the values that decided it are what a log must carry.
+        """
+        now = time.monotonic()
+        if now - self._idle_hold_logged.get(key, -1e9) >= every:
+            self._idle_hold_logged[key] = now
+            log_info(f"[vessel_interface] Idle beat held ({key}): {message}")
+
+    def _note_idle_novelty(self, summary: str) -> None:
+        """Remember that something changed around a body that is asked what it wants (a reason to ask sooner)."""
+        text = " ".join(str(summary or "").split())
+        if text and text not in self._idle_novelty:
+            self._idle_novelty.append(text[:160])
+            del self._idle_novelty[:-5]
+
+    @staticmethod
+    def _vessel_backlog(world: str) -> int:
+        """Turns of this world waiting in the message queue (the one being worked on is not counted). 0 when unknown."""
+        try:
+            from core import message_queue
+
+            prefix = f"vessel/{world}"
+            return sum(
+                1 for item in message_queue.snapshot_queue(limit=200) if str(item.get("interface_path", "")).startswith(prefix)
+            )
+        except Exception:
+            return 0
+
+    def _record_beat_outcome(self, connector: Any, outcome: str, turn_done: float) -> None:
+        """Statistics of a beat that has just been read: how it ended, how long the turn took, when its first verb came."""
+        try:
+            kind = "acted" if outcome.startswith("acted") else "cut_short" if outcome.startswith("cut short") else "did_nothing"
+            stats.incr(f"beat.{kind}")
+            if kind == "cut_short":
+                return
+            asked = self._last_idle_beat_at
+            if turn_done > asked > 0:
+                stats.observe("beat.ask_to_turn_done", turn_done - asked)
+            starts_fn = getattr(connector, "idle_act_starts", None)
+            starts = list(starts_fn()) if callable(starts_fn) else []
+            first = next((t for t in starts if t >= asked > 0), None)
+            if first is not None:
+                stats.observe("beat.ask_to_first_verb", max(0.0, first - asked))
+        except Exception as exc:  # pragma: no cover - a statistic never breaks a beat
+            log_debug(f"[vessel_interface] beat outcome stats failed: {exc}")
+
+    def _record_beat_phases(self, now: float, settled_since: float, pacing: Any, interval: float) -> None:
+        """Statistics and the ``[beat-timing]`` line of the beat about to be asked: how long each part of the last
+        cycle took (the numbers the auto pacing and the Stats page work from)."""
+        try:
+            previous_ask = self._last_idle_beat_at
+            turn_done = self._idle_turn_done_at
+            parts = []
+            if previous_ask > 0:
+                stats.observe("beat.cycle", now - previous_ask)
+                parts.append(f"cycle {now - previous_ask:.0f}s")
+            if turn_done > 0:
+                if settled_since > turn_done:
+                    stats.observe("beat.turn_done_to_settled", settled_since - turn_done)
+                    parts.append(f"turn-done->body-done {settled_since - turn_done:.0f}s")
+                waited = now - max(turn_done, settled_since)
+                stats.observe("beat.settled_to_next_ask", waited)
+                parts.append(f"done->asked {waited:.0f}s")
+            stats.incr("beat.asked")
+            log_info(
+                f"[vessel_interface] [beat-timing] {', '.join(parts) or 'first beat'} | pacing {pacing.mode}: wait {interval:.0f}s "
+                f"({pacing.reason}), lead {pacing.lead:.0f}s"
+            )
+        except Exception as exc:  # pragma: no cover
+            log_debug(f"[vessel_interface] beat phase stats failed: {exc}")
+
+    def _has_non_idle_world(self) -> bool:
+        """Is a connected world one whose fast motor tick needs the scheduler's cadence (it is not an idle-beat world)?"""
+        try:
+            from core.vessel_registry import VESSEL_REGISTRY
+
+            return any(
+                getattr(c, "is_connected", False) and not getattr(c, "uses_idle_beat", False)
+                for c in (getattr(VESSEL_REGISTRY, "_instances", {}) or {}).values()
+            )
+        except Exception:
+            return True
+
+    async def _maybe_run_idle_beat(self) -> None:
+        """Ask Synth what she wants to do, when nobody is talking to her (slow, LLM).
+
+        For connectors with ``uses_idle_beat``: once the body is ready (``idle_ready_since``: out of the
+        capsule, eyes reporting), every ``adaptive_idle_interval`` seconds (``VESSEL_IDLE_BEAT_INTERVAL_SEC``,
+        quicker just after she arrives or when something around her changed, stretched when beat after beat
+        ends in nothing), if no player has spoken for ``VESSEL_IDLE_BEAT_QUIET_SEC`` and the engine has been
+        free for ``VESSEL_IDLE_BEAT_ENGINE_REST_SEC``, hand her the connector's :meth:`describe_surroundings`,
+        what she did lately and what changed, and ask. She decides; staying put is allowed. It is an ordinary
+        vessel perception, ranked AMBIENT: above background work such as G.R.I.L.L.O. (BACKGROUND), below every
+        human, and a player's chat prunes it. Every reason it does not start is logged. Fully guarded; never raises.
+        """
+        try:
+            from core import vessel_beat
+        except Exception:
+            return
+
+        def _cfg(key: str, default: Any) -> Any:
+            return config_registry.get_value(
+                key, default, group="vessel", component="vessel"
+            )
+
+        self._idle_due_at = None
+        self._idle_waiting = False
+        if not vessel_beat.is_idle_beat_enabled(_cfg):
+            return
+        if not get_vessel_session_manager().has_active_session():
+            return
+        world = None
+        connector = None
+        try:
+            from core.vessel_registry import VESSEL_REGISTRY
+
+            for name, candidate in (getattr(VESSEL_REGISTRY, "_instances", {}) or {}).items():
+                if getattr(candidate, "is_connected", False) and getattr(
+                    candidate, "uses_idle_beat", False
+                ):
+                    world, connector = name, candidate
+                    break
+        except Exception as exc:
+            log_debug(f"[vessel_interface] idle beat lookup failed: {exc}")
+            return
+        if connector is None or world is None:
+            return
+
+        now = asyncio.get_event_loop().time()
+
+        # Is the body ready to be asked? (A connector that says nothing is ready since always.)
+        try:
+            ready_fn = getattr(connector, "idle_ready_since", None)
+            ready = ready_fn() if callable(ready_fn) else 0.0
+        except Exception as exc:
+            log_warning(f"[vessel_interface] idle_ready_since failed for '{world}': {exc}")
+            return
+        if ready is None:
+            self._idle_waiting = True
+            self._idle_hold("not_ready", f"'{world}' is not out and looking yet")
+            return
+        if ready > self._idle_seen_ready:
+            # A new arrival (or the first look): the rest of the bookkeeping belongs to the last one.
+            self._idle_seen_ready = ready
+            self._last_idle_beat_at = 0.0
+            self._idle_pending = False
+            self._idle_streak = 0
+            self._idle_novelty = []
+            self._idle_turn_done_at = 0.0
+            self._idle_acted_last = False
+            self._idle_gap_smoothed = None
+            log_info(f"[vessel_interface] Idle beat clock for '{world}' starts now (ready since {ready:.0f})")
+
+        try:
+            journal_fn = getattr(connector, "idle_journal", None)
+            journal = list(journal_fn()) if callable(journal_fn) else []
+        except Exception as exc:
+            log_debug(f"[vessel_interface] idle_journal failed for '{world}': {exc}")
+            journal = []
+
+        try:
+            from core import message_queue
+
+            rested = message_queue.consumer_idle_seconds(ignore_queued=True)
+        except Exception:  # pragma: no cover - defensive
+            rested = float("inf")
+        rest_needed = vessel_beat.resolve_idle_engine_rest_sec(_cfg)
+
+        # What the last beat came to, once its turn is over (the engine is free again): she did something, or
+        # she did not. A player who spoke since cut it short, which says nothing about her.
+        if self._idle_pending:
+            if rested < 3:
+                self._idle_waiting = True
+                self._idle_hold("last_beat_running", f"the last beat's turn is still running (engine free {rested:.0f}s)")
+                return
+            acted = [text for stamp, text in journal if stamp >= self._last_idle_beat_at]
+            if self._last_player_activity_at > self._last_idle_beat_at:
+                outcome = "cut short by the player"
+            elif acted:
+                self._idle_streak = 0
+                outcome = f"acted ({'; '.join(acted[-3:])})"
+            else:
+                self._idle_streak += 1
+                outcome = f"did nothing (streak {self._idle_streak})"
+            self._idle_pending = False
+            turn_done = (now - rested) if rested != float("inf") else now
+            self._idle_turn_done_at = turn_done
+            self._idle_acted_last = outcome.startswith("acted")
+            self._record_beat_outcome(connector, outcome, turn_done)
+            if self._turn_latency is not None and rested != float("inf") and not outcome.startswith("cut short"):
+                turn = (now - rested) - self._last_idle_beat_at
+                if turn > 0:
+                    self._turn_latency.observe(turn)
+            log_info(f"[vessel_interface] Idle beat outcome for '{world}': {outcome}")
+
+        # A walk she chose is going on: its own result is the next prompt, so no beat meanwhile.
+        try:
+            busy_fn = getattr(connector, "idle_busy", None)
+            busy = bool(busy_fn()) if callable(busy_fn) else False
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[vessel_interface] idle_busy failed for '{world}': {exc}")
+            busy = False
+        if busy:
+            self._idle_waiting = True
+            stats.incr("beat.hold", reason="walk")
+            self._idle_hold("body_busy", f"'{world}' is on a walk of its own: its result is the next prompt")
+            return
+
+        novelty = bool(self._idle_novelty)
+        since_ready = max(0.0, now - ready) if ready > 0 else float("inf")
+        # How long to wait after she (and her body) finished: measured from the last turns (auto), or as configured.
+        base_interval = float(vessel_beat.resolve_idle_interval(_cfg))
+        registry = stats.get_stats()
+        pacing = vessel_beat.auto_pacing(
+            turn=registry.timing("beat.ask_to_turn_done", max_age=vessel_beat.AUTO_MAX_AGE_SEC),
+            first_verb=registry.timing("beat.ask_to_first_verb", max_age=vessel_beat.AUTO_MAX_AGE_SEC),
+            active_gap_cfg=vessel_beat.resolve_idle_active_gap(_cfg),
+            base_interval=base_interval,
+        )
+        if pacing.mode == "auto":
+            self._idle_gap_smoothed = vessel_beat.smooth_gap(self._idle_gap_smoothed, pacing.gap)
+            gap = self._idle_gap_smoothed
+        else:
+            self._idle_gap_smoothed = None
+            gap = pacing.gap
+        interval = vessel_beat.adaptive_idle_interval(
+            base_interval,
+            vessel_beat.resolve_idle_arrival_interval(_cfg),
+            vessel_beat.resolve_idle_arrival_window(_cfg),
+            vessel_beat.resolve_idle_max_interval(_cfg),
+            since_ready,
+            self._idle_streak,
+            novelty=novelty,
+            acted_last=self._idle_acted_last,
+            active_gap=gap,
+        )
+        try:
+            settled_fn = getattr(connector, "idle_settled_since", None)
+            settled_since = float(settled_fn()) if callable(settled_fn) else 0.0
+        except Exception:  # pragma: no cover - defensive
+            settled_since = 0.0
+        # The interval counts from when the last beat's turn AND her body were done, not from the beat's start.
+        anchor = vessel_beat.idle_anchor(self._last_idle_beat_at, ready, self._idle_turn_done_at, settled_since)
+        self._idle_due_at = anchor + interval
+        self._idle_pacing = {
+            "mode": pacing.mode,
+            "reason": pacing.reason,
+            "gap": round(gap, 1),
+            "lead": round(pacing.lead, 1),
+            "interval": round(interval, 1),
+            "base_interval": base_interval,
+            "streak": self._idle_streak,
+            "acted_last": self._idle_acted_last,
+        }
+        stats.info("beat.pacing", {**self._idle_pacing, "due_in": round(self._idle_due_at - now, 1)})
+        quiet_sec = vessel_beat.resolve_idle_quiet_sec(_cfg)
+        if not vessel_beat.idle_beat_due(
+            now, anchor, interval, self._last_player_activity_at, quiet_sec
+        ):
+            if now - anchor >= interval:
+                self._idle_waiting = True
+                stats.incr("beat.hold", reason="player_active")
+                self._idle_hold(
+                    "player_active",
+                    f"a player spoke {now - self._last_player_activity_at:.0f}s ago (quiet window {quiet_sec}s)",
+                )
+            return
+
+        # Her body: asked only when it is done, or will be before the model could answer (a clip still playing is
+        # not talked over; one that ends in a second does not make a whole turn wait).
+        try:
+            eta_fn = getattr(connector, "idle_body_eta", None)
+            eta = eta_fn() if callable(eta_fn) else 0.0
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[vessel_interface] idle_body_eta failed for '{world}': {exc}")
+            eta = 0.0
+        if not vessel_beat.body_ready_for_ask(eta == 0.0, eta, pacing.lead):
+            self._idle_waiting = True
+            stats.incr("beat.hold", reason="body_settling")
+            self._idle_hold(
+                "body_settling",
+                f"her body is still busy ({'end unknown' if eta is None else f'{eta:.0f}s to go'}, lead {pacing.lead:.0f}s)",
+                every=30.0,
+            )
+            return
+        # The queue: nothing of this world waiting already (a beat piled behind other turns only goes stale).
+        backlog = self._vessel_backlog(world)
+        stats.gauge("queue.vessel_backlog", backlog)
+        if backlog > 0:
+            self._idle_waiting = True
+            stats.incr("beat.hold", reason="queue_busy")
+            self._idle_hold("queue_busy", f"{backlog} turn(s) of '{world}' already wait in the queue", every=30.0)
+            return
+
+        # A beat nobody asked for must not make a person wait: only start one when the engine has had nothing to
+        # do for a few seconds. (It used to be a whole interval, which a 90 s turn and a 90 s interval kept busy for
+        # ever: a chat waited 4+ minutes behind a running beat, 2026-11-04.)
+        if rested < rest_needed:
+            self._idle_waiting = True
+            stats.incr("beat.hold", reason="engine_busy")
+            self._idle_hold(
+                "engine_busy", f"the engine has been free for only {rested:.0f}s of the {rest_needed}s asked", every=30.0
+            )
+            return
+
+        try:
+            surroundings = connector.describe_surroundings()
+        except Exception as exc:
+            log_warning(f"[vessel_interface] describe_surroundings failed for '{world}': {exc}")
+            return
+        if not surroundings:
+            self._idle_hold("nothing_to_describe", f"'{world}' described nothing")
+            return
+        interface_path = self._decision_interface_path(world)
+        if interface_path is None:
+            self._idle_hold("no_path", f"no interface path for '{world}'")
+            return
+
+        recent = [(max(0.0, now - stamp), text) for stamp, text in journal[-5:]]
+        if journal:
+            still = max(0.0, now - journal[-1][0])
+        else:
+            still = since_ready if since_ready != float("inf") else None
+        intention = None
+        try:
+            intention_fn = getattr(connector, "idle_intention", None)
+            intention = await intention_fn() if callable(intention_fn) else None
+        except Exception as exc:
+            log_debug(f"[vessel_interface] idle_intention failed for '{world}': {exc}")
+        changes = list(self._idle_novelty)
+        self._idle_novelty = []
+        self._record_beat_phases(now, settled_since, pacing, interval)
+        self._last_idle_beat_at = now
+        self._idle_pending = True
+        # If she chooses to go for a walk, it should last until the NEXT prompt: the wait to the next beat plus the
+        # turn that answers it.
+        budget = None
+        try:
+            from plugins.rift_vessel import exploration
+
+            if getattr(connector, "explores", False) and self._turn_latency is not None:
+                budget = exploration.explore_budget(
+                    interval,
+                    self._turn_latency.value(),
+                    exploration.resolve_explore_min(_cfg),
+                    exploration.resolve_explore_max(_cfg),
+                )
+                connector.set_explore_budget(budget)
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[vessel_interface] explore budget failed for '{world}': {exc}")
+        log_info(
+            f"[vessel_interface] Idle beat for '{world}': asking what she wants to do "
+            f"(interval {interval:.0f}s, streak {self._idle_streak}, still "
+            f"{'?' if still is None else f'{still:.0f}s'}, {len(recent)} recent, {len(changes)} changed, "
+            f"{'an aim' if intention else 'no aim'}"
+            f"{'' if budget is None else f', a walk would last {budget:.0f}s'})"
+        )
+        await self._enqueue_perception(
+            interface_path=interface_path,
+            summary=vessel_beat.build_idle_prompt(world, surroundings, recent, still, changes, intention),
+            environment=world,
+            event_type="idle_beat",
+        )
 
     async def _maybe_run_will_beat(self) -> None:
         """Enqueue a **volition** cognition turn when it is due (slow layer).
@@ -1994,6 +2512,9 @@ class VesselInterface:
 
         world, world_state = await self._read_active_world_state()
         if world is None or world_state is None:
+            return
+        # A world that is asked what she wants (the idle beat) has no goal beats.
+        if self._uses_idle_beat(world):
             return
 
         interface_path = self._decision_interface_path(world)
@@ -2098,6 +2619,9 @@ class VesselInterface:
 
         world, world_state = await self._read_active_world_state()
         if world is None or world_state is None:
+            return
+        # A world that is asked what she wants (the idle beat) has no goal beats.
+        if self._uses_idle_beat(world):
             return
 
         interface_path = self._decision_interface_path(world)
@@ -3329,7 +3853,7 @@ class VesselInterface:
           vessel traffic for the world (via ``drop_vessel_queue_for_world`` in
           ``end_session``).
 
-        The grace window is ``VESSEL_DISCONNECT_GRACE_SEC`` (default 30s, clamped
+        The grace window is ``VESSEL_DISCONNECT_GRACE_SEC`` (default 120s, clamped
         5–3600) — long enough to absorb transient blips and retry. Fully
         guarded: any failure leaves the session untouched.
         """
@@ -3345,14 +3869,14 @@ class VesselInterface:
             grace = int(
                 config_registry.get_value(
                     "VESSEL_DISCONNECT_GRACE_SEC",
-                    30,
+                    120,
                     value_type=int,
                     group="vessel",
                     component="vessel",
                 )
             )
         except Exception:
-            grace = 30
+            grace = 120
         grace = max(5, min(3600, grace))
         now = asyncio.get_event_loop().time()
 

@@ -1905,6 +1905,18 @@ async def _handle_plugin_action(
     }
 
 
+def _count_action(action_type: Any, ok: bool) -> None:
+    """Statistics: one action ran (``actions.ok`` / ``actions.failed``, by type). Never raises."""
+    try:
+        from core import stats_registry
+
+        stats_registry.incr(
+            "actions.ok" if ok else "actions.failed", type=str(action_type or "unknown")
+        )
+    except Exception:  # pragma: no cover
+        pass
+
+
 async def run_action(action: Any, context: Dict[str, Any], bot, original_message):
     """Validate and execute a single action or list of actions."""
     log_info(f"[action_parser] 🎬 run_action called with action: {action}")
@@ -1920,6 +1932,7 @@ async def run_action(action: Any, context: Dict[str, Any], bot, original_message
     if not valid:
         error_msg = f"Invalid action: {errors}"
         log_error(f"[action_parser] ❌ {error_msg}")
+        _count_action(action_type, False)
         return {"error": error_msg}
 
     action_interface = action.get("interface")
@@ -1929,7 +1942,12 @@ async def run_action(action: Any, context: Dict[str, Any], bot, original_message
     )
 
     # Use plugin system for all action types (including messages)
-    result = await _handle_plugin_action(action, context, bot, original_message)
+    try:
+        result = await _handle_plugin_action(action, context, bot, original_message)
+    except Exception:
+        _count_action(action_type, False)
+        raise
+    _count_action(action_type, not (isinstance(result, dict) and result.get("error")))
     return result
 
 

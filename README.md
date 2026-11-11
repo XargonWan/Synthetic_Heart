@@ -11,6 +11,8 @@
 
 [![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/xargon)
 
+**Developed through Human-Directed Agentic Engineering.** Synthetic Heart is developed through a human-directed process that uses AI agents as active engineering collaborators, with human oversight and direction throughout development.
+
 ## Meet SyntH — your digital friend
 
 Synthetic Heart (SyntH) is a FOSS application and framework that helps you create and meet a persistent AI persona, a "Synth", that can follow you across platforms: Discord, Telegram, WebUI and more. Put simply: it's a digital friend that keeps its own memory, personality and state and can grow and eveolved by themselves.
