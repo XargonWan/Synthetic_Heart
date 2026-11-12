@@ -818,6 +818,26 @@ class DiscordInterface:
     def uses_synth_avatar() -> bool:
         return _avatar_switch()
 
+    async def send_activity(self, interface_path: str, kind: str) -> None:
+        """Show "typing…" (Discord has no wording for recording or uploading)."""
+        client = self.client
+        if client is None or not client.is_ready():
+            return
+        from core.interface_path_utils import parse_interface_path
+
+        _name, levels = parse_interface_path(interface_path)
+        if not levels or not str(levels[-1]).isdigit():
+            return
+        if len(levels) == 1:
+            # ``discord_bot/<user_id>``: a DM, whose channel has its own id.
+            user = client.get_user(int(levels[0])) or await client.fetch_user(
+                int(levels[0])
+            )
+            channel_id = (user.dm_channel or await user.create_dm()).id
+        else:
+            channel_id = int(levels[-1])  # channel, or the thread inside it
+        await client.http.send_typing(channel_id)
+
     async def set_avatar(
         self,
         image_bytes: Optional[bytes],

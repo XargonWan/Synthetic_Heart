@@ -5,7 +5,8 @@ import asyncio
 import inspect
 import re
 import time
-from typing import Any, Dict, List, Tuple
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Dict, List, Tuple
 
 from core.json_utils import dumps as json_dumps, redact_multimodal_for_logging
 from core.logging_utils import log_debug, log_info, log_warning, log_error
@@ -1804,9 +1805,12 @@ async def _handle_plugin_action(
                 log_info(
                     f"[action_parser] ✉️ Dispatching message action to interface '{plugin_iface}' via send_message"
                 )
-                result = plugin.send_message(payload, original_message=original_message)
-                if inspect.iscoroutine(result):
-                    result = await result
+                async with _action_activity(action_type, payload, context):
+                    result = plugin.send_message(
+                        payload, original_message=original_message
+                    )
+                    if inspect.iscoroutine(result):
+                        result = await result
                 # Propagate the delivery outcome so callers (agent router,
                 # agent tool executor) can observe success/failure instead of
                 # always assuming success. This is the path actually used in
@@ -1857,11 +1861,12 @@ async def _handle_plugin_action(
                     + json_dumps(redact_multimodal_for_logging(payload))
                 )
 
-                result = plugin.execute_action(
-                    new_action, context, bot, original_message
-                )
-                if inspect.iscoroutine(result):
-                    result = await result
+                async with _action_activity(action_type, payload, context):
+                    result = plugin.execute_action(
+                        new_action, context, bot, original_message
+                    )
+                    if inspect.iscoroutine(result):
+                        result = await result
                 # If a plugin explicitly skips this action, fall through to the next handler.
                 # "skipped" means "I'm not handling this — try the next plugin".
                 if isinstance(result, dict) and result.get("status") == "skipped":
@@ -3039,6 +3044,35 @@ def get_action_plugin_instructions() -> dict[str, Any]:
         )
 
     return instructions
+
+
+@asynccontextmanager
+async def _action_activity(
+    action_type: Any, payload: Any, context: Any
+) -> AsyncIterator[None]:
+    """Show "recording…" / "sending a file…" while an action runs, then stop.
+
+    A voice note (``tts_speak``) or a message with ``media`` gets its own
+    indicator for the duration; once anything has been delivered the typing
+    indicator of that conversation is stopped, because the client has just
+    cleared it and a pulse would bring it back. Never raises.
+    """
+    from core import chat_activity
+    from core.message_registry import is_message_action
+
+    kind = chat_activity.kind_for_action(action_type, payload)
+    path = (payload.get("interface_path") if isinstance(payload, dict) else None) or (
+        context.get("interface_path") if isinstance(context, dict) else None
+    )
+    try:
+        if kind and path:
+            async with chat_activity.show(path, kind):
+                yield
+        else:
+            yield
+    finally:
+        if path and (kind or is_message_action(action_type)):
+            await chat_activity.end(path)
 
 
 def _add_core_injections(injections: dict[str, Any]) -> dict[str, Any]:

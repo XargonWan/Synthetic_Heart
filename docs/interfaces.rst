@@ -529,3 +529,31 @@ Best Practices
     Provide clear action schemas and examples in the ``examples`` tier.
 
 For complete implementations, examine ``interface/telegram_bot.py`` or ``interface/discord_interface.py`` in the repository.
+
+
+Typing and recording status
+---------------------------
+
+While the synth generates a reply, records a voice note or sends a file, an
+interface can show it in the chat ("typing…", "recording a voice message…",
+"sending a file…"). It is optional and structural: implement
+
+.. code-block:: python
+
+   async def send_activity(self, interface_path: str, kind: str) -> None: ...
+
+``kind`` is ``typing``, ``record_audio``, ``upload_audio`` or ``upload_file``
+(``core.chat_activity.KIND_*``); use the nearest wording the platform has.
+``core.chat_activity`` repeats the pulse every four seconds, because chat clients
+drop the indicator after about five, and stops it by itself after repeated
+failures or four minutes.
+
+* ``core.message_queue`` starts "typing" when generation begins and stops it when
+  the turn ends.
+* ``core.action_parser`` switches it to "recording" while a ``tts_speak`` action
+  runs and to "sending a file" for a message with ``media``, and stops it as soon
+  as something has been delivered (the client has just cleared it).
+
+Implemented by ``telegram`` (Telethon ``SetTypingRequest``, including forum
+topics), ``telegram_bot`` (``sendChatAction``), ``discord_bot`` (typing only) and
+``matrix_chat`` (typing only). Turn it off with ``CHAT_ACTIVITY_ENABLED``.

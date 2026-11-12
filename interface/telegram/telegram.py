@@ -1150,6 +1150,31 @@ class TelegramUserInterface:
             log_warning(f"[telegram] avatar update failed: {type(exc).__name__}")
             return False
 
+    # Chat-action names the Telethon facade understands (core/chat_activity kinds).
+    _ACTIVITY_ACTIONS = {
+        "typing": "typing",
+        "record_audio": "record_voice",
+        "upload_audio": "upload_voice",
+        "upload_file": "upload_document",
+    }
+
+    async def send_activity(self, interface_path: str, kind: str) -> None:
+        """Show "typing…" / "recording…" / "sending a file…" in a chat."""
+        if self.bot is None:
+            return
+        from core.interface_path_utils import extract_legacy_ids
+
+        ids = extract_legacy_ids(interface_path)
+        chat_id = ids.get("chat_id")
+        if not chat_id:
+            return
+        thread = self._numeric_thread(ids.get("thread_id"))
+        await self.bot.send_chat_action(
+            chat_id,
+            self._ACTIVITY_ACTIONS.get(kind, "typing"),
+            message_thread_id=int(thread) if thread else None,
+        )
+
     async def stop(self) -> None:
         client, self.client, self.bot = self.client, None, None
         if client is not None:

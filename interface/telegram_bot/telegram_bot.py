@@ -2330,6 +2330,30 @@ class TelegramInterface:
     def uses_synth_avatar() -> bool:
         return _avatar_switch()
 
+    _ACTIVITY_ACTIONS = {
+        "typing": "typing",
+        "record_audio": "record_voice",
+        "upload_audio": "upload_voice",
+        "upload_file": "upload_document",
+    }
+
+    async def send_activity(self, interface_path: str, kind: str) -> None:
+        """Show "typing…" / "recording…" / "sending a file…" in a chat."""
+        if self.bot is None:
+            return
+        from core.interface_path_utils import extract_legacy_ids
+
+        ids = extract_legacy_ids(interface_path)
+        chat_id = ids.get("chat_id")
+        if not chat_id:
+            return
+        thread = ids.get("thread_id")
+        await self.bot.send_chat_action(
+            chat_id=int(chat_id),
+            action=self._ACTIVITY_ACTIONS.get(kind, "typing"),
+            message_thread_id=int(thread) if thread and str(thread).isdigit() else None,
+        )
+
     async def set_avatar(
         self,
         image_bytes: Optional[bytes],

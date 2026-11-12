@@ -312,6 +312,16 @@ class MatrixInterface:
     def uses_synth_avatar() -> bool:
         return _avatar_switch()
 
+    async def send_activity(self, interface_path: str, kind: str) -> None:
+        """Show "typing…" (Matrix has one indicator for every kind of work)."""
+        if self.client is None:
+            return
+        from core.interface_path_utils import parse_interface_path
+
+        _name, levels = parse_interface_path(interface_path)
+        if levels:
+            await self.client.room_typing(levels[0], True, timeout=6000)
+
     async def set_avatar(
         self,
         image_bytes: Optional[bytes],

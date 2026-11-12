@@ -10,7 +10,7 @@ from typing import Any, cast
 import traceback
 from types import SimpleNamespace
 
-from core import plugin_instance, rate_limit, stats_registry
+from core import chat_activity, plugin_instance, rate_limit, stats_registry
 from core.beat_utils import is_outbound_beat
 from core.logging_utils import log_debug, log_error, log_warning, log_info
 from core.mention_utils import is_message_for_bot
@@ -1863,6 +1863,9 @@ async def _consumer_loop() -> None:
                         )
 
                     async def _call_bot_generation_start() -> None:
+                        # "typing…" in the chat while the model generates (interfaces
+                        # that can show it implement send_activity; core/chat_activity).
+                        await chat_activity.begin(interface_path)
                         try:
                             bot_obj = final.get("bot")
                             if bot_obj is None:
@@ -2019,6 +2022,7 @@ async def _consumer_loop() -> None:
                         _interface_path: str = interface_path,
                         _context: Any = context,
                     ) -> None:
+                        await chat_activity.end(_interface_path)
                         try:
                             bot_obj = _final.get("bot")
                             if bot_obj is None:

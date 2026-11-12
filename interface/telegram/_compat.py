@@ -793,7 +793,13 @@ class TelethonBot:
 
     # -- chat state ---------------------------------------------------------
 
-    async def send_chat_action(self, chat_id: Any, action: str, **_: Any) -> bool:
+    async def send_chat_action(
+        self,
+        chat_id: Any,
+        action: str,
+        message_thread_id: Any = None,
+        **_: Any,
+    ) -> bool:
         from telethon import functions, types
 
         cls_name = _CHAT_ACTIONS.get(str(action), "SendMessageTypingAction")
@@ -805,8 +811,16 @@ class TelethonBot:
                 if cls_name.startswith("SendMessageUpload")
                 else action_cls()
             )
+            kwargs: dict[str, Any] = {}
+            try:
+                if message_thread_id is not None and int(message_thread_id) > 0:
+                    kwargs["top_msg_id"] = int(message_thread_id)  # forum topic
+            except (TypeError, ValueError):
+                pass
             await self.client(
-                functions.messages.SetTypingRequest(peer=peer, action=instance)
+                functions.messages.SetTypingRequest(
+                    peer=peer, action=instance, **kwargs
+                )
             )
             return True
         except Exception as exc:
