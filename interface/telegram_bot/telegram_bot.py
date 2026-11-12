@@ -69,6 +69,7 @@ import core.plugin_instance as plugin_instance
 from core.core_initializer import register_interface
 from core.interfaces_registry import get_interface_registry
 from core.config_manager import config_registry
+from core.synth_avatar import register_interface_switch as _register_avatar_switch
 from core.variables_engine import register_exposed_var
 
 
@@ -2180,6 +2181,9 @@ async def _record_telegram_delivery_failure(
         log_debug(f"[telegram_interface] Could not record delivery failure: {exc}")
 
 
+_avatar_switch = _register_avatar_switch("telegram_bot")
+
+
 class TelegramInterface:
     """Interface wrapper providing a standard send_message method for Telegram."""
 
@@ -2321,6 +2325,59 @@ class TelegramInterface:
     def get_interface_id() -> str:
         """Return the unique identifier for this interface."""
         return "telegram_bot"
+
+    @staticmethod
+    def uses_synth_avatar() -> bool:
+        return _avatar_switch()
+
+    async def set_avatar(
+        self,
+        image_bytes: Optional[bytes],
+        mime: Optional[str] = None,
+        version: Optional[str] = None,
+        force: bool = False,
+    ) -> bool:
+        """Set (or, for ``None``, remove) the bot's profile photo.
+
+        python-telegram-bot 22.6 predates ``setMyProfilePhoto`` /
+        ``removeMyProfilePhoto`` (Bot API 9.4), so they are called directly. A
+        Bot API server without them answers "not found" and this reports not
+        applied; the bot picture can then still be set through @BotFather.
+        """
+        bot = self.bot
+        if bot is None or not self.uses_synth_avatar():
+            return False
+        import json
+
+        import httpx
+
+        base = f"https://api.telegram.org/bot{bot.token}"
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as http:
+                if image_bytes is None:
+                    reply = await http.post(f"{base}/removeMyProfilePhoto")
+                else:
+                    reply = await http.post(
+                        f"{base}/setMyProfilePhoto",
+                        data={
+                            "photo": json.dumps(
+                                {"type": "static", "photo": "attach://avatar"}
+                            )
+                        },
+                        files={"avatar": ("avatar.png", image_bytes, "image/png")},
+                    )
+            body = reply.json()
+        except Exception as exc:
+            log_warning(f"[telegram_bot] avatar update failed: {type(exc).__name__}")
+            return False
+        if not body.get("ok"):
+            log_warning(
+                "[telegram_bot] avatar not applied by the Bot API: "
+                f"{body.get('error_code')} {body.get('description')}"
+            )
+            return False
+        log_info("[telegram_bot] synth avatar applied to the bot")
+        return True
 
     @staticmethod
     def get_interface_path_hint() -> str:

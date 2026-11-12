@@ -881,6 +881,8 @@ class CoreInitializer:
 
             # Start all registered interfaces
             await self._start_interfaces()
+            self._schedule_avatar_sync()
+
             # Tell the persona the core is up (and roughly how long it was
             # away); also starts the "last seen alive" heartbeat.
             try:
@@ -2283,6 +2285,32 @@ class CoreInitializer:
         return {"ok": True, "name": plugin_short_name, "enabled": True}
 
     @staticmethod
+    def _schedule_avatar_sync(interface_name: str | None = None) -> None:
+        """Bring the synth avatar up to date shortly after interfaces connect.
+
+        An interface that was off (or not yet connected) when the avatar changed
+        catches up here; the per-interface applied version keeps it cheap — only
+        interfaces whose picture is out of date are touched.
+        """
+
+        async def _run() -> None:
+            try:
+                await asyncio.sleep(20)  # let the gateways connect first
+                from core import synth_avatar
+
+                if interface_name:
+                    await synth_avatar.sync_interface(interface_name)
+                else:
+                    await synth_avatar.broadcast_avatar_changed(catch_up=True)
+            except Exception as exc:  # pragma: no cover - defensive
+                log_debug(f"[core_initializer] avatar sync skipped: {exc}")
+
+        try:
+            asyncio.get_running_loop().create_task(_run())
+        except RuntimeError:  # pragma: no cover - no loop (sync context)
+            pass
+
+    @staticmethod
     async def _record_toggle_event(name: str, kind: str, enabled: bool) -> None:
         """Note a successful runtime toggle in the system-event window.
 
@@ -2469,6 +2497,7 @@ class CoreInitializer:
 
         self._invalidate_action_caches()
         await self._build_actions_block()
+        self._schedule_avatar_sync(interface_name)
         log_info(
             f"[core_initializer] 🔺 Interface '{interface_name}' enabled (started)"
         )

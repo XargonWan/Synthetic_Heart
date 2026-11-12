@@ -1105,6 +1105,7 @@ class TelegramUserInterface:
         image_bytes: Optional[bytes],
         mime: Optional[str] = None,
         version: Optional[str] = None,
+        force: bool = False,
     ) -> bool:
         """Set (or, for ``None``, remove) the account profile picture.
 
@@ -1132,7 +1133,7 @@ class TelegramUserInterface:
                 await config_registry.set_value("TELEGRAM_AVATAR_APPLIED", "")
                 log_info("[telegram] synth avatar removed from the account")
                 return True
-            if version and version == applied:
+            if version and version == applied and not force:
                 log_debug("[telegram] synth avatar already applied; skipping upload")
                 return False
             uploaded = await client.upload_file(image_bytes, file_name="avatar.png")

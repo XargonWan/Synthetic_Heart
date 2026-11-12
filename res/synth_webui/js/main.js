@@ -1394,10 +1394,11 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         let inputEl = null;
                         let extraEl = null;
                         let skipAutoSave = false;
-                        if (item.ui_type === 'avatar' && window.createSynthAvatarEditor) {
-                            // Saved through /api/synth_avatar by the editor itself.
-                            inputEl = window.createSynthAvatarEditor();
-                            skipAutoSave = true;
+                        const registeredType = window.getUiType ? window.getUiType(item.ui_type) : null;
+                        if (registeredType) {
+                            // A widget registered for this ui_type (see ui-helpers.js).
+                            inputEl = registeredType.create(item);
+                            skipAutoSave = registeredType.selfSaving;
                         } else if (item.ui_type === 'bool' || item.value_type === 'bool') {
                             const checkbox = document.createElement('input');
                             const key = item.key || item.label || `bool-${Math.random().toString(36).slice(2)}`;
@@ -1451,6 +1452,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             inputFile.disabled = !isEditable;
 
                             const uploadBtn = document.createElement('button');
+                            uploadBtn.type = 'button';
+                            uploadBtn.className = 'btn-ghost';
                             uploadBtn.textContent = 'Upload';
                             uploadBtn.disabled = !isEditable;
                             uploadBtn.addEventListener('click', async () => {
@@ -3491,7 +3494,11 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                         let inputEl = null;
 
-                        if (ci.ui_type === 'bool' || ci.value_type === 'bool') {
+                        const registeredType = window.getUiType ? window.getUiType(ci.ui_type) : null;
+                        if (registeredType) {
+                            // A widget registered for this ui_type (see ui-helpers.js).
+                            inputEl = registeredType.create(ci);
+                        } else if (ci.ui_type === 'bool' || ci.value_type === 'bool') {
                             const wrap = document.createElement('div');
                             wrap.style.cssText = 'display:flex; align-items:center; gap:8px;';
                             const cb = document.createElement('input');
@@ -3710,7 +3717,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             const inputFile = document.createElement('input');
                             inputFile.type = 'file';
                             inputFile.disabled = !editable;
-                            inputFile.style.cssText = 'font-size:0.82rem; color:var(--text); flex:1 1 auto; min-width:0;';
+                            inputFile.style.cssText = 'flex:1 1 auto; min-width:0;';
                             // Auto-upload as soon as a file is selected.
                             inputFile.addEventListener('change', async () => {
                                 const f = inputFile.files && inputFile.files[0];
@@ -3740,7 +3747,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             const clearBtn = document.createElement('button');
                             clearBtn.textContent = 'Clear';
                             clearBtn.disabled = !editable || !val;
-                            clearBtn.style.cssText = 'padding:5px 12px; background:var(--accent); color:var(--accent-contrast); border:none; border-radius:6px; font-size:0.82rem; cursor:pointer;';
+                            clearBtn.type = 'button';
+                            clearBtn.className = 'btn-ghost';
                             clearBtn.addEventListener('click', async () => {
                                 try {
                                     clearBtn.disabled = true;

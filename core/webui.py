@@ -1037,6 +1037,9 @@ class SynthWebUIInterface:
         self.app.delete("/api/synth_avatar", dependencies=[Depends(_avatar_token)])(
             self.delete_synth_avatar
         )
+        self.app.post(
+            "/api/synth_avatar/resend", dependencies=[Depends(_avatar_token)]
+        )(self.resend_synth_avatar)
         # On-demand run of the nightly memory compaction (Settings → Memory Compaction).
         self.app.get("/api/grillo/compaction")(self.grillo_compaction_status)
         self.app.post("/api/grillo/compaction")(self.start_grillo_compaction)
@@ -10804,6 +10807,20 @@ class SynthWebUIInterface:
         return JSONResponse(
             {"success": True, "version": info.version, "interfaces": results}
         )
+
+    async def resend_synth_avatar(self) -> JSONResponse:
+        """Push the stored avatar to every opted-in interface again, by hand.
+
+        Skips the "already applied" shortcut, so an account whose picture was
+        changed elsewhere (or a push that failed earlier) is brought back in line.
+        """
+        from core import synth_avatar
+
+        if synth_avatar.load_avatar() is None:
+            raise HTTPException(status_code=404, detail="No avatar to resend")
+        results = await synth_avatar.broadcast_avatar_changed(force=True)
+        log_info(f"{LOG_PREFIX} Synth avatar resent: {results}")
+        return JSONResponse({"success": True, "interfaces": results})
 
     async def delete_synth_avatar(self) -> JSONResponse:
         from core import synth_avatar

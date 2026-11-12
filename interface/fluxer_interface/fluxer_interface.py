@@ -39,6 +39,7 @@ from core.core_initializer import register_interface
 from core.interface_path_utils import build_interface_path
 from core.interface_paths import resolve_and_touch, set_name_resolver
 from core.interfaces_registry import get_interface_registry
+from core.synth_avatar import register_interface_switch as _register_avatar_switch
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.variables_engine import register_exposed_var
 
@@ -448,6 +449,9 @@ async def _maybe_await(result: Any) -> Any:
     return result
 
 
+_avatar_switch = _register_avatar_switch(INTERFACE_NAME)
+
+
 class FluxerInterface:
     """Fluxer chat interface backed by an embedded REST + gateway client."""
 
@@ -554,6 +558,34 @@ class FluxerInterface:
     @staticmethod
     def get_interface_id() -> str:
         return INTERFACE_NAME
+
+    @staticmethod
+    def uses_synth_avatar() -> bool:
+        return _avatar_switch()
+
+    async def set_avatar(
+        self,
+        image_bytes: Optional[bytes],
+        mime: Optional[str] = None,
+        version: Optional[str] = None,
+        force: bool = False,
+    ) -> bool:
+        """Set (or, for ``None``, remove) the bot account avatar (``PATCH /users/@me``)."""
+        if self._rest is None or not self.uses_synth_avatar():
+            return False
+        import base64
+
+        avatar: Optional[str] = None
+        if image_bytes is not None:
+            encoded = base64.b64encode(image_bytes).decode("ascii")
+            avatar = f"data:{mime or 'image/png'};base64,{encoded}"
+        result = await self._rest._request(
+            "PATCH", "/users/@me", json_body={"avatar": avatar}
+        )
+        if result is None:
+            return False
+        log_info("[fluxer_interface] synth avatar applied to the bot account")
+        return True
 
     @staticmethod
     def get_interface_path_hint() -> str:

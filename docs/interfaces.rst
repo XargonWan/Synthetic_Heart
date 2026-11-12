@@ -26,7 +26,7 @@ Available Interfaces
 * ``telegram_bot`` – Telegram bot interface with media support. Requires ``BOTFATHER_TOKEN`` and trainer ID.
 * ``telegram`` – Telegram **user-account** interface (real phone number, MTProto via Telethon) with a WebUI login. Requires ``TELEGRAM_API_ID`` and ``TELEGRAM_API_HASH``. See :doc:`telegram_user_interface`.
 
-Interfaces that can set their own account picture (currently ``telegram``) use the core synth avatar; see :doc:`synth_avatar` for the support matrix.
+Interfaces that can set their own account picture (``discord_bot``, ``telegram_bot``, ``matrix_chat``, ``fluxer_bot`` and, opt-in, ``telegram``) use the core synth avatar; see :doc:`synth_avatar` for the support matrix.
 
 **Development Interfaces** (in ``interface_dev/`` directory):
 

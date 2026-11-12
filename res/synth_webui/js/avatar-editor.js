@@ -78,12 +78,18 @@
 
         // --- actions -----------------------------------------------------------------
         const bar = el('div', 'display:flex; align-items:center; gap:8px; flex-wrap:wrap;');
-        const confirm = el('button', '', 'Confirm and apply');
-        confirm.type = 'button'; confirm.disabled = true;
-        const remove = el('button', '', 'Remove avatar');
-        remove.type = 'button'; remove.className = 'btn-ghost'; remove.disabled = true;
+        // Same button style as every other settings widget (.btn-ghost).
+        const mkButton = (label) => {
+            const b = el('button', '', label);
+            b.type = 'button'; b.className = 'btn-ghost'; b.disabled = true;
+            return b;
+        };
+        const confirm = mkButton('Confirm and apply');
+        const resend = mkButton('Resend avatar');
+        resend.title = 'Push the current avatar to every interface again';
+        const remove = mkButton('Remove avatar');
         const status = el('span', ''); status.className = 'meta';
-        bar.appendChild(confirm); bar.appendChild(remove); bar.appendChild(status);
+        bar.appendChild(confirm); bar.appendChild(resend); bar.appendChild(remove); bar.appendChild(status);
         wrap.appendChild(bar);
         const ifaceList = el('div', 'display:flex; flex-direction:column; gap:2px;');
         ifaceList.className = 'meta';
@@ -181,14 +187,26 @@
                 current.style.display = '';
                 currentLabel.textContent = 'Current avatar';
                 remove.disabled = false;
+                resend.disabled = false;
             } else {
                 current.style.display = 'none';
                 currentLabel.textContent = 'No avatar set';
                 remove.disabled = true;
+                resend.disabled = true;
             }
             ifaceList.textContent = '';
             ((info && info.interfaces) || []).forEach((i) => {
-                ifaceList.appendChild(el('span', '', `${i.name}: ${i.enabled ? 'uses the avatar' : 'not enabled (turn on in its settings)'}`));
+                let line;
+                if (!i.enabled) {
+                    line = 'not enabled (turn on in its settings)';
+                } else if (i.connected === false) {
+                    line = 'not connected';
+                } else if (!info.exists) {
+                    line = 'uses the avatar';
+                } else {
+                    line = i.applied === info.version ? 'up to date' : 'not applied yet';
+                }
+                ifaceList.appendChild(el('span', '', `${i.name}: ${line}`));
             });
         }
         async function loadInfo() {
@@ -228,6 +246,22 @@
             }
         });
 
+        resend.addEventListener('click', async () => {
+            resend.disabled = true; status.textContent = 'Resending…';
+            try {
+                const r = await fetch(apiBase() + '/api/synth_avatar/resend', { method: 'POST' });
+                if (!r.ok) throw new Error(await readError(r));
+                const res = await r.json();
+                status.textContent = 'Resent' + summarize(res.interfaces);
+                toast('Synth avatar resent', false);
+                await loadInfo();
+            } catch (e) {
+                status.textContent = 'Not resent: ' + e.message;
+                toast('Avatar resend failed: ' + e.message, true);
+                resend.disabled = false;
+            }
+        });
+
         remove.addEventListener('click', async () => {
             remove.disabled = true; status.textContent = 'Removing…';
             try {
@@ -245,4 +279,10 @@
         loadInfo();
         return wrap;
     };
+
+    // Register with the settings renderer (ui-helpers.js): the avatar variable
+    // declares ui_type "avatar", and the renderer looks the widget up by it.
+    if (window.registerUiType) {
+        window.registerUiType('avatar', window.createSynthAvatarEditor, { selfSaving: true });
+    }
 })();

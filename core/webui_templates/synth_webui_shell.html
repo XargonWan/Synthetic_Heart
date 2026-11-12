@@ -865,6 +865,35 @@
             border-radius: 8px;
             cursor: pointer;
         }
+        .btn-ghost:hover:not(:disabled) {
+            border-color: var(--accent);
+        }
+        .btn-ghost:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        /* The browser's own "Choose file" button, drawn like every other button. */
+        input[type="file"] {
+            font-size: 0.85rem;
+            color: var(--text-soft, var(--text));
+        }
+        input[type="file"]::file-selector-button {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 0.45rem 0.8rem;
+            margin-right: 0.6rem;
+            border-radius: 8px;
+            font: inherit;
+            cursor: pointer;
+        }
+        input[type="file"]:not(:disabled)::file-selector-button:hover {
+            border-color: var(--accent);
+        }
+        input[type="file"]:disabled::file-selector-button {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
         .skins-grid {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
