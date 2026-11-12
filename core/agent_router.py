@@ -210,6 +210,15 @@ def classify(actions: List[Any], *, context: Dict[str, Any] | None = None) -> st
             log_info("[agent_router] classify: grillo beat -> FAST lane")
             return FAST
 
+    # A web-search delivery turn only reports results that already exist, with
+    # the action catalog restricted to messages. Its text quotes the original
+    # request, so recon flags it as agentic again and the Agent Lane would run
+    # a second task for it (one user message -> two tasks). Structural signal
+    # only: the beat type set by the search orchestrator, never message text.
+    if isinstance(context, dict) and context.get("beat_type") == "web_search_result":
+        log_info("[agent_router] classify: web search delivery turn -> FAST lane")
+        return FAST
+
     # Authoritative, pre-LLM decision: the recon plugin evaluated the user's
     # request and flagged it as agentic work. It escalates even when the main
     # model only emitted conversational actions — the under-emission case where

@@ -1203,6 +1203,50 @@ class AgentLoopManager:
         except Exception as e:
             log_warning(f"[agent_core] supersede_pending_task failed: {e}")
 
+    @staticmethod
+    def _observations_to_meta(observations: Any) -> list[Dict[str, Any]]:
+        """Loop observations in the shape stored in ``agent_tasks.iterations_meta``."""
+        meta: list[Dict[str, Any]] = []
+        items: list[Any] = observations if isinstance(observations, list) else []
+        for idx, obs in enumerate(items, start=1):
+            if not isinstance(obs, dict):
+                continue
+            entry: Dict[str, Any] = obs
+            meta.append(
+                {
+                    "iteration": entry.get("iteration") or idx,
+                    "role": entry.get("role") or "observation",
+                    "result": entry.get("content"),
+                }
+            )
+        return meta
+
+    async def _persist_progress(
+        self, task_id: Optional[int], observations: list[Dict[str, Any]]
+    ) -> None:
+        """Write the steps so far into the still-``running`` row.
+
+        The Agent panel reads ``iterations_meta`` from the DB, which used to be
+        filled only when the turn ended, so a running task showed nothing for
+        minutes. Best-effort and cheap: a failure is logged and ignored, the
+        final persist still writes everything.
+        """
+        if task_id is None or not observations:
+            return
+        try:
+            meta = json.dumps(self._observations_to_meta(observations), default=str)
+            conn_ctx = await self._get_conn_ctx()
+            async with conn_ctx as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "UPDATE agent_tasks SET iterations_meta=%s, "
+                        "updated_at=CURRENT_TIMESTAMP WHERE id=%s AND status='running'",
+                        (meta, int(task_id)),
+                    )
+                    await self._maybe_commit(conn)
+        except Exception as e:
+            log_debug(f"[agent_core] _persist_progress failed: {e}")
+
     async def _persist_agentic_turn(
         self,
         *,
@@ -1227,18 +1271,7 @@ class AgentLoopManager:
         """
         try:
             observations = result.get("observations") or []
-            iterations_meta: list[Dict[str, Any]] = []
-            if isinstance(observations, list):
-                for idx, obs in enumerate(observations, start=1):
-                    if not isinstance(obs, dict):
-                        continue
-                    iterations_meta.append(
-                        {
-                            "iteration": obs.get("iteration") or idx,
-                            "role": obs.get("role") or "observation",
-                            "result": obs.get("content"),
-                        }
-                    )
+            iterations_meta = self._observations_to_meta(observations)
 
             stop_reason = str(result.get("stop_reason") or "")
             if stop_reason in {
@@ -1552,6 +1585,20 @@ class AgentLoopManager:
             # turn on a status update failure.
             await self._mark_task_running(task_id)
 
+        # Let tools that start another task (spawn_drone) link it to this one.
+        # ``spawn_drone`` reads ``agent_task_id`` for the child's parent; nothing
+        # set it before, so sub-agents were never tied to the task that spawned
+        # them.
+        if task_id is not None:
+            if isinstance(context, dict):
+                context["agent_task_id"] = task_id
+            else:
+                context = {
+                    "from_cortex": True,
+                    "agent_tool": True,
+                    "agent_task_id": task_id,
+                }
+
         observations: list[Dict[str, Any]] = list(prior_observations or [])
         final_text = ""
         stop_reason = "max_iterations"
@@ -1686,6 +1733,7 @@ class AgentLoopManager:
                         "content": [
                             {
                                 "tool": name,
+                                "arguments": args,
                                 "ok": exec_result.get("ok", False),
                                 "result": exec_result.get("result", ""),
                                 "error": exec_result.get("error"),
@@ -1720,6 +1768,7 @@ class AgentLoopManager:
             if stop_reason == "timeout":
                 stop_reason = "max_iterations"
 
+        persisted_observations = 0
         for i in range(1, max_iterations + 1):
             elapsed = time.monotonic() - start
             if elapsed > timeout_seconds:
@@ -1739,6 +1788,11 @@ class AgentLoopManager:
                 config_registry.get_var("AWAIT_RESPONSE_TIMEOUT", 600)
             )
             per_call_timeout = max(2.0, min(engine_timeout, remaining_budget))
+
+            # Show the steps done so far in the Agent panel while the turn runs.
+            if len(observations) != persisted_observations:
+                persisted_observations = len(observations)
+                await self._persist_progress(task_id, observations)
 
             # Build the iteration prompt: goal + prior observations.
             prompt = self._build_agent_prompt(goal, observations, engine, context)
@@ -2153,6 +2207,7 @@ class AgentLoopManager:
                                     "content": [
                                         {
                                             "tool": mc_name,
+                                            "arguments": args,
                                             "ok": True,
                                             "result": "already delivered",
                                             "error": None,
@@ -2197,6 +2252,7 @@ class AgentLoopManager:
                                     "content": [
                                         {
                                             "tool": mc_name,
+                                            "arguments": args,
                                             "ok": True,
                                             "result": (
                                                 "suppressed: you already sent "
@@ -2267,6 +2323,7 @@ class AgentLoopManager:
                                 "content": [
                                     {
                                         "tool": mc_name,
+                                        "arguments": args,
                                         "ok": delivered_ok,
                                         "result": exec_result.get("result", ""),
                                         "error": exec_result.get("error"),
@@ -2553,6 +2610,7 @@ class AgentLoopManager:
                     iteration_results.append(
                         {
                             "tool": name,
+                            "arguments": args,
                             "ok": False,
                             "result": "",
                             "error": (
@@ -2666,6 +2724,9 @@ class AgentLoopManager:
                 iteration_results.append(
                     {
                         "tool": name,
+                        # The call's arguments, so the Agent panel (and a lean-prompt
+                        # endpoint) can show and replay what was actually run.
+                        "arguments": args,
                         "ok": exec_result.get("ok", False),
                         "result": exec_result.get("result", ""),
                         "error": exec_result.get("error"),
@@ -3003,6 +3064,94 @@ class AgentLoopManager:
             cortex_scope=cortex_scope,
         )
 
+    @staticmethod
+    def _lean_prompt(engine: Any) -> bool:
+        """True when *engine* is an endpoint configured for the lean agent prompt."""
+        return getattr(engine, "lean_agent_prompt", False) is True
+
+    @staticmethod
+    def _lean_messages(prompt: Dict[str, Any]) -> list[Dict[str, Any]]:
+        """Goal plus earlier tool calls/results as plain OpenAI chat messages.
+
+        No system text, no tool catalog and no protocol instructions: the tools
+        travel as native ``tools`` and the endpoint speaks the standard
+        function-calling API. Each earlier tool result becomes an
+        ``assistant`` message with its ``tool_calls`` followed by the ``tool``
+        message holding the output, so the endpoint can replay the whole
+        session (web-driven endpoints are stateless).
+        """
+        context = (
+            prompt.get("context") if isinstance(prompt.get("context"), dict) else None
+        )
+        goal = str((prompt.get("system_message") or {}).get("goal") or "")
+        preface = AgentLoopManager._reply_channel_preface(context)
+        messages: list[Dict[str, Any]] = [
+            {"role": "user", "content": f"{preface}\n\n{goal}" if preface else goal}
+        ]
+        counter = 0
+        for obs in prompt.get("observation_history") or []:
+            content = obs.get("content")
+            if not isinstance(content, list):
+                if content:
+                    messages.append({"role": "user", "content": str(content)})
+                continue
+            calls: list[Dict[str, Any]] = []
+            outputs: list[Dict[str, Any]] = []
+            for item in content:
+                counter += 1
+                call_id = f"call_{counter}"
+                calls.append(
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": str(item.get("tool") or ""),
+                            "arguments": json.dumps(
+                                item.get("arguments") or {},
+                                ensure_ascii=False,
+                                default=str,
+                            ),
+                        },
+                    }
+                )
+                if item.get("ok"):
+                    result = item.get("result", "")
+                    text = (
+                        result
+                        if isinstance(result, str)
+                        else json.dumps(result, ensure_ascii=False, default=str)
+                    )
+                else:
+                    text = f"error: {item.get('error')}"
+                outputs.append(
+                    {"role": "tool", "tool_call_id": call_id, "content": text}
+                )
+            if calls:
+                messages.append(
+                    {"role": "assistant", "content": None, "tool_calls": calls}
+                )
+                messages.extend(outputs)
+        return messages
+
+    @staticmethod
+    def _reply_channel_preface(context: Dict[str, Any] | None) -> str:
+        """Where the user is talking from and which files they sent, as prose."""
+        if not isinstance(context, dict):
+            return ""
+        lines: list[str] = []
+        path = context.get("interface_path")
+        if path:
+            lines.append(
+                f"The person I am helping writes from {path}. To reply to them, "
+                f"run send_message with --interface_path {path}."
+            )
+        attachments = context.get("attachment_paths")
+        if isinstance(attachments, list) and attachments:
+            lines.append(
+                "Files they sent me: " + ", ".join(str(a) for a in attachments) + "."
+            )
+        return "\n".join(lines)
+
     async def _call_engine_direct(
         self,
         prompt: Dict[str, Any],
@@ -3072,10 +3221,13 @@ class AgentLoopManager:
             text = str(payload.get("text", ""))
             system = str(payload.get("system", ""))
             if prompt.get("agent_mode") and hasattr(engine, "generate_response"):
-                messages = [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": text},
-                ]
+                if native_tools and self._lean_prompt(engine):
+                    messages = self._lean_messages(prompt)
+                else:
+                    messages = [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": text},
+                    ]
                 # Agent-route engine profile: thinking on + native tool calls
                 # (AGENT_ENABLE_THINKING / AGENT_NATIVE_TOOLS /
                 # AGENT_PARALLEL_TOOL_CALLS). Only external endpoint bridges
@@ -3359,6 +3511,35 @@ class AgentLoopManager:
             return ""
 
     @staticmethod
+    def _visible_tools(context: Dict[str, Any] | None) -> list[Any]:
+        """Tools the model may be shown for this turn.
+
+        Drones cannot spawn Drones: ``spawn_drone`` is hidden from a Drone's
+        tool list (single-level delegation). The handler enforces the same rule
+        defensively, this just keeps the model from ever proposing it.
+
+        A task-scoped Drone allow-list (e.g. the vessel goal-expander/planner is
+        limited to lookup_knowledge + update_goal) hides every other tool, so the
+        model never even sees — let alone proposes — an out-of-scope action such
+        as an in-world ``vessel_<world>_say``.
+        """
+        from core.tool_registry import tool_registry
+
+        is_drone = bool(
+            isinstance(context, dict)
+            and isinstance(context.get("drone"), dict)
+            and context["drone"].get("is_drone")
+        )
+        allowed_tools = _context_allowed_tools(context)
+        return [
+            tool
+            for tool in tool_registry.all_tools()
+            if tool.name not in _system_only_action_names()
+            and not (is_drone and tool.name == "spawn_drone")
+            and (allowed_tools is None or tool.name in allowed_tools)
+        ]
+
+    @staticmethod
     def _build_agent_prompt(
         goal: str,
         observations: list[Dict[str, Any]],
@@ -3366,7 +3547,6 @@ class AgentLoopManager:
         context: Dict[str, Any] | None,
     ) -> Dict[str, Any]:
         """Assemble the per-iteration prompt including observation history."""
-        from core.tool_registry import tool_registry
 
         history_lines: list[str] = []
         for obs in observations:
@@ -3432,30 +3612,8 @@ class AgentLoopManager:
                     lines.append(f"- {apath}")
                 attachment_block = "\n".join(lines)
 
-        # Drones cannot spawn Drones: hide the spawn_drone tool from a Drone's
-        # available tool list (single-level delegation). The handler enforces the
-        # same rule defensively, this just keeps the model from ever proposing it.
-        is_drone = bool(
-            isinstance(context, dict)
-            and isinstance(context.get("drone"), dict)
-            and context["drone"].get("is_drone")
-        )
-
-        # Task-scoped Drone allow-list: when the spawning caller restricted this
-        # Drone to a specific tool set (e.g. the vessel goal-expander/planner is
-        # limited to lookup_knowledge + update_goal), hide every other tool from
-        # the prompt so the model never even sees — let alone proposes — an
-        # out-of-scope action such as an in-world ``vessel_<world>_say``.
-        allowed_tools = _context_allowed_tools(context)
-
         tool_lines: list[str] = []
-        for tool in tool_registry.all_tools():
-            if tool.name in _system_only_action_names():
-                continue
-            if is_drone and tool.name == "spawn_drone":
-                continue
-            if allowed_tools is not None and tool.name not in allowed_tools:
-                continue
+        for tool in AgentLoopManager._visible_tools(context):
             params = []
             for p in tool.parameters:
                 ptype = p.type or "string"

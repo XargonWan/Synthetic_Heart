@@ -24,3 +24,22 @@ def test_instruction_stays_plain_without_attachments():
     for context_memory in (None, {}, {"attachment_paths": []}):
         instruction = plugin.get_recon_instruction(context_memory=context_memory)
         assert "attached file" not in instruction, context_memory
+
+
+def test_web_search_delivery_turn_is_not_judged_agentic():
+    import asyncio
+
+    plugin = ReconAgentIntentPlugin()
+    verdict = {"agent_needed": True, "reason": "multi-step", "task_title": "x"}
+
+    delivery = {"beat_type": "web_search_result"}
+    out = asyncio.run(
+        plugin.parse_recon_response(verdict, context_memory=delivery, text="results")
+    )
+    assert out == [] and "agent_needed" not in delivery
+
+    ordinary: dict = {}
+    out = asyncio.run(
+        plugin.parse_recon_response(verdict, context_memory=ordinary, text="do it")
+    )
+    assert ordinary.get("agent_needed") is True and out
