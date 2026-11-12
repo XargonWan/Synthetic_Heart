@@ -1203,6 +1203,50 @@ class AgentLoopManager:
         except Exception as e:
             log_warning(f"[agent_core] supersede_pending_task failed: {e}")
 
+    @staticmethod
+    def _observations_to_meta(observations: Any) -> list[Dict[str, Any]]:
+        """Loop observations in the shape stored in ``agent_tasks.iterations_meta``."""
+        meta: list[Dict[str, Any]] = []
+        items: list[Any] = observations if isinstance(observations, list) else []
+        for idx, obs in enumerate(items, start=1):
+            if not isinstance(obs, dict):
+                continue
+            entry: Dict[str, Any] = obs
+            meta.append(
+                {
+                    "iteration": entry.get("iteration") or idx,
+                    "role": entry.get("role") or "observation",
+                    "result": entry.get("content"),
+                }
+            )
+        return meta
+
+    async def _persist_progress(
+        self, task_id: Optional[int], observations: list[Dict[str, Any]]
+    ) -> None:
+        """Write the steps so far into the still-``running`` row.
+
+        The Agent panel reads ``iterations_meta`` from the DB, which used to be
+        filled only when the turn ended, so a running task showed nothing for
+        minutes. Best-effort and cheap: a failure is logged and ignored, the
+        final persist still writes everything.
+        """
+        if task_id is None or not observations:
+            return
+        try:
+            meta = json.dumps(self._observations_to_meta(observations), default=str)
+            conn_ctx = await self._get_conn_ctx()
+            async with conn_ctx as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "UPDATE agent_tasks SET iterations_meta=%s, "
+                        "updated_at=CURRENT_TIMESTAMP WHERE id=%s AND status='running'",
+                        (meta, int(task_id)),
+                    )
+                    await self._maybe_commit(conn)
+        except Exception as e:
+            log_debug(f"[agent_core] _persist_progress failed: {e}")
+
     async def _persist_agentic_turn(
         self,
         *,
@@ -1227,18 +1271,7 @@ class AgentLoopManager:
         """
         try:
             observations = result.get("observations") or []
-            iterations_meta: list[Dict[str, Any]] = []
-            if isinstance(observations, list):
-                for idx, obs in enumerate(observations, start=1):
-                    if not isinstance(obs, dict):
-                        continue
-                    iterations_meta.append(
-                        {
-                            "iteration": obs.get("iteration") or idx,
-                            "role": obs.get("role") or "observation",
-                            "result": obs.get("content"),
-                        }
-                    )
+            iterations_meta = self._observations_to_meta(observations)
 
             stop_reason = str(result.get("stop_reason") or "")
             if stop_reason in {
@@ -1552,6 +1585,20 @@ class AgentLoopManager:
             # turn on a status update failure.
             await self._mark_task_running(task_id)
 
+        # Let tools that start another task (spawn_drone) link it to this one.
+        # ``spawn_drone`` reads ``agent_task_id`` for the child's parent; nothing
+        # set it before, so sub-agents were never tied to the task that spawned
+        # them.
+        if task_id is not None:
+            if isinstance(context, dict):
+                context["agent_task_id"] = task_id
+            else:
+                context = {
+                    "from_cortex": True,
+                    "agent_tool": True,
+                    "agent_task_id": task_id,
+                }
+
         observations: list[Dict[str, Any]] = list(prior_observations or [])
         final_text = ""
         stop_reason = "max_iterations"
@@ -1720,6 +1767,7 @@ class AgentLoopManager:
             if stop_reason == "timeout":
                 stop_reason = "max_iterations"
 
+        persisted_observations = 0
         for i in range(1, max_iterations + 1):
             elapsed = time.monotonic() - start
             if elapsed > timeout_seconds:
@@ -1739,6 +1787,11 @@ class AgentLoopManager:
                 config_registry.get_var("AWAIT_RESPONSE_TIMEOUT", 600)
             )
             per_call_timeout = max(2.0, min(engine_timeout, remaining_budget))
+
+            # Show the steps done so far in the Agent panel while the turn runs.
+            if len(observations) != persisted_observations:
+                persisted_observations = len(observations)
+                await self._persist_progress(task_id, observations)
 
             # Build the iteration prompt: goal + prior observations.
             prompt = self._build_agent_prompt(goal, observations, engine, context)
