@@ -568,6 +568,9 @@ async def handle_message(update: Any, context: TgContext) -> None:
         )
     except Exception as exc:
         log_debug(f"[telegram] resolve_and_touch failed (non-fatal): {exc}")
+    from core.interface_aliases import remember_message_alias
+
+    await remember_message_alias(INTERFACE_ID, message)
     try:
         from core.peer_policy import notify_message_arrived
 
@@ -1086,7 +1089,9 @@ class TelegramUserInterface:
                 "type": "string",
                 "example": "telegram/123456789/456",
                 "description": (
-                    "Destination path 'telegram/chat_id' or 'telegram/chat_id/thread_id'. "
+                    "Destination path 'telegram/@username' (preferred when the person "
+                    "or public group has one), 'telegram/chat_id' or "
+                    "'telegram/chat_id/thread_id'. "
                     "OPTIONAL when replying to an incoming message (auto-routes to the origin "
                     "conversation); REQUIRED for spontaneous messages. Use "
                     "input.payload.source.interface_path verbatim when present."

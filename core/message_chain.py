@@ -407,6 +407,26 @@ def _auto_inject_interface_path(actions: list, interface_path: Optional[str]) ->
     return actions
 
 
+async def _canonicalize_alias_paths(actions: list) -> list:
+    """Map ``telegram/@jay`` style paths the model built to the stored id form.
+
+    The model is shown (and asked to build) readable alias paths; everything
+    downstream — routing, origin comparison, beat target checks, history —
+    keys on the canonical id path, so the conversion happens once, up front.
+    An alias that is not known is left untouched (an interface may still be able
+    to resolve it, e.g. a public Telegram username).
+    """
+    from core.interface_aliases import to_canonical_path
+
+    for action in actions or []:
+        payload = action.get("payload") if isinstance(action, dict) else None
+        if isinstance(payload, dict) and isinstance(payload.get("interface_path"), str):
+            payload["interface_path"] = await to_canonical_path(
+                payload["interface_path"]
+            )
+    return actions
+
+
 def _collect_beat_allowed_paths(ctx: Optional[dict]) -> Optional[set[str]]:
     """Collect the set of interface_paths a Grillo beat is allowed to route to.
 
@@ -2131,6 +2151,7 @@ async def handle_incoming_message(
                 actions = _normalize_message_payload_text(actions)
                 # Auto-inject interface_path into message actions that are missing it
                 # This prevents validation failures and avoids costly LLM correction calls
+                actions = await _canonicalize_alias_paths(actions)
                 actions = _auto_inject_interface_path(actions, ctx_interface_path)
                 # For Grillo beats, drop any message action routed to a conversation
                 # the beat never offered (snippet origin or eligible target). This
@@ -2260,6 +2281,7 @@ async def handle_incoming_message(
 
                         if rewrote_generic_message_action:
                             actions = _normalize_message_payload_text(actions)
+                            actions = await _canonicalize_alias_paths(actions)
                             actions = _auto_inject_interface_path(
                                 actions, ctx_interface_path
                             )

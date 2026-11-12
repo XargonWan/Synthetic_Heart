@@ -2797,6 +2797,7 @@ async def build_prompt_request(
     try:
         history_paths = context_section.pop("history_interface_paths", None)
         if history_paths:
+            from core.interface_aliases import to_display_path as _legend_path
             from core.interface_paths import build_pretty_name
 
             legend_lines: list[str] = []
@@ -2809,10 +2810,11 @@ async def build_prompt_request(
                         f"[json_prompt] pretty name for {hp} failed: {legend_err}"
                     )
                     display = None
+                shown_hp = await _legend_path(hp)
                 if display:
-                    legend_lines.append(f"{hp} = {display}")
+                    legend_lines.append(f"{shown_hp} = {display}")
                 else:
-                    legend_lines.append(str(hp))
+                    legend_lines.append(str(shown_hp))
             if legend_lines:
                 context_section["channel_legend"] = legend_lines
     except Exception as e:
@@ -3001,8 +3003,14 @@ async def build_prompt_request(
         isinstance(context_memory, dict) and context_memory.get("is_voice_input")
     )
 
+    # The model is shown the readable alias form (``telegram/@jay``) when one is
+    # known; ``core.message_chain`` maps it back to the stored id path.
+    from core.interface_aliases import to_display_path
+
+    _shown_path = await to_display_path(interface_path)
+
     _source_dict: dict = {
-        "interface_path": interface_path,
+        "interface_path": _shown_path,
         "message_id": message.message_id,
         "username": get_user_display_name(getattr(message, "from_user", None)),
         "usertag": get_user_usertag(getattr(message, "from_user", None)),
@@ -3030,7 +3038,7 @@ async def build_prompt_request(
         # history blends multiple chats, so we state it structurally, not just
         # in prose instructions.
         "current_chat": {
-            "interface_path": interface_path,
+            "interface_path": _shown_path,
             "interface": interface_name,
             "thread_id": getattr(message, "thread_id", None)
             or getattr(message, "message_thread_id", None),

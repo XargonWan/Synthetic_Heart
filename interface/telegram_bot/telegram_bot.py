@@ -1107,6 +1107,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         log_debug(f"[telegram_bot] resolve_and_touch failed (non-fatal): {e}")
 
+    from core.interface_aliases import remember_message_alias
+
+    await remember_message_alias("telegram_bot", message)
+
     try:
         from core.peer_policy import notify_message_arrived
 
@@ -2347,7 +2351,9 @@ class TelegramInterface:
                 "type": "string",
                 "example": "telegram_bot/123456789/456",
                 "description": (
-                    "Destination path 'telegram_bot/chat_id' or "
+                    "Destination path 'telegram_bot/@username' (preferred when the "
+                    "person or public group has one; only people who already wrote "
+                    "to the bot are known), 'telegram_bot/chat_id' or "
                     "'telegram_bot/chat_id/thread_id'. OPTIONAL when replying to an "
                     "incoming message (auto-routes to the origin conversation); "
                     "REQUIRED for spontaneous messages. Use "
