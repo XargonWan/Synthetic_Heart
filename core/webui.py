@@ -1305,10 +1305,16 @@ class SynthWebUIInterface:
                     tasks = []
                     for r in rows:
                         name = None
+                        source = None
+                        parent_task_id = None
                         try:
                             meta = json.loads(r[5]) if r[5] else None
                             if isinstance(meta, dict):
                                 name = meta.get("name") or None
+                                source = meta.get("source") or None
+                                drone = meta.get("drone")
+                                if isinstance(drone, dict):
+                                    parent_task_id = drone.get("parent_task_id")
                         except Exception:
                             name = None
                         tasks.append(
@@ -1319,6 +1325,11 @@ class SynthWebUIInterface:
                                 "created_at": r[3].isoformat() if r[3] else None,
                                 "updated_at": r[4].isoformat() if r[4] else None,
                                 "name": name,
+                                # Where the task came from (an interface, a web
+                                # search, "drone" for a sub-agent) and, for a
+                                # sub-agent, the task that spawned it.
+                                "source": source,
+                                "parent_task_id": parent_task_id,
                             }
                         )
                     return JSONResponse({"tasks": tasks})
@@ -3692,9 +3703,14 @@ class SynthWebUIInterface:
                 if face:
                     # Weights resolved per skin, as every later frame is (a raw emotion state here and
                     # resolved ones after would flip the face at the first refresh).
-                    resolve = getattr(self.animation_handler, "resolve_face_values", None)
+                    resolve = getattr(
+                        self.animation_handler, "resolve_face_values", None
+                    )
                     await websocket.send_json(
-                        {"type": "vrm_face", "values": resolve(face) if callable(resolve) else face}
+                        {
+                            "type": "vrm_face",
+                            "values": resolve(face) if callable(resolve) else face,
+                        }
                     )
 
                 # 5) If no animation is set yet, start idle
