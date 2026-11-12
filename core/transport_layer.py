@@ -415,6 +415,51 @@ def _format_json_error(text: str, err: json.JSONDecodeError) -> str:
     )
 
 
+def _ends_inside_unfinished_value(text: str) -> bool:
+    """True when ``text`` was cut off in the middle of its first JSON value.
+
+    A reply that stops inside a string (or right after a ``"key":``) was
+    interrupted by the engine, not finished by the model, and the last thing it
+    says is incomplete. Structural only: it counts quotes and braces, never reads
+    the words. A text that ends in ``}``, ``]`` or a code fence is a finished
+    reply even if a stray quote inside it makes the quote count odd, so those
+    are never reported as cut.
+    """
+    stripped = text.rstrip()
+    if not stripped or stripped[-1] in "}]`":
+        return False
+    start = next((i for i, ch in enumerate(stripped) if ch in "{["), None)
+    if start is None:
+        return False
+
+    depth = 0
+    in_string = False
+    escaped = False
+    last_significant = ""
+    for ch in stripped[start:]:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+                last_significant = '"'
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+            if depth <= 0:
+                return False  # the first value closed: whatever follows is extra text
+        if not ch.isspace():
+            last_significant = ch
+    return in_string or (depth > 0 and last_significant == ":")
+
+
 @overload
 def extract_json_from_text(
     text: str, return_metadata: Literal[False] = False
@@ -456,6 +501,8 @@ def extract_json_from_text(
         - 'had_extra_text': bool - True if text was found before or after JSON
         - 'prefix': str - Text before JSON (if any)
         - 'suffix': str - Text after JSON (if any)
+        - 'truncated': bool - True if the text was cut off mid-value; the cut-off
+          last action was dropped (and None is returned when it was the only one)
     """
     metadata: JsonMetadata = {
         "had_errors": False,
@@ -795,6 +842,26 @@ def extract_json_from_text(
             f"[extract_json_from_text] Text content (last 500 chars): {text[-500:]}"
         )
         return (None, metadata) if return_metadata else None
+
+    # A reply the engine cut off mid-value: json_repair closes the open string, so
+    # the half-written last action would otherwise run as if the model had finished
+    # it (live: "Ah, hai ragione! Sc" went to the chat as a complete message). Drop
+    # that action; with nothing left there is no valid JSON, which sends the turn
+    # through the corrector so the model is asked again.
+    if (
+        isinstance(found_json, dict)
+        and isinstance(found_json.get("actions"), list)
+        and _ends_inside_unfinished_value(text)
+    ):
+        metadata["truncated"] = True
+        _all_actions = found_json["actions"]
+        log_warning(
+            "[extract_json_from_text] ✂️ Reply ends inside an unfinished value "
+            f"(truncated by the engine): dropping the cut-off last of {len(_all_actions)} action(s)"
+        )
+        if len(_all_actions) <= 1:
+            return (None, metadata) if return_metadata else None
+        found_json = {**found_json, "actions": _all_actions[:-1]}
 
     # Log results based on what we found
     if metadata.get("had_extra_text", False):
