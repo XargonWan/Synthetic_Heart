@@ -44,6 +44,15 @@ Behaviour
   addressing rules (alias, ``@username``, reply, wake/sleep via
   ``core.chat_attention``) decide when SyntH answers. Private chats are always
   directed.
+- **Backlog is history, not conversation:** when the account is added to a chat
+  Telegram sends the latest messages (usually 100), and after downtime it sends
+  what was missed. A message older than ``TELEGRAM_BACKLOG_MAX_AGE_SECONDS``
+  (default 120, ``0`` = treat everything as live) when it reaches the account is
+  stored in the chat history under its **original timestamp** and nothing else:
+  no reply, no command execution, no attention or trigger evaluation. It then
+  reaches the model the usual way, as history. (Implemented by
+  ``is_backlog_message`` / ``store_backlog_message`` in
+  ``interface/telegram/telegram.py``.)
 - **Features:** text, replies, media (photos, documents, audio, video, stickers),
   voice notes (Auris transcription in, ``send_as_voice`` out), reactions,
   commands via the central command registry, trainer relay, peer-turn
@@ -66,13 +75,14 @@ current picture only if this interface set it.
 Configuration keys
 ------------------
 
-==============================  ====================================================
-Key                             Purpose
-==============================  ====================================================
-``TELEGRAM_API_ID``             API id from my.telegram.org (sensitive)
-``TELEGRAM_API_HASH``           API hash from my.telegram.org (sensitive)
-``TELEGRAM_PHONE``              Account phone number, set by the login card
-``TELEGRAM_SESSION``            Stored session (hidden, written by the login flow)
-``TELEGRAM_USE_SYNTH_AVATAR``   Opt in to the core synth avatar as profile picture
-``TRAINER_IDS``                 Add ``telegram:<user_id>`` for trainer features
-==============================  ====================================================
+======================================  ========================================================
+Key                                     Purpose
+======================================  ========================================================
+``TELEGRAM_API_ID``                     API id from my.telegram.org (sensitive)
+``TELEGRAM_API_HASH``                   API hash from my.telegram.org (sensitive)
+``TELEGRAM_PHONE``                      Account phone number, set by the login card
+``TELEGRAM_SESSION``                    Stored session (hidden, written by the login flow)
+``TELEGRAM_USE_SYNTH_AVATAR``           Opt in to the core synth avatar as profile picture
+``TELEGRAM_BACKLOG_MAX_AGE_SECONDS``    Older messages are history only (default 120; 0 = off)
+``TRAINER_IDS``                         Add ``telegram:<user_id>`` for trainer features
+======================================  ========================================================

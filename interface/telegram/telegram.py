@@ -11,6 +11,7 @@ import asyncio
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Optional
 
@@ -94,6 +95,25 @@ register_exposed_var(
     needs_component_reload=True,
     hidden=True,
     readonly=True,
+    component=INTERFACE_ID,
+)
+# Messages older than this when they reach us are backlog, not conversation: the
+# last ~100 messages Telegram delivers when the account is added to a chat, or
+# the ones that arrived while we were offline.
+register_exposed_var(
+    "TELEGRAM_BACKLOG_MAX_AGE_SECONDS",
+    label="Backlog Age (s)",
+    default=120,
+    value_type=int,
+    ui_type="number",
+    description=(
+        "A message older than this when it reaches the account (the history "
+        "Telegram sends when the account is added to a chat, or what arrived "
+        "while it was offline) is kept as chat history only: it is not answered "
+        "and triggers nothing. 0 treats every message as live."
+    ),
+    scope="interface",
+    advanced=True,
     component=INTERFACE_ID,
 )
 # Opt-in: this is a real person's account, so its profile picture is visible to
@@ -474,6 +494,85 @@ _BYPASS_SLEEP_TRIGGERS = (
 )
 
 
+def _reply_metadata(message: TgMessage) -> Optional[dict]:
+    """The ``reply_to`` block stored with a message that answers another one."""
+    reply_msg = message.reply_to_message
+    if reply_msg is None or (
+        message.is_topic_message and reply_msg.message_id == message.thread_id
+    ):
+        return None
+    reply_from = reply_msg.from_user
+    return {
+        "reply_to": {
+            "sender_name": (reply_from.full_name if reply_from else None) or "Unknown",
+            "text": reply_msg.text or reply_msg.caption or "",
+            "message_id": reply_msg.message_id,
+        }
+    }
+
+
+def _backlog_max_age() -> float:
+    try:
+        value = config_registry.get_value(
+            "TELEGRAM_BACKLOG_MAX_AGE_SECONDS", 120, value_type=int
+        )
+        return float(value) if not isinstance(value, bool) else 120.0
+    except Exception:
+        return 120.0
+
+
+def is_backlog_message(message: Any) -> bool:
+    """True for a message that is history delivered late, not a live one.
+
+    When the account is added to a chat Telegram sends the latest messages (about
+    a hundred), and after downtime it sends what was missed. They reach us as
+    ordinary incoming messages but are old; answering them one by one would be
+    absurd. Purely structural: the message's own timestamp against the clock.
+    """
+    limit = _backlog_max_age()
+    sent = getattr(message, "date", None)
+    if limit <= 0 or sent is None:
+        return False
+    try:
+        if sent.tzinfo is None:
+            sent = sent.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - sent).total_seconds() > limit
+    except Exception:
+        return False
+
+
+async def store_backlog_message(message: TgMessage) -> None:
+    """Keep a backlog message in the chat history, and do nothing else with it.
+
+    It is stored under its original timestamp, so it sits in the history exactly
+    where it belongs and reaches the model the usual way — as context — instead
+    of being forwarded as something to react to. Never raises.
+    """
+    try:
+        user = message.from_user
+        text = message.text or message.caption or ""
+        if user is None or not text:
+            return
+        from core.chat_context_manager import add_message_to_context
+        from core.interface_path_utils import build_interface_path
+
+        thread_id = message.thread_id
+        interface_path = build_interface_path(
+            INTERFACE_ID, str(message.chat_id), str(thread_id) if thread_id else None
+        )
+        await add_message_to_context(
+            interface_path=interface_path,
+            message_text=text,
+            sender_name=user.full_name,
+            sender_id=str(user.id),
+            message_id=message.message_id,
+            timestamp=message.date.isoformat() if message.date else None,
+            metadata=_reply_metadata(message),
+        )
+    except Exception as exc:
+        log_warning(f"[telegram] Failed to store backlog message: {exc}")
+
+
 async def handle_message(update: Any, context: TgContext) -> None:
     message: Optional[TgMessage] = update.message if update else None
     bot = context.bot
@@ -531,19 +630,7 @@ async def handle_message(update: Any, context: TgContext) -> None:
         INTERFACE_ID, str(message.chat_id), str(thread_id) if thread_id else None
     )
 
-    reply_meta: Optional[dict] = None
-    if reply_msg is not None and not (
-        message.is_topic_message and reply_msg.message_id == thread_id
-    ):
-        reply_from = reply_msg.from_user
-        reply_meta = {
-            "reply_to": {
-                "sender_name": (reply_from.full_name if reply_from else None)
-                or "Unknown",
-                "text": reply_msg.text or reply_msg.caption or "",
-                "message_id": reply_msg.message_id,
-            }
-        }
+    reply_meta = _reply_metadata(message)
     try:
         from core.chat_context_manager import add_message_to_context
 
@@ -770,6 +857,9 @@ async def _on_new_message(bot: TelethonBot, event: Any) -> None:
     """Telethon ``NewMessage`` entry point."""
     try:
         message = await wrap_message(bot, event.message)
+        if is_backlog_message(message):
+            await store_backlog_message(message)
+            return
         update = TgUpdate(message=message)
         context = TgContext(bot=bot)
         text = message.text or ""
