@@ -186,7 +186,7 @@ def test_the_release_job_consumes_the_artifact_the_build_produces() -> None:
 
 
 def test_only_main_and_develop_release_and_a_pull_request_does_not() -> None:
-    """main makes valid releases, develop the rolling pre-release, nothing else a release."""
+    """main makes valid releases, develop pre-releases, nothing else a release."""
     condition = str(_job("release").get("if", ""))
     assert "pull_request" in condition and "!=" in condition
     assert "github.ref_name == 'main'" in condition
@@ -210,23 +210,40 @@ def test_main_is_a_valid_release_and_develop_is_not() -> None:
     assert "scripts/release_notes.py" in notes and ".github/release-header.md" in notes
 
 
-def test_the_release_tag_is_the_version_on_main_and_fixed_on_develop() -> None:
+def test_the_release_tag_is_the_version() -> None:
     expression = _job("release")["env"]["RELEASE_TAG"]
     assert "format('v{0}', needs.prepare.outputs.version)" in expression
-    assert "'latest-develop'" in expression
-    # It must not look like a version, or version.py would count it as a release.
-    assert not re.fullmatch(r"v\d+\.\d+\.\d+", "latest-develop")
+    # It must not look like a plain version, or version.py would count it as a release.
+    assert not re.fullmatch(r"v\d+\.\d+\.\d+", "v1.31.0-develop")
 
 
-def test_the_rolling_pre_release_is_deleted_before_it_is_made_again() -> None:
-    """A tag that exists is never moved, and the assets are named after the version."""
-    step = _step("release", "Remove the previous rolling pre-release")
-    assert step["if"] == "github.ref_name != 'main'"
-    assert "gh release delete" in step["run"] and "--cleanup-tag" in step["run"]
+def test_develop_also_has_one_rolling_pre_release_and_keeps_the_versioned_one() -> None:
+    """latest-develop is deleted and made again; the versioned release is never deleted."""
+    remove = _step("release", "Remove the previous rolling pre-release")
+    assert remove["if"] == "github.ref_name == 'develop'"
+    assert (
+        "gh release delete latest-develop" in remove["run"]
+        and "--cleanup-tag" in remove["run"]
+    )
+    rolling = _step("release", "Publish the rolling pre-release")
+    assert rolling["if"] == "github.ref_name == 'develop'"
+    assert rolling["with"]["tag_name"] == "latest-develop"
+    assert (
+        rolling["with"]["prerelease"] is True
+        and rolling["with"]["make_latest"] is False
+    )
     steps = [x.get("name") for x in _job("release")["steps"]]
-    assert steps.index(step["name"]) < steps.index("Publish")
-    # main's releases are kept: the step must never be able to run there.
-    assert "main" in step["if"]
+    assert (
+        steps.index("Publish")
+        < steps.index(remove["name"])
+        < steps.index(rolling["name"])
+    )
+    # Only the rolling tag may ever be deleted.
+    for step in _job("release")["steps"]:
+        run = str(step.get("run", ""))
+        if "gh release delete" in run:
+            assert "latest-develop" in run, step.get("name")
+    assert not re.fullmatch(r"v\d+\.\d+\.\d+", "latest-develop")
 
 
 def test_pushes_to_the_rolling_release_do_not_overlap() -> None:

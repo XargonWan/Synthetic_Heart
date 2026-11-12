@@ -1,3 +1,9 @@
+### fix(ci): a push to develop keeps its versioned pre-release next to the single rolling `latest-develop`  <!-- 2026-11-13 -->
+
+**Before.** Every push to `develop` deleted the only pre-release (`latest-develop`) and made it again, so no earlier develop build stayed downloadable.
+
+**Now.** A push to `develop` publishes two pre-releases: `v<version>` (e.g. `v1.31.0-develop`), which is kept, and `latest-develop`, still the one rolling pre-release that is deleted and made again. Only `latest-develop` is ever deleted; `main` is unchanged. Neither tag is a plain `vX.Y.Z`, so neither counts as a release for `scripts/version.py`. `tests/test_release_workflow.py` and the docs (`contributing.rst`, `windows.rst`) follow.
+
 ### feat(retroxr,vessel): she can set things down on a surface, hold them out to the player and decide what to do when they are not taken; `combine`; a follow that tells her when it fails  <!-- 2026-11-06 -->
 
 **Before.** She said she wanted to put the Game Boy down and did not. `put_down` ignored its `target` (it let go under her hands), `hand_over` waited 8 s and then put the thing down by itself, so a refusal was never hers to decide, and the pose was the same two hands together as for carrying. Nothing put one thing into another in the Vessel's core set (`operate`, which can, existed in the mod but was never offered to her). `follow` promised a `target` and a failure it never reported, `stop` did not stop it, and nothing said when it gave up.

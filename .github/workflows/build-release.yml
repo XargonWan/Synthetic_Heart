@@ -8,9 +8,10 @@ name: "Synthetic Heart - Release"
 # Releases are another matter, and only two branches have them:
 #   main     a valid release v<version> with the Windows installer. The tag it creates is what
 #            the next release counts its version and notes from.
-#   develop  one rolling pre-release, tag latest-develop, deleted and made again on every push
-#            so it always holds the newest installer and nothing older. It is never "latest" and
-#            its tag is not a vX.Y.Z, so it never counts as a release.
+#   develop  two pre-releases per push. v<version> (v1.31.0-develop) is kept, so the earlier
+#            builds stay downloadable; latest-develop is the one rolling pre-release, deleted
+#            and made again on every push so it always holds the newest installer. Neither is
+#            "latest", and neither tag is a plain vX.Y.Z, so neither counts as a release.
 # Any other branch publishes no release (its installer stays a workflow artifact).
 # The body is written by scripts/release_notes.py from the commits since the previous release.
 # See docs/contributing.rst ("Releases").
@@ -393,7 +394,7 @@ jobs:
           retention-days: 30
 
   release:
-    # main publishes v<version>; develop republishes the rolling pre-release. Nothing else
+    # main publishes v<version>; develop publishes its two pre-releases. Nothing else
     # does, and a pull request only builds. The images are published by `manifest`, which a
     # fork skips (no Docker Hub secret); the release waits for it but does not need it.
     if: >-
@@ -404,15 +405,16 @@ jobs:
       && (needs.manifest.result == 'success' || needs.manifest.result == 'skipped') }}
     needs: [prepare, windows-installer, manifest]
     runs-on: ubuntu-latest
-    # Two pushes in a row must not delete and recreate the same release at once.
+    # Two pushes in a row must not delete and recreate latest-develop at once.
     concurrency:
       group: release-${{ github.ref_name }}
       cancel-in-progress: false
     permissions:
       contents: write
     env:
-      # The tag of the release: the version for main, a fixed name for the rolling one.
-      RELEASE_TAG: ${{ github.ref_name == 'main' && format('v{0}', needs.prepare.outputs.version) || 'latest-develop' }}
+      # The tag of the release: always the version, which on develop already carries the
+      # branch (v1.31.0-develop). develop's rolling pre-release is tagged latest-develop below.
+      RELEASE_TAG: ${{ format('v{0}', needs.prepare.outputs.version) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -453,7 +455,7 @@ jobs:
           cp .github/release-header.md header.md
           if [ "${{ github.ref_name }}" != "main" ]; then
             {
-              echo '> **Rolling pre-release.** This is the newest build of `develop`, replaced on every push. It is not a stable release: use it to try what is coming, and expect it to break.'
+              echo '> **Pre-release.** This is a build of `develop`; the newest one is the `latest-develop` release. It is not a stable release: use it to try what is coming, and expect it to break.'
               echo
               cat .github/release-header.md
             } > header.md
@@ -461,24 +463,40 @@ jobs:
           python3 scripts/release_notes.py --repo "${{ github.repository }}" --version "${{ needs.prepare.outputs.version }}" \
             --header header.md --body RELEASE.md
 
-      - name: Remove the previous rolling pre-release
-        # Its assets are named after the version, so updating it in place would pile them up,
-        # and a tag that already exists is never moved. Deleting both lets the next step make
-        # the release again at this commit.
-        if: github.ref_name != 'main'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
-
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           target_commitish: ${{ github.sha }}
-          name: ${{ github.ref_name == 'main' && format('Synthetic Heart v{0}', needs.prepare.outputs.version) || format('Synthetic Heart develop (v{0})', needs.prepare.outputs.version) }}
+          name: ${{ github.ref_name == 'main' && format('Synthetic Heart v{0}', needs.prepare.outputs.version) || format('Synthetic Heart v{0}', needs.prepare.outputs.version) }}
           draft: false
           prerelease: ${{ github.ref_name != 'main' }}
           make_latest: ${{ github.ref_name == 'main' }}
+          body_path: RELEASE.md
+          files: |
+            dist/*.exe
+            dist/SHA256SUMS
+          fail_on_unmatched_files: true
+
+      - name: Remove the previous rolling pre-release
+        # Its assets are named after the version, so updating it in place would pile them up,
+        # and a tag that already exists is never moved. Deleting both lets the next step make
+        # the release again at this commit. The versioned release above is never touched.
+        if: github.ref_name == 'develop'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release delete latest-develop --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
+
+      - name: Publish the rolling pre-release
+        if: github.ref_name == 'develop'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-develop
+          target_commitish: ${{ github.sha }}
+          name: Synthetic Heart develop (latest)
+          draft: false
+          prerelease: true
+          make_latest: false
           body_path: RELEASE.md
           files: |
             dist/*.exe

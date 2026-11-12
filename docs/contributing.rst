@@ -33,10 +33,12 @@ GitHub releases:
 - ``main`` publishes a valid release ``v<version>`` with the Windows installer. It is the only
   one that is: it is the latest release, and the tag it creates is what the next release counts
   its version and notes from. Nobody tags by hand.
-- ``develop`` keeps one **rolling pre-release**, tagged ``latest-develop``. Every push deletes
-  it and makes it again at the new commit, so it always holds the newest installer and nothing
-  older. It is marked as a pre-release, is never the latest release, and its tag is not a
-  ``vX.Y.Z``, so it never counts as a release for the version or the notes.
+- ``develop`` publishes two **pre-releases** on every push. ``v<version>`` (the version
+  already carries the branch: ``v1.31.0-develop``) is kept, so earlier builds stay
+  downloadable. ``latest-develop`` is the one rolling pre-release: every push deletes it and
+  makes it again at the new commit, so it always holds the newest installer. Neither is the
+  latest release and neither tag is a plain ``vX.Y.Z``, so neither counts as a release for
+  the version or the notes.
 - ``feat/**`` and ``fix/**`` publish images but no release; their installer is a workflow
   artifact for 30 days.
 
@@ -65,6 +67,6 @@ hash at the end as a link:
 
 So the subject of a commit is what the user reads: write it for them. The notice at the top
 of every release is ``.github/release-header.md`` (``{version}`` in it is the version); the
-rolling pre-release adds a notice that it is replaced on every push.
+pre-releases add a notice that they are not a stable release.
 Running ``python3 scripts/version.py`` and ``python3 scripts/release_notes.py --repo
 xargonwan/synthetic_heart --version <v>`` locally shows what a push would publish.
