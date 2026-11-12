@@ -163,6 +163,19 @@ Telegram Bot
 - **Validation**: Requires ``interface_path`` in message actions
 - **Thread Support**: Handles Telegram topic threads
 
+Telegram User Account
+~~~~~~~~~~~~~~~~~~~~~
+
+- **Path Format**: ``telegram/chat_id[/thread_id]`` or ``telegram/@username[/thread_id]``
+- **Writing first**: a user account can only message a bare user id it has seen.
+  ``TelethonBot.ensure_peer`` (``interface/telegram/_compat.py``) looks for the
+  person once in the groups the account shares with them, then tries the public
+  username that the ``telegram_bot`` interface knows for that id, and otherwise
+  fails with a "Chat not found" error that says what to do (they message the
+  account first, or the sender uses their ``@username``). A miss is remembered
+  for ten minutes. A destination written as ``@username`` is resolved by
+  Telegram and settled on the numeric id before it is sent.
+
 Aliases (``@username`` instead of the numeric id)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

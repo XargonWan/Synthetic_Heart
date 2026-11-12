@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from telethon import errors as tl_errors
 
@@ -421,11 +422,28 @@ _CHAT_ACTIONS = {
 }
 
 
+#: A public Telegram username (5-32 chars, letters/digits/underscore, starts with a letter).
+_USERNAME_RE = re.compile(r"^@?([A-Za-z][A-Za-z0-9_]{4,31})$")
+
+#: Looks up the public username of a user id from outside this account (the
+#: Bot API of the ``telegram_bot`` interface, for instance). Optional.
+UsernameLookup = Callable[[int], Awaitable[Optional[str]]]
+
+#: How long an unreachable user id is remembered, so a repeated send does not
+#: rescan every group again.
+_PEER_MISS_TTL_SECONDS = 600.0
+#: Bounds of the one-off search for a user the account has never addressed.
+_MAX_GROUPS_SCANNED = 25
+_MAX_PARTICIPANTS_SCANNED = 1000
+
+
 class TelethonBot:
     """Bot-API-compatible facade over a connected ``TelegramClient``."""
 
     def __init__(self, client: Any) -> None:
         self.client = client
+        self._peer_misses: dict[int, float] = {}
+        self.username_lookup: Optional[UsernameLookup] = None
         self.me: Optional[TgUser] = None
         self.id: Optional[int] = None
         self.username: Optional[str] = None
@@ -452,6 +470,139 @@ class TelethonBot:
         if isinstance(chat_id, str) and chat_id.strip().lstrip("-").isdigit():
             return int(chat_id)
         return chat_id
+
+    async def _is_addressable(self, user_id: int) -> bool:
+        try:
+            await self.client.get_input_entity(user_id)
+            return True
+        except ValueError:
+            return False
+
+    async def _learn_user(self, user_id: int) -> bool:
+        """Find ``user_id`` so Telethon has its access hash. True when found.
+
+        A user account can only message a bare user id it has *seen*: in a chat
+        list, or as a member of a group it shares with them. The startup warm-up
+        only loads the newest dialogs, so a person who never wrote privately is
+        usually missing. Telethon caches every user returned by a request, so
+        listing the members of the shared groups is enough.
+        """
+        try:
+            dialogs = list(await self.client.get_dialogs(limit=500))
+        except Exception as exc:
+            log_debug(f"[telegram] dialog refresh failed: {exc}")
+            dialogs = []
+        if await self._is_addressable(user_id):
+            return True
+
+        scanned = 0
+        for dialog in dialogs:
+            entity = getattr(dialog, "entity", None)
+            is_group = getattr(dialog, "is_group", False)
+            is_megagroup = getattr(dialog, "is_channel", False) and getattr(
+                entity, "megagroup", False
+            )
+            if not (is_group or is_megagroup):
+                continue
+            if scanned >= _MAX_GROUPS_SCANNED:
+                break
+            scanned += 1
+            try:
+                async for member in self.client.iter_participants(
+                    entity, limit=_MAX_PARTICIPANTS_SCANNED
+                ):
+                    if getattr(member, "id", None) == user_id:
+                        break
+            except Exception as exc:  # no rights to list members, flood wait...
+                log_debug(f"[telegram] member scan of a group failed: {exc}")
+                continue
+            if await self._is_addressable(user_id):
+                log_debug(
+                    f"[telegram] learned user {user_id} from a shared group "
+                    f"({scanned} group(s) scanned)"
+                )
+                return True
+        return await self._is_addressable(user_id)
+
+    async def resolve_username(self, username: str) -> Optional[int]:
+        """Resolve a public ``@username`` to its numeric peer id (None if unknown).
+
+        Telethon asks Telegram (``contacts.ResolveUsername``), which also hands
+        back the access hash, so the numeric id is addressable afterwards.
+        """
+        match = _USERNAME_RE.match(str(username or "").strip())
+        if not match:
+            return None
+        try:
+            from telethon import utils
+
+            entity = await self.client.get_entity(f"@{match.group(1)}")
+            return int(utils.get_peer_id(entity))
+        except (ValueError, tl_errors.RPCError) as exc:
+            log_debug(f"[telegram] username @{match.group(1)} not resolved: {exc}")
+            return None
+
+    async def _learn_user_by_username(self, user_id: int) -> bool:
+        """Try the user's public username, learned from ``username_lookup``."""
+        if self.username_lookup is None:
+            return False
+        try:
+            username = await self.username_lookup(user_id)
+        except Exception as exc:
+            log_debug(f"[telegram] username lookup for {user_id} failed: {exc}")
+            return False
+        if not username:
+            return False
+        resolved = await self.resolve_username(username)
+        if resolved == user_id and await self._is_addressable(user_id):
+            log_debug(f"[telegram] learned user {user_id} from @{username}")
+            return True
+        return False
+
+    async def ensure_peer(self, chat_id: Any) -> Any:
+        """Return ``chat_id`` as Telethon wants it, learning an unseen user first.
+
+        A public ``@username`` is resolved to its numeric id, so history and
+        replies stay under one conversation. Groups and channels (negative ids)
+        are left to Telethon. For a positive user id the account has not met, the
+        shared groups are searched once (see :meth:`_learn_user`), then the
+        user's public username if ``username_lookup`` knows it; a miss is
+        remembered for ``_PEER_MISS_TTL_SECONDS``. When the user cannot be reached the error
+        keeps the "Chat not found" wording the shared helpers key on and says
+        what to do about it.
+        """
+        peer = self._peer(chat_id)
+        if isinstance(peer, str) and _USERNAME_RE.match(peer.strip()):
+            resolved = await self.resolve_username(peer)
+            if resolved is None:
+                raise BadRequest(
+                    f"Chat not found (no public Telegram account is named "
+                    f"{peer.strip()!r}; check the @username)"
+                )
+            return resolved
+        if not isinstance(peer, int) or peer <= 0:
+            return peer
+        if await self._is_addressable(peer):
+            return peer
+
+        missed_at = self._peer_misses.get(peer)
+        recently_missed = (
+            missed_at is not None
+            and time.monotonic() - missed_at < _PEER_MISS_TTL_SECONDS
+        )
+        if not recently_missed and (
+            await self._learn_user(peer) or await self._learn_user_by_username(peer)
+        ):
+            self._peer_misses.pop(peer, None)
+            return peer
+
+        self._peer_misses[peer] = time.monotonic()
+        raise BadRequest(
+            f"Chat not found (this account has never seen Telegram user {peer}: "
+            "it has no chat with them, shares no group with them and knows no public "
+            "username for them, so it cannot write first by id; they must message "
+            "it once, or send to their @username)"
+        )
 
     async def fetch_message(self, file_id: str) -> Any:
         chat_part, _, msg_part = str(file_id).partition(":")
@@ -510,7 +661,7 @@ class TelethonBot:
             kwargs["link_preview"] = False
         try:
             sent = await self.client.send_message(
-                self._peer(chat_id),
+                await self.ensure_peer(chat_id),
                 text,
                 reply_to=self._reply_target(reply_to_message_id, message_thread_id),
                 **kwargs,
@@ -536,7 +687,7 @@ class TelethonBot:
         try:
             payload = await self._media_arg(media)
             sent = await self.client.send_file(
-                self._peer(chat_id),
+                await self.ensure_peer(chat_id),
                 payload,
                 caption=caption or None,
                 reply_to=self._reply_target(reply_to_message_id, message_thread_id),
@@ -695,10 +846,11 @@ class TelethonBot:
 
     async def get_chat(self, chat_id: Any) -> TgChat:
         try:
-            entity = await self.client.get_entity(self._peer(chat_id))
+            peer = await self.ensure_peer(chat_id)
+            entity = await self.client.get_entity(peer)
         except Exception as exc:
             raise translate_error(exc) from exc
-        return chat_from_entity(entity, int(chat_id))
+        return chat_from_entity(entity, peer if isinstance(peer, int) else entity.id)
 
     getChat = get_chat  # PTB camelCase alias used by the name resolver
 

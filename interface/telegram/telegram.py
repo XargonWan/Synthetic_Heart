@@ -827,6 +827,25 @@ async def _record_telegram_delivery_failure(
 # ---------------------------------------------------------------------------
 
 
+async def _bot_api_username(user_id: int) -> Optional[str]:
+    """Public username of ``user_id`` as the ``telegram_bot`` interface knows it.
+
+    Someone who has talked to the bot is known to the Bot API by id, with their
+    username; the user account may never have met them. Returns None when that
+    interface is off, not connected, or the person has no public username.
+    """
+    from core.core_initializer import INTERFACE_REGISTRY, core_initializer
+
+    if "telegram_bot" not in core_initializer.active_interfaces:
+        return None
+    bot = getattr(INTERFACE_REGISTRY.get("telegram_bot"), "bot", None)
+    if bot is None:
+        return None
+    chat = await bot.get_chat(int(user_id))
+    username = getattr(chat, "username", None)
+    return str(username) if username else None
+
+
 class TelegramUserInterface:
     """Interface wrapper around a Telethon user client."""
 
@@ -925,6 +944,7 @@ class TelegramUserInterface:
                     self._disable("Telegram session expired: log in again")
                     return
                 bot = TelethonBot(client)
+                bot.username_lookup = _bot_api_username
                 me = await bot.refresh_me()
             except Exception as exc:
                 try:
@@ -1437,6 +1457,19 @@ class TelegramUserInterface:
             return False
 
         chat_id = str(target)
+        if not chat_id.lstrip("-").isdigit() and self.bot is not None:
+            # A public @username: settle on the numeric id so the history and
+            # the person's replies stay under one conversation path. An unknown
+            # name is left as is and fails below with a clear "Chat not found".
+            resolved_id = await self.bot.resolve_username(chat_id)
+            if resolved_id is not None:
+                chat_id = str(resolved_id)
+                if interface_path:
+                    from core.interface_path_utils import build_interface_path
+
+                    interface_path = build_interface_path(
+                        INTERFACE_ID, chat_id, self._numeric_thread(thread_id)
+                    )
         thread_id = self._numeric_thread(thread_id)
         if (
             thread_id is None
