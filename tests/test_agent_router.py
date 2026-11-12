@@ -345,3 +345,26 @@ async def test_deliver_voiceover_failure_falls_back_to_original(
 
     assert len(delivered) == 1
     assert delivered[0]["payload"]["text"] == "the important result"
+
+
+def test_classify_web_search_delivery_turn_stays_fast_even_if_flagged_agentic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The delivery turn quotes the original request, so recon flags it as
+    # agentic again; it must not become a second agent task.
+    _set_agent_enabled(monkeypatch, True)
+    context = {"agent_needed": True, "beat_type": "web_search_result"}
+    assert agent_router.classify([], context=context) == agent_router.FAST
+    assert (
+        agent_router.classify(
+            [{"type": "agent_run_shell", "payload": {}}], context=context
+        )
+        == agent_router.FAST
+    )
+    # Other beat types and ordinary turns are untouched.
+    assert (
+        agent_router.classify(
+            [], context={"agent_needed": True, "beat_type": "self_reflection"}
+        )
+        == agent_router.AGENT
+    )

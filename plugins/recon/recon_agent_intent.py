@@ -167,6 +167,17 @@ class ReconAgentIntentPlugin:
         if not isinstance(data, dict):
             return []
 
+        # A web-search delivery turn is Synth reporting results it already has,
+        # restricted to message actions. Its text quotes the original request,
+        # so judging it again would flag it as agentic, add an instruction that
+        # contradicts the allowed actions and spawn a second agent task.
+        if (
+            isinstance(context_memory, dict)
+            and context_memory.get("beat_type") == "web_search_result"
+        ):
+            log_debug("[recon_agent_intent] web search delivery turn — skipping")
+            return []
+
         # New contract field is ``agent_needed``; keep reading the legacy
         # ``needs_agent`` for backward compatibility during the transition.
         agent_needed = bool(data.get("agent_needed", data.get("needs_agent")))
