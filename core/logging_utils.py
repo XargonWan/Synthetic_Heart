@@ -1,4 +1,5 @@
 import atexit
+import contextvars
 import copy
 import logging
 import os
@@ -828,6 +829,39 @@ def setup_logging() -> logging.Logger:
     return logger
 
 
+# True while a record is being forwarded to the LogChat. Anything logged during
+# that send (by the interface, the transport, the retry helpers, in this task or
+# in a task it spawns) is the send's own diagnostics: forwarding it would send a
+# message about the failed message, which fails the same way and logs again,
+# without end. Live (2026-11-12): the bot was kicked from the LogChat supergroup,
+# one forwarded ERROR failed with ``Forbidden``, and every failure line (none of
+# which the keyword list below matched) was forwarded in turn — ~50 MB of log
+# every few minutes and a saturated event loop, so the synth stopped answering.
+_forwarding_to_logchat: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "forwarding_to_logchat", default=False
+)
+
+# Backstop for any loop the re-entrancy guard cannot see (another thread, another
+# process of the same record): at most this many forwards per window.
+_LOGCHAT_MAX_FORWARDS = 20
+_LOGCHAT_WINDOW_SECONDS = 60.0
+_logchat_forward_times: "list[float]" = []
+_logchat_forward_lock = threading.Lock()
+
+
+def _logchat_rate_ok(now: Optional[float] = None) -> bool:
+    """Count one forward against the window; False when the budget is spent."""
+    moment = time.monotonic() if now is None else now
+    with _logchat_forward_lock:
+        cutoff = moment - _LOGCHAT_WINDOW_SECONDS
+        while _logchat_forward_times and _logchat_forward_times[0] < cutoff:
+            _logchat_forward_times.pop(0)
+        if len(_logchat_forward_times) >= _LOGCHAT_MAX_FORWARDS:
+            return False
+        _logchat_forward_times.append(moment)
+        return True
+
+
 def _log(
     level: str,
     message: str,
@@ -854,6 +888,10 @@ def _log(
         # Altrimenti scrivi nel log principale
         logger = setup_logging()
         logger.log(_LEVELS.get(level, logging.INFO), message, stacklevel=3)
+
+    # Never forward what the LogChat send itself logs (see _forwarding_to_logchat).
+    if _forwarding_to_logchat.get():
+        return
 
     # Skip notification for interface errors and transport errors to avoid recursion
     if (
@@ -891,8 +929,13 @@ def _log(
             ):
                 iface = INTERFACE_REGISTRY.get(log_chat_interface)
                 if iface and hasattr(iface, "send_message"):
+                    if not _logchat_rate_ok():
+                        return
 
                     async def send_to_logchat():
+                        # Set inside the task: it runs on its own context copy, and
+                        # every task it spawns inherits this one.
+                        _forwarding_to_logchat.set(True)
                         try:
                             message_data = {
                                 "text": notification_message,
