@@ -6,6 +6,7 @@ import inspect
 import asyncio
 import functools
 import json
+import sys
 import threading
 from pathlib import Path
 from typing import Any
@@ -2332,7 +2333,8 @@ class CoreInitializer:
 
         The instance is kept in ``INTERFACE_REGISTRY`` (so it can be re-enabled
         without a re-import) but stopped, its actions removed from the registry
-        and it is dropped from ``active_interfaces``. A grey ghost component
+        and it is dropped from ``active_interfaces``. The prompt only lists
+        ``active_interfaces``, so the interface disappears from it at once. A grey ghost component
         record is kept so the WebUI still lists it. State is persisted.
         """
         if self.is_core_interface(interface_name):
@@ -2363,9 +2365,8 @@ class CoreInitializer:
                 details="Disabled from WebUI",
             )
 
-        self._invalidate_action_caches()
-        await self._build_actions_block()
-
+        # Persist the flag before rebuilding, so everything the rebuild reads
+        # already sees the interface as off.
         try:
             from core.config_manager import config_registry
 
@@ -2377,6 +2378,9 @@ class CoreInitializer:
             log_warning(
                 f"[core_initializer] Failed to persist disabled state for interface {interface_name}: {exc}"
             )
+
+        self._invalidate_action_caches()
+        await self._build_actions_block()
 
         log_info(
             f"[core_initializer] 🔻 Interface '{interface_name}' disabled (stopped)"
@@ -2454,8 +2458,23 @@ class CoreInitializer:
         Returns True on success. Used by :meth:`enable_plugin`.
         """
         try:
-            module = importlib.import_module(module_name)
-            importlib.reload(module)
+            # Prefer the module already loaded: a package shim (``__init__`` that
+            # rebinds ``sys.modules[__name__]`` to its submodule, used by most
+            # plugins) has no ``__path__``, so importing a child of it fails.
+            module = sys.modules.get(module_name) or importlib.import_module(
+                module_name
+            )
+            try:
+                module = importlib.reload(module)
+            except AttributeError as exc:
+                # reload() also walks the parent's ``__path__``; the shim has
+                # none, so keep the loaded module and take a fresh instance.
+                if "__path__" not in str(exc):
+                    raise
+                log_debug(
+                    f"[core_initializer] {module_name} sits under a package shim; "
+                    "skipping reload"
+                )
         except Exception as exc:
             log_error(
                 f"[core_initializer] Failed to import {module_name} on enable: {exc}"
@@ -2645,6 +2664,19 @@ class CoreInitializer:
             log_error(f"[core_initializer] Error starting GrilloPlugin: {repr(e)}")
             self.startup_errors.append(f"GrilloPlugin: {e}")
 
+    def _is_inactive_interface_action(self, action_type: str) -> bool:
+        """True for a legacy ``message_<interface>`` action of an inactive interface.
+
+        Plugins such as ``message_plugin`` claim the per-interface message
+        actions for every interface at once. Whether the interface behind one is
+        switched on is the core's call, not the plugin's: when that interface is
+        known to the registry but not active, the action is not offered.
+        """
+        if not isinstance(action_type, str) or not action_type.startswith("message_"):
+            return False
+        target = action_type[len("message_") :]
+        return target in INTERFACE_REGISTRY and target not in self.active_interfaces
+
     async def _build_actions_block(self):
         """Collect and validate action schemas from all plugins and interfaces."""
         # TEMPORARILY DISABLE FLAG FOR TESTING
@@ -2791,6 +2823,12 @@ class CoreInitializer:
                     f"[core_initializer] Plugin {name} declares actions: {list(supported.keys())}"
                 )
                 for act, schema in supported.items():
+                    if self._is_inactive_interface_action(act):
+                        log_debug(
+                            f"[core_initializer] Action {act} from plugin {name} "
+                            "belongs to an inactive interface; withheld"
+                        )
+                        continue
                     _register(
                         act,
                         name,
@@ -2803,6 +2841,16 @@ class CoreInitializer:
         # --- Load interface actions from registry ---
         log_debug("[core_initializer] Starting interface loop")
         for name, iface in INTERFACE_REGISTRY.items():
+            # Registered means present in the prompt. Only interfaces the loader
+            # activated contribute: one switched off at runtime, disabled by
+            # config or missing its required configuration is not in
+            # ``active_interfaces``, so it must not advertise any action.
+            if name not in self.active_interfaces:
+                log_debug(
+                    f"[core_initializer] Interface {name} is not active; "
+                    "its actions are withheld from the prompt"
+                )
+                continue
             log_debug(f"[core_initializer] Processing interface: {name}")
             if not hasattr(iface, "get_supported_actions"):
                 continue
@@ -2858,7 +2906,9 @@ class CoreInitializer:
                     log_warning(
                         f"[core_initializer] Static injection from {plugin.__class__.__name__} must be a dict, got {type(data)}"
                     )
-        for iface in INTERFACE_REGISTRY.values():
+        for iface_name, iface in INTERFACE_REGISTRY.items():
+            if iface_name not in self.active_interfaces:
+                continue
             if hasattr(iface, "get_static_injection"):
                 try:
                     data = iface.get_static_injection()

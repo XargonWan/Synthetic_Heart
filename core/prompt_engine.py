@@ -10,6 +10,7 @@ from core.beat_utils import is_outbound_beat
 from core.db import _get_db_type, get_conn_ctx
 from core.synth_tagging import extract_tags, expand_tags
 from core.logging_utils import log_debug, log_info, log_warning, log_error
+from core.message_registry import SEND_MESSAGE_ACTION
 from core.json_utils import dumps as json_dumps, redact_multimodal_for_logging
 from core.config_manager import config_registry
 from core.user_utils import get_user_display_name, get_user_usertag
@@ -705,7 +706,22 @@ def _derive_default_prompt_action_types(
         if _is_non_user_facing_action(action_def):
             continue
 
-        if current_interface or outbound_target_interfaces:
+        # ``send_message`` is the unified action that delivers through ANY
+        # connected chat interface (the destination rides in ``interface_path``).
+        # On a turn of a real interface that does not declare it itself (the
+        # WebUI answers with ``message_synth_webui``), it would otherwise be
+        # hidden, leaving the model no way to write to another interface such as
+        # the Telegram user account. Beats keep the strict rule: their
+        # synthetic interface is not in the registry and they carry explicit
+        # outbound targets.
+        reaches_any_interface = (
+            action_name == SEND_MESSAGE_ACTION
+            and current_interface in interface_names
+            and not outbound_target_interfaces
+        )
+        if (current_interface or outbound_target_interfaces) and not (
+            reaches_any_interface
+        ):
             action_interfaces = _action_source_tokens(action_def) & interface_names
             accepted_interfaces = set(outbound_target_interfaces or ())
             if current_interface:
