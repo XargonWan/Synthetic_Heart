@@ -3021,6 +3021,16 @@ async def build_prompt_request(
         "usertag": get_user_usertag(getattr(message, "from_user", None)),
         "interface": interface_name,
     }
+    # The sender is an automated account (a bot): say so, so the reply is short
+    # and the exchange ends instead of going on forever (core/bot_ward.py).
+    try:
+        from core.bot_ward import BOT_NOTE, is_bot_sender
+
+        if is_bot_sender(message, interface_path):
+            _source_dict["is_bot"] = True
+            _source_dict["note"] = BOT_NOTE
+    except Exception as _bot_exc:  # pragma: no cover - defensive
+        log_debug(f"[json_prompt] bot sender check skipped: {_bot_exc}")
     # If the sender is currently in a Discord voice channel, tell the model —
     # this is what allows it to decide to issue join_voice_discord.
     _voice_channel_id = isinstance(context_memory, dict) and context_memory.get(

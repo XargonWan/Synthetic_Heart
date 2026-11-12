@@ -2547,6 +2547,7 @@ class DiscordInterface:
                         "display_name",
                         getattr(message.author, "name", None),
                     ),
+                    is_bot=bool(getattr(message.author, "bot", False)),
                 ),
                 chat=SimpleNamespace(
                     id=channel_id,

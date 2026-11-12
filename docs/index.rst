@@ -30,6 +30,7 @@ getting started.
    cortex
    interfaces
    peer_synths
+   bot_ward
    plugins
    plugins/generated_index
    self_growth
