@@ -2923,7 +2923,6 @@ async def run_corrector_middleware(
             # override above had nothing to resolve and the legacy label
             # survived).
             _legacy_iface_labels = {
-                "telegram": "telegram_bot",
                 "discord": "discord_bot",
                 "matrix": "matrix_chat",
                 "fluxer": "fluxer_bot",
@@ -3717,7 +3716,7 @@ async def notify_corrector_of_system_message(
     bot,
     chat_id: int | str | None = None,
     thread_id: int | None = None,
-    interface: str = "telegram",
+    interface: str = "telegram_bot",
 ):
     """Send a manually-generated system message into the corrector.
 

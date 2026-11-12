@@ -5,7 +5,7 @@ import threading
 import time
 from collections import deque
 from types import SimpleNamespace
-from typing import List, Any
+from typing import Any, List, Optional
 
 try:  # pragma: no cover - import may fail if dependency missing
     import discord  # type: ignore
@@ -25,6 +25,7 @@ except ImportError:
 
 import logging as _stdlib_logging
 
+from core.synth_avatar import register_interface_switch as _register_avatar_switch
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.chat_attention import set_attention, evaluate_triggers
 from core.reaction_handler import get_reaction_emoji
@@ -311,6 +312,9 @@ def _split_discord_text(
     if remaining:
         chunks.append(remaining)
     return [c for c in chunks if c]
+
+
+_avatar_switch = _register_avatar_switch("discord_bot")
 
 
 class DiscordInterface:
@@ -809,6 +813,63 @@ class DiscordInterface:
     def get_interface_id() -> str:
         """Return the unique identifier for this interface."""
         return "discord_bot"
+
+    @staticmethod
+    def uses_synth_avatar() -> bool:
+        return _avatar_switch()
+
+    async def send_activity(self, interface_path: str, kind: str) -> None:
+        """Show "typing…" (Discord has no wording for recording or uploading)."""
+        client = self.client
+        if client is None or not client.is_ready():
+            return
+        from core.interface_path_utils import parse_interface_path
+
+        _name, levels = parse_interface_path(interface_path)
+        if not levels or not str(levels[-1]).isdigit():
+            return
+        if len(levels) == 1:
+            # ``discord_bot/<user_id>``: a DM, whose channel has its own id.
+            user = client.get_user(int(levels[0])) or await client.fetch_user(
+                int(levels[0])
+            )
+            channel_id = (user.dm_channel or await user.create_dm()).id
+        else:
+            channel_id = int(levels[-1])  # channel, or the thread inside it
+        await client.http.send_typing(channel_id)
+
+    async def set_avatar(
+        self,
+        image_bytes: Optional[bytes],
+        mime: Optional[str] = None,
+        version: Optional[str] = None,
+        force: bool = False,
+    ) -> bool:
+        """Set (or, for ``None``, remove) the bot account's avatar.
+
+        Discord limits avatar changes sharply, so core only calls this when the
+        version changed (or on an explicit resend).
+        """
+        client = self.client
+        if client is None or not self.uses_synth_avatar():
+            return False
+        if not client.is_ready() or client.user is None:
+            log_debug("[discord_interface] avatar not applied: client not ready")
+            return False
+        try:
+            await client.user.edit(avatar=image_bytes)
+        except discord.HTTPException as exc:
+            log_warning(
+                f"[discord_interface] avatar update refused ({exc.status}): {exc.text}"
+            )
+            return False
+        log_info("[discord_interface] synth avatar applied to the bot account")
+        return True
+
+    @staticmethod
+    def get_interface_path_hint() -> str:
+        """Destination format shown to the model when it asks about channels."""
+        return "discord_bot/<guild_id>/<channel_id>[/<thread_id>] or discord_bot/<user_id> (DM)"
 
     @staticmethod
     def get_action_types() -> list[str]:
@@ -2486,6 +2547,7 @@ class DiscordInterface:
                         "display_name",
                         getattr(message.author, "name", None),
                     ),
+                    is_bot=bool(getattr(message.author, "bot", False)),
                 ),
                 chat=SimpleNamespace(
                     id=channel_id,

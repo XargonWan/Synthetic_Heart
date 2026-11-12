@@ -2037,6 +2037,23 @@ async def ensure_plugin_tables() -> None:
                     """
                 )
 
+                # system_events (core/system_events.py) — restarts, plugin /
+                # interface toggles and the heartbeat row (kind = 'heartbeat')
+                # used to estimate offline time.
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS system_events (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        ts DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        kind VARCHAR(32) NOT NULL,
+                        component VARCHAR(100),
+                        detail VARCHAR(500),
+                        INDEX idx_system_events_ts (ts),
+                        INDEX idx_system_events_kind (kind)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+                    """
+                )
+
                 try:
                     await conn.commit()
                 except Exception:

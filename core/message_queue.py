@@ -10,7 +10,7 @@ from typing import Any, cast
 import traceback
 from types import SimpleNamespace
 
-from core import plugin_instance, rate_limit, stats_registry
+from core import bot_ward, chat_activity, plugin_instance, rate_limit, stats_registry
 from core.beat_utils import is_outbound_beat
 from core.logging_utils import log_debug, log_error, log_warning, log_info
 from core.mention_utils import is_message_for_bot
@@ -1016,6 +1016,22 @@ async def enqueue(
         f"[QUEUE] DEBUG: User {user_id} is not blocked or is trainer, continuing processing"
     )
 
+    # Bot ward: a private chat with a bot account must not turn into an endless
+    # exchange. Messages from a bot rank below ordinary chat, and once the bot has
+    # sent too many in a short while the conversation is paused: its messages stay
+    # in the chat history (the interface stored them already) but start no turn.
+    ward_verdict = await bot_ward.check_inbound(
+        bot_ward.path_for(message, interface_id), message
+    )
+    if ward_verdict.action == bot_ward.HISTORY_ONLY:
+        log_info(
+            f"[QUEUE] Bot ward: message from {user_id} kept as history only "
+            f"({ward_verdict.reason})"
+        )
+        if response_future is not None and not response_future.done():
+            response_future.set_result(None)
+        return
+
     plugin = await ensure_active_plugin("incoming message")
     if not plugin:
         log_error(
@@ -1327,6 +1343,9 @@ async def enqueue(
                 priority_val = PRIORITY_TRAINER
         except Exception as exc:  # pragma: no cover - defensive
             log_debug(f"[QUEUE] Trainer priority lookup skipped: {exc}")
+        if ward_verdict.priority_drop and priority_val == PRIORITY_GENERAL:
+            # A bot's message: processed after the people waiting (bot ward).
+            priority_val = PRIORITY_GENERAL - ward_verdict.priority_drop
 
     _counter += 1
     await _get_queue().put((_heap_key(priority_val), _counter, item))
@@ -1863,6 +1882,9 @@ async def _consumer_loop() -> None:
                         )
 
                     async def _call_bot_generation_start() -> None:
+                        # "typing…" in the chat while the model generates (interfaces
+                        # that can show it implement send_activity; core/chat_activity).
+                        await chat_activity.begin(interface_path)
                         try:
                             bot_obj = final.get("bot")
                             if bot_obj is None:
@@ -2019,6 +2041,7 @@ async def _consumer_loop() -> None:
                         _interface_path: str = interface_path,
                         _context: Any = context,
                     ) -> None:
+                        await chat_activity.end(_interface_path)
                         try:
                             bot_obj = _final.get("bot")
                             if bot_obj is None:

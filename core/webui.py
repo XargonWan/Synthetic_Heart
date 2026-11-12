@@ -1025,6 +1025,21 @@ class SynthWebUIInterface:
         # one, and confirm / reject / lift / restore a stored one.
         self.app.get("/api/soul/retractions")(self.get_retractions)
         self.app.post("/api/soul/retractions")(self.post_retraction)
+        # Synth avatar (Settings → Synth Avatar): stored by core, pushed to interfaces.
+        from core import synth_avatar as _synth_avatar  # noqa: F401  (registers SYNTH_AVATAR)
+        from core.karada_api import _require_api_token as _avatar_token
+
+        self.app.get("/api/synth_avatar")(self.get_synth_avatar)
+        self.app.get("/api/synth_avatar/info")(self.get_synth_avatar_info)
+        self.app.post("/api/synth_avatar", dependencies=[Depends(_avatar_token)])(
+            self.upload_synth_avatar
+        )
+        self.app.delete("/api/synth_avatar", dependencies=[Depends(_avatar_token)])(
+            self.delete_synth_avatar
+        )
+        self.app.post(
+            "/api/synth_avatar/resend", dependencies=[Depends(_avatar_token)]
+        )(self.resend_synth_avatar)
         # On-demand run of the nightly memory compaction (Settings → Memory Compaction).
         self.app.get("/api/grillo/compaction")(self.grillo_compaction_status)
         self.app.post("/api/grillo/compaction")(self.start_grillo_compaction)
@@ -10757,6 +10772,83 @@ class SynthWebUIInterface:
         )
 
     # ------------------------------------------------------------------
+    # Synth avatar
+    # ------------------------------------------------------------------
+    async def get_synth_avatar(self) -> Response:
+        """The stored avatar PNG; the ``?v=`` cache-buster makes it cacheable."""
+        from core import synth_avatar
+
+        loaded = synth_avatar.load_avatar()
+        if loaded is None:
+            raise HTTPException(status_code=404, detail="No avatar set")
+        data, version = loaded
+        return Response(
+            content=data,
+            media_type=synth_avatar.AVATAR_MIME,
+            headers={"ETag": f'"{version}"', "Cache-Control": "no-cache"},
+        )
+
+    async def get_synth_avatar_info(self) -> JSONResponse:
+        from core import synth_avatar
+
+        version = synth_avatar.current_version()
+        return JSONResponse(
+            {
+                "success": True,
+                "exists": version is not None,
+                "version": version,
+                "size": synth_avatar.AVATAR_SIZE,
+                "interfaces": synth_avatar.interface_support(),
+            }
+        )
+
+    async def upload_synth_avatar(self, file: UploadFile = File(...)) -> JSONResponse:
+        """Store the (already framed) image and push it to the interfaces."""
+        from core import synth_avatar
+
+        raw = await file.read(synth_avatar.MAX_UPLOAD_BYTES + 1)
+        await file.close()
+        try:
+            info = await asyncio.to_thread(synth_avatar.save_avatar, raw)
+        except synth_avatar.AvatarError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to store synth avatar: {exc}")
+            raise HTTPException(
+                status_code=500, detail="Could not store avatar"
+            ) from exc
+        await synth_avatar.persist_version(info.version)
+        results = await synth_avatar.broadcast_avatar_changed()
+        log_info(f"{LOG_PREFIX} Synth avatar updated ({info.version}): {results}")
+        return JSONResponse(
+            {"success": True, "version": info.version, "interfaces": results}
+        )
+
+    async def resend_synth_avatar(self) -> JSONResponse:
+        """Push the stored avatar to every opted-in interface again, by hand.
+
+        Skips the "already applied" shortcut, so an account whose picture was
+        changed elsewhere (or a push that failed earlier) is brought back in line.
+        """
+        from core import synth_avatar
+
+        if synth_avatar.load_avatar() is None:
+            raise HTTPException(status_code=404, detail="No avatar to resend")
+        results = await synth_avatar.broadcast_avatar_changed(force=True)
+        log_info(f"{LOG_PREFIX} Synth avatar resent: {results}")
+        return JSONResponse({"success": True, "interfaces": results})
+
+    async def delete_synth_avatar(self) -> JSONResponse:
+        from core import synth_avatar
+
+        removed = synth_avatar.clear_avatar()
+        await synth_avatar.persist_version(None)
+        results = await synth_avatar.broadcast_avatar_changed() if removed else {}
+        return JSONResponse(
+            {"success": True, "removed": removed, "interfaces": results}
+        )
+
+    # ------------------------------------------------------------------
     # Nightly compaction, on demand (Settings → Memory Compaction)
     # ------------------------------------------------------------------
     @staticmethod
@@ -11274,7 +11366,13 @@ class SynthWebUIInterface:
             config_def = next((d for d in definitions if d["key"] == key), None)
             component = config_def.get("component") if config_def else None
         except Exception:
+            config_def = None
             component = None
+
+        try:
+            _previous_value = config_registry.get_value(key, None)
+        except Exception:
+            _previous_value = None
 
         try:
             await config_registry.set_value(key, value, require_persist=True)
@@ -11290,6 +11388,20 @@ class SynthWebUIInterface:
             raise HTTPException(
                 status_code=500, detail="Failed to update configuration"
             ) from exc
+
+        # Tell the persona the user changed a setting (system-event window). Only
+        # variables a person sees in the UI: hidden ones are internal flags (the
+        # plugin/interface switches record their own events). Sensitive values
+        # are never logged.
+        if not (config_def or {}).get("hidden"):
+            from core.system_events import record_variable_change
+
+            await record_variable_change(
+                key,
+                _previous_value,
+                value,
+                sensitive=bool((config_def or {}).get("sensitive")),
+            )
 
         # Invalidate the in-memory Vox language-override cache so the next TTS
         # call picks up the new mapping immediately (the cache has a short TTL

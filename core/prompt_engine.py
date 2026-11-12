@@ -10,6 +10,7 @@ from core.beat_utils import is_outbound_beat
 from core.db import _get_db_type, get_conn_ctx
 from core.synth_tagging import extract_tags, expand_tags
 from core.logging_utils import log_debug, log_info, log_warning, log_error
+from core.message_registry import SEND_MESSAGE_ACTION
 from core.json_utils import dumps as json_dumps, redact_multimodal_for_logging
 from core.config_manager import config_registry
 from core.user_utils import get_user_display_name, get_user_usertag
@@ -705,7 +706,22 @@ def _derive_default_prompt_action_types(
         if _is_non_user_facing_action(action_def):
             continue
 
-        if current_interface or outbound_target_interfaces:
+        # ``send_message`` is the unified action that delivers through ANY
+        # connected chat interface (the destination rides in ``interface_path``).
+        # On a turn of a real interface that does not declare it itself (the
+        # WebUI answers with ``message_synth_webui``), it would otherwise be
+        # hidden, leaving the model no way to write to another interface such as
+        # the Telegram user account. Beats keep the strict rule: their
+        # synthetic interface is not in the registry and they carry explicit
+        # outbound targets.
+        reaches_any_interface = (
+            action_name == SEND_MESSAGE_ACTION
+            and current_interface in interface_names
+            and not outbound_target_interfaces
+        )
+        if (current_interface or outbound_target_interfaces) and not (
+            reaches_any_interface
+        ):
             action_interfaces = _action_source_tokens(action_def) & interface_names
             accepted_interfaces = set(outbound_target_interfaces or ())
             if current_interface:
@@ -1178,6 +1194,11 @@ def _build_current_turn_anchor(context_section: dict[str, Any]) -> str:
 # route that consumes this table.
 _PLUGIN_CONTEXT_BLOCKS: tuple[tuple[str, str, str | None], ...] = (
     ("scene", "[Setting]", None),
+    # Core-sourced runtime state (``core.action_parser._add_runtime_state_injections``):
+    # the interfaces that are switched on right now, and the last few restarts /
+    # plugin toggles. Both follow a runtime enable/disable with no restart.
+    ("active_interfaces", "[Interfaces]", None),
+    ("system_events", "[Recent system events]", None),
     ("home", "[Home]", None),
     ("home_weather", "[Weather]", "weather"),
     ("home_location", "[House]", "location"),
@@ -2781,6 +2802,7 @@ async def build_prompt_request(
     try:
         history_paths = context_section.pop("history_interface_paths", None)
         if history_paths:
+            from core.interface_aliases import to_display_path as _legend_path
             from core.interface_paths import build_pretty_name
 
             legend_lines: list[str] = []
@@ -2793,10 +2815,11 @@ async def build_prompt_request(
                         f"[json_prompt] pretty name for {hp} failed: {legend_err}"
                     )
                     display = None
+                shown_hp = await _legend_path(hp)
                 if display:
-                    legend_lines.append(f"{hp} = {display}")
+                    legend_lines.append(f"{shown_hp} = {display}")
                 else:
-                    legend_lines.append(str(hp))
+                    legend_lines.append(str(shown_hp))
             if legend_lines:
                 context_section["channel_legend"] = legend_lines
     except Exception as e:
@@ -2985,13 +3008,29 @@ async def build_prompt_request(
         isinstance(context_memory, dict) and context_memory.get("is_voice_input")
     )
 
+    # The model is shown the readable alias form (``telegram/@jay``) when one is
+    # known; ``core.message_chain`` maps it back to the stored id path.
+    from core.interface_aliases import to_display_path
+
+    _shown_path = await to_display_path(interface_path)
+
     _source_dict: dict = {
-        "interface_path": interface_path,
+        "interface_path": _shown_path,
         "message_id": message.message_id,
         "username": get_user_display_name(getattr(message, "from_user", None)),
         "usertag": get_user_usertag(getattr(message, "from_user", None)),
         "interface": interface_name,
     }
+    # The sender is an automated account (a bot): say so, so the reply is short
+    # and the exchange ends instead of going on forever (core/bot_ward.py).
+    try:
+        from core.bot_ward import BOT_NOTE, is_bot_sender
+
+        if is_bot_sender(message, interface_path):
+            _source_dict["is_bot"] = True
+            _source_dict["note"] = BOT_NOTE
+    except Exception as _bot_exc:  # pragma: no cover - defensive
+        log_debug(f"[json_prompt] bot sender check skipped: {_bot_exc}")
     # If the sender is currently in a Discord voice channel, tell the model —
     # this is what allows it to decide to issue join_voice_discord.
     _voice_channel_id = isinstance(context_memory, dict) and context_memory.get(
@@ -3014,7 +3053,7 @@ async def build_prompt_request(
         # history blends multiple chats, so we state it structurally, not just
         # in prose instructions.
         "current_chat": {
-            "interface_path": interface_path,
+            "interface_path": _shown_path,
             "interface": interface_name,
             "thread_id": getattr(message, "thread_id", None)
             or getattr(message, "message_thread_id", None),

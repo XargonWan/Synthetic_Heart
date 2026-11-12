@@ -5,7 +5,8 @@ import asyncio
 import inspect
 import re
 import time
-from typing import Any, Dict, List, Tuple
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Dict, List, Tuple
 
 from core.json_utils import dumps as json_dumps, redact_multimodal_for_logging
 from core.logging_utils import log_debug, log_info, log_warning, log_error
@@ -1804,9 +1805,12 @@ async def _handle_plugin_action(
                 log_info(
                     f"[action_parser] ✉️ Dispatching message action to interface '{plugin_iface}' via send_message"
                 )
-                result = plugin.send_message(payload, original_message=original_message)
-                if inspect.iscoroutine(result):
-                    result = await result
+                async with _action_activity(action_type, payload, context):
+                    result = plugin.send_message(
+                        payload, original_message=original_message
+                    )
+                    if inspect.iscoroutine(result):
+                        result = await result
                 # Propagate the delivery outcome so callers (agent router,
                 # agent tool executor) can observe success/failure instead of
                 # always assuming success. This is the path actually used in
@@ -1857,11 +1861,12 @@ async def _handle_plugin_action(
                     + json_dumps(redact_multimodal_for_logging(payload))
                 )
 
-                result = plugin.execute_action(
-                    new_action, context, bot, original_message
-                )
-                if inspect.iscoroutine(result):
-                    result = await result
+                async with _action_activity(action_type, payload, context):
+                    result = plugin.execute_action(
+                        new_action, context, bot, original_message
+                    )
+                    if inspect.iscoroutine(result):
+                        result = await result
                 # If a plugin explicitly skips this action, fall through to the next handler.
                 # "skipped" means "I'm not handling this — try the next plugin".
                 if isinstance(result, dict) and result.get("status") == "skipped":
@@ -3041,6 +3046,35 @@ def get_action_plugin_instructions() -> dict[str, Any]:
     return instructions
 
 
+@asynccontextmanager
+async def _action_activity(
+    action_type: Any, payload: Any, context: Any
+) -> AsyncIterator[None]:
+    """Show "recording…" / "sending a file…" while an action runs, then stop.
+
+    A voice note (``tts_speak``) or a message with ``media`` gets its own
+    indicator for the duration; once anything has been delivered the typing
+    indicator of that conversation is stopped, because the client has just
+    cleared it and a pulse would bring it back. Never raises.
+    """
+    from core import chat_activity
+    from core.message_registry import is_message_action
+
+    kind = chat_activity.kind_for_action(action_type, payload)
+    path = (payload.get("interface_path") if isinstance(payload, dict) else None) or (
+        context.get("interface_path") if isinstance(context, dict) else None
+    )
+    try:
+        if kind and path:
+            async with chat_activity.show(path, kind):
+                yield
+        else:
+            yield
+    finally:
+        if path and (kind or is_message_action(action_type)):
+            await chat_activity.end(path)
+
+
 def _add_core_injections(injections: dict[str, Any]) -> dict[str, Any]:
     """Add the core-sourced prompt blocks that no plugin owns.
 
@@ -3061,6 +3095,43 @@ def _add_core_injections(injections: dict[str, Any]) -> dict[str, Any]:
             injections["scene"] = scene
     except Exception as exc:  # pragma: no cover - config safety net
         log_debug(f"[action_parser] core static injection skipped: {exc}")
+    return injections
+
+
+async def _add_runtime_state_injections(injections: dict[str, Any]) -> dict[str, Any]:
+    """Add what the persona should know about its own running state.
+
+    * ``active_interfaces`` — the interfaces that are on right now, so it knows
+      it can reach (say) both ``telegram`` and ``telegram_bot``. Recomputed on
+      every turn, hence it follows a runtime enable/disable with no restart.
+      Only the ids are listed (a few tokens); the path formats are added on
+      demand by ``plugins/recon/recon_interface_reference``.
+    * ``system_events`` — the last few restarts / plugin toggles
+      (``core.system_events``), empty once they fall outside the window.
+
+    Both fail safe to "nothing added": a prompt is never lost to this.
+    """
+    try:
+        from core.interface_paths import describe_active_interfaces
+
+        names = [item["id"] for item in describe_active_interfaces()]
+        if names:
+            injections["active_interfaces"] = (
+                "Connected: "
+                + ", ".join(names)
+                + ". Replies go back to the conversation you are in; to write "
+                "somewhere else use send_message with an interface_path."
+            )
+    except Exception as exc:  # pragma: no cover - safety net
+        log_debug(f"[action_parser] interface injection skipped: {exc}")
+    try:
+        from core.system_events import get_system_events_block
+
+        events = await get_system_events_block()
+        if events:
+            injections["system_events"] = events
+    except Exception as exc:  # pragma: no cover - safety net
+        log_debug(f"[action_parser] system events injection skipped: {exc}")
     return injections
 
 
@@ -3214,7 +3285,9 @@ async def gather_static_injections(message=None, context_memory=None):
         # No plugin supplies an injection this turn; the core-sourced blocks
         # (the standing scene note) still ride, because they do not depend on a
         # plugin being enabled.
-        return await _add_retraction_injections(_add_core_injections({}))
+        return await _add_retraction_injections(
+            await _add_runtime_state_injections(_add_core_injections({}))
+        )
 
     gather_start = time.time()
     log_debug(
@@ -3264,6 +3337,7 @@ async def gather_static_injections(message=None, context_memory=None):
     # Core-sourced blocks last, so the logged key list below is the truth about
     # what this turn carries.
     injections = _add_core_injections(injections)
+    injections = await _add_runtime_state_injections(injections)
     injections = await _add_retraction_injections(injections)
 
     log_info(
@@ -3430,6 +3504,7 @@ async def corrector_orchestrator(
                     # message_chain but kept inline to avoid circular imports.
                     _iface_msg_map: dict[str, str] = {
                         "telegram_bot": "message_telegram_bot",
+                        "telegram": "message_telegram",
                         "discord_bot": "message_discord_bot",
                         "synth_webui": "message_synth_webui",
                         "matrix_chat": "message_matrix_chat",

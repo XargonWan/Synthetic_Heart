@@ -667,3 +667,44 @@ async def backfill_interface_paths_from_history() -> int:
         )
         return 0
     return max(inserted, 0)
+
+
+def describe_active_interfaces() -> list[dict[str, str]]:
+    """Describe the interfaces that are switched on right now.
+
+    Each item is ``{"id", "display_name", "path_hint"}``. Only interfaces in
+    ``core_initializer.active_interfaces`` are returned, so the list follows a
+    runtime enable/disable without a restart. ``path_hint`` comes from the
+    interface's own optional ``get_interface_path_hint()`` and is ``""`` when
+    it has none. The internal ``vessel`` pseudo-interface is not a message
+    destination and is left out. Never raises.
+    """
+    try:
+        from core.core_initializer import INTERFACE_REGISTRY, core_initializer
+
+        active = list(core_initializer.active_interfaces)
+    except Exception as exc:
+        log_debug(f"[interface_paths] describe_active_interfaces unavailable: {exc}")
+        return []
+
+    described: list[dict[str, str]] = []
+    for name in active:
+        if name == "vessel":
+            continue
+        instance = INTERFACE_REGISTRY.get(name)
+        label = getattr(instance, "display_name", None)
+        hint = ""
+        hint_fn = getattr(instance, "get_interface_path_hint", None)
+        if callable(hint_fn):
+            try:
+                hint = str(hint_fn() or "").strip()
+            except Exception as exc:
+                log_debug(f"[interface_paths] path hint failed for {name}: {exc}")
+        described.append(
+            {
+                "id": name,
+                "display_name": label.strip() if isinstance(label, str) else name,
+                "path_hint": hint,
+            }
+        )
+    return described

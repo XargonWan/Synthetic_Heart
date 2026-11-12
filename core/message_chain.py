@@ -78,6 +78,7 @@ def get_failed_message_text() -> str:
 # remains for special interfaces whose outbound verb differs (WebUI, radio).
 _INTERFACE_TO_MESSAGE_ACTION: Dict[str, str] = {
     "telegram_bot": "send_message",
+    "telegram": "send_message",
     "discord_bot": "send_message",
     "synth_webui": "message_synth_webui",
     "matrix_chat": "send_message",
@@ -403,6 +404,26 @@ def _auto_inject_interface_path(actions: list, interface_path: Optional[str]) ->
             )
             payload["interface_path"] = interface_path
 
+    return actions
+
+
+async def _canonicalize_alias_paths(actions: list) -> list:
+    """Map ``telegram/@jay`` style paths the model built to the stored id form.
+
+    The model is shown (and asked to build) readable alias paths; everything
+    downstream — routing, origin comparison, beat target checks, history —
+    keys on the canonical id path, so the conversion happens once, up front.
+    An alias that is not known is left untouched (an interface may still be able
+    to resolve it, e.g. a public Telegram username).
+    """
+    from core.interface_aliases import to_canonical_path
+
+    for action in actions or []:
+        payload = action.get("payload") if isinstance(action, dict) else None
+        if isinstance(payload, dict) and isinstance(payload.get("interface_path"), str):
+            payload["interface_path"] = await to_canonical_path(
+                payload["interface_path"]
+            )
     return actions
 
 
@@ -1449,6 +1470,7 @@ async def handle_incoming_message(
         user_facing_interfaces = [
             "discord_bot",
             "telegram_bot",
+            "telegram",
             "synth_webui",
             "matrix_chat",
             "ollama_serve",
@@ -2129,6 +2151,7 @@ async def handle_incoming_message(
                 actions = _normalize_message_payload_text(actions)
                 # Auto-inject interface_path into message actions that are missing it
                 # This prevents validation failures and avoids costly LLM correction calls
+                actions = await _canonicalize_alias_paths(actions)
                 actions = _auto_inject_interface_path(actions, ctx_interface_path)
                 # For Grillo beats, drop any message action routed to a conversation
                 # the beat never offered (snippet origin or eligible target). This
@@ -2258,6 +2281,7 @@ async def handle_incoming_message(
 
                         if rewrote_generic_message_action:
                             actions = _normalize_message_payload_text(actions)
+                            actions = await _canonicalize_alias_paths(actions)
                             actions = _auto_inject_interface_path(
                                 actions, ctx_interface_path
                             )
@@ -2699,6 +2723,7 @@ async def handle_incoming_message(
                         user_facing_interfaces = [
                             "discord_bot",
                             "telegram_bot",
+                            "telegram",
                             "synth_webui",
                             "matrix_chat",
                             "ollama_serve",
@@ -2939,7 +2964,7 @@ async def handle_incoming_message(
                         _iface_tts_prefix = (ctx.get("interface_path") or "").split(
                             "/"
                         )[0]
-                        _voice_only_tts_ifaces = {"telegram_bot", "discord_bot"}
+                        _voice_only_tts_ifaces = {"telegram_bot", "telegram", "discord_bot"}
                         tts_allowed = (
                             _iface_tts_prefix not in _voice_only_tts_ifaces
                         ) or _is_voice_input

@@ -163,6 +163,42 @@ Telegram Bot
 - **Validation**: Requires ``interface_path`` in message actions
 - **Thread Support**: Handles Telegram topic threads
 
+Telegram User Account
+~~~~~~~~~~~~~~~~~~~~~
+
+- **Path Format**: ``telegram/chat_id[/thread_id]`` or ``telegram/@username[/thread_id]``
+- **Writing first**: a user account can only message a bare user id it has seen.
+  ``TelethonBot.ensure_peer`` (``interface/telegram/_compat.py``) looks for the
+  person once in the groups the account shares with them, then tries the public
+  username that the ``telegram_bot`` interface knows for that id, and otherwise
+  fails with a "Chat not found" error that says what to do (they message the
+  account first, or the sender uses their ``@username``). A miss is remembered
+  for ten minutes. A destination written as ``@username`` is resolved by
+  Telegram and settled on the numeric id before it is sent.
+
+Aliases (``@username`` instead of the numeric id)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The first segment of a Telegram path is a number, which tells a person (and the
+model) nothing. ``core/interface_aliases.py`` keeps ``id <-> @username`` pairs
+and converts in both directions, and **the username form is the preferred way to
+build a path**:
+
+- The **numeric id stays canonical**: history, memories, ``interface_paths``,
+  trainer checks and routing all key on ``telegram/31321637``. An alias can
+  change or be missing, so it is never stored in place of the id.
+- ``to_display_path`` is what the model is shown (``source.interface_path``,
+  ``current_chat``, the channel legend, the paths listed by the
+  ``recon_interface_reference`` plugin): ``telegram/@jay/12``.
+- ``to_canonical_path`` maps the model's answer back, once, in
+  ``core.message_chain`` before anything routes, compares or validates it. An
+  alias that is not known is left as written (the Telegram user interface can
+  still resolve a public username by itself).
+- Pairs are learnt from incoming traffic by both Telegram interfaces
+  (``remember_message_alias``): the sender's username in a private chat, the
+  chat's own username for a public group or channel. A renamed account replaces
+  its old alias; a username is unique per interface. Table: ``interface_aliases``.
+
 Matrix Interface
 ~~~~~~~~~~~~~~~~
 

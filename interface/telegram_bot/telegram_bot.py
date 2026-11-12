@@ -69,6 +69,7 @@ import core.plugin_instance as plugin_instance
 from core.core_initializer import register_interface
 from core.interfaces_registry import get_interface_registry
 from core.config_manager import config_registry
+from core.synth_avatar import register_interface_switch as _register_avatar_switch
 from core.variables_engine import register_exposed_var
 
 
@@ -1106,6 +1107,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         log_debug(f"[telegram_bot] resolve_and_touch failed (non-fatal): {e}")
+
+    from core.interface_aliases import remember_message_alias
+
+    await remember_message_alias("telegram_bot", message)
 
     try:
         from core.peer_policy import notify_message_arrived
@@ -2176,6 +2181,9 @@ async def _record_telegram_delivery_failure(
         log_debug(f"[telegram_interface] Could not record delivery failure: {exc}")
 
 
+_avatar_switch = _register_avatar_switch("telegram_bot")
+
+
 class TelegramInterface:
     """Interface wrapper providing a standard send_message method for Telegram."""
 
@@ -2319,6 +2327,88 @@ class TelegramInterface:
         return "telegram_bot"
 
     @staticmethod
+    def uses_synth_avatar() -> bool:
+        return _avatar_switch()
+
+    _ACTIVITY_ACTIONS = {
+        "typing": "typing",
+        "record_audio": "record_voice",
+        "upload_audio": "upload_voice",
+        "upload_file": "upload_document",
+    }
+
+    async def send_activity(self, interface_path: str, kind: str) -> None:
+        """Show "typing…" / "recording…" / "sending a file…" in a chat."""
+        if self.bot is None:
+            return
+        from core.interface_path_utils import extract_legacy_ids
+
+        ids = extract_legacy_ids(interface_path)
+        chat_id = ids.get("chat_id")
+        if not chat_id:
+            return
+        thread = ids.get("thread_id")
+        await self.bot.send_chat_action(
+            chat_id=int(chat_id),
+            action=self._ACTIVITY_ACTIONS.get(kind, "typing"),
+            message_thread_id=int(thread) if thread and str(thread).isdigit() else None,
+        )
+
+    async def set_avatar(
+        self,
+        image_bytes: Optional[bytes],
+        mime: Optional[str] = None,
+        version: Optional[str] = None,
+        force: bool = False,
+    ) -> bool:
+        """Set (or, for ``None``, remove) the bot's profile photo.
+
+        python-telegram-bot 22.6 predates ``setMyProfilePhoto`` /
+        ``removeMyProfilePhoto`` (Bot API 9.4), so they are called directly. A
+        Bot API server without them answers "not found" and this reports not
+        applied; the bot picture can then still be set through @BotFather.
+        """
+        bot = self.bot
+        if bot is None or not self.uses_synth_avatar():
+            return False
+        import json
+
+        import httpx
+
+        base = f"https://api.telegram.org/bot{bot.token}"
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as http:
+                if image_bytes is None:
+                    reply = await http.post(f"{base}/removeMyProfilePhoto")
+                else:
+                    reply = await http.post(
+                        f"{base}/setMyProfilePhoto",
+                        data={
+                            "photo": json.dumps(
+                                {"type": "static", "photo": "attach://avatar"}
+                            )
+                        },
+                        files={"avatar": ("avatar.png", image_bytes, "image/png")},
+                    )
+            body = reply.json()
+        except Exception as exc:
+            log_warning(f"[telegram_bot] avatar update failed: {type(exc).__name__}")
+            return False
+        if not body.get("ok"):
+            log_warning(
+                "[telegram_bot] avatar not applied by the Bot API: "
+                f"{body.get('error_code')} {body.get('description')}"
+            )
+            return False
+        log_info("[telegram_bot] synth avatar applied to the bot")
+        return True
+
+    @staticmethod
+    def get_interface_path_hint() -> str:
+        """Destination format shown to the model when it asks about channels."""
+        return "telegram_bot/<@username or chat_id>[/<thread_id>]"
+
+    @staticmethod
     def get_supported_actions() -> dict:
         """Return schema information for supported actions."""
         from core.message_registry import get_send_message_schema
@@ -2347,7 +2437,9 @@ class TelegramInterface:
                 "type": "string",
                 "example": "telegram_bot/123456789/456",
                 "description": (
-                    "Destination path 'telegram_bot/chat_id' or "
+                    "Destination path 'telegram_bot/@username' (preferred when the "
+                    "person or public group has one; only people who already wrote "
+                    "to the bot are known), 'telegram_bot/chat_id' or "
                     "'telegram_bot/chat_id/thread_id'. OPTIONAL when replying to an "
                     "incoming message (auto-routes to the origin conversation); "
                     "REQUIRED for spontaneous messages. Use "
@@ -2866,7 +2958,7 @@ class TelegramInterface:
                 self.bot,
                 chat_id=None,
                 thread_id=None,
-                interface="telegram",
+                interface="telegram_bot",
             )
             return False
 
@@ -3029,7 +3121,7 @@ class TelegramInterface:
                     self.bot,
                     chat_id=chat_id,
                     thread_id=thread_id,
-                    interface="telegram",
+                    interface="telegram_bot",
                 )
                 return False
             else:
@@ -3041,7 +3133,7 @@ class TelegramInterface:
                     self.bot,
                     chat_id=chat_id,
                     thread_id=thread_id,
-                    interface="telegram",
+                    interface="telegram_bot",
                 )
                 return False
         except Exception as e:
