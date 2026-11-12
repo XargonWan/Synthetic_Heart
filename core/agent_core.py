@@ -1733,6 +1733,7 @@ class AgentLoopManager:
                         "content": [
                             {
                                 "tool": name,
+                                "arguments": args,
                                 "ok": exec_result.get("ok", False),
                                 "result": exec_result.get("result", ""),
                                 "error": exec_result.get("error"),
@@ -2206,6 +2207,7 @@ class AgentLoopManager:
                                     "content": [
                                         {
                                             "tool": mc_name,
+                                            "arguments": args,
                                             "ok": True,
                                             "result": "already delivered",
                                             "error": None,
@@ -2250,6 +2252,7 @@ class AgentLoopManager:
                                     "content": [
                                         {
                                             "tool": mc_name,
+                                            "arguments": args,
                                             "ok": True,
                                             "result": (
                                                 "suppressed: you already sent "
@@ -2320,6 +2323,7 @@ class AgentLoopManager:
                                 "content": [
                                     {
                                         "tool": mc_name,
+                                        "arguments": args,
                                         "ok": delivered_ok,
                                         "result": exec_result.get("result", ""),
                                         "error": exec_result.get("error"),
@@ -2606,6 +2610,7 @@ class AgentLoopManager:
                     iteration_results.append(
                         {
                             "tool": name,
+                            "arguments": args,
                             "ok": False,
                             "result": "",
                             "error": (
@@ -2719,6 +2724,9 @@ class AgentLoopManager:
                 iteration_results.append(
                     {
                         "tool": name,
+                        # The call's arguments, so the Agent panel (and a lean-prompt
+                        # endpoint) can show and replay what was actually run.
+                        "arguments": args,
                         "ok": exec_result.get("ok", False),
                         "result": exec_result.get("result", ""),
                         "error": exec_result.get("error"),
@@ -3056,6 +3064,94 @@ class AgentLoopManager:
             cortex_scope=cortex_scope,
         )
 
+    @staticmethod
+    def _lean_prompt(engine: Any) -> bool:
+        """True when *engine* is an endpoint configured for the lean agent prompt."""
+        return getattr(engine, "lean_agent_prompt", False) is True
+
+    @staticmethod
+    def _lean_messages(prompt: Dict[str, Any]) -> list[Dict[str, Any]]:
+        """Goal plus earlier tool calls/results as plain OpenAI chat messages.
+
+        No system text, no tool catalog and no protocol instructions: the tools
+        travel as native ``tools`` and the endpoint speaks the standard
+        function-calling API. Each earlier tool result becomes an
+        ``assistant`` message with its ``tool_calls`` followed by the ``tool``
+        message holding the output, so the endpoint can replay the whole
+        session (web-driven endpoints are stateless).
+        """
+        context = (
+            prompt.get("context") if isinstance(prompt.get("context"), dict) else None
+        )
+        goal = str((prompt.get("system_message") or {}).get("goal") or "")
+        preface = AgentLoopManager._reply_channel_preface(context)
+        messages: list[Dict[str, Any]] = [
+            {"role": "user", "content": f"{preface}\n\n{goal}" if preface else goal}
+        ]
+        counter = 0
+        for obs in prompt.get("observation_history") or []:
+            content = obs.get("content")
+            if not isinstance(content, list):
+                if content:
+                    messages.append({"role": "user", "content": str(content)})
+                continue
+            calls: list[Dict[str, Any]] = []
+            outputs: list[Dict[str, Any]] = []
+            for item in content:
+                counter += 1
+                call_id = f"call_{counter}"
+                calls.append(
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": str(item.get("tool") or ""),
+                            "arguments": json.dumps(
+                                item.get("arguments") or {},
+                                ensure_ascii=False,
+                                default=str,
+                            ),
+                        },
+                    }
+                )
+                if item.get("ok"):
+                    result = item.get("result", "")
+                    text = (
+                        result
+                        if isinstance(result, str)
+                        else json.dumps(result, ensure_ascii=False, default=str)
+                    )
+                else:
+                    text = f"error: {item.get('error')}"
+                outputs.append(
+                    {"role": "tool", "tool_call_id": call_id, "content": text}
+                )
+            if calls:
+                messages.append(
+                    {"role": "assistant", "content": None, "tool_calls": calls}
+                )
+                messages.extend(outputs)
+        return messages
+
+    @staticmethod
+    def _reply_channel_preface(context: Dict[str, Any] | None) -> str:
+        """Where the user is talking from and which files they sent, as prose."""
+        if not isinstance(context, dict):
+            return ""
+        lines: list[str] = []
+        path = context.get("interface_path")
+        if path:
+            lines.append(
+                f"The person I am helping writes from {path}. To reply to them, "
+                f"run send_message with --interface_path {path}."
+            )
+        attachments = context.get("attachment_paths")
+        if isinstance(attachments, list) and attachments:
+            lines.append(
+                "Files they sent me: " + ", ".join(str(a) for a in attachments) + "."
+            )
+        return "\n".join(lines)
+
     async def _call_engine_direct(
         self,
         prompt: Dict[str, Any],
@@ -3125,10 +3221,13 @@ class AgentLoopManager:
             text = str(payload.get("text", ""))
             system = str(payload.get("system", ""))
             if prompt.get("agent_mode") and hasattr(engine, "generate_response"):
-                messages = [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": text},
-                ]
+                if native_tools and self._lean_prompt(engine):
+                    messages = self._lean_messages(prompt)
+                else:
+                    messages = [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": text},
+                    ]
                 # Agent-route engine profile: thinking on + native tool calls
                 # (AGENT_ENABLE_THINKING / AGENT_NATIVE_TOOLS /
                 # AGENT_PARALLEL_TOOL_CALLS). Only external endpoint bridges
@@ -3412,6 +3511,35 @@ class AgentLoopManager:
             return ""
 
     @staticmethod
+    def _visible_tools(context: Dict[str, Any] | None) -> list[Any]:
+        """Tools the model may be shown for this turn.
+
+        Drones cannot spawn Drones: ``spawn_drone`` is hidden from a Drone's
+        tool list (single-level delegation). The handler enforces the same rule
+        defensively, this just keeps the model from ever proposing it.
+
+        A task-scoped Drone allow-list (e.g. the vessel goal-expander/planner is
+        limited to lookup_knowledge + update_goal) hides every other tool, so the
+        model never even sees — let alone proposes — an out-of-scope action such
+        as an in-world ``vessel_<world>_say``.
+        """
+        from core.tool_registry import tool_registry
+
+        is_drone = bool(
+            isinstance(context, dict)
+            and isinstance(context.get("drone"), dict)
+            and context["drone"].get("is_drone")
+        )
+        allowed_tools = _context_allowed_tools(context)
+        return [
+            tool
+            for tool in tool_registry.all_tools()
+            if tool.name not in _system_only_action_names()
+            and not (is_drone and tool.name == "spawn_drone")
+            and (allowed_tools is None or tool.name in allowed_tools)
+        ]
+
+    @staticmethod
     def _build_agent_prompt(
         goal: str,
         observations: list[Dict[str, Any]],
@@ -3419,7 +3547,6 @@ class AgentLoopManager:
         context: Dict[str, Any] | None,
     ) -> Dict[str, Any]:
         """Assemble the per-iteration prompt including observation history."""
-        from core.tool_registry import tool_registry
 
         history_lines: list[str] = []
         for obs in observations:
@@ -3485,30 +3612,8 @@ class AgentLoopManager:
                     lines.append(f"- {apath}")
                 attachment_block = "\n".join(lines)
 
-        # Drones cannot spawn Drones: hide the spawn_drone tool from a Drone's
-        # available tool list (single-level delegation). The handler enforces the
-        # same rule defensively, this just keeps the model from ever proposing it.
-        is_drone = bool(
-            isinstance(context, dict)
-            and isinstance(context.get("drone"), dict)
-            and context["drone"].get("is_drone")
-        )
-
-        # Task-scoped Drone allow-list: when the spawning caller restricted this
-        # Drone to a specific tool set (e.g. the vessel goal-expander/planner is
-        # limited to lookup_knowledge + update_goal), hide every other tool from
-        # the prompt so the model never even sees — let alone proposes — an
-        # out-of-scope action such as an in-world ``vessel_<world>_say``.
-        allowed_tools = _context_allowed_tools(context)
-
         tool_lines: list[str] = []
-        for tool in tool_registry.all_tools():
-            if tool.name in _system_only_action_names():
-                continue
-            if is_drone and tool.name == "spawn_drone":
-                continue
-            if allowed_tools is not None and tool.name not in allowed_tools:
-                continue
+        for tool in AgentLoopManager._visible_tools(context):
             params = []
             for p in tool.parameters:
                 ptype = p.type or "string"
