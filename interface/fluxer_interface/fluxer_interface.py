@@ -556,6 +556,11 @@ class FluxerInterface:
         return INTERFACE_NAME
 
     @staticmethod
+    def get_interface_path_hint() -> str:
+        """Destination format shown to the model when it asks about channels."""
+        return f"{INTERFACE_NAME}/<channel_id>[/<thread_id>]"
+
+    @staticmethod
     def get_action_types() -> List[str]:
         if not FluxerInterface._current_instance_enabled:
             return []

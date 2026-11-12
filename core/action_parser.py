@@ -3064,6 +3064,43 @@ def _add_core_injections(injections: dict[str, Any]) -> dict[str, Any]:
     return injections
 
 
+async def _add_runtime_state_injections(injections: dict[str, Any]) -> dict[str, Any]:
+    """Add what the persona should know about its own running state.
+
+    * ``active_interfaces`` — the interfaces that are on right now, so it knows
+      it can reach (say) both ``telegram`` and ``telegram_bot``. Recomputed on
+      every turn, hence it follows a runtime enable/disable with no restart.
+      Only the ids are listed (a few tokens); the path formats are added on
+      demand by ``plugins/recon/recon_interface_reference``.
+    * ``system_events`` — the last few restarts / plugin toggles
+      (``core.system_events``), empty once they fall outside the window.
+
+    Both fail safe to "nothing added": a prompt is never lost to this.
+    """
+    try:
+        from core.interface_paths import describe_active_interfaces
+
+        names = [item["id"] for item in describe_active_interfaces()]
+        if names:
+            injections["active_interfaces"] = (
+                "Connected: "
+                + ", ".join(names)
+                + ". Replies go back to the conversation you are in; to write "
+                "somewhere else use send_message with an interface_path."
+            )
+    except Exception as exc:  # pragma: no cover - safety net
+        log_debug(f"[action_parser] interface injection skipped: {exc}")
+    try:
+        from core.system_events import get_system_events_block
+
+        events = await get_system_events_block()
+        if events:
+            injections["system_events"] = events
+    except Exception as exc:  # pragma: no cover - safety net
+        log_debug(f"[action_parser] system events injection skipped: {exc}")
+    return injections
+
+
 async def _add_retraction_injections(injections: dict[str, Any]) -> dict[str, Any]:
     """Add the retraction blocks (known-false claims, pending confirmations).
 
@@ -3214,7 +3251,9 @@ async def gather_static_injections(message=None, context_memory=None):
         # No plugin supplies an injection this turn; the core-sourced blocks
         # (the standing scene note) still ride, because they do not depend on a
         # plugin being enabled.
-        return await _add_retraction_injections(_add_core_injections({}))
+        return await _add_retraction_injections(
+            await _add_runtime_state_injections(_add_core_injections({}))
+        )
 
     gather_start = time.time()
     log_debug(
@@ -3264,6 +3303,7 @@ async def gather_static_injections(message=None, context_memory=None):
     # Core-sourced blocks last, so the logged key list below is the truth about
     # what this turn carries.
     injections = _add_core_injections(injections)
+    injections = await _add_runtime_state_injections(injections)
     injections = await _add_retraction_injections(injections)
 
     log_info(

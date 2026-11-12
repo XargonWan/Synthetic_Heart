@@ -11333,7 +11333,13 @@ class SynthWebUIInterface:
             config_def = next((d for d in definitions if d["key"] == key), None)
             component = config_def.get("component") if config_def else None
         except Exception:
+            config_def = None
             component = None
+
+        try:
+            _previous_value = config_registry.get_value(key, None)
+        except Exception:
+            _previous_value = None
 
         try:
             await config_registry.set_value(key, value, require_persist=True)
@@ -11349,6 +11355,20 @@ class SynthWebUIInterface:
             raise HTTPException(
                 status_code=500, detail="Failed to update configuration"
             ) from exc
+
+        # Tell the persona the user changed a setting (system-event window). Only
+        # variables a person sees in the UI: hidden ones are internal flags (the
+        # plugin/interface switches record their own events). Sensitive values
+        # are never logged.
+        if not (config_def or {}).get("hidden"):
+            from core.system_events import record_variable_change
+
+            await record_variable_change(
+                key,
+                _previous_value,
+                value,
+                sensitive=bool((config_def or {}).get("sensitive")),
+            )
 
         # Invalidate the in-memory Vox language-override cache so the next TTS
         # call picks up the new mapping immediately (the cache has a short TTL

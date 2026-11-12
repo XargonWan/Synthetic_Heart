@@ -1194,6 +1194,11 @@ def _build_current_turn_anchor(context_section: dict[str, Any]) -> str:
 # route that consumes this table.
 _PLUGIN_CONTEXT_BLOCKS: tuple[tuple[str, str, str | None], ...] = (
     ("scene", "[Setting]", None),
+    # Core-sourced runtime state (``core.action_parser._add_runtime_state_injections``):
+    # the interfaces that are switched on right now, and the last few restarts /
+    # plugin toggles. Both follow a runtime enable/disable with no restart.
+    ("active_interfaces", "[Interfaces]", None),
+    ("system_events", "[Recent system events]", None),
     ("home", "[Home]", None),
     ("home_weather", "[Weather]", "weather"),
     ("home_location", "[House]", "location"),

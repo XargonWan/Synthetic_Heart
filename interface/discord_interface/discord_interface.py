@@ -811,6 +811,11 @@ class DiscordInterface:
         return "discord_bot"
 
     @staticmethod
+    def get_interface_path_hint() -> str:
+        """Destination format shown to the model when it asks about channels."""
+        return "discord_bot/<guild_id>/<channel_id>[/<thread_id>] or discord_bot/<user_id> (DM)"
+
+    @staticmethod
     def get_action_types() -> list[str]:
         """Return action types supported by this interface."""
         return [

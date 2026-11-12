@@ -881,6 +881,14 @@ class CoreInitializer:
 
             # Start all registered interfaces
             await self._start_interfaces()
+            # Tell the persona the core is up (and roughly how long it was
+            # away); also starts the "last seen alive" heartbeat.
+            try:
+                from core.system_events import record_boot
+
+                await record_boot()
+            except Exception as exc:  # pragma: no cover - defensive
+                log_debug(f"[core_initializer] boot event not recorded: {exc}")
 
             # Display summary at the end of initialization
             self._display_startup_summary()
@@ -2222,6 +2230,7 @@ class CoreInitializer:
         log_info(
             f"[core_initializer] 🔻 Plugin '{plugin_short_name}' disabled (unloaded)"
         )
+        await self._record_toggle_event(plugin_short_name, "plugin", False)
         return {"ok": True, "name": plugin_short_name, "enabled": False}
 
     async def enable_plugin(self, plugin_short_name: str) -> Dict[str, Any]:
@@ -2270,7 +2279,22 @@ class CoreInitializer:
         self._invalidate_action_caches()
         await self._build_actions_block()
         log_info(f"[core_initializer] 🔺 Plugin '{plugin_short_name}' enabled (loaded)")
+        await self._record_toggle_event(plugin_short_name, "plugin", True)
         return {"ok": True, "name": plugin_short_name, "enabled": True}
+
+    @staticmethod
+    async def _record_toggle_event(name: str, kind: str, enabled: bool) -> None:
+        """Note a successful runtime toggle in the system-event window.
+
+        Recorded here, in the manager, so no plugin has to report its own
+        switch. Never raises: the toggle has already succeeded.
+        """
+        try:
+            from core.system_events import record_component_toggle
+
+            await record_component_toggle(name, kind, enabled)
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[core_initializer] toggle event not recorded: {exc}")
 
     # ------------------------------------------------------------------
     # Runtime interface enable/disable (WebUI plugins/interfaces grid)
@@ -2385,6 +2409,7 @@ class CoreInitializer:
         log_info(
             f"[core_initializer] 🔻 Interface '{interface_name}' disabled (stopped)"
         )
+        await self._record_toggle_event(interface_name, "interface", False)
         return {"ok": True, "name": interface_name, "enabled": False}
 
     async def enable_interface(self, interface_name: str) -> Dict[str, Any]:
@@ -2447,6 +2472,7 @@ class CoreInitializer:
         log_info(
             f"[core_initializer] 🔺 Interface '{interface_name}' enabled (started)"
         )
+        await self._record_toggle_event(interface_name, "interface", True)
         return {"ok": True, "name": interface_name, "enabled": True}
 
     async def _instantiate_and_register(

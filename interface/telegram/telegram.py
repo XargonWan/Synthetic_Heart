@@ -1068,6 +1068,11 @@ class TelegramUserInterface:
         return INTERFACE_ID
 
     @staticmethod
+    def get_interface_path_hint() -> str:
+        """Destination format shown to the model when it asks about channels."""
+        return "telegram/<@username or chat_id>[/<thread_id>]"
+
+    @staticmethod
     def get_supported_actions() -> dict:
         from core.message_registry import get_send_message_schema
 

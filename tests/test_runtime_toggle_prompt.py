@@ -52,6 +52,25 @@ class _LegacyMessagePlugin:
         return {f"message_{FAKE_IFACE}": {}}
 
 
+@pytest.fixture(autouse=True)
+def toggle_events(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str, str]]:
+    """Capture the system events a toggle records (no database involved)."""
+    from core import system_events
+
+    recorded: list[tuple[str, str, str]] = []
+
+    async def fake_record_event(
+        kind: str,
+        component: str | None = None,
+        detail: str | None = None,
+        **_: Any,
+    ) -> None:
+        recorded.append((kind, component or "", detail or ""))
+
+    monkeypatch.setattr(system_events, "record_event", fake_record_event)
+    return recorded
+
+
 @pytest.fixture()
 def core(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
     from core import core_initializer as ci
@@ -120,6 +139,34 @@ def test_interface_off_then_on_without_restart(core: Any) -> None:
     assert FAKE_IFACE in core.active_interfaces
     assert "fake_toggle_ping" in _available(core)
     assert ci.ACTION_REGISTRY.get("fake_toggle_ping") is iface
+
+
+def test_toggling_an_interface_is_noted_as_a_system_event(
+    core: Any, toggle_events: list[tuple[str, str, str]]
+) -> None:
+    from core import core_initializer as ci
+
+    ci.INTERFACE_REGISTRY[FAKE_IFACE] = _FakeInterface()
+    core.active_interfaces.append(FAKE_IFACE)
+
+    asyncio.run(core.disable_interface(FAKE_IFACE))
+    assert toggle_events == [("component_disabled", FAKE_IFACE, "interface")]
+
+    async def turn_on() -> None:
+        await core.enable_interface(FAKE_IFACE)
+        await asyncio.sleep(0)
+
+    asyncio.run(turn_on())
+    assert toggle_events[-1] == ("component_enabled", FAKE_IFACE, "interface")
+
+
+def test_a_refused_toggle_records_nothing(
+    core: Any, toggle_events: list[tuple[str, str, str]]
+) -> None:
+    """The core interface cannot be switched off; nothing changed, nothing noted."""
+    result = asyncio.run(core.disable_interface("synth_webui"))
+    assert result["ok"] is False
+    assert toggle_events == []
 
 
 def test_inactive_interface_is_not_in_the_prompt(core: Any) -> None:
