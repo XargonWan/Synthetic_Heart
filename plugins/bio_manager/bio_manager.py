@@ -1462,6 +1462,14 @@ class BioPlugin:
 
         if getattr(message, "from_user", None):
             uid = str(message.from_user.id)
+            try:
+                from core.bot_ward import is_bot_sender
+
+                sender_is_bot = is_bot_sender(
+                    message, getattr(message, "interface_path", None)
+                )
+            except Exception:
+                sender_is_bot = False
             participants.append(
                 {
                     "id": uid,
@@ -1469,6 +1477,11 @@ class BioPlugin:
                         getattr(message, "from_user", None)
                     ),
                     "usertag": get_user_usertag(getattr(message, "from_user", None)),
+                    # The person writing this turn: the prompt marks them so the
+                    # model never mistakes another participant (or the trainer)
+                    # for its current interlocutor.
+                    "is_sender": True,
+                    "is_bot": sender_is_bot,
                 }
             )
             seen.add(uid)
@@ -1505,7 +1518,10 @@ class BioPlugin:
                 short_info = bio.get("information", "")[:200]
                 entry = {
                     "id": p["id"],
+                    "username": p.get("username"),
                     "usertag": p.get("usertag"),
+                    "is_sender": bool(p.get("is_sender")),
+                    "is_bot": bool(p.get("is_bot")),
                     "nicknames": bio.get("known_as", []),
                     "short_bio": short_info,
                     "feelings": bio.get("feelings", []),
@@ -1524,7 +1540,10 @@ class BioPlugin:
                 log_error(f"[bio_manager] Error fetching bio for {p['id']}: {e}")
                 return {
                     "id": p["id"],
+                    "username": p.get("username"),
                     "usertag": p.get("usertag"),
+                    "is_sender": bool(p.get("is_sender")),
+                    "is_bot": bool(p.get("is_bot")),
                     "nicknames": [],
                     "short_bio": "",
                     "feelings": [],

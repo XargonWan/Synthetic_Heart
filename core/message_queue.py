@@ -1788,6 +1788,11 @@ async def _consumer_loop() -> None:
                         # Propagate trainer flag so plugin_instance can route
                         # to TRAINER_CORTEX when a scope override is configured.
                         context["is_trainer"] = is_trainer
+                        # Chat/thread names resolved at enqueue time, for the prompt
+                        # ("current_chat"). Written even when empty so a previous
+                        # chat's name never lingers on a reused context.
+                        context["chat_name"] = final.get("chat_name")
+                        context["thread_name"] = final.get("message_thread_name")
                         # Propagate voice input flag from interface (used by message_chain TTS auto-inject)
                         # We explicitly write *both* True and False so that stale values
                         # from a previous message do not linger.  Previously we only

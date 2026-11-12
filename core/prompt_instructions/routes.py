@@ -63,7 +63,8 @@ def _without(*drop: str) -> tuple[str, ...]:
 #:   user chat and forbids ``message_*`` / ``send_message``; the reply obligation
 #:   says the opposite ("internal-only actions are a hard failure"), and the
 #:   worked example shows exactly the ``send_message`` the guard forbids. Both
-#:   are removed. ``INPUT METADATA`` is KEPT: an internal beat's own user body
+#:   are removed, and so is ``INTERLOCUTOR`` (an internal beat has no sender to
+#:   tell apart from the trainer). ``INPUT METADATA`` is KEPT: an internal beat's own user body
 #:   does carry the ``[lang:… | grillo:true | beat:…]`` routing bracket.
 #: * ``observer`` — the outreach beat must send a message, so the reply
 #:   obligation is correct for it and stays. The worked example is dropped
@@ -76,6 +77,7 @@ ROUTE_RULES: dict[str, tuple[str, ...]] = {
     ROUTE_CHAT_VOICE: RULE_ORDER,
     ROUTE_VESSEL: RULE_ORDER,
     ROUTE_GRILLO_INTERNAL: _without(
+        "RULE_INTERLOCUTOR_IDENTITY",
         "RULE_CHAT_REPLY_REQUIRED",
         "RULE_RESPONSE_EXAMPLE_LEAD",
         "RULE_RESPONSE_EXAMPLE",

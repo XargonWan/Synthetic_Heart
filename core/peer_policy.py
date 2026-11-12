@@ -100,6 +100,17 @@ def _read_config(key: str, default: Any) -> Any:
         return default
 
 
+#: Interfaces whose user ids the ``SYNTH_PEERS`` entries are written in. Peer ids
+#: are Telegram user ids, so a peer block is only meaningful on these; keeping the
+#: list here (not in the prompt builder) leaves the builder interface-agnostic.
+PEER_INTERFACES: frozenset[str] = frozenset({"telegram", "telegram_bot"})
+
+
+def interface_has_peers(interface_name: str | None) -> bool:
+    """True when the configured peer ids belong to ``interface_name``'s platform."""
+    return bool(interface_name) and str(interface_name) in PEER_INTERFACES
+
+
 def is_peer_mode_enabled() -> bool:
     """Return True if peer SyntH awareness mode is globally enabled."""
     return bool(_read_config("SYNTH_PEER_ENABLED", False))

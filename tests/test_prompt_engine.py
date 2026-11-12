@@ -1496,6 +1496,59 @@ class TestHistoryToTurns:
         assert len(turns) == 1
         assert turns[0].role == "assistant"
 
+    def test_group_chat_attributes_each_human_turn(self) -> None:
+        """In a group every ``user`` turn names its sender.
+
+        Without it Alice, Bob and the trainer are all anonymous ``user`` turns and
+        the model reads them as the one person it knows (the trainer).
+        """
+        lines = [
+            '[13/04/26:0924] Alice: "Hi all"',
+            '[13/04/26:0925] Bob: "Hey"',
+            '[13/04/26:0926] self: "Hello!"',
+        ]
+        turns = self._call_kind(lines, "group")
+        assert [t.content for t in turns] == [
+            "[Alice]: Hi all",
+            "[Bob]: Hey",
+            "Hello!",
+        ]
+
+    def test_two_human_senders_are_attributed_even_without_chat_kind(self) -> None:
+        lines = [
+            '[13/04/26:0924] Alice: "one"',
+            '[13/04/26:0925] Bob: "two"',
+        ]
+        turns = self._call_kind(lines, None)
+        assert [t.content for t in turns] == ["[Alice]: one", "[Bob]: two"]
+
+    def test_dm_with_a_single_sender_keeps_bare_text(self) -> None:
+        lines = [
+            '[13/04/26:0924] Pilgram: "command invalid"',
+            '[13/04/26:0925] self: "retrying"',
+            '[13/04/26:0926] Pilgram: "command invalid"',
+        ]
+        turns = self._call_kind(lines, "dm")
+        assert [t.content for t in turns] == [
+            "command invalid",
+            "retrying",
+            "command invalid",
+        ]
+
+    def test_attribution_survives_the_leading_assistant_trim(self) -> None:
+        lines = [
+            '[13/04/26:0900] self: "Older outreach"',
+            '[13/04/26:0902] Alice: "Replying now"',
+            '[13/04/26:0903] Bob: "me too"',
+        ]
+        turns = self._call_kind(lines, "group")
+        assert [t.content for t in turns] == ["[Alice]: Replying now", "[Bob]: me too"]
+
+    def _call_kind(self, lines: Sequence[object], kind: str | None) -> list[Any]:
+        from core.prompt_engine import _history_to_turns
+
+        return _history_to_turns(list(lines), {"synth"}, chat_kind=kind)
+
     def test_drops_leading_assistant_run_when_user_appears_later(self) -> None:
         lines = [
             '[13/04/26:0900] self: "Older outreach"',
