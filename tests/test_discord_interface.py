@@ -6,6 +6,14 @@ from unittest.mock import AsyncMock
 from interface.discord_interface import DiscordInterface
 
 
+@pytest.fixture(autouse=True)
+def _live_route_enabled(monkeypatch):
+    """These tests exercise the Gemini Live route, which is opt-in (off by default)."""
+    from core.call_manager import get_call_manager
+
+    monkeypatch.setattr(get_call_manager(), "live_enabled", lambda: True)
+
+
 def test_execute_action_with_interface_path(monkeypatch):
     di = DiscordInterface(bot_token="")
 
