@@ -28,7 +28,7 @@ from core.user_utils import ensure_message_user_fields
 
 # Use a priority queue so events can be processed before regular messages.
 #
-# Priority scale: a plain 0–11 numeric axis where HIGHER = MORE URGENT.
+# Priority scale: a plain 0–12 numeric axis where HIGHER = MORE URGENT.
 # The names are deliberately generic (broad-scope) — the *meaning* lives in the
 # comments, not in narrow feature-bound names. Producers pick the closest band.
 #
@@ -39,14 +39,18 @@ from core.user_utils import ensure_message_user_fields
 #
 # NOTE ON VALUES: producers reference these constants **by name**, never by the
 # raw integer, so the exact numbers are free to be re-spaced. REFLECTION was
-# inserted between HIGH and URGENT (bumping EMERGENCY→11, URGENT→10) so a Vessel
-# "stop and think about my goal" turn can jump ahead of ordinary in-world player
-# chat yet still yield to a real-world emergency/safety notification.
+# inserted between HIGH and URGENT so a Vessel "stop and think about my goal"
+# turn can jump ahead of ordinary in-world player chat yet still yield to a
+# real-world emergency/safety notification. CALL was later slotted between
+# REFLECTION and HIGH (bumping REFLECTION→10, URGENT→11, EMERGENCY→12): a live
+# audio/video call is a person waiting in real time, so its turns rank above all
+# chat but still yield to a rift/vessel reflection and to urgent notifications.
 # BACKGROUND(2) was split below LOW(3) so G.R.I.L.L.O. background beats sit at
 # the absolute bottom and never contend with anything else.
-PRIORITY_EMERGENCY = 11  # Reserved top band — a real emergency, above everything
-PRIORITY_URGENT = 10  # Calendar reminders, auto_response(priority=True), safety
-PRIORITY_REFLECTION = 9  # Vessel "pause & reflect on my goal" turn (above player chat)
+PRIORITY_EMERGENCY = 12  # Reserved top band — a real emergency, above everything
+PRIORITY_URGENT = 11  # Calendar reminders, auto_response(priority=True), safety
+PRIORITY_REFLECTION = 10  # Vessel "pause & reflect on my goal" turn (above calls)
+PRIORITY_CALL = 9  # A turn inside a live audio/video call (above all chat)
 PRIORITY_HIGH = 8  # Direct prioritised human input (e.g. in-world player chat)
 PRIORITY_TRAINER = 7  # The trainer — must always reach Synth promptly
 PRIORITY_RADIO = 6  # Radio-host DJ banter (on-the-fly LLM generation during playback)
@@ -78,6 +82,7 @@ _PRIORITY_LABELS: dict[int, str] = {
     PRIORITY_EMERGENCY: "Emergency",
     PRIORITY_URGENT: "Urgent",
     PRIORITY_REFLECTION: "Reflection",
+    PRIORITY_CALL: "Call",
     PRIORITY_HIGH: "High",
     PRIORITY_TRAINER: "Trainer",
     PRIORITY_RADIO: "Radio",
@@ -1259,7 +1264,7 @@ async def enqueue(
 
     global _counter
 
-    # === Priority assignment (numeric 0–10 scale, higher = more urgent) ===
+    # === Priority assignment (numeric 0–12 scale, higher = more urgent) ===
     # A pure, unconditional ranking based only on the message's structural
     # origin — never on message text (project rule: no keyword/trigger-word
     # logic) and never conditional on whether a Vessel session is active. There
@@ -1299,6 +1304,10 @@ async def enqueue(
         # reflection turn is not coalesced with — or delayed behind — stale
         # will/action beats (structural + world scope, guarded; player chats and
         # ``no_compact`` items are preserved).
+        # Structural marker: this turn belongs to a live audio/video call (set by
+        # ``core.call_manager.CallManager.mark_turn``). Ranked at PRIORITY_CALL —
+        # above every chat band, below rift/vessel reflection and urgent items.
+        "call": bool(getattr(message, "_call", False)),
         priority_val = PRIORITY_REFLECTION
         try:
             _supersede_pending_vessel_beats(chat_id)
@@ -1310,6 +1319,9 @@ async def enqueue(
         priority_val = PRIORITY_HIGH
         try:
             _drop_stale_vessel_perceptions(chat_id)
+    #   * A live-call turn (structural ``call`` flag, set by the call manager)
+    #     → CALL: a person waiting in real time, above every chat band but below
+    #     a rift/vessel reflection and urgent items.
         except Exception as _prune_exc:  # pragma: no cover - defensive
             log_debug(f"[QUEUE] Vessel perception prune skipped: {_prune_exc}")
     elif interface == "vessel" and item.get("vessel_idle_beat"):
@@ -1348,6 +1360,12 @@ async def enqueue(
             priority_val = PRIORITY_GENERAL - ward_verdict.priority_drop
 
     _counter += 1
+    elif item.get("call"):
+        # A person is talking to Synth in a live call and is waiting in real
+        # time: rank above every chat band (and exempt from the bot-ward demotion
+        # below, which only touches the ordinary-chat branch). Structural flag,
+        # never message text.
+        priority_val = PRIORITY_CALL
     await _get_queue().put((_heap_key(priority_val), _counter, item))
     log_debug(f"[QUEUE] Message successfully put in queue with priority {priority_val}")
 

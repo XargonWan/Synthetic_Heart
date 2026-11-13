@@ -382,6 +382,58 @@ async def test_vessel_reflection_ranked_above_player_chat(
     assert mq.PRIORITY_EMERGENCY > mq.PRIORITY_URGENT
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trainer_path", ["", "telegram_bot/999"])
+async def test_call_turn_ranked_between_reflection_and_chat(
+    monkeypatch: pytest.MonkeyPatch, trainer_path: str
+) -> None:
+    """A turn flagged ``_call`` gets PRIORITY_CALL, even from the trainer.
+
+    The call tier sits between rift/vessel reflection and every chat band:
+    ``EMERGENCY > URGENT > REFLECTION > CALL > HIGH > TRAINER > ... > GENERAL``.
+    """
+    import core.message_queue as mq
+
+    put_items = _patch_enqueue_hot_path(
+        monkeypatch, session_active=False, trainer_path=trainer_path
+    )
+    message = _make_message("telegram_bot/999")
+    message._call = True
+
+    await mq.enqueue(
+        bot=None,
+        message=message,
+        interface_id="telegram_bot",
+        skip_mention_check=True,
+    )
+
+    assert _semantic_priority(put_items) == mq.PRIORITY_CALL
+    assert put_items[-1][2]["call"] is True
+    assert mq.PRIORITY_REFLECTION > mq.PRIORITY_CALL > mq.PRIORITY_HIGH
+    assert mq.PRIORITY_HIGH > mq.PRIORITY_TRAINER > mq.PRIORITY_GENERAL
+    assert mq.priority_label(mq.PRIORITY_CALL) == "Call"
+
+
+@pytest.mark.asyncio
+async def test_non_call_turn_is_not_call_priority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without the ``_call`` flag an ordinary chat stays at GENERAL."""
+    import core.message_queue as mq
+
+    put_items = _patch_enqueue_hot_path(monkeypatch, session_active=False)
+
+    await mq.enqueue(
+        bot=None,
+        message=_make_message("telegram_bot/999"),
+        interface_id="telegram_bot",
+        skip_mention_check=True,
+    )
+
+    assert _semantic_priority(put_items) == mq.PRIORITY_GENERAL
+    assert put_items[-1][2]["call"] is False
+
+
 # ---------------------------------------------------------------------------
 # En-route element collection (_collect_en_route_sightings)
 # ---------------------------------------------------------------------------
