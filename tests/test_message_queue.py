@@ -610,3 +610,49 @@ async def test_a_failing_notice_never_breaks_the_queue():
 
     message = SimpleNamespace(chat_id="webui_default")
     await message_queue.notify_unanswerable(_Broken(), message, "synth_webui")
+
+
+@pytest.mark.asyncio
+async def test_snapshot_keeps_the_item_in_flight_until_it_is_completed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The queue view lists the item being processed (first) until its turn ends."""
+    import asyncio
+
+    import core.message_queue as mq
+
+    queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
+    monkeypatch.setattr(mq, "_queue", queue)
+    msg = lambda text: type("M", (), {"text": text})()  # noqa: E731
+    running = {
+        "chat_id": "c1",
+        "interface": "synth_webui",
+        "interface_path": "synth_webui/s1",
+        "message": msg("running now"),
+        "timestamp": 1.0,
+        "call": True,
+    }
+    waiting = {
+        "chat_id": "c2",
+        "interface": "telegram_bot",
+        "interface_path": "telegram_bot/2",
+        "message": msg("waiting"),
+        "timestamp": 2.0,
+    }
+    await queue.put((mq._heap_key(mq.PRIORITY_GENERAL), 1, waiting))
+
+    # The consumer picked `running` off the heap and is working on it.
+    mq._note_item_in_flight(running, mq.PRIORITY_CALL)
+    try:
+        snap = mq.snapshot_queue()
+        assert [e["status"] for e in snap] == ["processing", "pending"]
+        first, second = snap
+        assert first["position"] == 0 and first["text_preview"] == "running now"
+        assert first["priority_label"] == "Call" and first["call"] is True
+        assert first["processing_seconds"] >= 0.0
+        assert second["position"] == 1 and second["text_preview"] == "waiting"
+    finally:
+        # Completed (ok or failed): it leaves the view.
+        mq._clear_item_in_flight()
+
+    assert [e["status"] for e in mq.snapshot_queue()] == ["pending"]
