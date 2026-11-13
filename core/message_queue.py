@@ -131,6 +131,10 @@ _in_flight_reported: bool = False
 # What the statistics say of the item in flight: its interface and kind, and whether its turn failed.
 _in_flight_meta: dict[str, str] = {}
 _in_flight_failed: bool = False
+# The item being worked on and its priority band, kept so the queue view can keep
+# showing it until its turn is completed (it has already left the heap).
+_in_flight_item: dict[str, Any] | None = None
+_in_flight_priority: int | None = None
 # When the consumer last finished an item (monotonic); None until it has finished one.
 _last_item_finished_at: float | None = None
 
@@ -147,14 +151,20 @@ def _item_label(item: dict[str, Any] | None) -> str:
     return label
 
 
-def _note_item_in_flight(item: dict[str, Any] | None) -> None:
+def _note_item_in_flight(
+    item: dict[str, Any] | None, priority: int | None = None
+) -> None:
     """Record the item the consumer is now working on."""
     global \
         _in_flight_label, \
         _in_flight_started_at, \
         _in_flight_reported, \
         _in_flight_meta, \
-        _in_flight_failed
+        _in_flight_failed, \
+        _in_flight_item, \
+        _in_flight_priority
+    _in_flight_item = item if isinstance(item, dict) else None
+    _in_flight_priority = priority
     _in_flight_label = _item_label(item)
     _in_flight_started_at = time.monotonic()
     _in_flight_reported = False
@@ -194,7 +204,12 @@ def _note_turn_failed() -> None:
 
 def _clear_item_in_flight() -> None:
     """Clear the in-flight item once its handling block has finished."""
-    global _in_flight_label, _in_flight_reported, _last_item_finished_at
+    global \
+        _in_flight_label, \
+        _in_flight_reported, \
+        _last_item_finished_at, \
+        _in_flight_item, \
+        _in_flight_priority
     try:
         if _in_flight_label:
             meta = dict(_in_flight_meta)
@@ -208,6 +223,8 @@ def _clear_item_in_flight() -> None:
         pass
     _in_flight_label = None
     _in_flight_reported = False
+    _in_flight_item = None
+    _in_flight_priority = None
     _last_item_finished_at = time.monotonic()
 
 
@@ -581,51 +598,119 @@ def drop_vessel_queue_for_world(world_chat_id: str) -> int:
     return dropped
 
 
+def _snapshot_entry(
+    item: dict[str, Any], priority_val: int, position: int, now: float, status: str
+) -> dict[str, object]:
+    """One plain, JSON-safe description of a queue item (never the live ``item``)."""
+    # Text preview from the wrapped message object, truncated. Guarded — the
+    # message may be any interface's object; we only want its ``.text``.
+    preview = ""
+    try:
+        raw_text = getattr(item.get("message"), "text", "") or ""
+        preview = str(raw_text).strip().replace("\n", " ")
+        if len(preview) > 240:
+            preview = preview[:240] + "…"
+    except Exception:  # pragma: no cover - defensive
+        preview = ""
+
+    enqueued_at = item.get("timestamp")
+    try:
+        enqueued_at_f = float(enqueued_at) if enqueued_at is not None else None
+    except (TypeError, ValueError):
+        enqueued_at_f = None
+    age_seconds = (now - enqueued_at_f) if enqueued_at_f is not None else None
+
+    return {
+        "position": position,
+        "status": status,
+        "priority": priority_val,
+        "priority_label": priority_label(priority_val),
+        "interface": item.get("interface"),
+        "interface_path": item.get("interface_path"),
+        "chat_id": item.get("chat_id"),
+        "chat_name": item.get("chat_name"),
+        "thread_name": item.get("message_thread_name"),
+        "enqueued_at": enqueued_at_f,
+        "age_seconds": age_seconds,
+        "text_preview": preview,
+        "is_priority": bool(item.get("priority")),
+        "call": bool(item.get("call")),
+        "vessel_player_chat": bool(item.get("vessel_player_chat")),
+        "vessel_reflection": bool(item.get("vessel_reflection")),
+        "vessel_appraisal": bool(item.get("vessel_appraisal")),
+    }
+
+
 def snapshot_queue(limit: int = 500) -> list[dict[str, object]]:
-    """Return a read-only snapshot of the currently PENDING queue items.
+    """Return a read-only snapshot of the queue: the item being processed, then the backlog.
 
     Powers the WebUI Activity → Queue tab. Each entry is a plain, JSON-safe dict
     describing one queued message — never the live ``item`` (which holds the bot,
-    the raw message object and futures). Items are returned in the order they
-    would be popped by the consumer: most urgent first (highest semantic
-    priority), FIFO within a band (via the monotonic counter).
+    the raw message object and futures).
 
-    The item currently being processed by the consumer has already been
-    ``get``-ed off the heap and is therefore NOT included — this is only the
-    pending backlog.
+    The item the consumer is working on has already been ``get``-ed off the heap,
+    but it is still listed — first, with ``status == "processing"`` and
+    ``position == 0`` — until its turn is completed (it succeeded or failed), so
+    the view does not lose a message while its (slow) turn runs. The pending
+    backlog follows with ``status == "pending"``, in the order the consumer would
+    pop it: most urgent first (highest semantic priority), FIFO within a band (via
+    the monotonic counter), ``position`` 1-based.
 
     Best-effort and fully guarded (mirrors the prune helpers): reads a copy of
     the internal heap without a lock, so a rare concurrent mutation can only
-    yield a slightly stale snapshot, never an exception. Returns ``[]`` when the
-    queue has not been created yet or on any error.
+    yield a slightly stale snapshot, never an exception. Returns ``[]`` when there
+    is nothing in flight and the queue has not been created yet, or on any error.
 
     Args:
-        limit: Maximum number of items to return (defensive cap for huge
-            backlogs). Clamped to ``[1, 5000]``.
+        limit: Maximum number of PENDING items to return (defensive cap for huge
+            backlogs). Clamped to ``[1, 5000]``. The in-flight item is always listed.
 
     Returns:
-        A list of dicts, each with: ``position`` (1-based pop order),
-        ``priority`` (int), ``priority_label`` (str), ``interface``,
-        ``interface_path``, ``chat_id``, ``chat_name``, ``thread_name``,
-        ``enqueued_at`` (epoch seconds, float), ``age_seconds`` (float),
-        ``text_preview`` (str, truncated), ``is_priority`` (bool) and the
-        structural vessel flags ``vessel_player_chat`` / ``vessel_reflection`` /
-        ``vessel_appraisal``.
+        A list of dicts, each with: ``position``, ``status`` (``"processing"`` or
+        ``"pending"``), ``priority`` (int), ``priority_label`` (str),
+        ``interface``, ``interface_path``, ``chat_id``, ``chat_name``,
+        ``thread_name``, ``enqueued_at`` (epoch seconds, float), ``age_seconds``
+        (float), ``text_preview`` (str, truncated), ``is_priority`` (bool),
+        ``call`` (bool) and the structural vessel flags ``vessel_player_chat`` /
+        ``vessel_reflection`` / ``vessel_appraisal``. The processing entry also has
+        ``processing_seconds``.
     """
     try:
         cap = max(1, min(5000, int(limit)))
     except (TypeError, ValueError):
         cap = 500
 
+    now = time.time()
+    out: list[dict[str, object]] = []
+
+    # The item being processed stays visible until its turn is completed.
+    try:
+        in_flight = _in_flight_item
+        if isinstance(in_flight, dict):
+            band = _in_flight_priority
+            entry = _snapshot_entry(
+                in_flight,
+                int(band) if band is not None else PRIORITY_GENERAL,
+                0,
+                now,
+                "processing",
+            )
+            entry["processing_seconds"] = max(
+                0.0, time.monotonic() - _in_flight_started_at
+            )
+            out.append(entry)
+    except Exception:  # pragma: no cover - defensive
+        pass
+
     if _queue is None:
-        return []
+        return out
 
     try:
         # Copy the heap before iterating so a concurrent enqueue/prune cannot
         # mutate it mid-read. Each entry is ``(heap_key, counter, item)``.
         entries = list(_queue._queue)
     except Exception:  # pragma: no cover - defensive
-        return []
+        return out
 
     # Sort into the exact pop order: min-heap key first (most urgent), then the
     # monotonic counter (FIFO tie-break).
@@ -641,8 +726,6 @@ def snapshot_queue(limit: int = 500) -> list[dict[str, object]]:
     except Exception:  # pragma: no cover - defensive
         pass
 
-    now = time.time()
-    out: list[dict[str, object]] = []
     for position, entry in enumerate(entries[:cap], start=1):
         try:
             heap_key, _counter_val, item = entry
@@ -650,46 +733,7 @@ def snapshot_queue(limit: int = 500) -> list[dict[str, object]]:
             continue
         if not isinstance(item, dict):
             continue
-
-        priority_val = -int(heap_key)
-
-        # Text preview from the wrapped message object, truncated. Guarded — the
-        # message may be any interface's object; we only want its ``.text``.
-        preview = ""
-        try:
-            raw_text = getattr(item.get("message"), "text", "") or ""
-            preview = str(raw_text).strip().replace("\n", " ")
-            if len(preview) > 240:
-                preview = preview[:240] + "…"
-        except Exception:  # pragma: no cover - defensive
-            preview = ""
-
-        enqueued_at = item.get("timestamp")
-        try:
-            enqueued_at_f = float(enqueued_at) if enqueued_at is not None else None
-        except (TypeError, ValueError):
-            enqueued_at_f = None
-        age_seconds = (now - enqueued_at_f) if enqueued_at_f is not None else None
-
-        out.append(
-            {
-                "position": position,
-                "priority": priority_val,
-                "priority_label": priority_label(priority_val),
-                "interface": item.get("interface"),
-                "interface_path": item.get("interface_path"),
-                "chat_id": item.get("chat_id"),
-                "chat_name": item.get("chat_name"),
-                "thread_name": item.get("message_thread_name"),
-                "enqueued_at": enqueued_at_f,
-                "age_seconds": age_seconds,
-                "text_preview": preview,
-                "is_priority": bool(item.get("priority")),
-                "vessel_player_chat": bool(item.get("vessel_player_chat")),
-                "vessel_reflection": bool(item.get("vessel_reflection")),
-                "vessel_appraisal": bool(item.get("vessel_appraisal")),
-            }
-        )
+        out.append(_snapshot_entry(item, -int(heap_key), position, now, "pending"))
 
     return out
 
@@ -1260,6 +1304,10 @@ async def enqueue(
         # (GENERAL) so it alternates with Telegram in FIFO order instead of
         # starving behind it.
         "vessel_idle_beat": bool(getattr(message, "_vessel_idle_beat", False)),
+        # Structural marker: this turn belongs to a live audio/video call (set by
+        # ``core.call_manager.CallManager.mark_turn``). Ranked at PRIORITY_CALL —
+        # above every chat band, below rift/vessel reflection and urgent items.
+        "call": bool(getattr(message, "_call", False)),
     }
 
     global _counter
@@ -1271,6 +1319,9 @@ async def enqueue(
     # is NO de-prioritisation: ordinary chat is never demoted because Synth
     # happens to be embodied in a world. The bands, from most to least urgent:
     #   * priority=True (scheduled events / urgent notifications) → URGENT.
+    #   * A live-call turn (structural ``call`` flag, set by the call manager)
+    #     → CALL: a person waiting in real time, above every chat band but below
+    #     a rift/vessel reflection and urgent items.
     #   * A real in-world player chat (structural ``vessel_player_chat`` flag,
     #     set by the vessel interface from event kind + actor) → HIGH: it is a
     #     human speaking directly, so it ranks above ordinary chat and above
@@ -1304,24 +1355,23 @@ async def enqueue(
         # reflection turn is not coalesced with — or delayed behind — stale
         # will/action beats (structural + world scope, guarded; player chats and
         # ``no_compact`` items are preserved).
-        # Structural marker: this turn belongs to a live audio/video call (set by
-        # ``core.call_manager.CallManager.mark_turn``). Ranked at PRIORITY_CALL —
-        # above every chat band, below rift/vessel reflection and urgent items.
-        "call": bool(getattr(message, "_call", False)),
         priority_val = PRIORITY_REFLECTION
         try:
             _supersede_pending_vessel_beats(chat_id)
         except Exception as _ref_exc:  # pragma: no cover - defensive
             log_debug(f"[QUEUE] Vessel reflection prune skipped: {_ref_exc}")
+    elif item.get("call"):
+        # A person is talking to Synth in a live call and is waiting in real
+        # time: rank above every chat band (and exempt from the bot-ward demotion
+        # below, which only touches the ordinary-chat branch). Structural flag,
+        # never message text.
+        priority_val = PRIORITY_CALL
     elif interface == "vessel" and item.get("vessel_player_chat"):
         # A human speaking in-world. Prune stale autonomous perceptions for the
         # same world so the player is answered promptly (structural, guarded).
         priority_val = PRIORITY_HIGH
         try:
             _drop_stale_vessel_perceptions(chat_id)
-    #   * A live-call turn (structural ``call`` flag, set by the call manager)
-    #     → CALL: a person waiting in real time, above every chat band but below
-    #     a rift/vessel reflection and urgent items.
         except Exception as _prune_exc:  # pragma: no cover - defensive
             log_debug(f"[QUEUE] Vessel perception prune skipped: {_prune_exc}")
     elif interface == "vessel" and item.get("vessel_idle_beat"):
@@ -1360,12 +1410,6 @@ async def enqueue(
             priority_val = PRIORITY_GENERAL - ward_verdict.priority_drop
 
     _counter += 1
-    elif item.get("call"):
-        # A person is talking to Synth in a live call and is waiting in real
-        # time: rank above every chat band (and exempt from the bot-ward demotion
-        # below, which only touches the ordinary-chat branch). Structural flag,
-        # never message text.
-        priority_val = PRIORITY_CALL
     await _get_queue().put((_heap_key(priority_val), _counter, item))
     log_debug(f"[QUEUE] Message successfully put in queue with priority {priority_val}")
 
@@ -1718,7 +1762,7 @@ async def _consumer_loop() -> None:
 
             # Tell the supervisor watchdog which item is in flight: a stalled
             # generation is otherwise invisible while it happens.
-            _note_item_in_flight(final)
+            _note_item_in_flight(final, priority)
 
             try:
                 # Get timeout configuration from message_chain module

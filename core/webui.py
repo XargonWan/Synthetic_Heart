@@ -8835,13 +8835,12 @@ class SynthWebUIInterface:
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
     async def history_queue(self, request: Request):
-        """Return a snapshot of the pending message-queue backlog.
+        """Return a snapshot of the message queue: the item being processed, then the backlog.
 
         Powers the History > Queue sub-tab. Read-only: it never dequeues or
-        reorders anything, it just reflects what is currently waiting to be
-        processed (most urgent first, FIFO within a band). The single in-flight
-        item being processed by the consumer is not included (it has already
-        left the heap). Optional query filters: ``search`` (substring across
+        reorders anything. The item the consumer is working on stays listed first
+        (``status == "processing"``) until its turn is completed; the pending
+        backlog follows (most urgent first, FIFO within a band). Optional query filters: ``search`` (substring across
         interface_path / chat_name / text preview) and ``priority`` (exact
         numeric priority band).
         """
