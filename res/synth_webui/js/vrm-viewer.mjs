@@ -61,6 +61,9 @@ let __synthFollowMouse = {
     // full strength (no ease-in restarts, no fade) so the head tracks smoothly
     // instead of stuttering. Released on drag end, which starts the fade.
     sustaining: false,
+    // Video call: gaze pinned on the camera until released (see
+    // window.__synthSetCameraGazeLock); camera drags/taps must not release it.
+    lockCamera: false,
 };
 let __synthTmpFollow = null;
 // Head-turn follow: additive head/neck rotation applied AFTER the animation
@@ -5959,15 +5962,51 @@ const CAMERA_TARGET_Y = 1.2;
 // al bordo basso, con margini minimi e senza tagliare nulla.
 const PORTRAIT_TARGET_Y = 0.79;
 
+// Framing "webcam" (chiamata attiva): primo piano di testa e spalle. Con FOV
+// verticale 30° una distanza ~1.25 mostra ~0.67 di altezza attorno al target.
+const CLOSEUP_TARGET_Y = 1.30;
+const CLOSEUP_DISTANCE = 1.25;
+
+// Modalità di framing impostata dal PiP (window.__vrmFramingMode):
+//   'closeup' → primo piano, a qualunque aspect (la "webcam" della chiamata);
+//   'full'    → corpo intero, a qualunque aspect (anche landscape);
+//   null/altro → comportamento storico (solo portrait, mai toccata altrove).
+function fitCloseupFraming(aspect) {
+    // In una finestra stretta il primo piano taglierebbe le spalle: arretra
+    // in proporzione (a ~0.8 di aspect le spalle rientrano già).
+    const dist = CLOSEUP_DISTANCE * Math.max(1, 0.8 / Math.max(aspect, 0.1));
+    const dirY = 0.03;
+    const dirZ = 1.0;
+    const dirLen = Math.hypot(dirY, dirZ) || 1;
+    camera.position.set(
+        0,
+        CLOSEUP_TARGET_Y + (dirY / dirLen) * dist,
+        (dirZ / dirLen) * dist,
+    );
+    if (controls && controls.target) {
+        controls.target.set(0, CLOSEUP_TARGET_Y, 0);
+        controls.update();
+    }
+    camera.lookAt(0, CLOSEUP_TARGET_Y, 0);
+    camera.updateProjectionMatrix();
+}
+
 function fitFramingForAspect() {
     try {
         if (!camera || typeof camera.aspect !== 'number') return;
         const aspect = camera.aspect;
+        const mode = (typeof window !== 'undefined' && window.__vrmFramingMode) || null;
+        if (mode === 'closeup') {
+            fitCloseupFraming(aspect);
+            return;
+        }
         // Riposizioniamo la camera SOLO in portrait (finestra più alta che
         // larga, tipicamente il PiP). In landscape/quadrato non tocchiamo la
         // camera così da preservare lo zoom/rotazione impostati dall'utente
-        // tramite gli OrbitControls nella WebUI principale.
-        if (aspect >= 1) return;
+        // tramite gli OrbitControls nella WebUI principale. Eccezione: il PiP
+        // in modalità 'full' deve mostrare il corpo intero anche se la finestra
+        // è ancora landscape (es. appena finita una chiamata).
+        if (aspect >= 1 && mode !== 'full') return;
         // Override live per tuning (impostabile da console): {targetY, scaleCap}
         const ov = (typeof window !== 'undefined' && window.__vrmFramingOverride) || null;
         const targetY = ov && typeof ov.targetY === 'number' ? ov.targetY : PORTRAIT_TARGET_Y;
@@ -5975,7 +6014,9 @@ function fitFramingForAspect() {
         // Con FOV verticale fisso, per contenere l'intera figura in una
         // finestra stretta dobbiamo indietreggiare in proporzione a quanto la
         // finestra è più alta che larga.
-        const scale = Math.min(scaleCap, 1 / aspect);
+        // In landscape (aspect >= 1) è l'altezza a limitare: serve l'arretramento
+        // massimo, non quello proporzionale all'aspect.
+        const scale = aspect >= 1 ? scaleCap : Math.min(scaleCap, 1 / aspect);
         const dist = BASE_CAMERA_DISTANCE * scale;
         // Vista quasi frontale verso il centro corpo (targetY).
         const dirY = 0.05;
@@ -8302,6 +8343,7 @@ try {
         function _triggerFollowMouseGaze(clientX, clientY) {
             try {
                 if (!currentVRM || !camera || !canvas) return;
+                if (__synthFollowMouse.lockCamera) return; // video call: eyes stay on the camera
                 const rect = canvas.getBoundingClientRect();
                 if (!rect.width || !rect.height) return;
                 const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
@@ -8354,6 +8396,7 @@ try {
         // window so the head eases back to neutral after a short hold.
         function _endFollowCameraGaze() {
             try {
+                if (__synthFollowMouse.lockCamera) return; // a video call keeps looking at us
                 if (!__synthFollowMouse.sustaining) return;
                 const now = Date.now();
                 const holdMs = 1600 + Math.floor(Math.random() * 900); // 1.6-2.5s
@@ -8361,6 +8404,16 @@ try {
                 __synthFollowMouse.activeUntil = now + holdMs;
             } catch (e) { /* ignore */ }
         }
+        // Video call: Synth keeps looking into the camera (sustained, full strength)
+        // until released; taps no longer pull the gaze elsewhere meanwhile.
+        function _setCameraGazeLock(on) {
+            try {
+                __synthFollowMouse.lockCamera = !!on;
+                if (on) _beginFollowCameraGaze();
+                else _endFollowCameraGaze();
+            } catch (e) { /* ignore */ }
+        }
+        try { window.__synthSetCameraGazeLock = _setCameraGazeLock; } catch (_e) { /* ignore */ }
         // Expose for cross-module callers (e.g. main.js window-tap listener).
         try { window.__synthTriggerFollowMouseGaze = _triggerFollowMouseGaze; } catch (_e) { /* ignore */ }
         try { window.__synthTriggerFollowCameraGaze = _triggerFollowCameraGaze; } catch (_e) { /* ignore */ }
