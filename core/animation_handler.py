@@ -2334,6 +2334,31 @@ class KaradaStateServer:
         except Exception:
             pass
 
+    async def broadcast_sfx(
+        self, audio_path: str, audio_duration_s: Optional[float] = None
+    ) -> None:
+        """Play a sound effect on every client — *not* the avatar speaking.
+
+        Unlike :meth:`broadcast_audio` this sends ``sfx-play``: no lip-sync, no TALK
+        animation, no "current audio" record for late joiners, and clients do not
+        attach it to a chat bubble. Used for signals such as the call's "message
+        received" chime. Best-effort; never raises.
+        """
+        payload: Dict[str, Any] = {
+            "type": "sfx-play",
+            "url": self._derive_audio_url(audio_path),
+        }
+        if audio_duration_s is not None:
+            payload["audio_duration_s"] = audio_duration_s
+        for transport in self._transports:
+            try:
+                await transport.broadcast_audio(payload)
+            except Exception as exc:  # pragma: no cover - best effort
+                log_warning(
+                    f"[KaradaStateServer] failed to broadcast sfx via "
+                    f"{type(transport).__name__}: {exc}"
+                )
+
     def _start_talk_animation(self, audio_duration_s: Optional[float]) -> None:
         """Play the TALK animation for the duration of the current audio clip.
 

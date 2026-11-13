@@ -39,6 +39,8 @@ function injectChatStyles() {
             animation: synth-mic-pulse-active 0.45s ease-in-out infinite;
             box-shadow: 0 0 0 4px rgba(230,60,30,0.35);
         }
+        #call-btn.in-call { background: #d9534f; color: #fff; border-color: #d9534f; animation: synth-mic-pulse 1.6s ease-in-out infinite; }
+        #screen-share-btn.sharing { background: var(--accent, #6bfefe); color: #111; }
         #send.processing {
             background: rgba(255,255,255,0.08);
             color: transparent;
@@ -143,6 +145,7 @@ function createChatTemplate() {
                     <div class="synth-chat-archive">
                         <button id="chat-archive" title="Archive current chat" type="button" class="pill">📦 Archive Chat</button>
                         <button id="chat-restore" title="Open archives" type="button" class="pill">🗂️ Open Archives</button>
+                        <button id="call-btn" title="Start a call" type="button" class="pill">📞 Call</button>
                     </div>
                 </div>
 
@@ -153,6 +156,7 @@ function createChatTemplate() {
                 <div class="synth-chat-footer synth-chat-toolbar">
                     <form id="composer" class="synth-chat-composer" autocomplete="off">
                         <button id="attach-file" type="button" class="attach-btn" title="Attach file">📎</button>
+                        <button id="screen-share-btn" type="button" class="attach-btn" title="Share your screen" style="display:none">🖥️</button>
                         <textarea id="input" placeholder="Type a message…" rows="2"></textarea>
                         <button id="send" type="button">➤</button>
                         <input id="file-input" type="file" accept="image/*,audio/*,video/*,.pdf,.txt,.doc,.docx,.ppt,.pptx,.xlsx" style="display:none" />
@@ -256,10 +260,6 @@ function _attachChatAutoResize(winbox, mount) {
     setTimeout(_schedule, 120);
 }
 
-export async function createChatWindow() {
-    try {
-        // Ensure WinBox is available
-        if (!window.SynthWindowManager || typeof window.SynthWindowManager.create !== 'function') {
 // A chat window below this height is not usable. The comfortable height is 45%
 // of the viewport (at least 320 px), never above the 65% auto-fit cap.
 function _chatComfortHeight() {
@@ -287,6 +287,10 @@ function _enforceChatMinHeight(winbox) {
     } catch (e) { /* ignore */ }
 }
 
+export async function createChatWindow() {
+    try {
+        // Ensure WinBox is available
+        if (!window.SynthWindowManager || typeof window.SynthWindowManager.create !== 'function') {
             if (typeof window.SynthWindowManager === 'undefined' && typeof window.WinBox === 'undefined' && typeof window.SynthWindowManager !== 'undefined') {
                 try { await window.SynthWindowManager.ensureWinBoxAssets(); } catch (e) { /* ignore */ }
             }
@@ -371,15 +375,15 @@ function _enforceChatMinHeight(winbox) {
             // Auto-grow the WinBox when messages are added (anchored to bottom)
             try { _attachChatAutoResize(winbox, mount); } catch (e) { /* ignore */ }
 
-            // Slight title size tweak for visibility
-            try {
-                const winEl = winbox.window || winbox.dom || winbox.g;
-                const titleEl = winEl ? winEl.querySelector('.wb-title') : null;
             // After the saved geometry has been restored and the history has loaded,
             // make sure the window is not left unusably small.
             setTimeout(() => _enforceChatMinHeight(winbox), 400);
             setTimeout(() => _enforceChatMinHeight(winbox), 1500);
 
+            // Slight title size tweak for visibility
+            try {
+                const winEl = winbox.window || winbox.dom || winbox.g;
+                const titleEl = winEl ? winEl.querySelector('.wb-title') : null;
                 if (titleEl) titleEl.classList.add('synth-winbox-title-large');
             } catch (e) { /* ignore */ }
 
@@ -800,9 +804,12 @@ export function initChatUI() {
         let _sileroWs     = null;   // WebSocket to /api/audio/stream (Silero VAD)
         let _sileroNode   = null;   // ScriptProcessorNode feeding PCM to Silero
         let _sileroActive = false;  // true once Silero WS has confirmed 'ready'
+        let callClient    = null;   // call-client.mjs instance (lazy, see _ensureCallClient)
         const MIC_LONG_PRESS_MS   = 300;   // ms before PTT activates
         const MIC_SILENCE_SEND_MS = 1800;  // ms of silence after speech → auto-send (toggle)
         const MIC_VAD_THRESHOLD   = 0.015; // RMS volume threshold
+        const MIC_MIN_SPEECH_MS   = 600;   // call: shorter "speech" is a noise blip, not an utterance
+        let _vadSpeechStartAt = 0;         // when the current VAD speech began (0 = none)
 
         // ── Button mode (➤ send / 🎤 mic / ⏹ recording / ⏳ processing) ──
         function updateButtonMode() {
@@ -810,6 +817,11 @@ export function initChatUI() {
             const hasText = input.value.trim().length > 0;
             const hasAttachment = !!pendingAttachmentMeta;
             const wsReady = ws && ws.readyState === WebSocket.OPEN;
+            // In a call the mic is always open, so the mic / recording button has
+            // no purpose: hide it. It stays visible as ➤ when there is text to send
+            // and as the spinner while a transcription can still be cancelled.
+            const inCall = !!(callClient && callClient.active);
+            sendBtn.style.display = '';
             if (_sttAbortController) {
                 // STT in progress: spin + click = cancel
                 sendBtn.type        = 'button';
@@ -823,6 +835,7 @@ export function initChatUI() {
                 sendBtn.disabled    = false;
                 sendBtn.className   = 'recording';
                 sendBtn.title       = micRecordingMode === 'ptt' ? 'Release to send (PTT)' : 'Tap to stop & send';
+                if (inCall) sendBtn.style.display = 'none';
             } else if (hasText || hasAttachment) {
                 sendBtn.type        = 'submit';
                 sendBtn.textContent = '➤';
@@ -835,6 +848,7 @@ export function initChatUI() {
                 sendBtn.disabled    = false;
                 sendBtn.className   = 'mic-mode';
                 sendBtn.title       = 'Hold to record (PTT) • Tap to toggle recording';
+                if (inCall) sendBtn.style.display = 'none';
             }
         }
 
@@ -966,6 +980,10 @@ export function initChatUI() {
         // Apply Silero VAD events to button animation and auto-send logic.
         // Called by _startSileroVAD onmessage; mirrors the RMS loop's visual logic.
         function _applySileroVAD(speaking) {
+            // In a call, ignore the mic while our own signal plays (it would be
+            // heard back and taken for speech).
+            if (callClient && callClient.active && Date.now() < (window.__synthIgnoreMicUntil || 0)) return;
+            if (speaking && !_vadSpeechStartAt) _vadSpeechStartAt = Date.now();
             if (speaking) {
                 micSilenceMs = 0;
                 if (!micSpeaking) {
@@ -981,6 +999,11 @@ export function initChatUI() {
                 }
             } else {
                 // speech_end: Silero already applied hysteresis server-side — act immediately.
+                const spokeMs = _vadSpeechStartAt ? Date.now() - _vadSpeechStartAt : 0;
+                _vadSpeechStartAt = 0;
+                // In a call a very short "speech" is noise: do not send it.
+                const tooShort = !!(callClient && callClient.active && spokeMs < MIC_MIN_SPEECH_MS);
+                if (tooShort) micHasSpoken = false;
                 micSilenceMs = MIC_SILENCE_SEND_MS; // saturate to unblock auto-send guard
                 if (micSpeaking) {
                     micSpeaking = false;
@@ -988,7 +1011,7 @@ export function initChatUI() {
                     if (sendBtn) sendBtn.classList.remove('speaking');
                     if (sendBtn) sendBtn.classList.remove('ambient-speaking');
                 }
-                if (micRecordingMode === 'toggle' && micHasSpoken && !micSilenceTimer) {
+                if (!tooShort && micRecordingMode === 'toggle' && micHasSpoken && !micSilenceTimer) {
                     micSilenceTimer = setTimeout(() => { stopRecordingAndSend(); }, 0);
                 }
             }
@@ -1094,6 +1117,9 @@ export function initChatUI() {
                         if (blob.size < 512) { resolve(); return; }
                         const fd = new FormData();
                         fd.append('file', blob, 'recording.webm');
+                        // In a call the server plays the "message received" signal once
+                        // text has actually been transcribed (never for noise or typing).
+                        if (callClient && callClient.callId) fd.append('call_id', callClient.callId);
                         const base = _getApiBase();
 
                         // Show user-side 3-dot bubble immediately
@@ -1122,6 +1148,11 @@ export function initChatUI() {
                             if (fetchErr && fetchErr.name === 'AbortError') {
                                 aborted = true;
                                 console.info('[chat-window] STT request cancelled by user');
+                            } else if (callClient && callClient.active && /no text/i.test(String(fetchErr && fetchErr.message))) {
+                                // In a call an empty clip is just a false VAD trigger (noise,
+                                // an echo): drop it quietly instead of showing an error.
+                                aborted = true;
+                                console.debug('[chat-window] call: empty transcription ignored');
                             } else {
                                 console.warn('[chat-window] STT failed:', fetchErr);
                                 _setUserAudioError(messages, '❌ ' + (fetchErr.message || 'Transcription failed'));
@@ -1141,7 +1172,10 @@ export function initChatUI() {
                                 _replaceUserAudioIndicator(getMessagesEl(), text, Date.now());
                                 if (ws && ws.readyState === WebSocket.OPEN) {
                                     // Mark as voice input so the server triggers TTS auto-inject
-                                    ws.send(JSON.stringify({ text, is_voice_input: true }));
+                                    const msg = { text, is_voice_input: true };
+                                    // A turn spoken inside a call is ranked above chat and answered by voice.
+                                    if (callClient && callClient.callId) msg.call_id = callClient.callId;
+                                    ws.send(JSON.stringify(msg));
                                 }
                             } else if (data) {
                                 // Response OK but no text
@@ -1156,6 +1190,98 @@ export function initChatUI() {
                 };
                 try { micMediaRecorder.stop(); } catch (_) { resolve(); }
                 micMediaRecorder = null;
+            });
+            // Calls listen continuously: re-arm the recorder for the next utterance.
+            if (callClient && callClient.active) {
+                setTimeout(() => {
+                    if (callClient && callClient.active && !micRecordingMode) startRecording('toggle');
+                }, 250);
+            }
+        }
+
+        // ── Calls (audio/video) ───────────────────────────────────────────
+        // The server owns the call (core/call_manager.py); the client only keeps
+        // the mic open, tags each spoken turn with the call id, and can share the
+        // screen. The avatar on screen is the SyntH's "webcam" in a video call.
+        const callBtn = document.getElementById('call-btn');
+        const screenShareBtn = document.getElementById('screen-share-btn');
+
+        async function _ensureCallClient() {
+            if (callClient) return callClient;
+            const mod = await import(`/js/call-client.mjs?t=${Date.now()}`);
+            callClient = mod.createCallClient({
+                apiBase: _getApiBase(),
+                getSessionId: () => window.sessionId || (typeof sessionId !== 'undefined' ? sessionId : null),
+            });
+            callClient.onChange((c) => {
+                if (callBtn) {
+                    callBtn.classList.toggle('in-call', c.active);
+                    callBtn.title = c.active ? 'End call' : 'Start a call';
+                    callBtn.textContent = c.active ? '📞 End call' : '📞 Call';
+                }
+                // The pop-out window is the SyntH's webcam during a call (close-up,
+                // landscape) and the full-body view otherwise: tell it which.
+                try {
+                    window.__synthCallActive = !!c.active;
+                    window.dispatchEvent(new CustomEvent('synth:call-state', { detail: { active: !!c.active, kind: c.kind } }));
+                } catch (_) { /* ignore */ }
+                try { updateButtonMode(); } catch (_) { /* ignore */ }
+                if (screenShareBtn) {
+                    screenShareBtn.style.display = c.active ? '' : 'none';
+                    screenShareBtn.classList.toggle('sharing', c.sharingScreen);
+                    screenShareBtn.title = c.sharingScreen ? 'Stop sharing your screen' : 'Share your screen';
+                }
+            });
+            return callClient;
+        }
+
+        async function _discardRecording() {
+            clearTimeout(micSilenceTimer); micSilenceTimer = null;
+            if (micMediaRecorder) {
+                micMediaRecorder.onstop = null;
+                try { micMediaRecorder.stop(); } catch (_) { /* ignore */ }
+                micMediaRecorder = null;
+            }
+            micAudioChunks = [];
+            micRecordingMode = null;
+            updateButtonMode();
+        }
+
+        async function toggleCall() {
+            try {
+                const client = await _ensureCallClient();
+                if (client.active) {
+                    await client.end();
+                    await _discardRecording();
+                    return;
+                }
+                const stream = await _ensureMicStream();
+                if (!stream) return;
+                await client.start('audio');
+                // Tell the user right away when the call cannot work (no STT / no voice).
+                try {
+                    const warns = (client.warnings || []).join(' ');
+                    if (warns) _showMicNotice('📞 ' + warns);
+                } catch (_) { /* ignore */ }
+                await startRecording('toggle');
+            } catch (e) {
+                console.warn('[chat-window] call failed:', e);
+                _showMicNotice('📞 ' + ((e && e.message) || 'Unable to start the call'));
+                try { if (callClient && callClient.active) await callClient.end(); } catch (_) { /* ignore */ }
+            }
+        }
+
+        if (callBtn) callBtn.addEventListener('click', () => { toggleCall(); });
+        if (screenShareBtn) {
+            screenShareBtn.addEventListener('click', async () => {
+                if (!callClient || !callClient.active) return;
+                try {
+                    if (callClient.sharingScreen) callClient.stopScreenShare();
+                    else await callClient.startScreenShare();
+                } catch (e) {
+                    console.warn('[chat-window] screen share failed:', e);
+                    _showMicNotice('🖥️ ' + ((e && e.message) || 'Unable to share the screen'));
+                }
             });
         }
 
@@ -1688,6 +1814,17 @@ export function initChatUI() {
                                 if (panel && typeof panel.dispatchEvent === 'function') {
                                     panel.dispatchEvent(new CustomEvent('archive:refresh', { detail: data }));
                                 }
+                            } catch (e) { /* ignore */ }
+                        } else if (data && data.type === 'sfx-play' && data.url) {
+                            // ── Sound effect (e.g. the call's "message received" chime) ─────
+                            // Not the avatar speaking: no lip-sync, no bubble, no TTS cache.
+                            try {
+                                const sfxWin = (window.__synthAudioWindow && window.__synthAudioWindow.Audio) ? window.__synthAudioWindow : window;
+                                const sfx = new sfxWin.Audio(data.url);
+                                const p = sfx.play();
+                                if (p && typeof p.catch === 'function') p.catch(() => { /* autoplay blocked */ });
+                                // Our own signal must not come back through the mic as "speech".
+                                window.__synthIgnoreMicUntil = Date.now() + ((Number(data.audio_duration_s) || 0.8) * 1000) + 700;
                             } catch (e) { /* ignore */ }
                         } else if (data && data.type === 'tts-play' && data.url) {
                             // ── Vox TTS audio playback ────────────────────────────────────

@@ -882,6 +882,12 @@ class SynthWebUIInterface:
         )
         self.app.websocket("/api/audio/stream")(self.audio_stream_ws_endpoint)
 
+        # Centralised call service: register the WebUI as a call provider and
+        # mount /api/call/* (start/end/status + screen-share WS).
+        from core.webui_call import mount_call_api
+
+        mount_call_api(self.app)
+
         # Vox metadata/sample endpoints
         self.app.get("/api/vox/speakers")(self.vox_speakers)
         self.app.get("/api/vox/sample")(self.vox_sample)
@@ -3780,6 +3786,7 @@ class SynthWebUIInterface:
                 if not text and not attachments:
                     continue
                 is_voice_input = bool(payload.get("is_voice_input", False))
+                call_id = str(payload.get("call_id") or "") or None
                 normalized_attachments = [
                     self._normalize_webui_attachment(att) for att in attachments
                 ]
@@ -3796,6 +3803,7 @@ class SynthWebUIInterface:
                         text,
                         attachments=normalized_attachments,
                         is_voice_input=is_voice_input,
+                        call_id=call_id,
                     )
                 )
         except WebSocketDisconnect:
@@ -3815,6 +3823,12 @@ class SynthWebUIInterface:
             )
             if not still_connected:
                 self.message_history.pop(session_id, None)
+                try:
+                    from core.webui_call import end_calls_for_session
+
+                    await end_calls_for_session(session_id)
+                except Exception as call_exc:  # pragma: no cover - defensive
+                    log_debug(f"{LOG_PREFIX} call cleanup skipped: {call_exc}")
 
     async def logs_ws_endpoint(
         self, websocket: WebSocket
@@ -3966,12 +3980,16 @@ class SynthWebUIInterface:
         self,
         file: UploadFile = File(...),
         engine: Optional[str] = Form(None),
+        call_id: Optional[str] = Form(None),
     ):
         """POST /api/audio/upload — transcribe an uploaded audio file via Auris.
 
         Multipart form fields:
         - ``file``: the audio file (wav, ogg, mp4, …)
         - ``engine``: optional engine override (default: active auris engine)
+        - ``call_id``: the live call this clip belongs to. When text was actually
+          transcribed, the call's "message received" signal plays (never for an
+          empty transcription: typing, a cough, an echo).
 
         Returns JSON: ``{"text": "...", "engine": "..."}`` or
         ``{"error": "..."}`` with an appropriate HTTP status.
@@ -4013,10 +4031,26 @@ class SynthWebUIInterface:
                     pass
 
             if text is None:
+                # Name the engine so "no text" is diagnosable at a glance: an
+                # engine that is 'disabled'/'inline' (or down) never transcribes,
+                # unlike a clip that simply held no speech.
+                log_warning(
+                    f"{LOG_PREFIX} STT returned no text (engine={transcribed_engine!r}, "
+                    f"bytes={len(contents)}, mime={mime_hint!r})"
+                )
                 return JSONResponse(
-                    {"error": "Transcription returned no text"},
+                    {
+                        "error": (
+                            "Transcription returned no text "
+                            f"(Auris engine: {transcribed_engine or 'unknown'})"
+                        )
+                    },
                     status_code=422,
                 )
+            if text.strip() and call_id:
+                from core.webui_call import notify_transcribed
+
+                notify_transcribed(call_id)
             return JSONResponse({"text": text, "engine": transcribed_engine})
 
         except HTTPException:
@@ -4955,10 +4989,13 @@ class SynthWebUIInterface:
         text: str,
         attachments: list[dict[str, Any]] | None = None,
         is_voice_input: bool = False,
+        call_id: str | None = None,
     ) -> None:
         from types import SimpleNamespace
         from core.config import TRAINER_NAME
         from core import message_queue
+        from core.call_manager import get_call_manager
+        from core.webui_call import resolve_call_for_session
 
         normalized_attachments = [
             self._normalize_webui_attachment(att) for att in (attachments or [])
@@ -5008,6 +5045,13 @@ class SynthWebUIInterface:
             ),
             reply_to_message=None,
         )
+
+        # A turn inside a live call: ranked PRIORITY_CALL by the queue, carries the
+        # latest screen-share frame (if any), and is always answered by voice
+        # (mark_turn forces request_tts and is_voice_input).
+        call_session = resolve_call_for_session(call_id, session_id)
+        if call_session is not None:
+            get_call_manager().mark_turn(message, call_session)
 
         log_debug(f"{LOG_PREFIX} message from {session_id}: {text}")
 
