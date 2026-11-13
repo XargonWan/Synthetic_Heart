@@ -58,6 +58,22 @@ def _reset_animation_handler_singleton():
     ah._karada_state_server = None
 
 
+@pytest.fixture(autouse=True)
+def _reset_call_singletons():
+    """Ensure tests don't leak call manager / ack cache state across modules."""
+    import core.call_ack_cache as cac
+    import core.call_audio as ca
+    import core.call_manager as cm
+
+    cm.reset_call_manager()
+    cac.reset_call_ack_cache()
+    ca.reset_call_audio_pipeline()
+    yield
+    cm.reset_call_manager()
+    cac.reset_call_ack_cache()
+    ca.reset_call_audio_pipeline()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _set_backups_dir(tmp_path_factory):
     """Ensure tests use a writable backups directory to avoid permission issues."""
