@@ -30,6 +30,15 @@ from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.chat_attention import set_attention, evaluate_triggers
 from core.reaction_handler import get_reaction_emoji
 from core.delivery_guard import DeadTargetError
+from core.call_audio import get_call_audio_pipeline
+from core.call_manager import (
+    CallCapabilities,
+    CallError,
+    CallKind,
+    CallProvider,
+    CallSession,
+    get_call_manager,
+)
 
 # ── Route discord.ext.voice_recv logs into the synth logger ──────────────
 # voice_recv uses stdlib logging; without this its errors are invisible.
@@ -777,12 +786,20 @@ class DiscordInterface:
         if self.client is not None and self.client.is_closed():
             self.client.clear()
 
+        # A Discord voice session is a call: let the central call service host it
+        # (start/end sounds, status). Audio only: Discord gives bots no video.
+        self._register_call_provider()
+
         # Start the Discord client
         await self._start_discord_client()
         log_info("[discord_interface] Discord interface started successfully")
 
     async def stop(self) -> None:
         """Close the Discord client (disable and token-reload both rely on it)."""
+        try:
+            get_call_manager().unregister_provider("discord_bot")
+        except Exception as e:  # pragma: no cover - defensive
+            log_debug(f"[discord_interface] call provider unregister skipped: {e}")
         client = self.client
         if client is None or client.is_closed():
             return
@@ -1259,6 +1276,233 @@ class DiscordInterface:
             log_error(f"[discord_interface] Failed to send media to {channel_id}: {e}")
             return False
 
+    # ------------------------------------------------------------------
+    # Calls (central call service)
+    # ------------------------------------------------------------------
+
+    def _register_call_provider(self) -> None:
+        try:
+            get_call_manager().register_provider(DiscordCallProvider(self))
+        except Exception as e:  # pragma: no cover - defensive
+            log_warning(f"[discord_interface] call provider not registered: {e}")
+
+    async def _open_call(self, interface_path: str, user: str | None = None) -> None:
+        """A live voice session began: open the matching call. Never raises."""
+        try:
+            await get_call_manager().request_call(
+                "discord_bot", interface_path, CallKind.AUDIO, user_id=user
+            )
+        except CallError as e:
+            log_info(f"[discord_interface] no call opened for voice session: {e}")
+        except Exception as e:  # pragma: no cover - defensive
+            log_warning(f"[discord_interface] opening the call failed: {e}")
+
+    async def _close_call(self, interface_path: str | None) -> bool:
+        """The live voice session is ending: end its call. Returns True if one was open."""
+        if not interface_path:
+            return False
+        try:
+            manager = get_call_manager()
+            session = manager.get_active_call(interface_path)
+            return bool(session and await manager.end_call(session.call_id))
+        except Exception as e:  # pragma: no cover - defensive
+            log_warning(f"[discord_interface] ending the call failed: {e}")
+            return False
+
+    def _voice_session_state(self, guild_id: int) -> dict[str, Any] | None:
+        """The voice session of a guild: an ordinary call, or the Live session."""
+        return getattr(self, "_call_voice_state", {}).get(guild_id) or getattr(
+            self, "_live_voice_state", {}
+        ).get(guild_id)
+
+    async def _start_call_voice(
+        self, channel_id: str | int, initial_sender: str | None = None
+    ) -> dict[str, str]:
+        """Join a voice channel as a call: the default, Live-free way to talk.
+
+        What people say is cut into utterances (voice activity detection), transcribed
+        by Auris and handed to the message chain as a call turn; the reply is spoken by
+        Vox and played into the channel (``DiscordCallProvider.play_speech``).
+        """
+        if not self.client:
+            return {"status": "failed", "message": "Discord client not initialized"}
+        if not _HAS_VOICE_RECV:
+            return {
+                "status": "failed",
+                "message": "discord-ext-voice-recv not installed. Install with: uv add discord-ext-voice-recv",
+            }
+        joined = await self._join_voice(channel_id)
+        if joined.get("status") != "success":
+            return joined
+        try:
+            channel = self.client.get_channel(int(channel_id))
+            if channel is None:
+                channel = await self.client.fetch_channel(int(channel_id))
+            guild = channel.guild
+            voice_client = guild.voice_client
+            if voice_client is None:
+                return {"status": "failed", "message": "Not connected to voice"}
+
+            states: dict[int, dict[str, Any]] = self.__dict__.setdefault(
+                "_call_voice_state", {}
+            )
+            existing = states.get(guild.id)
+            if existing and existing.get("channel_id") == channel.id:
+                return {"status": "success", "message": "Call already active"}
+            if existing:
+                await self._stop_call_voice(guild.id)
+
+            interface_path = f"discord_bot/{guild.id}/{channel.id}"
+            buffer = LiveAudioBuffer()
+            if voice_client.is_playing():
+                voice_client.stop()
+            # One always-on source: every sound (tones, the SyntH's voice) is written
+            # into this buffer, so nothing ever cuts anything else off.
+            voice_client.play(LivePCMAudioSource(buffer))
+            state: dict[str, Any] = {
+                "channel_id": channel.id,
+                "interface_path": interface_path,
+                "audio_buffer": buffer,
+                "sink": None,
+                "call_id": None,
+            }
+            states[guild.id] = state
+
+            try:
+                session = await get_call_manager().request_call(
+                    "discord_bot",
+                    interface_path,
+                    CallKind.AUDIO,
+                    user_id=initial_sender,
+                )
+            except CallError as e:
+                states.pop(guild.id, None)
+                buffer.close()
+                return {"status": "failed", "message": f"Call not started: {e}"}
+
+            pipeline = get_call_audio_pipeline()
+            pipeline.bind_loop(self.client.loop)
+            sink = CallVoiceSink(session.call_id, pipeline)
+            voice_client.listen(sink)
+            state["sink"], state["call_id"] = sink, session.call_id
+            log_info(
+                f"[discord_interface] Call started in guild {guild.id} "
+                f"channel {channel.name} ({session.call_id})"
+            )
+            return {
+                "status": "success",
+                "message": f"Call started in {channel.name}",
+            }
+        except Exception as e:
+            log_error(f"[discord_interface] Failed to start the call: {e}")
+            return {"status": "failed", "message": str(e)}
+
+    async def _stop_call_voice(self, guild_id: int) -> dict[str, str]:
+        """End the call of a guild (the bot stays in the channel, like the Live stop)."""
+        states = getattr(self, "_call_voice_state", {})
+        state = states.get(guild_id)
+        if state is None:
+            return {"status": "success", "message": "No call in this guild"}
+        try:
+            # Hang up first so the end tone still goes out through the open buffer.
+            if await self._close_call(state.get("interface_path")):
+                await asyncio.sleep(0.6)
+            states.pop(guild_id, None)
+            guild = self.client.get_guild(guild_id) if self.client else None
+            voice_client = guild.voice_client if guild else None
+            if voice_client is not None:
+                if hasattr(voice_client, "stop_listening"):
+                    voice_client.stop_listening()
+                if voice_client.is_playing():
+                    voice_client.stop()
+            buffer = state.get("audio_buffer")
+            if buffer is not None:
+                buffer.close()
+            log_info(f"[discord_interface] Call stopped in guild {guild_id}")
+            return {"status": "success", "message": "Call stopped"}
+        except Exception as e:
+            log_error(f"[discord_interface] Failed to stop the call: {e}")
+            return {"status": "failed", "message": str(e)}
+
+    async def _deliver_call_turn(
+        self, session: CallSession, text: str, speaker_id: str, speaker_name: str
+    ) -> None:
+        """What someone said in the call, as a normal message at ``PRIORITY_CALL``."""
+        parts = session.interface_path.split("/")
+        guild_id = parts[1] if len(parts) > 1 else None
+        channel_id = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+        channel = (
+            self.client.get_channel(channel_id) if self.client and channel_id else None
+        )
+        user_id: Any = int(speaker_id) if str(speaker_id).isdigit() else speaker_id
+        wrapped = SimpleNamespace(
+            message_id=int(time.time() * 1000) % 1_000_000_000,
+            chat_id=channel_id,
+            interface_path=session.interface_path,
+            voice_channel_id=str(channel_id) if channel_id else None,
+            text=text,
+            caption=None,
+            date=None,
+            thread_id=None,
+            is_wake_sleep_command=False,
+            is_explicit_trigger=True,  # in a call, every utterance is addressed to Synth
+            from_user=SimpleNamespace(
+                id=user_id,
+                username=speaker_name or None,
+                full_name=speaker_name or str(speaker_id),
+                is_bot=False,
+            ),
+            chat=SimpleNamespace(
+                id=channel_id,
+                type="group",
+                title=getattr(channel, "name", None),
+                username=None,
+                first_name=None,
+                human_count=None,
+            ),
+            entities=None,
+            role_mentions=None,
+            bot_roles=None,
+            reply_to_message=None,
+            attachments=[],
+        )
+        get_call_manager().mark_turn(wrapped, session)
+        try:
+            await resolve_and_touch(
+                session.interface_path, guild_id, str(channel_id), bot=self.client
+            )
+        except Exception as e:  # pragma: no cover - names are decoration
+            log_debug(f"[discord_interface] resolve_and_touch failed (non-fatal): {e}")
+        try:
+            from core.chat_context_manager import add_message_to_context
+
+            await add_message_to_context(
+                interface_path=session.interface_path,
+                message_text=text,
+                sender_name=speaker_name or str(speaker_id),
+                sender_id=str(speaker_id),
+                message_id=wrapped.message_id,
+                timestamp=None,
+                metadata=None,
+            )
+        except Exception as e:  # pragma: no cover - context is best effort
+            log_warning(f"[discord_interface] call turn not added to context: {e}")
+        await message_queue.enqueue(
+            self.client,
+            wrapped,
+            interface_id="discord_bot",
+            original_message=wrapped,
+            skip_mention_check=True,
+        )
+
+    async def start_call(self, channel_id: str | int) -> dict[str, str]:
+        """Start a voice call in a Discord voice channel (advertises the ``call`` capability)."""
+        return await self._start_live_voice(channel_id)
+
+    async def end_call(self, guild_id: int) -> dict[str, str]:
+        """End the voice call of a guild."""
+        return await self._stop_live_voice(guild_id)
+
     async def _stream_audio(self, voice_client, audio_path):
         """Stream audio to voice client."""
         if not os.path.exists(audio_path):
@@ -1381,6 +1625,12 @@ class DiscordInterface:
             initial_sender: Optional display name for ``initial_text``.
             initial_timestamp: Optional ISO timestamp for ``initial_text``.
         """
+        # The Live engine is an opt-in route (CALL_LIVE_ENGINE_ENABLED, off by default):
+        # otherwise the voice session is an ordinary call, heard by speech-to-text and
+        # answered by a normal turn and voice (see ``_start_call_voice``).
+        if not get_call_manager().live_enabled():
+            return await self._start_call_voice(channel_id, initial_sender)
+
         if not self.client:
             return {"status": "failed", "message": "Discord client not initialized"}
 
@@ -1791,6 +2041,7 @@ class DiscordInterface:
                 f"[discord_interface] Live voice session started in "
                 f"guild {guild_id} channel {channel.name}"
             )
+            await self._open_call(live_interface_path, initial_sender)
             return {
                 "status": "success",
                 "message": f"Live voice session started in {channel.name}",
@@ -1801,11 +2052,17 @@ class DiscordInterface:
             return {"status": "failed", "message": str(e)}
 
     async def _stop_live_voice(self, guild_id: int) -> dict[str, str]:
-        """Stop the Gemini Live API voice session for a guild."""
+        """Stop the voice session of a guild (a call, or the Gemini Live session)."""
+        if guild_id in getattr(self, "_call_voice_state", {}):
+            return await self._stop_call_voice(guild_id)
         try:
             # Use the live engine stored at session start — NOT the global cortex,
             # which may be a different engine (e.g. zen_gemini).
             _state_now = getattr(self, "_live_voice_state", {}).get(guild_id, {})
+            # Hang up first: the end tone goes out through the still-open audio
+            # buffer, so give the voice client a moment to play it.
+            if await self._close_call(_state_now.get("interface_path")):
+                await asyncio.sleep(0.6)
             _live_eng = _state_now.get("live_engine")
             if _live_eng and hasattr(_live_eng, "stop_live_voice_session"):
                 await _live_eng.stop_live_voice_session(guild_id)
@@ -1957,11 +2214,8 @@ class DiscordInterface:
 
         guild_id = guild.id
 
-        # Check if we even have a live session for this guild
-        if (
-            not hasattr(self, "_live_voice_state")
-            or guild_id not in self._live_voice_state
-        ):
+        # Check if we even have a voice session (call or live) for this guild
+        if self._voice_session_state(guild_id) is None:
             return
 
         # Case 1: The bot itself left the voice channel.
@@ -2021,7 +2275,7 @@ class DiscordInterface:
         # change — but only count the member as "leaving" if they actually left
         # the channel (not just muted/deafened while staying in the same channel).
         if before.channel is not None:
-            state = self._live_voice_state.get(guild_id)
+            state = self._voice_session_state(guild_id)
             if state and state.get("channel_id") == before.channel.id:
                 # Determine if the member actually left (or moved to a different
                 # channel) versus only changing voice properties (mute/deafen).
@@ -3647,6 +3901,130 @@ class LiveAudioBuffer:
 
     def close(self) -> None:
         self._closed = True
+
+
+def _wav_to_pcm_24k_mono(path: str) -> bytes:
+    """Read a 16-bit WAV as 24 kHz mono PCM (what ``LiveAudioBuffer.write`` takes)."""
+    import wave
+
+    with wave.open(str(path), "rb") as wav:
+        width = wav.getsampwidth()
+        channels = wav.getnchannels()
+        rate = wav.getframerate()
+        pcm = wav.readframes(wav.getnframes())
+    if width != _DISCORD_SAMPLE_WIDTH:
+        pcm = audioop.lin2lin(pcm, width, _DISCORD_SAMPLE_WIDTH)
+    if channels == 2:
+        pcm = audioop.tomono(pcm, _DISCORD_SAMPLE_WIDTH, 0.5, 0.5)
+    if rate != _GEMINI_OUTPUT_RATE:
+        pcm, _ = audioop.ratecv(
+            pcm, _DISCORD_SAMPLE_WIDTH, 1, rate, _GEMINI_OUTPUT_RATE, None
+        )
+    return pcm
+
+
+class DiscordCallProvider(CallProvider):
+    """Hosts calls for Discord: a call is the bot's live voice session in a channel.
+
+    Audio only. Discord's API gives bots no camera or Go Live video, so a video call
+    degrades to audio (``CallManager.request_call``). The conversation itself runs in
+    the Live engine (it does its own speech recognition and voice), so the call
+    service here provides the call's lifecycle and its signals: the pickup and
+    hang-up tones are mixed into the same audio buffer the Live model speaks through,
+    never played as a second source that would cut the model off.
+    """
+
+    name = "discord_bot"
+    capabilities = CallCapabilities(audio=True, video=False, screen_share=False)
+
+    def __init__(self, interface: Any) -> None:
+        self._interface = interface
+
+    #: The SyntH's spoken replies are played into the voice channel by this provider.
+    plays_speech_in_call = True
+
+    def _audio_buffer(self, session: CallSession) -> LiveAudioBuffer | None:
+        for attr in ("_call_voice_state", "_live_voice_state"):
+            for state in (getattr(self._interface, attr, None) or {}).values():
+                if state.get("interface_path") == session.interface_path:
+                    return state.get("audio_buffer")
+        return None
+
+    async def play_speech(self, session: CallSession, path: Any) -> None:
+        await self.play_audio(session, path)
+
+    async def deliver_turn(
+        self,
+        session: CallSession,
+        text: str,
+        speaker_id: str,
+        speaker_name: str,
+    ) -> None:
+        await self._interface._deliver_call_turn(
+            session, text, speaker_id, speaker_name
+        )
+
+    async def play_audio(self, session: CallSession, path: Any) -> None:
+        buffer = self._audio_buffer(session)
+        if buffer is None:
+            return
+        pcm = await asyncio.to_thread(_wav_to_pcm_24k_mono, str(path))
+        buffer.write(pcm)
+
+    def is_agent_speaking(self, session: CallSession) -> bool:
+        buffer = self._audio_buffer(session)
+        return bool(buffer is not None and buffer.is_speaking())
+
+
+if _HAS_VOICE_RECV and voice_recv is not None:
+
+    class CallVoiceSink(voice_recv.AudioSink):  # type: ignore[misc]
+        """Feeds what people say in a voice channel to the call audio pipeline.
+
+        ``write`` runs on voice_recv's packet-router thread, so it only converts the
+        audio (48 kHz stereo -> 16 kHz mono) and hands it to
+        ``CallAudioPipeline.feed``, which is thread-safe.
+        """
+
+        def __init__(self, call_id: str, pipeline: Any) -> None:
+            super().__init__()
+            self._call_id = call_id
+            self._pipeline = pipeline
+            self._resample: dict[Any, Any] = {}  # per-speaker audioop.ratecv state
+
+        def wants_opus(self) -> bool:
+            return False  # let voice_recv decode (jitter buffer, FEC, PLC)
+
+        def write(self, user: Any, data: Any) -> None:
+            if user is None or getattr(user, "bot", False):
+                return
+            pcm = getattr(data, "pcm", None)
+            if not pcm or len(pcm) < 4:
+                return
+            try:
+                # The decoder always returns stereo; speech is in the left channel.
+                mono = audioop.tomono(pcm, _DISCORD_SAMPLE_WIDTH, 1, 0)
+                key = getattr(user, "id", None)
+                out, self._resample[key] = audioop.ratecv(
+                    mono,
+                    _DISCORD_SAMPLE_WIDTH,
+                    1,
+                    _DISCORD_RATE,
+                    16000,
+                    self._resample.get(key),
+                )
+            except (
+                Exception
+            ) as e:  # pragma: no cover - a bad packet must not end the call
+                log_debug(f"[call_voice_sink] packet dropped: {e}")
+                return
+            name = str(
+                getattr(user, "display_name", None) or getattr(user, "name", "") or ""
+            )
+            self._pipeline.feed(self._call_id, out, str(getattr(user, "id", "")), name)
+
+        def cleanup(self) -> None:
+            self._resample.clear()
 
 
 class LivePCMAudioSource(discord.AudioSource if discord else object):  # type: ignore[misc]
