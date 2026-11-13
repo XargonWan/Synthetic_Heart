@@ -182,10 +182,20 @@ With the radio plugin, SyntH becomes a **live AI radio DJ** for your [AzuraCast]
 </div>
 
 ### Rift Vessel
-Embodiment into external game/virtual worlds through pluggable connectors, while identity, memory and personality persist across worlds and chat interfaces. Minecraft ships today (with autonomous play — Synth wanders, sets its own goals and pursues them); Skyrim, VRChat and Hytale might be coming next.
+Embodiment into external game/virtual worlds through pluggable connectors, while identity, memory and personality persist across worlds and chat interfaces. Minecraft and [RetroXR](https://retroxr.app/) (both in VR and Desktop) ships today (with autonomous play. Synth wanders, sets its own goals and pursues them); Skyrim, VRChat and Hytale might be coming next.
 
 <div align="center">
-   <img src="docs/res/screenshots/minecraft.png" alt="SyntH embodied in Minecraft via the Rift Vessel" width="700" />
+   <figure>
+      <img src="docs/res/screenshots/minecraft.png" alt="SyntH embodied in Minecraft via the Rift Vessel" width="700" />
+      <figcaption>SyntH embodied in Minecraft via the Rift Vessel</figcaption>
+   </figure>
+</div>
+
+<div align="center">
+   <figure>
+      <img src="docs/res/screenshots/retroxr.png" alt="SyntH embodied in VR RetroXR via the Rift Vessel" width="700" />
+      <figcaption>SyntH embodied in VR, RetroXR, via the Rift Vessel</figcaption>
+   </figure>
 </div>
 
 For more information, see the [FAQ](https://synthetic-heart.readthedocs.io/en/latest/faq.html).
