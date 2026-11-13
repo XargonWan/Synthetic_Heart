@@ -1062,6 +1062,9 @@ class TelegramUserInterface:
 
             # Warm the entity cache so sends to known dialogs resolve by id.
             asyncio.create_task(self._warm_dialogs(client))
+            # Voice calls (py-tgcalls is installed on first use, which can take a
+            # while): never hold up startup for it.
+            asyncio.create_task(self._start_calls(client))
             asyncio.create_task(self._sync_avatar())
             await message_queue.run()
             try:
@@ -1071,6 +1074,29 @@ class TelegramUserInterface:
             except Exception as exc:
                 log_debug(f"[telegram] refresh_actions_block failed: {exc}")
             log_info(f"[telegram] connected as {me.full_name} (id={me.id})")
+
+    async def _start_calls(self, client: Any) -> None:
+        try:
+            from interface.telegram.telegram_call import TelegramCalls
+
+            self._calls = TelegramCalls(self)
+            await self._calls.start(client)
+        except Exception as exc:  # calls are optional: never break the interface
+            log_warning(f"[telegram] calls unavailable: {exc!r}")
+
+    async def start_call(self, user_id: int | str) -> dict[str, str]:
+        """Call a Telegram user (advertises the ``call`` capability)."""
+        calls = getattr(self, "_calls", None)
+        if calls is None:
+            return {"status": "failed", "message": "Telegram calls are not available"}
+        return await calls.dial(int(user_id))
+
+    async def end_call(self, user_id: int | str) -> dict[str, str]:
+        """Hang up the call with a Telegram user."""
+        calls = getattr(self, "_calls", None)
+        if calls is None:
+            return {"status": "success", "message": "No call"}
+        return await calls.hangup(int(user_id))
 
     @staticmethod
     async def _warm_dialogs(client: Any) -> None:
@@ -1176,6 +1202,12 @@ class TelegramUserInterface:
         )
 
     async def stop(self) -> None:
+        calls = getattr(self, "_calls", None)
+        if calls is not None:
+            try:
+                await calls.stop()
+            except Exception as exc:  # pragma: no cover - shutdown errors
+                log_debug(f"[telegram] calls stop error: {exc}")
         client, self.client, self.bot = self.client, None, None
         if client is not None:
             try:
