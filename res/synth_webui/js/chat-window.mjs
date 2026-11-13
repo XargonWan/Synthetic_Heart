@@ -216,7 +216,11 @@ function _attachChatAutoResize(winbox, mount) {
             const contentH = headerH + bodyNatural + footerH;
             const maxH = getMaxH();
             const targetH = Math.min(contentH + TITLE_BAR_H + 8, maxH);
-            const minH = headerH + footerH + TITLE_BAR_H + 24;
+            // Floor for a chat nobody has resized yet: with a short or empty
+            // history the content-fit height is tiny and the user had to enlarge
+            // the window on every load. Never above the 65% cap.
+            const comfortH = Math.min(maxH, Math.max(320, Math.floor(window.innerHeight * 0.45)));
+            const minH = Math.max(headerH + footerH + TITLE_BAR_H + 24, comfortH);
             const finalH = Math.max(minH, targetH);
 
             // Toggle the at-max class to enable scrollbar only when capped
@@ -256,6 +260,33 @@ export async function createChatWindow() {
     try {
         // Ensure WinBox is available
         if (!window.SynthWindowManager || typeof window.SynthWindowManager.create !== 'function') {
+// A chat window below this height is not usable. The comfortable height is 45%
+// of the viewport (at least 320 px), never above the 65% auto-fit cap.
+function _chatComfortHeight() {
+    const vh = window.innerHeight || 0;
+    return Math.min(Math.floor(vh * 0.65), Math.max(320, Math.floor(vh * 0.45)));
+}
+
+// On load the window can come back tiny: the auto-fit is content-sized (a thin
+// strip for a short history) and a size saved by an earlier build, or taken from
+// that auto-fit, is restored as "the user's choice". Raise anything below the
+// comfortable height, keeping the bottom edge where it is, and save the result.
+function _enforceChatMinHeight(winbox) {
+    try {
+        if (!winbox || winbox.min || winbox.max || winbox.full) return;
+        const winEl = winbox.window || winbox.dom || winbox.g || null;
+        const current = winEl && winEl.getBoundingClientRect
+            ? Math.round(winEl.getBoundingClientRect().height)
+            : Math.round(winbox.height || 0);
+        const wanted = _chatComfortHeight();
+        if (!current || current >= wanted) return;
+        const bottom = (winbox.y || 0) + current;
+        winbox.resize(winbox.width, wanted);
+        winbox.move(winbox.x, Math.max(0, bottom - wanted));
+        try { if (window.SynthWindowManager && typeof window.SynthWindowManager.saveState === 'function') window.SynthWindowManager.saveState('chat'); } catch (e) { /* ignore */ }
+    } catch (e) { /* ignore */ }
+}
+
             if (typeof window.SynthWindowManager === 'undefined' && typeof window.WinBox === 'undefined' && typeof window.SynthWindowManager !== 'undefined') {
                 try { await window.SynthWindowManager.ensureWinBoxAssets(); } catch (e) { /* ignore */ }
             }
@@ -344,6 +375,11 @@ export async function createChatWindow() {
             try {
                 const winEl = winbox.window || winbox.dom || winbox.g;
                 const titleEl = winEl ? winEl.querySelector('.wb-title') : null;
+            // After the saved geometry has been restored and the history has loaded,
+            // make sure the window is not left unusably small.
+            setTimeout(() => _enforceChatMinHeight(winbox), 400);
+            setTimeout(() => _enforceChatMinHeight(winbox), 1500);
+
                 if (titleEl) titleEl.classList.add('synth-winbox-title-large');
             } catch (e) { /* ignore */ }
 

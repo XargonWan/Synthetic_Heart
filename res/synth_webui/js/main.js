@@ -1104,8 +1104,30 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 });
                 try { console.debug('[SynthWindowManager] created winbox for', opts.id, 'instance=', winbox); } catch (e) { /* ignore */ }
                 entry.winbox = winbox;
+                // Persist a size the user picked by dragging a resize handle.
+                // onresize alone only updates the in-memory rect, so the size was
+                // lost on reload. It also fires for programmatic resizes (e.g. the
+                // chat window's auto-fit), which must NOT be saved as the user's
+                // choice — hence the hook on the handles, saved when the drag ends.
                 try {
-                    const nativeMaximize = typeof winbox.maximize === 'function' ? winbox.maximize.bind(winbox) : null;
+                    const resizeEl = winbox.window || winbox.dom || winbox.g || null;
+                    if (resizeEl) {
+                        resizeEl.querySelectorAll('.wb-n, .wb-s, .wb-w, .wb-e, .wb-nw, .wb-ne, .wb-sw, .wb-se').forEach((handle) => {
+                            handle.addEventListener('pointerdown', () => {
+                                const onResizeEnd = () => {
+                                    document.removeEventListener('pointerup', onResizeEnd, true);
+                                    document.removeEventListener('pointercancel', onResizeEnd, true);
+                                    try { captureNormalRect(entry); } catch (e) { /* ignore */ }
+                                    try { saveState(opts.id); } catch (e) { /* ignore */ }
+                                };
+                                document.addEventListener('pointerup', onResizeEnd, true);
+                                document.addEventListener('pointercancel', onResizeEnd, true);
+                            }, { passive: true });
+                        });
+                    }
+                } catch (e) { /* ignore */ }
+                try {
+                    const nativeMaximize =typeof winbox.maximize === 'function' ? winbox.maximize.bind(winbox) : null;
                     if (nativeMaximize) {
                         winbox.maximize = function(...args) {
                             // Capture pre-maximize rect before WinBox resizes to fullscreen.
