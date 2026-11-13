@@ -133,14 +133,15 @@ The Synthetic Heart uses an **asyncio.PriorityQueue** for processing messages in
 
 **Priority Levels**:
 
-All messages are ranked on a **0–11 absolute urgency scale** (higher = more
+All messages are ranked on a **0–12 absolute urgency scale** (higher = more
 urgent). The background threshold is ``PRIORITY_LOW`` (3): items at or below
 this level run as non-blocking background tasks; items above it block the
 consumer.
 
-- **PRIORITY_EMERGENCY (11)**: System emergencies
-- **PRIORITY_URGENT (10)**: Calendar reminders, urgent notifications
-- **PRIORITY_REFLECTION (9)**: Vessel reflection pauses — above player chat
+- **PRIORITY_EMERGENCY (12)**: System emergencies
+- **PRIORITY_URGENT (11)**: Calendar reminders, urgent notifications
+- **PRIORITY_REFLECTION (10)**: Vessel reflection pauses — above player chat
+- **PRIORITY_CALL (9)**: Turns inside a live audio/video call — above every chat band (see :doc:`call_service`)
 - **PRIORITY_HIGH (8)**: Direct human input (in-world player chat)
 - **PRIORITY_TRAINER (7)**: Trainer messages
 - **PRIORITY_RADIO (6)**: Radio DJ banter — above ordinary chat
@@ -161,6 +162,8 @@ cooperatively at the event-loop level. Each turn is persisted to the
 ``agent_tasks`` table from the moment it starts (status ``running``) so it is
 durable across a container restart; the startup recovery sweep reconciles any
 turn left ``running`` by a previous process.
+
+**Queue view**: ``message_queue.snapshot_queue()`` (History → Queue) lists the item the consumer is working on first, with ``status == "processing"``, until its turn is completed (succeeded or failed); the pending backlog follows with ``status == "pending"``. A message therefore does not vanish from the view the moment it leaves the heap, which for a slow LLM turn can be minutes.
 
 **PriorityQueue Fix**: To prevent ``TypeError`` when comparing messages with identical priorities, the queue uses a **monotonic counter** as tiebreaker. Each message is stored as ``(priority, counter, item)`` instead of ``(priority, item)``, ensuring consistent ordering even when priorities are equal.
 

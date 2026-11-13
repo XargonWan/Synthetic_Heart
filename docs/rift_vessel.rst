@@ -188,14 +188,16 @@ The Rift Vessel is primarily used in interactive game worlds, where
 responsiveness matters. Two behaviours make embodiment feel like a person who
 is *concentrating on the game* rather than multitasking every chat:
 
-**Priority — a pure 0–11 numeric ranking (higher = more urgent), with NO
+**Priority — a pure 0–12 numeric ranking (higher = more urgent), with NO
 de-prioritisation.** Each message is assigned an absolute urgency from its
 **structural origin only** (never from message text, never conditional on
-whether a session is active): an emergency → ``PRIORITY_EMERGENCY`` (11); an
+whether a session is active): an emergency → ``PRIORITY_EMERGENCY`` (12); an
 urgent (``priority=True``) message or calendar reminder → ``PRIORITY_URGENT``
-(10); a reflection-pause turn (``_vessel_reflection``) →
-``PRIORITY_REFLECTION`` (9, above player chat so a stop-and-think turn is
-consumed before ordinary in-world traffic, yet below urgent/emergency); a real
+(11); a reflection-pause turn (``_vessel_reflection``) →
+``PRIORITY_REFLECTION`` (10, above player chat so a stop-and-think turn is
+consumed before ordinary in-world traffic, yet below urgent/emergency); a turn
+inside a live call (``_call``) → ``PRIORITY_CALL`` (9, below a reflection,
+above every chat band — see :doc:`call_service`); a real
 in-world **player** chat → ``PRIORITY_HIGH`` (8); the trainer →
 ``PRIORITY_TRAINER`` (7); radio banter → ``PRIORITY_RADIO`` (6, above ordinary
 chat); ordinary chat → ``PRIORITY_GENERAL`` (5); Synth's **own** autonomous
@@ -675,7 +677,7 @@ has elapsed, and Synth has **no active goal or a goal with no step plan**
    must **not** speak (no ``say``) — only author/refine the goal via
    ``vessel_<world>_set_goal`` / ``vessel_<world>_update_goal``;
 #. enqueues it as a ``vessel`` message tagged ``_vessel_reflection`` →
-   ``PRIORITY_REFLECTION`` (9, above player chat), whose enqueue path **prunes
+   ``PRIORITY_REFLECTION`` (10, above player chat), whose enqueue path **prunes
    older pending autonomous vessel beats** for that world
    (``core/message_queue.py::_supersede_pending_vessel_beats`` — which keeps
    player chat and ``no_compact`` items; it never uses

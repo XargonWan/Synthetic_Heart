@@ -1,3 +1,91 @@
+### feat(call,discord,telegram): every call is heard by speech-to-text and answered by a normal turn; the Live route is optional and off; Telegram user-account calls
+
+**Before.** Only the WebUI had calls that went through the turn queue. A Discord voice session always used the Gemini Live engine, which does its own recognition and voice and bypasses the queue, the priority, the "tu-din" and forced voice replies. Telegram had no calls.
+
+**Now.** `core/call_audio.py` is the default way a call hears, on every interface that gives the core raw audio: PCM frames -> voice detection (Silero, else a simple energy detector) -> one utterance -> Auris -> the "tu-din" -> a normal turn at `PRIORITY_CALL` (`CallProvider.deliver_turn`, `request_tts` forced). The reply is spoken by Vox and played into the call: `VoxPlugin._dispatch` first offers the clip to `CallManager.route_speech`, and a provider with `plays_speech_in_call` plays it (`play_speech`). The Live engine is now an opt-in route behind `CALL_LIVE_ENGINE_ENABLED` (default **off**), a call-wide switch.
+**Discord:** `_start_live_voice` is the one entry point and starts an ordinary call unless the switch is on; the call joins the channel, plays everything through one always-on buffer, and feeds each person's audio (48 kHz stereo -> 16 kHz mono, `CallVoiceSink`) to the pipeline.
+**Telegram (user account):** `interface/telegram/telegram_call.py` on py-tgcalls (installed on first use, `ensure_package("pytgcalls")`): answers incoming calls from the trainer or `TELEGRAM_CALL_ALLOWED_IDS` with the pickup tone, feeds the caller's frames to the pipeline, plays replies back, leaves after the hang-up tone. `request_call(..., announce=False)` lets a provider answer with the pickup tone itself.
+
+**Not verified here.** The Telegram part has never run: no account here, and py-tgcalls' private-call support is thinly documented (the library's own docs pages were unreachable; a 2.0.0 release with private-call methods was yanked). It follows `example/p2p_example` and the `stream_frame` filter; the incoming audio format (`TELEGRAM_CALL_RX_RATE`, `TELEGRAM_CALL_RX_CHANNELS`) and the end-of-call status names are guesses, and everything logs under `[telegram_call]`. Discord was tested with fakes, not a guild. The switch is only honoured where an interface has a Live implementation (Discord); the WebUI has none. Video is not implemented on Telegram.
+
+### feat(discord,call): a Discord voice session is a call (audio only); video and Telegram checked and not available
+
+**Checked.** Which interfaces can host a call: only the WebUI (audio and video) and Discord (audio). Discord's API gives bots no camera or Go Live video; the Telegram Bot API has no call methods; Telegram user accounts can only take calls through py-tgcalls/ntgcalls, whose private-call support is documented as not released and could not be tried without an account; Matrix, Fluxer, the OpenAI bridge and the Vessel have no call transport. See `docs/call_service.rst` (*Support per interface*).
+
+**Now.** `interface/discord_interface/discord_interface.py` registers a `DiscordCallProvider` (`discord_bot`, audio only) on start and removes it on stop. `_start_live_voice` opens a call for the guild's live session (`discord_live_<guild>`) and `_stop_live_voice` ends it first; the pickup and hang-up tones are mixed into the `LiveAudioBuffer` the Live model speaks through (a second voice-client source would cut the model off), and the model counts as speaking while that buffer plays. `start_call` / `end_call` on the interface advertise the `call` capability. A video request degrades to audio.
+
+**Not verified here.** Not run against a real Discord guild: the tests use the real `LiveAudioBuffer` with a fake live session. The conversation is still the Live engine's own; the turn-queue parts of a call (`PRIORITY_CALL`, the "tu-din", forced `request_tts`) do not apply to it. Not implemented: Telegram user-account calls (no verified library route), and a speech-recognition call pipeline for Discord without a Live engine.
+
+### feat(call): a pickup sound when a call starts and a hang-up tone when it ends
+
+**Now.** Starting a call plays a short rising three-note "pickup" and ending it a short falling hang-up tone (`core/call_ack_cache.py`: `render_signal("start")` / `("end")`, synthesised like the "tu-din", saved as `pickup-v1.wav` and `hangup-v1.wav` under `<VOX_OUTPUT_DIR>/call_ack/`). `CallManager.request_call` plays `start` and `end_call` plays `end` through the provider (in the WebUI as `sfx-play`: not speech, no lip-sync). A provider that cannot play audio never blocks a call. `CALL_SOUNDS_ENABLED` (default on) turns them off.
+
+**Not verified here.** Not heard: the notes (G5-C6-E6 up, C6-G5-C5 down, about 0.4 s) were chosen from the description, not compared with Skype's sounds, and the browser path was not run.
+
+### fix(call): in a call the reply is always spoken, on any interface
+
+**Before.** A call turn only carried `is_voice_input`, which `message_chain` weighs against the interface, `VOX_SPEAK_TEXT_REPLIES` and whether Vox is enabled at that moment; when any of them said no, the reply went out as chat text only.
+
+**Now.** `CallManager.mark_turn` forces `request_tts = True` (and `is_voice_input = True`) on every call turn. `message_queue` copies the explicit flag into the context and `message_chain` honours it for every interface, even voice-only ones (Telegram, Discord) and even while Vox is off (the Vox plugin then falls back to text only if synthesis itself fails). The WebUI no longer sets `is_voice_input` itself; it is done once, for every provider.
+
+**Not verified here.** Not run against a real reply: the flag path (`message_queue` -> context -> `message_chain` auto-inject) was read, not exercised end to end.
+
+### fix(call,queue): the call signal plays only after text was transcribed; the queue keeps the item being processed
+
+**Before.** The "message received" signal followed the VAD, so typing on the keyboard or a cough triggered it, each time followed by an empty clip. The History → Queue view listed only the pending backlog: a message disappeared the moment the consumer took it, so during a slow turn (the last call turn spent 300 s in the LLM before failing) the queue looked empty.
+
+**Now.** `POST /api/audio/upload` takes the call's `call_id`; the signal plays (`CallManager.on_message_transcribed`) only when Auris returned non-empty text. The VAD-driven path is gone (`notify_vad_signal`, `on_speech_start`, `/api/call/utterance_end`, the Silero `call_id`). `snapshot_queue()` lists the item in flight first (`status: "processing"`, `position: 0`, `processing_seconds`) until its turn is completed, then the pending items; the Queue tab marks it with a highlighted row and a "processing" tag, and flags call turns.
+
+**Not verified here.** Not run in a browser. A cough that Vosk transcribes into a word still triggers the signal; only an empty transcription is filtered.
+
+### fix(call,webui): the call signal is a sound effect, not speech, and only plays after real speech; in a video call Synth looks into the camera  <!-- 2026-11-13 -->
+
+**Before.** The "tu-din" went out as `tts-play`, so clients treated it as the avatar speaking: lip-sync, TALK animation, and its URL attached to the last chat bubble. It played "at random": every VAD `speech_end` triggered it, including noise and the signal's own echo in the microphone, and each one was followed by a recording that transcribed to nothing, shown as "❌ Transcription returned no text" for a moment. In a video call nothing made Synth look at the camera.
+
+**Now.** The signal is sent as `sfx-play` (`KaradaStateServer.broadcast_sfx`): no lip-sync, no TALK, no bubble. It plays only after a VAD speech of at least 0.6 s, never while the SyntH speaks (`CallProvider.is_agent_speaking`), at most every 3 s; the browser ignores the mic while it plays and drops "speech" shorter than 0.6 s instead of sending it, and an empty transcription in a call is ignored quietly. A call with the pop-out (webcam) open is a video call: Synth keeps looking into the camera (`window.__synthSetCameraGazeLock`).
+
+**Not verified here.** Not run in a browser, so the gaze lock, the muted-mic window and the thresholds (0.6 s, 3 s, 0.7 s) are untested against real audio; the Stage frontend (`frontend/`) does not handle `sfx-play` yet, so it will not play the signal.
+
+### fix(call,webui,auris): a "tu-din" signal instead of a spoken "Hmm", Vosk gets the right language, a webcam icon for the pop-out and a chat that is never tiny on load  <!-- 2026-11-13 -->
+
+**Before.** The call's "message received" sound was a spoken "Hmm" made by the TTS engine: it sounded wrong and was silent whenever Vox was off or slow. After vosk installed itself, every transcription still came back empty: the language is detected acoustically with Whisper (`faster-whisper`), that package was not installed either, so the language always fell back to `en-us` and Italian speech went to the English model. The pop-out button was a picture-frame emoji. The chat could still come back tiny on reload: a size saved by an earlier build (or taken from the content-fit) was restored as the user's choice.
+
+**Now.** The signal is a synthesised two-note "tu-din" (`core/call_ack_cache.py`, `render_chime`), ready at once, no TTS involved; the `language` argument added to `VoxPlugin.speak` for the "Hmm" is removed again. `faster-whisper` is installed on first use like vosk (`ensure_package("faster_whisper")` in `_get_whisper_lid_model`), so the spoken language is detected and the matching Vosk model is downloaded. The pop-out button is a webcam icon (inline SVG). On load the chat is raised to at least 45% of the viewport height (320 px minimum, never above the 65% cap), keeping its bottom edge, 0.4 s and 1.5 s after it opens.
+
+**Not verified here.** None of it ran in a browser or in the container: the first real `faster-whisper` install plus the Whisper-tiny and Vosk Italian model downloads happen on the next transcription once the container runs this code, and the sound was checked as numbers (length, level, no click), not by ear. A chat deliberately made smaller than the comfortable height is raised again on every load.
+
+### fix(auris,vox): engines install their package on first use again, and Vox is on by default  <!-- 2026-11-13 -->
+
+**Before.** Since the one-click install work (`249bddb1`, 2026-09-24) `vosk` and `kittentts` are extras, not base dependencies, but nothing installed them when an engine was used. Auris starts on `vosk`, so in the Docker image every transcription failed with "'vosk' package is not installed. Run: uv add vosk" and the WebUI said only "Transcription returned no text". Vox started `disabled` (a merge on 2026-07-10 changed the `kitten` default and its test), against the documentation, `webui.py`'s own fallbacks and the "downloaded on first use" design, so a fresh instance could neither hear nor speak, and a call had no "Hmm".
+
+**Now.** `core/package_installer.py` installs an engine's package on first use: only allowlisted requirements (`vosk`, `faster-whisper`), into `<data root>/pylibs` (`/config/pylibs` in the container, so it survives container recreation), appended to `sys.path` so the application environment is never shadowed, never through `uv add` (so `pyproject.toml` and `uv.lock` stay as they are). The Vosk engine calls it before importing; a failed install is not retried for 10 minutes; `AUTO_INSTALL_ENGINE_PACKAGES` turns it off. `ACTIVE_VOX_ENGINE` defaults to `kitten` again (`test_vox_defaults.py`, `test_vox_plugin.py` follow). `scripts/modules_registry.py` no longer says `vosk` is a core dependency.
+
+**Not verified here.** The install itself was not run: the command (`uv pip install --python /app/venv/bin/python --target /config/pylibs vosk>=0.3.45`) was dry-run inside the live container and resolves; the first real install, and the first Vosk model download after it, happen on the next transcription once the container runs this code. A fresh `kitten` Vox needs network (gTTS stub) or the `kittentts` extra; `test_vox_builtin_engines::test_builtin_vox_engines_registered` was already failing (the `http` engine has been imported unconditionally since 2026-07-09).
+
+### feat(webui): in a call the pop-out is the SyntH's webcam (close-up, landscape), the Call button moves to the chat header and the mic button goes away  <!-- 2026-11-13 -->
+
+**Before.** The Call button sat in the composer next to the mic, the pop-out was always a portrait full-body window, and "Transcription returned no text" did not say which Auris engine had been asked.
+
+**Now.** The 📞 Call button is at the top right of the chat, after *Open Archives*, and reads *End call* during a call. While a call is active the mic button is hidden (➤ still appears for typed text). The pop-out follows the call: close-up in a 640x360 landscape window during a call, full body in 360x640 otherwise, and it switches live when the call starts or ends (`window.__vrmFramingMode`, `fitCloseupFraming` in `vrm-viewer.mjs`; `resizeTo()` is tried and retried on the next click if Chrome refuses it without a gesture). `/api/call/status` and `/api/call/utterance_end` report why no "Hmm" played (`last_ack`), the `[call]` log says so, and the STT 422 now names the Auris engine and is logged with the clip size.
+
+**Not verified here.** Not run in a browser: whether Chrome lets `resizeTo()` resize a Document PiP window without a user gesture is unconfirmed, and the close-up distance and target (`CLOSEUP_DISTANCE`, `CLOSEUP_TARGET_Y`) were set from the model's height, not checked against the picture.
+
+### fix(webui): the chat window keeps the size you give it and opens taller by default  <!-- 2026-11-13 -->
+
+**Before.** Dragging a window's edge to resize it only updated its in-memory rectangle; the size reached `localStorage` only when the window was maximized, minimized, restored or dragged by its header. After a reload the chat came back at its content-fit height, which with a short history is a thin strip, so it had to be enlarged on every load.
+
+**Now.** A resize done with the window's handles is saved when the drag ends (`SynthWindowManager.create` in `res/synth_webui/js/main.js`); the chat's own auto-fit resizes are not saved as the user's choice. A chat nobody has resized yet opens at least 45% of the viewport high (320 px minimum, never above the existing 65% cap).
+
+**Not verified here.** Not run in a browser. A chat size already saved before this fix (from a maximize, minimize or drag) is kept as the user's choice, so a small one stays small until it is resized once or the saved `synth-webui-chat-rect-chat` entry is removed.
+
+### feat(core,webui): a central audio/video call service, a "Call" priority tier and a pre-recorded "Hmm" when the caller stops speaking  <!-- 2026-11-13 -->
+
+**Before.** There was no notion of a call. The WebUI took voice one clip at a time, Discord's Live voice was its own path, Telegram had nothing, and after the user stopped speaking nothing told them the message had been taken while the (slow) turn was prepared.
+
+**Now.** `core/call_manager.py` models a call once: an interface registers a `CallProvider` (`audio` / `video` / `screen_share` capabilities) and `request_call()` starts a `CallSession`; a video call on an audio-only provider degrades to audio. The WebUI is the first provider (`core/webui_call.py`: `/api/call/start|end|utterance_end|status`, `WS /api/call/screen`; a 📞 and a 🖥️ button in the chat window). Turns in a call are flagged `_call` and ranked at the new `PRIORITY_CALL` (9), between a rift/vessel reflection and every chat band (`REFLECTION` 10, `URGENT` 11, `EMERGENCY` 12; the others are unchanged). When the caller stops speaking (server VAD `speech_end`) the SyntH plays a short "Hmm..." in its own voice: `core/call_ack_cache.py` makes it in the background when the call is requested, once per language in `VOX_LANGUAGE_OVERRIDES` plus the default voice, through `VoxPlugin.speak(generate_only=True, language=...)` (new optional `language` argument), and keeps it under `<VOX_OUTPUT_DIR>/call_ack/`. Screen share reuses the RetroXR attachment shape: only the latest JPEG frame is kept (throttled, de-duplicated, downscaled) and rides on the next call turn. New settings: `CALL_ENABLED`, `CALL_ACK_ENABLED`, `CALL_SCREEN_FRAME_MIN_INTERVAL_SEC`, `CALL_SCREEN_MAX_EDGE_PX`. See `docs/call_service.rst`.
+
+**Not built yet.** Telegram and Discord providers (no call library is a dependency), the pop-out webcam (capturing the Karada render), and a screen-frame hand-over in the Telegram/Discord attachment extractors. Checked by tests (`tests/test_call_manager.py`, `test_call_ack_cache.py`, `test_webui_call.py`, `test_vessel_realtime.py`); the browser side (`call-client.mjs`, the buttons) was syntax-checked only, not run in a browser.
+
 ### fix(ci): a push to develop keeps its versioned pre-release next to the single rolling `latest-develop`  <!-- 2026-11-13 -->
 
 **Before.** Every push to `develop` deleted the only pre-release (`latest-develop`) and made it again, so no earlier develop build stayed downloadable.
