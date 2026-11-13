@@ -123,7 +123,7 @@ def _detect_language(text: str) -> str | None:
 
 config_registry.get_value(
     "ACTIVE_VOX_ENGINE",
-    "disabled",
+    "kitten",
     label="Active Vox Engine",
     description="Active voice text-to-speech engine selection.",
     value_type=str,
@@ -1048,7 +1048,7 @@ class VoxPlugin(AIPluginBase):
             self._active_engine_name = str(
                 config_registry.get_value(
                     "ACTIVE_VOX_ENGINE",
-                    "http",
+                    "kitten",
                     value_type=str,
                     group="plugins",
                     component="vox_plugin",

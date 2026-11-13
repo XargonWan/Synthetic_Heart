@@ -88,6 +88,13 @@ def _get_whisper_lid_model() -> Any:
         if _WHISPER_LID_MODEL is not None:  # double-checked locking
             return _WHISPER_LID_MODEL
         try:
+            # Not a base dependency: install it on first use (like the Whisper
+            # model below is downloaded). Without it the language always falls
+            # back to English and speech in any other language transcribes to
+            # nothing.
+            from core.package_installer import ensure_package
+
+            ensure_package("faster_whisper")
             from faster_whisper import WhisperModel  # type: ignore[import]
 
             log_info(
@@ -315,6 +322,11 @@ def _load_model(model_path: Path) -> Any:
     if key in _MODEL_CACHE:
         return _MODEL_CACHE[key]
     try:
+        # The package is not a base dependency: install it on first use (like the
+        # model below is downloaded). No-op when it is already importable.
+        from core.package_installer import ensure_package
+
+        ensure_package("vosk")
         import vosk  # type: ignore[import]
 
         vosk.SetLogLevel(-1)  # suppress verbose Kaldi output
@@ -375,7 +387,11 @@ def _load_model(model_path: Path) -> Any:
             log_error(f"[auris/vosk] Failed to instantiate model: {exc}")
             return None
     except ImportError:
-        log_error("[auris/vosk] 'vosk' package is not installed. Run: uv add vosk")
+        log_error(
+            "[auris/vosk] 'vosk' package is not installed and could not be installed "
+            "automatically (see the [package_installer] log lines; "
+            "AUTO_INSTALL_ENGINE_PACKAGES must be on and the network reachable)"
+        )
         return None
     except Exception as exc:
         log_error(f"[auris/vosk] Failed to load model: {exc}")

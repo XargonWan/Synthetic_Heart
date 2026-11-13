@@ -279,6 +279,20 @@ Configuration (all WebUI-configurable):
 
    A fresh installation uses ``kitten`` as the default ``ACTIVE_VOX_ENGINE``.
 
+.. note::
+
+   **Engines install themselves on first use.** Local voice engines are not base
+   dependencies (see the ``local-voice`` / ``vosk`` extras in ``pyproject.toml``),
+   so the first time one is used its Python package is installed and its model
+   downloaded, with no manual step. The package installer
+   (``core/package_installer.py``) installs only an allowlisted requirement
+   (``vosk``, ``faster-whisper``), into ``<data root>/pylibs`` (``/config/pylibs``
+   in the container, which persists with the volume) appended to ``sys.path`` so
+   it never shadows the application environment; it never runs ``uv add`` and so
+   never edits ``pyproject.toml`` or ``uv.lock``. A failed install is retried at
+   most every 10 minutes. ``AUTO_INSTALL_ENGINE_PACKAGES`` (default on) turns it
+   off. The ``[package_installer]`` log lines say what was installed or why not.
+
 WebUI helper endpoints
 ~~~~~~~~~~~~~~~~~~~~~~
 
