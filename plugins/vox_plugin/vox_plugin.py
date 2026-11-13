@@ -1364,6 +1364,16 @@ class VoxPlugin(AIPluginBase):
             log_warning("[vox_plugin] No interface_path; cannot dispatch audio.")
             return
 
+        # A live call owns the reply: play it into the call instead of sending a voice
+        # message. (The WebUI plays through Karada below, so its provider declines.)
+        try:
+            from core.call_manager import get_call_manager
+
+            if await get_call_manager().route_speech(interface_path, audio_path):
+                return
+        except Exception as exc:  # pragma: no cover - never lose a reply over a call
+            log_debug(f"[vox_plugin] call routing skipped: {exc}")
+
         try:
             from core.interface_path_utils import parse_interface_path
 
