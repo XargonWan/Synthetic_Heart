@@ -38,7 +38,7 @@ MODULES: dict[str, ModuleSpec] = {
     "tts-kitten": ModuleSpec(
         name="KittenTTS",
         description="Local neural TTS (~150 MB model, 8 English voices, CPU-ready).",
-        uv_packages=[],  # kittentts is already in core deps
+        uv_packages=[],  # the vendored kittentts shim + gtts/pydub (core deps) are enough
         env_vars={"ACTIVE_VOX_ENGINE": "kitten"},
         post_install="download_kitten_model",
     ),
@@ -52,7 +52,7 @@ MODULES: dict[str, ModuleSpec] = {
     "stt-vosk": ModuleSpec(
         name="VOSK (local STT)",
         description="Offline speech-to-text (~50 MB model).  CPU-only, works without internet.",
-        uv_packages=[],  # vosk is already in core deps
+        uv_packages=["vosk>=0.3.45"],  # not a base dependency (see pyproject extras)
         env_vars={"ACTIVE_AURIS_ENGINE": "vosk"},
         post_install="download_vosk_model",
     ),

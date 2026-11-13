@@ -41,11 +41,11 @@ def test_vox_registry_unknown_engine_raises() -> None:
         reg.load_engine("does_not_exist")
 
 
-def test_active_vox_engine_default_is_disabled() -> None:
+def test_active_vox_engine_default_is_kitten() -> None:
     from core.config_manager import config_registry
     import plugins.vox_plugin  # noqa: F401
 
-    assert config_registry.get_value("ACTIVE_VOX_ENGINE", None) == "disabled"
+    assert config_registry.get_value("ACTIVE_VOX_ENGINE", None) == "kitten"
 
 
 def test_vox_plugin_is_enabled_tracks_active_engine() -> None:
