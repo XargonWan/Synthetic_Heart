@@ -133,14 +133,15 @@ The Synthetic Heart uses an **asyncio.PriorityQueue** for processing messages in
 
 **Priority Levels**:
 
-All messages are ranked on a **0–11 absolute urgency scale** (higher = more
+All messages are ranked on a **0–12 absolute urgency scale** (higher = more
 urgent). The background threshold is ``PRIORITY_LOW`` (3): items at or below
 this level run as non-blocking background tasks; items above it block the
 consumer.
 
-- **PRIORITY_EMERGENCY (11)**: System emergencies
-- **PRIORITY_URGENT (10)**: Calendar reminders, urgent notifications
-- **PRIORITY_REFLECTION (9)**: Vessel reflection pauses — above player chat
+- **PRIORITY_EMERGENCY (12)**: System emergencies
+- **PRIORITY_URGENT (11)**: Calendar reminders, urgent notifications
+- **PRIORITY_REFLECTION (10)**: Vessel reflection pauses — above player chat
+- **PRIORITY_CALL (9)**: Turns inside a live audio/video call — above every chat band (see :doc:`call_service`)
 - **PRIORITY_HIGH (8)**: Direct human input (in-world player chat)
 - **PRIORITY_TRAINER (7)**: Trainer messages
 - **PRIORITY_RADIO (6)**: Radio DJ banter — above ordinary chat
@@ -161,6 +162,8 @@ cooperatively at the event-loop level. Each turn is persisted to the
 ``agent_tasks`` table from the moment it starts (status ``running``) so it is
 durable across a container restart; the startup recovery sweep reconciles any
 turn left ``running`` by a previous process.
+
+**Queue view**: ``message_queue.snapshot_queue()`` (History → Queue) lists the item the consumer is working on first, with ``status == "processing"``, until its turn is completed (succeeded or failed); the pending backlog follows with ``status == "pending"``. A message therefore does not vanish from the view the moment it leaves the heap, which for a slow LLM turn can be minutes.
 
 **Merging pending messages of one chat**: while a slow turn runs, messages of the same chat pile up and would each cost a whole turn. ``message_queue.enqueue`` therefore folds a new message into a *pending* queue element that has the exact same ``interface_path`` (same interface, thread and priority band) instead of putting it on the heap; the element in flight is never touched. The queue shows one element (``merged_count``, first → last time, every line in the preview) and the consumer answers all its messages in a single turn (``_flatten_absorbed`` + ``_build_merged_message``). Scheduled/urgent events, vessel reflection/appraisal/idle beats and autonomous vessel perceptions, and anything a caller waits on (``response_future``/``media_future``) are never merged; a vessel player chat merges only with other player chats of the same path. Settings: ``QUEUE_COALESCE_ENABLED`` (default on) and ``QUEUE_COALESCE_MAX_ITEMS`` (default 20; past it a new element starts).
 

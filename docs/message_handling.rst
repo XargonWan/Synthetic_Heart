@@ -28,7 +28,10 @@ Key Points
   ``PRIORITY_LOW`` = 3) lets callers place themselves at the correct rung:
   Grillo beats use ``PRIORITY_BACKGROUND`` (2, absolute bottom), radio banter
   uses ``PRIORITY_RADIO`` (6, above normal chat), calendar reminders use
-  ``PRIORITY_URGENT`` (10).
+  ``PRIORITY_URGENT`` (11). Turns inside a live audio/video call are not
+  enqueued by callers choosing a band: ``core.call_manager`` flags them
+  (``_call``) and ``enqueue()`` ranks them at ``PRIORITY_CALL`` (9, see
+  :doc:`call_service`).
 - Do NOT write directly into the priority queue internals (``message_queue._queue``)
   or call ``._queue.put((prio, counter, item))`` from plugin code. This bypasses
   important normalization, checks, and queue invariants.
@@ -96,8 +99,8 @@ Enqueue a low-priority background message from a plugin:
         priority=message_queue.PRIORITY_RADIO,
     )
 
-The full priority scale: ``EMERGENCY`` (11) > ``URGENT`` (10) > ``REFLECTION`` (9)
-> ``HIGH`` (8) > ``TRAINER`` (7) > ``RADIO`` (6) > ``GENERAL`` (5) > ``AMBIENT``
+The full priority scale: ``EMERGENCY`` (12) > ``URGENT`` (11) > ``REFLECTION`` (10)
+> ``CALL`` (9) > ``HIGH`` (8) > ``TRAINER`` (7) > ``RADIO`` (6) > ``GENERAL`` (5) > ``AMBIENT``
 (4) > ``LOW`` (3, background threshold) > ``BACKGROUND`` (2).
 
   Migration from direct queue writes
