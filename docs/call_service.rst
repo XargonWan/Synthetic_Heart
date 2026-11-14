@@ -39,7 +39,12 @@ produced by the client, so a provider only declares the ``video`` capability; a
 video call on a provider without it degrades to audio (``CallSession.degraded``
 tells the caller). In the WebUI the avatar is always on screen, so a call there
 is in practice an audio call; the webcam proper is for the pop-out window and
-for interfaces that can show a video stream (Telegram, Discord).
+for interfaces that can show a video stream (Telegram today, see below).
+
+The Karada render proper exists only in the browser. A call hosted by another interface
+gets its video from the server: a small headless renderer draws the active VRM model
+(``core/avatar_render/``), or, as the alternative, an open WebUI tab is borrowed as the
+camera (``core/call_video.py``). See *The SyntH's face in other interfaces' calls* below.
 
 Turn priority
 -------------
@@ -244,10 +249,12 @@ What an interface can do is set by the platform, not by this project. Checked on
        Discord's terms forbid. A video request degrades to audio.
    * - ``telegram`` (user account)
      - yes, **untested**
-     - no
+     - yes, **untested**: the face is drawn by the server (no browser); audio-only where the
+       server cannot draw it
      - ``interface/telegram/telegram_call.py`` on py-tgcalls (installed on first use). Written
-       from the library's published examples without an account to run it on: see
-       *Debugging Telegram calls* below.
+       from the library's published examples and API without an account to run it on: see
+       *Debugging Telegram calls* below. For the video see *The SyntH's face in other
+       interfaces' calls*.
    * - ``telegram_bot``
      - no
      - no
@@ -290,8 +297,106 @@ adjusting:
   The py-tgcalls documentation does not describe private calls (a 2.0.0 release with
   "private_calls" methods was yanked as broken), so whether this works on the installed
   version is the first thing to find out.
-* Video is not implemented: the SyntH's "webcam" is the Karada render, which exists only in a
-  browser, so a Telegram call cannot show it until there is a server-side render to stream.
+* **Video.** The call starts with audio *and* video when a source for the face exists
+  (the server renderer, or a WebUI tab; see the next section): the first stream is
+  ``MediaStream(ExternalMedia.VIDEO, audio_path=<wav>, video_parameters=...)`` and each frame
+  goes out with ``send_frame(chat_id, Device.CAMERA, <I420 bytes>, Frame.Info(...))``, the
+  external-frame API of py-tgcalls 3.x (read from its installed code; not tried on a live
+  call). Look for these lines:
+
+  * ``call with <id> is audio-only: ...`` — video was not started (switch off, library
+    without external frames, no source for the face); the call is a plain audio call.
+  * ``call with <id> has video (WxH @ N fps)`` and ``first video frame sent`` — the pump is
+    running. The first line without the second: no frame arrives (see the next bullets).
+  * ``[call_video] the server cannot draw the avatar: ...`` — no GL context (see
+    *Server renderer* below).
+  * ``no video frame has arrived after 8 s`` / ``no new video frame for N s`` — the source
+    stopped sending (server renderer: see the ``[avatar_render]`` lines; browser source: a
+    hidden tab is throttled by the browser).
+  * ``send_frame failed (n/5)`` — py-tgcalls refused the frames. After five in a row the
+    call becomes audio-only (``call with <id> is audio-only now``). If every frame fails,
+    suspect the pixel format first: planar limited-range I420 of exactly the configured size.
+  * What the caller sees after the source is lost (frozen last frame or nothing) depends on
+    Telegram's client; the SyntH stops sending and treats the call as audio from then on.
+
+The SyntH's face in other interfaces' calls
+-------------------------------------------
+
+A call hosted outside the WebUI (Telegram) shows the SyntH's face, which is the Karada
+render of the model. ``CALL_VIDEO_SOURCE`` says where the frames come from:
+
+* ``server`` (what ``auto`` tries first): the server draws the avatar itself, with no
+  browser.
+* ``browser``: an open WebUI tab is the camera.
+* ``auto`` (default): the server renderer, and a tab if the server cannot draw.
+
+**Server renderer** (``core/avatar_render/``). A small headless renderer built on
+``moderngl`` and an EGL context:
+
+* It reads the active ``.vrm`` (0.x or 1.0; ``CALL_VIDEO_MODEL`` to force a file, else the
+  active avatar of the Karada state server, else ``skins/Rei/model.vrm``) and draws a close-up
+  of the head and shoulders: textured and lit, the arms lowered from the T-pose.
+* The animation is its own and small, **not** the Karada animation engine: a little head sway
+  and breathing, blinking, the emotion intensities of the Karada state server as expressions
+  (happy, sad, angry, relaxed, surprised), and the mouth following the loudness of the
+  SyntH's voice while it speaks. No FBX animations, no MToon shading or outlines: it looks
+  like the browser render, it is not identical.
+* **Nothing to install in the Docker image.** The ``Dockerfile`` installs Mesa's EGL and
+  software rasteriser (llvmpipe: ``libegl1``, ``libegl-mesa0``, ``libgl1``,
+  ``libgl1-mesa-dri``), links the unversioned ``libEGL.so`` / ``libGL.so`` that moderngl
+  opens, and, after ``uv sync``, prints ``avatar renderer GL: llvmpipe ...`` (or a warning,
+  without failing the build). ``moderngl`` and ``numpy`` come from ``pyproject.toml``. The
+  image grows by the Mesa/LLVM packages (roughly a hundred MB; check with ``docker images``).
+  Outside Docker the same Debian packages are needed. The first call tries a GL context once
+  (``[call_video] the server can draw the avatar (GL: ...)``); if that fails the log says why
+  and the call is audio-only. A host with a GPU uses it. ``LP_NUM_THREADS`` limits
+  llvmpipe's threads.
+* **Cost** (measured on a 16-core desktop with llvmpipe, 854x480 at 12 fps): about 0.6 of a
+  core while a call has video, nothing otherwise; the model loads in about half a second at
+  the start of the call. Lower ``CALL_VIDEO_FPS`` / ``CALL_VIDEO_WIDTH`` / ``CALL_VIDEO_HEIGHT``
+  on a slow CPU.
+
+**Browser source.** A WebUI tab keeps an idle WebSocket open on ``/api/call/camera`` while the
+avatar is on screen (``res/synth_webui/js/call-camera.mjs``, same token as the other call
+sockets). When a call asks for video the server sends ``{"type": "start", call_id, fps, width,
+height, quality}``; the tab then paints the avatar canvas (page colour behind it, scaled to fit)
+into a small canvas on every rendered frame, at most ``fps`` times a second, and sends each
+JPEG as a binary message (``{"type": "stop"}`` ends it). The canvas is read from the render
+loop itself (``window.__synthFrameTap``) because the WebGL buffer is not preserved between
+frames. A frame is accepted only from the tab that was told to start, only for that call, and
+only if it is a JPEG under 2 MB. This needs a WebUI tab with the avatar open for the whole call
+(a hidden tab is throttled by the browser; the pop-out webcam window keeps rendering). The
+browser can be on any device that reaches the WebUI: it does not run on the server.
+
+Either way only the latest frame is kept; the provider reads it at the call's frame rate and
+pushes it into its call. If the source is lost (the tab closes, the renderer fails) the call
+carries on as audio: ``CallSession.kind`` becomes ``audio``, so the model is no longer told
+that the caller sees it.
+
+.. list-table::
+   :header-rows: 1
+
+   * - Key
+     - Default
+     - Meaning
+   * - ``TELEGRAM_CALL_VIDEO_ENABLED``
+     - ``true``
+     - Show the SyntH's face in answered Telegram calls.
+   * - ``CALL_VIDEO_SOURCE``
+     - ``auto``
+     - ``server``, ``browser`` or ``auto`` (see above).
+   * - ``CALL_VIDEO_MODEL``
+     - (empty)
+     - ``.vrm`` the server draws; empty means the active avatar, else ``skins/Rei``.
+   * - ``CALL_VIDEO_FPS``
+     - ``12``
+     - Frames per second (1-30).
+   * - ``CALL_VIDEO_WIDTH``, ``CALL_VIDEO_HEIGHT``
+     - ``854``, ``480``
+     - Size of the call video (made even, 64-1920 by 64-1080).
+   * - ``CALL_VIDEO_JPEG_QUALITY``
+     - ``0.7``
+     - JPEG quality of each frame from a browser tab (0.1-1.0).
 
 Registering an interface
 ------------------------
@@ -318,9 +423,8 @@ capability (``core/interface_capabilities.py``). When a turn from that interface
 arrives, call ``get_call_manager().mark_turn(message, call_id_or_session)``
 before ``message_queue.enqueue()``.
 
-Not built yet: Telegram and Discord providers (no call library is a dependency;
-Discord's existing Live voice is a separate path), and the pop-out webcam
-(capturing the Karada render with ``canvas.captureStream()``).
+A provider whose video depends on something at call time (Telegram: a source for the face)
+can make ``capabilities`` a property; the manager reads it when a call is requested.
 
 Configuration
 -------------
@@ -359,6 +463,15 @@ Configuration
    * - ``TELEGRAM_CALL_ALLOWED_IDS``
      - (empty)
      - Extra user ids, besides the trainer, whose calls are answered.
+   * - ``TELEGRAM_CALL_VIDEO_ENABLED``
+     - ``true``
+     - Show the SyntH's face in answered Telegram calls.
+   * - ``CALL_VIDEO_SOURCE``, ``CALL_VIDEO_MODEL``
+     - ``auto``, (empty)
+     - Where the face comes from (``server``/``browser``/``auto``) and which ``.vrm`` the server draws.
+   * - ``CALL_VIDEO_FPS``, ``CALL_VIDEO_WIDTH``, ``CALL_VIDEO_HEIGHT``, ``CALL_VIDEO_JPEG_QUALITY``
+     - ``12``, ``854``, ``480``, ``0.7``
+     - Frame rate, size and JPEG quality of the call video.
    * - ``TELEGRAM_CALL_RX_RATE``, ``TELEGRAM_CALL_RX_CHANNELS``
      - ``48000``, ``1``
      - Format of the raw audio py-tgcalls delivers from the caller.
