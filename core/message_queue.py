@@ -756,12 +756,11 @@ def _snapshot_entry(
     item: dict[str, Any], priority_val: int, position: int, now: float, status: str
 ) -> dict[str, object]:
     """One plain, JSON-safe description of a queue item (never the live ``item``)."""
-    # A merged element (see ``_try_coalesce_pending``) previews every message it holds.
-    absorbed = item.get("absorbed") or []
-    merged_count = 1 + len(absorbed)
-
     # Text preview from the wrapped message object(s), truncated. Guarded — the
     # message may be any interface's object; we only want its ``.text``.
+    # A merged element (see ``_try_coalesce_pending``) previews every message it holds.
+    absorbed = item.get("absorbed") or []
+    merged_count = max(int(item.get("merged_count") or 1), 1 + len(absorbed))
     preview = ""
     try:
         texts = [

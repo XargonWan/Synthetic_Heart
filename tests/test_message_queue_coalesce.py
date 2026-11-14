@@ -76,17 +76,24 @@ async def _enqueue(
 
 @pytest.mark.asyncio
 async def test_pending_items_of_the_same_path_become_one_element(queue) -> None:
-    """Six messages pile up behind a running turn: they leave one pending element."""
-    # The turn in flight already left the heap, so it is never a merge target.
-    merged = [await _enqueue(queue, _item(f"line {n}", 2.0 + n)) for n in range(6)]
-    assert merged == [False, True, True, True, True, True]
-    assert len(queue._queue) == 1
+    """7 messages, 1 in flight: it keeps going and the other 6 are one element."""
+    in_flight = _item("running", 1.0)
+    mq._note_item_in_flight(in_flight, mq.PRIORITY_HIGH)
+    try:
+        merged = [await _enqueue(queue, _item(f"line {n}", 2.0 + n)) for n in range(6)]
+        assert merged == [False, True, True, True, True, True]
+        assert len(queue._queue) == 1
 
-    (pending,) = mq.snapshot_queue()
-    assert pending["merged_count"] == 6
-    assert pending["enqueued_at"] == 2.0
-    assert pending["last_enqueued_at"] == 7.0
-    assert str(pending["text_preview"]).startswith("line 0 ⏎ line 1")
+        snap = mq.snapshot_queue()
+        assert [e["status"] for e in snap] == ["processing", "pending"]
+        processing, pending = snap
+        assert processing["merged_count"] == 1
+        assert pending["merged_count"] == 6
+        assert pending["enqueued_at"] == 2.0
+        assert pending["last_enqueued_at"] == 7.0
+        assert str(pending["text_preview"]).startswith("line 0 ⏎ line 1")
+    finally:
+        mq._clear_item_in_flight()
 
 
 @pytest.mark.asyncio
