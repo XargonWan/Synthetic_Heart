@@ -59,6 +59,7 @@ def test_settings_are_clamped_and_even(monkeypatch: pytest.MonkeyPatch) -> None:
         "CALL_VIDEO_WIDTH": 855,
         "CALL_VIDEO_HEIGHT": 9,
         "CALL_VIDEO_JPEG_QUALITY": 5.0,
+        "CALL_VIDEO_ORIENTATION": "landscape",
     }
     monkeypatch.setattr(
         cv.config_registry,
@@ -71,10 +72,36 @@ def test_settings_are_clamped_and_even(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.quality == 1.0
 
 
-def test_default_settings_are_480p() -> None:
+def test_default_settings_are_a_480p_square() -> None:
+    """A square fits a phone held either way: Telegram does not say which it is."""
     settings = cv.VideoSettings.from_config()
-    assert (settings.width, settings.height) == (854, 480)
+    assert (settings.width, settings.height) == (480, 480)
     assert 1 <= settings.fps <= 30
+
+
+@pytest.mark.parametrize(
+    ("orientation", "expected"),
+    [
+        ("landscape", (854, 480)),
+        ("portrait", (480, 854)),
+        ("square", (480, 480)),
+        ("Portrait ", (480, 854)),
+        ("diagonal", (480, 480)),  # unknown: the safe shape
+    ],
+)
+def test_orientation_shapes_the_video(
+    monkeypatch: pytest.MonkeyPatch, orientation: str, expected: tuple[int, int]
+) -> None:
+    monkeypatch.setattr(
+        cv.config_registry,
+        "get_value",
+        lambda key, default=None, **_: (
+            orientation if key == "CALL_VIDEO_ORIENTATION" else default
+        ),
+    )
+    settings = cv.VideoSettings.from_config()
+    assert (settings.width, settings.height) == expected
+    assert settings.width % 2 == 0 and settings.height % 2 == 0
 
 
 # -- the hub ------------------------------------------------------------------
@@ -285,7 +312,9 @@ class _FakeProducer:
     instances: list["_FakeProducer"] = []
     unavailable = False
 
-    def __init__(self, path: Any, width: int, height: int, fps: int) -> None:
+    def __init__(
+        self, path: Any, width: int, height: int, fps: int, exposure: float = 1.0
+    ) -> None:
         self.size = (width, height, fps)
         self.spoken: list[Any] = []
         self.stopped = False

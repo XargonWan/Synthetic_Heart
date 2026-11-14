@@ -82,6 +82,37 @@ register_exposed_var(
     advanced=True,
 )
 register_exposed_var(
+    "CALL_VIDEO_ORIENTATION",
+    label="Call Video Orientation",
+    default="square",
+    value_type=str,
+    ui_type="select",
+    options=["square", "landscape", "portrait"],
+    description=(
+        "Shape of the SyntH's call video. Telegram does not tell the SyntH how the caller "
+        "holds the phone, and the size cannot change mid-call, so the default 'square' "
+        "fits a phone held either way. 'landscape' uses CALL_VIDEO_WIDTH x CALL_VIDEO_HEIGHT, "
+        "'portrait' the same turned on its side, 'square' a square as tall as the height."
+    ),
+    scope="core",
+    component="call_video",
+    advanced=True,
+)
+register_exposed_var(
+    "CALL_VIDEO_EXPOSURE",
+    label="Call Video Exposure",
+    default=1.0,
+    value_type=float,
+    ui_type="number",
+    description=(
+        "Brightness of the avatar the server draws in calls, as a multiplier (0.3-2.0). "
+        "1.0 is the WebUI's lighting; lower it if the face looks washed out."
+    ),
+    scope="core",
+    component="call_video",
+    advanced=True,
+)
+register_exposed_var(
     "CALL_VIDEO_JPEG_QUALITY",
     label="Call Video JPEG Quality",
     default=0.7,
@@ -164,6 +195,11 @@ class VideoSettings:
             quality = 0.7
         width = int(_clamp(_num("CALL_VIDEO_WIDTH", 854), 64, 1920)) // 2 * 2
         height = int(_clamp(_num("CALL_VIDEO_HEIGHT", 480), 64, 1080)) // 2 * 2
+        orientation = str(_cfg("CALL_VIDEO_ORIENTATION", "square", str)).strip().lower()
+        if orientation == "portrait":
+            width, height = height, width
+        elif orientation != "landscape":  # square, and anything unknown
+            width = height
         return cls(
             fps=int(_clamp(_num("CALL_VIDEO_FPS", 12), 1, 30)),
             width=width,
@@ -374,7 +410,13 @@ class CallVideoHub:
         if path is None:
             log_warning("[call_video] no VRM model to draw (set CALL_VIDEO_MODEL)")
             return None
-        producer = AvatarVideoSource(path, cfg.width, cfg.height, cfg.fps)
+        try:
+            exposure = _clamp(float(_cfg("CALL_VIDEO_EXPOSURE", 1.0, float)), 0.3, 2.0)
+        except (TypeError, ValueError):
+            exposure = 1.0
+        producer = AvatarVideoSource(
+            path, cfg.width, cfg.height, cfg.fps, exposure=exposure
+        )
         feed = CallVideoFeed(call_id, cfg, None, on_lost, fmt="i420", producer=producer)
 
         async def _failed() -> None:
