@@ -1420,14 +1420,27 @@ async def _heal_cortex_config(cur: Any) -> None:
         if key:
             current[str(key)] = "" if value is None else str(value)
 
+    # A scope value is a bare engine name or, once a model was picked, the JSON
+    # ``{"engine": ..., "model": ...}``. Only the engine part is compared with the
+    # known engines: the whole JSON string never is one, so comparing it would call
+    # every engine+model selection stale and overwrite it on the next start.
+    from core.config import parse_cortex_scope_value
+
     updates: list[tuple[str, str]] = []
     for key in ("TRAINER_CORTEX", "GRILLO_CORTEX", "LIVE_CORTEX", "DSP_CORTEX"):
         value = current.get(key, "")
-        if value and value not in ("Default", "None") and value not in valid_names:
+        engine, _model = parse_cortex_scope_value(value)
+        if (
+            value
+            and value not in ("Default", "None")
+            and engine not in ("Default", "None")
+            and engine not in valid_names
+        ):
             updates.append((key, "Default"))
 
     base_value = current.get("BASE_CORTEX", "")
-    if base_value and base_value not in valid_names:
+    base_engine, _base_model = parse_cortex_scope_value(base_value)
+    if base_value and base_engine not in valid_names:
         fallback = _pick_preferred_cortex(enabled_endpoints)
         if fallback is None and registry is not None:
             try:

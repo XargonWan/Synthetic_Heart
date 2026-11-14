@@ -1,3 +1,13 @@
+### fix(config): an engine and model picked in the WebUI are no longer replaced at the next start
+
+**Before.** Choosing an engine *and* a model for the Base Cortex stores `{"engine": ..., "model": ...}` in `BASE_CORTEX`. At startup `_heal_cortex_config` compared that whole JSON string with the known engine names, never found it, took it for a removed engine and overwrote it with `_pick_preferred_cortex(...)`: the first enabled external endpoint alphabetically unless its name contains "zen". On 14 Nov that was `fish-audio`, a Vox-only endpoint, so no Cortex could be loaded and every message on every interface was dropped until the value was fixed by hand. The scope overrides (`TRAINER_CORTEX`, `GRILLO_CORTEX`, `LIVE_CORTEX`, `DSP_CORTEX`) holding an engine+model were reset to `Default` the same way.
+
+**Now.** The healer compares only the `engine` part (`parse_cortex_scope_value`) for the base value and the overrides; a valid selection is left untouched, model included. An engine that is really gone is still repaired as before.
+
+**Not changed.** The replacement for a genuinely stale base engine can still be an endpoint that does not offer Cortex.
+
+**Location.** `core/db.py`, `tests/test_db_postgres_compat.py`.
+
 ### fix(telegram): messages sent while the user account was offline are picked up at startup, whatever Telegram says about them being read
 
 **Before.** The Telethon client runs on a `StringSession`, which keeps no update state, so a message sent while the container was restarting was never delivered. On 14 Nov a reply to Rekku ("riprova ora", sent in the seconds the container was restarting) left no row in `chat_history_cache` and got no answer; the restart gap is the likely cause, not proven. Telegram's own unread flags were no help either: they are cleared by opening the account in any other client.
