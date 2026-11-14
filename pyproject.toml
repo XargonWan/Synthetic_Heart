@@ -61,6 +61,8 @@ dependencies = [
     "pillow>=10.0.0",
     "pypdfium2>=5.12.1",
     "python-docx>=1.2.0",
+    "moderngl>=5.13.0",
+    "numpy>=2.4.3",
 ]
 
 [project.optional-dependencies]
