@@ -43,6 +43,8 @@ class _FakeApp:
         self.handlers: dict[Any, Any] = {}
         self.played: list[str] = []
         self.left: list[int] = []
+        self.recorded: list[tuple[int, Any]] = []
+        self.fail_record = 0
         self.started = False
         self.frames: list[tuple[int, Any, bytes, Any]] = []
         self.fail_frames = False
@@ -65,6 +67,12 @@ class _FakeApp:
     async def leave_call(self, chat_id: int) -> None:
         self.left.append(chat_id)
 
+    async def record(self, chat_id: int, stream: Any) -> None:
+        if self.fail_record:
+            self.fail_record -= 1
+            raise RuntimeError("call not ready")
+        self.recorded.append((chat_id, stream))
+
     async def send_frame(
         self, chat_id: int, device: Any, data: bytes, info: Any
     ) -> None:
@@ -81,6 +89,10 @@ def _fake_lib() -> Any:
     lib.MediaStream = lambda path: SimpleNamespace(path=path)
     lib.Direction = SimpleNamespace(INCOMING="in", OUTGOING="out")
     lib.Device = SimpleNamespace(MICROPHONE="mic", SCREEN="screen")
+    lib.can_record = True
+    lib.record_stream = lambda rate, channels: SimpleNamespace(
+        rate=rate, channels=channels
+    )
     lib.ended_flags = lambda: _Status.DISCARDED_CALL | _Status.LEFT_CALL
     lib.frame_filter = lambda: _Filters.stream_frame(directions="in", devices="mic")
     return lib
@@ -663,3 +675,40 @@ async def test_a_call_can_show_the_face_drawn_by_the_server(
 
     await calls.hangup(TRAINER)
     assert made[0].stopped is True
+
+
+@pytest.mark.asyncio
+async def test_the_caller_is_listened_to_once_the_call_is_open() -> None:
+    """py-tgcalls >= 3 only hands over the caller's voice after record(): without it the
+    call is deaf (nothing reached the speech-to-text)."""
+    _, app = await _started()
+    handler = app.handlers[("chat_update", _Status.INCOMING_CALL)]
+    await handler(None, SimpleNamespace(chat_id=TRAINER, status=_Status.INCOMING_CALL))
+    assert [(c, (s.rate, s.channels)) for c, s in app.recorded] == [
+        (TRAINER, (48000, 1))
+    ]
+
+
+@pytest.mark.asyncio
+async def test_listening_is_retried_once_then_given_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _no_wait(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(tc.asyncio, "sleep", _no_wait)
+    _, app = await _started()
+    app.fail_record = 1
+    handler = app.handlers[("chat_update", _Status.INCOMING_CALL)]
+    await handler(None, SimpleNamespace(chat_id=TRAINER, status=_Status.INCOMING_CALL))
+    assert len(app.recorded) == 1  # second attempt worked
+
+    app.recorded.clear()
+    app.fail_record = 5
+    await get_call_manager().end_call(
+        get_call_manager().get_active_call(f"telegram/{TRAINER}").call_id  # type: ignore[union-attr]
+    )
+    await handler(None, SimpleNamespace(chat_id=TRAINER, status=_Status.INCOMING_CALL))
+    # Never raised: the call goes on (it just cannot hear).
+    assert app.recorded == []
+    assert get_call_manager().get_active_call(f"telegram/{TRAINER}") is not None

@@ -195,6 +195,15 @@ class _Lib:
         # Optional: used to narrow the frame filter; frames are re-checked by hand.
         self.Direction = getattr(types, "Direction", None)
         self.Device: Any = getattr(types, "Device", None)
+        # py-tgcalls >= 3 delivers the caller's audio only after ``record(...)``.
+        self.RecordStream: Any = getattr(types, "RecordStream", None)
+        try:
+            from pytgcalls.types.raw import AudioParameters  # type: ignore[import-not-found]
+
+            self.AudioParameters: Any = AudioParameters
+        except Exception as exc:
+            log_debug(f"[telegram_call] no AudioParameters in this py-tgcalls: {exc!r}")
+            self.AudioParameters = None
         # Optional: only needed to show video (external frames, py-tgcalls >= 3).
         self.ExternalMedia: Any = getattr(types, "ExternalMedia", None)
         self.Frame: Any = getattr(types, "Frame", None)
@@ -216,6 +225,17 @@ class _Lib:
             and self.Device is not None
             and hasattr(self.Device, "CAMERA")
             and hasattr(self.ExternalMedia, "VIDEO")
+        )
+
+    @property
+    def can_record(self) -> bool:
+        """Does the installed py-tgcalls need (and offer) ``record`` to hear the caller?"""
+        return self.RecordStream is not None and self.AudioParameters is not None
+
+    def record_stream(self, rate: int, channels: int) -> Any:
+        """The stream that asks py-tgcalls to hand over the caller's voice, ``rate`` Hz."""
+        return self.RecordStream(
+            audio=True, audio_parameters=self.AudioParameters(rate, channels)
         )
 
     def video_stream(self, path: Path, video: VideoSettings) -> Any:
@@ -243,7 +263,10 @@ class _Lib:
         if self.Direction is not None and hasattr(self.Direction, "INCOMING"):
             kwargs["directions"] = self.Direction.INCOMING
         if self.Device is not None and hasattr(self.Device, "MICROPHONE"):
-            kwargs["devices"] = self.Device.MICROPHONE
+            devices = self.Device.MICROPHONE
+            if hasattr(self.Device, "SPEAKER"):
+                devices = devices | self.Device.SPEAKER
+            kwargs["devices"] = devices
         try:
             return self.filters.stream_frame(**kwargs)
         except TypeError:
@@ -419,7 +442,8 @@ class TelegramCalls:
                 lib.Device is not None
                 and device is not None
                 and hasattr(lib.Device, "MICROPHONE")
-                and device != lib.Device.MICROPHONE
+                and device
+                not in (lib.Device.MICROPHONE, getattr(lib.Device, "SPEAKER", None))
             ):
                 return
         rate = _cfg_int("TELEGRAM_CALL_RX_RATE", 48000)
@@ -496,6 +520,7 @@ class TelegramCalls:
             return None
         get_call_audio_pipeline().bind_loop(asyncio.get_running_loop())
         state["call_id"] = session.call_id
+        await self._start_listening(chat_id)
         if video is not None:
             if session.kind is CallKind.VIDEO and await self._start_video(
                 chat_id, session, video
@@ -507,6 +532,37 @@ class TelegramCalls:
             else:
                 self._degrade_to_audio(chat_id, session, "the video could not start")
         return session
+
+    async def _start_listening(self, chat_id: int) -> None:
+        """Ask py-tgcalls for the caller's voice. Without this a >= 3 call is deaf.
+
+        Two attempts: the call may not be fully set up the instant it is answered.
+        """
+        lib, app = self._lib, self._app
+        if lib is None or app is None or not getattr(lib, "can_record", False):
+            log_debug(
+                "[telegram_call] this py-tgcalls has no record(): relying on its default frames"
+            )
+            return
+        rate = _cfg_int("TELEGRAM_CALL_RX_RATE", 48000)
+        channels = 2 if _cfg_int("TELEGRAM_CALL_RX_CHANNELS", 1) == 2 else 1
+        for attempt in (1, 2):
+            try:
+                await _maybe_await(
+                    app.record(chat_id, lib.record_stream(rate, channels))
+                )
+            except Exception as exc:
+                log_warning(
+                    f"[telegram_call] could not listen to {chat_id} "
+                    f"(attempt {attempt}/2): {exc!r}"
+                )
+                if attempt == 1:
+                    await asyncio.sleep(1.0)
+                continue
+            log_info(
+                f"[telegram_call] listening to {chat_id} ({rate} Hz, {channels} ch)"
+            )
+            return
 
     # -- video ------------------------------------------------------------
 
