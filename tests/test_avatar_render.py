@@ -166,6 +166,22 @@ def build_vrm(vrm1: bool = False) -> bytes:
     )
 
 
+def _patched(glb: bytes, patch: Any) -> bytes:
+    """``glb`` with its JSON chunk changed by ``patch(gltf_dict)`` (the binary is kept)."""
+    json_len, _ = struct.unpack_from("<II", glb, 12)
+    gltf = json.loads(glb[20 : 20 + json_len])
+    patch(gltf)
+    js = _pad(json.dumps(gltf).encode(), b" ")
+    rest = glb[20 + json_len :]
+    total = 12 + 8 + len(js) + len(rest)
+    return (
+        struct.pack("<4sII", b"glTF", 2, total)
+        + struct.pack("<I4s", len(js), b"JSON")
+        + js
+        + rest
+    )
+
+
 # -- the loader -------------------------------------------------------------------
 
 
@@ -362,7 +378,9 @@ def test_a_real_skin_renders_when_present(gl_available: None) -> None:
 class _FakeRenderer:
     fail = False
 
-    def __init__(self, model: Any, width: int, height: int) -> None:
+    def __init__(
+        self, model: Any, width: int, height: int, exposure: float = 1.0
+    ) -> None:
         self.gl_renderer = "fake-gl"
         self.poses: list[AvatarPose] = []
         self.closed = False
@@ -445,7 +463,7 @@ async def test_the_source_gives_up_after_repeated_failures(
 async def test_a_source_that_cannot_start_raises_and_cleans_up(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _no_gl(model: Any, width: int, height: int) -> Any:
+    def _no_gl(model: Any, width: int, height: int, exposure: float = 1.0) -> Any:
         raise RendererUnavailable("no EGL")
 
     monkeypatch.setattr(src, "AvatarRenderer", _no_gl)
@@ -483,3 +501,114 @@ def test_the_model_to_draw_is_the_configured_then_the_active_then_rei(
         (p for p in (src._DEFAULT_MODEL, src._SEED_MODEL) if p.is_file()), None
     )
     assert src.resolve_model_path("") == expected
+
+
+# -- MToon materials -----------------------------------------------------------------------------
+
+
+def test_a_plain_material_is_lit_with_no_outline() -> None:
+    material = parse_vrm(build_vrm()).primitives[0].material
+    assert material.outline_width == 0.0
+    assert material.emission_color == (0.0, 0.0, 0.0)
+    assert material.shade_edges[0] == material.shade_edges[1]  # hard step, no gradient
+
+
+def test_vrm0_mtoon_properties_are_read() -> None:
+    def patch(gltf: dict) -> None:
+        gltf["extensions"]["VRM"]["materialProperties"] = [
+            {
+                "shader": "VRM/MToon",
+                "floatProperties": {
+                    "_ShadeShift": -0.2,
+                    "_ShadeToony": 0.5,
+                    "_OutlineWidthMode": 1,
+                    "_OutlineWidth": 0.25,
+                    "_OutlineColorMode": 1,
+                    "_OutlineLightingMix": 0.7,
+                },
+                "vectorProperties": {
+                    "_Color": [0.5, 0.6, 0.7, 1.0],
+                    "_ShadeColor": [0.9, 0.8, 0.7, 1.0],
+                    "_EmissionColor": [0.0, 0.9, 1.0, 1.0],
+                    "_OutlineColor": [0.3, 0.1, 0.1, 1.0],
+                },
+                "textureProperties": {"_ShadeTexture": 3, "_EmissionMap": 4},
+            }
+        ]
+
+    material = parse_vrm(_patched(build_vrm(), patch)).primitives[0].material
+    assert material.base_color == pytest.approx((0.5, 0.6, 0.7, 1.0))
+    assert material.shade_color == pytest.approx((0.9, 0.8, 0.7))
+    assert material.shade_texture == 3 and material.emission_texture == 4
+    assert material.emission_color == pytest.approx((0.0, 0.9, 1.0))
+    # Unity MToon: the ramp runs from the shift to lerp(1, shift, toony).
+    assert material.shade_edges == pytest.approx((-0.2, 1.0 + (-0.2 - 1.0) * 0.5))
+    # Centimetres in the file, metres here.
+    assert material.outline_width == pytest.approx(0.0025)
+    assert material.outline_color == pytest.approx((0.3, 0.1, 0.1))
+    assert material.outline_lighting_mix == pytest.approx(0.7)
+
+
+def test_vrm0_screen_space_outline_and_other_shaders_are_left_alone() -> None:
+    def patch(gltf: dict) -> None:
+        gltf["extensions"]["VRM"]["materialProperties"] = [
+            {
+                "shader": "VRM_USE_GLTFSHADER",
+                "floatProperties": {"_OutlineWidthMode": 1},
+            }
+        ]
+
+    material = parse_vrm(_patched(build_vrm(), patch)).primitives[0].material
+    assert material.outline_width == 0.0  # not MToon: nothing is read from it
+
+
+def test_vrm1_mtoon_properties_are_read() -> None:
+    def patch(gltf: dict) -> None:
+        gltf["materials"][0]["extensions"] = {
+            "VRMC_materials_mtoon": {
+                "shadeColorFactor": [0.2, 0.3, 0.4],
+                "shadeMultiplyTexture": {"index": 2},
+                "shadingShiftFactor": 0.1,
+                "shadingToonyFactor": 0.8,
+                "outlineWidthMode": "worldCoordinates",
+                "outlineWidthFactor": 0.002,
+                "outlineColorFactor": [0.1, 0.1, 0.2],
+            }
+        }
+
+    material = parse_vrm(_patched(build_vrm(vrm1=True), patch)).primitives[0].material
+    assert material.shade_color == pytest.approx((0.2, 0.3, 0.4))
+    assert material.shade_texture == 2
+    # VRM 1.0: linearstep(-1 + toony, 1 - toony, dot + shift)
+    assert material.shade_edges == pytest.approx((-1.0 + 0.8 - 0.1, 1.0 - 0.8 - 0.1))
+    assert material.outline_width == pytest.approx(0.002)
+
+
+def test_unreadable_shading_data_leaves_the_material_plain() -> None:
+    def patch(gltf: dict) -> None:
+        gltf["extensions"]["VRM"]["materialProperties"] = [
+            {"shader": "VRM/MToon", "floatProperties": {"_ShadeToony": "not a number"}}
+        ]
+
+    material = parse_vrm(_patched(build_vrm(), patch)).primitives[0].material
+    assert material.shade_texture is None  # the model still loads
+
+
+def test_the_camera_is_the_webuis_closeup(gl_available: None) -> None:
+    """Same framing as ``fitCloseupFraming``: a square keeps 1.25 m, a narrow frame backs off."""
+    from core.avatar_render.renderer import AvatarRenderer
+
+    model = parse_vrm(build_vrm())
+    square = AvatarRenderer(model, 64, 64)
+    tall = AvatarRenderer(model, 36, 64)
+    try:
+        # The camera looks down -Z at the model: the clip-space w of the target is its distance.
+        def depth(renderer: Any) -> float:
+            mvp = renderer._camera(renderer.width / renderer.height)
+            return float((mvp @ np.array([0.0, 1.3, 0.0, 1.0]))[3])
+
+        assert depth(square) == pytest.approx(1.25, rel=0.02)
+        assert depth(tall) == pytest.approx(1.25 * 0.8 / (36 / 64), rel=0.02)
+    finally:
+        square.close()
+        tall.close()

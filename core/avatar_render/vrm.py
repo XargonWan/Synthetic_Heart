@@ -71,6 +71,79 @@ class Material:
     alpha_mode: str = "OPAQUE"  # OPAQUE | MASK | BLEND
     cutoff: float = 0.5
     double_sided: bool = False
+    # -- MToon (the toon shading VRM models use); the defaults draw "lit, no shade" --
+    #: the colour of the shaded side (sRGB) and the texture it is multiplied with
+    shade_color: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    shade_texture: int | None = None
+    #: where the light/shade ramp starts and ends, in ``dot(normal, light)``. Equal edges
+    #: are a hard step; a very low pair means "lit everywhere" (flat, as in anime models).
+    shade_edges: tuple[float, float] = (-1.0, -1.0)
+    emission_color: tuple[float, float, float] = (0.0, 0.0, 0.0)  # sRGB
+    emission_texture: int | None = None
+    #: outline: half-width in metres (0 = none), colour (sRGB) and how much light it takes
+    outline_width: float = 0.0
+    outline_color: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    outline_lighting_mix: float = 1.0
+
+
+def _vec(value: Any, n: int, default: tuple[float, ...]) -> tuple[float, ...]:
+    try:
+        out = tuple(float(x) for x in list(value)[:n])
+    except (TypeError, ValueError):
+        return default
+    return out if len(out) == n else default
+
+
+def _apply_mtoon_v0(material: Material, props: dict[str, Any]) -> None:
+    """VRM 0.x ``materialProperties`` entry of a ``VRM/MToon`` shader (Unity's MToon)."""
+    if "MToon" not in str(props.get("shader", "")):
+        return
+    f = props.get("floatProperties", {}) or {}
+    v = props.get("vectorProperties", {}) or {}
+    t = props.get("textureProperties", {}) or {}
+    color = _vec(v.get("_Color"), 4, material.base_color)
+    material.base_color = (color[0], color[1], color[2], color[3])
+    material.shade_color = _vec(v.get("_ShadeColor"), 3, (1.0, 1.0, 1.0))  # type: ignore[assignment]
+    if isinstance(t.get("_ShadeTexture"), int):
+        material.shade_texture = int(t["_ShadeTexture"])
+    # Unity MToon: the ramp runs from _ShadeShift to lerp(1, _ShadeShift, _ShadeToony).
+    shift = float(f.get("_ShadeShift", 0.0))
+    toony = float(f.get("_ShadeToony", 0.9))
+    material.shade_edges = (shift, 1.0 + (shift - 1.0) * toony)
+    material.emission_color = _vec(v.get("_EmissionColor"), 3, (0.0, 0.0, 0.0))  # type: ignore[assignment]
+    if isinstance(t.get("_EmissionMap"), int):
+        material.emission_texture = int(t["_EmissionMap"])
+    # Outline: only the world-space mode (1); the width is in centimetres.
+    if int(f.get("_OutlineWidthMode", 0)) == 1:
+        material.outline_width = max(0.0, float(f.get("_OutlineWidth", 0.0))) * 0.01
+    material.outline_color = _vec(v.get("_OutlineColor"), 3, (0.0, 0.0, 0.0))  # type: ignore[assignment]
+    material.outline_lighting_mix = (
+        float(f.get("_OutlineLightingMix", 1.0))
+        if int(f.get("_OutlineColorMode", 0)) == 1
+        else 0.0
+    )
+
+
+def _apply_mtoon_v1(
+    material: Material, mtoon: dict[str, Any], mat: dict[str, Any]
+) -> None:
+    """VRM 1.0 ``VRMC_materials_mtoon`` extension of a glTF material."""
+    material.shade_color = _vec(mtoon.get("shadeColorFactor"), 3, (1.0, 1.0, 1.0))  # type: ignore[assignment]
+    tex = (mtoon.get("shadeMultiplyTexture") or {}).get("index")
+    if isinstance(tex, int):
+        material.shade_texture = tex
+    # VRM 1.0: shading = linearstep(-1 + toony, 1 - toony, dot + shift)
+    shift = float(mtoon.get("shadingShiftFactor", 0.0))
+    toony = float(mtoon.get("shadingToonyFactor", 0.9))
+    material.shade_edges = (-1.0 + toony - shift, 1.0 - toony - shift)
+    material.emission_color = _vec(mat.get("emissiveFactor"), 3, (0.0, 0.0, 0.0))  # type: ignore[assignment]
+    emissive = (mat.get("emissiveTexture") or {}).get("index")
+    if isinstance(emissive, int):
+        material.emission_texture = emissive
+    if mtoon.get("outlineWidthMode") == "worldCoordinates":
+        material.outline_width = max(0.0, float(mtoon.get("outlineWidthFactor", 0.0)))
+    material.outline_color = _vec(mtoon.get("outlineColorFactor"), 3, (0.0, 0.0, 0.0))  # type: ignore[assignment]
+    material.outline_lighting_mix = float(mtoon.get("outlineLightingMixFactor", 1.0))
 
 
 @dataclass
@@ -292,17 +365,25 @@ def parse_vrm(data: bytes) -> VrmModel:
         for s in gltf.get("skins", [])
     ]
     materials = []
-    for mat in gltf.get("materials", []):
+    v0_props = (ext.get("VRM", {}) or {}).get("materialProperties", []) or []
+    for index, mat in enumerate(gltf.get("materials", [])):
         pbr = mat.get("pbrMetallicRoughness", {})
-        materials.append(
-            Material(
-                base_color=tuple(pbr.get("baseColorFactor", (1.0, 1.0, 1.0, 1.0))),
-                texture=pbr.get("baseColorTexture", {}).get("index"),
-                alpha_mode=mat.get("alphaMode", "OPAQUE"),
-                cutoff=float(mat.get("alphaCutoff", 0.5)),
-                double_sided=bool(mat.get("doubleSided", False)),
-            )
+        material = Material(
+            base_color=tuple(pbr.get("baseColorFactor", (1.0, 1.0, 1.0, 1.0))),
+            texture=pbr.get("baseColorTexture", {}).get("index"),
+            alpha_mode=mat.get("alphaMode", "OPAQUE"),
+            cutoff=float(mat.get("alphaCutoff", 0.5)),
+            double_sided=bool(mat.get("doubleSided", False)),
         )
+        try:
+            mtoon = (mat.get("extensions", {}) or {}).get("VRMC_materials_mtoon")
+            if mtoon:
+                _apply_mtoon_v1(material, mtoon, mat)
+            elif index < len(v0_props):
+                _apply_mtoon_v0(material, v0_props[index])
+        except (TypeError, ValueError, KeyError):
+            pass  # unreadable shading data: the material stays plain (lit, no shade)
+        materials.append(material)
 
     primitives: list[Primitive] = []
     for node_index, node in enumerate(nodes):

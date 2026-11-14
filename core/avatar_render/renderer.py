@@ -4,10 +4,12 @@
 (llvmpipe) provides the GL, so the Mesa EGL libraries must be installed in the image
 (Debian: ``libegl1``, ``libegl-mesa0``, ``libgl1-mesa-dri``); a host with a GPU uses it.
 
-What is drawn is an approximation of the browser's Karada render, not a copy: textured and
-lit (no MToon shading, no outlines), the model in its rest pose with the arms lowered, a
-little head sway and breathing, and the face expressions as morph targets. It is *not* the
-Karada animation engine (no FBX animations).
+What is drawn is an approximation of the browser's Karada render (three.js + three-vrm),
+not a copy: the same camera, lights and sRGB output, and MToon's flat/toon colouring
+(shade colour, light/shade ramp, emission, world-space outlines) read from the model, in its
+rest pose with the arms lowered, a little head sway and breathing, and the face expressions as
+morph targets. It is *not* the Karada animation engine (no FBX animations), and MToon's rim
+light, UV animation and per-pixel masks are left out.
 
 Everything here must run on ONE thread: the GL context belongs to the thread that made it.
 """
@@ -26,6 +28,18 @@ from core.avatar_render.vrm import Primitive, VrmModel
 #: Background behind the avatar (the WebUI's dark theme colour), 0-255.
 BACKGROUND_RGB = (13, 13, 23)
 _MAX_JOINTS = 256
+
+# The WebUI's scene (res/synth_webui/js/vrm-viewer.mjs): a 30 degree camera and three lights.
+_FOV_DEG = 30.0
+#: "webcam" framing (``fitCloseupFraming``): head and shoulders around this height, this far
+#: away, pulled back in a narrow window so the shoulders still fit (below aspect 0.8).
+_CLOSEUP_TARGET_Y = 1.30
+_CLOSEUP_DISTANCE = 1.25
+_CLOSEUP_DIR = (0.03, 1.0)  # (up, towards the camera)
+#: three's AmbientLight(0.6), DirectionalLight(1.2) at (1, 1.2, 1), DirectionalLight(0.4) at (-1, 1.2, -1)
+_AMBIENT, _KEY, _FILL = 0.6, 1.2, 0.4
+_KEY_POS = (1.0, 1.2, 1.0)
+_FILL_POS = (-1.0, 1.2, -1.0)
 
 
 class RendererUnavailable(RuntimeError):
@@ -84,25 +98,55 @@ _VERTEX = """
 #version 330
 uniform mat4 mvp;
 uniform mat4 joints[256];
+uniform float outline_w;   // 0 in the colour pass; the hull's half-width (metres) in the outline pass
 in vec3 in_pos; in vec3 in_nrm; in vec2 in_uv; in vec4 in_joints; in vec4 in_weights;
 out vec3 v_nrm; out vec2 v_uv;
 void main() {
     mat4 sk = joints[int(in_joints.x)] * in_weights.x + joints[int(in_joints.y)] * in_weights.y
             + joints[int(in_joints.z)] * in_weights.z + joints[int(in_joints.w)] * in_weights.w;
-    gl_Position = mvp * (sk * vec4(in_pos, 1.0));
-    v_nrm = mat3(sk) * in_nrm;
+    vec3 nrm = normalize(mat3(sk) * in_nrm);
+    vec4 world = sk * vec4(in_pos, 1.0);
+    world.xyz += nrm * outline_w;
+    gl_Position = mvp * world;
+    v_nrm = nrm;
     v_uv = in_uv;
 }
 """
+# Lighting is done in linear light and written as sRGB, as three.js does
+# (renderer.outputColorSpace = SRGBColorSpace). MToon colours the surface by its light/shade
+# ramp (below) and multiplies the result by the light that reaches it: the ambient light plus
+# each directional light weighted by the cosine to the normal, as in three-vrm.
 _FRAGMENT = """
 #version 330
-uniform sampler2D tex; uniform vec4 base; uniform float cutoff; uniform float blended; uniform vec3 light_dir;
+uniform sampler2D tex; uniform sampler2D shade_tex; uniform sampler2D emis_tex;
+uniform vec4 base; uniform vec3 shade_col; uniform vec3 emis_col;
+uniform float cutoff; uniform float blended;
+uniform vec2 edges;                 // light/shade ramp, in dot(normal, key light)
+uniform vec3 key_dir; uniform vec3 fill_dir; uniform vec3 light_i; // ambient, key, fill intensity
+uniform float exposure;
+uniform float outline_pass; uniform vec3 outline_col; uniform float outline_mix;
 in vec3 v_nrm; in vec2 v_uv; out vec4 frag;
+vec3 to_lin(vec3 c) { return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c)); }
+vec3 to_srgb(vec3 c) {
+    c = clamp(c, 0.0, 1.0);
+    return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
+}
 void main() {
-    vec4 c = texture(tex, v_uv) * base;
-    if (c.a < cutoff) discard;
-    float lit = 0.6 + 0.4 * max(dot(normalize(v_nrm), normalize(light_dir)), 0.0);
-    frag = vec4(c.rgb * lit, blended > 0.5 ? c.a : 1.0);
+    vec4 t = texture(tex, v_uv);
+    float alpha = t.a * base.a;
+    if (alpha < cutoff) discard;
+    vec3 n = normalize(v_nrm);
+    float key_cos = dot(n, key_dir);
+    float light = (light_i.x + light_i.y * max(key_cos, 0.0) + light_i.z * max(dot(n, fill_dir), 0.0)) * exposure;
+    if (outline_pass > 0.5) {
+        frag = vec4(to_srgb(to_lin(outline_col) * mix(1.0, light, outline_mix)), 1.0);
+        return;
+    }
+    vec3 lit = to_lin(t.rgb) * to_lin(base.rgb);
+    vec3 shade = to_lin(shade_col) * to_lin(texture(shade_tex, v_uv).rgb);
+    float ramp = clamp((key_cos - edges.x) / max(edges.y - edges.x, 1e-5), 0.0, 1.0);
+    vec3 col = mix(shade, lit, ramp) * light + to_lin(emis_col) * to_lin(texture(emis_tex, v_uv).rgb);
+    frag = vec4(to_srgb(col), blended > 0.5 ? alpha : 1.0);
 }
 """
 
@@ -149,7 +193,9 @@ def rgb_to_i420(rgb: np.ndarray) -> bytes:
 class AvatarRenderer:
     """Draws ``model`` at ``width`` x ``height``; one instance, one thread."""
 
-    def __init__(self, model: VrmModel, width: int, height: int) -> None:
+    def __init__(
+        self, model: VrmModel, width: int, height: int, exposure: float = 1.0
+    ) -> None:
         if width % 2 or height % 2 or width < 2 or height < 2:
             raise ValueError("width and height must be even")
         import moderngl
@@ -176,8 +222,19 @@ class AvatarRenderer:
 
         self._rest_rotations: dict[int, np.ndarray] = self._arm_rest_rotations()
         self._prog["mvp"].write(self._camera(width / height).T.tobytes())
+        # A VRM 0.x model faces -Z and three-vrm turns it to face +Z; here the model stays
+        # put, so the lights (like the camera) are turned half a circle instead.
         facing = -1.0 if model.faces_minus_z else 1.0
-        self._prog["light_dir"].value = (0.3, 0.5, 0.8 * facing)
+        for name, pos in (("key_dir", _KEY_POS), ("fill_dir", _FILL_POS)):
+            vec = np.array([pos[0] * facing, pos[1], pos[2] * facing])
+            self._prog[name].value = tuple(float(x) for x in vec / np.linalg.norm(vec))
+        self._prog["light_i"].value = (_AMBIENT, _KEY, _FILL)
+        self._prog["exposure"].value = float(exposure)
+        self._prog["tex"].value = 0
+        self._prog["shade_tex"].value = 1
+        self._prog["emis_tex"].value = 2
+        self._prog["outline_w"].value = 0.0
+        self._prog["outline_pass"].value = 0.0
 
     # -- set up -------------------------------------------------------------
 
@@ -226,20 +283,18 @@ class AvatarRenderer:
         return out
 
     def _camera(self, aspect: float) -> np.ndarray:
-        model = self.model
-        worlds = model.world_matrices()
-        head = model.humanoid.get("head")
-        center = (
-            worlds[head][:3, 3]
-            if head is not None
-            else np.array([0.0, 1.4, 0.0], np.float32)
+        """The WebUI's close-up "webcam" camera (``fitCloseupFraming``)."""
+        side = -1.0 if self.model.faces_minus_z else 1.0
+        up, toward = _CLOSEUP_DIR
+        norm = float(np.hypot(up, toward))
+        dist = _CLOSEUP_DISTANCE * max(1.0, 0.8 / max(aspect, 0.1))
+        target = np.array([0.0, _CLOSEUP_TARGET_Y, 0.0], dtype=np.float32)
+        eye = target + np.array(
+            [0.0, up / norm * dist, side * toward / norm * dist], dtype=np.float32
         )
-        target = center + np.array([0.0, -0.05, 0.0], dtype=np.float32)
-        side = -1.0 if model.faces_minus_z else 1.0
-        eye = target + np.array([0.0, 0.03, 0.85 * side], dtype=np.float32)
-        return (_perspective(32.0, aspect, 0.05, 10.0) @ _look_at(eye, target)).astype(
-            np.float32
-        )
+        return (
+            _perspective(_FOV_DEG, aspect, 0.1, 20.0) @ _look_at(eye, target)
+        ).astype(np.float32)
 
     # -- a frame ------------------------------------------------------------
 
@@ -270,7 +325,15 @@ class AvatarRenderer:
             for draw in self._draws:
                 if draw.blend == blended:
                     draw.draw(worlds, weights, skin_cache)
+        # Outlines: the model's back faces, pushed out along their normals. Drawn after the
+        # opaque colour pass so the colour always wins where the two overlap.
         self._fbo.depth_mask = True
+        self._ctx.enable(self._gl.CULL_FACE)
+        self._ctx.cull_face = "front"
+        for draw in self._draws:
+            if draw.outline_width > 0.0 and not draw.blend:
+                draw.draw_outline()
+        self._ctx.disable(self._gl.CULL_FACE)
 
         data = self._fbo.read(components=3)
         rgb = np.frombuffer(data, dtype=np.uint8).reshape(self.height, self.width, 3)[
@@ -298,7 +361,12 @@ class _Draw:
             if prim.material.alpha_mode == "MASK"
             else (0.02 if self.blend else 0.0)
         )
-        self.texture = renderer.texture(prim.material.texture)
+        material = prim.material
+        self.texture = renderer.texture(material.texture)
+        # No shade / emission texture: a white pixel, so the colour factor alone applies.
+        self.shade_texture = renderer.texture(material.shade_texture)
+        self.emission_texture = renderer.texture(material.emission_texture)
+        self.outline_width = material.outline_width
         self.vbo_pos = ctx.buffer(prim.positions.tobytes(), dynamic=True)
         self.vao = ctx.vertex_array(
             prog,
@@ -312,6 +380,7 @@ class _Draw:
             ctx.buffer(prim.indices.tobytes()),
         )
         self._morphed = False
+        self._joints_bytes = b""
 
     def draw(
         self,
@@ -348,9 +417,31 @@ class _Draw:
                 # glTF: a skinned mesh's own node transform is ignored.
                 joints[:count] = joint_worlds @ skin.inverse_bind[:count]
             skin_cache[key] = joints
-        prog["joints"].write(joints.transpose(0, 2, 1).tobytes())
-        prog["base"].value = tuple(prim.material.base_color)
+        self._joints_bytes = joints.transpose(0, 2, 1).tobytes()
+        prog["joints"].write(self._joints_bytes)
+        material = prim.material
+        prog["base"].value = tuple(material.base_color)
+        prog["shade_col"].value = tuple(material.shade_color)
+        prog["emis_col"].value = tuple(material.emission_color)
+        prog["edges"].value = tuple(material.shade_edges)
         prog["cutoff"].value = self.cutoff
         prog["blended"].value = 1.0 if self.blend else 0.0
+        prog["outline_pass"].value = 0.0
+        prog["outline_w"].value = 0.0
+        self.texture.use(0)
+        self.shade_texture.use(1)
+        self.emission_texture.use(2)
+        self.vao.render()
+
+    def draw_outline(self) -> None:
+        """The outline hull of the primitive just drawn (same skin and morph state)."""
+        prog, material = self.r._prog, self.prim.material
+        prog["joints"].write(self._joints_bytes)  # the program's uniform is shared
+        prog["outline_pass"].value = 1.0
+        prog["outline_w"].value = float(self.outline_width)
+        prog["outline_col"].value = tuple(material.outline_color)
+        prog["outline_mix"].value = float(material.outline_lighting_mix)
         self.texture.use(0)
         self.vao.render()
+        prog["outline_pass"].value = 0.0
+        prog["outline_w"].value = 0.0

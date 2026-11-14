@@ -70,9 +70,11 @@ class AvatarVideoSource:
         height: int,
         fps: int,
         state_reader: StateReader = karada_state,
+        exposure: float = 1.0,
     ) -> None:
         self._model_path = model_path
         self._width, self._height = width, height
+        self._exposure = exposure
         self._interval = 1.0 / max(1, fps)
         self._state_reader = state_reader
         self._pool = ThreadPoolExecutor(
@@ -88,7 +90,9 @@ class AvatarVideoSource:
 
     def _build(self) -> str:
         model = load_vrm(self._model_path)
-        self._renderer = AvatarRenderer(model, self._width, self._height)
+        self._renderer = AvatarRenderer(
+            model, self._width, self._height, self._exposure
+        )
         return self._renderer.gl_renderer
 
     async def start(
