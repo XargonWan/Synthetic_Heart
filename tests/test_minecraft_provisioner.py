@@ -32,9 +32,9 @@ def test_is_enabled_reads_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     prov = _make_prov(tmp_path)
-    _mock_config(monkeypatch, {"PLUGIN_ENABLED__minecraft_vessel": True})
+    _mock_config(monkeypatch, {"PLUGIN_ENABLED__minecraft": True})
     assert prov._is_enabled() is True
-    _mock_config(monkeypatch, {"PLUGIN_ENABLED__minecraft_vessel": False})
+    _mock_config(monkeypatch, {"PLUGIN_ENABLED__minecraft": False})
     assert prov._is_enabled() is False
 
 
@@ -84,7 +84,7 @@ def test_status_when_not_running(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     prov = _make_prov(tmp_path)
-    _mock_config(monkeypatch, {"PLUGIN_ENABLED__minecraft_vessel": True})
+    _mock_config(monkeypatch, {"PLUGIN_ENABLED__minecraft": True})
     status = prov.status()
     assert status["ok"] is True
     assert status["enabled"] is True
@@ -125,7 +125,7 @@ async def test_install_refused_when_disabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     prov = _make_prov(tmp_path)
-    _mock_config(monkeypatch, {"PLUGIN_ENABLED__minecraft_vessel": False})
+    _mock_config(monkeypatch, {"PLUGIN_ENABLED__minecraft": False})
     res = await prov.install()
     assert res["ok"] is False
     assert "disabled" in res["detail"]
@@ -136,7 +136,7 @@ async def test_start_refused_when_disabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     prov = _make_prov(tmp_path)
-    _mock_config(monkeypatch, {"PLUGIN_ENABLED__minecraft_vessel": False})
+    _mock_config(monkeypatch, {"PLUGIN_ENABLED__minecraft": False})
     res = await prov.start()
     assert res["ok"] is False
     assert "disabled" in res["detail"]
@@ -147,7 +147,7 @@ async def test_start_reports_missing_node(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     prov = _make_prov(tmp_path)
-    _mock_config(monkeypatch, {"PLUGIN_ENABLED__minecraft_vessel": True})
+    _mock_config(monkeypatch, {"PLUGIN_ENABLED__minecraft": True})
     monkeypatch.setattr(
         "interface.minecraft_provisioner.shutil.which", lambda name: None
     )

@@ -20,8 +20,11 @@ embodied, and changes automatically on the next prompt (no restart):
 
 * **Disconnected** — only `vessel_connect` is exposed. Its required `game` field
   is an enum of every *enabled* world (a world is enabled when its
-  `<world>_vessel` sub-plugin is on); optional `host`/`port` override that
-  world's server address for the connect only.
+  `PLUGIN_ENABLED__<world>` toggle is on); optional `host`/`port` override that
+  world's server address for the connect only. The backend honours them only
+  when the host appears verbatim in the recent messages people wrote in that chat (last 60 stored rows)
+  (a port only if its digits do too); otherwise the configured server is used
+  and the action result says so.
 * **Connected to world W** — the core set below (minus `connect`) plus W's own
   world-specific verbs appear namespaced `vessel_<W>_<verb>` (e.g.
   `vessel_minecraft_say`), together with `vessel_disconnect`. `vessel_connect`

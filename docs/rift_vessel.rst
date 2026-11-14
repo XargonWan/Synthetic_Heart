@@ -93,7 +93,7 @@ File                                            Role
                                                 While disconnected it exposes a single
                                                 ``vessel_connect`` entry point whose ``game`` enum
                                                 lists every enabled world (plus optional
-                                                ``host``/``port`` overrides). Once connected to
+                                                ``host``/``port`` overrides, honoured only when the host appears in the recent messages people wrote in that chat (last 60 stored rows)). Once connected to
                                                 world *W* the world-agnostic **core set** —
                                                 ``say``, ``move``, ``look``, ``observe``, ``use``,
                                                 ``attack``, ``follow``, ``unfollow``, ``respawn``,
@@ -399,7 +399,7 @@ Key                             Purpose
 
    The Minecraft connector no longer has a dedicated ``MINECRAFT_BRIDGE_ENABLED``
    switch. The bridge provisioner is gated by the Minecraft Vessel plugin's own
-   enable toggle (``PLUGIN_ENABLED__minecraft_vessel``) — enable/disable the
+   enable toggle (``PLUGIN_ENABLED__minecraft``) — enable/disable the
    whole connector from its card in the WebUI Plugins tab.
 
 .. note::
@@ -422,7 +422,7 @@ The bridge is a small Node.js process (Mineflayer) exposing a local HTTP API:
 
 ``BridgeProvisioner`` manages its lifecycle as a **non-root** subprocess inside
 the same container (single-container), gated by the Minecraft Vessel plugin's
-enable toggle (``PLUGIN_ENABLED__minecraft_vessel``).
+enable toggle (``PLUGIN_ENABLED__minecraft``).
 Node.js is **baked into the Docker image by default** (``INSTALL_NODE=true``),
 so the Minecraft Vessel works out of the box in Docker. Only non-Docker /
 bare-metal deployments need to install Node themselves; a node-free image can be

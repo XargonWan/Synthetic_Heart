@@ -1,3 +1,19 @@
+### feat(vessel): ask Rekku to join a named Minecraft server and she really goes there
+
+**Before.** "Rekku logga in minecraft su pvp.gentoobtw.fyi" connected to the configured default (a dead LAN address) while she announced the requested server. The model passed the address as `server`, a field `vessel_connect` did not have; host/port had been hidden from it (`9f123a81`) so provider names in its context could not become endpoints, and the unknown field was dropped without a word.
+
+**Now.** `vessel_connect` offers optional `host`/`port` again, told to use them only for a server the asker named. `VesselPlugin._vet_address_override` (called from `execute_action` with `_asking_text`: the triggering message, the turn's queued messages and the people's messages (never Synth's) among the last 60 stored in that chat — so "ok, riprova" after "logga su X" still works) keeps a host only when it appears there as a whole token (`rift.venice.ai` out of nowhere, or `gentoobtw.fyi` out of `pvp.gentoobtw.fyi`, is dropped), a port only when its digits appear too, and understands the `server`/`address`/`ip` spellings and `host:port`. A dropped address is logged and named in the action result, so the model stops claiming a server it is not on. Direct backend callers (`connect_world`, tests) are unchanged.
+
+**Location.** `plugins/rift_vessel/vessel_plugin.py`, `tests/test_vessel_connect_address.py` (new), `tests/test_vessel_action_namespacing.py`, `plugins/rift_vessel/guide.md`, `docs/rift_vessel.rst`.
+
+### fix(vessel): Minecraft was missing from the games `vessel_connect` offers while its plugin card was enabled
+
+**Before.** The Minecraft card showed enabled, but `vessel_connect` listed only `retroxr` ("Available games: retroxr"). Asked to log into Minecraft, the model sent `game: minecraft`, the connect was refused as `world_unavailable`, and the corrector kept retrying for minutes (finally swapping in `retroxr`, a game nobody asked for).
+
+**Now.** `VesselPlugin._world_enabled` reads `PLUGIN_ENABLED__<world>` (e.g. `PLUGIN_ENABLED__minecraft`), the key the plugin loader and the card toggle actually read and write. It used to read `PLUGIN_ENABLED__<world>_vessel`, an alias key the card cannot reach; a stale `false` left there (the live database had one from July) hid the world with no way to clear it from the UI. `interface/minecraft_provisioner.py::_is_enabled` had the same mismatch and now reads the same key. No database change is needed: the stale `_vessel` row is simply ignored.
+
+**Location.** `plugins/rift_vessel/vessel_plugin.py`, `interface/minecraft_provisioner.py`, `tests/test_vessel_world_enabled.py` (new), `tests/test_minecraft_provisioner.py`, `AGENTS.md`, `docs/rift_vessel.rst`, `plugins/rift_vessel/minecraft/guide.md`.
+
 ### fix(vessel): a visit shows under its world in Activities, once, not as "Unknown"
 
 **Before.** A connect that failed after the 30 s disconnect grace had already closed its session rolled back through `VesselInterface.end_session`, which no longer tracked the session: it logged another `session_end` with an empty path and `environment = unknown` ("Left unknown (connect_failed)", once per retry). The Activities card is grouped by session and titled by its last row's environment, so the whole visit showed as "Unknown". A retried connect that reused the open session also logged a second "Embodied in minecraft".

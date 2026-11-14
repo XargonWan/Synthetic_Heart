@@ -45,7 +45,7 @@ Without a skin plugin the bot keeps the default skin. See *Skin* below.
 
 1. **Enable the plugin** — flip the Minecraft Vessel plugin **on** from its card
    in the WebUI Plugins tab. The bridge provisioner is gated by this toggle
-   (`PLUGIN_ENABLED__minecraft_vessel`); there is no separate bridge master switch.
+   (`PLUGIN_ENABLED__minecraft`); there is no separate bridge master switch.
    Note: if this plugin is enabled but the **Rift Vessel** core plugin is
    disabled, the card shows an **orange** LED — Minecraft can't connect until the
    core Vessel plugin is also enabled.
@@ -108,7 +108,7 @@ These live on the Rift Vessel **core** and apply to every world, not just Minecr
 ### Minecraft connector settings (`minecraft_vessel`)
 
 The bridge itself is gated by the plugin's own enable toggle
-(`PLUGIN_ENABLED__minecraft_vessel`) — there is no separate `MINECRAFT_BRIDGE_ENABLED`
+(`PLUGIN_ENABLED__minecraft`) — there is no separate `MINECRAFT_BRIDGE_ENABLED`
 key. Enable/disable the whole thing from the plugin card.
 
 | Key | Default | Advanced | Purpose |

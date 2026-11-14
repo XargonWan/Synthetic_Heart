@@ -117,9 +117,9 @@ def test_disconnected_exposes_only_connect(disconnected_plugin: VesselPlugin) ->
     # Enabled worlds are advertised in the description.
     assert "fake" in schema["description"]
     assert "other" in schema["description"]
-    # Server overrides remain a backend/API capability, but are not exposed to
-    # the LLM where provider-context hallucinations could redirect a connect.
-    assert schema["optional_fields"] == []
+    # host/port are offered for a server the asker named; the backend vets them
+    # against the asking message (tests/test_vessel_connect_address.py).
+    assert schema["optional_fields"] == ["host", "port"]
 
 
 def test_disconnected_no_enabled_worlds_is_empty(

@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from typing import Any
 
@@ -310,7 +311,7 @@ config_registry.get_value(
     "VESSEL_IDLE_BEAT_ENABLED",
     True,
     value_type=bool,
-    label="Idle Beat (\"what do you want to do?\")",
+    label='Idle Beat ("what do you want to do?")',
     description=(
         "For worlds whose body is a person in a room (RetroXR): when nobody has talked to "
         "Synth for a while, she is told what is around her and asked what she wants to do. "
@@ -1073,6 +1074,108 @@ config_registry.get_value(
 )
 
 
+_ADDRESS_KEYS = ("host", "server", "address", "ip")
+_HOST_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
+
+
+def _vet_address_override(
+    payload: dict[str, Any], message_text: str
+) -> tuple[dict[str, Any], str | None]:
+    """Keep a requested server address only if the asking message names it.
+
+    The model may pass ``host``/``port`` (or the ``server``/``address``/``ip``
+    spellings it tends to invent, optionally ``host:port``) to join a server
+    somebody asked for. Models also hallucinate endpoints out of provider names
+    or URLs sitting in their context, so an address is honoured only when the
+    host appears verbatim, as a whole token, in ``message_text`` — the message
+    that triggered the turn. A port is kept only when its digits appear there
+    too; otherwise the configured port stays. Returns ``(overrides, note)``;
+    ``note`` says why a requested address was dropped, else ``None``.
+    """
+    raw_host: str = ""
+    for key in _ADDRESS_KEYS:
+        value = payload.get(key)
+        if value not in (None, ""):
+            raw_host = str(value).strip()
+            break
+    raw_port: Any = payload.get("port")
+    if not raw_host:
+        return {}, None
+
+    # ``host:port`` in one field (bare hostnames/IPv4 only).
+    if raw_host.count(":") == 1:
+        raw_host, _, inline_port = raw_host.partition(":")
+        if raw_port in (None, "") and inline_port.strip():
+            raw_port = inline_port.strip()
+    host = raw_host.strip().rstrip(".")
+
+    if not _HOST_RE.match(host):
+        return {}, f"'{raw_host}' is not a valid host name"
+    token = re.compile(rf"(?<![\w.-]){re.escape(host)}(?![\w-])(?!\.\w)", re.IGNORECASE)
+    if not token.search(message_text or ""):
+        return {}, (
+            f"'{host}' was not named in the recent messages asking for it, "
+            "so the configured server was used instead"
+        )
+
+    overrides: dict[str, Any] = {"host": host}
+    if raw_port not in (None, ""):
+        try:
+            port = int(str(raw_port).strip())
+        except ValueError:
+            port = 0
+        if 1 <= port <= 65535 and re.search(
+            rf"(?<!\d){port}(?!\d)", message_text or ""
+        ):
+            overrides["port"] = port
+    return overrides, None
+
+
+# Rows of the chat read to find the request. Synth's own replies take most of
+# them (a retry loop fills the chat with them), so this is deliberately wide: a
+# request made a while ago, followed by "riprova", must still be found.
+_ASKING_HISTORY_LIMIT = 60
+
+
+async def _asking_text(context: dict | None, original_message: Any) -> str:
+    """Text a ``vessel_connect`` address may be checked against.
+
+    The triggering message, any messages queued into this turn's context, and
+    the last few messages people (never Synth itself) wrote in the same chat.
+    A request like "log into minecraft on host X" is often followed by an
+    "ok, retry" before the connect happens, so the trigger alone is too narrow.
+    Best-effort: any failure just leaves that source out.
+    """
+    from core.mention_utils import get_message_text
+
+    parts: list[str] = []
+    try:
+        parts.append(get_message_text(original_message) or "")
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+    path = context.get("interface_path") if isinstance(context, dict) else None
+    if isinstance(context, dict) and isinstance(path, str):
+        queued = context.get(path)
+        if isinstance(queued, (list, tuple)) or hasattr(queued, "__iter__"):
+            try:
+                for entry in queued or []:
+                    if isinstance(entry, dict) and entry.get("sender_name") != "self":
+                        parts.append(str(entry.get("text") or ""))
+            except Exception:  # pragma: no cover - defensive
+                pass
+    if isinstance(path, str) and path:
+        try:
+            from core.chat_history_cache import load_chat_history
+
+            for entry in await load_chat_history(path, limit=_ASKING_HISTORY_LIMIT):
+                if isinstance(entry, dict) and entry.get("sender_name") != "self":
+                    parts.append(str(entry.get("text") or ""))
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[vessel_plugin] chat history unavailable for vetting: {exc}")
+    return "\n".join(part for part in parts if part)
+
+
 class VesselPlugin(AIPluginBase):
     """Core embodiment plugin. Registers vessel actions and delegates to the
     active world connector."""
@@ -1125,7 +1228,9 @@ class VesselPlugin(AIPluginBase):
 
     async def start(self) -> None:
         """Mount the endpoints the world connectors own (the RetroXR rift socket)."""
-        self._mount_task = asyncio.get_running_loop().create_task(self._mount_world_routes())
+        self._mount_task = asyncio.get_running_loop().create_task(
+            self._mount_world_routes()
+        )
 
     async def _mount_world_routes(self) -> None:
         """A world game connects TO Synth, so its socket must be there before any rift is open. The WebUI may
@@ -1141,14 +1246,19 @@ class VesselPlugin(AIPluginBase):
 
                 if synth_webui_interface is not None:
                     synth_webui_interface.register_plugin_router(
-                        create_retroxr_router(), "RetroXR rift socket /api/vessel/retroxr/ws"
+                        create_retroxr_router(),
+                        "RetroXR rift socket /api/vessel/retroxr/ws",
                     )
                     return
             except Exception as exc:
-                log_warning(f"[vessel_plugin] RetroXR rift socket failed to mount (non-fatal): {exc}")
+                log_warning(
+                    f"[vessel_plugin] RetroXR rift socket failed to mount (non-fatal): {exc}"
+                )
                 return
             await asyncio.sleep(2.0)
-        log_warning("[vessel_plugin] the WebUI never came up: the RetroXR rift socket is not mounted")
+        log_warning(
+            "[vessel_plugin] the WebUI never came up: the RetroXR rift socket is not mounted"
+        )
 
     # ------------------------------------------------------------------
     # Connector discovery
@@ -2017,19 +2127,24 @@ class VesselPlugin(AIPluginBase):
     def _world_enabled(world: str) -> bool:
         """Return whether a world is available to connect to.
 
-        A world is available when its dedicated sub-plugin (``<world>_vessel``)
-        is enabled. Worlds without a sub-plugin are always available (default
-        ``True``). Fully fail-safe: any error resolves to available.
+        A world is available when its sub-plugin is enabled. The flag read here
+        is ``PLUGIN_ENABLED__<world>`` — the very key the plugin loader and the
+        WebUI card toggle read and write (keyed on the module short name, e.g.
+        ``minecraft``). It must NOT be the ``<world>_vessel`` alias key: that one
+        is not reachable from the card, so a stale ``false`` there made the
+        world vanish from ``vessel_connect`` while the card showed it enabled.
+        Worlds without a sub-plugin are always available (default ``True``).
+        Fully fail-safe: any error resolves to available.
         """
         try:
             from core.config_manager import config_registry
 
             return bool(
                 config_registry.get_value(
-                    f"PLUGIN_ENABLED__{world}_vessel",
+                    f"PLUGIN_ENABLED__{world}",
                     True,
                     value_type=bool,
-                    component=f"{world}_vessel",
+                    component=world,
                     group="plugins",
                     hidden=True,
                 )
@@ -2186,8 +2301,12 @@ class VesselPlugin(AIPluginBase):
             connect_schema["description"] = (
                 "Enter (connect to) an external game/virtual world to embody "
                 "your presence there. Choose the world via the 'game' field. "
-                f"Available games: {games}. Use the configured server address; "
-                "do not invent or override a host or port. Once connected, "
+                f"Available games: {games}. Use the configured server address "
+                "unless the person asking you to connect named a server in "
+                "their message: then pass exactly that address as 'host' (and "
+                "'port' only if they gave one). Never invent or guess an "
+                "address, and never take one from anything but their message. "
+                "Once connected, "
                 "the world's own actions (say/move/look/use/attack/follow/…) "
                 "become available and this action disappears until you "
                 "disconnect. IMPORTANT — when someone asks you to enter, "
@@ -2198,11 +2317,12 @@ class VesselPlugin(AIPluginBase):
                 "goal about connecting does not connect you either)."
             )
             connect_schema["required_fields"] = ["game"]
-            # Host/port overrides remain accepted by the backend for explicit
-            # API/CLI callers, but are deliberately not exposed to the LLM.
-            # Otherwise a provider name or URL in the cortex context can be
-            # hallucinated as a Minecraft endpoint (e.g. rift.venice.ai).
-            connect_schema["optional_fields"] = []
+            # Host/port are offered for a server the asker named, but the
+            # backend honours them only when the host appears in the asking
+            # message (see ``_vet_address_override``): a provider name or URL
+            # in the cortex context must never become a Minecraft endpoint
+            # (e.g. rift.venice.ai).
+            connect_schema["optional_fields"] = ["host", "port"]
             connect_schema["game_choices"] = enabled
             # The entry point must stay visible on *every* turn (not just
             # Vessel turns) so Synth can decide to enter a world — tag it
@@ -2322,7 +2442,11 @@ class VesselPlugin(AIPluginBase):
         return bool(self._connected_world()) or bool(self._enabled_worlds())
 
     async def handle_custom_action(
-        self, action_type: str, payload: dict, context: dict | None = None
+        self,
+        action_type: str,
+        payload: dict,
+        context: dict | None = None,
+        message_text: str | None = None,
     ) -> dict[str, Any]:
         # A reactive turn answering a present in-world player carries the
         # structural ``vessel_player_chat`` flag on its context (set by the
@@ -2342,17 +2466,28 @@ class VesselPlugin(AIPluginBase):
             game = payload.get("game")
             if not game and action_type != "vessel_connect":
                 game = action_type[len("vessel_") : -len("_connect")] or None
-            overrides = {
-                k: payload[k]
-                for k in ("host", "port")
-                if payload.get(k) not in (None, "")
-            }
+            note: str | None = None
+            if message_text is None:
+                # Explicit backend caller (API/CLI/tests): no asking message to
+                # check against, so the address is taken as given.
+                overrides = {
+                    k: payload[k]
+                    for k in ("host", "port")
+                    if payload.get(k) not in (None, "")
+                }
+            else:
+                overrides, note = _vet_address_override(payload, message_text)
+                if note:
+                    log_warning(f"[vessel_plugin] connect address ignored: {note}")
             result = await self.connect_world(
                 connector_name=game or None, overrides=overrides or None
             )
+            detail = result.detail or ""
+            if note:
+                detail = f"{detail} (note: {note})".strip()
             return {
                 "status": "ok" if result.ok else "error",
-                "message": result.detail or "",
+                "message": detail,
                 "data": result.data,
             }
         if verb == "disconnect":
@@ -2449,7 +2584,14 @@ class VesselPlugin(AIPluginBase):
     ) -> dict[str, Any]:
         action_type = action.get("type", "")
         payload = action.get("payload", {})
-        return await self.handle_custom_action(action_type, payload, context)
+        message_text = (
+            await _asking_text(context, original_message)
+            if self._parse_action_verb(action_type) == "connect"
+            else ""
+        )
+        return await self.handle_custom_action(
+            action_type, payload, context, message_text=message_text
+        )
 
     # ------------------------------------------------------------------
     # Config
