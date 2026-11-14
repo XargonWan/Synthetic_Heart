@@ -2468,6 +2468,7 @@ class TelegramInterface:
             "Format: 'telegram_bot/chat_id' for regular chats or 'telegram_bot/chat_id/thread_id' for topics/threads",
             "Example: if input shows 'telegram_bot/-1003098886330/789', use EXACTLY that as interface_path in your payload",
             "Never use just chat_id or target - always use the complete interface_path format",
+            "A Telegram Bot API bot cannot message another bot, nor start a chat with someone who never wrote to it: to reach another bot use an interface that writes from a user account.",
         ]
         if vox_on:
             payload["send_as_voice"] = {

@@ -193,6 +193,12 @@ except Exception:
 # the final answer, and stops. Recognised in the prompt's AVAILABLE TOOLS block.
 _COMPLETION_TOOL = "attempt_completion"
 
+# Structural marker prefixed to a completion summary so a later turn reads the
+# task as FINISHED (see the ``attempt_completion`` handling in the loop). It is
+# for persisted context only: delivery to the user strips it
+# (``agent_router._deliver_agent_reply``) so it never reaches a chat.
+TASK_COMPLETE_PREFIX = "Task complete: "
+
 # Delivery actions whose failure the loop tries to fix *programmatically* once,
 # before ever surfacing the error back to the model. Only cheap, safe repairs
 # are attempted (text sanitisation, deriving a missing target from the
@@ -2126,7 +2132,7 @@ class AgentLoopManager:
                     # f1684175: after "good job baby" the model replied "I'll
                     # get that all read for you right away" although the task
                     # was already done).
-                    final_text = f"Task complete: {final_text}"
+                    final_text = f"{TASK_COMPLETE_PREFIX}{final_text}"
                 observations.append(
                     {
                         "iteration": i,
@@ -3586,10 +3592,16 @@ class AgentLoopManager:
                 if source_interface:
                     lines.append(f"- interface: {source_interface}")
                 lines.append(
-                    "When you call a message/delivery action (e.g. "
-                    "message_telegram_bot), you MUST set its 'interface_path' "
-                    "field to EXACTLY the interface_path above so the reply "
-                    "reaches this same conversation."
+                    "When you reply to the user with send_message, you MUST set "
+                    "its 'interface_path' field to EXACTLY the interface_path "
+                    "above so the reply reaches this same conversation. The ONLY "
+                    "exception: when the user explicitly asks you to send a "
+                    "message or command to someone else or to a bot (e.g. "
+                    "'send /embark to @some_bot'), do it with send_message using "
+                    "that recipient's own interface_path (e.g. "
+                    "'telegram/@some_bot') and the exact text asked, then tell "
+                    "the user here that you sent it. Never answer with "
+                    "instructions for the user to do it themselves."
                 )
                 source_block = "\n".join(lines)
 
@@ -3670,7 +3682,7 @@ class AgentLoopManager:
             "rather than repeating an identical call.\n"
             "INTERNAL NOTES vs USER MESSAGES: keep your private reasoning "
             "separate from what you say to the user. A message/delivery action "
-            "(e.g. message_telegram_bot) is a real message the user WILL read — "
+            "(send_message) is a real message the user WILL read — "
             "it must contain ONLY what you want to tell them, in natural "
             "conversational language, never your step-by-step plan, tool logs, "
             "raw tool output, status chatter, or thinking-out-loud. If you want "

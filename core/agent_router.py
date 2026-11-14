@@ -818,6 +818,16 @@ async def _deliver_agent_reply(
         )
         return
 
+    # The ``Task complete:`` marker exists for persisted context only (so a later
+    # turn reads the task as finished). It must never reach the chat, and the
+    # persona voiceover must not be asked to restyle it either.
+    from core.agent_core import TASK_COMPLETE_PREFIX
+
+    if final_text.startswith(TASK_COMPLETE_PREFIX):
+        final_text = final_text[len(TASK_COMPLETE_PREFIX) :].lstrip()
+        if not final_text:
+            return
+
     # Persona voiceover: the agent loop runs persona-free by design (its raw
     # final text is operationally correct but tonally flat), so before the
     # result ships to the user, re-voice it once through the persona chat

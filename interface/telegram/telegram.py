@@ -1258,7 +1258,7 @@ class TelegramUserInterface:
             "CRITICAL: ALWAYS use interface_path from input.payload.source.interface_path to reply in same conversation!",
             "Format: 'telegram/chat_id' for regular chats or 'telegram/chat_id/thread_id' for topics",
             "Never use just chat_id or target - always use the complete interface_path format",
-            "You are writing from a real user account, not a bot: write like a person, no bot commands.",
+            "You are writing from a real user account, not a bot: write like a person and do not use bot commands in normal conversation. Exception: when the user explicitly asks you to send a command (e.g. /start) to a bot, send exactly that text to that bot's interface_path.",
         ]
         if is_vox_enabled():
             payload["send_as_voice"] = {

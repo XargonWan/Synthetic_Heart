@@ -368,3 +368,24 @@ def test_classify_web_search_delivery_turn_stays_fast_even_if_flagged_agentic(
         )
         == agent_router.AGENT
     )
+
+
+@pytest.mark.asyncio
+async def test_deliver_strips_task_complete_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ``Task complete:`` marker is persisted-context only, never user-facing."""
+    delivered, _ = _delivery_fixture(monkeypatch)
+    result: dict[str, Any] = {
+        "stop_reason": "completed",
+        "final_text": "Task complete: Sent /embark to the bot.",
+        "observations": [],
+    }
+    context = {"interface_path": "telegram_bot/123"}
+
+    await agent_router._deliver_agent_reply(result, context, None, None)
+
+    assert len(delivered) == 1
+    assert delivered[0]["payload"]["text"] == "Sent /embark to the bot."
+    # The persisted result keeps the marker for later turns.
+    assert result["final_text"].startswith("Task complete: ")
