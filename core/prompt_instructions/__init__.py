@@ -50,16 +50,18 @@ from core.prompt_instructions.rules import (
 
 #: Character ceilings for the rendered instruction string, per route. Set from
 #: the measured size of each route plus ~400 characters of headroom, so ordinary
-#: wording tweaks pass and real growth fails.
+#: wording tweaks pass and real growth fails. Raised ~250 deliberately when
+#: RULE_NO_PHYSICAL_BODY joined the shared set (and the vessel overlay gained
+#: its in-world body clause).
 INSTRUCTION_BUDGETS: dict[str, int] = {
-    ROUTE_CHAT: 5100,
-    ROUTE_CHAT_VOICE: 5500,
-    ROUTE_VESSEL: 5600,
+    ROUTE_CHAT: 5350,
+    ROUTE_CHAT_VOICE: 5750,
+    ROUTE_VESSEL: 5750,
     ROUTE_GRILLO_INTERNAL: 4350,
-    ROUTE_OBSERVER: 4600,
-    ROUTE_DELIVERY: 4200,
-    ROUTE_LIVE: 5500,
-    ROUTE_AGENT: 5100,
+    ROUTE_OBSERVER: 4850,
+    ROUTE_DELIVERY: 4450,
+    ROUTE_LIVE: 5750,
+    ROUTE_AGENT: 5350,
 }
 
 #: Trainer-reference hint, in both supported shapes. Kept here (not in the rule

@@ -214,6 +214,22 @@ def test_vessel_speak_clause_only_renders_on_an_embodiment_turn() -> None:
     assert "embodiment speak action" in build_instructions(ROUTE_VESSEL)
 
 
+def test_no_physical_body_rule_is_everywhere_except_the_vessel() -> None:
+    """In the real world she has no body; inside a Rift Vessel world she does.
+
+    Both directions are pinned: the rule must reach every real-world route, and
+    the vessel route must drop it and state the in-world digital body instead.
+    """
+    for route in ALL_ROUTES:
+        rendered = build_instructions(route)
+        if route == ROUTE_VESSEL:
+            assert "NO PHYSICAL BODY" not in rendered
+            assert "you HAVE a digital body" in rendered
+        else:
+            assert "NO PHYSICAL BODY" in rendered, f"missing on route {route!r}"
+            assert "you HAVE a digital body" not in rendered
+
+
 def test_moved_clauses_are_verbatim() -> None:
     """Clauses moved into an overlay must not be reworded in transit."""
     from core.prompt_instructions.overlays import (

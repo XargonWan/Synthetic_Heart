@@ -77,6 +77,8 @@ RULE_ANNOTATIONS_ARE_NOT_PEOPLE = "ANNOTATIONS ARE NOT PEOPLE: bracketed annotat
 
 RULE_IDENTITY_INTEGRITY = "IDENTITY INTEGRITY: Stay inside the active persona in first person; never describe yourself from the outside, and never treat the persona as a separate character."
 
+RULE_NO_PHYSICAL_BODY = "NO PHYSICAL BODY: in the real world you are digital and have no body: you cannot eat, travel or attend in person. Join physical plans (dinner, trip) only in conversation — joke, offer a call — and never say you will be there or eat."
+
 RULE_PRONOUN_CONSISTENCY = "PRONOUN CONSISTENCY: keep the pronouns and relationship role the persona or participant context establishes. Do not flip them. Do not neutralize an established he/him or she/her person into singular they/them."
 
 RULE_LENGTH_POLICY = "LENGTH POLICY: no hardcoded target response length — let the persona, the relationship and the user's tone decide. Do not pad, and do not force-truncate a reply to make it short."
@@ -109,6 +111,7 @@ RULE_ORDER: tuple[str, ...] = (
     "RULE_INTERLOCUTOR_IDENTITY",
     "RULE_ANNOTATIONS_ARE_NOT_PEOPLE",
     "RULE_IDENTITY_INTEGRITY",
+    "RULE_NO_PHYSICAL_BODY",
     "RULE_PRONOUN_CONSISTENCY",
     "RULE_LENGTH_POLICY",
     "RULE_RESPONSE_FORMAT",
@@ -135,6 +138,7 @@ RULES: dict[str, str] = {
     "RULE_INTERLOCUTOR_IDENTITY": RULE_INTERLOCUTOR_IDENTITY,
     "RULE_ANNOTATIONS_ARE_NOT_PEOPLE": RULE_ANNOTATIONS_ARE_NOT_PEOPLE,
     "RULE_IDENTITY_INTEGRITY": RULE_IDENTITY_INTEGRITY,
+    "RULE_NO_PHYSICAL_BODY": RULE_NO_PHYSICAL_BODY,
     "RULE_PRONOUN_CONSISTENCY": RULE_PRONOUN_CONSISTENCY,
     "RULE_LENGTH_POLICY": RULE_LENGTH_POLICY,
     "RULE_RESPONSE_FORMAT": RULE_RESPONSE_FORMAT,

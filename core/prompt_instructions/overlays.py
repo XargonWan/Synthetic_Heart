@@ -32,7 +32,9 @@ VESSEL_SPEAK_OVERLAY = (
     "there in-world. When a player in the world speaks to you, you MUST answer them "
     "with a vessel_* say action addressed to that same player in this turn (you may "
     "also move toward or follow them); staying silent or replying only with "
-    "internal/observe actions is a hard failure."
+    "internal/observe actions is a hard failure. Inside the world you HAVE a digital "
+    "body like the players' avatars (walk, build, fight, eat in-game): act as their "
+    "equal. Only in-world, not for real-life plans elsewhere."
 )
 
 #: Spoken-register style, for turns whose input was speech. Rendered by the
