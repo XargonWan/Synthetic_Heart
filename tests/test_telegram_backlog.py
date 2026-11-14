@@ -9,6 +9,7 @@ history under that timestamp and must not reach the live pipeline.
 from __future__ import annotations
 
 import asyncio
+import itertools
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -16,6 +17,8 @@ from typing import Any
 import pytest
 
 from interface.telegram import telegram as tg
+
+_ids = itertools.count(1000)
 
 
 def _message(
@@ -33,7 +36,7 @@ def _message(
         chat=SimpleNamespace(id=-1003098886330, type="supergroup", username=None),
         thread_id=thread_id,
         is_topic_message=thread_id is not None,
-        message_id=77,
+        message_id=next(_ids),
         from_user=SimpleNamespace(id=31321637, full_name="Jay Cheshire"),
         reply_to_message=reply_to,
     )
@@ -111,7 +114,7 @@ def test_a_backlog_message_goes_to_history_only(pipeline: dict[str, list[Any]]) 
     assert entry["message_text"] == "ieri sera"
     assert entry["interface_path"] == "telegram/-1003098886330/239"
     assert entry["sender_name"] == "Jay Cheshire" and entry["sender_id"] == "31321637"
-    assert entry["message_id"] == 77
+    assert entry["message_id"] == old.message_id
     # Kept under its own time, so it sits where it belongs in the history.
     assert entry["timestamp"] == old.date.isoformat()
 

@@ -45,14 +45,24 @@ Behaviour
   ``core.chat_attention``) decide when SyntH answers. Private chats are always
   directed.
 - **Backlog is history, not conversation:** when the account is added to a chat
-  Telegram sends the latest messages (usually 100), and after downtime it sends
-  what was missed. A message older than ``TELEGRAM_BACKLOG_MAX_AGE_SECONDS``
+  Telegram sends the latest messages (usually 100), and the startup recovery
+  (below) hands over what was missed. A message older than ``TELEGRAM_BACKLOG_MAX_AGE_SECONDS``
   (default 120, ``0`` = treat everything as live) when it reaches the account is
   stored in the chat history under its **original timestamp** and nothing else:
   no reply, no command execution, no attention or trigger evaluation. It then
   reaches the model the usual way, as history. (Implemented by
   ``is_backlog_message`` / ``store_backlog_message`` in
   ``interface/telegram/telegram.py``.)
+- **Messages missed while offline are recovered:** the session carries no update
+  state (``StringSession``), so Telegram cannot replay what arrived while SyntH
+  was down. After connecting, ``recover_missed_messages`` re-reads every chat
+  active within ``TELEGRAM_RECOVERY_WINDOW_SECONDS`` (default 3600, ``0`` = off)
+  and sends each incoming text message that is not yet in ``chat_history_cache``
+  (same chat path, sender and timestamp) through the normal path, oldest first;
+  past the backlog age it becomes history only. Telegram's read/unread flags are
+  never consulted, so opening the account in another client cannot make a
+  message vanish. Media-only messages are not recovered (they leave no history
+  row to tell them from handled ones).
 - **Features:** text, replies, media (photos, documents, audio, video, stickers),
   voice notes (Auris transcription in, ``send_as_voice`` out), reactions,
   commands via the central command registry, trainer relay, peer-turn
@@ -84,5 +94,6 @@ Key                                     Purpose
 ``TELEGRAM_SESSION``                    Stored session (hidden, written by the login flow)
 ``TELEGRAM_USE_SYNTH_AVATAR``           Opt in to the core synth avatar as profile picture
 ``TELEGRAM_BACKLOG_MAX_AGE_SECONDS``    Older messages are history only (default 120; 0 = off)
+``TELEGRAM_RECOVERY_WINDOW_SECONDS``     Re-read chats at startup for missed messages (default 3600; 0 = off)
 ``TRAINER_IDS``                         Add ``telegram:<user_id>`` for trainer features
 ======================================  ========================================================

@@ -1,3 +1,13 @@
+### fix(telegram): messages sent while the user account was offline are picked up at startup, whatever Telegram says about them being read
+
+**Before.** The Telethon client runs on a `StringSession`, which keeps no update state, so a message sent while the container was restarting was never delivered. On 14 Nov a reply to Rekku ("riprova ora", sent in the seconds the container was restarting) left no row in `chat_history_cache` and got no answer; the restart gap is the likely cause, not proven. Telegram's own unread flags were no help either: they are cleared by opening the account in any other client.
+
+**Now.** After connecting, `recover_missed_messages` re-reads each chat active within `TELEGRAM_RECOVERY_WINDOW_SECONDS` (default 3600, `0` = off) and sends every incoming text message that is not in `chat_history_cache` yet (matched on chat path, sender and timestamp, new `chat_message_exists`) through the normal path, oldest first. Past `TELEGRAM_BACKLOG_MAX_AGE_SECONDS` a message stays history-only, as before. Read/unread state is never consulted, so reading the account on a phone cannot hide a message. A per-process set of handled messages keeps recovery and live updates from processing the same one twice (it also drops a redelivered update).
+
+**Not verified here.** Not run against a live Telegram account; the unit tests drive a fake client. Media-only messages (voice, photo without caption) are not recovered: they leave no history row to tell them from handled ones.
+
+**Location.** `interface/telegram/telegram.py`, `core/chat_history_cache.py`, `docs/telegram_user_interface.rst`, `tests/test_telegram_recovery.py` (new), `tests/test_telegram_backlog.py` (unique message ids).
+
 ### feat(queue): messages of the same chat that pile up behind a slow turn become one queue element
 
 **Before.** With a slow model every message queued as its own element and cost a whole turn: fifteen `player-chat` lines of `vessel/minecraft/192_168_1_42_25565` meant fifteen turns, and the Queue view listed all of them. Vessel player chat is `no_compact`, so even the consumer-side compaction never joined them.

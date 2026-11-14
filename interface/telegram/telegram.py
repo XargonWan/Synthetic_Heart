@@ -11,7 +11,8 @@ import asyncio
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from collections import OrderedDict
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Optional
 
@@ -111,6 +112,28 @@ register_exposed_var(
         "Telegram sends when the account is added to a chat, or what arrived "
         "while it was offline) is kept as chat history only: it is not answered "
         "and triggers nothing. 0 treats every message as live."
+    ),
+    scope="interface",
+    advanced=True,
+    component=INTERFACE_ID,
+)
+# Startup recovery: Telethon is given no persisted update state (StringSession),
+# so a message that arrives while the process is down is never delivered. After
+# connecting we re-read the recent chats from Telegram and hand over whatever we
+# have not stored yet. Telegram's own read/unread flags are deliberately not used:
+# opening this account in another client marks messages read and must not hide
+# them from us.
+register_exposed_var(
+    "TELEGRAM_RECOVERY_WINDOW_SECONDS",
+    label="Missed Message Recovery Window (s)",
+    default=3600,
+    value_type=int,
+    ui_type="number",
+    description=(
+        "At startup, re-read chats active within this many seconds and process "
+        "the messages that arrived while SyntH was offline and were never stored. "
+        "Read/unread state on Telegram is ignored. Messages older than the backlog "
+        "age are kept as history only. 0 disables the recovery."
     ),
     scope="interface",
     advanced=True,
@@ -853,22 +876,125 @@ async def handle_command(update: Any, context: TgContext) -> None:
         await message.reply_text("❌ Error processing command.")
 
 
+# Messages already handed to the pipeline in this process, so the startup
+# recovery and a live (or re-delivered) update never process the same one twice.
+_SEEN_LIMIT = 4000
+_seen_messages: "OrderedDict[tuple[Any, Any], None]" = OrderedDict()
+
+
+def _claim_message(raw: Any) -> bool:
+    """Mark a raw message as handled; False when it already was."""
+    key = (
+        getattr(raw, "chat_id", None),
+        getattr(raw, "id", None) or getattr(raw, "message_id", None),
+    )
+    if key[1] is None:
+        return True
+    if key in _seen_messages:
+        return False
+    _seen_messages[key] = None
+    while len(_seen_messages) > _SEEN_LIMIT:
+        _seen_messages.popitem(last=False)
+    return True
+
+
+async def _dispatch_incoming(bot: TelethonBot, message: TgMessage) -> None:
+    """Send one wrapped incoming message down the live or the backlog path."""
+    if is_backlog_message(message):
+        await store_backlog_message(message)
+        return
+    update = TgUpdate(message=message)
+    context = TgContext(bot=bot)
+    text = message.text or ""
+    if text.startswith("/"):
+        await handle_command(update, context)
+    else:
+        await handle_message(update, context)
+
+
 async def _on_new_message(bot: TelethonBot, event: Any) -> None:
     """Telethon ``NewMessage`` entry point."""
     try:
-        message = await wrap_message(bot, event.message)
-        if is_backlog_message(message):
-            await store_backlog_message(message)
+        if not _claim_message(event.message):
+            log_debug("[telegram] update already handled; skipping")
             return
-        update = TgUpdate(message=message)
-        context = TgContext(bot=bot)
-        text = message.text or ""
-        if text.startswith("/"):
-            await handle_command(update, context)
-        else:
-            await handle_message(update, context)
+        message = await wrap_message(bot, event.message)
+        await _dispatch_incoming(bot, message)
     except Exception as exc:
         log_error(f"[telegram] Exception while handling an update: {exc!r}")
+
+
+# Dialogs scanned and messages read per dialog by the startup recovery.
+_RECOVERY_DIALOGS = 200
+_RECOVERY_PER_DIALOG = 40
+
+
+def _recovery_window() -> float:
+    try:
+        value = config_registry.get_value(
+            "TELEGRAM_RECOVERY_WINDOW_SECONDS", 3600, value_type=int
+        )
+        return float(value) if not isinstance(value, bool) else 3600.0
+    except Exception:
+        return 3600.0
+
+
+async def recover_missed_messages(client: Any, bot: TelethonBot) -> int:
+    """Process messages that arrived while we were offline. Returns how many.
+
+    Reads each recently active chat from Telegram and handles every incoming
+    text message we have not stored yet, oldest first, through the same path as
+    a live update (so old ones become history only, see ``is_backlog_message``).
+    What counts as "already handled" is our own chat history; Telegram's
+    read/unread state is never consulted, so reading the account elsewhere
+    cannot make a message disappear from here. Media-only messages are skipped:
+    they leave no history row to tell them apart from handled ones.
+    """
+    window = _recovery_window()
+    if window <= 0:
+        return 0
+    from core.chat_history_cache import chat_message_exists
+    from core.interface_path_utils import build_interface_path
+
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=window)
+    recovered = 0
+    async for dialog in client.iter_dialogs(limit=_RECOVERY_DIALOGS):
+        last = getattr(dialog, "date", None)
+        if last is not None and last < cutoff:
+            continue  # pinned chats come first, so no early exit
+        try:
+            pending: list[Any] = []
+            async for raw in client.iter_messages(
+                dialog.entity, limit=_RECOVERY_PER_DIALOG
+            ):
+                if raw.date is not None and raw.date < cutoff:
+                    break
+                if not getattr(raw, "out", False):
+                    pending.append(raw)
+            for raw in reversed(pending):  # oldest first
+                if not (getattr(raw, "message", None) or "").strip():
+                    continue
+                message = await wrap_message(bot, raw)
+                user = message.from_user
+                if user is None:
+                    continue
+                thread_id = message.thread_id
+                path = build_interface_path(
+                    INTERFACE_ID,
+                    str(message.chat_id),
+                    str(thread_id) if thread_id else None,
+                )
+                if await chat_message_exists(path, str(user.id), message.date):
+                    continue
+                if not _claim_message(raw):
+                    continue
+                await _dispatch_incoming(bot, message)
+                recovered += 1
+        except Exception as exc:
+            log_warning(f"[telegram] recovery failed for a chat: {exc!r}")
+    if recovered:
+        log_info(f"[telegram] recovered {recovered} message(s) missed while offline")
+    return recovered
 
 
 # ---------------------------------------------------------------------------
@@ -1061,7 +1187,7 @@ class TelegramUserInterface:
             self.is_enabled, self.disabled_reason = True, None
 
             # Warm the entity cache so sends to known dialogs resolve by id.
-            asyncio.create_task(self._warm_dialogs(client))
+            asyncio.create_task(self._warm_and_recover(client, bot))
             asyncio.create_task(self._sync_avatar())
             await message_queue.run()
             try:
@@ -1078,6 +1204,14 @@ class TelegramUserInterface:
             await client.get_dialogs(limit=200)
         except Exception as exc:
             log_debug(f"[telegram] dialog warm-up failed: {exc}")
+
+    async def _warm_and_recover(self, client: Any, bot: TelethonBot) -> None:
+        """Warm the entity cache, then pick up what arrived while offline."""
+        await self._warm_dialogs(client)
+        try:
+            await recover_missed_messages(client, bot)
+        except Exception as exc:
+            log_warning(f"[telegram] missed-message recovery failed: {exc!r}")
 
     # -- synth avatar (core/synth_avatar.py) ---------------------------------------
 
