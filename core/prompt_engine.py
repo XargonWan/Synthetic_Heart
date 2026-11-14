@@ -3105,6 +3105,23 @@ async def build_prompt_request(
     )
     if _voice_channel_id:
         _source_dict["author_voice_channel_id"] = str(_voice_channel_id)
+    # A live audio/video call: tell the model, so it speaks instead of writing.
+    _call_ctx = isinstance(context_memory, dict) and context_memory.get("call")
+    if isinstance(_call_ctx, dict) and _call_ctx:
+        from core.call_manager import CALL_NOTE
+
+        _in_call: dict[str, Any] = {
+            "kind": _call_ctx.get("kind", "audio"),
+            "seconds": _call_ctx.get("seconds", 0),
+            "note": CALL_NOTE,
+        }
+        if _call_ctx.get("caller_sees_you"):
+            _in_call["video"] = "the caller sees your avatar live on their screen"
+        if _call_ctx.get("screen_share"):
+            _in_call["screen_share"] = (
+                "the caller shares their screen: the image attached is what it shows now"
+            )
+        _source_dict["in_call"] = _in_call
 
     input_payload = {
         "text": text,

@@ -26,6 +26,7 @@ except ImportError:
 import logging as _stdlib_logging
 
 from core.synth_avatar import register_interface_switch as _register_avatar_switch
+from core.voice_reply import is_voice_reply
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.chat_attention import set_attention, evaluate_triggers
 from core.reaction_handler import get_reaction_emoji
@@ -3178,7 +3179,8 @@ class DiscordInterface:
                     webui_session_id = context.get("webui_session_id") or context.get(
                         "session_id"
                     )
-                    if webui_session_id:
+                    # A voice reply has no writing phase: the avatar stays in THINK.
+                    if webui_session_id and not is_voice_reply(context):
                         persona_manager = PersonaManager.get_instance()
                         if persona_manager:
                             await persona_manager.set_animation_state(
@@ -3213,7 +3215,8 @@ class DiscordInterface:
                     webui_session_id = context.get("webui_session_id") or context.get(
                         "session_id"
                     )
-                    if webui_session_id:
+                    # A voice reply has no writing phase: the avatar stays in THINK.
+                    if webui_session_id and not is_voice_reply(context):
                         persona_manager = PersonaManager.get_instance()
                         if persona_manager:
                             await persona_manager.set_animation_state(

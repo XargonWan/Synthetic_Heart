@@ -25,6 +25,7 @@ from core.session_meta import (
 from plugins.blocklist import is_user_blocked
 from core.interface_paths import get_name_resolver
 from core.user_utils import ensure_message_user_fields
+from core.voice_reply import is_voice_reply
 
 # Use a priority queue so events can be processed before regular messages.
 #
@@ -1557,6 +1558,43 @@ async def enqueue_low_priority(
     )
 
 
+#: Structural turn flags a coalesced message must keep. They are set by the
+#: originating interface (``core.call_manager.CallManager.mark_turn`` for a call turn) and
+#: read downstream: the queue ranks on ``_call``; the context carries ``request_tts`` /
+#: ``is_voice_input`` to the reply path, which is what makes a call turn answered by voice.
+_CARRIED_TURN_FLAGS: tuple[str, ...] = (
+    "_call",
+    "call_id",
+    "request_tts",
+    "is_voice_input",
+    "interface_path",
+)
+
+
+def _carry_turn_flags(merged: Any, batch: list) -> Any:
+    """Copy the structural turn flags of the coalesced ``batch`` onto ``merged``.
+
+    A merged message is a new object built from text only. Without this a call turn that
+    was queued behind another one lost its call/voice flags when the two were coalesced,
+    so its reply came back as text and the avatar went to WRITE instead of staying in THINK.
+    A flag is kept when ANY message of the batch carries it; the latest screen-share
+    attachment wins.
+    """
+    for name in _CARRIED_TURN_FLAGS:
+        for entry in batch:
+            value = getattr(entry.get("message"), name, None)
+            if value:
+                setattr(merged, name, value)
+    attachments = None
+    for entry in batch:
+        found = getattr(entry.get("message"), "attachments", None)
+        if found:
+            attachments = found
+    if attachments:
+        merged.attachments = attachments
+    return merged
+
+
 async def compact_similar_messages(first: dict, limit: int = 5) -> list:
     """Collect already-queued messages from same chat/thread/interface."""
     batch = [first]
@@ -1707,6 +1745,7 @@ async def _consumer_loop() -> None:
                         chat=getattr(base, "chat", None),
                         reply_to_message=getattr(base, "reply_to_message", None),
                     )
+                    _carry_turn_flags(merged, batch)
                     final["message"] = merged
                     final["context"] = batch[-1].get("context", final.get("context"))
                 log_debug(
@@ -1886,6 +1925,26 @@ async def _consumer_loop() -> None:
                         else:
                             context.pop("request_tts", None)
 
+                        # A live call: say so in the context (the prompt tells the model
+                        # it is on a call) and keep the avatar in THINK while the reply is
+                        # spoken. Written or cleared every turn so a call never lingers.
+                        _call_info = None
+                        if getattr(_queued_msg, "_call", False):
+                            from core.call_manager import get_call_manager
+
+                            _call_info = get_call_manager().turn_context(
+                                getattr(_queued_msg, "call_id", None)
+                            )
+                        if _call_info:
+                            context["call"] = _call_info
+                            context["request_tts"] = True
+                            context["is_voice_input"] = True
+                            context.setdefault(
+                                "animation_state_on_generation_start", "think"
+                            )
+                        else:
+                            context.pop("call", None)
+
                         # Propagate voice channel presence so the prompt engine can
                         # inform the LLM that the sender is in a voice channel — this
                         # lets the model decide to issue join_voice_discord.
@@ -2003,6 +2062,10 @@ async def _consumer_loop() -> None:
 
                         context_obj = _final.get("context")
                         if isinstance(context_obj, dict):
+                            if event == "start" and is_voice_reply(context_obj):
+                                # Spoken reply: no writing phase, the avatar stays in THINK
+                                # until the audio starts (Karada fires TALK).
+                                return "think"
                             if event == "start":
                                 for k in (
                                     "generation_animation_state_start",
