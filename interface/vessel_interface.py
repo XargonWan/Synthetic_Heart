@@ -776,20 +776,38 @@ class VesselInterface:
         interface_path = build_interface_path(INTERFACE_NAME, environment, world_token)
         manager = get_vessel_session_manager()
         session_id = await manager.start_session(environment, interface_path)
+        # The manager hands back the live session when one is already open for
+        # this world (a retried connect): that is the same visit, not a new one,
+        # so it must not add a second "Embodied in" row to the Activities card.
+        already_tracked = session_id in self._sessions
         self._sessions[session_id] = interface_path
-        await self._log_activity(
-            session_id=session_id,
-            interface_path=interface_path,
-            environment=environment,
-            event_type="session_start",
-            summary=f"Embodied in {environment}",
-        )
+        if not already_tracked:
+            await self._log_activity(
+                session_id=session_id,
+                interface_path=interface_path,
+                environment=environment,
+                event_type="session_start",
+                summary=f"Embodied in {environment}",
+            )
         return session_id
 
     async def end_session(self, session_id: str, reason: str = "logout") -> None:
         """End an embodiment session (flushes buffered experience to diary)."""
         manager = get_vessel_session_manager()
         interface_path = self._sessions.get(session_id, "")
+        if not interface_path:
+            # Not tracked here: it was already closed (the disconnect grace, a
+            # logout) before this call, e.g. a connect that failed after the
+            # grace had closed its session. The manager end is idempotent; but
+            # there is no world to name, and logging a second ``session_end``
+            # with an empty path made the Activities card show the visit as
+            # "Unknown" with duplicate "Left unknown" rows.
+            await manager.end_session(session_id, reason=reason)
+            log_debug(
+                f"[vessel_interface] end_session({session_id}, {reason}): "
+                "session no longer tracked — nothing more to record"
+            )
+            return
         environment = (
             interface_path.split("/")[1] if "/" in interface_path else "unknown"
         )

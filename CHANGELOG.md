@@ -1,3 +1,11 @@
+### fix(vessel): a visit shows under its world in Activities, once, not as "Unknown"
+
+**Before.** A connect that failed after the 30 s disconnect grace had already closed its session rolled back through `VesselInterface.end_session`, which no longer tracked the session: it logged another `session_end` with an empty path and `environment = unknown` ("Left unknown (connect_failed)", once per retry). The Activities card is grouped by session and titled by its last row's environment, so the whole visit showed as "Unknown". A retried connect that reused the open session also logged a second "Embodied in minecraft".
+
+**Now.** `end_session` on a session that is no longer tracked only asks the (idempotent) manager to end it and records nothing; `begin_session` logs `session_start` only for a session it was not already tracking. Rows already in `vessel_activity_log` are not rewritten.
+
+**Location.** `interface/vessel_interface.py`, `tests/test_vessel_session_activity_log.py` (new).
+
 ### fix(ci): a push to develop keeps its versioned pre-release next to the single rolling `latest-develop`  <!-- 2026-11-13 -->
 
 **Before.** Every push to `develop` deleted the only pre-release (`latest-develop`) and made it again, so no earlier develop build stayed downloadable.
