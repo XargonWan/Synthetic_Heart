@@ -2579,6 +2579,34 @@ class KaradaStateServer:
         return result
 
     # ------------------------------------------------------------------
+    # Read-only face/model accessors (used by server-side renderers such as
+    # ``core.avatar_render``, which draw the avatar without a browser)
+    # ------------------------------------------------------------------
+
+    def get_face_values(self) -> Dict[str, float]:
+        """Current emotion/face intensities (name -> 0..1), as shown to clients."""
+        return dict(self._current_face_values)
+
+    def get_current_expression(self) -> Optional[Dict[str, Any]]:
+        """The active transient expression override, or ``None``."""
+        return dict(self._current_expression) if self._current_expression else None
+
+    def get_active_vrm_path(self) -> Optional[Path]:
+        """Local path of the active VRM model, or ``None`` when it cannot be told."""
+        try:
+            webui = self.webui
+            active = getattr(webui, "active_vrm", None) if webui else None
+            if not isinstance(active, str) or not active:
+                return None
+            root = Path(__file__).resolve().parent.parent
+            if active.startswith("/"):
+                return root / active.lstrip("/")
+            vrm_dir = getattr(webui, "vrm_dir", None)
+            return Path(vrm_dir) / active if vrm_dir else None
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------
     # Priority registration
     # ------------------------------------------------------------------
 
