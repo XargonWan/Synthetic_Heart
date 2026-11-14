@@ -1,3 +1,13 @@
+### fix(minecraft): Synth stops digging blocks that cannot be broken
+
+**Before.** `mine`/`collect_block` kept digging the same block when it would not break. mineflayer's `dig()` sets the cell to air locally the moment a dig finishes and returns without waiting for the server, so a block in a protected area (spawn protection, a region plugin) looked broken while the server quietly put it back; the log shows hundreds of "Mined dirt/grass_block (no drop collected)" events. Only a bare `canDigBlock` check existed, which also fails on plain distance and says just "cannot dig".
+
+**Now.** `minecraft_bridge.js` (`whyNotBreakable`, `digBlockVerified`, `// BEGIN breakable-blocks`): a block is refused up front in `adventure`/`spectator`, or when minecraft-data says it is unbreakable (not in `creative`); after a dig the cell is re-read after `DIG_SETTLE_MS`, and a block the server restored is remembered as protected for 10 minutes. Targets are chosen among the nearest 16 matches skipping those, so a protected block no longer hides the next one. Failures say why (`reason`: `game_mode`/`unbreakable`/`protected`) and tell Synth not to retry. Falling blocks (sand, gravel, ...) refilling a cell are not mistaken for a revert. Also: both `block = obstruction` reassignments were on a `const` (a TypeError whenever a block stood in the way); they are `let` now.
+
+**Not verified here.** Not run against a real protected server (the bot has not spawned on one since); the revert timing (`DIG_SETTLE_MS`, 450 ms) is a judgement for normal latency, and the test drives the helpers with a simulated bot under `node`.
+
+**Location.** `plugins/rift_vessel/minecraft/minecraft_bridge.js`, `plugins/rift_vessel/minecraft/guide.md`, `tests/test_minecraft_bridge_breakable.py` (new).
+
 ### feat(vessel): ask Rekku to join a named Minecraft server and she really goes there
 
 **Before.** "Rekku logga in minecraft su pvp.gentoobtw.fyi" connected to the configured default (a dead LAN address) while she announced the requested server. The model passed the address as `server`, a field `vessel_connect` did not have; host/port had been hidden from it (`9f123a81`) so provider names in its context could not become endpoints, and the unknown field was dropped without a word.

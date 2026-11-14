@@ -138,6 +138,17 @@ three in a row end the walk. While it runs `motor_step` stands back (`deliberate
 chat interrupts it (the bot's own echo does not). It reads the bridge's `status` directly, never `get_world_state`: that
 read consumes the "took damage" delta. **No Minecraft server was available: this is tested against a fake bridge only.**
 
+## Blocks that cannot be broken
+
+`mine` and `collect_block` do not keep trying a block that will not break. They refuse up front, with a clear
+reason, when the game mode forbids it (`adventure` / `spectator`) or the block is unbreakable by nature
+(bedrock, barrier, ... — not in `creative`, where those can be broken). After a dig they wait a moment
+(`DIG_SETTLE_MS`) and re-read the cell: a server that protects the area (spawn protection, a claim or region
+plugin) puts the block back, and mineflayer has by then already shown it as broken locally. A block restored
+this way is remembered as *protected* for 10 minutes and skipped, and the next nearest block of that kind is
+taken instead. When every nearby block of the requested kind is skipped, the action fails with `reason`
+(`game_mode`, `unbreakable` or `protected`) and tells Synth to pick another block or area.
+
 ## Skin — how it works (important)
 
 **A real client-side skin upload is not possible for an offline-mode bot.** In
