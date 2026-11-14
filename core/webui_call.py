@@ -14,6 +14,8 @@ Endpoints (all behind the WebUI auth middleware / token):
   field: when text was actually transcribed, the call's signal plays
 * ``GET  /api/call/status``         ``?session_id=``
 * ``WS   /api/call/screen``         ``?call_id=`` — binary JPEG screen-share frames
+* ``WS   /api/call/camera``         the page's avatar as the camera of a call on another
+  interface (see :mod:`core.call_video`)
 """
 
 from __future__ import annotations
@@ -227,6 +229,10 @@ def mount_call_api(app: FastAPI) -> None:
     try:
         get_call_manager().register_provider(WebUICallProvider())
         app.include_router(create_call_router())
+        # The camera socket lets other interfaces' calls borrow this page's avatar.
+        from core.call_video import mount_call_video_api
+
+        mount_call_video_api(app)
         log_info("[call] WebUI call API mounted at /api/call/")
     except Exception as exc:
         log_warning(f"[call] WebUI call API failed to mount (non-fatal): {exc}")
