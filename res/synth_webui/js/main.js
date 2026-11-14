@@ -1365,6 +1365,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                         const persistValue = async (val, controls = []) => {
                             const targets = Array.isArray(controls) ? controls.filter(Boolean) : [];
+                            let saved = false;
                             try {
                                 targets.forEach((el) => { try { if (typeof el.disabled !== 'undefined') el.disabled = true; } catch (e) {} });
                                 const payload = { key: item.key, value: val };
@@ -1373,6 +1374,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                     const txt = await res.text();
                                     try { window.showToast('Save failed: ' + txt, true); } catch (e) {}
                                 } else {
+                                    saved = true;
                                     try {
                                         const out = await res.json();
                                         window.showToast('Saved', false);
@@ -1389,6 +1391,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             } finally {
                                 targets.forEach((el) => { try { if (typeof el.disabled !== 'undefined') el.disabled = !isEditable; } catch (e) {} });
                             }
+                            return saved;
                         };
 
                         let inputEl = null;
@@ -1981,6 +1984,17 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                     .join(',');
                             };
 
+                            // Only complete rows (interface AND id) are stored, so a half-filled
+                            // row never changes what is saved. Saving it anyway would disable the
+                            // controls (the interface list would not open when clicked: the click
+                            // blurs the id field first) and re-render, dropping the new row.
+                            let lastSaved = serializeEntries();
+                            const saveIfChanged = async (controls) => {
+                                const next = serializeEntries();
+                                if (next === lastSaved) return;
+                                if (await persistValue(next, controls)) lastSaved = next;
+                            };
+
                             const renderRows = () => {
                                 list.innerHTML = '';
                                 if (!entries.length) {
@@ -1988,7 +2002,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 }
                                 entries.forEach((entry, idx) => {
                                     const rowEl = document.createElement('div');
-                                    rowEl.className = 'repeatable-row';
+                                    rowEl.className = 'repeatable-row repeatable-row--trainer';
 
                                     const select = document.createElement('select');
                                     if (!interfaceOptions.length) {
@@ -2023,18 +2037,18 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                                     select.addEventListener('change', () => {
                                         entries[idx] = { iface: select.value, id: idInput.value };
-                                        persistValue(serializeEntries(), [select, idInput, removeBtn, addBtn]);
+                                        saveIfChanged([select, idInput, removeBtn, addBtn]);
                                     });
 
                                     idInput.addEventListener('blur', () => {
                                         entries[idx] = { iface: select.value, id: idInput.value.trim() };
-                                        persistValue(serializeEntries(), [select, idInput, removeBtn, addBtn]);
+                                        saveIfChanged([select, idInput, removeBtn, addBtn]);
                                     });
 
                                     removeBtn.addEventListener('click', () => {
                                         entries.splice(idx, 1);
                                         renderRows();
-                                        persistValue(serializeEntries(), [select, idInput, removeBtn, addBtn]);
+                                        saveIfChanged([select, idInput, removeBtn, addBtn]);
                                     });
 
                                     rowEl.appendChild(select);

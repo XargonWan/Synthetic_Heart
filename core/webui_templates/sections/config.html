@@ -317,6 +317,29 @@
             .repeatable-row input {
                 width: 100%;
             }
+
+            /* One trainer = one line: interface, id and Remove side by side, never wrapped. */
+            .repeatable-row--trainer {
+                display: flex;
+                flex-wrap: nowrap;
+                gap: 0.5rem;
+                align-items: center;
+            }
+            .repeatable-row--trainer select {
+                flex: 0 0 11rem;
+                width: auto;
+                min-width: 0;
+            }
+            .repeatable-row--trainer input {
+                flex: 1 1 auto;
+                width: auto;
+                min-width: 0;
+            }
+            .repeatable-row--trainer button {
+                flex: 0 0 auto;
+                width: auto;
+                white-space: nowrap;
+            }
             .config-disclaimer {
                 display: flex;
                 gap: 1rem;
