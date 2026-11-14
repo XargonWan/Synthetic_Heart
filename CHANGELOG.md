@@ -1,3 +1,11 @@
+### feat(queue): messages of the same chat that pile up behind a slow turn become one queue element
+
+**Before.** With a slow model every message queued as its own element and cost a whole turn: fifteen `player-chat` lines of `vessel/minecraft/192_168_1_42_25565` meant fifteen turns, and the Queue view listed all of them. Vessel player chat is `no_compact`, so even the consumer-side compaction never joined them.
+
+**Now.** `enqueue` folds a message into a *pending* element with the exact same `interface_path` (same interface, thread and priority band); the turn in flight is untouched. One turn answers all the lines, and the Queue view shows one element with `×N merged`, the first → last time and every line in the preview. Scheduled/urgent events, vessel reflection/appraisal/idle beats, autonomous perceptions and anything awaited by a caller are never merged; a player chat merges only with other player chats. A merged vessel chat keeps no `from_user` (no bogus "group" speaker) and still carries `_vessel_player_chat`. Settings `QUEUE_COALESCE_ENABLED` and `QUEUE_COALESCE_MAX_ITEMS` (default 20).
+
+**Location.** `core/message_queue.py`, `res/synth_webui/js/history.js`, `docs/architecture.rst`, `tests/test_message_queue_coalesce.py` (new).
+
 ### fix(minecraft): Synth stops digging blocks that cannot be broken
 
 **Before.** `mine`/`collect_block` kept digging the same block when it would not break. mineflayer's `dig()` sets the cell to air locally the moment a dig finishes and returns without waiting for the server, so a block in a protected area (spawn protection, a region plugin) looked broken while the server quietly put it back; the log shows hundreds of "Mined dirt/grass_block (no drop collected)" events. Only a bare `canDigBlock` check existed, which also fails on plain distance and says just "cannot dig".
