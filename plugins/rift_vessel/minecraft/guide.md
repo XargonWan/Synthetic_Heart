@@ -13,6 +13,34 @@ is guarded to no-op when the bot is already alive.
 The connector never creates agentic tasks and never writes diary/memory — the
 interface buffers experiences and flushes a single entry at end-of-session.
 
+## Server prerequisites (non-Microsoft accounts and skins)
+
+The bot joins with an offline username (no Microsoft or Mojang account), so the
+server has to be set up for it before Synth can enter the world:
+
+- **`online-mode=false`** in `server.properties` (restart afterwards). With
+  `online-mode=true` the server rejects the bot. Behind a proxy (Velocity or
+  BungeeCord), set the same on the proxy: `online-mode` in `velocity.toml`,
+  `online_mode` in BungeeCord's `config.yml`.
+- **`enforce-secure-profile=false`** on 1.19.1 and newer, otherwise the server
+  may refuse an offline client.
+- **Whitelist** (only if `white-list=true`): `/whitelist add <bot name>`. The name
+  is `MC_BOT_USERNAME` / `SYNTH_NAME`, at most 16 letters, digits or underscores.
+- **No password-login plugins** (AuthMe, LimboAuth and similar) unless they
+  exempt the bot. The bridge never sends `/login` or `/register`.
+
+Recommended server-side plugins:
+
+- **SkinsRestorer** (Paper, Spigot, Purpur, Velocity, BungeeCord): the recommended
+  skin provider, works on offline-mode servers. Install it on the backend the bot
+  joins.
+- **SkinRestorer** by Lionarius (Fabric, Forge, NeoForge, Quilt): the mod
+  equivalent for modded servers.
+- **LuckPerms** (optional): if the `/skin` commands are ignored for the bot, grant
+  its name the SkinsRestorer permissions or op it.
+
+Without a skin plugin the bot keeps the default skin. See *Skin* below.
+
 ## Enabling
 
 1. **Enable the plugin** — flip the Minecraft Vessel plugin **on** from its card

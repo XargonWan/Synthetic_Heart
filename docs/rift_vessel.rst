@@ -435,6 +435,40 @@ built explicitly with:
 The offline auth mode (``MC_AUTH=offline``) is used; real
 Microsoft/XBL auth and multiplayer sync are out of scope.
 
+Server setup (accepting non-Microsoft accounts)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The bot has no Microsoft or Mojang account, so the server must accept
+offline-mode logins **before** Synth can enter the world, and only then can a
+skin be applied. Configure the server as follows:
+
+* **``online-mode=false``** in ``server.properties`` (restart afterwards). With
+  ``online-mode=true`` the server rejects the bot's login. If the world sits
+  behind a proxy (Velocity or BungeeCord), set the same flag on the proxy too
+  (``online-mode`` in ``velocity.toml``, ``online_mode`` in BungeeCord's
+  ``config.yml``).
+* **``enforce-secure-profile=false``** on 1.19.1 and newer, since an offline
+  client has no signed profile key and the server may otherwise refuse it.
+* **Whitelist** (only if ``white-list=true``): add the bot's name with
+  ``/whitelist add <name>``. The name is ``MC_BOT_USERNAME`` / ``SYNTH_NAME``
+  (16 characters maximum, letters, digits and underscores only).
+* **Avoid password-login plugins** (AuthMe, LimboAuth and similar) unless they
+  exempt the bot. The bridge never sends ``/login`` or ``/register``, so the bot
+  would stay stuck at the login screen.
+
+Recommended server-side plugins:
+
+* **SkinsRestorer** (Paper, Spigot, Purpur, Velocity, BungeeCord) — the
+  recommended skin provider. It works on offline-mode servers and is supported
+  out of the box (see *Skin* below). Install it on the **backend** that the bot
+  joins.
+* **SkinRestorer** by Lionarius (Fabric, Forge, NeoForge, Quilt) — the mod
+  equivalent, for modded servers.
+* **LuckPerms** (optional) — if SkinsRestorer's ``/skin`` commands are ignored
+  for the bot, grant its name the SkinsRestorer permissions (or op it) here.
+  Plugins that are only needed for Bedrock clients (such as Floodgate) are not
+  required.
+
 Skin
 ~~~~
 
