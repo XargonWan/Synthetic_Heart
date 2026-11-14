@@ -1,10 +1,12 @@
-"""Call turns in the queue: flags kept through coalescing, voice replies."""
+"""Call turns in the queue: flags kept through coalescing, young-turn interruption."""
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 
 import core.message_queue as mq
 from core.voice_reply import is_voice_reply
@@ -45,3 +47,85 @@ def test_is_voice_reply() -> None:
     assert is_voice_reply({"is_voice_input": True})
     assert not is_voice_reply({"interface_path": "x/1"})
     assert not is_voice_reply(None)
+
+
+@pytest.fixture
+def _window(monkeypatch: pytest.MonkeyPatch):
+    def _set(seconds: float) -> None:
+        import core.config_manager as cfg
+
+        monkeypatch.setattr(
+            cfg.config_registry,
+            "get_value",
+            lambda key, default=None, **_: (
+                seconds if key == "CALL_TURN_INTERRUPT_WINDOW_SEC" else default
+            ),
+        )
+
+    return _set
+
+
+async def _running_turn(call_id: str | None, *, cancellable: bool = True):
+    task = asyncio.ensure_future(asyncio.sleep(30))
+    mq._register_call_turn({"call_id": call_id}, task, 9, cancellable)
+    await asyncio.sleep(0)
+    return task
+
+
+@pytest.mark.asyncio
+async def test_a_young_turn_of_the_same_call_is_interrupted(_window) -> None:
+    _window(8.0)
+    task = await _running_turn("c1")
+    try:
+        assert mq._interrupt_young_call_turn("c1") is True
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert mq._call_turn_interrupted(task)
+        # Once interrupted it is not interrupted a second time.
+        assert mq._interrupt_young_call_turn("c1") is False
+    finally:
+        mq._clear_call_turn()
+
+
+@pytest.mark.asyncio
+async def test_other_calls_and_old_turns_are_left_alone(_window) -> None:
+    _window(8.0)
+    task = await _running_turn("c1")
+    try:
+        assert mq._interrupt_young_call_turn("other") is False
+        assert mq._interrupt_young_call_turn(None) is False
+        mq._active_call_turn.started -= 60  # type: ignore[union-attr]
+        assert mq._interrupt_young_call_turn("c1") is False
+        assert not task.cancelled()
+    finally:
+        task.cancel()
+        mq._clear_call_turn()
+
+
+@pytest.mark.asyncio
+async def test_interruption_can_be_disabled_or_unsafe(_window) -> None:
+    _window(0.0)
+    task = await _running_turn("c1")
+    try:
+        assert mq._interrupt_young_call_turn("c1") is False
+    finally:
+        task.cancel()
+        mq._clear_call_turn()
+
+    _window(8.0)
+    task = await _running_turn("c1", cancellable=False)  # e.g. a Zen engine
+    try:
+        assert mq._interrupt_young_call_turn("c1") is False
+    finally:
+        task.cancel()
+        mq._clear_call_turn()
+
+
+@pytest.mark.asyncio
+async def test_a_non_call_turn_is_never_registered() -> None:
+    task = await _running_turn(None)
+    try:
+        assert mq._active_call_turn is None
+        assert mq._interrupt_young_call_turn("c1") is False
+    finally:
+        task.cancel()
