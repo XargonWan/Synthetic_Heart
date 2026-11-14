@@ -56,6 +56,29 @@ ranks it at ``PRIORITY_CALL`` (9):
 The ranking uses the flag, never the message text. A call turn is not demoted by
 the bot ward. In the WebUI queue view it shows as a ``Call`` badge.
 
+What a call turn carries
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+* **The model knows it is on a call.** The queue writes ``context["call"]`` (kind, duration,
+  whether the caller sees the avatar or shares a screen) and the prompt renders it as
+  ``input.payload.source.in_call`` with a short note: the reply is spoken, so short plain
+  sentences, no markdown or emoji, and an utterance cut off mid-thought is waited for.
+* **The reply is always spoken.** ``request_tts`` and ``is_voice_input`` are forced for the
+  turn and ``message_plugin`` forces ``send_as_voice`` on every ``message_*`` action of a
+  call turn, whatever the model chose and even while Vox is momentarily off (Vox then falls
+  back to text). These flags survive queue coalescing: when several queued messages of a
+  chat are merged into one turn, the merged message keeps ``_call``, ``call_id``,
+  ``request_tts``, ``is_voice_input`` and the latest screen-share attachment.
+* **The avatar stays in THINK.** A turn answered by voice has no writing phase, so neither the
+  queue nor the WebUI nor Discord switch the Karada state to ``write``; ``talk`` is fired by
+  ``broadcast_audio()`` when the clip starts (``core.voice_reply.is_voice_reply``).
+* **A young turn is interrupted.** People speak in pieces. When a further utterance of the
+  *same call* arrives while the previous call turn is younger than
+  ``CALL_TURN_INTERRUPT_WINDOW_SEC`` (default 8 s, ``0`` disables it), the in-flight turn is
+  cancelled and put back in the queue, where coalescing joins both utterances into the one
+  turn that gets answered. An older turn is left to finish (the SyntH is already replying);
+  engines that cannot be cancelled (Zen) are never interrupted.
+
 The "message received" sound
 ----------------------------
 
@@ -247,8 +270,11 @@ Debugging Telegram calls
 ------------------------
 
 Telegram's Bot API has no calls, so this exists only for the Telethon **user** account.
-Only the trainer (and ids in ``TELEGRAM_CALL_ALLOWED_IDS``) is answered; anyone else's
-call is ignored. ``TELEGRAM_CALLS_ENABLED`` (default on) turns it off. Every library call
+The trainer (and ids in ``TELEGRAM_CALL_ALLOWED_IDS``) is answered at once. For anyone
+else the call is left ringing and the trainer gets a message in their Telegram chat saying
+who is calling; once the trainer has replied, the SyntH picks up or declines with the
+``answer_call_telegram`` action (``user_id``, ``answer``). It only works while the call
+rings (about 45 s). ``TELEGRAM_CALLS_ENABLED`` (default on) turns it off. Every library call
 is guarded and logs with the ``[telegram_call]`` prefix. The parts most likely to need
 adjusting:
 
@@ -264,7 +290,8 @@ adjusting:
   The py-tgcalls documentation does not describe private calls (a 2.0.0 release with
   "private_calls" methods was yanked as broken), so whether this works on the installed
   version is the first thing to find out.
-* Video is not implemented.
+* Video is not implemented: the SyntH's "webcam" is the Karada render, which exists only in a
+  browser, so a Telegram call cannot show it until there is a server-side render to stream.
 
 Registering an interface
 ------------------------
@@ -322,6 +349,10 @@ Configuration
    * - ``CALL_SCREEN_MAX_EDGE_PX``
      - ``1280``
      - Longest edge of a kept screen frame.
+   * - ``CALL_TURN_INTERRUPT_WINDOW_SEC``
+     - ``8.0``
+     - A call turn younger than this is cancelled and merged with the caller's next
+       utterance (``0`` = never).
    * - ``TELEGRAM_CALLS_ENABLED``
      - ``true``
      - Let the Telegram user account answer calls.
