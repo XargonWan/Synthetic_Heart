@@ -23,7 +23,16 @@ private-call documentation is thin. Every library call is isolated in ``_Lib`` o
 guarded block and logs the exception with the ``[telegram_call]`` prefix; the two things
 most likely to need adjusting are the incoming-audio format
 (``TELEGRAM_CALL_RX_RATE`` / ``TELEGRAM_CALL_RX_CHANNELS``) and the names of the end-of-call
-statuses (``_ENDED_STATUS_NAMES``). Video is not implemented.
+statuses (``_ENDED_STATUS_NAMES``).
+
+Video: the SyntH's face is drawn by ``core.avatar_render`` (a small headless renderer of the
+active VRM model on the server; no browser) or, with ``CALL_VIDEO_SOURCE=browser``, comes
+from an open WebUI tab (``core.call_video``). An answered call then starts with audio *and*
+video: frames are converted to I420 when needed and pushed into the call with py-tgcalls'
+external-frame API (``MediaStream(ExternalMedia.VIDEO, ...)`` +
+``send_frame(chat_id, Device.CAMERA, ...)``; checked against py-tgcalls 3.0.0's code, not on
+a live call). With no source, or if it stops, the call is audio-only
+(``CallSession.degraded``) and says so with a ``[telegram_call]`` log line.
 """
 
 from __future__ import annotations
@@ -39,6 +48,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from core.call_audio import get_call_audio_pipeline
+from core.call_video import VideoSettings, get_call_video_hub, jpeg_to_i420
 from core.call_manager import (
     CallCapabilities,
     CallError,
@@ -100,6 +110,21 @@ register_exposed_var(
     advanced=True,
 )
 
+register_exposed_var(
+    "TELEGRAM_CALL_VIDEO_ENABLED",
+    label="Telegram Call Video",
+    default=True,
+    value_type=bool,
+    ui_type="bool",
+    description=(
+        "Show the SyntH's face (the Karada render) in answered Telegram calls. It needs a "
+        "WebUI tab with the avatar open for the whole call; without one the call is audio-only. "
+        "Frame rate and size: CALL_VIDEO_FPS / CALL_VIDEO_WIDTH / CALL_VIDEO_HEIGHT."
+    ),
+    scope="interface",
+    component="telegram",
+)
+
 #: ``ChatUpdate.Status`` members that mean the call is over; resolved by name because
 #: the library's set of statuses is not documented. Unknown names are skipped.
 _ENDED_STATUS_NAMES = (
@@ -116,6 +141,12 @@ _ENDED_STATUS_NAMES = (
 #: How long an unanswered call from a stranger is still worth answering (Telegram rings
 #: about this long before the caller gives up).
 _RING_TIMEOUT_S = 45.0
+
+#: Video pump limits: how long to wait for the browser's first frame / how old a frame may
+#: get before it is reported, and how many send failures in a row end the video.
+_VIDEO_FIRST_FRAME_S = 8.0
+_VIDEO_STALE_S = 5.0
+_VIDEO_MAX_FAILURES = 5
 
 
 def _cfg_int(key: str, default: int) -> int:
@@ -163,7 +194,40 @@ class _Lib:
         self.MediaStream = types.MediaStream
         # Optional: used to narrow the frame filter; frames are re-checked by hand.
         self.Direction = getattr(types, "Direction", None)
-        self.Device = getattr(types, "Device", None)
+        self.Device: Any = getattr(types, "Device", None)
+        # Optional: only needed to show video (external frames, py-tgcalls >= 3).
+        self.ExternalMedia: Any = getattr(types, "ExternalMedia", None)
+        self.Frame: Any = getattr(types, "Frame", None)
+        try:
+            from pytgcalls.types.raw import VideoParameters  # type: ignore[import-not-found]
+
+            self.VideoParameters: Any = VideoParameters
+        except Exception as exc:
+            log_debug(f"[telegram_call] no VideoParameters in this py-tgcalls: {exc!r}")
+            self.VideoParameters = None
+
+    @property
+    def video_supported(self) -> bool:
+        """Does the installed py-tgcalls take external video frames?"""
+        return bool(
+            self.ExternalMedia is not None
+            and self.VideoParameters is not None
+            and self.Frame is not None
+            and self.Device is not None
+            and hasattr(self.Device, "CAMERA")
+            and hasattr(self.ExternalMedia, "VIDEO")
+        )
+
+    def video_stream(self, path: Path, video: VideoSettings) -> Any:
+        """``path`` as the audio, plus an external (frame-by-frame) camera."""
+        return self.MediaStream(
+            self.ExternalMedia.VIDEO,
+            audio_path=str(path),
+            video_parameters=self.VideoParameters(video.width, video.height, video.fps),
+        )
+
+    def frame_info(self, video: VideoSettings) -> Any:
+        return self.Frame.Info(int(time.time() * 1000), video.width, video.height)
 
     def ended_flags(self) -> Any:
         flags = None
@@ -198,6 +262,8 @@ class TelegramCalls:
         # Calls from users who may not call (yet): chat_id -> when it started ringing.
         self._ringing: dict[int, float] = {}
         self._provider: TelegramCallProvider | None = None
+        # chat_id -> the running video of that call (its pump task, feed and settings)
+        self._video: dict[int, dict[str, Any]] = {}
 
     # -- lifecycle --------------------------------------------------------
 
@@ -229,7 +295,14 @@ class TelegramCalls:
             return False
         self._provider = TelegramCallProvider(self)
         get_call_manager().register_provider(self._provider)
-        log_info("[telegram_call] ready: the trainer can call this account")
+        log_info(
+            "[telegram_call] ready: the trainer can call this account"
+            + (
+                " (video when a WebUI tab with the avatar is open)"
+                if getattr(lib, "video_supported", False)
+                else " (audio only: this py-tgcalls cannot send video)"
+            )
+        )
         return True
 
     async def stop(self) -> None:
@@ -321,6 +394,7 @@ class TelegramCalls:
         log_info(f"[telegram_call] call with {chat_id} ended ({update.status})")
         session = get_call_manager().get_active_call(self._path(chat_id))
         self._calls.pop(chat_id, None)
+        await self._stop_video(chat_id)
         if session is not None:
             await get_call_manager().end_call(session.call_id)
 
@@ -384,11 +458,15 @@ class TelegramCalls:
     async def _open(self, chat_id: int, *, answer: bool) -> CallSession | None:
         """Open the call: answer (or place) it with the pickup tone, then register it."""
         manager = get_call_manager()
+        # Video is decided before the first stream: the camera has to be part of the
+        # stream that opens the call.
+        video = await self._video_settings(chat_id)
         # The state exists before the pickup plays, so that tone counts as speech.
         state: dict[str, Any] = {
             "call_id": None,
             "name": await self._display_name(chat_id),
             "speaking_until": 0.0,
+            "video": video,
         }
         self._calls[chat_id] = state
         try:
@@ -404,7 +482,7 @@ class TelegramCalls:
             session = await manager.request_call(
                 INTERFACE_ID,
                 self._path(chat_id),
-                CallKind.AUDIO,
+                CallKind.VIDEO if video is not None else CallKind.AUDIO,
                 user_id=str(chat_id),
                 announce=False,
             )
@@ -418,7 +496,187 @@ class TelegramCalls:
             return None
         get_call_audio_pipeline().bind_loop(asyncio.get_running_loop())
         state["call_id"] = session.call_id
+        if video is not None:
+            if session.kind is CallKind.VIDEO and await self._start_video(
+                chat_id, session, video
+            ):
+                log_info(
+                    f"[telegram_call] call with {chat_id} has video "
+                    f"({video.width}x{video.height} @ {video.fps} fps)"
+                )
+            else:
+                self._degrade_to_audio(chat_id, session, "the video could not start")
         return session
+
+    # -- video ------------------------------------------------------------
+
+    def video_available(self) -> bool:
+        """Can a call answered now show the SyntH's face? (read by the provider)"""
+        lib = self._lib
+        return bool(
+            self._app is not None
+            and lib is not None
+            and getattr(lib, "video_supported", False)
+            and bool(
+                config_registry.get_value(
+                    "TELEGRAM_CALL_VIDEO_ENABLED",
+                    True,
+                    value_type=bool,
+                    component="telegram",
+                )
+            )
+            and get_call_video_hub().video_possible()
+        )
+
+    async def _video_settings(self, chat_id: int) -> VideoSettings | None:
+        """The video of a call about to be answered, or ``None`` for an audio-only call."""
+        try:
+            # Whether the server can draw the avatar is learnt once, before it matters.
+            await get_call_video_hub().ensure_renderer_probe()
+        except Exception as exc:
+            log_debug(f"[telegram_call] renderer probe failed: {exc!r}")
+        if not self.video_available():
+            log_info(
+                f"[telegram_call] call with {chat_id} is audio-only: video needs "
+                "TELEGRAM_CALL_VIDEO_ENABLED, a py-tgcalls with external frames and a "
+                "source for the face (the server renderer: moderngl + Mesa/EGL, or a "
+                "WebUI tab with the avatar open; see CALL_VIDEO_SOURCE)"
+            )
+            return None
+        return VideoSettings.from_config()
+
+    async def _start_video(
+        self, chat_id: int, session: CallSession, video: VideoSettings
+    ) -> bool:
+        """Ask the WebUI tab for frames and start pushing them into the call."""
+        try:
+            feed = await get_call_video_hub().begin(
+                session.call_id,
+                on_lost=lambda: self._video_lost(chat_id, "the WebUI tab was closed"),
+                settings=video,
+            )
+        except Exception as exc:
+            log_error(f"[telegram_call] could not start the camera: {exc!r}")
+            return False
+        if feed is None:
+            log_warning(
+                "[telegram_call] no source for the video is available (no renderer, no free WebUI tab)"
+            )
+            return False
+        task = asyncio.ensure_future(self._pump_video(chat_id, feed, video))
+        self._video[chat_id] = {"call_id": session.call_id, "task": task}
+        return True
+
+    async def _pump_video(self, chat_id: int, feed: Any, video: VideoSettings) -> None:
+        """Push the latest browser frame into the call, ``video.fps`` times a second."""
+        interval = 1.0 / max(1, video.fps)
+        started = time.monotonic()
+        sent_seq = -1
+        i420 = b""
+        failures = 0
+        warned_wait = warned_stale = logged_first = False
+        while True:
+            await asyncio.sleep(interval)
+            lib, app = self._lib, self._app
+            if lib is None or app is None:
+                return
+            latest = feed.latest()
+            if latest is None:
+                if (
+                    not warned_wait
+                    and time.monotonic() - started > _VIDEO_FIRST_FRAME_S
+                ):
+                    warned_wait = True
+                    log_warning(
+                        "[telegram_call] no video frame has arrived "
+                        f"after {int(_VIDEO_FIRST_FRAME_S)} s: is the avatar rendering "
+                        "(server renderer: see the [avatar_render] lines; browser source: tab "
+                        "visible, or the pop-out webcam window open)?"
+                    )
+                continue
+            jpeg, seq = latest
+            age = feed.age_s()
+            if age is not None and age > _VIDEO_STALE_S:
+                if not warned_stale:
+                    warned_stale = True
+                    log_warning(
+                        f"[telegram_call] no new video frame for {int(age)} s (a hidden browser "
+                        "tab is throttled by the browser); repeating the last frame"
+                    )
+            else:
+                warned_stale = False
+            if seq != sent_seq:
+                try:
+                    # The server renderer's frames are already I420; a tab's are JPEG.
+                    i420 = (
+                        jpeg
+                        if feed.fmt == "i420"
+                        else await asyncio.to_thread(
+                            jpeg_to_i420, jpeg, video.width, video.height
+                        )
+                    )
+                except Exception as exc:
+                    log_warning(f"[telegram_call] video frame dropped: {exc!r}")
+                    sent_seq = seq
+                    continue
+                sent_seq = seq
+            try:
+                await _maybe_await(
+                    app.send_frame(
+                        chat_id, lib.Device.CAMERA, i420, lib.frame_info(video)
+                    )
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                failures += 1
+                log_warning(
+                    f"[telegram_call] send_frame failed ({failures}/{_VIDEO_MAX_FAILURES}): {exc!r}"
+                )
+                if failures >= _VIDEO_MAX_FAILURES:
+                    await self._video_lost(chat_id, "py-tgcalls kept refusing frames")
+                    return
+                continue
+            failures = 0
+            if not logged_first:
+                logged_first = True
+                log_info(
+                    f"[telegram_call] first video frame sent to {chat_id} "
+                    f"({len(i420)} bytes I420 {video.width}x{video.height})"
+                )
+
+    async def _video_lost(self, chat_id: int, reason: str) -> None:
+        """The video cannot go on: the call carries on as an audio call."""
+        session = get_call_manager().get_active_call(self._path(chat_id))
+        await self._stop_video(chat_id)
+        if session is not None:
+            self._degrade_to_audio(chat_id, session, reason)
+
+    def _degrade_to_audio(
+        self, chat_id: int, session: CallSession, reason: str
+    ) -> None:
+        state = self._calls.get(chat_id)
+        if state is not None:
+            state["video"] = None
+        if session.kind is CallKind.VIDEO:
+            session.kind = (
+                CallKind.AUDIO
+            )  # the model is told the caller no longer sees it
+        log_warning(f"[telegram_call] call with {chat_id} is audio-only now: {reason}")
+
+    async def _stop_video(self, chat_id: int) -> None:
+        """Stop pushing frames and tell the WebUI tab to stop capturing (idempotent)."""
+        running = self._video.pop(chat_id, None)
+        if running is None:
+            return
+        task = running["task"]
+        if task is not asyncio.current_task() and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        try:
+            await get_call_video_hub().end(running["call_id"])
+        except Exception as exc:
+            log_debug(f"[telegram_call] camera stop failed: {exc!r}")
 
     async def _display_name(self, chat_id: int) -> str:
         try:
@@ -450,6 +708,7 @@ class TelegramCalls:
         return {"status": "success", "message": "Call ended"}
 
     async def _leave(self, chat_id: int) -> None:
+        await self._stop_video(chat_id)
         self._calls.pop(chat_id, None)
         if self._app is None:
             return
@@ -464,10 +723,16 @@ class TelegramCalls:
         """Play a WAV into the call (it replaces whatever was playing)."""
         if self._app is None or self._lib is None:
             return
+        state = self._calls.get(chat_id)
+        video = state.get("video") if state is not None else None
         try:
-            await _maybe_await(
-                self._app.play(chat_id, self._lib.MediaStream(str(path)))
+            # While the call has video, every stream carries the external camera too.
+            stream = (
+                self._lib.video_stream(path, video)
+                if video is not None
+                else self._lib.MediaStream(str(path))
             )
+            await _maybe_await(self._app.play(chat_id, stream))
         except Exception as exc:
             log_warning(f"[telegram_call] could not play {path.name}: {exc!r}")
             return
@@ -529,14 +794,20 @@ class TelegramCalls:
 
 
 class TelegramCallProvider(CallProvider):
-    """Hosts Telegram private calls (audio only: video is not implemented)."""
+    """Hosts Telegram private calls: audio, plus the SyntH's face when a WebUI tab can lend it."""
 
     name = INTERFACE_ID
-    capabilities = CallCapabilities(audio=True, video=False, screen_share=False)
     plays_speech_in_call = True
 
     def __init__(self, calls: TelegramCalls) -> None:
         self._calls = calls
+
+    @property
+    def capabilities(self) -> CallCapabilities:
+        """``video`` only while a call answered now could really show the SyntH's face."""
+        return CallCapabilities(
+            audio=True, video=self._calls.video_available(), screen_share=False
+        )
 
     @staticmethod
     def _chat_id(session: CallSession) -> int:
@@ -546,6 +817,8 @@ class TelegramCallProvider(CallProvider):
         await self._calls.play_file(self._chat_id(session), Path(path))
 
     async def play_speech(self, session: CallSession, path: Path) -> None:
+        # The server-drawn face moves its mouth with the voice (no-op without video).
+        get_call_video_hub().speak(session.call_id, Path(path))
         await self._calls.play_file(self._chat_id(session), Path(path))
 
     def is_agent_speaking(self, session: CallSession) -> bool:
@@ -557,6 +830,7 @@ class TelegramCallProvider(CallProvider):
         await self._calls.deliver_turn(session, text, speaker_id, speaker_name)
 
     async def on_call_ended(self, session: CallSession) -> None:
-        # Let the hang-up tone play before leaving the call.
+        # Stop the camera at once; the hang-up tone still plays before leaving the call.
+        await self._calls._stop_video(self._chat_id(session))
         await asyncio.sleep(0.6)
         await self._calls._leave(self._chat_id(session))
