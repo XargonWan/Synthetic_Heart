@@ -187,3 +187,78 @@ async def test_local_language_precheck_can_bypass_llm(monkeypatch):
         c.get("type") == "language_hint" and c.get("language_code") == "pt"
         for c in contribs
     )
+
+
+class _VideoKeyPlugin:
+    recon_priority = 5
+
+    def __init__(self) -> None:
+        self.received: list[object] = []
+
+    def get_recon_key(self) -> str:
+        return "video_media"
+
+    def get_recon_instruction(self) -> str:
+        return "Return video_media"
+
+    async def parse_recon_response(self, data, **kwargs):
+        self.received.append(data)
+        return []
+
+    async def get_recon_contributions(self, **kwargs):
+        return []
+
+
+@pytest.mark.asyncio
+async def test_hint_shortcuts_do_not_skip_llm_when_other_keys_requested(monkeypatch):
+    """A non-hint recon key (video_media) must still get the shared LLM call."""
+    import core.config as config_mod
+    import core.core_initializer as ci
+    import core.cortex_registry as registry_mod
+    import core.recon as recon_mod
+
+    recon_mod._RECON_HINT_CACHE.clear()
+
+    plugins_backup = dict(ci.PLUGIN_REGISTRY)
+    video = _VideoKeyPlugin()
+    ci.PLUGIN_REGISTRY.clear()
+    ci.PLUGIN_REGISTRY["lang"] = _LangPlugin()
+    ci.PLUGIN_REGISTRY["video"] = video
+
+    engine = _CountingEngine()
+
+    async def fake_active_cortex(scope=None):
+        return "dummy"
+
+    monkeypatch.setattr(config_mod, "get_active_cortex_engine", fake_active_cortex)
+    monkeypatch.setattr(config_mod, "derive_cortex_scope", lambda *_: "chat")
+    monkeypatch.setattr(
+        registry_mod, "get_cortex_registry", lambda: _DummyRegistry(engine)
+    )
+    # The lingua precheck would resolve the language and (before the fix) skip
+    # the LLM call even though ``video_media`` was also requested.
+    monkeypatch.setattr(recon_mod, "_detect_language_locally", lambda _t: "it")
+    monkeypatch.setattr(recon_mod.config_registry, "get_var", lambda k, d=None, **_: d)
+
+    def fake_get_value(key, default=None, value_type=None):
+        if key in ("ENABLE_RECON", "RECON_LOCAL_LANGUAGE_PRECHECK"):
+            return True
+        if key == "RECON_HINT_CACHE_TTL_SECONDS":
+            return 300
+        return default
+
+    monkeypatch.setattr(recon_mod.config_registry, "get_value", fake_get_value)
+
+    msg = _Msg("guarda https://youtube.com/shorts/wPPg5oiO_zw")
+
+    try:
+        await recon_mod.gather_recon_contributions(
+            message=msg, context_memory={}, text=msg.text
+        )
+    finally:
+        ci.PLUGIN_REGISTRY.clear()
+        ci.PLUGIN_REGISTRY.update(plugins_backup)
+        recon_mod._RECON_HINT_CACHE.clear()
+
+    assert engine.calls == 1
+    assert len(video.received) == 1

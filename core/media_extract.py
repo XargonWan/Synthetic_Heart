@@ -25,7 +25,7 @@ import tempfile
 from dataclasses import dataclass, field
 from urllib.parse import parse_qs, urlparse
 
-from core.logging_utils import log_debug, log_warning
+from core.logging_utils import log_debug, log_info, log_warning
 
 # Directory for transient downloads / extractions.
 _MEDIA_TMP_DIR = os.path.join("tmp", "recon_media")
@@ -266,7 +266,7 @@ def _download_youtube_subtitles(
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])
     except Exception as exc:
-        log_debug(f"[media_extract] Subtitle download failed: {exc!r}")
+        log_warning(f"[media_extract] Subtitle download failed for {url}: {exc!r}")
         return None
 
     # Locate any produced .vtt file sharing our prefix.
@@ -278,6 +278,7 @@ def _download_youtube_subtitles(
             vtt_path = os.path.join(base_dir, fname)
             break
     if not vtt_path:
+        log_info(f"[media_extract] No subtitles available for {url}; trying audio.")
         return None
 
     result.temp_files.append(vtt_path)
