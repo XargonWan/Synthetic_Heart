@@ -11,8 +11,10 @@ How a call works here — the same way as on every interface (``core/call_audio.
         -> a normal turn at ``PRIORITY_CALL`` (``deliver_turn``)
     the SyntH's reply is spoken by Vox and played into the call (``play_speech``)
 
-Only the trainer (or ids listed in ``TELEGRAM_CALL_ALLOWED_IDS``) can call: an incoming
-call from anyone else is not answered.
+The trainer (or an id listed in ``TELEGRAM_CALL_ALLOWED_IDS``) is answered at once. A call
+from anyone else is not answered: the trainer is told who is calling, and the SyntH answers
+(or declines) with the ``answer_call_telegram`` action once the trainer has said what to do.
+The call only rings for a short while (``_RING_TIMEOUT_S``).
 
 NOTE FOR DEBUGGING. This module was written against py-tgcalls' published examples
 (``example/p2p_example``: ``ChatUpdate.Status.INCOMING_CALL`` + ``play``; the
@@ -111,6 +113,11 @@ _ENDED_STATUS_NAMES = (
 )
 
 
+#: How long an unanswered call from a stranger is still worth answering (Telegram rings
+#: about this long before the caller gives up).
+_RING_TIMEOUT_S = 45.0
+
+
 def _cfg_int(key: str, default: int) -> int:
     try:
         return int(config_registry.get_value(key, default, value_type=int))
@@ -188,6 +195,8 @@ class TelegramCalls:
         self._app: Any = None
         # chat_id -> call state
         self._calls: dict[int, dict[str, Any]] = {}
+        # Calls from users who may not call (yet): chat_id -> when it started ringing.
+        self._ringing: dict[int, float] = {}
         self._provider: TelegramCallProvider | None = None
 
     # -- lifecycle --------------------------------------------------------
@@ -253,16 +262,60 @@ class TelegramCalls:
     async def _on_incoming(self, _client: Any, update: Any) -> None:
         chat_id = int(update.chat_id)
         if not self._allowed(chat_id):
-            log_warning(
-                f"[telegram_call] call from {chat_id} not answered (not the trainer "
-                "and not in TELEGRAM_CALL_ALLOWED_IDS)"
+            log_info(
+                f"[telegram_call] call from {chat_id} is not from the trainer: "
+                "asking the trainer whether to answer"
             )
+            await self._ask_trainer(chat_id)
             return
         log_info(f"[telegram_call] answering the call from {chat_id}")
         await self._open(chat_id, answer=True)
 
+    async def _ask_trainer(self, chat_id: int) -> None:
+        """Leave the call ringing and tell the trainer who is calling."""
+        self._ringing[chat_id] = time.monotonic()
+        try:
+            from interface.telegram.telegram import get_trainer_id
+
+            trainer = get_trainer_id()
+            if trainer is None:
+                log_warning("[telegram_call] no trainer to ask about the call")
+                self._ringing.pop(chat_id, None)
+                return
+            name = await self._display_name(chat_id)
+            await self._interface.send_message(
+                {
+                    "text": (
+                        f"\U0001f4de {name} (telegram/{chat_id}) is calling me and is not "
+                        "on the list of people I answer without asking. Should I pick up? "
+                        f"It rings for about {int(_RING_TIMEOUT_S)} seconds."
+                    ),
+                    "interface_path": f"{INTERFACE_ID}/{trainer}",
+                }
+            )
+        except Exception as exc:
+            log_warning(f"[telegram_call] could not ask the trainer: {exc!r}")
+
+    async def answer_pending(self, user_id: int, answer: bool) -> dict[str, str]:
+        """Answer or decline a call that is ringing and was held for the trainer's decision."""
+        started = self._ringing.pop(int(user_id), None)
+        if started is None or (time.monotonic() - started) > _RING_TIMEOUT_S:
+            return {"status": "failed", "message": "That call is not ringing any more"}
+        if not answer:
+            await self._leave(int(user_id))
+            log_info(f"[telegram_call] call from {user_id} declined")
+            return {"status": "success", "message": "Call declined"}
+        log_info(
+            f"[telegram_call] answering the call from {user_id} (trainer said yes)"
+        )
+        session = await self._open(int(user_id), answer=True)
+        if session is None:
+            return {"status": "failed", "message": "Call not answered"}
+        return {"status": "success", "message": "Call answered"}
+
     async def _on_ended(self, _client: Any, update: Any) -> None:
         chat_id = int(update.chat_id)
+        self._ringing.pop(chat_id, None)
         if chat_id not in self._calls:
             return
         log_info(f"[telegram_call] call with {chat_id} ended ({update.status})")

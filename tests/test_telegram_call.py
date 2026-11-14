@@ -92,7 +92,15 @@ def _env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 
 async def _started() -> tuple[tc.TelegramCalls, _FakeApp]:
-    interface = SimpleNamespace(client=SimpleNamespace(), bot=SimpleNamespace())
+    sent: list[dict[str, Any]] = []
+
+    async def _send(payload: dict[str, Any]) -> bool:
+        sent.append(payload)
+        return True
+
+    interface = SimpleNamespace(
+        client=SimpleNamespace(), bot=SimpleNamespace(), send_message=_send, sent=sent
+    )
     calls = tc.TelegramCalls(interface)
     assert await calls.start(interface.client) is True
     app = calls._app
@@ -139,12 +147,78 @@ async def test_the_trainer_is_answered_with_the_pickup_tone() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_stranger_is_not_answered() -> None:
-    _, app = await _started()
+async def test_a_stranger_is_not_answered_but_the_trainer_is_asked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib
+
+    tg = importlib.import_module("interface.telegram.telegram")
+
+    monkeypatch.setattr(tg, "get_trainer_id", lambda: TRAINER)
+    calls, app = await _started()
     handler = app.handlers[("chat_update", _Status.INCOMING_CALL)]
     await handler(None, SimpleNamespace(chat_id=STRANGER, status=_Status.INCOMING_CALL))
     assert get_call_manager().get_active_call(f"telegram/{STRANGER}") is None
     assert app.played == []
+    # The trainer is told who is calling, in their own chat.
+    sent = calls._interface.sent
+    assert len(sent) == 1 and sent[0]["interface_path"] == f"telegram/{TRAINER}"
+    assert str(STRANGER) in sent[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_the_held_call_is_answered_when_the_trainer_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib
+
+    tg = importlib.import_module("interface.telegram.telegram")
+
+    monkeypatch.setattr(tg, "get_trainer_id", lambda: TRAINER)
+    calls, app = await _started()
+    handler = app.handlers[("chat_update", _Status.INCOMING_CALL)]
+    await handler(None, SimpleNamespace(chat_id=STRANGER, status=_Status.INCOMING_CALL))
+
+    result = await calls.answer_pending(STRANGER, True)
+    assert result["status"] == "success"
+    session = get_call_manager().get_active_call(f"telegram/{STRANGER}")
+    assert session is not None and session.state is CallState.ACTIVE
+    # It can only be answered once.
+    assert (await calls.answer_pending(STRANGER, True))["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_a_declined_or_expired_call_is_not_answered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib
+
+    tg = importlib.import_module("interface.telegram.telegram")
+
+    monkeypatch.setattr(tg, "get_trainer_id", lambda: TRAINER)
+    calls, app = await _started()
+    handler = app.handlers[("chat_update", _Status.INCOMING_CALL)]
+    await handler(None, SimpleNamespace(chat_id=STRANGER, status=_Status.INCOMING_CALL))
+    assert (await calls.answer_pending(STRANGER, False))["status"] == "success"
+    assert get_call_manager().get_active_call(f"telegram/{STRANGER}") is None
+
+    await handler(None, SimpleNamespace(chat_id=STRANGER, status=_Status.INCOMING_CALL))
+    calls._ringing[STRANGER] -= tc._RING_TIMEOUT_S + 1
+    assert (await calls.answer_pending(STRANGER, True))["status"] == "failed"
+    assert get_call_manager().get_active_call(f"telegram/{STRANGER}") is None
+    # Nobody is asked about a call that is not ringing.
+    assert (await calls.answer_pending(999, True))["status"] == "failed"
+
+
+def test_the_answer_call_action_is_validated() -> None:
+    from interface.telegram.telegram import ANSWER_CALL_ACTION, TelegramUserInterface
+
+    ok = {"user_id": "42", "answer": True}
+    assert TelegramUserInterface.validate_payload(ANSWER_CALL_ACTION, ok) == []
+    assert TelegramUserInterface.validate_payload(
+        ANSWER_CALL_ACTION, {"user_id": "x", "answer": "yes"}
+    )
+    assert ANSWER_CALL_ACTION in TelegramUserInterface.get_supported_actions()
 
 
 @pytest.mark.asyncio
