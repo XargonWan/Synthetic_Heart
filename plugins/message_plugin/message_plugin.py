@@ -573,7 +573,16 @@ class MessagePlugin:
             _voice_input = isinstance(context, dict) and (
                 context.get("is_voice_input") or context.get("request_tts")
             )
-            if _voice_input and not payload.get("send_as_voice"):
+            # In a live call the reply is ALWAYS spoken, whatever the model chose for
+            # send_as_voice (and even with Vox momentarily off: Vox.speak then falls
+            # back to the text itself, so the person still gets an answer).
+            _in_call = isinstance(context, dict) and bool(context.get("call"))
+            if _in_call and not payload.get("send_as_voice"):
+                log_info(
+                    "[message_plugin] Live call — forcing send_as_voice=true for the reply."
+                )
+                payload["send_as_voice"] = True
+            elif _voice_input and not payload.get("send_as_voice"):
                 from plugins.vox_plugin import is_vox_available
 
                 if is_vox_available():

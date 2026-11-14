@@ -105,6 +105,16 @@ register_exposed_var(
 )
 
 
+#: Shown to the model on a call turn (``source.in_call.note``), so it knows it is on a call.
+CALL_NOTE = (
+    "this is a live call, not a chat: the person hears you, and what you write is spoken "
+    "aloud (the system speaks it for you, whatever send_as_voice says). Answer the way you "
+    "would on the phone: short, plain sentences, no markdown, lists, links or emoji. Their "
+    "words come from speech-to-text, so they can be cut off, mis-heard, or one thought "
+    "split over several messages: if one ends mid-thought, wait for the rest instead of "
+    "answering the fragment."
+)
+
 #: Minimum seconds between two acknowledgements in the same call. Also long enough
 #: for the signal not to be answered by its own echo in the caller's microphone.
 _ACK_MIN_GAP_S = 3.0
@@ -554,6 +564,26 @@ class CallManager:
             )
             message.attachments = attachments
         return message
+
+    def turn_context(self, call_id: str | None) -> dict[str, Any] | None:
+        """What the model is told about the call a turn belongs to, or ``None``.
+
+        Read by the queue into the turn context and rendered into the prompt, so the
+        SyntH knows it is in a live call (not a chat) and how it is being heard.
+        """
+        session = self.get_session(call_id)
+        if session is None or session.state is not CallState.ACTIVE:
+            return None
+        provider = self._providers.get(session.interface_name)
+        shares_screen = bool(provider and provider.capabilities.screen_share)
+        return {
+            "call_id": session.call_id,
+            "kind": session.kind.value,
+            "interface": session.interface_name,
+            "seconds": int(max(0.0, time.time() - session.started_at)),
+            "caller_sees_you": session.kind is CallKind.VIDEO,
+            "screen_share": shares_screen and session.latest_screen_frame is not None,
+        }
 
     # -- internals --------------------------------------------------------
 

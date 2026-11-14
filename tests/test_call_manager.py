@@ -340,3 +340,21 @@ async def test_start_end_sounds_can_be_switched_off_and_never_break_a_call(
     session = await mgr.request_call("deaf", "deaf/1")
     assert session.state is CallState.ACTIVE
     assert await mgr.end_call(session.call_id) is True
+
+
+@pytest.mark.asyncio
+async def test_turn_context_describes_the_call_to_the_model() -> None:
+    mgr = get_call_manager()
+    mgr.register_provider(
+        _FakeProvider("cam", CallCapabilities(audio=True, video=True))
+    )
+    session = await mgr.request_call("cam", "c/1", CallKind.VIDEO)
+
+    info = mgr.turn_context(session.call_id)
+    assert info is not None
+    assert info["kind"] == "video" and info["caller_sees_you"] is True
+    assert info["call_id"] == session.call_id
+
+    await mgr.end_call(session.call_id)
+    assert mgr.turn_context(session.call_id) is None
+    assert mgr.turn_context(None) is None

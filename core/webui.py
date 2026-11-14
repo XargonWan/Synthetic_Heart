@@ -5859,8 +5859,10 @@ class SynthWebUIInterface:
         # Detect voice-originated input; if so we keep THINK instead of WRITE.
         _is_voice_input = False
         try:
+            from core.voice_reply import is_voice_reply
+
             _ctx = kwargs.get("context")
-            if isinstance(_ctx, dict) and _ctx.get("is_voice_input"):
+            if is_voice_reply(_ctx):
                 _is_voice_input = True
             _msg = kwargs.get("message")
             if not _is_voice_input and getattr(_msg, "is_voice_input", False):
