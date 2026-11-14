@@ -472,3 +472,58 @@ async def test_self_repeat_gate_ignores_non_self_lines(
     assert connector.calls == [("say", {"text": "Ehi Rekku!"})]
 
     context.clear()
+
+
+# ---------------------------------------------------------------------------
+# Reconnecting (connector dropped, session still inside the grace window)
+# ---------------------------------------------------------------------------
+
+
+def test_reconnecting_world_keeps_gameplay_verbs_exposed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bridge blip must not turn ``vessel_<world>_say`` into 'Unsupported'."""
+    p = _make_plugin(monkeypatch)
+    monkeypatch.setattr(VesselPlugin, "_connected_world", lambda self: None)
+    monkeypatch.setattr(VesselPlugin, "_reconnecting_world", lambda self: "fake")
+    actions = p.get_supported_actions()
+    assert "vessel_fake_say" in actions
+    assert "vessel_connect" not in actions
+    assert p._parse_action_verb("vessel_fake_say") == "say"
+
+
+def test_reconnecting_world_reads_the_interface(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    p = _make_plugin(monkeypatch)
+
+    class _Iface:
+        def __init__(self, worlds: list[str]) -> None:
+            self.worlds = worlds
+
+        def reconnecting_worlds(self) -> list[str]:
+            return self.worlds
+
+    iface = _Iface(["fake"])
+    monkeypatch.setattr(
+        VesselPlugin, "_get_vessel_interface", staticmethod(lambda: iface)
+    )
+    assert p._reconnecting_world() == "fake"
+    iface.worlds = []
+    assert p._reconnecting_world() is None
+    monkeypatch.setattr(
+        VesselPlugin, "_get_vessel_interface", staticmethod(lambda: None)
+    )
+    assert p._reconnecting_world() is None
+
+
+def test_connect_overrides_are_remembered_per_world(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``connect_overrides_for`` hands back a copy of what the world was entered with."""
+    p = _make_plugin(monkeypatch)
+    assert p.connect_overrides_for("fake") is None
+    p._connect_overrides["fake"] = {"host": "10.0.0.1", "port": 25565}
+    got = p.connect_overrides_for("fake")
+    assert got == {"host": "10.0.0.1", "port": 25565}
+    assert got is not p._connect_overrides["fake"]

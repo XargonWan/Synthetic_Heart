@@ -1214,6 +1214,11 @@ class VesselPlugin(AIPluginBase):
         super().__init__()
         self._active_connector_name: str = "disabled"
         self._settings: dict[str, Any] = {}
+        # Per-world server override (host/port) the live session was entered
+        # with. A reconnect after a bridge blip must go back to *that* server,
+        # not to the saved default, or it lands on a host the player never
+        # asked for (and overwrites the bridge's own reconnect target).
+        self._connect_overrides: dict[str, dict[str, Any]] = {}
 
         # Import built-in connector modules so they self-register.
         self._import_builtin_connectors()
@@ -1864,6 +1869,11 @@ class VesselPlugin(AIPluginBase):
                 data={"environment": name, "reason": reason},
             )
 
+        applied = {k: v for k, v in (overrides or {}).items() if v not in (None, "")}
+        if applied:
+            self._connect_overrides[name] = applied
+        else:
+            self._connect_overrides.pop(name, None)
         log_info(f"[vessel_plugin] Entered world '{name}' (session={session_id})")
         # Now that a world is connected, the connection-driven gameplay verbs
         # (vessel_<world>_say/move/...) are exposed by get_supported_actions().
@@ -1874,6 +1884,15 @@ class VesselPlugin(AIPluginBase):
             detail="connected",
             data={"environment": name, "session_id": session_id},
         )
+
+    def connect_overrides_for(self, connector_name: str) -> dict[str, Any] | None:
+        """Return the server override ``connector_name`` was entered with, if any.
+
+        The Vessel interface passes it back to :meth:`connect_world` when it
+        reconnects a dropped world, so the retry targets the same server.
+        """
+        stored = self._connect_overrides.get(connector_name)
+        return dict(stored) if stored else None
 
     async def disconnect_world(
         self, connector_name: str | None = None
@@ -1907,6 +1926,7 @@ class VesselPlugin(AIPluginBase):
                     f"[vessel_plugin] end_sessions_for_environment failed: {exc}"
                 )
 
+        self._connect_overrides.pop(name, None)
         log_info(f"[vessel_plugin] Left world '{name}'")
         # Gameplay verbs are hidden again once disconnected; drop them from the
         # cached actions block so the prompt only exposes vessel_connect.
@@ -2193,6 +2213,30 @@ class VesselPlugin(AIPluginBase):
                 continue
         return None
 
+    def _reconnecting_world(self) -> str | None:
+        """Return the world whose connector dropped but is still within grace.
+
+        While the Vessel interface retries a dropped connector the session is
+        frozen (``has_active_session()`` reads false) but the body is still
+        "ours". Treating that window as embodied keeps the world's verbs
+        exposed and valid, so a reply sent during a blip is not rejected as
+        ``Unsupported type`` and bounced through the corrector until it is
+        abandoned. Side-effect-free; ``None`` when the interface is absent.
+        """
+        iface = self._get_vessel_interface()
+        probe = getattr(iface, "reconnecting_worlds", None)
+        if not callable(probe):
+            return None
+        try:
+            worlds = probe()
+        except Exception:  # pragma: no cover - defensive
+            return None
+        return worlds[0] if worlds else None
+
+    def _embodied_world(self) -> str | None:
+        """Return the connected world, else the one reconnecting within grace."""
+        return self._connected_world() or self._reconnecting_world()
+
     def _world_extra_verbs_for(self, world: str) -> dict[str, dict[str, Any]]:
         """Return a specific connector's **world-specific** extra action verbs.
 
@@ -2283,12 +2327,15 @@ class VesselPlugin(AIPluginBase):
           :meth:`VesselConnectorBase.get_world_actions` extras are exposed,
           namespaced ``vessel_<W>_<verb>``, together with ``vessel_disconnect``.
           ``vessel_connect`` disappears while embodied.
+        * **Reconnecting** — the connector dropped but the session is still
+          inside the disconnect-grace window: treated as connected, so the
+          verbs stay valid across a bridge blip (:meth:`_embodied_world`).
 
         When the Vessel is disabled entirely (no enabled worlds) the action set
         is empty. This keeps the prompt clean: Synth only ever sees the verbs it
         can actually use right now.
         """
-        connected = self._connected_world()
+        connected = self._embodied_world()
         actions: dict[str, dict[str, Any]] = {}
 
         if not connected:
@@ -2423,7 +2470,7 @@ class VesselPlugin(AIPluginBase):
         """
         if not action_type.startswith("vessel_"):
             return None
-        connected = self._connected_world()
+        connected = self._embodied_world()
         extra_verbs = list(self._world_extra_verbs_for(connected)) if connected else []
         known_verbs = list(self._ACTION_VERBS) + extra_verbs
         for verb in known_verbs:

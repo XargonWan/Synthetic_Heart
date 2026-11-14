@@ -72,7 +72,11 @@ def _ambient_triggers_turn() -> bool:
     Fail-safe: any error reads as OFF.
     """
     try:
-        return bool(config_registry.get_value("VESSEL_AMBIENT_TRIGGERS_TURN", False, value_type=bool))
+        return bool(
+            config_registry.get_value(
+                "VESSEL_AMBIENT_TRIGGERS_TURN", False, value_type=bool
+            )
+        )
     except Exception:
         return False
 
@@ -357,7 +361,9 @@ class VesselInterface:
             from core import vessel_stats
 
             vessel_stats.register()  # its block on the Logs > Stats page, only while the interface runs
-        except Exception as exc:  # pragma: no cover - a statistic never blocks the interface
+        except (
+            Exception
+        ) as exc:  # pragma: no cover - a statistic never blocks the interface
             log_debug(f"[vessel_interface] stats section registration failed: {exc}")
         self.disabled_reason = None
         # Wire the connection-liveness probe into the session manager so
@@ -851,7 +857,11 @@ class VesselInterface:
     def _connector_remembers_chat(self, environment: str) -> bool:
         """Does the connector of ``environment`` keep its chat between sessions? (``remembers_chat``)"""
         connector = self._connector_environments().get(environment)
-        return bool(getattr(connector, "remembers_chat", False)) if connector is not None else False
+        return (
+            bool(getattr(connector, "remembers_chat", False))
+            if connector is not None
+            else False
+        )
 
     async def forget_chat(self, environment: str, world: Any = None) -> bool:
         """Clear the remembered chat of ``environment`` (every tracked scope of it, and the scope ``world`` names).
@@ -862,9 +872,17 @@ class VesselInterface:
         paths: set[str] = set()
         for path in self._sessions.values():
             parts = path.split("/")
-            if len(parts) >= 2 and parts[0] == INTERFACE_NAME and parts[1] == environment:
+            if (
+                len(parts) >= 2
+                and parts[0] == INTERFACE_NAME
+                and parts[1] == environment
+            ):
                 paths.add(path)
-        paths.add(build_interface_path(INTERFACE_NAME, environment, _slugify_world_token(world)))
+        paths.add(
+            build_interface_path(
+                INTERFACE_NAME, environment, _slugify_world_token(world)
+            )
+        )
         cleared = False
         try:
             from core.chat_context_manager import clear_chat_context
@@ -874,9 +892,13 @@ class VesselInterface:
                 await clear_chat_history(path)
                 clear_chat_context(path)
                 cleared = True
-                log_info(f"[vessel_interface] chat forgotten at the player's request: {path}")
+                log_info(
+                    f"[vessel_interface] chat forgotten at the player's request: {path}"
+                )
         except Exception as exc:
-            log_warning(f"[vessel_interface] forget_chat failed for '{environment}': {exc}")
+            log_warning(
+                f"[vessel_interface] forget_chat failed for '{environment}': {exc}"
+            )
         return cleared
 
     def _tracked_path_for_environment(self, environment: str) -> str | None:
@@ -1030,7 +1052,11 @@ class VesselInterface:
         # the shape every interface's attachments take). The pictures go to the model with this turn and nowhere
         # else: they are not written to the activity log, the experience record or the chat history, where a
         # base64 frame would be a megabyte of noise per event.
-        attachments = [a for a in ((data or {}).get("attachments") or []) if isinstance(a, dict) and a.get("data")]
+        attachments = [
+            a
+            for a in ((data or {}).get("attachments") or [])
+            if isinstance(a, dict) and a.get("data")
+        ]
         if attachments:
             data = {k: v for k, v in (data or {}).items() if k != "attachments"}
             data["attachments_count"] = len(attachments)
@@ -1842,7 +1868,9 @@ class VesselInterface:
             from core import vessel_beat
 
             def _cfg(key: str, default: Any) -> Any:
-                return config_registry.get_value(key, default, group="vessel", component="vessel")
+                return config_registry.get_value(
+                    key, default, group="vessel", component="vessel"
+                )
 
             motor_interval = float(vessel_beat.resolve_motor_interval(_cfg))
         except Exception:
@@ -1852,9 +1880,16 @@ class VesselInterface:
             if self._has_non_idle_world():
                 return legacy
             tick_cfg = vessel_beat.resolve_tick(_cfg)
-            wake = vessel_beat.next_wake(asyncio.get_event_loop().time(), self._idle_due_at, self._idle_waiting, tick_cfg)
+            wake = vessel_beat.next_wake(
+                asyncio.get_event_loop().time(),
+                self._idle_due_at,
+                self._idle_waiting,
+                tick_cfg,
+            )
             if self._pending_perceptions:
-                wake = min(wake, 2.0)  # a batch of perceptions is flushed when its window ends
+                wake = min(
+                    wake, 2.0
+                )  # a batch of perceptions is flushed when its window ends
             return max(0.25, min(30.0, wake))
         except Exception:
             return legacy
@@ -2096,7 +2131,9 @@ class VesselInterface:
         if not world:
             return False
         connector = self._connected_connector(world)
-        return bool(connector is not None and getattr(connector, "uses_idle_beat", False))
+        return bool(
+            connector is not None and getattr(connector, "uses_idle_beat", False)
+        )
 
     def _idle_hold(self, key: str, message: str, every: float = 60.0) -> None:
         """Log why an idle beat did NOT start, at INFO, at most once per ``every`` seconds per reason.
@@ -2124,15 +2161,25 @@ class VesselInterface:
 
             prefix = f"vessel/{world}"
             return sum(
-                1 for item in message_queue.snapshot_queue(limit=200) if str(item.get("interface_path", "")).startswith(prefix)
+                1
+                for item in message_queue.snapshot_queue(limit=200)
+                if str(item.get("interface_path", "")).startswith(prefix)
             )
         except Exception:
             return 0
 
-    def _record_beat_outcome(self, connector: Any, outcome: str, turn_done: float) -> None:
+    def _record_beat_outcome(
+        self, connector: Any, outcome: str, turn_done: float
+    ) -> None:
         """Statistics of a beat that has just been read: how it ended, how long the turn took, when its first verb came."""
         try:
-            kind = "acted" if outcome.startswith("acted") else "cut_short" if outcome.startswith("cut short") else "did_nothing"
+            kind = (
+                "acted"
+                if outcome.startswith("acted")
+                else "cut_short"
+                if outcome.startswith("cut short")
+                else "did_nothing"
+            )
             stats.incr(f"beat.{kind}")
             if kind == "cut_short":
                 return
@@ -2147,7 +2194,9 @@ class VesselInterface:
         except Exception as exc:  # pragma: no cover - a statistic never breaks a beat
             log_debug(f"[vessel_interface] beat outcome stats failed: {exc}")
 
-    def _record_beat_phases(self, now: float, settled_since: float, pacing: Any, interval: float) -> None:
+    def _record_beat_phases(
+        self, now: float, settled_since: float, pacing: Any, interval: float
+    ) -> None:
         """Statistics and the ``[beat-timing]`` line of the beat about to be asked: how long each part of the last
         cycle took (the numbers the auto pacing and the Stats page work from)."""
         try:
@@ -2159,8 +2208,12 @@ class VesselInterface:
                 parts.append(f"cycle {now - previous_ask:.0f}s")
             if turn_done > 0:
                 if settled_since > turn_done:
-                    stats.observe("beat.turn_done_to_settled", settled_since - turn_done)
-                    parts.append(f"turn-done->body-done {settled_since - turn_done:.0f}s")
+                    stats.observe(
+                        "beat.turn_done_to_settled", settled_since - turn_done
+                    )
+                    parts.append(
+                        f"turn-done->body-done {settled_since - turn_done:.0f}s"
+                    )
                 waited = now - max(turn_done, settled_since)
                 stats.observe("beat.settled_to_next_ask", waited)
                 parts.append(f"done->asked {waited:.0f}s")
@@ -2178,7 +2231,8 @@ class VesselInterface:
             from core.vessel_registry import VESSEL_REGISTRY
 
             return any(
-                getattr(c, "is_connected", False) and not getattr(c, "uses_idle_beat", False)
+                getattr(c, "is_connected", False)
+                and not getattr(c, "uses_idle_beat", False)
                 for c in (getattr(VESSEL_REGISTRY, "_instances", {}) or {}).values()
             )
         except Exception:
@@ -2217,7 +2271,9 @@ class VesselInterface:
         try:
             from core.vessel_registry import VESSEL_REGISTRY
 
-            for name, candidate in (getattr(VESSEL_REGISTRY, "_instances", {}) or {}).items():
+            for name, candidate in (
+                getattr(VESSEL_REGISTRY, "_instances", {}) or {}
+            ).items():
                 if getattr(candidate, "is_connected", False) and getattr(
                     candidate, "uses_idle_beat", False
                 ):
@@ -2236,7 +2292,9 @@ class VesselInterface:
             ready_fn = getattr(connector, "idle_ready_since", None)
             ready = ready_fn() if callable(ready_fn) else 0.0
         except Exception as exc:
-            log_warning(f"[vessel_interface] idle_ready_since failed for '{world}': {exc}")
+            log_warning(
+                f"[vessel_interface] idle_ready_since failed for '{world}': {exc}"
+            )
             return
         if ready is None:
             self._idle_waiting = True
@@ -2252,7 +2310,9 @@ class VesselInterface:
             self._idle_turn_done_at = 0.0
             self._idle_acted_last = False
             self._idle_gap_smoothed = None
-            log_info(f"[vessel_interface] Idle beat clock for '{world}' starts now (ready since {ready:.0f})")
+            log_info(
+                f"[vessel_interface] Idle beat clock for '{world}' starts now (ready since {ready:.0f})"
+            )
 
         try:
             journal_fn = getattr(connector, "idle_journal", None)
@@ -2274,9 +2334,14 @@ class VesselInterface:
         if self._idle_pending:
             if rested < 3:
                 self._idle_waiting = True
-                self._idle_hold("last_beat_running", f"the last beat's turn is still running (engine free {rested:.0f}s)")
+                self._idle_hold(
+                    "last_beat_running",
+                    f"the last beat's turn is still running (engine free {rested:.0f}s)",
+                )
                 return
-            acted = [text for stamp, text in journal if stamp >= self._last_idle_beat_at]
+            acted = [
+                text for stamp, text in journal if stamp >= self._last_idle_beat_at
+            ]
             if self._last_player_activity_at > self._last_idle_beat_at:
                 outcome = "cut short by the player"
             elif acted:
@@ -2290,7 +2355,11 @@ class VesselInterface:
             self._idle_turn_done_at = turn_done
             self._idle_acted_last = outcome.startswith("acted")
             self._record_beat_outcome(connector, outcome, turn_done)
-            if self._turn_latency is not None and rested != float("inf") and not outcome.startswith("cut short"):
+            if (
+                self._turn_latency is not None
+                and rested != float("inf")
+                and not outcome.startswith("cut short")
+            ):
                 turn = (now - rested) - self._last_idle_beat_at
                 if turn > 0:
                     self._turn_latency.observe(turn)
@@ -2306,7 +2375,10 @@ class VesselInterface:
         if busy:
             self._idle_waiting = True
             stats.incr("beat.hold", reason="walk")
-            self._idle_hold("body_busy", f"'{world}' is on a walk of its own: its result is the next prompt")
+            self._idle_hold(
+                "body_busy",
+                f"'{world}' is on a walk of its own: its result is the next prompt",
+            )
             return
 
         novelty = bool(self._idle_novelty)
@@ -2315,13 +2387,19 @@ class VesselInterface:
         base_interval = float(vessel_beat.resolve_idle_interval(_cfg))
         registry = stats.get_stats()
         pacing = vessel_beat.auto_pacing(
-            turn=registry.timing("beat.ask_to_turn_done", max_age=vessel_beat.AUTO_MAX_AGE_SEC),
-            first_verb=registry.timing("beat.ask_to_first_verb", max_age=vessel_beat.AUTO_MAX_AGE_SEC),
+            turn=registry.timing(
+                "beat.ask_to_turn_done", max_age=vessel_beat.AUTO_MAX_AGE_SEC
+            ),
+            first_verb=registry.timing(
+                "beat.ask_to_first_verb", max_age=vessel_beat.AUTO_MAX_AGE_SEC
+            ),
             active_gap_cfg=vessel_beat.resolve_idle_active_gap(_cfg),
             base_interval=base_interval,
         )
         if pacing.mode == "auto":
-            self._idle_gap_smoothed = vessel_beat.smooth_gap(self._idle_gap_smoothed, pacing.gap)
+            self._idle_gap_smoothed = vessel_beat.smooth_gap(
+                self._idle_gap_smoothed, pacing.gap
+            )
             gap = self._idle_gap_smoothed
         else:
             self._idle_gap_smoothed = None
@@ -2343,7 +2421,9 @@ class VesselInterface:
         except Exception:  # pragma: no cover - defensive
             settled_since = 0.0
         # The interval counts from when the last beat's turn AND her body were done, not from the beat's start.
-        anchor = vessel_beat.idle_anchor(self._last_idle_beat_at, ready, self._idle_turn_done_at, settled_since)
+        anchor = vessel_beat.idle_anchor(
+            self._last_idle_beat_at, ready, self._idle_turn_done_at, settled_since
+        )
         self._idle_due_at = anchor + interval
         self._idle_pacing = {
             "mode": pacing.mode,
@@ -2355,7 +2435,10 @@ class VesselInterface:
             "streak": self._idle_streak,
             "acted_last": self._idle_acted_last,
         }
-        stats.info("beat.pacing", {**self._idle_pacing, "due_in": round(self._idle_due_at - now, 1)})
+        stats.info(
+            "beat.pacing",
+            {**self._idle_pacing, "due_in": round(self._idle_due_at - now, 1)},
+        )
         quiet_sec = vessel_beat.resolve_idle_quiet_sec(_cfg)
         if not vessel_beat.idle_beat_due(
             now, anchor, interval, self._last_player_activity_at, quiet_sec
@@ -2392,7 +2475,11 @@ class VesselInterface:
         if backlog > 0:
             self._idle_waiting = True
             stats.incr("beat.hold", reason="queue_busy")
-            self._idle_hold("queue_busy", f"{backlog} turn(s) of '{world}' already wait in the queue", every=30.0)
+            self._idle_hold(
+                "queue_busy",
+                f"{backlog} turn(s) of '{world}' already wait in the queue",
+                every=30.0,
+            )
             return
 
         # A beat nobody asked for must not make a person wait: only start one when the engine has had nothing to
@@ -2402,14 +2489,18 @@ class VesselInterface:
             self._idle_waiting = True
             stats.incr("beat.hold", reason="engine_busy")
             self._idle_hold(
-                "engine_busy", f"the engine has been free for only {rested:.0f}s of the {rest_needed}s asked", every=30.0
+                "engine_busy",
+                f"the engine has been free for only {rested:.0f}s of the {rest_needed}s asked",
+                every=30.0,
             )
             return
 
         try:
             surroundings = connector.describe_surroundings()
         except Exception as exc:
-            log_warning(f"[vessel_interface] describe_surroundings failed for '{world}': {exc}")
+            log_warning(
+                f"[vessel_interface] describe_surroundings failed for '{world}': {exc}"
+            )
             return
         if not surroundings:
             self._idle_hold("nothing_to_describe", f"'{world}' described nothing")
@@ -2460,7 +2551,9 @@ class VesselInterface:
         )
         await self._enqueue_perception(
             interface_path=interface_path,
-            summary=vessel_beat.build_idle_prompt(world, surroundings, recent, still, changes, intention),
+            summary=vessel_beat.build_idle_prompt(
+                world, surroundings, recent, still, changes, intention
+            ),
             environment=world,
             event_type="idle_beat",
         )
@@ -3998,12 +4091,34 @@ class VesselInterface:
         if plugin is None or not hasattr(plugin, "connect_world"):
             return
         try:
-            await plugin.connect_world(connector_name=environment)
+            # Reconnect to the server the session was entered with: an override
+            # given to ``vessel_connect`` must survive a bridge blip, otherwise
+            # the retry lands on the saved default host.
+            lookup = getattr(plugin, "connect_overrides_for", None)
+            overrides = lookup(environment) if callable(lookup) else None
+            await plugin.connect_world(
+                connector_name=environment, overrides=overrides or None
+            )
         except Exception as exc:  # pragma: no cover - defensive
             log_debug(
                 f"[vessel_interface] reconnect attempt for '{environment}' "
                 f"failed: {exc}"
             )
+
+    def reconnecting_worlds(self) -> list[str]:
+        """Return worlds in the RECONNECTING state, in the order they dropped.
+
+        A world is reconnecting while its connector has dropped but its session
+        is still tracked and the disconnect-grace window (``VESSEL_DISCONNECT_GRACE_SEC``)
+        has not elapsed. The Vessel plugin uses this to keep the world's verbs
+        exposed across a blip, so validation does not flip between "valid" and
+        "unsupported" while the bridge retries. Cheap, synchronous, never raises.
+        """
+        try:
+            live = self._active_session_environments()
+            return [env for env in self._disconnected_since if env in live]
+        except Exception:  # pragma: no cover - defensive
+            return []
 
     def _active_session_environments(self) -> set[str]:
         """Return the set of environments with a locally-tracked session.
