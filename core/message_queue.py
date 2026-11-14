@@ -1475,6 +1475,14 @@ async def enqueue(
         # ``core.call_manager.CallManager.mark_turn``). Ranked at PRIORITY_CALL —
         # above every chat band, below rift/vessel reflection and urgent items.
         "call": bool(getattr(message, "_call", False)),
+        # The call this turn belongs to (set by ``CallManager.mark_turn``); lets the
+        # queue recognise a follow-up utterance of the same call (see
+        # ``_interrupt_young_call_turn``).
+        "call_id": (
+            getattr(message, "call_id", None)
+            if getattr(message, "_call", False)
+            else None
+        ),
     }
 
     global _counter
@@ -1575,6 +1583,9 @@ async def enqueue(
         if ward_verdict.priority_drop and priority_val == PRIORITY_GENERAL:
             # A bot's message: processed after the people waiting (bot ward).
             priority_val = PRIORITY_GENERAL - ward_verdict.priority_drop
+
+    if item.get("call_id"):
+        _interrupt_young_call_turn(item["call_id"])
 
     # Same chat already waiting in the queue: fold this message into that element
     # (one turn for all of them) instead of paying a whole turn per message.
@@ -1727,6 +1738,110 @@ async def enqueue_low_priority(
         f"[QUEUE] enqueue_low_priority: {priority_label(priority)} "
         f"from {item['interface']} chat {chat_id} thread {thread_id}"
     )
+
+
+# -- young call turns ---------------------------------------------------------
+# On a call people speak in pieces: the first words often arrive before the thought is
+# finished and the rest follows seconds later. While a call turn is still *young* (its
+# generation just started, nothing has been said back yet) a further utterance of the SAME
+# call cancels it and puts it back in the queue, where the queue's normal coalescing joins
+# both utterances into the one turn that is answered. An older turn is left to finish: the
+# SyntH is already replying and the new utterance is simply the next turn.
+register_exposed_var(
+    "CALL_TURN_INTERRUPT_WINDOW_SEC",
+    label="Call Turn Interrupt Window (s)",
+    default=8.0,
+    value_type=float,
+    ui_type="number",
+    description=(
+        "A call turn younger than this many seconds is cancelled and merged with the "
+        "next thing the caller says in the same call. 0 disables the interruption."
+    ),
+    scope="core",
+    component="call_manager",
+    advanced=True,
+)
+
+
+@dataclass(slots=True)
+class _CallTurn:
+    call_id: str
+    task: asyncio.Task
+    item: dict
+    priority: int
+    started: float
+    cancellable: bool
+    interrupted: bool = False
+
+
+_active_call_turn: _CallTurn | None = None
+
+
+def _register_call_turn(
+    item: dict, task: asyncio.Task, priority: int, cancellable: bool
+) -> None:
+    """Remember the call turn being generated, so a follow-up can interrupt it."""
+    global _active_call_turn
+    call_id = item.get("call_id")
+    _active_call_turn = (
+        _CallTurn(str(call_id), task, item, priority, time.monotonic(), cancellable)
+        if call_id
+        else None
+    )
+
+
+def _clear_call_turn(task: asyncio.Task | None = None) -> None:
+    global _active_call_turn
+    if task is None or (_active_call_turn and _active_call_turn.task is task):
+        _active_call_turn = None
+
+
+def _call_turn_interrupted(task: asyncio.Task) -> bool:
+    """True when ``task`` was cancelled on purpose by :func:`_interrupt_young_call_turn`."""
+    return bool(
+        _active_call_turn
+        and _active_call_turn.task is task
+        and _active_call_turn.interrupted
+    )
+
+
+def _interrupt_young_call_turn(call_id: str | None) -> bool:
+    """Cancel the in-flight turn of ``call_id`` if it is still young. True if cancelled."""
+    entry = _active_call_turn
+    if not call_id or entry is None or entry.call_id != str(call_id):
+        return False
+    if entry.interrupted or entry.task.done() or not entry.cancellable:
+        return False
+    try:
+        from core.config_manager import config_registry
+
+        window = float(
+            config_registry.get_value(
+                "CALL_TURN_INTERRUPT_WINDOW_SEC",
+                8.0,
+                value_type=float,
+                component="call_manager",
+            )
+        )
+    except (TypeError, ValueError):
+        window = 8.0
+    age = time.monotonic() - entry.started
+    if window <= 0 or age > window:
+        return False
+    entry.interrupted = True
+    entry.task.cancel()
+    log_info(
+        f"[QUEUE] Call {call_id}: new utterance {age:.1f}s into the previous turn — "
+        "interrupting it so both are answered together"
+    )
+    return True
+
+
+async def _requeue_interrupted(item: dict, priority: int) -> None:
+    """Put an interrupted call turn back; coalescing joins it with the new utterance."""
+    global _counter
+    _counter += 1
+    await _get_queue().put((_heap_key(priority), _counter, item))
 
 
 #: Structural turn flags a coalesced message must keep. They are set by the
@@ -2385,7 +2500,7 @@ async def _consumer_loop() -> None:
                             try:
                                 exc = task.exception()
                                 success = exc is None
-                            except Exception:
+                            except (Exception, asyncio.CancelledError):
                                 success = False
                             if inspect.iscoroutinefunction(fn):
                                 await fn(
@@ -2496,6 +2611,9 @@ async def _consumer_loop() -> None:
                             )
                         )
                         response_future = final.get("response_future")
+                        _register_call_turn(
+                            final, processing_task, priority, task_is_cancellable
+                        )
                         log_debug(
                             f"[QUEUE] Dispatched handle_incoming_message task for interface_path={interface_path}, interface={final.get('interface')} cancellable={task_is_cancellable}"
                         )
@@ -2569,10 +2687,18 @@ async def _consumer_loop() -> None:
                             continue
 
                         timed_out = False
+                        interrupted = False
                         try:
                             await asyncio.wait_for(
                                 processing_task, timeout=timeout_seconds
                             )
+                        except asyncio.CancelledError:
+                            # Only a deliberate interruption of a young call turn is
+                            # absorbed here; any other cancellation still propagates.
+                            if not _call_turn_interrupted(processing_task):
+                                raise
+                            interrupted = True
+                            await _requeue_interrupted(final, priority)
                         except asyncio.TimeoutError:
                             timed_out = True
                             log_error(
@@ -2710,7 +2836,10 @@ async def _consumer_loop() -> None:
                                 response_future is not None
                                 and not response_future.done()
                             ):
-                                if processing_task.done():
+                                if interrupted:
+                                    # The re-queued turn resolves it when it is answered.
+                                    pass
+                                elif processing_task.done():
                                     try:
                                         response_future.set_result(
                                             processing_task.result()
@@ -2801,6 +2930,7 @@ async def _consumer_loop() -> None:
                     log_warning(f"[QUEUE] Failed to send fallback message: {send_err}")
             finally:
                 _clear_item_in_flight()
+                _clear_call_turn()
                 for _ in batch:
                     _get_queue().task_done()
         except asyncio.CancelledError:
