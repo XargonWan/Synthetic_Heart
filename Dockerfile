@@ -44,8 +44,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       xz-utils \
       python3-venv python3-dev build-essential libxml2-dev libxslt1-dev \
       zlib1g-dev libffi-dev libssl-dev \
+      libegl1 libegl-mesa0 libgl1 libgl1-mesa-dri \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -s /bin/bash abc
+
+# --- [Headless avatar renderer: Mesa EGL + software GL (llvmpipe)] ---
+# core/avatar_render draws the SyntH's face for video calls on the server with moderngl.
+# The packages above give an EGL context without a GPU or a display. moderngl's glcontext
+# opens "libEGL.so" / "libGL.so" by their unversioned names, which Debian only ships in the
+# -dev packages: link them to the runtime libraries (works on amd64 and arm64).
+RUN for lib in libEGL libGL; do \
+      target="$(ldconfig -p | awk -v n="$lib.so.1" '$1 == n { print $NF; exit }')" && \
+      test -n "$target" && ln -sf "$target" "/usr/local/lib/$lib.so" ; \
+    done && ldconfig
 
 # --- [Node.js LTS for the Minecraft Vessel] ---
 # The runtime image (python:3.12-slim) ships WITHOUT Node. The Minecraft Rift
@@ -106,6 +117,11 @@ ENV UV_PROJECT_ENVIRONMENT=/app/venv
 # This replaces the old "python3 -m venv && pip install" block
 # --frozen: Uses the exact versions from uv.lock
 RUN uv sync --frozen --no-cache
+
+# Build-time check of the headless renderer: prints the GL implementation, or a loud warning
+# (the build is not failed: calls then simply stay audio-only, see docs/call_service.rst).
+RUN EGL_PLATFORM=surfaceless /app/venv/bin/python -c "import moderngl; c = moderngl.create_standalone_context(backend='egl'); print('avatar renderer GL:', c.info['GL_RENDERER'])" \
+    || echo "WARNING: no headless GL context in this image: video calls will be audio-only"
 
 
 # --- [SearXNG (self-hosted, in-container) ] ---
