@@ -210,6 +210,10 @@ def _parse_trainer_id_from_config() -> Optional[int]:
     return None
 
 
+#: The action the SyntH uses to pick up (or decline) a call it was holding for the trainer.
+ANSWER_CALL_ACTION = "answer_call_telegram"
+
+
 def is_trainer(user_id: int) -> bool:
     return _interface_registry.is_trainer(INTERFACE_ID, user_id)
 
@@ -1244,12 +1248,45 @@ class TelegramUserInterface:
     def get_supported_actions() -> dict:
         from core.message_registry import get_send_message_schema
 
-        return {"send_message": get_send_message_schema([INTERFACE_ID])}
+        return {
+            "send_message": get_send_message_schema([INTERFACE_ID]),
+            ANSWER_CALL_ACTION: {
+                "description": (
+                    "Pick up (or decline) a Telegram call from someone who does not "
+                    "call you freely, after the trainer said what to do."
+                ),
+                "required_fields": ["user_id", "answer"],
+                "optional_fields": [],
+            },
+        }
 
     @staticmethod
     def get_prompt_instructions(action_name: str) -> Optional[dict]:
         from plugins.vox_plugin import is_vox_enabled
 
+        if action_name == ANSWER_CALL_ACTION:
+            return {
+                "description": (
+                    "Answer or decline a Telegram voice call that is ringing. Only for a "
+                    "call you were told about and the trainer decided on."
+                ),
+                "payload": {
+                    "user_id": {
+                        "type": "string",
+                        "example": "123456789",
+                        "description": "The Telegram id of the caller, from the notice.",
+                    },
+                    "answer": {
+                        "type": "boolean",
+                        "example": True,
+                        "description": "true to pick up, false to decline.",
+                    },
+                },
+                "important_notes": [
+                    "The call rings for under a minute: act as soon as the trainer has decided.",
+                    "Never pick up a call from someone the trainer did not approve.",
+                ],
+            }
         if action_name != "send_message":
             return None
         payload: dict[str, Any] = {
@@ -1314,6 +1351,14 @@ class TelegramUserInterface:
     @staticmethod
     def validate_payload(action_type: str, payload: dict) -> list:
         errors: list = []
+        if action_type == ANSWER_CALL_ACTION:
+            try:
+                int(str(payload.get("user_id", "")).strip())
+            except ValueError:
+                errors.append("payload.user_id must be a Telegram id")
+            if not isinstance(payload.get("answer"), bool):
+                errors.append("payload.answer must be a boolean")
+            return errors
         if action_type != "send_message":
             return errors
         text, media = payload.get("text"), payload.get("media")
@@ -1356,6 +1401,19 @@ class TelegramUserInterface:
         self, action: dict, context: dict, bot: Any, original_message: Any
     ) -> dict:
         action_type = action.get("type")
+        if action_type == ANSWER_CALL_ACTION:
+            calls = getattr(self, "_calls", None)
+            payload = action.get("payload") or {}
+            if calls is None:
+                return {
+                    "status": "failed",
+                    "message": "Telegram calls are not available",
+                }
+            try:
+                caller = int(str(payload.get("user_id", "")).strip())
+            except ValueError:
+                return {"status": "failed", "message": "user_id must be a Telegram id"}
+            return await calls.answer_pending(caller, bool(payload.get("answer")))
         log_warning(
             f"[telegram] execute_action called for unknown action {action_type}"
         )
