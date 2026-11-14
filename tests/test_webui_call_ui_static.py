@@ -86,3 +86,24 @@ def test_client_sends_the_call_id_with_the_clip_and_has_no_vad_ack_path() -> Non
     # The signal follows the transcription now, not the VAD.
     assert "cfg.call_id" not in chat and "notifyUtteranceEnd" not in chat + client
     assert "utterance_end" not in client
+
+
+def test_call_camera_lends_the_karada_canvas_to_outside_calls() -> None:
+    camera = _read("call-camera.mjs")
+    viewer = _read("vrm-viewer.mjs")
+    home = Path("core/webui_templates/sections/home.html").read_text(encoding="utf-8")
+    # An idle socket tells the server a camera exists; capture runs only between
+    # the server's start and stop messages.
+    assert "/api/call/camera" in camera
+    assert "msg.type === 'start'" in camera and "msg.type === 'stop'" in camera
+    assert "canvas.toBlob" in camera or "state.canvas.toBlob" in camera
+    assert "image/jpeg" in camera
+    # The canvas is read from the render loop, right after the frame is drawn
+    # (the WebGL buffer is not preserved), through a tap that exists only in a call.
+    assert "window.__synthFrameTap = onRendered" in camera
+    assert "window.__synthFrameTap = null" in camera
+    render = viewer.index("renderer.render(scene, camera);")
+    assert (
+        "window.__synthFrameTap(renderer.domElement)" in viewer[render : render + 400]
+    )
+    assert "/js/call-camera.mjs" in home

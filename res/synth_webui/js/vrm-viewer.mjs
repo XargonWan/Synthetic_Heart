@@ -7515,6 +7515,11 @@ function render(generation) {
     controls.update();
     resizeRenderer();
     renderer.render(scene, camera);
+    // A call that borrows the avatar as its camera (call-camera.mjs) reads the canvas
+    // right here: the WebGL back buffer is not preserved after this task.
+    try {
+        if (typeof window.__synthFrameTap === 'function') window.__synthFrameTap(renderer.domElement);
+    } catch (e) { /* the tap must never break rendering */ }
 }
 render(renderGeneration);
 
