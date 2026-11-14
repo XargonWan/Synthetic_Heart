@@ -288,7 +288,9 @@ adjusting:
 * **Incoming audio format.** The first frame of each call is logged with its size and the
   format it was assumed to have; set ``TELEGRAM_CALL_RX_RATE`` (default 48000) and
   ``TELEGRAM_CALL_RX_CHANNELS`` (default 1) to match what py-tgcalls delivers. A call that
-  "hears nothing" or hears chipmunks is this.
+  "hears nothing" or hears chipmunks is this. With py-tgcalls >= 3 the caller's voice is only
+  delivered after ``record()``: the call asks for it right after it is opened (log line
+  ``listening to <id>``); if that line is missing, or says it could not listen, the call is deaf.
 * **End of call.** The statuses that mean "call over" are matched by name
   (``_ENDED_STATUS_NAMES``); names the library does not have are skipped. A call that never
   ends on hang-up is this.
@@ -335,12 +337,18 @@ render of the model. ``CALL_VIDEO_SOURCE`` says where the frames come from:
 
 * It reads the active ``.vrm`` (0.x or 1.0; ``CALL_VIDEO_MODEL`` to force a file, else the
   active avatar of the Karada state server, else ``skins/Rei/model.vrm``) and draws a close-up
-  of the head and shoulders: textured and lit, the arms lowered from the T-pose.
+  of the head and shoulders with the WebUI's webcam camera (30 degree lens, head and shoulders
+  around 1.3 m, pulled back in a narrow frame) and lights (ambient 0.6, key 1.2, fill 0.4). Colours
+  are computed in linear light and written as sRGB, as three.js does, and the model's MToon
+  data is used: shade colour and its light/shade ramp, emission and world-space outlines
+  (VRM 0.x ``materialProperties`` and VRM 1.0 ``VRMC_materials_mtoon``). The arms are lowered
+  from the T-pose.
 * The animation is its own and small, **not** the Karada animation engine: a little head sway
   and breathing, blinking, the emotion intensities of the Karada state server as expressions
   (happy, sad, angry, relaxed, surprised), and the mouth following the loudness of the
-  SyntH's voice while it speaks. No FBX animations, no MToon shading or outlines: it looks
-  like the browser render, it is not identical.
+  SyntH's voice while it speaks. No FBX animations, no rim light or per-pixel masks: it looks
+  like the browser render, it is not identical. If the face looks washed out or too dark,
+  ``CALL_VIDEO_EXPOSURE`` scales the brightness.
 * **Nothing to install in the Docker image.** The ``Dockerfile`` installs Mesa's EGL and
   software rasteriser (llvmpipe: ``libegl1``, ``libegl-mesa0``, ``libgl1``,
   ``libgl1-mesa-dri``), links the unversioned ``libEGL.so`` / ``libGL.so`` that moderngl
@@ -388,12 +396,20 @@ that the caller sees it.
    * - ``CALL_VIDEO_MODEL``
      - (empty)
      - ``.vrm`` the server draws; empty means the active avatar, else ``skins/Rei``.
+   * - ``CALL_VIDEO_EXPOSURE``
+     - ``1.0``
+     - Brightness of the avatar the server draws (0.3-2.0).
    * - ``CALL_VIDEO_FPS``
      - ``12``
      - Frames per second (1-30).
    * - ``CALL_VIDEO_WIDTH``, ``CALL_VIDEO_HEIGHT``
      - ``854``, ``480``
-     - Size of the call video (made even, 64-1920 by 64-1080).
+     - Size of the call video in landscape (made even, 64-1920 by 64-1080).
+   * - ``CALL_VIDEO_ORIENTATION``
+     - ``square``
+     - ``square`` (as tall as ``CALL_VIDEO_HEIGHT``), ``landscape`` or ``portrait`` (the same
+       size turned on its side). Telegram does not tell the SyntH how the caller holds the
+       phone and the size cannot change mid-call, so the default fits both.
    * - ``CALL_VIDEO_JPEG_QUALITY``
      - ``0.7``
      - JPEG quality of each frame from a browser tab (0.1-1.0).
