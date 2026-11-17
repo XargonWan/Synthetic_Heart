@@ -1938,6 +1938,14 @@ def _usable_application_builder() -> str | None:
     return f"replaced an unusable ApplicationBuilder: {detail}"
 
 
+def _builder_instance_repr() -> str:
+    """``repr`` of one ApplicationBuilder instance, or the error creating it."""
+    try:
+        return repr(ApplicationBuilder())
+    except Exception as exc:
+        return f"<cannot instantiate: {exc!r}>"
+
+
 async def start_bot() -> bool:
     """Start the Telegram bot application.
 
@@ -2192,6 +2200,16 @@ async def start_bot() -> bool:
     except Exception as e:
         failure = last_error or e
         _bot_started = False
+        if "ApplicationBuilder" in repr(failure):
+            log_error(
+                "[telegram_bot] ApplicationBuilder diagnostic: "
+                f"global={ApplicationBuilder!r} "
+                f"module={getattr(ApplicationBuilder, '__module__', None)!r} "
+                f"instance={_builder_instance_repr()} "
+                f"telegram_ext={getattr(sys.modules.get('telegram.ext'), '__file__', None)!r} "
+                f"telegram_ext.builder="
+                f"{getattr(sys.modules.get('telegram.ext'), 'ApplicationBuilder', None)!r}"
+            )
         if telegram_interface is not None:
             telegram_interface.bot = None
             telegram_interface.is_enabled = False
