@@ -43,10 +43,23 @@ def test_no_test_file_is_ever_a_plugin_candidate() -> None:
 
 def test_the_retroxr_plugin_loads_while_its_own_tests_do_not() -> None:
     plugin = REPO_ROOT / "plugins" / "rift_vessel" / "retroxr" / "retroxr.py"
-    conftest = REPO_ROOT / "plugins" / "rift_vessel" / "retroxr" / "tests" / "conftest.py"
+    conftest = (
+        REPO_ROOT / "plugins" / "rift_vessel" / "retroxr" / "tests" / "conftest.py"
+    )
 
     assert plugin.exists(), "the retroxr plugin itself must keep loading"
     assert conftest.exists(), "the case that caused the outage must stay in the tree"
 
     assert is_plugin_candidate(plugin) is True
     assert is_plugin_candidate(conftest) is False
+
+
+def test_a_checkout_under_a_tests_directory_still_loads_its_plugins(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "tests" / "synth" / "plugins"
+    plugin = root / "demo" / "demo.py"
+    plugin_test = root / "demo" / "tests" / "conftest.py"
+
+    assert is_plugin_candidate(plugin, root) is True
+    assert is_plugin_candidate(plugin_test, root) is False
