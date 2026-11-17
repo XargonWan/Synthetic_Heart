@@ -1941,6 +1941,19 @@ async def start_bot() -> bool:
 
         bot_token_str = str(BOTFATHER_TOKEN) if BOTFATHER_TOKEN else None
 
+        if (
+            "pytest" not in sys.modules
+            and isinstance(ApplicationBuilder, type)
+            and not hasattr(ApplicationBuilder, "token")
+        ):
+            # Name the cause here instead of losing it as "'ApplicationBuilder'
+            # object has no attribute 'token'" from the middle of the chain.
+            raise RuntimeError(
+                "python-telegram-bot's ApplicationBuilder is not the real class: "
+                f"{ApplicationBuilder!r} loaded from "
+                f"{getattr(sys.modules.get('telegram.ext'), '__file__', None)!r}"
+            )
+
         app = (
             ApplicationBuilder()
             .token(bot_token_str)
