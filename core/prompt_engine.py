@@ -1123,8 +1123,19 @@ def _pretty_anchor_time(time_val: str) -> str:
         return time_val
 
 
+def _current_scene_block(context_section: dict[str, Any]) -> str:
+    """Render optional plugin-owned scene data on both anchor surfaces.
+
+    No plugin import: removing the tracker leaves temporal grounding unchanged.
+    """
+    scene = context_section.get("scene_context")
+    if not isinstance(scene, str) or not scene.strip():
+        return ""
+    return "[Current scene]\n" + scene.strip()[:2600]
+
+
 def _build_current_turn_anchor(context_section: dict[str, Any]) -> str:
-    """Build the compact one-line Reality Anchor duplicate for the current turn.
+    """Build the compact Reality Anchor duplicate, with optional scene lines.
 
     The full anchor block built by :func:`_build_context_summary` lives in
     ``PromptRequest.context_summary``, which renderers merge into the *system*
@@ -1132,6 +1143,8 @@ def _build_current_turn_anchor(context_section: dict[str, Any]) -> str:
     away from the text being generated. This returns the same temporal facts
     (date + weekday, exact time + part of day, season, location) compressed to a
     single line, which the renderers place directly above the current user turn.
+    Optional plugin-owned spatial facts follow on separate lines, using the
+    same formatter as the system block.
 
     The exact clock IS included: the anchor is the authoritative temporal context
     (that is what ``TIME AUTHORITY`` names), and "what time is it / what is the
@@ -1140,8 +1153,8 @@ def _build_current_turn_anchor(context_section: dict[str, Any]) -> str:
     volunteering it in ordinary replies.
 
     Deliberately omitted: the stable boilerplate ``Temporal Delta`` sentence,
-    which the system block already carries. Returns ``""`` when no temporal field
-    is available, so a turn without runtime facts contributes nothing.
+    which the system block already carries. Returns ``""`` when no temporal or
+    spatial field is available, so a turn without runtime facts adds nothing.
     """
     fields: list[str] = []
 
@@ -1169,10 +1182,12 @@ def _build_current_turn_anchor(context_section: dict[str, Any]) -> str:
     if location:
         fields.append(location)
 
-    if not fields:
+    scene_block = _current_scene_block(context_section)
+    if not fields and not scene_block:
         return ""
 
-    return f"{_REALITY_ANCHOR_HEADER} " + " · ".join(fields)
+    anchor = f"{_REALITY_ANCHOR_HEADER} " + " · ".join(fields)
+    return anchor.rstrip() + ("\n" + scene_block if scene_block else "")
 
 
 # Plugin-injected context keys that this renderer knows how to render.
@@ -1244,6 +1259,7 @@ _RENDERED_CONTEXT_KEYS: frozenset[str] = frozenset(
         "voice_channel_id",
         "gasmask_protection",
         "soul_temporal_context",
+        "scene_context",
         "persona_preferences",
         "self_growth",
         "history_recent",
@@ -1401,6 +1417,9 @@ def _build_context_summary(
     anchor_lines.append(
         f"- Temporal Delta: It is now {curr_year}. It has been approximately 2-3 years since your primary core baseline training knowledge cutoff (early 2023 / mid-2024 depending on the model). Adjust your perspective on tools, software versions, and global releases to reflect this passage of time naturally."
     )
+    scene_block = _current_scene_block(context_section)
+    if scene_block:
+        anchor_lines.append(scene_block)
     parts.append("\n".join(anchor_lines))
 
     temporal_context = context_section.get("soul_temporal_context")

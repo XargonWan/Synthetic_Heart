@@ -69,6 +69,37 @@ Debrief action-intent recovery
   canonical action parser with the original interface/chat context preserved,
   so validation, safety policy, and selective correction still apply.
 
+Current scene continuity
+------------------------
+The optional ``plugins/scene_context/`` plugin maintains a bounded,
+conversation-scoped spatial state independently of temporal notes and the diary.
+It uses the combined Recon call to apply human scene corrections before the
+reply, then a bounded Debrief call to track explicitly enacted persona movements
+from successfully processed ``send_message`` actions. Evidence quotations,
+directional actor relationships, per-field expiry and revision checks limit
+unsupported changes. Human corrections made in the current turn are protected
+from the postflight update.
+
+The scene renders inside the Reality Anchor and immediately above the current
+turn. Direct human conversations only are eligible; bots, groups, internal beats
+and Vessel turns are excluded. With Recon disabled, the postflight tracker does
+not update from a reply without a preflight snapshot.
+
+``SCENE_NOTE`` remains the independent, manually configured standing convention
+for how a conversation is experienced (such as spoken interaction rather than
+typing). It never changes actual TTS/STT enablement. Current location/posture
+belongs in the tracked scene, not in that standing note.
+
+Configuration: ``SCENE_CONTEXT_ENABLED``,
+``SCENE_CONTEXT_MAX_AGE_SECONDS`` (default 21600, per field) and
+``SCENE_CONTEXT_POSTFLIGHT_ENABLED``. The master and postflight switches both
+default to False: tracking and the additional postflight model request require
+explicit opt-in. Both are visible boolean controls under Scene Context in the
+WebUI Control Deck; disabling the master skips all scene work. Existing saved
+choices are preserved. State persists in the plugin-local
+``data/scene_context.sqlite3``, not the deployment database; include it in file
+backups if required. See ``plugins/scene_context/guide.md`` for the full contract.
+
 Debrief situational notes
 -------------------------
 - The situational-notes Debrief plugin extracts short-lived circumstances of

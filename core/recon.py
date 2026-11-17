@@ -1,5 +1,6 @@
 from core import stats_registry
 import asyncio
+import inspect
 import json
 import threading
 import time
@@ -668,14 +669,24 @@ async def gather_recon_contributions(
         try:
             # Pass the message/context so plugins can tailor their instruction
             # (e.g. whether the user attached files). Older plugins take none.
-            instruction = str(
-                plugin.get_recon_instruction(
-                    message=message, context_memory=context_memory
-                )
+            instruction = plugin.get_recon_instruction(
+                message=message, context_memory=context_memory
             )
         except TypeError:
-            instruction = str(plugin.get_recon_instruction())
-        recon_specs.append((plugin, key, instruction))
+            instruction = plugin.get_recon_instruction()
+        try:
+            # Stateful contributors may load a small snapshot without blocking
+            # the event loop. Existing synchronous contributors are unchanged.
+            if inspect.isawaitable(instruction):
+                instruction = await asyncio.wait_for(instruction, timeout=5)
+            recon_specs.append((plugin, key, str(instruction)))
+        except Exception as exc:
+            log_warning(
+                f"[recon] Instruction unavailable for {key}: {type(exc).__name__}"
+            )
+
+    if not recon_specs:
+        return []
 
     # Build combined system prompt
     keys = [key for _, key, _ in recon_specs]

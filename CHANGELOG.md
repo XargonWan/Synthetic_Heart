@@ -1,3 +1,29 @@
+### fix(scene): model-cost features are explicit opt-ins  <!-- 2026-10-29 -->
+
+`SCENE_CONTEXT_ENABLED` and `SCENE_CONTEXT_POSTFLIGHT_ENABLED` now default to False, including their runtime fallback values. The master disables all scene hooks; the extra postflight request requires both switches. Both controls remain visible, non-advanced booleans in the Control Deck's Scene Context card, with explicit UI types and cost-aware labels/descriptions. Existing saved opt-ins are preserved; the trainer's running instance remains explicitly enabled. No-change extraction avoids a state write, not the extraction request itself.
+
+Verified both live switches in the browser, plus 207 isolated tests including fresh-default no-work/no-store and separate-postflight-opt-in coverage. Existing behavior tests now opt in explicitly. The new default declarations and cost labels load on the next normal process start; no restart was performed for this change.
+
+### fix(scene): native Telegram messages use context-carried routing  <!-- 2026-10-29 -->
+
+**Live symptom.** Current Scene loaded successfully and its flags were enabled, but the main traces `13e0cbf5-56df-4170-8500-b7037339e159` and `984f6bd6-aa34-4312-9783-204f7ea53027` contained no `[Current scene]` block. The preceding Recon trace did not request `scene_context`, and no scene store had been created.
+
+**Root cause/fix.** `SceneContextPlugin._scope` read only `message.interface_path`; native immutable Telegram messages instead receive their route in `context_memory["interface_path"]` from the queue. The plugin now uses the same message-first/context-fallback contract as the prompt builder, and passes that resolved path explicitly into Vessel exclusion. This repairs Recon, static injection and Debrief together. Earlier path-bearing test doubles hid the adapter mismatch.
+
+**Validation.** 204 isolated tests pass, including immutable/context-only routing across all scene hooks and context-only Vessel exclusion. A separate probe using the installed real `telegram.Message` also passed scope, persistence and injection (outside pytest, whose package initializer stubs Telegram). Ruff/types pass. Applied by reloading only Current Scene through its normal plugin toggle; the main process stayed running. Existing traces remain unchanged; verify the block in the next real turn.
+
+### feat(scene): directional, conversation-scoped scene continuity in the Reality Anchor  <!-- 2026-10-29 -->
+
+**Why.** Reconstructing posture and co-presence from a short chat window allowed actor positions to reverse and chat-app stereotypes to replace the intended scene. Temporal situational notes deliberately exclude the persona's own state and are not a current-scene store.
+
+**Change.** The optional `plugins/scene_context/` plugin adds evidence-backed human corrections to the existing combined Recon call, injects a bounded `[Current scene]` block into both Reality Anchor surfaces, and uses Debrief to record only explicitly enacted persona movements from successfully processed replies. Directional relationships name both actors; human corrections in the current turn are protected. Scene fields expire independently, explicit human resets clear state, and SQLite revision checks reject stale writers. The plugin-local `data/scene_context.sqlite3` survives restarts without touching SOUL, memories or the diary. Bots, groups, internal beats and Vessel turns are excluded. The existing `SCENE_NOTE` remains the separate, operator-configured spoken-conversation convention, not an assertion of actual TTS/STT enablement.
+
+**Recon fix.** Language/tone cache and local-language shortcuts now apply only when those are the only requested keys. Previously they could skip unrelated Recon work. Async instruction hooks can load a scene snapshot without blocking the event loop; legacy synchronous hooks remain supported.
+
+**Validation.** 202 isolated tests pass across scene tracking/recovery, Recon, prompt blocks/renderers, temporal grounding, minification, plugin conformance and Vessel Recon whitelisting. Coverage includes human precedence, failed/foreign/legacy delivery exclusion, later correction batches, expiry/reset, restart persistence, corruption recovery, conversation isolation, stale writers and all seven current-turn renderer paths. Deployment DB/network access was blocked and logs redirected to scratch. Ruff checks/format and scoped types pass for the plugin, Recon and new tests. Two unrelated broader test failures and two existing `prompt_engine.py` type diagnostics were reproduced against unchanged HEAD code. Full runtime behaviour still depends on model extraction and requires the new plugin/core code to be loaded by a normal process restart. See `plugins/scene_context/guide.md`.
+
+### fix(vox): facial-expression tags are stripped from the text sent to TTS, and kept in the chat text  <!-- 2026-10-29 -->
+
 ### fix(config): an engine and model picked in the WebUI are no longer replaced at the next start
 
 **Before.** Choosing an engine *and* a model for the Base Cortex stores `{"engine": ..., "model": ...}` in `BASE_CORTEX`. At startup `_heal_cortex_config` compared that whole JSON string with the known engine names, never found it, took it for a removed engine and overwrote it with `_pick_preferred_cortex(...)`: the first enabled external endpoint alphabetically unless its name contains "zen". On 14 Nov that was `fish-audio`, a Vox-only endpoint, so no Cortex could be loaded and every message on every interface was dropped until the value was fixed by hand. The scope overrides (`TRAINER_CORTEX`, `GRILLO_CORTEX`, `LIVE_CORTEX`, `DSP_CORTEX`) holding an engine+model were reset to `Default` the same way.
