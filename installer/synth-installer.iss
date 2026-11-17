@@ -43,8 +43,14 @@
 ; which is a lot to download for something most people never switch to, so they
 ; are opt-in at build time:
 ;   iscc /DWithExampleSkins=1 installer\synth-installer.iss
+; Each excluded persona is named as a directory, not as "dir\*". The entry's
+; createallsubdirs flag still creates a directory whose files are all excluded,
+; so the old "skins\Miku\*" also produced an empty skins\Miku, and the WebUI
+; then listed it as a persona with no model, no preview and an Activate button
+; that never enabled. Naming the directory excludes it and everything below it
+; and creates nothing.
 #ifndef WithExampleSkins
-  #define ExampleSkinsExclude "skins\Zero\*,skins\Miku\*,skins\Riko\*,"
+  #define ExampleSkinsExclude "skins\Zero,skins\Miku,skins\Riko,"
 #else
   #define ExampleSkinsExclude ""
 #endif
@@ -120,7 +126,7 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 ; NOTE: the Excludes list must stay on ONE line. A trailing backslash inside a
 ; quoted string is not a line continuation to Inno, it is a literal character,
 ; and the compiler then fails with "The system cannot find the path specified".
-Source: "..\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion createallsubdirs; Excludes: ".git\*,.github\*,.venv*,.venv\*,logs\*,data\*,__pycache__\*,**\__pycache__\*,*.pyc,*.pyo,*.pyd,.tools\*,.gitnexus\*,.claude\*,.clinerules*,.codex\*,.continue\*,.cursor\*,.gemini\*,.zed\*,.idea\*,.vscode\*,node_modules\*,frontend\node_modules\*,mcp_servers\*,*.egg-info\*,docs\res\*,docs\wiki\*,installer\Output\*,installer\vendor\*,installer\*.iss,installer\*.ps1,installer\wizard-*.bmp,installer\synth-256.png,{#ExampleSkinsExclude}skins\2B\*,skins\temp\*,backups\*,tmp*,dist\*,build\*,site\*,htmlcov\*,.mypy_cache\*,.pytest_cache\*,.tox\*,.ruff_cache\*,old\*,SyntH_main,REWRITE-TASK.mm,SOUL-REWRITE-TASK.md,*.bak,*.swp,*.orig,*.log,*.log.*,.env,.env-*,.env.local,VENICE_NO_RESPONSE_REPORT.md,pr.md,one-click.md,res\synth_webui\static\audio\tts\*"
+Source: "..\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion createallsubdirs; Excludes: ".git\*,.github\*,.venv*,.venv\*,logs\*,data\*,__pycache__\*,**\__pycache__\*,*.pyc,*.pyo,*.pyd,.tools\*,.gitnexus\*,.claude\*,.clinerules*,.codex\*,.continue\*,.cursor\*,.gemini\*,.zed\*,.idea\*,.vscode\*,node_modules\*,frontend\node_modules\*,mcp_servers\*,*.egg-info\*,docs\res\*,docs\wiki\*,installer\Output\*,installer\vendor\*,installer\*.iss,installer\*.ps1,installer\wizard-*.bmp,installer\synth-256.png,{#ExampleSkinsExclude}skins\2B,skins\temp,backups\*,tmp*,dist\*,build\*,site\*,htmlcov\*,.mypy_cache\*,.pytest_cache\*,.tox\*,.ruff_cache\*,old\*,SyntH_main,REWRITE-TASK.mm,SOUL-REWRITE-TASK.md,*.bak,*.swp,*.orig,*.log,*.log.*,.env,.env-*,.env.local,VENICE_NO_RESPONSE_REPORT.md,pr.md,one-click.md,res\synth_webui\static\audio\tts\*"
 
 ; pgvector for the PostgreSQL we provision. Built by CI, absent in a source
 ; checkout, hence skipifsourcedoesntexist: the app degrades to in-memory SOUL
