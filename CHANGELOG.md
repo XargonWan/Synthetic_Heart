@@ -1,3 +1,20 @@
+### fix(debrief): a finished activity stops being asserted as present fact, and STATE notes get a bounded window  <!-- 2026-10-29 -->
+
+**Symptom (live, trace 067dbfac).** The persona closed a reply with "…and you're still thinking about jumbo. Just checking that's normal." The human had said nothing about jumbo in that turn — his last line was "I'm not sure yet, I guess we'll see". The prompt was intact: all four turns were present and in order, including his jumbo line two turns earlier and her own reply about it.
+
+**Root cause.** The system prompt carries `[Temporal context]`, built from `situational_notes` entries with their own validity windows. Two STATE notes about jumbo were `active` and rendered as present-tense fact in every turn: `jumbo block build running` (filed 10:45, valid until 01:00 the next day) and `jumbo cleanup in progress` (filed 11:36, same window). Nothing retired the first one: superseding and `ended`-retirement are both keyed on the note's own `subject`, and the debrief described the same circumstance twice under two different subjects ("jumbo block build running" vs "jumbo cleanup in progress"), so neither blurred into the other — and although the human confirmed the build worked at 11:33:59, the `ended` channel was never used. A note whose subject does not repeat, and which nothing ends, keeps being injected until its window runs out: 13 hours of "it is still running".
+
+**Fix.**
+
+- `SITUATIONAL_NOTES_STATE_MAX_HOURS` (float, default `6`, `0` disables) clamps a STATE note's `valid_until` to now + that many hours at persist time (`_clamp_state_window`, logged at INFO when it bites). STATE-only: EVENT, INTERVAL and INSTANT notes keep the window the model resolved for them. Deterministic, no text matching. Trade-off, deliberate: multi-day STATE notes now expire six hours after their last refiling, so durable circumstances belong in INTERVAL or in the user profile.
+- The extraction instruction now names the missing completion trigger — an activity the human DELEGATED that he reports as finished or working ("it works", "it's done", "it cleaned up") must go under `ended` on that turn — and states that STATE is only for something still true later today, with the cap named so the model picks INTERVAL for longer spans.
+
+**Data repair.** Both jumbo notes were retired through the repository API (`resolve_situational_note(id, "resolved")`), not deleted: active notes went 47 -> 45, and none matching "jumbo" remain. The rest of the standing store was left untouched.
+
+**Measured after.** 39 pass across `tests/test_debrief_situational_notes.py`, `tests/test_debrief_retractions.py` and `tests/test_debrief_action_intent.py`, including three new tests (a STATE window above the cap is clamped, an EVENT window is not, `0` disables the cap) and assertions pinning both new instruction rules. `ruff format`, `ruff check` and `ty check` clean on the plugin.
+
+### fix(scene): model-cost features are explicit opt-ins  <!-- 2026-10-29 -->
+
 ### fix(config): an engine and model picked in the WebUI are no longer replaced at the next start
 
 **Before.** Choosing an engine *and* a model for the Base Cortex stores `{"engine": ..., "model": ...}` in `BASE_CORTEX`. At startup `_heal_cortex_config` compared that whole JSON string with the known engine names, never found it, took it for a removed engine and overwrote it with `_pick_preferred_cortex(...)`: the first enabled external endpoint alphabetically unless its name contains "zen". On 14 Nov that was `fish-audio`, a Vox-only endpoint, so no Cortex could be loaded and every message on every interface was dropped until the value was fixed by hand. The scope overrides (`TRAINER_CORTEX`, `GRILLO_CORTEX`, `LIVE_CORTEX`, `DSP_CORTEX`) holding an engine+model were reset to `Default` the same way.

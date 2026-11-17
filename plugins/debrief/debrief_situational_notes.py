@@ -65,6 +65,27 @@ try:
         advanced=True,
         needs_component_reload=False,
     )
+    register_exposed_var(
+        "SITUATIONAL_NOTES_STATE_MAX_HOURS",
+        label="Situational Notes STATE Max Window (hours)",
+        default=6,
+        value_type=float,
+        ui_type="number",
+        description=(
+            "Ceiling on a STATE note's validity window, in hours from now. A STATE "
+            "note describes a circumstance that is true right now (an activity in "
+            "progress, a temporary condition), and the model sets its own "
+            "valid_until; left uncapped that window reached 14 hours and the note "
+            "kept asserting finished work as present fact, which the persona then "
+            "raised in conversation. Durable facts are not STATE: they belong to "
+            "INTERVAL or to the user profile, and expire here instead of being "
+            "re-told. 0 disables the cap."
+        ),
+        scope="agent",
+        component="debrief_situational_notes",
+        advanced=True,
+        needs_component_reload=False,
+    )
     # Not a setting: the key only places the notes editor in this component's
     # pane. The WebUI reads and writes the notes through
     # /api/soul/situational-notes and never saves a value under this key.
@@ -122,6 +143,15 @@ _EXTRACT_INSTRUCTIONS = (
     "note whose validity window has not run out yet is retired by NOTHING else, "
     "so a stale filed note that goes unreported keeps being told to you as "
     "current fact. Report it even when the turn has no new circumstance to note.\n"
+    "An activity the human DELEGATED and is waiting on is a circumstance too, "
+    "and it ends the moment he says it finished or worked ('it works', 'it's "
+    "done', 'it cleaned up', 'that got sorted'): on that turn list the filed "
+    "note about it under 'ended', because its window stays open otherwise and "
+    "the persona keeps raising finished work as if it were still running. "
+    "Use STATE only for a circumstance that will still be true later today; "
+    "anything spanning longer than a day is an INTERVAL (or belongs in the user "
+    "profile), because a STATE note's window is capped by configuration to a few "
+    "hours and it then expires instead of being re-told. "
     "A circumstance the human DENIES, corrects or merely jokes about ('I am not "
     "going on a trip', 'that was a joke') is not a circumstance: never write a "
     "note that asserts it, even when the persona's reply repeated it. Retire the "
@@ -185,6 +215,55 @@ class DebriefSituationalNotesPlugin:
         except Exception:
             return 8
         return max(1, min(value, 20))
+
+    def _state_max_hours(self) -> float:
+        """Return the cap on a STATE note's window, in hours (0 = uncapped)."""
+        try:
+            value = float(
+                config_registry.get_value(
+                    "SITUATIONAL_NOTES_STATE_MAX_HOURS", 6, value_type=float
+                )
+            )
+        except Exception:
+            return 6.0
+        return max(0.0, min(value, 168.0))
+
+    def _clamp_state_window(self, note: Any) -> None:
+        """Bound a STATE note's validity window to ``_state_max_hours``.
+
+        A STATE note is a snapshot of "true right now", and its window is written
+        by the model. Unbounded, a note about work in progress outlived the work
+        by hours and kept being injected as present-tense fact: live 2026-10-29, a
+        note filed at 10:45 ("jumbo... has already been running about an hour")
+        was still valid until 01:00 the next day, hours after the human said the
+        build worked, and the persona raised it in a reply that had nothing to do
+        with it. The cap is deterministic and applies to STATE only: EVENT,
+        INTERVAL and INSTANT notes are date-anchored descriptions and keep the
+        window the model resolved for them. Old rows are archived by the store's
+        own expiry sweep, never deleted.
+        """
+        if str(getattr(note, "note_type", "") or "").upper() != "STATE":
+            return
+        cap_hours = self._state_max_hours()
+        if cap_hours <= 0:
+            return
+        valid_until = getattr(note, "valid_until", None)
+        if valid_until is None:
+            return
+        if valid_until.tzinfo is None:
+            valid_until = valid_until.replace(tzinfo=timezone.utc)
+        from datetime import timedelta
+
+        from core.soul.models import now_utc
+
+        ceiling = now_utc() + timedelta(hours=cap_hours)
+        if valid_until <= ceiling:
+            return
+        note.valid_until = ceiling
+        log_info(
+            "[debrief_situational_notes] capped the window of STATE note "
+            f"'{getattr(note, 'subject', '?')}' to {cap_hours:g}h"
+        )
 
     @staticmethod
     def _normalize_assistant_response(text: str) -> str:
@@ -544,6 +623,7 @@ class DebriefSituationalNotesPlugin:
                 source="debrief",
                 session_id=session_id,
             )
+            self._clamp_state_window(note)
             try:
                 keep_id = await repository.upsert_situational_note(note)
                 stored += 1
