@@ -6053,6 +6053,110 @@ function clearVRM() {
     }
 }
 
+function applyEyeMaterialFallback(vrm, reason) {
+    // Eye material fallback: Vroid/VRM models (Rei, Miku, etc.) use
+    // separate eye materials (EyeIris, EyeWhite, EyeHighlight) with
+    // KHR_materials_unlit + alphaMode=BLEND. The iris texture is an
+    // atlas with alpha - when the image fails to decode (null image
+    // OR incomplete / 0×0), BLEND mode + white baseColorFactor makes
+    // the eye fully transparent (no pupil visible). We detect all
+    // broken-image forms and REMOVE the broken map so the fallback
+    // solid color actually shows (leaving the map would keep sampling
+    // alpha 0 → still transparent). We also force opaque settings
+    // and needsUpdate so Three uploads the change. Valid iris mats
+    // keep their texture but get a stable alphaTest/depthWrite and
+    // renderOrder to avoid transparent-sort flicker (white randomly
+    // covering iris).
+    // Runs once at load AND on a slow re-check: a texture that decoded
+    // fine at load can go bad later (late decode failure / GPU eviction)
+    // which presents as white/open eyes until reload.
+    if (!vrm || !vrm.scene) return 0;
+    try {
+        let eyeFallbackCount = 0;
+        vrm.scene.traverse((obj) => {
+            if (!obj.isMesh || !obj.material) return;
+            const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+            for (const m of mats) {
+                if (!m || !m.name || !/eye/i.test(m.name)) continue;
+                const lower = m.name.toLowerCase();
+                const isIris = lower.includes('iris');
+                const isWhite = lower.includes('white');
+                const isHighlight = lower.includes('highlight');
+                const hasMap = !!m.map;
+                const hasImage = hasMap && !!m.map.image;
+                const img = hasImage ? m.map.image : null;
+                const imageOk = !!(img && img.complete !== false && (img.naturalWidth === undefined || img.naturalWidth !== 0) && (img.width === undefined || img.width !== 0) && (img.height === undefined || img.height !== 0));
+                const needsFallback = !hasMap || !hasImage || !imageOk;
+                if (needsFallback) {
+                    if (isIris) {
+                        m.color.setHex(0x8B4513); // brown iris
+                    } else if (isWhite) {
+                        m.color.setHex(0xF5F5DC); // off-white sclera
+                    } else if (isHighlight) {
+                        m.color.setHex(0xFFFFFF); // white highlight
+                    }
+                    // Remove broken texture - otherwise alpha 0 keeps pupil transparent
+                    if (m.map) {
+                        try { if (m.map.dispose) m.map.dispose(); } catch (e) {}
+                        m.map = null;
+                    }
+                    m.transparent = false;
+                    m.opacity = 1;
+                    m.alphaTest = 0;
+                    m.depthWrite = true;
+                    m.depthTest = true;
+                    if (m.needsUpdate !== undefined) m.needsUpdate = true;
+                    console.log('[synth_webui] Eye fallback (broken texture) applied to', m.name, 'color=', m.color.getHexString(), reason ? `(${reason})` : '');
+                    eyeFallbackCount++;
+                } else {
+                    // Valid textured eye - enforce stable cutout/sort so iris
+                    // never randomly sorts behind white (pupil "disappears").
+                    if (isIris) {
+                        if (typeof m.alphaTest === 'number') m.alphaTest = Math.max(0.5, m.alphaTest);
+                        else m.alphaTest = 0.5;
+                        m.depthWrite = true;
+                        m.needsUpdate = true;
+                        if (obj.renderOrder < 1) obj.renderOrder = 1;
+                    } else if (isHighlight) {
+                        if (obj.renderOrder < 2) obj.renderOrder = 2;
+                    }
+                }
+            }
+        });
+        if (eyeFallbackCount > 0) {
+            console.log('[synth_webui] Eye fallback applied to', eyeFallbackCount, 'materials', reason ? `(${reason})` : '');
+        }
+        return eyeFallbackCount;
+    } catch (eyeErr) {
+        console.warn('[synth_webui] Eye fallback failed (non-fatal):', eyeErr);
+        return 0;
+    }
+}
+
+function scheduleEyeFallbackRecheck() {
+    // A texture healthy at load can degrade later (white/open eyes until
+    // reload). Re-run the broken-texture check slowly + when the tab becomes
+    // visible again. Only broken mats are touched; valid iris settings are
+    // idempotent. Single global timer regardless of model swaps.
+    try {
+        if (window.__synth_eye_fallback_timer) return;
+        window.__synth_eye_fallback_timer = setInterval(() => {
+            try {
+                if (document.visibilityState && document.visibilityState !== 'visible') return;
+                if (typeof currentVRM !== 'undefined' && currentVRM) applyEyeMaterialFallback(currentVRM, 'periodic');
+            } catch (e) { /* ignore */ }
+        }, 30000);
+        document.addEventListener('visibilitychange', () => {
+            try {
+                if (document.visibilityState === 'visible' && typeof currentVRM !== 'undefined' && currentVRM) {
+                    applyEyeMaterialFallback(currentVRM, 'visible');
+                }
+            } catch (e) { /* ignore */ }
+        });
+    } catch (e) { /* ignore */ }
+}
+try { window.applyEyeMaterialFallback = applyEyeMaterialFallback; } catch (e) {}
+
 async function loadVRM(url, name, { isObjectUrl = false } = {}) {
     console.log(`[synth_webui] ========== LOAD VRM START ==========`);
     console.log(`[synth_webui] loadVRM called - url: ${url}, name: ${name}, isObjectUrl: ${isObjectUrl}`);
@@ -6212,6 +6316,15 @@ async function loadVRM(url, name, { isObjectUrl = false } = {}) {
             currentVRM = vrm;
             currentModel = name;
             console.log('[synth_webui] currentVRM set:', currentVRM);
+
+            // Eye-material fallback (broken iris texture -> solid colors)
+            // runs at load and re-checks periodically + on tab-visible.
+            try {
+                applyEyeMaterialFallback(vrm, 'load');
+                scheduleEyeFallbackRecheck();
+            } catch (eyeErr) {
+                console.warn('[synth_webui] Eye fallback failed (non-fatal):', eyeErr);
+            }
 
             // Warm up spring bones: run several physics update cycles while
             // invisible so hair/clothes settle from T-pose to their natural
