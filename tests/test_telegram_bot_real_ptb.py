@@ -54,3 +54,33 @@ def test_a_stubbed_telegram_is_replaced_before_start_bot_uses_it() -> None:
     assert "BUILDER_HAS_TOKEN True" in result.stdout, result.stdout[-2000:]
     assert "BUILDER_MODULE telegram.ext" in result.stdout, result.stdout[-2000:]
     assert "EXT_IS_REAL True" in result.stdout, result.stdout[-2000:]
+
+
+_HEAL_PROBE = """
+import interface.telegram_bot as tb
+
+# What a broken or half-imported telegram.ext leaves behind: a class that is not
+# the real one, so its instances have no chained builder methods.
+tb.ApplicationBuilder = type("ApplicationBuilder", (), {})
+
+note = tb._usable_application_builder()
+print("NOTE", bool(note))
+print("HEALED_MODULE", getattr(tb.ApplicationBuilder, "__module__", None))
+print("HEALED_HAS_TOKEN", hasattr(tb.ApplicationBuilder(), "token"))
+"""
+
+
+def test_a_broken_builder_is_healed_at_build_time() -> None:
+    """start_bot() rebuilds from the real package instead of dying on the chain."""
+    result = subprocess.run(
+        [sys.executable, "-c", _HEAL_PROBE],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert "NOTE True" in result.stdout, result.stdout[-2000:]
+    assert "HEALED_MODULE telegram.ext" in result.stdout, result.stdout[-2000:]
+    assert "HEALED_HAS_TOKEN True" in result.stdout, result.stdout[-2000:]
