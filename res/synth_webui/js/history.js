@@ -745,7 +745,7 @@ async function loadHistoryGrillo() {
         console.log('[History] grillo response:', data);
         if (data && data.success) {
             const beatSelect = document.getElementById('history-grillo-beat-type');
-            if (beatSelect && Array.isArray(data.beat_types)) {
+            if (beatSelect && Array.isArray(data.beat_types) && data.beat_types.length > 0) {
                 // Replace existing options (preserve the default first option)
                 const defaultOption = beatSelect.options && beatSelect.options[0] ? beatSelect.options[0] : null;
                 beatSelect.innerHTML = '';
@@ -1114,7 +1114,10 @@ async function loadHistoryChat() {
         const data = await response.json();
         console.log('[History] chat response:', data);
         const interfaceSelect = document.getElementById('history-chat-interface');
-        if (interfaceSelect && Array.isArray(data.interface_paths)) {
+        // Only rebuild when the response carries a list: filtered requests
+        // return [] (lazy-loaded), and rebuilding from that wipes the
+        // dropdown until the next full refresh.
+        if (interfaceSelect && Array.isArray(data.interface_paths) && data.interface_paths.length > 0) {
             // Replace options with fresh list (preserve default first 'All Chats')
             const defaultOpt = interfaceSelect.options && interfaceSelect.options[0] ? interfaceSelect.options[0] : null;
             interfaceSelect.innerHTML = '';
@@ -1270,7 +1273,7 @@ async function loadHistoryVessel() {
         console.log('[History] vessel response:', data);
         if (data && data.success) {
             const envSelect = document.getElementById('history-vessel-environment');
-            if (envSelect && Array.isArray(data.environments)) {
+            if (envSelect && Array.isArray(data.environments) && data.environments.length > 0) {
                 const defaultOption = envSelect.options && envSelect.options[0] ? envSelect.options[0] : null;
                 envSelect.innerHTML = '';
                 if (defaultOption) envSelect.appendChild(defaultOption);
