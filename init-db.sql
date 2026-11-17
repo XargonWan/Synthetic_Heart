@@ -297,6 +297,19 @@ CREATE TABLE IF NOT EXISTS turn_reason_trail (
     INDEX idx_reason_trail_interface_path (interface_path)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- System Events: tiny log of restarts and plugin/interface toggles shown to the
+-- persona, plus one heartbeat row (kind = 'heartbeat') used to estimate offline
+-- time. Lazy-init mirrors core/system_events.py::_TABLE_SQL.
+CREATE TABLE IF NOT EXISTS system_events (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    ts DATETIME DEFAULT CURRENT_TIMESTAMP,
+    kind VARCHAR(32) NOT NULL,
+    component VARCHAR(100),
+    detail VARCHAR(500),
+    INDEX idx_system_events_ts (ts),
+    INDEX idx_system_events_kind (kind)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- External Endpoints: user-defined external AI service endpoints
 -- (OpenAI-compatible, Gemini, Anthropic, custom)
 CREATE TABLE IF NOT EXISTS external_endpoints (

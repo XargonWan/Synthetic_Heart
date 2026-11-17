@@ -62,6 +62,22 @@ Architecture
              ▼
         Connector.act → world
 
+Layer boundaries
+~~~~~~~~~~~~~~~~
+
+Three layers, each talking only to its neighbour (see ``AGENTS.md`` §5c):
+
+* **Core** (``core/``) — chain, queue, DB, dispatch. Knows no world or connector.
+* **Rift Vessel** (``plugins/rift_vessel/vessel_*.py``, ``interface/vessel_interface.py``)
+  — the only layer that touches the core chain. Connectors are reached only
+  through ``VesselConnectorBase`` and ``VESSEL_REGISTRY``.
+* **Rift adapter / world connector** (``plugins/rift_vessel/<world>/``) — talks
+  only to the Rift Vessel layer and its world bridge. It never enqueues messages,
+  never imports ``core.message_queue``, never touches the DB, and never imports
+  other plugins or adapters. Adapters are pluggable: each world is a self-contained
+  folder plus its ``<world>_vessel`` sub-plugin, and nothing outside that folder
+  depends on it.
+
 ==============================================  =============================================
 File                                            Role
 ==============================================  =============================================
@@ -77,7 +93,7 @@ File                                            Role
                                                 While disconnected it exposes a single
                                                 ``vessel_connect`` entry point whose ``game`` enum
                                                 lists every enabled world (plus optional
-                                                ``host``/``port`` overrides). Once connected to
+                                                ``host``/``port`` overrides, honoured only when the host appears in the recent messages people wrote in that chat (last 60 stored rows)). Once connected to
                                                 world *W* the world-agnostic **core set** —
                                                 ``say``, ``move``, ``look``, ``observe``, ``use``,
                                                 ``attack``, ``follow``, ``unfollow``, ``respawn``,
@@ -204,7 +220,7 @@ The interface registers a *liveness probe* into the session manager (keeping
   ``has_active_session()`` reads **false**, so vessel elements are *frozen*
   (no new beats or perceptions enqueued; existing priorities untouched). The
   disconnect sweep retries the connection every tick for
-  ``VESSEL_DISCONNECT_GRACE_SEC`` seconds (default 30, clamped 5–3600). A
+  ``VESSEL_DISCONNECT_GRACE_SEC`` seconds (default 120, clamped 5–3600). A
   successful reconnection flips the connector live again → back to CONNECTED.
 * **ENDED** — the connection could not be restored within the grace window.
   The session is closed, flushed to a single diary entry, and **all queued
@@ -383,7 +399,7 @@ Key                             Purpose
 
    The Minecraft connector no longer has a dedicated ``MINECRAFT_BRIDGE_ENABLED``
    switch. The bridge provisioner is gated by the Minecraft Vessel plugin's own
-   enable toggle (``PLUGIN_ENABLED__minecraft_vessel``) — enable/disable the
+   enable toggle (``PLUGIN_ENABLED__minecraft``) — enable/disable the
    whole connector from its card in the WebUI Plugins tab.
 
 .. note::
@@ -406,7 +422,7 @@ The bridge is a small Node.js process (Mineflayer) exposing a local HTTP API:
 
 ``BridgeProvisioner`` manages its lifecycle as a **non-root** subprocess inside
 the same container (single-container), gated by the Minecraft Vessel plugin's
-enable toggle (``PLUGIN_ENABLED__minecraft_vessel``).
+enable toggle (``PLUGIN_ENABLED__minecraft``).
 Node.js is **baked into the Docker image by default** (``INSTALL_NODE=true``),
 so the Minecraft Vessel works out of the box in Docker. Only non-Docker /
 bare-metal deployments need to install Node themselves; a node-free image can be
@@ -418,6 +434,40 @@ built explicitly with:
 
 The offline auth mode (``MC_AUTH=offline``) is used; real
 Microsoft/XBL auth and multiplayer sync are out of scope.
+
+Server setup (accepting non-Microsoft accounts)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The bot has no Microsoft or Mojang account, so the server must accept
+offline-mode logins **before** Synth can enter the world, and only then can a
+skin be applied. Configure the server as follows:
+
+* **``online-mode=false``** in ``server.properties`` (restart afterwards). With
+  ``online-mode=true`` the server rejects the bot's login. If the world sits
+  behind a proxy (Velocity or BungeeCord), set the same flag on the proxy too
+  (``online-mode`` in ``velocity.toml``, ``online_mode`` in BungeeCord's
+  ``config.yml``).
+* **``enforce-secure-profile=false``** on 1.19.1 and newer, since an offline
+  client has no signed profile key and the server may otherwise refuse it.
+* **Whitelist** (only if ``white-list=true``): add the bot's name with
+  ``/whitelist add <name>``. The name is ``MC_BOT_USERNAME`` / ``SYNTH_NAME``
+  (16 characters maximum, letters, digits and underscores only).
+* **Avoid password-login plugins** (AuthMe, LimboAuth and similar) unless they
+  exempt the bot. The bridge never sends ``/login`` or ``/register``, so the bot
+  would stay stuck at the login screen.
+
+Recommended server-side plugins:
+
+* **SkinsRestorer** (Paper, Spigot, Purpur, Velocity, BungeeCord) — the
+  recommended skin provider. It works on offline-mode servers and is supported
+  out of the box (see *Skin* below). Install it on the **backend** that the bot
+  joins.
+* **SkinRestorer** by Lionarius (Fabric, Forge, NeoForge, Quilt) — the mod
+  equivalent, for modded servers.
+* **LuckPerms** (optional) — if SkinsRestorer's ``/skin`` commands are ignored
+  for the bot, grant its name the SkinsRestorer permissions (or op it) here.
+  Plugins that are only needed for Bedrock clients (such as Floodgate) are not
+  required.
 
 Skin
 ~~~~
@@ -475,6 +525,66 @@ command is sent, and a failed/ignored command never breaks the session.
    In that case set it to the SyntH host's VPN/public IP and verify with
    ``curl -I http://<synth-host-ip>:<port>/api/config/MINECRAFT_SKIN_FILE/file``
    (must return ``200``), then reconnect the Vessel to re-run the skin command.
+
+RetroXR
+-------
+
+``plugins/rift_vessel/retroxr/retroxr.py`` is the second connector, for the
+`RetroXR <https://github.com/RetroXR/RetroXR>`_ VR retro-gaming room. It inverts
+Minecraft's direction: there is no bridge to start. The RetroXR mod
+``xenu.synth_rift`` opens a WebSocket to ``/api/vessel/retroxr/ws`` (same token
+gate as the WebUI) when the player switches on the *Synthetic Heart Rift
+Summoner*, and that socket is the embodiment. ``plugins/rift_vessel/retroxr/api.py``
+does the handshake and calls ``VesselPlugin.connect_world("retroxr")``, so the
+session, recap and autonomy beats are the ones every world uses; leaving the
+socket calls ``disconnect_world``. The wire protocol is in
+``plugins/rift_vessel/retroxr/guide.md``.
+
+**The body never plays.** ``act`` refuses any verb outside the core set
+(``say move look use follow unfollow status combine``) and the RetroXR verbs
+(``look_at touch pick_up put_down hand_over sit emote inspect operate``, and the
+ones she does on her own: ``search explore watch bring stop``); nothing writes
+input to a console.
+
+Hands and following
+~~~~~~~~~~~~~~~~~~~
+
+She holds one thing at a time. ``put_down`` sets it down where her hands are or,
+with a ``target``, on the flat top of that thing, and says where it ended up.
+``hand_over`` and ``bring`` take her to the player with the thing held out in both
+hands (the ``give`` animation of the skin) for ``seconds`` (her choice, 3 to 60;
+30 by default); ``say`` is what she says as she does it. A thing the player does
+not take stays in her hands: she is told so, and what to do with it is her
+decision. ``combine`` (see below) puts a cartridge or a tape into a machine, and
+``operate`` works the machine. ``follow`` is always the player; when she cannot
+keep up she is told once (``follow_lost``).
+
+``combine``: one core verb for every world
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``combine {target, item?, how?}`` puts one thing into, onto or together with
+another (a cartridge into a console, a key into a lock). It is an **opt-in** core
+verb: ``VesselPlugin._OPT_IN_CORE_VERBS``. A world gets it only when its
+connector lists ``"combine"`` in ``core_verbs``; a world that restricts nothing
+(``core_verbs = None``, Minecraft) is not offered it, so a verb added to the core
+later does not appear in worlds that never heard of it. The connector receives
+``act("combine", {...})`` and does what its world does (a Minecraft connector would
+map it to crafting). A connector can also give some core verbs a description of
+its own (``core_verb_descriptions``): RetroXR says that ``follow`` takes no target,
+where the generic text promises one.
+
+Embodiment assets
+~~~~~~~~~~~~~~~~~
+
+Until RetroXR a Vessel never sent a model or an animation to its world. A world
+that draws Synth itself can now ask: ``VesselConnectorBase.get_embodiment_assets``
+(optional, default ``None``) returns the active skin's VRM and the animations the
+world named, resolved by :mod:`core.embodiment_assets` from the Karada skins:
+``animations/vessel/<name>/`` first (a namespace any world shares), then the
+Karada state folder, then the fallback skin ``Rei``. The world downloads the
+files from ``/skins/...`` and skips what it already holds through
+``/api/karada/assets/manifest``. Nothing is pushed unasked, and the avatar of the
+WebUI (Karada's global ``AnimationState``) is never touched by a world's body.
 
 Commands
 --------
@@ -981,6 +1091,144 @@ Rift Vessel entity. The Minecraft connector lives in
   toggleable WebUI entity and owns the Minecraft-specific config keys under the
   ``minecraft_vessel`` component (``MINECRAFT_BRIDGE_*``, ``MINECRAFT_SERVER_*``,
   ``MINECRAFT_BOT_USERNAME_OVERRIDE``, ``MINECRAFT_SKIN_*``).
+
+Skills and cross-world reuse
+----------------------------
+
+The Rift Vessel is not a collection of per-game integrations. It is a **shared
+base** whose purpose is to teach SyntH about many possible worlds and to give it
+**skills**. Every adapter *adds to* a growing skill set, so the effort needed for
+the Nth world is smaller than for the first. Anyone writing an adapter must
+therefore ask, for every capability they implement, *"would another game need
+this too?"* — "pick up an object" is not a Skyrim concept, it is a concept shared
+by almost every world.
+
+Skill, verb, world content
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Three things are easy to confuse and must be kept apart:
+
+* A **skill** is a capability expressed in world-neutral terms: collect an item,
+  travel to a place, fight a target, craft, capture a creature, drive a vehicle,
+  claim a base, follow a questline, look up the rules.
+* A **verb** is how a skill is exposed to cognition (``vessel_<world>_<verb>``).
+* **World content** is everything that belongs to one game: its item and entity
+  ids, recipes, maps, questline, wiki sources, special-creature tactics.
+
+The skill (mechanism plus a neutral verb contract) is what gets reused. The
+content is what each adapter supplies. The existing generic stores follow
+exactly this split: ``vessel_quests.py``, ``vessel_bases.py``,
+``vessel_combat_strategy.py`` and ``knowledge_client.py`` hold the mechanism in
+the Vessel layer, while each adapter registers its own questline, base shape,
+creature tactics and ``WikiSource``.
+
+Worked examples
+~~~~~~~~~~~~~~~
+
+If SyntH already plays Skyrim, Forza Horizon and Bayonetta, it already has item
+pickup, navigation, vehicles, melee and ranged combat and evasion. GTA is then
+mostly *world content* plus thin glue, not a new set of skills. Pokémon is
+different: it introduces **capture**, which none of those games have. Once
+capture exists as a shared skill, Lumen Tale and Cassette Beasts reuse it
+instead of reimplementing it.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 18 42 40
+
+   * - World
+     - Skills it needs
+     - Status when it is added
+   * - Skyrim
+     - collect, navigate, melee/ranged combat, craft, quests, knowledge
+     - Mostly shared; world content plus magic as a world-specific verb
+   * - Forza Horizon
+     - navigate, drive a vehicle, race/objectives
+     - Adds *vehicle*; navigation already shared
+   * - Bayonetta
+     - melee/ranged combat, evasion, objectives
+     - Almost entirely shared
+   * - GTA
+     - collect, navigate, vehicles, combat, objectives
+     - Almost entirely shared; content and glue only
+   * - Pokémon
+     - navigate, combat, **capture**, party management
+     - Adds *capture*
+   * - Lumen Tale, Cassette Beasts
+     - navigate, combat, capture, party management
+     - Reuse *capture*; only content is new
+
+"Almost entirely shared" refers to skills. Perception, control quirks and the
+bridge to each game still need adapter work. A skill transfers only as far as its
+contract is world-neutral.
+
+Three tiers
+~~~~~~~~~~~
+
+This extends the Scope rule in ``AGENTS.md`` §5c: the rule alone is binary
+(core or one game) and cannot place a skill shared by *several* games but not
+*most*, such as capture.
+
+1. **Universal core** — needed by nearly every world (``say``, ``move``,
+   ``look``, ``observe``, ``use``, ``attack``, ``follow``, goals, bases, quests,
+   knowledge). Lives on ``vessel_base`` / ``vessel_plugin`` as a core verb.
+2. **Shared skill** — needed by several worlds (capture, vehicles, crafting,
+   building, inventory and trade). The *mechanism* and the *verb contract*
+   (verb name, field names, structural result shape) are world-neutral and
+   belong to the Rift Vessel layer. An adapter opts in by declaring the skill in
+   the ``capabilities`` it passes to ``register_vessel_connector`` (and returns
+   from ``describe_capabilities()``); the registry can then answer which worlds
+   offer it (``VESSEL_REGISTRY.find_connector_by_capabilities``).
+3. **World-specific** — meaningful in one game only (a particular spell system,
+   a particular minigame). Stays in that adapter and is exposed through
+   ``get_world_actions()``.
+
+Rule of two
+~~~~~~~~~~~
+
+Do not promote a skill to the shared layer on speculation.
+
+* The **first** adapter that needs a tier-2 skill implements it inside its own
+  folder, but **behind the neutral contract**: a neutral verb name, structural
+  fields, no game nouns in names or signatures.
+* When a **second** world needs the same skill, promote the neutral parts into
+  the Rift Vessel layer; both adapters then shrink to content providers.
+  Adapters may not import each other, so duplicated logic across adapters is the
+  signal to promote — never copy code from one adapter into another.
+* Promotion is a deliberate refactor: run impact analysis on the symbols you move
+  and keep every adapter working while the other is absent.
+
+Checklist for a new adapter
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+1. **List the skills the game needs** before writing code, and classify each as
+   tier 1, 2 or 3 against the verbs and ``capabilities`` that already exist.
+2. **Reuse before inventing.** Use the existing verb or contract. Do not add a
+   game-flavoured synonym of one that exists.
+3. **Name by the action, not the game's noun**: ``collect``, not
+   ``pick_up_mushroom``; ``capture``, not ``throw_pokeball``; ``drive``, not
+   ``enter_car``.
+4. **Keep content out of the mechanism.** Ids, recipes, maps, questlines and
+   wiki sources are supplied by the adapter, like quests, bases, combat
+   strategies and ``WikiSource``.
+5. **Stay structural.** Never encode a skill with keyword or display-name
+   matching; use ids and state the connector reports.
+6. **Respect the spontaneity rule.** Skills are affordances. They are never a
+   scripted catalogue of objectives.
+7. **Declare capabilities** and document any new shared verb in this page and in
+   the adapter's ``guide.md``.
+8. **Prove pluggability.** The adapter must import and run with every other
+   adapter absent, and the neutral contract needs a test that does not depend on
+   the game.
+
+Anti-patterns
+~~~~~~~~~~~~~
+
+* A world name or world-specific id in a Rift Vessel core or shared module.
+* A ``skyrim_pickup`` verb that duplicates ``collect``.
+* Copying another adapter's code instead of promoting the shared part.
+* Promoting a skill to the shared layer after only one game needed it.
+* Treating "GTA is almost free" as "GTA needs no adapter work".
 
 Extending — new worlds
 ---------------------

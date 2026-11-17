@@ -828,3 +828,37 @@ async def test_describe_sighting_shows_known_player_identity() -> None:
     )
     assert plain is not None
     assert plain == "sheep (~3 blocks E)"
+
+
+@pytest.mark.asyncio
+async def test_reconnect_reuses_the_server_the_session_was_entered_with(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dropped world is retried on the override it was entered with, not the
+    saved default host (the default host once swallowed every retry)."""
+    from core import core_initializer
+    from interface.vessel_interface import VesselInterface
+
+    calls: list[dict[str, Any]] = []
+
+    class _Plugin:
+        def connect_overrides_for(self, name: str) -> dict[str, Any] | None:
+            return {"host": "pvp.example.net", "port": 25565}
+
+        async def connect_world(
+            self,
+            connector_name: str | None = None,
+            overrides: dict[str, Any] | None = None,
+        ) -> None:
+            calls.append({"name": connector_name, "overrides": overrides})
+
+    monkeypatch.setitem(core_initializer.PLUGIN_REGISTRY, "vessel_plugin", _Plugin())
+    iface = VesselInterface.__new__(VesselInterface)
+    await iface._attempt_reconnect("minecraft")
+
+    assert calls == [
+        {
+            "name": "minecraft",
+            "overrides": {"host": "pvp.example.net", "port": 25565},
+        }
+    ]

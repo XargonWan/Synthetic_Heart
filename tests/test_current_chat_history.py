@@ -672,3 +672,43 @@ def test_source_label_is_none_for_current_chat():
         entry, current_interface_path="telegram_bot/-100987654321"
     )
     assert "[from" not in line
+
+
+def test_participants_block_marks_the_current_sender_even_without_a_bio():
+    """The person writing now is always listed and marked.
+
+    Live (2026-11-12): in a DM with a game bot the only profiled participant was
+    the trainer, so the block read as "you are talking to the trainer" and Rekku
+    kept addressing the bot as "Jay".
+    """
+    summary = prompt_engine._build_context_summary(
+        {
+            "participants": [
+                {
+                    "usertag": "@pilgram_bot",
+                    "username": "Pilgram",
+                    "is_sender": True,
+                    "is_bot": True,
+                    "short_bio": "",
+                },
+                {"usertag": "@jay", "short_bio": "Your trainer."},
+            ]
+        },
+        is_grillo_internal=False,
+    )
+
+    assert "[People in this conversation]" in summary
+    assert (
+        "- @pilgram_bot (automated account) <- the person writing to you now" in summary
+    )
+    assert "- @jay: Your trainer." in summary
+    assert "@jay <- the person" not in summary
+
+
+def test_participants_without_a_bio_stay_hidden_unless_they_are_the_sender():
+    summary = prompt_engine._build_context_summary(
+        {"participants": [{"usertag": "@ghost", "short_bio": ""}]},
+        is_grillo_internal=False,
+    )
+
+    assert "@ghost" not in summary

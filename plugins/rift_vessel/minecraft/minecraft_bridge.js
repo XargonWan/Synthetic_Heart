@@ -1400,17 +1400,106 @@ function diggableObstructionTowards(origin, targetBlock) {
     // data-packs mark thin foliage empty too — skip those as well.
     if (b.boundingBox === 'empty') return null;
     if (typeof bot.canDigBlock === 'function' && !bot.canDigBlock(b)) return null;
+    if (whyNotBreakable(b)) return null;
     return b;
   } catch (e) {
     return null;
   }
 }
 
+// BEGIN breakable-blocks
+// Blocks that cannot be broken here. Trying again at a block that will not break
+// wastes a motor tick every time and reads as "mining" while nothing happens, so
+// Synth is told once, clearly, and the block (or the whole situation) is skipped:
+//  * the game mode forbids it (adventure / spectator);
+//  * the block is unbreakable by nature (bedrock, barrier, ... minecraft-data
+//    ``diggable === false``; creative players can break those, so not there);
+//  * the server restored it after we broke it (spawn protection, a claim or
+//    region plugin). mineflayer's dig() sets the cell to air LOCALLY the moment
+//    the dig finishes and resolves without waiting for the server, so a
+//    protected block looks broken until the server's revert arrives a moment
+//    later — we re-read the cell after a short settle to catch exactly that.
+// All structural (block ids, game mode, world state); never keyword logic.
+const protectedBlocks = new Map(); // "x,y,z" -> { name, at }
+const PROTECTED_BLOCK_TTL_MS = 10 * 60 * 1000;
+const DIG_SETTLE_MS = 450;
+// Blocks that fall into the cell when the one below them is removed: the cell
+// can legitimately hold the same name again, which is not a server revert.
+const FALLING_BLOCK_RE = /(^|_)(sand|gravel|concrete_powder|anvil)$|^(dragon_egg|scaffolding)$/;
+
+function blockPosKey(pos) {
+  return `${pos.x},${pos.y},${pos.z}`;
+}
+
+// null when digging `block` is worth trying, else { reason, detail }.
+function whyNotBreakable(block) {
+  if (!block || !block.position) return { reason: 'no_block', detail: 'there is no block there' };
+  const mode = bot && bot.game ? bot.game.gameMode : null;
+  if (mode === 'adventure' || mode === 'spectator') {
+    return { reason: 'game_mode', detail: `blocks cannot be broken in ${mode} mode` };
+  }
+  if (mode !== 'creative' && block.diggable === false) {
+    return { reason: 'unbreakable', detail: `${block.name} is unbreakable` };
+  }
+  const key = blockPosKey(block.position);
+  const entry = protectedBlocks.get(key);
+  if (entry) {
+    if (Date.now() - entry.at < PROTECTED_BLOCK_TTL_MS && entry.name === block.name) {
+      return {
+        reason: 'protected',
+        detail: `this ${block.name} was put back by the server when it was broken (protected area)`,
+      };
+    }
+    protectedBlocks.delete(key);
+  }
+  return null;
+}
+
+// Result for a request whose every candidate block was skipped by whyNotBreakable.
+function unbreakableResult(name, skipped) {
+  const first = skipped[0];
+  return {
+    ok: false,
+    detail:
+      `the ${name} blocks nearby cannot be broken here (${first.detail}) — ` +
+      'do not try to break them again; pick another kind of block or move to another area',
+    data: { block: name, reason: first.reason, skipped: skipped.length },
+  };
+}
+
+// bot.dig() and then confirm the block really went away (see above).
+async function digBlockVerified(block) {
+  const pos = block.position.clone ? block.position.clone() : block.position;
+  const name = block.name;
+  const above = bot.blockAt(pos.offset ? pos.offset(0, 1, 0) : pos);
+  const refills = !!(above && FALLING_BLOCK_RE.test(above.name));
+  await bot.dig(block);
+  if (refills) return { broken: true };
+  await sleep(DIG_SETTLE_MS);
+  const now = bot.blockAt(pos);
+  if (now && now.name === name) {
+    protectedBlocks.set(blockPosKey(pos), { name, at: Date.now() });
+    return { broken: false };
+  }
+  return { broken: true };
+}
+
+function protectedDigResult(blockName, position) {
+  return {
+    ok: false,
+    detail:
+      `${blockName} cannot be broken here: the server put it back (protected area). ` +
+      'Do not try this block again; pick another spot or another kind of block',
+    data: { block: blockName, reason: 'protected', position },
+  };
+}
+// END breakable-blocks
+
 // Resolve the nearest block matching a canonical 'target' name (the block name
 // reported by nearbyBlocks/scan). Returns the block object or null. Purely
 // structural: the caller supplies a game id and only that exact block id is
 // accepted.
-function resolveTargetBlock(target, maxDistance) {
+function resolveTargetBlock(target, maxDistance, opts) {
   if (!bot || typeof bot.findBlocks !== 'function') return null;
   const wanted = target != null ? String(target).trim().toLowerCase() : '';
   if (!wanted) return null;
@@ -1446,12 +1535,27 @@ function resolveTargetBlock(target, maxDistance) {
         break;
       }
     }
+    // ``opts.breakableOnly``: the caller is going to dig it, so skip blocks that
+    // cannot be broken (recorded in ``opts.skipped``) and take the next nearest.
+    const breakableOnly = !!(opts && opts.breakableOnly);
     let blocks = matchIds
-      ? bot.findBlocks({ matching: matchIds, maxDistance: dist, count: 1 })
+      ? bot.findBlocks({
+          matching: matchIds,
+          maxDistance: dist,
+          count: breakableOnly ? 16 : 1,
+        })
       : [];
-    if (blocks && blocks.length) {
-      const exact = bot.blockAt(blocks[0]);
-      if (exact && exact.name === wanted) return exact;
+    for (const pos of blocks || []) {
+      const exact = bot.blockAt(pos);
+      if (!exact || exact.name !== wanted) continue;
+      if (breakableOnly) {
+        const why = whyNotBreakable(exact);
+        if (why) {
+          if (Array.isArray(opts.skipped)) opts.skipped.push({ block: exact, ...why });
+          continue;
+        }
+      }
+      return exact;
     }
 
     // Do not broaden an explicit block id to a different variant.  The old
@@ -2763,7 +2867,12 @@ async function runAction(action, payload) {
       // inventory delta so the caller learns whether the gather truly yielded
       // an item (raw dig on a mis-timed block, creative mode, or a lost drop
       // can "succeed" while collecting nothing).
-      const block = resolveTargetBlock(payload.target, payload.search_radius);
+      const skipped = [];
+      let block = resolveTargetBlock(payload.target, payload.search_radius, {
+        breakableOnly: true,
+        skipped,
+      });
+      if (!block && skipped.length) return unbreakableResult(payload.target, skipped);
       if (!block) {
         // Same structural entity hint as collect_block: a 'mine sheep' request
         // means the model mistook a living entity for a block — say so
@@ -2861,7 +2970,8 @@ async function runAction(action, payload) {
         if (typeof bot.canDigBlock === 'function' && !bot.canDigBlock(block)) {
           return { ok: false, detail: `cannot dig ${blockName}`, data: {} };
         }
-        await bot.dig(block);
+        const dug = await digBlockVerified(block);
+        if (!dug.broken) return protectedDigResult(blockName, roundVec(block.position));
         // Walk over the resulting ground drops so they land in the inventory,
         // then settle — replaces the old blind sleep(400) which only worked
         // when the drop spawned on top of the bot (OOM-safe, no collectBlock).
@@ -2913,7 +3023,12 @@ async function runAction(action, payload) {
           inventoryDelta(startTotals, inventoryTotals()),
         ).reduce((a, b) => a + b, 0);
         if (collectedSoFar >= wantCount) break;
-        const block = resolveTargetBlock(name, searchRadius);
+        const skipped = [];
+        let block = resolveTargetBlock(name, searchRadius, { breakableOnly: true, skipped });
+        if (!block && skipped.length) {
+          lastDetail = unbreakableResult(name, skipped).detail;
+          break;
+        }
         if (!block) {
           // The requested name may be a living entity rather than a block
           // (e.g. the model asks to 'collect sheep' for wool). Resolve it
@@ -2990,7 +3105,11 @@ async function runAction(action, payload) {
             lastDetail = `cannot dig ${block.name}`;
             break;
           }
-          await bot.dig(block);
+          const dug = await digBlockVerified(block);
+          if (!dug.broken) {
+            lastDetail = protectedDigResult(block.name, null).detail;
+            break;
+          }
           // Walk over drops so they land in the inventory (OOM-safe pickup).
           await pickupNearbyDrops(6, 3000);
         } catch (err) {

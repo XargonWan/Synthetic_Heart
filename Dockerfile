@@ -156,7 +156,7 @@ RUN rm -rf /app/s6-services /app/automation_tools
 ENV PYTHONPATH=/app
 # Concretize the resolved version into the image so it is available at runtime
 # via os.getenv("SYNTH_VERSION") (read by core/webui.py). GITVERSION_TAG is
-# supplied by CI (GitVersion majorMinorPatch); local builds fall back to the
+# supplied by CI (scripts/version.py); local builds fall back to the
 # ARG default above.
 ENV SYNTH_VERSION=$GITVERSION_TAG
 

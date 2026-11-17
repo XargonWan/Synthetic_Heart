@@ -71,6 +71,15 @@ class KaradaTransport(ABC):
                      ``vrm_expression_clear``) and optional ``targets``.
         """
 
+    async def broadcast_presence(self, payload: Dict[str, Any]) -> None:
+        """Tell clients she is being introduced into / is leaving a world (optional).
+
+        ``payload`` is ``{"type": "vrm_presence", "state": "summon" | "idle"}``. Not abstract: a
+        transport that draws an avatar from Karada's animation states alone (the WebUI) has no use
+        for it and ignores it. Embodied clients (a game room) use it to know she is arriving.
+        """
+        return None
+
     # ------------------------------------------------------------------
     # Targeted send (single client / session)
     # ------------------------------------------------------------------

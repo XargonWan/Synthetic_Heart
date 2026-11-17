@@ -30,6 +30,7 @@ getting started.
    cortex
    interfaces
    peer_synths
+   bot_ward
    plugins
    plugins/generated_index
    self_growth
@@ -59,6 +60,7 @@ getting started.
    dev_components
    api_endpoints
    logging
+   statistics
    agent_integration
    agentic_tools
    component_pattern

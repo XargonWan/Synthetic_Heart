@@ -11,13 +11,15 @@ from typing import Any
 
 
 from core.config_manager import config_registry
-from core.app_paths import app_root, usable_container_dir
+from core.app_paths import app_root, persistent_media_dir, usable_container_dir
 from core.core_initializer import register_plugin
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.persona_manager import get_persona_manager
 from core.variables_engine import register_exposed_var
 
 from pathlib import Path as _Path
+
+from core.media_url_utils import get_vox_output_dir
 
 from .azuracast_client import AzuraCastClient
 from .db import init_radio_tables, trim_old_audio
@@ -37,6 +39,11 @@ def _resolve_audio_storage_dir() -> _Path:
     override = os.environ.get("SYNTH_RADIO_AUDIO_DIR", "").strip()
     if override:
         return _Path(override).expanduser()
+    # The data volume, so the banter clips survive a container recreate. The
+    # image-layer paths below are only for deployments without that volume.
+    persistent = persistent_media_dir("radio_host")
+    if persistent:
+        return persistent
     container_dir = _Path("/app/tmp_tts/radio_host")
     if usable_container_dir(container_dir.parent):
         return container_dir
@@ -1955,6 +1962,7 @@ class RadioHostPlugin:
             allowed_prefixes = (
                 _os.path.abspath(str(AUDIO_STORAGE_DIR)),
                 _os.path.abspath("res/synth_webui/static/audio/tts"),
+                _os.path.abspath(str(get_vox_output_dir())),
             )
             abs_path = _os.path.abspath(direct_path)
             for prefix in allowed_prefixes:

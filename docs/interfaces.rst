@@ -24,12 +24,15 @@ Available Interfaces
 * ``matrix_interface`` – Matrix chat bridge powered by ``matrix-nio``. Requires homeserver credentials and tokenizer (password or access token).
 * ``openai_api_server`` – OpenAI-compatible REST bridge that lets external clients talk to SyntH as if it were an OpenAI endpoint. It also implements the legacy ``/api/generate`` · ``/api/chat`` · ``/api/tags`` routes, so tools written for a local Ollama daemon work unchanged.
 * ``telegram_bot`` – Telegram bot interface with media support. Requires ``BOTFATHER_TOKEN`` and trainer ID.
+* ``telegram`` – Telegram **user-account** interface (real phone number, MTProto via Telethon) with a WebUI login. Requires ``TELEGRAM_API_ID`` and ``TELEGRAM_API_HASH``. See :doc:`telegram_user_interface`.
+
+Interfaces that can set their own account picture (``discord_bot``, ``telegram_bot``, ``matrix_chat``, ``fluxer_bot`` and, opt-in, ``telegram``) use the core synth avatar; see :doc:`synth_avatar` for the support matrix.
 
 **Development Interfaces** (in ``interface_dev/`` directory):
 
 * ``cli`` – Local command-line interface for direct interaction (no configuration).
 * ``reddit_interface`` – Asynchronous Reddit client for posts, comments, and DMs. Requires Reddit API credentials.
-* ``telethon_userbot`` – Advanced Telegram userbot using Telethon. Requires ``API_ID``, ``API_HASH``, and session.
+* ``telethon_userbot`` – Legacy Telethon userbot prototype (superseded by the stable ``telegram`` interface). Requires ``API_ID``, ``API_HASH``, and session.
 * ``webui`` – FastAPI-based web interface for browser access. Configurable host/port.
 * ``x_interface`` – Experimental X (Twitter) integration with timeline features. Requires ``X_USERNAME``.
 
@@ -526,3 +529,31 @@ Best Practices
     Provide clear action schemas and examples in the ``examples`` tier.
 
 For complete implementations, examine ``interface/telegram_bot.py`` or ``interface/discord_interface.py`` in the repository.
+
+
+Typing and recording status
+---------------------------
+
+While the synth generates a reply, records a voice note or sends a file, an
+interface can show it in the chat ("typing…", "recording a voice message…",
+"sending a file…"). It is optional and structural: implement
+
+.. code-block:: python
+
+   async def send_activity(self, interface_path: str, kind: str) -> None: ...
+
+``kind`` is ``typing``, ``record_audio``, ``upload_audio`` or ``upload_file``
+(``core.chat_activity.KIND_*``); use the nearest wording the platform has.
+``core.chat_activity`` repeats the pulse every four seconds, because chat clients
+drop the indicator after about five, and stops it by itself after repeated
+failures or four minutes.
+
+* ``core.message_queue`` starts "typing" when generation begins and stops it when
+  the turn ends.
+* ``core.action_parser`` switches it to "recording" while a ``tts_speak`` action
+  runs and to "sending a file" for a message with ``media``, and stops it as soon
+  as something has been delivered (the client has just cleared it).
+
+Implemented by ``telegram`` (Telethon ``SetTypingRequest``, including forum
+topics), ``telegram_bot`` (``sendChatAction``), ``discord_bot`` (typing only) and
+``matrix_chat`` (typing only). Turn it off with ``CHAT_ACTIVITY_ENABLED``.

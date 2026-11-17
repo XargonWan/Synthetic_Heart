@@ -1440,10 +1440,17 @@ function renderQueueItem(it) {
     const iso = epochToIso(it && it.enqueued_at);
     const absTime = iso ? formatTimestamp(iso) : '';
     const age = formatQueueAge(it && it.age_seconds);
-    const timeText = escapeHtml([absTime, age ? `(${age})` : ''].filter(Boolean).join(' '));
+    // A merged element holds several messages of the same chat: show first → last.
+    const mergedCount = Number(it && it.merged_count) || 1;
+    const lastIso = mergedCount > 1 ? epochToIso(it && it.last_enqueued_at) : '';
+    const lastTime = lastIso && lastIso !== iso ? formatTimestamp(lastIso) : '';
+    const timeText = escapeHtml(
+        [absTime, lastTime ? `→ ${lastTime}` : '', age ? `(${age})` : ''].filter(Boolean).join(' ')
+    );
 
     // Vessel flags (structural, from the snapshot — no keyword logic).
     const flags = [];
+    if (mergedCount > 1) flags.push(`×${mergedCount} merged`);
     if (it && it.vessel_player_chat) flags.push('player-chat');
     if (it && it.vessel_reflection) flags.push('reflection');
     if (it && it.vessel_appraisal) flags.push('appraisal');

@@ -13,6 +13,7 @@ Key features:
 
 from __future__ import annotations
 
+from core import stats_registry
 import asyncio
 import base64
 import copy
@@ -586,6 +587,7 @@ class OpenRouterPlugin(AIPluginBase):
         finally:
             self._current_request_meta = None
 
+    @stats_registry.tracked_engine("cortex", "openrouter")
     async def generate_response(self, prompt):  # type: ignore[override]
         """Send prompt to OpenRouter and return the response text."""
         if not OPENROUTER_API_KEY:

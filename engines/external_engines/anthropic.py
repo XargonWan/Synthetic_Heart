@@ -15,6 +15,7 @@ Key features:
 
 from __future__ import annotations
 
+from core import stats_registry
 import asyncio
 import base64
 import copy
@@ -309,6 +310,7 @@ class AnthropicPlugin(AIPluginBase):
         finally:
             self._current_request_meta = None
 
+    @stats_registry.tracked_engine("cortex", "anthropic")
     async def generate_response(self, prompt: Any) -> str:  # type: ignore[override]
         """Send prompt to Anthropic Claude and return the response text."""
         api_key = str(ANTHROPIC_API_KEY).strip() if ANTHROPIC_API_KEY else ""

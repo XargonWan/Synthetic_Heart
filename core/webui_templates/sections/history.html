@@ -1850,6 +1850,30 @@
         font-family: monospace;
         font-weight: 600;
       }
+      /* The command line the agent ran, then its output underneath. */
+      .agent-tool .agent-tool-cmd-line {
+        font-family: monospace;
+        font-weight: 600;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      /* A sub-agent the agent handed work to: its steps nest under the card. */
+      .agent-tool.agent-subagent { border-left: 3px solid var(--accent, #4f8cff); }
+      .agent-subagent-body {
+        display: flex;
+        flex-direction: column;
+        gap: 0.4rem;
+        padding: 0.5rem 0.5rem 0.5rem 0.9rem;
+        border-top: 1px solid var(--border);
+      }
+      .agent-subagent-body .agent-tool { width: 100%; }
+      .agent-tool .agent-tool-none {
+        padding: 0.35rem 0.65rem;
+        font-size: 0.78rem;
+        color: var(--text-soft, #8a8a9a);
+      }
       .agent-tool .agent-tool-badge {
         margin-left: auto;
         padding: 1px 8px;

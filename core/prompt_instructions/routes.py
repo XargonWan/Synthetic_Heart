@@ -63,8 +63,13 @@ def _without(*drop: str) -> tuple[str, ...]:
 #:   user chat and forbids ``message_*`` / ``send_message``; the reply obligation
 #:   says the opposite ("internal-only actions are a hard failure"), and the
 #:   worked example shows exactly the ``send_message`` the guard forbids. Both
-#:   are removed. ``INPUT METADATA`` is KEPT: an internal beat's own user body
+#:   are removed, and so is ``INTERLOCUTOR`` (an internal beat has no sender to
+#:   tell apart from the trainer). ``INPUT METADATA`` is KEPT: an internal beat's own user body
 #:   does carry the ``[lang:… | grillo:true | beat:…]`` routing bracket.
+#: * ``vessel`` — in a Rift Vessel world the persona DOES have a digital body and
+#:   stands on the same footing as the players (both inhabit the same game), so
+#:   the real-world "no physical body" rule is dropped and the vessel overlay
+#:   states the in-world embodiment instead.
 #: * ``observer`` — the outreach beat must send a message, so the reply
 #:   obligation is correct for it and stays. The worked example is dropped
 #:   because its own instruction constants carry one.
@@ -74,8 +79,9 @@ def _without(*drop: str) -> tuple[str, ...]:
 ROUTE_RULES: dict[str, tuple[str, ...]] = {
     ROUTE_CHAT: RULE_ORDER,
     ROUTE_CHAT_VOICE: RULE_ORDER,
-    ROUTE_VESSEL: RULE_ORDER,
+    ROUTE_VESSEL: _without("RULE_NO_PHYSICAL_BODY"),
     ROUTE_GRILLO_INTERNAL: _without(
+        "RULE_INTERLOCUTOR_IDENTITY",
         "RULE_CHAT_REPLY_REQUIRED",
         "RULE_RESPONSE_EXAMPLE_LEAD",
         "RULE_RESPONSE_EXAMPLE",

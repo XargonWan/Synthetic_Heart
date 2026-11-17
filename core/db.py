@@ -1420,14 +1420,27 @@ async def _heal_cortex_config(cur: Any) -> None:
         if key:
             current[str(key)] = "" if value is None else str(value)
 
+    # A scope value is a bare engine name or, once a model was picked, the JSON
+    # ``{"engine": ..., "model": ...}``. Only the engine part is compared with the
+    # known engines: the whole JSON string never is one, so comparing it would call
+    # every engine+model selection stale and overwrite it on the next start.
+    from core.config import parse_cortex_scope_value
+
     updates: list[tuple[str, str]] = []
     for key in ("TRAINER_CORTEX", "GRILLO_CORTEX", "LIVE_CORTEX", "DSP_CORTEX"):
         value = current.get(key, "")
-        if value and value not in ("Default", "None") and value not in valid_names:
+        engine, _model = parse_cortex_scope_value(value)
+        if (
+            value
+            and value not in ("Default", "None")
+            and engine not in ("Default", "None")
+            and engine not in valid_names
+        ):
             updates.append((key, "Default"))
 
     base_value = current.get("BASE_CORTEX", "")
-    if base_value and base_value not in valid_names:
+    base_engine, _base_model = parse_cortex_scope_value(base_value)
+    if base_value and base_engine not in valid_names:
         fallback = _pick_preferred_cortex(enabled_endpoints)
         if fallback is None and registry is not None:
             try:
@@ -2033,6 +2046,23 @@ async def ensure_plugin_tables() -> None:
                         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                         INDEX idx_reason_trail_created_at (created_at),
                         INDEX idx_reason_trail_interface_path (interface_path)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+                    """
+                )
+
+                # system_events (core/system_events.py) — restarts, plugin /
+                # interface toggles and the heartbeat row (kind = 'heartbeat')
+                # used to estimate offline time.
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS system_events (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        ts DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        kind VARCHAR(32) NOT NULL,
+                        component VARCHAR(100),
+                        detail VARCHAR(500),
+                        INDEX idx_system_events_ts (ts),
+                        INDEX idx_system_events_kind (kind)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
                     """
                 )

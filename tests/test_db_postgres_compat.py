@@ -545,6 +545,80 @@ async def test_heal_cortex_config_repairs_invalid_values(monkeypatch) -> None:
     ) in fake_cursor.calls
 
 
+def _heal_cursor(rows: list[tuple[str, str]], endpoints: list[str]):
+    class FakeCursor:
+        def __init__(self) -> None:
+            self._rows: list[tuple[str, ...]] = []
+            self.calls: list[tuple[str, object]] = []
+
+        async def execute(self, query, params=None):
+            self.calls.append((query, params))
+            if "SELECT name FROM external_endpoints" in query:
+                self._rows = [(name,) for name in endpoints]
+            elif "SELECT config_key, value FROM config" in query:
+                self._rows = list(rows)
+            else:
+                self._rows = []
+
+        async def fetchall(self):
+            rows_, self._rows = self._rows, []
+            return rows_
+
+    return FakeCursor()
+
+
+def _use_registry(monkeypatch, engines: list[str]) -> None:
+    class FakeRegistry:
+        def get_available_engines(self) -> list[str]:
+            return engines
+
+        def get_default_engine(self) -> str:
+            return engines[0]
+
+    monkeypatch.setattr(
+        "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
+    )
+
+
+def _updates(cursor) -> list[object]:
+    return [
+        params
+        for query, params in cursor.calls
+        if "UPDATE config SET value = %s WHERE config_key = %s" in query
+    ]
+
+
+@pytest.mark.asyncio
+async def test_heal_cortex_config_keeps_an_engine_with_a_model(monkeypatch) -> None:
+    """Picking engine + model stores JSON; that is not a stale engine name."""
+    _use_registry(monkeypatch, ["anthropic"])
+    chosen = '{"engine": "selenium-llm-engine", "model": "chatgpt"}'
+    cursor = _heal_cursor(
+        [("BASE_CORTEX", chosen), ("GRILLO_CORTEX", chosen)],
+        ["fish-audio", "selenium-llm-engine"],
+    )
+
+    await db_module._heal_cortex_config(cursor)
+
+    assert _updates(cursor) == []
+
+
+@pytest.mark.asyncio
+async def test_heal_cortex_config_still_repairs_a_removed_engine_with_a_model(
+    monkeypatch,
+) -> None:
+    _use_registry(monkeypatch, ["anthropic"])
+    gone = '{"engine": "removed_engine", "model": "chatgpt"}'
+    cursor = _heal_cursor(
+        [("BASE_CORTEX", gone), ("GRILLO_CORTEX", gone)], ["anthropic"]
+    )
+
+    await db_module._heal_cortex_config(cursor)
+
+    assert ("Default", "GRILLO_CORTEX") in _updates(cursor)
+    assert ("anthropic", "BASE_CORTEX") in _updates(cursor)
+
+
 @pytest.mark.asyncio
 async def test_heal_cortex_config_skips_when_registry_is_uninitialized(
     monkeypatch,

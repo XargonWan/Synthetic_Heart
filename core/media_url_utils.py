@@ -33,7 +33,9 @@ def get_vox_output_dir() -> Path:
     Reads the ``VOX_OUTPUT_DIR`` config value (falling back to the in-image
     default) and resolves it. Never raises — returns the default on any error.
     """
-    default = "res/synth_webui/static/audio/tts"
+    from core.app_paths import default_tts_output_dir, resolve_tts_output_dir
+
+    default = default_tts_output_dir()
     try:
         from core.config_manager import config_registry
 
@@ -47,7 +49,7 @@ def get_vox_output_dir() -> Path:
     except Exception:
         raw = default
     try:
-        return Path(str(raw)).resolve()
+        return Path(resolve_tts_output_dir(raw)).resolve()
     except Exception:
         return Path(default)
 

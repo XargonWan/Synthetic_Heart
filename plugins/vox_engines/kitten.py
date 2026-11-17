@@ -563,8 +563,17 @@ class KittenVoxEngine(VoxEngineBase):
         """
         return [{"code": v, "name": v, "language": "*"} for v in _KITTEN_VOICES]
 
-    def sample(self, speaker: str, text_hint: str | None = None) -> bytes:
+    def sample(
+        self,
+        speaker: str,
+        text_hint: str | None = None,
+        model_id: str | None = None,
+    ) -> bytes:
         """Return WAV bytes for a quick voice sample from the local engine.
+
+        *model_id* selects the KittenTTS model to render with (a catalog sample
+        must come from the model it is shipped for); it defaults to the model
+        configured in ``KITTEN_MODEL``.
 
         Uses a localised template that embeds the voice name so listeners
         can distinguish between personas even in the WebUI sample player.
@@ -578,8 +587,7 @@ class KittenVoxEngine(VoxEngineBase):
             template = _SAMPLE_TEXTS.get("en", _SAMPLE_TEXT_DEFAULT)
             text = template.format(voice=speaker)
 
-        model_id = self._active_model_id()
-        tts = _get_model(model_id)
+        tts = _get_model(model_id or self._active_model_id())
         if tts is None:
             raise NotImplementedError("TTS engine unavailable")
         try:

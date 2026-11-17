@@ -1007,6 +1007,7 @@ class SynthWebUIInterface:
         self.app.get("/api/history/chat")(self.history_chat)
         self.app.get("/api/log-failures")(self.list_log_failures)
         self.app.delete("/api/log-failures/{failure_id}")(self.delete_log_failure)
+        self.app.get("/api/stats")(self.stats_overview)
         self.app.get("/api/dead-targets")(self.list_dead_targets)
         self.app.delete("/api/dead-targets/{target_id}")(self.delete_dead_target)
         self.app.get("/api/reason-trail")(self.list_reason_trail)
@@ -1024,6 +1025,21 @@ class SynthWebUIInterface:
         # one, and confirm / reject / lift / restore a stored one.
         self.app.get("/api/soul/retractions")(self.get_retractions)
         self.app.post("/api/soul/retractions")(self.post_retraction)
+        # Synth avatar (Settings → Synth Avatar): stored by core, pushed to interfaces.
+        from core import synth_avatar as _synth_avatar  # noqa: F401  (registers SYNTH_AVATAR)
+        from core.karada_api import _require_api_token as _avatar_token
+
+        self.app.get("/api/synth_avatar")(self.get_synth_avatar)
+        self.app.get("/api/synth_avatar/info")(self.get_synth_avatar_info)
+        self.app.post("/api/synth_avatar", dependencies=[Depends(_avatar_token)])(
+            self.upload_synth_avatar
+        )
+        self.app.delete("/api/synth_avatar", dependencies=[Depends(_avatar_token)])(
+            self.delete_synth_avatar
+        )
+        self.app.post(
+            "/api/synth_avatar/resend", dependencies=[Depends(_avatar_token)]
+        )(self.resend_synth_avatar)
         # On-demand run of the nightly memory compaction (Settings → Memory Compaction).
         self.app.get("/api/grillo/compaction")(self.grillo_compaction_status)
         self.app.post("/api/grillo/compaction")(self.start_grillo_compaction)
@@ -1237,6 +1253,20 @@ class SynthWebUIInterface:
             log_file=WEBUI_LOG,
         )
 
+    def register_plugin_router(self, router: Any, name: str = "") -> None:
+        """Mount a FastAPI ``APIRouter`` a plugin owns (an HTTP or WebSocket endpoint).
+
+        ``register_plugin_api_route`` only serves JSON on GET; a plugin that needs more, such as a
+        WebSocket a game connects to, brings its own router and mounts it here, so the core knows
+        nothing about the plugin. The router must do its own authorisation for a WebSocket (see
+        ``webui_auth.websocket_authorized``).
+        """
+        self.app.include_router(router)
+        log_info(
+            f"{LOG_PREFIX} Plugin router mounted: {name or router}",
+            log_file=WEBUI_LOG,
+        )
+
     def register_plugin_section_tab(
         self,
         section: str,
@@ -1290,10 +1320,16 @@ class SynthWebUIInterface:
                     tasks = []
                     for r in rows:
                         name = None
+                        source = None
+                        parent_task_id = None
                         try:
                             meta = json.loads(r[5]) if r[5] else None
                             if isinstance(meta, dict):
                                 name = meta.get("name") or None
+                                source = meta.get("source") or None
+                                drone = meta.get("drone")
+                                if isinstance(drone, dict):
+                                    parent_task_id = drone.get("parent_task_id")
                         except Exception:
                             name = None
                         tasks.append(
@@ -1304,6 +1340,11 @@ class SynthWebUIInterface:
                                 "created_at": r[3].isoformat() if r[3] else None,
                                 "updated_at": r[4].isoformat() if r[4] else None,
                                 "name": name,
+                                # Where the task came from (an interface, a web
+                                # search, "drone" for a sub-agent) and, for a
+                                # sub-agent, the task that spawned it.
+                                "source": source,
+                                "parent_task_id": parent_task_id,
                             }
                         )
                     return JSONResponse({"tasks": tasks})
@@ -2202,8 +2243,15 @@ class SynthWebUIInterface:
                     "optional": True,
                 }
 
+            description = f"Send a message to the {BRAND_NAME} browser client."
+            if not vox_on:
+                from core.optional_plugins import voice_unavailable_note
+
+                if voice_note := voice_unavailable_note():
+                    description += f" {voice_note}"
+
             return {
-                "description": f"Send a message to the {BRAND_NAME} browser client.",
+                "description": description,
                 "payload": payload,
             }
         if action_name == "message_mate_engine":
@@ -2584,6 +2632,17 @@ class SynthWebUIInterface:
         uptime = int((datetime.now(timezone.utc) - self.start_time).total_seconds())
         return JSONResponse({"uptime": uptime, "sessions": len(self.connections)})
 
+    @staticmethod
+    def _turns_today() -> int | None:
+        """Turns the engine ran today (the statistics registry's count); None when it cannot be read."""
+        try:
+            from core import stats_registry
+
+            registry = stats_registry.get_stats()
+            return registry.count("turns.ok") + registry.count("turns.failed")
+        except Exception:
+            return None
+
     async def about_summary(self) -> JSONResponse:
         """Return lightweight About tab metadata (uptime, system, and component counts)."""
         uptime = int((datetime.now(timezone.utc) - self.start_time).total_seconds())
@@ -2613,7 +2672,7 @@ class SynthWebUIInterface:
                 "uptime": uptime,
                 "sessions": sessions,
                 "components": components_count,
-                "messages_today": None,
+                "messages_today": self._turns_today(),
                 "version": version,
                 "python": python_version,
                 "platform": platform_label,
@@ -3657,7 +3716,17 @@ class SynthWebUIInterface:
                 # 4) Face values (emotions)
                 face = full_state.get("face_values", {})
                 if face:
-                    await websocket.send_json({"type": "vrm_face", "values": face})
+                    # Weights resolved per skin, as every later frame is (a raw emotion state here and
+                    # resolved ones after would flip the face at the first refresh).
+                    resolve = getattr(
+                        self.animation_handler, "resolve_face_values", None
+                    )
+                    await websocket.send_json(
+                        {
+                            "type": "vrm_face",
+                            "values": resolve(face) if callable(resolve) else face,
+                        }
+                    )
 
                 # 5) If no animation is set yet, start idle
                 if not anim.get("descriptor") and self.persona_manager:
@@ -4361,7 +4430,6 @@ class SynthWebUIInterface:
         """
         import asyncio as _asyncio
         from core.model_manager import MODEL_MANAGER
-        from core.vox_registry import VOX_REGISTRY
 
         lang = request.query_params.get("lang", "en")
 
@@ -4388,36 +4456,16 @@ class SynthWebUIInterface:
                 gender = vm.gender
                 break
 
-        # Import generator helper lazily to avoid circular imports
-        import inspect
+        # Import generator helpers lazily to avoid circular imports
+        from scripts.generate_model_samples import (
+            edge_fallback_sample,
+            vox_engine_sample,
+        )
 
         def _generate_fn(text: str, v: str | None) -> "bytes | None":
-            # Try VOX engine first
-            for engine_name in VOX_REGISTRY.get_available_engines():
-                try:
-                    engine = VOX_REGISTRY.load_engine(engine_name)
-                    if not hasattr(engine, "sample"):
-                        continue
-                    sig = inspect.signature(engine.sample)
-                    data: bytes | None = (
-                        engine.sample(text, v)
-                        if len(sig.parameters) == 2
-                        else engine.sample(v)
-                    )
-                    if data:
-                        return data
-                except Exception:
-                    continue
-            # edge-tts fallback with correct locale + gender
-            try:
-                from scripts.generate_model_samples import _edge_generate, _tweak_audio
-
-                data = _edge_generate(text, v, lang=lang, gender=gender)
-                if data:
-                    return _tweak_audio(data, v, lang)
-            except Exception:
-                pass
-            return None
+            return vox_engine_sample(text, v, model_id) or edge_fallback_sample(
+                text, v, lang, gender
+            )
 
         loop = _asyncio.get_event_loop()
         try:
@@ -10402,6 +10450,29 @@ class SynthWebUIInterface:
             log_error(f"{LOG_PREFIX} Failed to delete log failure {failure_id}: {exc}")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+    async def stats_overview(self, request: Request):
+        """Return the stat server's report (Logs > Stats): the sections that plugins and the core registered, each with
+        the blocks that have data in the chosen period (``?period=1h|24h|3d|7d|14d|all``, or the older ``?days=N``)."""
+        try:
+            from core import stats_registry
+
+            period = stats_registry.Period.parse(
+                request.query_params.get("period"), request.query_params.get("days")
+            )
+            report = stats_registry.get_stats().report(period)
+            report["periods"] = [
+                {"key": key, "label": choice[0]}
+                for key, choice in stats_registry.Period.CHOICES.items()
+            ]
+            report["uptime"] = int(
+                (datetime.now(timezone.utc) - self.start_time).total_seconds()
+            )
+            report["success"] = True
+            return JSONResponse(report)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to build the statistics: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
     async def list_dead_targets(self, request: Request):
         """Return the dead-delivery-target registry (Logs > Dead Targets)."""
         try:
@@ -10698,6 +10769,83 @@ class SynthWebUIInterface:
                 "abandoned_goals": outcome.abandoned_goals,
                 "discarded_proposal": outcome.discarded_proposal,
             }
+        )
+
+    # ------------------------------------------------------------------
+    # Synth avatar
+    # ------------------------------------------------------------------
+    async def get_synth_avatar(self) -> Response:
+        """The stored avatar PNG; the ``?v=`` cache-buster makes it cacheable."""
+        from core import synth_avatar
+
+        loaded = synth_avatar.load_avatar()
+        if loaded is None:
+            raise HTTPException(status_code=404, detail="No avatar set")
+        data, version = loaded
+        return Response(
+            content=data,
+            media_type=synth_avatar.AVATAR_MIME,
+            headers={"ETag": f'"{version}"', "Cache-Control": "no-cache"},
+        )
+
+    async def get_synth_avatar_info(self) -> JSONResponse:
+        from core import synth_avatar
+
+        version = synth_avatar.current_version()
+        return JSONResponse(
+            {
+                "success": True,
+                "exists": version is not None,
+                "version": version,
+                "size": synth_avatar.AVATAR_SIZE,
+                "interfaces": synth_avatar.interface_support(),
+            }
+        )
+
+    async def upload_synth_avatar(self, file: UploadFile = File(...)) -> JSONResponse:
+        """Store the (already framed) image and push it to the interfaces."""
+        from core import synth_avatar
+
+        raw = await file.read(synth_avatar.MAX_UPLOAD_BYTES + 1)
+        await file.close()
+        try:
+            info = await asyncio.to_thread(synth_avatar.save_avatar, raw)
+        except synth_avatar.AvatarError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to store synth avatar: {exc}")
+            raise HTTPException(
+                status_code=500, detail="Could not store avatar"
+            ) from exc
+        await synth_avatar.persist_version(info.version)
+        results = await synth_avatar.broadcast_avatar_changed()
+        log_info(f"{LOG_PREFIX} Synth avatar updated ({info.version}): {results}")
+        return JSONResponse(
+            {"success": True, "version": info.version, "interfaces": results}
+        )
+
+    async def resend_synth_avatar(self) -> JSONResponse:
+        """Push the stored avatar to every opted-in interface again, by hand.
+
+        Skips the "already applied" shortcut, so an account whose picture was
+        changed elsewhere (or a push that failed earlier) is brought back in line.
+        """
+        from core import synth_avatar
+
+        if synth_avatar.load_avatar() is None:
+            raise HTTPException(status_code=404, detail="No avatar to resend")
+        results = await synth_avatar.broadcast_avatar_changed(force=True)
+        log_info(f"{LOG_PREFIX} Synth avatar resent: {results}")
+        return JSONResponse({"success": True, "interfaces": results})
+
+    async def delete_synth_avatar(self) -> JSONResponse:
+        from core import synth_avatar
+
+        removed = synth_avatar.clear_avatar()
+        await synth_avatar.persist_version(None)
+        results = await synth_avatar.broadcast_avatar_changed() if removed else {}
+        return JSONResponse(
+            {"success": True, "removed": removed, "interfaces": results}
         )
 
     # ------------------------------------------------------------------
@@ -11218,7 +11366,13 @@ class SynthWebUIInterface:
             config_def = next((d for d in definitions if d["key"] == key), None)
             component = config_def.get("component") if config_def else None
         except Exception:
+            config_def = None
             component = None
+
+        try:
+            _previous_value = config_registry.get_value(key, None)
+        except Exception:
+            _previous_value = None
 
         try:
             await config_registry.set_value(key, value, require_persist=True)
@@ -11234,6 +11388,20 @@ class SynthWebUIInterface:
             raise HTTPException(
                 status_code=500, detail="Failed to update configuration"
             ) from exc
+
+        # Tell the persona the user changed a setting (system-event window). Only
+        # variables a person sees in the UI: hidden ones are internal flags (the
+        # plugin/interface switches record their own events). Sensitive values
+        # are never logged.
+        if not (config_def or {}).get("hidden"):
+            from core.system_events import record_variable_change
+
+            await record_variable_change(
+                key,
+                _previous_value,
+                value,
+                sensitive=bool((config_def or {}).get("sensitive")),
+            )
 
         # Invalidate the in-memory Vox language-override cache so the next TTS
         # call picks up the new mapping immediately (the cache has a short TTL

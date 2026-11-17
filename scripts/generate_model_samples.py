@@ -26,8 +26,9 @@ HuggingFace/URL dependencies installed.
 from __future__ import annotations
 
 import argparse
+import inspect
 import io
-from typing import Callable
+from typing import Any, Callable
 
 from core.model_manager import MODEL_MANAGER
 from core.vox_registry import VOX_REGISTRY
@@ -209,45 +210,72 @@ def _tweak_audio(data: bytes, voice: str | None, lang: str = "en") -> bytes:
             return data
 
 
+def _call_engine_sample(
+    engine: Any, voice: str | None, text: str, model_id: str | None
+) -> bytes | None:
+    """Ask *engine* for a sample of *voice*.
+
+    The VOX contract is ``sample(speaker, ...)``: the voice always comes first.
+    ``text_hint`` / ``model_id`` are passed only to engines that accept them.
+    """
+    params = inspect.signature(engine.sample).parameters
+    kwargs: dict[str, Any] = {}
+    if "text_hint" in params:
+        kwargs["text_hint"] = text
+    if model_id and "model_id" in params:
+        kwargs["model_id"] = model_id
+    return engine.sample(voice, **kwargs)
+
+
+def vox_engine_sample(
+    text: str, voice: str | None, model_id: str | None = None
+) -> bytes | None:
+    """Render *voice* of *model_id* with the VOX engine that owns the model.
+
+    A catalog sample has to be spoken by the voice it advertises, so when the
+    model's owner engine is registered (``plugin_id`` ``vox_kitten`` → engine
+    ``kitten``) only that engine is asked, with *model_id*. Models whose owner
+    is not a registered engine fall back to the first engine that answers.
+    Returns MP3 bytes (WAV when no converter is available), or ``None``.
+    """
+    available = VOX_REGISTRY.get_available_engines()
+    spec = MODEL_MANAGER.get_spec(model_id) if model_id else None
+    owner = spec.plugin_id.removeprefix("vox_") if spec else None
+    candidates = [owner] if owner in available else available
+
+    for engine_name in candidates:
+        try:
+            engine = VOX_REGISTRY.load_engine(engine_name)
+            if not hasattr(engine, "sample"):
+                continue
+            data = _call_engine_sample(engine, voice, text, model_id)
+        except Exception:
+            continue
+        if data:
+            return _convert_to_mp3(data)
+    return None
+
+
+def edge_fallback_sample(
+    text: str, voice: str | None, lang: str = "en", gender: str = "N"
+) -> bytes | None:
+    """``edge-tts`` stand-in for models no local engine can speak."""
+    data = _edge_generate(text, voice, lang=lang, gender=gender)
+    return _tweak_audio(data, voice, lang) if data else None
+
+
 def _make_generate_callback(
     gender: str = "N",
     lang: str = "en",
+    model_id: str | None = None,
 ) -> Callable[[str, str | None], "bytes | None"]:
-    """Return a generate_fn closure bound to *gender* and *lang*."""
-    import inspect
+    """Return a generate_fn closure bound to *gender*, *lang* and *model_id*."""
 
     def _generate_callback(text: str, voice: str | None) -> bytes | None:
-        """Produce sample audio bytes for *text* and *voice*.
-
-        Tries registered VOX engines first (respecting 1- vs 2-arg ``sample()``
-        signature), then falls back to ``edge-tts`` with the correct locale and
-        gender filter.
-        """
-        text_to_say = text if voice is None else f"{text}"
-
-        for engine_name in VOX_REGISTRY.get_available_engines():
-            try:
-                engine = VOX_REGISTRY.load_engine(engine_name)
-            except Exception:
-                continue
-            if not hasattr(engine, "sample"):
-                continue
-            try:
-                sig = inspect.signature(engine.sample)
-                if len(sig.parameters) == 2:
-                    data = engine.sample(text_to_say, voice)
-                else:
-                    data = engine.sample(voice)
-            except Exception:
-                continue
-            if data:
-                return _tweak_audio(_convert_to_mp3(data), voice, lang)
-
-        # Fallback: edge-tts with correct locale + gender
-        data = _edge_generate(text_to_say, voice, lang=lang, gender=gender)
-        if data:
-            return _tweak_audio(data, voice, lang)
-        return None
+        """Produce sample audio bytes for *text* and *voice*."""
+        return vox_engine_sample(text, voice, model_id) or edge_fallback_sample(
+            text, voice, lang, gender
+        )
 
     return _generate_callback
 
@@ -334,7 +362,9 @@ def main() -> None:
                         pass
 
                 print(f"generating sample for {mid}/{voice}/{lang}…", end=" ")
-                generate_fn = _make_generate_callback(gender=gender, lang=lang)
+                generate_fn = _make_generate_callback(
+                    gender=gender, lang=lang, model_id=mid
+                )
                 path = MODEL_MANAGER.ensure_sample(mid, voice, generate_fn, lang=lang)
                 if path:
                     print(f"ok ({path})")

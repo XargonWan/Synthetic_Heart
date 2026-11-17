@@ -1,0 +1,735 @@
+"""Tests for the RetroXR Rift Vessel connector, its socket and the body assets.
+
+No DB, no LLM, no RetroXR: the mod is played by a fake WebSocket / the FastAPI
+TestClient. Each case is a way the rift could wrongly work (see the mutations in
+the commit message).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from plugins.rift_vessel import embodiment_assets
+from plugins.rift_vessel.retroxr.api import PROTOCOL_VERSION, create_retroxr_router
+from plugins.rift_vessel.retroxr.retroxr import (
+    CORE_VERBS,
+    WORLD_VERBS,
+    RetroXRConnector,
+)
+from plugins.rift_vessel.vessel_base import PerceptionEvent, VesselActionResult
+
+
+class FakeSocket:
+    """Stands in for the mod's WebSocket on the connector side."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict[str, Any]] = []
+        self.closed = False
+
+    async def send_json(self, payload: dict[str, Any]) -> None:
+        self.sent.append(payload)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+async def _connected(hello: dict[str, Any] | None = None) -> tuple[RetroXRConnector, FakeSocket, list]:
+    events: list[PerceptionEvent] = []
+    conn = RetroXRConnector()
+    ws = FakeSocket()
+    conn.attach_socket(ws, hello or {"room": "den", "capabilities": ["motion"]})
+    assert await conn.connect({}, events.append) is True
+    return conn, ws, events
+
+
+# -- connector ---------------------------------------------------------------
+
+
+async def test_connect_refused_while_the_rift_is_closed() -> None:
+    conn = RetroXRConnector()
+    assert await conn.connect({}, lambda e: None) is False
+    assert conn.is_connected is False
+    assert "Summoner" in (conn.last_error or "")
+
+
+async def test_action_round_trip() -> None:
+    conn, ws, _ = await _connected()
+
+    task = asyncio.create_task(conn.act("say", {"text": "hi"}))
+    for _ in range(20):  # the text waits for its voice's first sentence (none here: it goes at once)
+        if ws.sent:
+            break
+        await asyncio.sleep(0)
+    frame = ws.sent[-1]
+    assert frame["type"] == "action" and frame["action"] == "say"
+    assert frame["payload"] == {"text": "hi", "audio": True}, "in RetroXR a say is always spoken"
+
+    await conn.handle_frame(
+        {"type": "action_result", "id": frame["id"], "ok": True, "detail": "spoken", "data": {"n": 1}}
+    )
+    res = await task
+    assert res == VesselActionResult(ok=True, detail="spoken", data={"n": 1})
+
+
+async def test_results_are_matched_by_id_not_order() -> None:
+    conn, ws, _ = await _connected({"room": "den", "verbs": ["look_at", "touch"]})
+    t1 = asyncio.create_task(conn.act("look_at", {"target": "tv"}))
+    t2 = asyncio.create_task(conn.act("touch", {"target": "lamp"}))
+    await asyncio.sleep(0.01)
+    ids = {f["action"]: f["id"] for f in ws.sent}
+    # answer the SECOND request first
+    await conn.handle_frame({"type": "action_result", "id": ids["touch"], "ok": False, "detail": "out_of_reach"})
+    await conn.handle_frame({"type": "action_result", "id": ids["look_at"], "ok": True})
+    assert (await t1).ok is True
+    assert (await t2).detail == "out_of_reach"
+
+
+async def test_body_never_plays_unknown_verbs_are_refused() -> None:
+    conn, ws, _ = await _connected()
+    for verb in ("press_button", "play", "set_input", "attack", "respawn", ""):
+        res = await conn.act(verb, {})
+        assert res.ok is False and "unknown_verb" in (res.detail or ""), verb
+    assert ws.sent == [], "a refused verb must never reach the room"
+
+
+async def test_every_declared_verb_is_a_known_one() -> None:
+    conn, ws, _ = await _connected({"room": "den", "verbs": sorted(CORE_VERBS | set(WORLD_VERBS))})
+    assert "attack" not in CORE_VERBS
+    for verb in list(CORE_VERBS | set(WORLD_VERBS)):
+        task = asyncio.create_task(conn.act(verb, {"target": "x"}))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        await conn.handle_frame({"type": "action_result", "id": ws.sent[-1]["id"], "ok": True})
+        assert (await task).ok is True, verb
+
+
+async def test_closing_the_rift_fails_waiting_actions() -> None:
+    conn, _, _ = await _connected()
+    task = asyncio.create_task(conn.act("move", {"target": "tv"}))
+    await asyncio.sleep(0.01)
+    conn.detach_socket()
+    res = await asyncio.wait_for(task, timeout=1)
+    assert res.ok is False and res.detail == "rift_closed"
+    assert conn.is_connected is False
+    # and nothing is sent once it is closed
+    assert (await conn.act("say", {"text": "x"})).detail == "rift_closed"
+
+
+async def test_a_dead_socket_marks_the_connector_down() -> None:
+    conn, ws, _ = await _connected()
+
+    async def boom(_: dict[str, Any]) -> None:
+        raise RuntimeError("socket gone")
+
+    ws.send_json = boom  # type: ignore[method-assign]
+    res = await conn.act("say", {"text": "x"})
+    assert res.detail == "rift_closed"
+    assert conn.is_connected is False
+    assert "socket gone" in (conn.last_error or "")
+
+
+async def test_events_become_perceptions() -> None:
+    conn, _, events = await _connected()
+    await conn.handle_frame(
+        {"type": "event", "event_type": "touch", "summary": "the player touched your hand",
+         "actor": "player", "salience": 0.9, "data": {"part": "hand"}}
+    )
+    assert len(events) == 1
+    ev = events[0]
+    assert (ev.environment, ev.event_type, ev.actor, ev.salience) == ("retroxr", "touch", "player", 0.9)
+    assert ev.data == {"part": "hand"}
+
+
+async def test_a_picture_from_her_eyes_rides_as_an_attachment() -> None:
+    conn, _, events = await _connected()
+    await conn.handle_frame(
+        {"type": "event", "event_type": "watch_done", "summary": "You watched TV for 4 seconds.",
+         "salience": 0.9, "data": {"seconds": 4, "image_jpeg_b64": "QUJD"}}
+    )
+    ev = events[0]
+    assert ev.event_type == "watch_done"
+    assert "image_jpeg_b64" not in ev.data, "the raw field does not travel twice"
+    assert ev.data["attachments"] == [{"mime_type": "image/jpeg", "data": "QUJD", "filename": "what_she_saw.jpg"}]
+    assert ev.data["seconds"] == 4
+    # an event with no picture has no attachments key
+    await conn.handle_frame({"type": "event", "event_type": "search_done", "summary": "x", "data": {"found": True}})
+    assert "attachments" not in events[1].data
+
+
+def test_what_she_does_on_her_own_is_not_ambient_telemetry() -> None:
+    """A finished search/fetch/watch is a turn of its own: the model asked for it and wants to know."""
+    from plugins.rift_vessel.vessel_base import is_ephemeral_event
+
+    for kind in ("search_done", "explore_done", "watch_done", "bring_done", "pick_up_done", "hand_over_done"):
+        assert not is_ephemeral_event(kind), kind
+
+
+def test_the_verbs_she_does_on_her_own_have_schemas() -> None:
+    from plugins.rift_vessel.retroxr.retroxr import LOCAL_VERBS, WORLD_VERBS
+
+    for verb in ("search", "watch", "bring", "stop", "pick_up", "put_down", "hand_over"):
+        assert verb in WORLD_VERBS and WORLD_VERBS[verb]["description"]
+    # `explore` is Synth's own now (the core decides the route): the mod no longer has a verb of that name to offer
+    assert "explore" not in WORLD_VERBS and LOCAL_VERBS["explore"]["description"]
+    assert WORLD_VERBS["search"]["required_fields"] == ["target"]
+    assert WORLD_VERBS["bring"]["required_fields"] == ["target"]
+
+
+async def test_state_frame_feeds_world_state() -> None:
+    conn, _, _ = await _connected({"room": "den"})
+    assert (await conn.get_world_state()).position is None
+    await conn.handle_frame(
+        {"type": "state", "state": {"position": {"x": 1, "y": 0, "z": 2}, "holding": "cart",
+                                    "extra": {"entities": [{"name": "tv"}]}}}
+    )
+    st = await conn.get_world_state()
+    assert st.environment == "retroxr"
+    assert st.position == {"x": 1, "y": 0, "z": 2}
+    assert st.flags["holding"] == "cart"
+    assert st.extra["entities"] == [{"name": "tv"}] and st.extra["room"] == "den"
+    assert "say" in st.possible_actions and "attack" not in st.possible_actions
+
+
+async def test_world_identity_is_the_house_not_the_room() -> None:
+    """One scope: a chat (and a session resumed after a room change) must not be cut off from the room it began in."""
+    conn, _, _ = await _connected({"room": "xenu.mod:attic"})
+    assert conn.get_world_identity() is None
+    other, _, _ = await _connected({"room": "bedroom"})
+    assert other.get_world_identity() == conn.get_world_identity()
+
+
+def test_she_remembers_her_chat_between_sessions() -> None:
+    assert RetroXRConnector.remembers_chat is True
+
+
+async def test_a_forget_frame_clears_the_chat_and_answers(monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import core_initializer
+
+    asked: list[tuple[str, Any]] = []
+
+    class _Iface:
+        async def forget_chat(self, environment: str, world: Any = None) -> bool:
+            asked.append((environment, world))
+            return True
+
+    monkeypatch.setitem(core_initializer.INTERFACE_REGISTRY, "vessel", _Iface())
+    conn, ws, _ = await _connected()
+    await conn.handle_frame({"type": "forget"})
+    assert asked == [("retroxr", None)]
+    assert {"type": "forgotten", "ok": True} in ws.sent
+
+
+async def test_a_forget_with_no_interface_says_nothing_was_cleared(monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import core_initializer
+
+    monkeypatch.delitem(core_initializer.INTERFACE_REGISTRY, "vessel", raising=False)
+    conn, ws, _ = await _connected()
+    await conn.handle_frame({"type": "forget"})
+    assert {"type": "forgotten", "ok": False} in ws.sent
+
+
+async def test_a_dropped_socket_pauses_the_session_it_does_not_end_it() -> None:
+    conn, ws, _ = await _connected()
+    conn.session_token = "sess-1"
+    conn.pause_socket()
+    assert conn.paused is True and conn.is_connected is False
+    # the interface's reconnect sweep asks again and again: no error shown to anyone, no new socket made up
+    assert await conn.connect({}, lambda e: None) is False and conn.last_error is None
+
+
+async def test_disconnect_closes_the_socket() -> None:
+    conn, ws, _ = await _connected()
+    await conn.disconnect()
+    assert ws.closed is True and conn.is_connected is False
+
+
+# -- body assets -------------------------------------------------------------
+
+
+def _skin(root: Path, name: str, clips: dict[str, list[str]]) -> None:
+    (root / name).mkdir(parents=True, exist_ok=True)
+    (root / name / "model.vrm").write_bytes(b"vrm")
+    for folder, files in clips.items():
+        d = root / name / "animations" / folder
+        d.mkdir(parents=True, exist_ok=True)
+        for f in files:
+            (d / f).write_bytes(b"fbx")
+
+
+async def test_animation_lookup_order(tmp_path: Path) -> None:
+    _skin(tmp_path, "Rei", {"greet": ["Wave.fbx"], "vessel/walk": ["WalkRei.fbx"]})
+    _skin(tmp_path, "Mine", {"vessel/walk": ["WalkMine.fbx"], "vessel/sit": ["Sit.fbx"]})
+
+    # the skin's own vessel clip beats the fallback skin's
+    assert embodiment_assets.resolve_animation("walk", "Mine", tmp_path)["clips"][0]["file"] == "WalkMine.fbx"
+    # a state folder is found when there is no vessel clip
+    got = embodiment_assets.resolve_animation("greet", "Mine", tmp_path)
+    assert got["skin"] == "Rei" and got["namespace"] == "state"
+    # nothing anywhere
+    assert embodiment_assets.resolve_animation("moonwalk", "Mine", tmp_path) is None
+
+
+async def test_turns_filed_under_walk_are_animations_of_their_own(tmp_path: Path) -> None:
+    # Rei's walk/ keeps Walking.fbx in walk/walk/ and the turns beside it: asking for walk must not hand over the turns.
+    _skin(tmp_path, "Rei", {"walk/walk": ["Walking.fbx"], "walk/turn_left": ["Left Turn.fbx"], "walk/turn_right": ["Right Turn.fbx"]})
+    walk = embodiment_assets.resolve_animation("walk", "Rei", tmp_path)
+    assert walk is not None and [c["file"] for c in walk["clips"]] == ["Walking.fbx"]
+    left = embodiment_assets.resolve_animation("turn_left", "Rei", tmp_path)
+    assert left is not None and left["namespace"] == "nested" and [c["file"] for c in left["clips"]] == ["Left Turn.fbx"]
+    assert [c["file"] for c in embodiment_assets.resolve_animation("turn_right", "Rei", tmp_path)["clips"]] == ["Right Turn.fbx"]
+    # a skin with a flat walk/ (Zero) is unchanged, and a variant folder is still a variant
+    _skin(tmp_path, "Zero", {"walk": ["Walking.fbx"], "idle/happy": ["Happy.fbx"], "idle": ["Idle.fbx"]})
+    assert [c["file"] for c in embodiment_assets.resolve_animation("walk", "Zero", tmp_path)["clips"]] == ["Walking.fbx"]
+    assert sorted(c["file"] for c in embodiment_assets.resolve_animation("idle", "Zero", tmp_path)["clips"]) == ["Happy.fbx", "Idle.fbx"]
+
+
+async def test_the_skins_folder_is_the_repositorys(tmp_path: Path) -> None:
+    # It was `parent.parent` of core/ once, and moving the module under plugins/ silently pointed it at plugins/skins.
+    assert embodiment_assets.SKINS_ROOT.name == "skins"
+    assert (embodiment_assets.SKINS_ROOT.parent / "plugins" / "rift_vessel").is_dir(), "its parent is the repository root"
+
+
+async def test_a_loose_clip_with_the_word_in_its_name_is_found_last(tmp_path: Path) -> None:
+    # Rei's skin ships "Texting And Walking.fbx" at the top of animations/, with no folder of its own.
+    base = tmp_path / "Rei" / "animations"
+    base.mkdir(parents=True)
+    (base / "Texting And Walking.fbx").write_bytes(b"x")
+    (base / "Thankful.fbx").write_bytes(b"x")
+    got = embodiment_assets.resolve_animation("walk", "Rei", tmp_path)
+    assert got is not None and got["namespace"] == "loose" and got["clips"][0]["file"] == "Texting And Walking.fbx"
+    assert embodiment_assets.resolve_animation("thank", "Rei", tmp_path)["clips"][0]["file"] == "Thankful.fbx"
+    assert embodiment_assets.resolve_animation("moon", "Rei", tmp_path) is None, "a word must START with the name"
+    assert embodiment_assets.resolve_animation("ing", "Rei", tmp_path) is None, "not a piece from the middle of one"
+    # a folder or a vessel clip still wins over a loose file
+    (base / "vessel" / "walk").mkdir(parents=True)
+    (base / "vessel" / "walk" / "Proper.fbx").write_bytes(b"x")
+    assert embodiment_assets.resolve_animation("walk", "Rei", tmp_path)["clips"][0]["file"] == "Proper.fbx"
+
+
+async def test_animation_names_cannot_climb_out_of_the_skins(tmp_path: Path) -> None:
+    _skin(tmp_path, "Rei", {"idle": ["Idle.fbx"]})
+    secret = tmp_path / "secret"
+    secret.mkdir()
+    (secret / "x.fbx").write_bytes(b"x")
+    for bad in ("..", "../secret", "a/b", "..\\secret", ""):
+        assert embodiment_assets.resolve_animation(bad, "Rei", tmp_path) is None, bad
+    assert embodiment_assets.resolve_animation("idle", "../Rei", tmp_path) is None
+
+
+async def test_descriptor_travels_with_the_clip(tmp_path: Path) -> None:
+    _skin(tmp_path, "Rei", {"vessel/sit": ["Sit.fbx"]})
+    desc = {"fps": 30, "loop": {"start_frame": 1, "end_frame": 9}}
+    (tmp_path / "Rei" / "animations" / "vessel" / "sit" / "Sit.fbx.json").write_text(json.dumps(desc))
+    clip = embodiment_assets.resolve_animation("sit", "Rei", tmp_path)["clips"][0]
+    assert clip["url"] == "/skins/Rei/animations/vessel/sit/Sit.fbx"
+    assert clip["descriptor"] == desc
+    assert clip["descriptor_url"].endswith("Sit.fbx.json")
+
+
+async def test_describe_assets_names_missing_animations(tmp_path: Path) -> None:
+    _skin(tmp_path, "Rei", {"vessel/walk": ["Walk.fbx"]})
+    body = await embodiment_assets.describe_assets(["walk", "dance"], skins_root=tmp_path)
+    assert body["skin"] == "Rei"
+    assert body["model"]["url"] == "/skins/Rei/model.vrm"
+    assert list(body["animations"]) == ["walk"]
+    assert body["missing_animations"] == ["dance"]
+    assert body["manifest_url"] == "/api/karada/assets/manifest"
+    assert body["persona"] == {}, "no persona.json in the skin: nothing is promised"
+
+
+async def test_describe_assets_points_at_the_skins_persona_not_the_models_folder(tmp_path: Path) -> None:
+    """The model may come from /avatars/ (the server's active VRM): its face map is still the SKIN's persona.json."""
+    _skin(tmp_path, "Rei", {"vessel/walk": ["Walk.fbx"]})
+    (tmp_path / "Rei" / "persona.json").write_text('{"blendshape_map": {"mouth_smile": "happy"}}', encoding="utf-8")
+    body = await embodiment_assets.describe_assets(["walk"], skins_root=tmp_path)
+    assert body["persona"] == {"url": "/skins/Rei/persona.json"}
+
+
+async def test_assets_name_the_current_persona(monkeypatch) -> None:
+    """The welcome's assets carry the persona's name, so the mod labels the chat with it instead of a fixed word."""
+    import core.persona_manager as pm
+
+    class _Persona:
+        name = "Rei"
+
+    class _Manager:
+        def get_current_persona(self):
+            return _Persona()
+
+    monkeypatch.setattr(pm, "get_persona_manager", lambda: _Manager())
+    body = await RetroXRConnector().get_embodiment_assets([])
+    assert body["name"] == "Rei"
+
+
+async def test_assets_have_no_name_without_a_persona(monkeypatch) -> None:
+    import core.persona_manager as pm
+
+    monkeypatch.setattr(pm, "get_persona_manager", lambda: None)
+    body = await RetroXRConnector().get_embodiment_assets([])
+    assert "name" not in body, "no persona: the mod falls back to its own word"
+
+
+# -- the socket --------------------------------------------------------------
+
+
+class FakeVesselPlugin:
+    """What the rift handler needs of the Rift Vessel plugin."""
+
+    def __init__(self, ok: bool = True) -> None:
+        self.ok = ok
+        self.connected: list[str] = []
+        self.disconnected: list[str] = []
+
+    async def connect_world(self, connector_name: str | None = None, overrides: Any = None):
+        from core.vessel_registry import VESSEL_REGISTRY
+
+        self.connected.append(connector_name or "")
+        if not self.ok:
+            return VesselActionResult(ok=False, detail="world_unavailable")
+        conn = VESSEL_REGISTRY.load_connector(connector_name)
+        ok = await conn.connect({}, lambda e: None)
+        return VesselActionResult(ok=ok, data={"session_id": "sess-1"})
+
+    async def disconnect_world(self, connector_name: str | None = None):
+        from core.vessel_registry import VESSEL_REGISTRY
+
+        self.disconnected.append(connector_name or "")
+        await VESSEL_REGISTRY.load_connector(connector_name).disconnect()
+        return VesselActionResult(ok=True)
+
+
+@pytest.fixture
+def rift(monkeypatch: pytest.MonkeyPatch):
+    from core import core_initializer
+    from plugins.rift_vessel.retroxr import api as vessel_retroxr_api
+    from core.vessel_registry import VESSEL_REGISTRY
+
+    VESSEL_REGISTRY.unload_connector("retroxr")
+    plugin = FakeVesselPlugin()
+    monkeypatch.setitem(core_initializer.PLUGIN_REGISTRY, "vessel_plugin", plugin)
+    monkeypatch.setattr(vessel_retroxr_api.webui_auth, "configured_token", lambda: None)
+    app = FastAPI()
+    app.include_router(create_retroxr_router())
+    yield TestClient(app), plugin
+    VESSEL_REGISTRY.unload_connector("retroxr")
+
+
+def _hello(**extra: Any) -> str:
+    return json.dumps({"type": "hello", "protocol": PROTOCOL_VERSION, "room": "den",
+                       "capabilities": ["motion"], "animations": [], **extra})
+
+
+def test_handshake_welcomes_with_the_body(rift) -> None:
+    client, plugin = rift
+    with client.websocket_connect("/api/vessel/retroxr/ws") as ws:
+        ws.send_text(_hello())
+        welcome = ws.receive_json()
+        assert welcome["type"] == "welcome"
+        assert welcome["session"] == "sess-1"
+        assert "assets" in welcome
+    assert plugin.connected == ["retroxr"]
+    assert plugin.disconnected == [], "a socket that just drops does NOT end the session: it waits out the grace"
+
+
+def test_a_goodbye_ends_the_session_through_the_plugin(rift) -> None:
+    client, plugin = rift
+    with client.websocket_connect("/api/vessel/retroxr/ws") as ws:
+        ws.send_text(_hello())
+        assert ws.receive_json()["type"] == "welcome"
+        ws.send_text(json.dumps({"type": "bye"}))
+    assert plugin.disconnected == ["retroxr"], "leaving on purpose must end the session through the plugin"
+
+
+def test_a_dropped_rift_can_be_resumed_by_naming_its_session(rift) -> None:
+    from core.vessel_registry import VESSEL_REGISTRY
+
+    client, plugin = rift
+    with client.websocket_connect("/api/vessel/retroxr/ws") as ws:
+        ws.send_text(_hello())
+        first = ws.receive_json()
+        assert first["resumed"] is False
+    conn = VESSEL_REGISTRY.load_connector("retroxr")
+    assert conn.paused is True and conn.session_token == first["session"]
+    with client.websocket_connect("/api/vessel/retroxr/ws") as ws:
+        ws.send_text(_hello(resume=first["session"]))
+        again = ws.receive_json()
+        assert again["type"] == "welcome" and again["resumed"] is True
+        assert conn.paused is False and conn.is_connected
+    assert plugin.disconnected == []
+
+
+def test_resuming_a_session_that_has_ended_is_a_new_one(rift) -> None:
+    """Control: `resumed` is true only when the server's session IS the one the mod named."""
+    client, _ = rift
+    with client.websocket_connect("/api/vessel/retroxr/ws") as ws:
+        ws.send_text(_hello())
+        assert ws.receive_json()["resumed"] is False
+    with client.websocket_connect("/api/vessel/retroxr/ws") as ws:
+        ws.send_text(_hello(resume="some-other-session"))
+        assert ws.receive_json()["resumed"] is False
+
+
+def test_a_resume_replaces_a_socket_the_server_has_not_seen_die(rift) -> None:
+    import time
+
+    from core.vessel_registry import VESSEL_REGISTRY
+
+    client, plugin = rift
+    old_cm = client.websocket_connect("/api/vessel/retroxr/ws")
+    old = old_cm.__enter__()
+    old.send_text(_hello())
+    sid = old.receive_json()["session"]
+    new_cm = client.websocket_connect("/api/vessel/retroxr/ws")
+    new = new_cm.__enter__()
+    try:
+        new.send_text(_hello(resume=sid))
+        welcome = new.receive_json()
+        assert welcome["type"] == "welcome" and welcome["resumed"] is True
+        # now the old socket really dies: its handler ends, and must not take the new rift down with it
+        old_cm.__exit__(None, None, None)
+        time.sleep(0.5)
+        conn = VESSEL_REGISTRY.load_connector("retroxr")
+        assert conn.is_connected and conn.paused is False, "the old socket's end ended the new rift"
+        assert plugin.disconnected == []
+    finally:
+        new_cm.__exit__(None, None, None)
+
+
+@pytest.mark.parametrize(
+    "first,code",
+    [
+        ("not json", "bad_hello"),
+        (json.dumps({"type": "event"}), "bad_hello"),
+        (json.dumps({"type": "hello", "protocol": 99}), "protocol"),
+    ],
+)
+def test_bad_handshakes_are_refused_with_a_reason(rift, first: str, code: str) -> None:
+    client, plugin = rift
+    with client.websocket_connect("/api/vessel/retroxr/ws") as ws:
+        ws.send_text(first)
+        err = ws.receive_json()
+        assert err["type"] == "error" and err["code"] == code
+    assert plugin.connected == []
+
+
+def test_refused_connect_leaves_no_socket_behind(rift) -> None:
+    from core.vessel_registry import VESSEL_REGISTRY
+
+    client, plugin = rift
+    plugin.ok = False
+    with client.websocket_connect("/api/vessel/retroxr/ws") as ws:
+        ws.send_text(_hello())
+        err = ws.receive_json()
+        assert err["code"] == "connect_failed" and "world_unavailable" in err["message"]
+    assert VESSEL_REGISTRY.load_connector("retroxr").is_connected is False
+
+
+def test_a_second_rift_is_refused_while_one_is_open(rift) -> None:
+    client, _ = rift
+    with client.websocket_connect("/api/vessel/retroxr/ws") as first:
+        first.send_text(_hello())
+        assert first.receive_json()["type"] == "welcome"
+        with client.websocket_connect("/api/vessel/retroxr/ws") as second:
+            second.send_text(_hello())
+            assert second.receive_json()["code"] == "busy"
+
+
+def test_summoned_is_a_real_event_not_ambient_telemetry() -> None:
+    """Being summoned (and what she sees) is a moment of its own: it must reach Synth as a
+    turn, not be folded into the batched ambient perceptions with 'proximity' and 'spawn'."""
+    from plugins.rift_vessel.vessel_base import is_ephemeral_event
+
+    assert is_ephemeral_event("summoned") is False
+    assert is_ephemeral_event("proximity") is True  # the control: ambient stays ambient
+
+
+# -- the plugin brings its own socket; the core only offers a place to mount it ---------------------------
+
+
+async def test_the_vessel_plugin_mounts_the_rift_socket_through_the_webui(monkeypatch: pytest.MonkeyPatch) -> None:
+    import core.webui as webui
+    from plugins.rift_vessel.vessel_plugin import VesselPlugin
+
+    mounted: list[tuple[Any, str]] = []
+
+    class FakeWebUI:
+        def register_plugin_router(self, router: Any, name: str = "") -> None:
+            mounted.append((router, name))
+
+    monkeypatch.setattr(webui, "synth_webui_interface", FakeWebUI())
+    await VesselPlugin._mount_world_routes(None)  # type: ignore[arg-type]
+    assert len(mounted) == 1
+    paths = [getattr(r, "path", "") for r in mounted[0][0].routes]
+    assert "/api/vessel/retroxr/ws" in paths, "the route the mod connects to is the one that was mounted"
+
+
+def test_the_webui_mounts_a_plugin_router_without_knowing_the_plugin(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from core.webui import SynthWebUIInterface
+    from plugins.rift_vessel.retroxr import api as rift_api
+
+    monkeypatch.setattr(rift_api.webui_auth, "configured_token", lambda: None)
+
+    class Host:
+        app = FastAPI()
+
+    SynthWebUIInterface.register_plugin_router(Host(), create_retroxr_router(), "test")  # type: ignore[arg-type]
+    with TestClient(Host.app).websocket_connect("/api/vessel/retroxr/ws") as ws:
+        ws.send_json({"type": "not-a-hello"})
+        assert ws.receive_json()["code"] == "bad_hello", "the mounted socket answers like the rift's own"
+
+
+# -- her ears: a clip the player recorded in the room -------------------------
+
+
+class FakeAuris:
+    """Stands in for the Auris plugin: records what it was given and answers with `text`."""
+
+    def __init__(self, text: str | None = "hello there", language: str | None = "en") -> None:
+        self.text = text
+        self.language = language
+        self.calls: list[tuple[str, str | None, bool, bytes]] = []
+
+    async def transcribe_audio(self, file_path: str, mime_type: str | None = None, engine_name: str | None = None) -> Any:
+        import os
+
+        existed = os.path.exists(file_path)
+        self.calls.append((file_path, mime_type, existed, Path(file_path).read_bytes() if existed else b""))
+        if self.text is None:
+            return None
+        from plugins.auris_base import AurisTranscriptResult
+
+        return AurisTranscriptResult(text=self.text, language=self.language)
+
+
+def _clip(data: bytes = b"RIFF....WAVEfake", **over: Any) -> dict[str, Any]:
+    import base64
+
+    msg = {"type": "audio", "id": 3, "format": "wav", "data": base64.b64encode(data).decode(), "actor": "player"}
+    msg.update(over)
+    return msg
+
+
+def _transcripts(ws: FakeSocket) -> list[dict[str, Any]]:
+    return [f for f in ws.sent if f.get("type") == "transcript"]
+
+
+async def test_a_spoken_clip_becomes_a_chat_event_and_the_mod_gets_the_transcript(monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.core_initializer import PLUGIN_REGISTRY
+
+    auris = FakeAuris("bring me the game boy")
+    monkeypatch.setitem(PLUGIN_REGISTRY, "auris_plugin", auris)
+    conn, ws, events = await _connected()
+    await conn._hear(_clip())
+
+    assert [e.event_type for e in events] == ["chat"]
+    assert events[0].summary == "player: bring me the game boy"
+    assert events[0].actor == "player" and events[0].data["via"] == "voice"
+    assert _transcripts(ws) == [{"type": "transcript", "id": 3, "ok": True, "text": "bring me the game boy", "reason": ""}]
+    path, mime, existed, body = auris.calls[0]
+    assert mime == "audio/wav" and existed and body == b"RIFF....WAVEfake", "Auris was not handed the clip as a real file"
+    import os
+
+    assert not os.path.exists(path), "the temporary clip was left on disk"
+
+
+async def test_with_no_auris_the_player_is_told_and_nothing_is_said_for_them(monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.core_initializer import PLUGIN_REGISTRY
+
+    monkeypatch.delitem(PLUGIN_REGISTRY, "auris_plugin", raising=False)
+    conn, ws, events = await _connected()
+    await conn._hear(_clip())
+    assert events == [], "a chat line was invented with no transcript"
+    assert _transcripts(ws)[0]["ok"] is False and _transcripts(ws)[0]["reason"] == "no_stt"
+
+
+@pytest.mark.parametrize("text", [None, "   "])
+async def test_a_clip_nothing_could_be_read_from_says_so(monkeypatch: pytest.MonkeyPatch, text: str | None) -> None:
+    from core.core_initializer import PLUGIN_REGISTRY
+
+    monkeypatch.setitem(PLUGIN_REGISTRY, "auris_plugin", FakeAuris(text))
+    conn, ws, events = await _connected()
+    await conn._hear(_clip())
+    assert events == []
+    assert _transcripts(ws)[0]["reason"] == "nothing_heard"
+
+
+async def test_bad_clips_are_refused_without_reaching_auris(monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.core_initializer import PLUGIN_REGISTRY
+    from plugins.rift_vessel.retroxr import retroxr as mod
+
+    auris = FakeAuris()
+    monkeypatch.setitem(PLUGIN_REGISTRY, "auris_plugin", auris)
+    monkeypatch.setattr(mod, "_MAX_AUDIO_BYTES", 8)
+    conn, ws, events = await _connected()
+    await conn._hear(_clip(format="exe"))
+    await conn._hear(_clip(data=b""))
+    await conn._hear(_clip(data=b"x" * 9))
+    await conn._hear({"type": "audio", "id": 4})
+    assert [t["reason"] for t in _transcripts(ws)] == ["bad_clip", "bad_clip", "too_long", "bad_clip"]
+    assert auris.calls == [] and events == []
+
+
+async def test_an_audio_frame_does_not_block_the_read_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """handle_frame hands the clip to a task and returns: the socket keeps being read while Auris works."""
+    from core.core_initializer import PLUGIN_REGISTRY
+
+    gate = asyncio.Event()
+
+    class Slow(FakeAuris):
+        async def transcribe_audio(self, *a: Any, **k: Any) -> Any:
+            await gate.wait()
+            return await super().transcribe_audio(*a, **k)
+
+    monkeypatch.setitem(PLUGIN_REGISTRY, "auris_plugin", Slow("later"))
+    conn, ws, events = await _connected()
+    await asyncio.wait_for(conn.handle_frame(_clip()), timeout=1.0)
+    assert events == [] and conn._voice_tasks, "the clip should still be in flight"
+    gate.set()
+    await asyncio.gather(*list(conn._voice_tasks))
+    assert [e.summary for e in events] == ["player: later"]
+
+
+async def test_the_chat_clock_stops_when_she_answers() -> None:
+    conn, ws, _ = await _connected()
+    await conn._dispatch_event({"event_type": "chat", "summary": "player: hi", "actor": "player"})
+    assert conn._chat_waiting_since is not None
+    task = asyncio.create_task(conn.act("say", {"text": "hello"}))
+    await asyncio.sleep(0.05)
+    assert conn._chat_waiting_since is None, "the latency clock kept running after she spoke"
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+# -- the plugin loader's policy ------------------------------------------------
+
+
+def test_no_rift_vessel_plugin_file_names_the_queue_internals() -> None:
+    """core_initializer SKIPS a plugin file (tests in the plugin folder too) that mentions the message queue's
+    internals: the whole connector, silently, and the Summoner then sits on LINKING for ever. The tokens are built
+    here so that this file does not trip the same rule."""
+    root = Path(__file__).resolve().parents[2]
+    forbidden = ("message_queue." + "_queue", "_queue." + "put(", "_queue." + "_queue")
+    offenders = [
+        f"{p.relative_to(root)}: {tok}"
+        for p in root.rglob("*.py")
+        if "__pycache__" not in p.parts
+        for tok in forbidden
+        if tok in p.read_text(encoding="utf-8")
+    ]
+    assert offenders == [], f"the plugin loader would refuse these files: {offenders}"
+
+
+async def test_the_queue_depth_for_the_latency_log_is_a_number() -> None:
+    from plugins.rift_vessel.retroxr import retroxr as mod
+
+    assert isinstance(mod._queued_turns(), int)

@@ -4,7 +4,9 @@ import os
 import importlib
 import inspect
 import asyncio
+import functools
 import json
+import sys
 import threading
 from pathlib import Path
 from typing import Any
@@ -879,6 +881,16 @@ class CoreInitializer:
 
             # Start all registered interfaces
             await self._start_interfaces()
+            self._schedule_avatar_sync()
+
+            # Tell the persona the core is up (and roughly how long it was
+            # away); also starts the "last seen alive" heartbeat.
+            try:
+                from core.system_events import record_boot
+
+                await record_boot()
+            except Exception as exc:  # pragma: no cover - defensive
+                log_debug(f"[core_initializer] boot event not recorded: {exc}")
 
             # Display summary at the end of initialization
             self._display_startup_summary()
@@ -1718,10 +1730,16 @@ class CoreInitializer:
                 module = sys.modules.get(module_name) if module_name else None
                 if module and hasattr(module, "reload_interface"):
                     handler = getattr(module, "reload_interface")
-                    config_registry.register_reload_handler(interface_name, handler)
-                    log_info(
-                        f"[core_initializer] ✅ Reload handler registered for component: {interface_name}"
+                else:
+                    # No module-level handler: restart the live instance in
+                    # place so a changed token/endpoint still takes effect.
+                    handler = functools.partial(
+                        self._restart_interface_in_place, interface_name
                     )
+                config_registry.register_reload_handler(interface_name, handler)
+                log_info(
+                    f"[core_initializer] ✅ Reload handler registered for component: {interface_name}"
+                )
             except Exception as e:
                 log_error(
                     f"[core_initializer] Failed to register reload handler for {interface_name}: {e}"
@@ -1784,6 +1802,23 @@ class CoreInitializer:
             log_warning(
                 f"[core_initializer] Failed to register Cortex reload handlers: {e}"
             )
+
+    async def _restart_interface_in_place(self, interface_name: str) -> None:
+        """Stop and start a registered interface so it re-reads its configuration.
+
+        Used as the reload handler of interfaces that do not ship their own
+        ``reload_interface``. An interface the operator disabled stays stopped.
+        """
+        instance = INTERFACE_REGISTRY.get(interface_name)
+        if instance is None or not self._is_interface_enabled(interface_name):
+            return
+        log_info(f"[core_initializer] Restarting interface '{interface_name}'")
+        await self._teardown_interface_instance(instance)
+        start_fn = getattr(instance, "start", None)
+        if callable(start_fn):
+            # start() may run for the whole connection lifetime: don't await it.
+            task = asyncio.create_task(start_fn())
+            task.set_name(f"interface_{interface_name}")
 
     def _missing_required_config_vars(self, interface_instance: Any) -> List[str]:
         """Return the list of declared-required config keys that are absent.
@@ -2197,6 +2232,7 @@ class CoreInitializer:
         log_info(
             f"[core_initializer] 🔻 Plugin '{plugin_short_name}' disabled (unloaded)"
         )
+        await self._record_toggle_event(plugin_short_name, "plugin", False)
         return {"ok": True, "name": plugin_short_name, "enabled": False}
 
     async def enable_plugin(self, plugin_short_name: str) -> Dict[str, Any]:
@@ -2245,7 +2281,48 @@ class CoreInitializer:
         self._invalidate_action_caches()
         await self._build_actions_block()
         log_info(f"[core_initializer] 🔺 Plugin '{plugin_short_name}' enabled (loaded)")
+        await self._record_toggle_event(plugin_short_name, "plugin", True)
         return {"ok": True, "name": plugin_short_name, "enabled": True}
+
+    @staticmethod
+    def _schedule_avatar_sync(interface_name: str | None = None) -> None:
+        """Bring the synth avatar up to date shortly after interfaces connect.
+
+        An interface that was off (or not yet connected) when the avatar changed
+        catches up here; the per-interface applied version keeps it cheap — only
+        interfaces whose picture is out of date are touched.
+        """
+
+        async def _run() -> None:
+            try:
+                await asyncio.sleep(20)  # let the gateways connect first
+                from core import synth_avatar
+
+                if interface_name:
+                    await synth_avatar.sync_interface(interface_name)
+                else:
+                    await synth_avatar.broadcast_avatar_changed(catch_up=True)
+            except Exception as exc:  # pragma: no cover - defensive
+                log_debug(f"[core_initializer] avatar sync skipped: {exc}")
+
+        try:
+            asyncio.get_running_loop().create_task(_run())
+        except RuntimeError:  # pragma: no cover - no loop (sync context)
+            pass
+
+    @staticmethod
+    async def _record_toggle_event(name: str, kind: str, enabled: bool) -> None:
+        """Note a successful runtime toggle in the system-event window.
+
+        Recorded here, in the manager, so no plugin has to report its own
+        switch. Never raises: the toggle has already succeeded.
+        """
+        try:
+            from core.system_events import record_component_toggle
+
+            await record_component_toggle(name, kind, enabled)
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[core_initializer] toggle event not recorded: {exc}")
 
     # ------------------------------------------------------------------
     # Runtime interface enable/disable (WebUI plugins/interfaces grid)
@@ -2308,7 +2385,8 @@ class CoreInitializer:
 
         The instance is kept in ``INTERFACE_REGISTRY`` (so it can be re-enabled
         without a re-import) but stopped, its actions removed from the registry
-        and it is dropped from ``active_interfaces``. A grey ghost component
+        and it is dropped from ``active_interfaces``. The prompt only lists
+        ``active_interfaces``, so the interface disappears from it at once. A grey ghost component
         record is kept so the WebUI still lists it. State is persisted.
         """
         if self.is_core_interface(interface_name):
@@ -2339,9 +2417,8 @@ class CoreInitializer:
                 details="Disabled from WebUI",
             )
 
-        self._invalidate_action_caches()
-        await self._build_actions_block()
-
+        # Persist the flag before rebuilding, so everything the rebuild reads
+        # already sees the interface as off.
         try:
             from core.config_manager import config_registry
 
@@ -2354,9 +2431,13 @@ class CoreInitializer:
                 f"[core_initializer] Failed to persist disabled state for interface {interface_name}: {exc}"
             )
 
+        self._invalidate_action_caches()
+        await self._build_actions_block()
+
         log_info(
             f"[core_initializer] 🔻 Interface '{interface_name}' disabled (stopped)"
         )
+        await self._record_toggle_event(interface_name, "interface", False)
         return {"ok": True, "name": interface_name, "enabled": False}
 
     async def enable_interface(self, interface_name: str) -> Dict[str, Any]:
@@ -2416,9 +2497,11 @@ class CoreInitializer:
 
         self._invalidate_action_caches()
         await self._build_actions_block()
+        self._schedule_avatar_sync(interface_name)
         log_info(
             f"[core_initializer] 🔺 Interface '{interface_name}' enabled (started)"
         )
+        await self._record_toggle_event(interface_name, "interface", True)
         return {"ok": True, "name": interface_name, "enabled": True}
 
     async def _instantiate_and_register(
@@ -2430,8 +2513,23 @@ class CoreInitializer:
         Returns True on success. Used by :meth:`enable_plugin`.
         """
         try:
-            module = importlib.import_module(module_name)
-            importlib.reload(module)
+            # Prefer the module already loaded: a package shim (``__init__`` that
+            # rebinds ``sys.modules[__name__]`` to its submodule, used by most
+            # plugins) has no ``__path__``, so importing a child of it fails.
+            module = sys.modules.get(module_name) or importlib.import_module(
+                module_name
+            )
+            try:
+                module = importlib.reload(module)
+            except AttributeError as exc:
+                # reload() also walks the parent's ``__path__``; the shim has
+                # none, so keep the loaded module and take a fresh instance.
+                if "__path__" not in str(exc):
+                    raise
+                log_debug(
+                    f"[core_initializer] {module_name} sits under a package shim; "
+                    "skipping reload"
+                )
         except Exception as exc:
             log_error(
                 f"[core_initializer] Failed to import {module_name} on enable: {exc}"
@@ -2621,6 +2719,19 @@ class CoreInitializer:
             log_error(f"[core_initializer] Error starting GrilloPlugin: {repr(e)}")
             self.startup_errors.append(f"GrilloPlugin: {e}")
 
+    def _is_inactive_interface_action(self, action_type: str) -> bool:
+        """True for a legacy ``message_<interface>`` action of an inactive interface.
+
+        Plugins such as ``message_plugin`` claim the per-interface message
+        actions for every interface at once. Whether the interface behind one is
+        switched on is the core's call, not the plugin's: when that interface is
+        known to the registry but not active, the action is not offered.
+        """
+        if not isinstance(action_type, str) or not action_type.startswith("message_"):
+            return False
+        target = action_type[len("message_") :]
+        return target in INTERFACE_REGISTRY and target not in self.active_interfaces
+
     async def _build_actions_block(self):
         """Collect and validate action schemas from all plugins and interfaces."""
         # TEMPORARILY DISABLE FLAG FOR TESTING
@@ -2767,6 +2878,12 @@ class CoreInitializer:
                     f"[core_initializer] Plugin {name} declares actions: {list(supported.keys())}"
                 )
                 for act, schema in supported.items():
+                    if self._is_inactive_interface_action(act):
+                        log_debug(
+                            f"[core_initializer] Action {act} from plugin {name} "
+                            "belongs to an inactive interface; withheld"
+                        )
+                        continue
                     _register(
                         act,
                         name,
@@ -2779,6 +2896,16 @@ class CoreInitializer:
         # --- Load interface actions from registry ---
         log_debug("[core_initializer] Starting interface loop")
         for name, iface in INTERFACE_REGISTRY.items():
+            # Registered means present in the prompt. Only interfaces the loader
+            # activated contribute: one switched off at runtime, disabled by
+            # config or missing its required configuration is not in
+            # ``active_interfaces``, so it must not advertise any action.
+            if name not in self.active_interfaces:
+                log_debug(
+                    f"[core_initializer] Interface {name} is not active; "
+                    "its actions are withheld from the prompt"
+                )
+                continue
             log_debug(f"[core_initializer] Processing interface: {name}")
             if not hasattr(iface, "get_supported_actions"):
                 continue
@@ -2834,7 +2961,9 @@ class CoreInitializer:
                     log_warning(
                         f"[core_initializer] Static injection from {plugin.__class__.__name__} must be a dict, got {type(data)}"
                     )
-        for iface in INTERFACE_REGISTRY.values():
+        for iface_name, iface in INTERFACE_REGISTRY.items():
+            if iface_name not in self.active_interfaces:
+                continue
             if hasattr(iface, "get_static_injection"):
                 try:
                     data = iface.get_static_injection()

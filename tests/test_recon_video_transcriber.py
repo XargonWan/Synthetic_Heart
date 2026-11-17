@@ -205,7 +205,7 @@ async def test_youtube_audio_stt_fallback(
     assert "transcribed audio" in result[0]["content"]
 
 
-async def test_youtube_fetch_none_returns_empty(
+async def test_youtube_fetch_none_returns_unreadable_snippet(
     enable_plugin: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import plugins.recon.recon_video_transcriber as mod
@@ -215,7 +215,49 @@ async def test_youtube_fetch_none_returns_empty(
     result = await plugin.parse_recon_response(
         {"video_media": {"youtube_urls": ["https://youtu.be/aoP81h68Xkk"]}}
     )
-    assert result == []
+    assert len(result) == 1
+    content = result[0]["content"]
+    assert "https://youtu.be/aoP81h68Xkk" in content
+    assert "could not be read" in content
+    assert "do not promise" in content
+
+
+async def test_message_text_fallback_finds_shorts_link(
+    enable_plugin: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The recon LLM returned nothing, but the link is in the message text."""
+    import plugins.recon.recon_video_transcriber as mod
+
+    class _Fetched:
+        title = "A Short"
+        duration_s = 20
+        subtitle_text = "short transcript"
+        audio_path = None
+        temp_files: list[str] = []
+
+        def cleanup(self) -> None:
+            pass
+
+    seen: list[str] = []
+
+    def _fetch(url: str, *a: Any, **k: Any) -> _Fetched:
+        seen.append(url)
+        return _Fetched()
+
+    monkeypatch.setattr(mod, "fetch_youtube", _fetch)
+    plugin = ReconVideoTranscriberPlugin()
+    result = await plugin.parse_recon_response(
+        {"video_media": {"youtube_urls": []}},
+        text="guarda https://youtube.com/shorts/wPPg5oiO_zw?si=Df2UVAtLf7-viTXj.",
+    )
+    assert seen == ["https://youtube.com/shorts/wPPg5oiO_zw?si=Df2UVAtLf7-viTXj"]
+    assert "short transcript" in result[0]["content"]
+
+
+def test_urls_from_message_text_ignores_other_links() -> None:
+    plugin = ReconVideoTranscriberPlugin()
+    assert plugin._urls_from_message_text("see https://example.com/watch?v=1") == []
+    assert plugin._urls_from_message_text(None) == []
 
 
 # ----------------------------------------------------------------------

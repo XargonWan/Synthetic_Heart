@@ -50,6 +50,7 @@ Design:
 
 from __future__ import annotations
 
+from core import stats_registry
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -403,6 +404,7 @@ class LlmDspBuilder:
             current_dsp=current_dsp, extractions=extractions
         )
 
+    @stats_registry.with_purpose("soul")
     async def _generate_biography(
         self, engine: Any, model: str | None, prompt: dict[str, Any]
     ) -> str | None:
@@ -627,6 +629,7 @@ class LlmDspExtractor:
             )
         return parsed
 
+    @stats_registry.with_purpose("soul")
     async def _generate_model(
         self, engine: Any, model: str | None, prompt: dict[str, Any]
     ) -> DspExtractionModel | None:
@@ -938,6 +941,7 @@ class LlmMemCellExtractor:
             log_warning(f"[soul_llm] deterministic memcell fallback failed: {exc}")
             return []
 
+    @stats_registry.with_purpose("soul")
     async def _generate_cells(
         self, engine: Any, model: str | None, prompt: dict[str, Any]
     ) -> Any | None:

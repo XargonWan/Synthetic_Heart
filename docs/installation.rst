@@ -77,6 +77,29 @@ Build and start the services:
 PostgreSQL is started automatically and a daily backup container writes dumps to
 ``./backups/``.
 
+Building from local sources (development)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``docker-compose.yml`` pulls the published images. To build them from your own
+checkouts instead, add ``docker-compose-dev.yml`` as a second ``-f`` file. It is
+an override, so it must come after the main file:
+
+.. code-block:: bash
+
+   docker compose -f docker-compose.yml -f docker-compose-dev.yml up -d --build
+
+* ``synth`` is built from this repository (``.``) and tagged ``synthetic_heart:dev``.
+* ``synth-zen-llm-engine`` is built from ``../zen-llm-engine`` (a sibling checkout
+  of this repository, with its ``Dockerfile`` at the root) and tagged
+  ``zen-llm-engine:dev``.
+
+Ports, volumes, environment and the database are inherited unchanged from
+``docker-compose.yml``. The local ``:dev`` tags mean the build never overwrites
+the published ``xargonwan/*`` images. If ``../zen-llm-engine`` does not exist the
+build fails; clone it there, or start only Synth with
+``docker compose -f docker-compose.yml -f docker-compose-dev.yml up -d --build synth``
+(the Zen service is not a dependency of ``synth``).
+
 .. note::
 
    Docker deployments now use PostgreSQL, the same database as the native

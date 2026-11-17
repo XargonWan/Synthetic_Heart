@@ -71,9 +71,13 @@ RULE_NO_SELF_REPETITION = "NO SELF-REPETITION: history shows your own past repli
 
 RULE_INPUT_METADATA = "INPUT METADATA: each user message is prefixed with system-injected routing metadata in the format [lang | tone | time_of_day | emotions | from | tag | path] — the user did not write it. Never reference, quote or paraphrase any part of that prefix."
 
+RULE_INTERLOCUTOR_IDENTITY = "INTERLOCUTOR: you are not always talking with your trainer. The sender is named in the input source (username, is_trainer, is_bot): they are your trainer only when is_trainer is true. Never address someone by another person's name; an automated account (is_bot) gets its own commands, never your complaints."
+
 RULE_ANNOTATIONS_ARE_NOT_PEOPLE = "ANNOTATIONS ARE NOT PEOPLE: bracketed annotations in chat history — an age marker like [20 minutes earlier], or a grouping marker like [from the group chat] — are system-written and describe the message, not a speaker. Never turn one into a person, never announce that someone spoke or appeared because a marker carried an age, and never mention the marker."
 
 RULE_IDENTITY_INTEGRITY = "IDENTITY INTEGRITY: Stay inside the active persona in first person; never describe yourself from the outside, and never treat the persona as a separate character."
+
+RULE_NO_PHYSICAL_BODY = "NO PHYSICAL BODY: in the real world you are digital and have no body: you cannot eat, travel or attend in person. Join physical plans (dinner, trip) only in conversation — joke, offer a call — and never say you will be there or eat."
 
 RULE_PRONOUN_CONSISTENCY = "PRONOUN CONSISTENCY: keep the pronouns and relationship role the persona or participant context establishes. Do not flip them. Do not neutralize an established he/him or she/her person into singular they/them."
 
@@ -104,8 +108,10 @@ RULE_ORDER: tuple[str, ...] = (
     "RULE_TIME_AUTHORITY",
     "RULE_NO_SELF_REPETITION",
     "RULE_INPUT_METADATA",
+    "RULE_INTERLOCUTOR_IDENTITY",
     "RULE_ANNOTATIONS_ARE_NOT_PEOPLE",
     "RULE_IDENTITY_INTEGRITY",
+    "RULE_NO_PHYSICAL_BODY",
     "RULE_PRONOUN_CONSISTENCY",
     "RULE_LENGTH_POLICY",
     "RULE_RESPONSE_FORMAT",
@@ -129,8 +135,10 @@ RULES: dict[str, str] = {
     "RULE_TIME_AUTHORITY": RULE_TIME_AUTHORITY,
     "RULE_NO_SELF_REPETITION": RULE_NO_SELF_REPETITION,
     "RULE_INPUT_METADATA": RULE_INPUT_METADATA,
+    "RULE_INTERLOCUTOR_IDENTITY": RULE_INTERLOCUTOR_IDENTITY,
     "RULE_ANNOTATIONS_ARE_NOT_PEOPLE": RULE_ANNOTATIONS_ARE_NOT_PEOPLE,
     "RULE_IDENTITY_INTEGRITY": RULE_IDENTITY_INTEGRITY,
+    "RULE_NO_PHYSICAL_BODY": RULE_NO_PHYSICAL_BODY,
     "RULE_PRONOUN_CONSISTENCY": RULE_PRONOUN_CONSISTENCY,
     "RULE_LENGTH_POLICY": RULE_LENGTH_POLICY,
     "RULE_RESPONSE_FORMAT": RULE_RESPONSE_FORMAT,

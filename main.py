@@ -165,6 +165,21 @@ async def stop_synth_mcp() -> None:
         log_warning(f"[main] Error stopping Synth MCP client: {exc}")
 
 
+async def _note_shutdown(reason: str) -> None:
+    """Record a graceful stop/restart for the persona's system-event window.
+
+    Called before teardown while the database is still reachable. The event
+    also freezes the heartbeat, which is what lets the next boot tell a clean
+    stop from a crash. Never raises.
+    """
+    try:
+        from core.system_events import record_shutdown
+
+        await asyncio.wait_for(record_shutdown(reason), timeout=5)
+    except Exception as exc:
+        log_warning(f"[main] Could not record shutdown event: {exc}")
+
+
 def signal_handler(signum, frame):
     """Request a graceful shutdown; never blocks or exits from this raw signal frame.
 
@@ -501,6 +516,7 @@ if __name__ == "__main__":
                         log_info(
                             "[main] Shutdown requested during wait - cleaning up..."
                         )
+                        await _note_shutdown("stop requested")
                         await stop_interfaces()
                         await stop_synth_mcp()
                         cleanup_components()
@@ -530,6 +546,7 @@ if __name__ == "__main__":
 
                 if shutdown_wait in done:
                     log_info("[main] Shutdown requested - cleaning up...")
+                    await _note_shutdown("stop requested")
                     await stop_interfaces()
                     await stop_synth_mcp()
                     cleanup_components()
@@ -541,6 +558,7 @@ if __name__ == "__main__":
                         "[main] 🔄 Restart requested - cleaning up and restarting..."
                     )
 
+                    await _note_shutdown("restart requested")
                     await stop_synth_mcp()
                     # Cleanup components
                     cleanup_components()
@@ -566,6 +584,7 @@ if __name__ == "__main__":
 
             except KeyboardInterrupt:
                 log_info("[main] Received shutdown signal, exiting...")
+                await _note_shutdown("stop requested")
                 await stop_interfaces()
                 await stop_synth_mcp()
                 cleanup_components()

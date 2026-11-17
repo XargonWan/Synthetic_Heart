@@ -33,6 +33,7 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
+from core import stats_registry
 from core.config_manager import config_registry
 from core.logging_utils import log_debug, log_info, log_warning
 from core.variables_engine import register_exposed_var
@@ -330,6 +331,7 @@ class DeliveryGuard:
         chat_id = str(chat_id)
         reason = str(exc) if exc is not None else "Unknown channel or user"
         key = self.target_key(interface, chat_id)
+        stats_registry.incr("delivery.failed", interface=interface)
 
         async with self._lock:
             count = self._failure_counts.get(key, 0) + 1
@@ -352,6 +354,7 @@ class DeliveryGuard:
         interface = str(interface or "unknown")
         chat_id = str(chat_id)
         key = self.target_key(interface, chat_id)
+        stats_registry.incr("delivery.ok", interface=interface)
 
         async with self._lock:
             had_count = self._failure_counts.pop(key, None) is not None

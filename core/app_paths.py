@@ -187,6 +187,47 @@ def exposed_storage_root() -> Path:
     return data_root() / "storage"
 
 
+#: The Vox/TTS output directory used before clips moved to the persistent volume.
+#: It sits inside the image, so in a container everything written there is lost
+#: when the container is recreated.
+LEGACY_TTS_OUTPUT_DIR = "res/synth_webui/static/audio/tts"
+
+
+def persistent_media_dir(name: str) -> Path | None:
+    """Return ``/config/media/<name>`` when the container's data volume is usable.
+
+    ``None`` outside a container (or when ``/config`` is not writable): callers
+    then keep their in-tree default, which is already persistent on a native
+    install. Read-only: nothing is created here.
+    """
+    if usable_container_dir(CONTAINER_DATA_ROOT):
+        return CONTAINER_DATA_ROOT / "media" / name
+    return None
+
+
+def default_tts_output_dir() -> str:
+    """Default directory for generated speech (Vox and tts_lipsync clips).
+
+    The persistent volume in a container, so voice messages and other generated
+    audio survive a reboot; the in-tree path otherwise.
+    """
+    persistent = persistent_media_dir("tts")
+    return str(persistent) if persistent else LEGACY_TTS_OUTPUT_DIR
+
+
+def resolve_tts_output_dir(configured: object) -> str:
+    """Return the speech output directory for a configured value.
+
+    An empty value, or the old in-image default (which earlier runs may have
+    stored in the database), resolves to :func:`default_tts_output_dir`. Any
+    other value is an explicit choice and is kept.
+    """
+    raw = str(configured or "").strip()
+    if not raw or raw.rstrip("/") == LEGACY_TTS_OUTPUT_DIR:
+        return default_tts_output_dir()
+    return raw
+
+
 def state_path(name: str) -> Path:
     """Return a path for a small JSON state file under the data root."""
     override = (os.getenv("SYNTH_STATE_DIR") or "").strip()
@@ -197,14 +238,18 @@ def state_path(name: str) -> Path:
 __all__ = [
     "APP_ROOT",
     "CONTAINER_DATA_ROOT",
+    "LEGACY_TTS_OUTPUT_DIR",
     "agent_fs_roots",
     "app_root",
     "cert_dir",
     "data_root",
     "default_bind_host",
+    "default_tts_output_dir",
     "exposed_storage_root",
     "in_container",
     "log_dir",
+    "persistent_media_dir",
+    "resolve_tts_output_dir",
     "state_path",
     "usable_container_dir",
 ]

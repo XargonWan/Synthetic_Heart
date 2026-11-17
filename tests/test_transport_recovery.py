@@ -365,3 +365,76 @@ def test_parser_recovers_flat_tool_call_dialect_keeps_sibling_fields():
     assert actions[0]["type"] == "send_message"
     assert actions[0]["payload"]["interface_path"] == "telegram_bot/31321637"
     assert actions[0]["payload"]["content"] == "Buongiorno! Cielo nuvoloso, +13°C."
+
+
+# --- replies the engine cut off mid-value -----------------------------------
+
+
+def test_reply_cut_inside_its_only_action_yields_no_json():
+    """Live (2026-11-12 17:38 UTC): "Ah, hai ragione! Sc" was sent as a finished message.
+
+    json_repair closes the open string, so the half-written action looked valid.
+    A reply that stops inside a string is not finished: there is nothing to run.
+    """
+    cut = (
+        'JSON\n{\n  "actions": [\n    {\n      "type": "send_message",\n'
+        '      "payload": {\n        "text": "Ah, hai ragione! Sc'
+    )
+
+    obj, meta = extract_json_from_text(cut, return_metadata=True)
+
+    assert obj is None
+    assert meta.get("truncated") is True
+
+
+def test_reply_cut_in_its_last_action_keeps_the_finished_ones():
+    cut = (
+        '{"actions": [{"type": "update_emotion_state", "payload": {"emotions": {"joy": 7.0}}}, '
+        '{"type": "send_message", "payload": {"text": "Ciao, come st'
+    )
+
+    obj, meta = extract_json_from_text(cut, return_metadata=True)
+
+    assert meta.get("truncated") is True
+    assert isinstance(obj, dict)
+    assert [a["type"] for a in obj["actions"]] == ["update_emotion_state"]
+
+
+def test_reply_cut_right_after_a_key_is_truncated_too():
+    cut = '{"actions": [{"type": "send_message", "payload": {"text":'
+
+    obj, meta = extract_json_from_text(cut, return_metadata=True)
+
+    assert obj is None
+    assert meta.get("truncated") is True
+
+
+def test_finished_reply_is_never_flagged_truncated():
+    done = '{"actions": [{"type": "send_message", "payload": {"text": "Ciao!"}}]}'
+
+    obj, meta = extract_json_from_text(done, return_metadata=True)
+
+    assert meta.get("truncated") is not True
+    assert obj == {"actions": [{"type": "send_message", "payload": {"text": "Ciao!"}}]}
+
+
+def test_text_after_a_finished_reply_does_not_count_as_a_cut():
+    done = (
+        '{"actions": [{"type": "send_message", "payload": {"text": "Ciao!"}}]}\n'
+        'Note: a "quote and a { brace left open'
+    )
+
+    obj, meta = extract_json_from_text(done, return_metadata=True)
+
+    assert meta.get("truncated") is not True
+    assert isinstance(obj, dict) and len(obj["actions"]) == 1
+
+
+def test_stray_quote_in_a_finished_reply_is_not_mistaken_for_a_cut():
+    """An odd quote count inside a reply that still ends in `}` is a repair, not a cut."""
+    done = '{"actions": [{"type": "send_message", "payload": {"text": "He said "hi there"}}]}'
+
+    obj, meta = extract_json_from_text(done, return_metadata=True)
+
+    assert meta.get("truncated") is not True
+    assert isinstance(obj, dict) and obj["actions"]

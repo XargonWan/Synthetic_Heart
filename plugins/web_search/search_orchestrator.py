@@ -19,6 +19,7 @@ they are not resumed (out of scope).
 
 from __future__ import annotations
 
+from core import stats_registry
 import asyncio
 import json
 import uuid
@@ -467,6 +468,7 @@ class SearchOrchestrator:
 
         return blocks, link_outcomes
 
+    @stats_registry.with_purpose("web_search")
     async def _synthesize(
         self,
         blocks: list[dict[str, Any]],

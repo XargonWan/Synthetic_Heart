@@ -7,6 +7,7 @@ from typing import List
 import requests
 
 from core.ai_plugin_base import AIPluginBase
+from core.app_paths import default_tts_output_dir, resolve_tts_output_dir
 from core.core_initializer import register_plugin, INTERFACE_REGISTRY
 from core.config_manager import config_registry
 from core.variables_engine import register_exposed_var
@@ -41,7 +42,7 @@ register_exposed_var(
 register_exposed_var(
     "TTS_OUTPUT_DIR",
     label="TTS Output Directory",
-    default="res/synth_webui/static/audio/tts",
+    default=default_tts_output_dir(),
     value_type=str,
     ui_type="string",
     description="Directory for generated TTS audio files.",
@@ -159,12 +160,14 @@ class TTSLipSyncPlugin(AIPluginBase):
                 component="tts_lipsync",
             )
             output_dir = Path(
-                config_registry.get_value(
-                    "TTS_OUTPUT_DIR",
-                    "res/synth_webui/static/audio/tts",
-                    value_type=str,
-                    group="plugins",
-                    component="tts_lipsync",
+                resolve_tts_output_dir(
+                    config_registry.get_value(
+                        "TTS_OUTPUT_DIR",
+                        default_tts_output_dir(),
+                        value_type=str,
+                        group="plugins",
+                        component="tts_lipsync",
+                    )
                 )
             )
 

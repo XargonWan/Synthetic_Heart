@@ -162,6 +162,8 @@ cooperatively at the event-loop level. Each turn is persisted to the
 durable across a container restart; the startup recovery sweep reconciles any
 turn left ``running`` by a previous process.
 
+**Merging pending messages of one chat**: while a slow turn runs, messages of the same chat pile up and would each cost a whole turn. ``message_queue.enqueue`` therefore folds a new message into a *pending* queue element that has the exact same ``interface_path`` (same interface, thread and priority band) instead of putting it on the heap; the element in flight is never touched. The queue shows one element (``merged_count``, first → last time, every line in the preview) and the consumer answers all its messages in a single turn (``_flatten_absorbed`` + ``_build_merged_message``). Scheduled/urgent events, vessel reflection/appraisal/idle beats and autonomous vessel perceptions, and anything a caller waits on (``response_future``/``media_future``) are never merged; a vessel player chat merges only with other player chats of the same path. Settings: ``QUEUE_COALESCE_ENABLED`` (default on) and ``QUEUE_COALESCE_MAX_ITEMS`` (default 20; past it a new element starts).
+
 **PriorityQueue Fix**: To prevent ``TypeError`` when comparing messages with identical priorities, the queue uses a **monotonic counter** as tiebreaker. Each message is stored as ``(priority, counter, item)`` instead of ``(priority, item)``, ensuring consistent ordering even when priorities are equal.
 
 **Consumer Loop**: A dedicated async task continuously processes queued messages, ensuring no message loss and proper serialization of operations.

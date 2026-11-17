@@ -184,6 +184,46 @@ the WebUI can surface it. Persistence is best-effort — a DB failure is logged
 and swallowed and never breaks the turn itself. The WebUI route no longer
 persists its own row; it reads ``task_id`` from the result to avoid duplicates.
 
+How tool calls reach the model
+------------------------------
+
+By default the loop describes the tools in the prompt and asks for a JSON
+``tool_calls`` reply; endpoints that opt in (``extra_config.enable_tools``) also
+receive native function-calling declarations. Both paths end in the same tool
+call structure, parsed by ``_extract_tool_calls``.
+
+Lean prompt (web-driven endpoints)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Chat UIs driven by the ZEN engine tend to refuse a prompt that announces an
+"agentic mode" and lays down a JSON protocol. ZEN therefore speaks the standard
+OpenAI tool-calling API (``tools`` in, ``tool_calls`` out) and does the rest
+itself: it presents the tools to the web model as commands on a shell, replays
+earlier calls and their results as a session, and turns the reply back into
+``tool_calls``. SyntH only has to stop getting in the way.
+
+An external endpoint opts in through its *Extra Config* JSON::
+
+    {"lean_agent_prompt": true}
+
+For agent iterations on that endpoint the loop sends:
+
+* a single ``user`` message with the goal (plus, when the turn comes from a
+  conversation, where the person writes from and how to reply);
+* every earlier tool call as an ``assistant`` message with ``tool_calls``
+  followed by the ``tool`` message holding its output, built from the
+  ``arguments`` and ``result`` recorded in the observations;
+* the tools as native ``tools``.
+
+There is no system text, no ``AVAILABLE TOOLS`` block and no JSON protocol
+instructions. The behaviour rules of the normal agent prompt (diary discipline,
+interim-message limits, voice) are not sent either, so keep them in mind when
+enabling the flag on a persona. Endpoints without the flag are not affected.
+
+The Agent panel shows every step as the command that ran (``$ tool --key
+value``) with its output underneath; short outputs are open, long ones fold.
+Steps recorded before the arguments were stored show only the tool name.
+
 Drones — ephemeral sub-agents
 -----------------------------
 
