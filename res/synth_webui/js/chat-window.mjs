@@ -1830,6 +1830,21 @@ export function initChatUI() {
         } catch (e) { /* ignore */ }
 
         if (!ws || ws.readyState === WebSocket.CLOSED) connectWs();
+        // Bfcache/navigate-away: park the socket instead of failing reconnects
+        // against a frozen page (console spam); resume once on restore.
+        if (!window.__synth_chat_bfcache_bound) {
+            window.__synth_chat_bfcache_bound = true;
+            document.addEventListener('pagehide', () => {
+                try { if (ws) ws.close(); } catch (e) { /* ignore */ }
+                if (_wsReconnectTimer) { clearTimeout(_wsReconnectTimer); _wsReconnectTimer = null; }
+            });
+            document.addEventListener('pageshow', (event) => {
+                if (event && event.persisted) {
+                    _wsReconnectDelay = 1500;
+                    if (!ws || ws.readyState === WebSocket.CLOSED) connectWs();
+                }
+            });
+        }
         updateButtonMode(); // set initial icon state
         try {
             if (typeof localStorage !== 'undefined' && localStorage.getItem && localStorage.getItem(TYPING_INDICATOR_KEY)) {
