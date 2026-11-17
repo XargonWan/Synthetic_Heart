@@ -358,3 +358,71 @@ async def test_wait_for_peer_reply_wakes_immediately_on_notify(monkeypatch):
     assert result is True
     # Should wake on the notify (~0.05s), not sit out the 5s poll interval.
     assert elapsed < 1.0
+
+
+# ── Peer group detection + outreach form of the instruction block ───────────
+
+
+def _peer_config(monkeypatch, *, enabled: bool = True, rows=None):
+    rows = [{"id": 8243553794, "name": "2B"}] if rows is None else rows
+
+    def _read_config(key, default):
+        if key == "SYNTH_PEER_ENABLED":
+            return enabled
+        if key == "SYNTH_PEERS":
+            return rows
+        if key == "SYNTH_PEER_POLICY":
+            return "mention_only"
+        return default
+
+    monkeypatch.setattr("core.peer_policy._read_config", _read_config)
+
+
+def test_is_peer_group_path_uses_the_telegram_sign_convention():
+    assert peer_policy.is_peer_group_path("telegram_bot/-5414243676")
+    assert not peer_policy.is_peer_group_path("telegram_bot/5208932647")
+    assert not peer_policy.is_peer_group_path("discord_bot/123/-456")
+    assert not peer_policy.is_peer_group_path("grillo/-1")
+    assert not peer_policy.is_peer_group_path("")
+
+
+def test_offers_peer_group_needs_peer_mode_and_a_group_target(monkeypatch):
+    _peer_config(monkeypatch)
+    assert peer_policy.offers_peer_group(["telegram_bot/-5414243676"])
+    assert not peer_policy.offers_peer_group(["telegram_bot/5208932647"])
+    assert not peer_policy.offers_peer_group(["grillo/-1"])
+    assert not peer_policy.offers_peer_group([])
+
+    _peer_config(monkeypatch, enabled=False)
+    assert not peer_policy.offers_peer_group(["telegram_bot/-5414243676"])
+
+    _peer_config(monkeypatch, rows=[])
+    assert not peer_policy.offers_peer_group(["telegram_bot/-5414243676"])
+
+
+def test_peer_context_block_outreach_form_describes_the_shared_space(monkeypatch):
+    """A beat reaching into a group is told how peer lines are labelled THERE.
+
+    The ``[PeerName]: `` prefix only exists on turns that arrive in the group
+    (``_history_to_turns``); on an outreach the peer's lines sit in the
+    cross-chat block labelled with their own name, and without saying so the
+    model read the peer as the trainer.
+    """
+    _peer_config(monkeypatch)
+
+    outreach = peer_policy.get_peer_context_block(form="outreach")
+    assert outreach is not None
+    assert "=== PEER SYNTHS ===" in outreach
+    assert "- 2B" in outreach
+    assert "deciding whether to reach into it" in outreach
+    assert "any `[PeerName]: ` prefix" in outreach
+    assert "mention_only" in outreach
+
+    chat = peer_policy.get_peer_context_block()
+    assert "message flow as your trainer's" in chat
+    assert "deciding whether to reach into it" not in chat
+
+
+def test_peer_context_block_missing_when_peer_mode_is_off(monkeypatch):
+    _peer_config(monkeypatch, enabled=False)
+    assert peer_policy.get_peer_context_block(form="outreach") is None

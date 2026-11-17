@@ -2984,20 +2984,23 @@ async def build_prompt_request(
     except Exception as e:
         log_debug(f"[json_prompt] capability-drops injection skipped: {e}")
 
-    # === 3b. Peer SyntH awareness block (group chats on an interface whose ids
-    # the configured peers are written in; see core.peer_policy.PEER_INTERFACES) ===
+    # === 3b. Peer SyntH awareness block ===
+    # Needed on turns that arrive in a shared group AND on beats reaching into
+    # one; the gate lives in ``_peer_context_form`` so it is unit-tested. The
+    # interface check is ``peer_policy.PEER_INTERFACES``' job, so a second
+    # Telegram interface (``telegram``) gets the block without another edit here.
     try:
-        from core.chat_context import GROUP, resolve_chat_kind
-        from core.peer_policy import get_peer_context_block, interface_has_peers
+        _peer_form = _peer_context_form(
+            message, interface_name, context_memory, interface_path
+        )
+        if _peer_form:
+            from core.peer_policy import get_peer_context_block
 
-        if interface_has_peers(interface_name) and (
-            resolve_chat_kind(message, interface_path) == GROUP
-        ):
-            peer_block = get_peer_context_block()
+            peer_block = get_peer_context_block(form=_peer_form)
             if peer_block:
                 recon_instructions.append(peer_block)
                 log_debug(
-                    f"[json_prompt] Peer context block injected for group chat ({interface_name})"
+                    f"[json_prompt] Peer context block injected (form={_peer_form})"
                 )
     except Exception as e:
         log_debug(f"[json_prompt] Peer context block skipped: {e}")
@@ -3752,6 +3755,66 @@ async def build_prompt_request(
         log_debug(f"[json_prompt] Reason trail capture skipped: {_reason_exc}")
 
     return prompt_with_instructions
+
+
+def _peer_context_form(
+    message: Any,
+    interface_name: str | None,
+    context_memory: Any,
+    interface_path: str | None = None,
+) -> str | None:
+    """Which ``=== PEER SYNTHS ===`` block this turn needs, if any.
+
+    Two turns need it, and both are recognised structurally, never from text:
+
+    - ``"chat"``: a message arriving in a shared Telegram group. Which
+      interfaces carry peers at all is ``peer_policy.PEER_INTERFACES``' answer
+      (both the bot and the user interface), and the group test is
+      ``chat_context.resolve_chat_kind`` so a message that carries no
+      ``chat.type`` is still recognised from a group-shaped interface path.
+    - ``"outreach"``: a proactive beat deciding whether to reach *into* such a
+      group. Beats run in an internal ``grillo/-1`` chat, so their own message
+      type says nothing about the room; what identifies the shared space is the
+      offered target list the beat handed the chain (``grillo_targets``).
+      Without this an outreach had no idea a peer SyntH was in the room and read
+      the peer's lines as the trainer's (live 2026-10-29 20:15).
+
+    Returns ``None`` when neither applies or peer mode is off. Fails closed.
+    """
+    try:
+        from core.chat_context import GROUP, resolve_chat_kind
+        from core.peer_policy import interface_has_peers, offers_peer_group
+
+        if interface_has_peers(interface_name) and (
+            resolve_chat_kind(message, interface_path) == GROUP
+        ):
+            return "chat"
+
+        chat_type = getattr(getattr(message, "chat", None), "type", None)
+        if chat_type != "internal" and interface_name != "grillo":
+            return None
+
+        offered: list[Any] = []
+        sources = [context_memory]
+        prior = (
+            context_memory.get("prior_context")
+            if isinstance(context_memory, dict)
+            else None
+        )
+        if isinstance(prior, dict):
+            sources.append(prior)
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            for item in source.get("grillo_targets") or []:
+                if isinstance(item, dict):
+                    offered.append(item.get("interface_path"))
+                elif isinstance(item, str):
+                    offered.append(item)
+        return "outreach" if offers_peer_group(offered) else None
+    except Exception as e:
+        log_debug(f"[json_prompt] peer context form probe skipped: {e}")
+        return None
 
 
 async def build_json_prompt(

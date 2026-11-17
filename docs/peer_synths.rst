@@ -249,6 +249,39 @@ Aria and Sol using ``mention_only`` it looks like this:
 The names come from ``SYNTH_PEER_NAMES``. If a peer ID has no name entry it
 falls back to ``SyntH#<id>``.
 
+Proactive beats (G.R.I.L.L.O. observer, reflections, curiosity)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A beat runs in an internal ``grillo/-1`` chat, so it never looks like a group
+message and used to get no peer block at all: reaching into the shared group, it
+read the peer SyntH's lines exactly like the trainer's. The block is therefore
+injected on two kinds of turn, decided structurally in
+``core/prompt_engine.py::_peer_context_form``:
+
+* a message that arrived in a Telegram group (chat type ``group`` /
+  ``supergroup``), and
+* a beat whose offered target list (``grillo_targets``, the routable paths the
+  observer hands the chain) contains a Telegram group. Group and supergroup chat
+  ids are negative, which is the same convention
+  ``interface/message_send_utils.py::telegram_parse_mode_for`` uses.
+
+The second form says something different, because the labelling differs: a turn
+that *arrives* in the group sees the peer's line prefixed ``[SynthA]: ``, while a
+beat reaching *into* it sees the peer's line in the cross-chat context block
+labelled with the peer's own name (``2B: …``) and never sees the prefix. Without
+that paragraph a model reads the peer as the trainer.
+
+Two related limits on how much of a shared group reaches such a turn:
+
+* the cross-chat block is capped globally by ``CONTEXT_VERBOSITY``, so a busy
+  private chat could fill every slot. ``CONTEXT_TARGET_CHAT_LINES`` now reserves
+  a few newest lines per offered target, preferring one line from the human over
+  a peer SyntH's, when they are not already in the block.
+* the observer's own snippet window is ``GRILLO_OBSERVER_SNIPPETS_PER_CHAT``
+  lines per conversation, and when the budget would be entirely peer lines the
+  oldest is swapped for the newest human line, so the person in a two-SyntH
+  group is always represented.
+
 
 Turn Coordination (Roleplay)
 ----------------------------
