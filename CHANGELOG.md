@@ -1,3 +1,23 @@
+### feat(hass): one entity can be dropped from the house-state block without narrowing the include list  <!-- 2026-10-29 -->
+
+**Symptom.** Every prompt carried `[Home] iPhone Kiosk Screensaver off, raineadmin home`. The kiosk line is noise in every turn: the iPhone screensaver state of a wall-mounted phone is not house state the persona can act on.
+
+**Root cause.** The default include list is `sensor.*_temperature,sensor.*_humidity,light.*,switch.*,person.*,cover.*,climate.*,binary_sensor.*`, and the entity is `binary_sensor.iphone_kiosk_screensaver` — matched by the broad `binary_sensor.*`. There was no way to exclude one entity: narrowing the include list would have dropped every other binary sensor with it, and `HASS_AWARENESS_ENTITIES` had no stored row, so the default was in force.
+
+**Fix.** `HASS_AWARENESS_EXCLUDE` (comma-separated entity ids or wildcard patterns, empty by default, exposed in the WebUI under the Home Assistant component) is applied in `_render_house_state` **after** the include match, so one noisy entity goes while the broad pattern keeps covering the rest. Live value on this deployment: `binary_sensor.iphone_kiosk_screensaver`.
+
+**Measured after.** Rendering the block from the live HA state (68 entities) with the deployment's own config:
+
+```
+BEFORE (no exclusion): iPhone Kiosk Screensaver off, raineadmin home
+AFTER  (live exclusion): raineadmin home
+dropped: ['iPhone Kiosk Screensaver off']
+```
+
+Three new tests in `tests/test_hass_awareness_exclude.py` pin it: an excluded entity leaves the block while the other entities the broad pattern matched stay, an empty exclusion renders it as before, and wildcard patterns work. `ruff format`, `ruff check` and `ty check` clean.
+
+### fix(debrief): a finished activity stops being asserted as present fact, and STATE notes get a bounded window  <!-- 2026-10-29 -->
+
 ### fix(config): an engine and model picked in the WebUI are no longer replaced at the next start
 
 **Before.** Choosing an engine *and* a model for the Base Cortex stores `{"engine": ..., "model": ...}` in `BASE_CORTEX`. At startup `_heal_cortex_config` compared that whole JSON string with the known engine names, never found it, took it for a removed engine and overwrote it with `_pick_preferred_cortex(...)`: the first enabled external endpoint alphabetically unless its name contains "zen". On 14 Nov that was `fish-audio`, a Vox-only endpoint, so no Cortex could be loaded and every message on every interface was dropped until the value was fixed by hand. The scope overrides (`TRAINER_CORTEX`, `GRILLO_CORTEX`, `LIVE_CORTEX`, `DSP_CORTEX`) holding an engine+model were reset to `Default` the same way.

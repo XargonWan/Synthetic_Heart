@@ -153,6 +153,19 @@ _expose(
     "Hard cap on the injected house-state block.",
 )
 _expose(
+    "HASS_AWARENESS_EXCLUDE",
+    "House State Excluded Entities",
+    "",
+    str,
+    "string",
+    (
+        "Comma-separated entity ids or wildcard patterns omitted from the "
+        "house-state block even when the include list above matches them. Use it "
+        "for one noisy entity without narrowing a broad pattern: excluding "
+        "'binary_sensor.iphone_kiosk_screensaver' keeps every other binary_sensor."
+    ),
+)
+_expose(
     "HASS_AWARENESS_MAX_AGE_SEC",
     "House State Max Age (s)",
     900,
@@ -1289,9 +1302,15 @@ class HomeAssistantPlugin(PluginBase):
         patterns = self._awareness_patterns()
         if not states or not patterns:
             return ""
+        excluded = _cfg_list("HASS_AWARENESS_EXCLUDE", "")
         pieces: List[str] = []
         for entity_id in sorted(states):
             if not any(fnmatch(entity_id, pattern) for pattern in patterns):
+                continue
+            # Exclusions are applied after the include match so one noisy entity
+            # can be dropped without narrowing a broad pattern like
+            # 'binary_sensor.*' and losing everything else it covers.
+            if excluded and any(fnmatch(entity_id, pattern) for pattern in excluded):
                 continue
             item = states.get(entity_id) or {}
             value = item.get("state")
