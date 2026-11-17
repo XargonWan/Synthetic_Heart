@@ -1872,6 +1872,72 @@ async def _cleanup_failed_startup_app(app: object | None) -> None:
             )
 
 
+def _usable_application_builder() -> str | None:
+    """Make sure the module-level PTB names are the real, usable ones.
+
+    A stubbed or half-imported ``telegram.ext`` can leave ``ApplicationBuilder``
+    as an object that answers ``hasattr(..., "token")`` yet whose instances do
+    not, which is why the first chained call inside ``_build_application`` used
+    to fail with ``AttributeError("'ApplicationBuilder' object has no attribute
+    'token'")`` and nothing else.
+
+    Probe by instantiating. Outside pytest, when the probe fails, drop the cached
+    telegram modules, take the real package and rebind the names this module
+    imported so handlers and Bot/Update come from the real library too.
+
+    Returns a human readable note when something was replaced, else ``None``.
+    """
+    global ApplicationBuilder, Bot, Update, MessageHandler, ContextTypes, filters
+
+    if "pytest" in sys.modules:
+        return None
+
+    def _works(candidate: object) -> bool:
+        try:
+            return hasattr(candidate(), "token")
+        except Exception:
+            return False
+
+    if _works(ApplicationBuilder):
+        log_info(
+            "[telegram_bot] builder: "
+            f"{getattr(ApplicationBuilder, '__module__', None)}."
+            f"{getattr(ApplicationBuilder, '__qualname__', None)} from "
+            f"{getattr(sys.modules.get('telegram.ext'), '__file__', None)!r}"
+        )
+        return None
+
+    ext = sys.modules.get("telegram.ext")
+    detail = (
+        f"{ApplicationBuilder!r} (type {type(ApplicationBuilder).__name__}, "
+        f"module {getattr(ApplicationBuilder, '__module__', None)!r}), with "
+        f"telegram.ext from {getattr(ext, '__file__', None)!r}"
+    )
+
+    for name in ("telegram.ext", "telegram.error", "telegram"):
+        sys.modules.pop(name, None)
+
+    try:
+        import telegram as _telegram
+        import telegram.ext as _telegram_ext
+    except Exception as exc:  # pragma: no cover - dependency missing entirely
+        return f"python-telegram-bot cannot be imported: {exc!r}; was {detail}"
+
+    ApplicationBuilder = _telegram_ext.ApplicationBuilder
+    MessageHandler = _telegram_ext.MessageHandler
+    ContextTypes = _telegram_ext.ContextTypes
+    filters = _telegram_ext.filters
+    Bot = _telegram.Bot
+    Update = _telegram.Update
+
+    if not _works(ApplicationBuilder):
+        return (
+            "python-telegram-bot's ApplicationBuilder is still unusable after a "
+            f"fresh import; was {detail}"
+        )
+    return f"replaced an unusable ApplicationBuilder: {detail}"
+
+
 async def start_bot() -> bool:
     """Start the Telegram bot application.
 
@@ -1941,18 +2007,9 @@ async def start_bot() -> bool:
 
         bot_token_str = str(BOTFATHER_TOKEN) if BOTFATHER_TOKEN else None
 
-        if (
-            "pytest" not in sys.modules
-            and isinstance(ApplicationBuilder, type)
-            and not hasattr(ApplicationBuilder, "token")
-        ):
-            # Name the cause here instead of losing it as "'ApplicationBuilder'
-            # object has no attribute 'token'" from the middle of the chain.
-            raise RuntimeError(
-                "python-telegram-bot's ApplicationBuilder is not the real class: "
-                f"{ApplicationBuilder!r} loaded from "
-                f"{getattr(sys.modules.get('telegram.ext'), '__file__', None)!r}"
-            )
+        _builder_note = _usable_application_builder()
+        if _builder_note:
+            log_warning(f"[telegram_bot] {_builder_note}")
 
         app = (
             ApplicationBuilder()
