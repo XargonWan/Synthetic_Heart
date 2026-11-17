@@ -80,6 +80,42 @@ VENDORED_RUNTIME_DIR_SEGMENTS: frozenset[str] = frozenset(
     }
 )
 
+#: Directory and file names inside a plugin that are TEST code, never plugins.
+#: A plugin may ship its own ``tests/`` tree (``plugins/rift_vessel/retroxr/tests``
+#: arrived with upstream on 2026-11-17). Importing those files drags in the
+#: repository's ``tests`` package, whose ``__init__`` installs stand-ins for
+#: ``telegram``/``telegram.error``/``telegram.ext`` and pulls in pytest, so the
+#: live process then binds a stub ``ApplicationBuilder`` and the Telegram bot
+#: cannot start (``AttributeError: 'ApplicationBuilder' object has no attribute
+#: 'token'``, live 2026-11-17). Test files also have no business being started.
+NON_PLUGIN_DIR_SEGMENTS: frozenset[str] = frozenset({"tests", "test", "__pycache__"})
+
+
+def is_plugin_candidate(py_file: Path) -> bool:
+    """Whether a ``.py`` found by the recursive plugin scan is a plugin.
+
+    Skips package markers and private modules, vendored third-party runtime
+    trees, and a plugin's own test code. The test tree matters: importing
+    ``plugins/<p>/tests/conftest.py`` (upstream's retroxr plugin ships one) runs
+    ``from tests.conftest import ...``, which imports the repository's ``tests``
+    package. That package installs stand-ins for ``telegram``, ``telegram.error``
+    and ``telegram.ext`` into ``sys.modules`` and imports pytest, so the live
+    process then binds the stub ``ApplicationBuilder`` and ``start_bot()`` fails
+    with ``AttributeError: 'ApplicationBuilder' object has no attribute 'token'``
+    (live 2026-11-17, 2D checkout).
+    """
+    if py_file.name == "__init__.py" or py_file.name.startswith("_"):
+        return False
+    if any(part in VENDORED_RUNTIME_DIR_SEGMENTS for part in py_file.parts):
+        return False
+    if any(part in NON_PLUGIN_DIR_SEGMENTS for part in py_file.parts):
+        return False
+    if py_file.name == "conftest.py" or py_file.name.startswith("test_"):
+        return False
+    return True
+
+
+
 
 def derive_plugin_category(
     module_name: str, dir_path: str, declared: str | None = None
@@ -1232,15 +1268,7 @@ class CoreInitializer:
                 continue
 
             for py_file in base_path.rglob("*.py"):
-                if py_file.name == "__init__.py" or py_file.name.startswith("_"):
-                    continue
-
-                # Skip vendored third-party runtime trees (npm node_modules,
-                # the SearXNG vendored source, etc.). These are not SyntH
-                # plugins and must not be imported or tracked as components.
-                if isinstance(py_file, Path) and any(
-                    part in VENDORED_RUNTIME_DIR_SEGMENTS for part in py_file.parts
-                ):
+                if not is_plugin_candidate(py_file):
                     continue
 
                 if (
