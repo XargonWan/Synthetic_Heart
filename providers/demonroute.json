@@ -1,0 +1,17 @@
+{
+  "provider_id": "demonroute",
+  "display_name": "Demon Route",
+  "description": "OpenAI-compatible router for 1,700+ open-weight models, including roleplay and uncensored fine-tunes (api.demonroute.com)",
+  "icon": "demonroute",
+  "protocol": "openai",
+  "base_url": "https://api.demonroute.com/v1",
+  "base_url_locked": true,
+  "requires_api_key": true,
+  "api_key_placeholder": "sk-dr-…",
+  "api_key_hint": "Sign in at https://demonroute.com/login and create a key in the console. Model IDs are listed at https://demonroute.com/models.",
+  "default_capabilities": { "cortex": true, "vox": false, "auris": false, "live": false, "vision": false },
+  "suggested_name": "demonroute",
+  "suggested_label": "Demon Route",
+  "extra_config": {},
+  "sort_order": 125
+}
