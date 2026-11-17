@@ -15,9 +15,13 @@ def test_builtin_vox_engines_registered() -> None:
             VOX_REGISTRY.unregister_engine(name)
         VoxPlugin()
         engines = set(VOX_REGISTRY.get_available_engines())
-        # Only kitten is a built-in engine; other TTS models come from
-        # external endpoints (e.g. Harmony).
-        assert engines == {"kitten"}
+        # Both built-ins register unconditionally: ``kitten`` is the local
+        # neural engine, and ``http`` is always imported so its config box shows
+        # in Engines → Vox before any endpoint exists (see
+        # ``VoxPlugin._import_builtin_engines``). The http engine used to be
+        # gated on the legacy ``TTS_ENDPOINTS`` key, which is why this assertion
+        # once read ``{"kitten"}``.
+        assert engines == {"http", "kitten"}
     finally:
         VOX_REGISTRY._engine_modules.clear()
         VOX_REGISTRY._engine_modules.update(saved_modules)
@@ -27,19 +31,30 @@ def test_builtin_vox_engines_registered() -> None:
         VOX_REGISTRY._instances.update(saved_instances)
 
 
-def test_http_vox_engine_registered_when_legacy_endpoints_configured() -> None:
-    """HTTP Vox should register only when legacy TTS_ENDPOINTS are configured."""
+def test_http_vox_engine_registration_ignores_the_legacy_endpoints_key() -> None:
+    """The http engine registers regardless of the legacy ``TTS_ENDPOINTS`` key.
+
+    It is imported unconditionally so its config box shows in Engines → Vox
+    before an endpoint exists; the endpoint value only decides whether it can
+    actually speak. This test used to assert the old gated behaviour, which no
+    longer exists.
+    """
     saved_modules = VOX_REGISTRY._engine_modules.copy()
     saved_meta = VOX_REGISTRY._engine_meta.copy()
     saved_instances = VOX_REGISTRY._instances.copy()
     original_tts_endpoints = os.environ.get("TTS_ENDPOINTS")
-    os.environ["TTS_ENDPOINTS"] = "http://example.com/tts"
     try:
+        os.environ.pop("TTS_ENDPOINTS", None)
         for name in list(VOX_REGISTRY.get_available_engines()):
             VOX_REGISTRY.unregister_engine(name)
         VoxPlugin()
-        engines = set(VOX_REGISTRY.get_available_engines())
-        assert "http" in engines
+        assert set(VOX_REGISTRY.get_available_engines()) == {"http", "kitten"}
+
+        os.environ["TTS_ENDPOINTS"] = "http://example.com/tts"
+        for name in list(VOX_REGISTRY.get_available_engines()):
+            VOX_REGISTRY.unregister_engine(name)
+        VoxPlugin()
+        assert set(VOX_REGISTRY.get_available_engines()) == {"http", "kitten"}
     finally:
         if original_tts_endpoints is None:
             os.environ.pop("TTS_ENDPOINTS", None)

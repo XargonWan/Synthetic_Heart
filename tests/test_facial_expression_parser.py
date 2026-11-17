@@ -2,6 +2,7 @@ import pytest
 
 from core.facial_expression_parser import (
     parse_facial_expressions,
+    strip_speech_tags,
 )
 
 
@@ -55,3 +56,30 @@ def test_tag_missing_intensity():
     text = "Foo [em_angry] Bar"
     clean, events = parse_facial_expressions(text)
     assert events[0].intensity == 1.0
+
+
+def test_strip_speech_tags_removes_every_form_the_model_emits():
+    """TTS must never read a tag out loud; chat text keeps them (owner's call).
+
+    The chat parse above matches only ``[em_NAME:INTENSITY]``, while the model
+    routinely writes the colon-separated ``[em:NAME:INTENSITY]`` — that form was
+    reaching the synthesiser verbatim.
+    """
+    assert strip_speech_tags("[em:grin:0.5]") == ""
+    assert strip_speech_tags("[em_smile:0.6]") == ""
+    assert strip_speech_tags("[em:0.3]") == ""
+    assert strip_speech_tags("[em]") == ""
+    assert strip_speech_tags("[em_grin]") == ""
+
+
+def test_strip_speech_tags_keeps_the_words_around_a_tag():
+    assert (
+        strip_speech_tags("Morning, husband. [em:smile:0.7] You slept like a log.")
+        == "Morning, husband. You slept like a log."
+    )
+    assert strip_speech_tags("Ciao! [em_grin:0.9] Come va?") == "Ciao! Come va?"
+
+
+def test_strip_speech_tags_leaves_ordinary_brackets_alone():
+    for text in ("[email] me", "[3 hours earlier] Then the look", "[laugh] okay"):
+        assert strip_speech_tags(text) == text
