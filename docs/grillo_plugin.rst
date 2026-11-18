@@ -115,7 +115,7 @@ Priority System
 ---------------
 
 G.R.I.L.L.O. beats use ``PRIORITY_BACKGROUND`` (2) — the **absolute bottom**
-of the 0–11 urgency scale. This ensures autonomous beats never block or compete
+of the 0–12 urgency scale. This ensures autonomous beats never block or compete
 with any user interaction; they are processed only when the queue is completely
 idle. The full priority scale is documented in :doc:`architecture`.
 

@@ -104,6 +104,43 @@
         // framing portrait a corpo intero).
         let savedCameraPose = null;
 
+        // Durante una chiamata il PiP è la "webcam" del Synth: primo piano in
+        // formato landscape. Fuori chiamata resta la vista a corpo intero in
+        // portrait. Lo stato arriva da chat-window.mjs (evento synth:call-state).
+        const FULL_BODY_SIZE = { width: 360, height: 640 };
+        const WEBCAM_SIZE = { width: 640, height: 360 };
+        let callActive = !!window.__synthCallActive;
+        let resizeRetryArmed = false;
+        let gazeTimer = null;
+
+        // A video call is a call with the webcam (this pop-out) open. While it is,
+        // Synth looks into the camera. Re-asserted every 2 s because the lock is a
+        // no-op until the model has loaded and a reload of the model clears it.
+        function updateVideoCall() {
+            const video = !!(callActive && pipWindow);
+            try { window.__synthCallVideo = video; } catch (e) { /* ignore */ }
+            try { window.dispatchEvent(new CustomEvent('synth:call-video', { detail: { on: video } })); } catch (e) { /* ignore */ }
+            const lock = (on) => {
+                try { if (typeof window.__synthSetCameraGazeLock === 'function') window.__synthSetCameraGazeLock(on); } catch (e) { /* ignore */ }
+            };
+            clearInterval(gazeTimer);
+            gazeTimer = null;
+            if (video) {
+                lock(true);
+                gazeTimer = setInterval(() => lock(true), 2000);
+            } else {
+                lock(false);
+            }
+        }
+
+        function targetSize() {
+            return callActive ? WEBCAM_SIZE : FULL_BODY_SIZE;
+        }
+
+        function framingMode() {
+            return callActive ? 'closeup' : 'full';
+        }
+
         function resizeRenderer() {
             try {
                 if (typeof window.resizeVRMRenderer === 'function') {
@@ -141,6 +178,10 @@
             anchor = null;
             movedNode = null;
             pipWindow = null;
+            resizeRetryArmed = false;
+            updateVideoCall();
+            // Fuori dal PiP il framing torna quello storico (mai toccato).
+            try { window.__vrmFramingMode = null; } catch (e) { /* ignore */ }
             setActive(false);
             // Ripristina la posa camera che l'utente aveva nella WebUI (lo
             // zoom/rotazione), sovrascritta dal framing portrait del PiP.
@@ -188,10 +229,7 @@
             } catch (e) { savedCameraPose = null; }
 
             try {
-                pipWindow = await window.documentPictureInPicture.requestWindow({
-                    width: 360,
-                    height: 640,
-                });
+                pipWindow = await window.documentPictureInPicture.requestWindow(targetSize());
             } catch (e) {
                 console.warn('[pip-window] requestWindow rifiutata:', e);
                 pipWindow = null;
@@ -250,6 +288,7 @@
             movedNode = canvas;
             pipWindow.document.body.appendChild(canvas);
             setActive(true);
+            updateVideoCall();
 
             // Guida il render loop con il requestAnimationFrame della finestra
             // PiP. La finestra PiP è sempre visibile a schermo, quindi il suo
@@ -272,7 +311,9 @@
                 console.warn('[pip-window] impossibile instradare l\'audio nel PiP:', e);
             }
 
-            // Adatta il renderer alle dimensioni della finestra PiP.
+            // Adatta il renderer alle dimensioni della finestra PiP (e imposta
+            // il framing: primo piano in chiamata, corpo intero altrimenti).
+            try { window.__vrmFramingMode = framingMode(); } catch (e) { /* ignore */ }
             requestAnimationFrame(() => resizeRenderer());
 
             // La chiusura della finestra PiP vale come "ritorno Synth".
@@ -280,6 +321,54 @@
             // Adatta il renderer quando l'utente ridimensiona la finestra.
             pipWindow.addEventListener('resize', resizeRenderer);
         }
+
+        // La finestra ha la forma giusta per lo stato corrente? (landscape in
+        // chiamata, portrait altrimenti)
+        function hasRightShape() {
+            try {
+                const landscape = pipWindow.innerWidth > pipWindow.innerHeight;
+                return landscape === callActive;
+            } catch (e) {
+                return true;
+            }
+        }
+
+        // Prova a ridimensionare il PiP. Chrome può richiedere un gesto utente
+        // per resizeTo() su una finestra Document PiP: se non va, il framing
+        // della camera è comunque già corretto e al prossimo click/tocco (nella
+        // pagina o nel PiP) si riprova.
+        function resizeToTarget() {
+            if (!pipWindow) return;
+            const { width, height } = targetSize();
+            try {
+                pipWindow.resizeTo(width, height);
+            } catch (e) {
+                console.debug('[pip-window] resizeTo non consentito ora:', e);
+            }
+            setTimeout(() => {
+                if (!pipWindow) return;
+                resizeRenderer();
+                if (hasRightShape() || resizeRetryArmed) return;
+                resizeRetryArmed = true;
+                const retry = () => {
+                    resizeRetryArmed = false;
+                    if (pipWindow && !hasRightShape()) resizeToTarget();
+                };
+                try { pipWindow.document.addEventListener('pointerdown', retry, { once: true }); } catch (e) { /* ignore */ }
+                try { document.addEventListener('pointerdown', retry, { once: true }); } catch (e) { /* ignore */ }
+            }, 200);
+        }
+
+        // Chiamata avviata/terminata mentre il PiP è aperto: passa da corpo
+        // intero a webcam (e viceversa) senza chiudere la finestra.
+        window.addEventListener('synth:call-state', (ev) => {
+            callActive = !!(ev && ev.detail && ev.detail.active);
+            updateVideoCall();
+            if (!pipWindow) return;
+            try { window.__vrmFramingMode = framingMode(); } catch (e) { /* ignore */ }
+            resizeRenderer();       // riframing immediato (camera)
+            resizeToTarget();       // forma della finestra, se il browser lo permette
+        });
 
         btn.addEventListener('click', () => {
             if (pipWindow) {

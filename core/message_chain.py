@@ -1344,6 +1344,10 @@ async def handle_incoming_message(
         and not ctx.get("is_voice_input")
     ):
         ctx["is_voice_input"] = True
+    # Same for a call turn: ``CallManager.mark_turn`` sets request_tts on the message, and a
+    # call is always answered by voice even if the queue context did not carry the flag.
+    if getattr(message, "_call", False) and not ctx.get("request_tts"):
+        ctx["request_tts"] = True
 
     log_debug(
         f"[message_chain] Context preserved: interface_path={ctx.get('interface_path')}, chat_id={ctx.get('chat_id')}, interface={ctx.get('interface')}"
@@ -2964,7 +2968,11 @@ async def handle_incoming_message(
                         _iface_tts_prefix = (ctx.get("interface_path") or "").split(
                             "/"
                         )[0]
-                        _voice_only_tts_ifaces = {"telegram_bot", "telegram", "discord_bot"}
+                        _voice_only_tts_ifaces = {
+                            "telegram_bot",
+                            "telegram",
+                            "discord_bot",
+                        }
                         tts_allowed = (
                             _iface_tts_prefix not in _voice_only_tts_ifaces
                         ) or _is_voice_input
