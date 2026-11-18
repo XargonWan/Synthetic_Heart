@@ -12,7 +12,7 @@ import random
 import struct
 import wave
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import pytest
@@ -243,29 +243,13 @@ def test_the_mouth_follows_the_voice() -> None:
     assert loud["aa"] == pytest.approx(0.9)
 
 
-def test_an_idle_face_is_not_blank_and_an_emotion_replaces_that() -> None:
+def test_the_animator_invents_no_face_and_no_head_turn() -> None:
     animator = an.AvatarAnimator()
-    assert animator.pose(1.0).expressions["relaxed"] == pytest.approx(0.12)
+    assert animator.pose(1.0).expressions == {}  # the Karada decides the face
     sad = animator.pose(1.0, expressions={"sad": 0.6}).expressions
-    assert sad["sad"] == pytest.approx(0.6) and "relaxed" not in sad
-    assert set(animator.pose(1.0).bone_deltas) == {"head", "neck", "chest"}
-
-
-def test_emotions_become_expressions_from_numbers_not_words() -> None:
-    out = an.emotion_expressions(
-        {"happy": 1.0, "sad": 0.2, "love": 1.0, "neutral": 0.9}
-    )
-    assert out == {"happy": pytest.approx(0.7), "sad": pytest.approx(0.14)}
-    # A transient expression of the Karada server wins; VRM 0.x names are understood.
-    override = {"type": "vrm_expression_set", "name": "joy", "intensity": 0.5}
-    assert an.emotion_expressions({}, override) == {"happy": 0.5}
-    targets: Any = {
-        "type": "vrm_expression_set",
-        "targets": {"angry": 1.0, "bogus": "x"},
-    }
-    assert an.emotion_expressions({}, targets) == {"angry": 1.0}
-    bad = cast(Any, {"happy": "bad"})  # a garbled value is skipped, not fatal
-    assert an.emotion_expressions(bad) == {}
+    assert sad == {"sad": pytest.approx(0.6)}
+    # Only breathing: a head swaying left and right is not what the Karada animation does.
+    assert set(animator.pose(1.0).bone_deltas) == {"chest"}
 
 
 def _wav(path: Path, samples: np.ndarray, rate: int = 16000) -> Path:
@@ -408,9 +392,9 @@ async def test_the_source_renders_frames_from_the_karada_state(
     fake_gl: type[_FakeRenderer], tmp_path: Path
 ) -> None:
     frames: list[bytes] = []
-    state = ({"happy": 1.0}, None)
+    state = {"happy": 0.16}
     source = src.AvatarVideoSource(
-        Path("m.vrm"), 64, 48, 50, state_reader=lambda: state
+        Path("m.vrm"), 64, 48, 50, state_reader=lambda speaking: state
     )
     await source.start(frames.append)
     try:
@@ -421,7 +405,7 @@ async def test_the_source_renders_frames_from_the_karada_state(
         assert len(frames) >= 3 and set(frames) == {b"frame"}
         renderer = source._renderer
         assert isinstance(renderer, _FakeRenderer)
-        assert renderer.poses[0].expressions["happy"] == pytest.approx(0.7)
+        assert renderer.poses[0].expressions["happy"] == pytest.approx(0.16)
 
         # While a clip plays the mouth opens with it.
         tone = 8000 * np.sin(np.linspace(0, 2 * np.pi * 400, 16000))
@@ -447,7 +431,7 @@ async def test_the_source_gives_up_after_repeated_failures(
         failed.append("failed")
 
     source = src.AvatarVideoSource(
-        Path("m.vrm"), 64, 48, 100, state_reader=lambda: ({}, None)
+        Path("m.vrm"), 64, 48, 100, state_reader=lambda speaking: {}
     )
     fake_gl.fail = True
     await source.start(lambda frame: None, on_failed=_on_failed)

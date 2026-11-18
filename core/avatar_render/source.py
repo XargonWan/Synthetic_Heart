@@ -12,9 +12,8 @@ import time
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
 
-from core.avatar_render.animator import AvatarAnimator, SpeechTrack, emotion_expressions
+from core.avatar_render.animator import AvatarAnimator, SpeechTrack
 from core.avatar_render.renderer import AvatarPose, AvatarRenderer
 from core.avatar_render.vrm import load_vrm
 from core.logging_utils import log_debug, log_info, log_warning
@@ -25,19 +24,20 @@ _DEFAULT_MODEL = Path("skins") / "Rei" / "model.vrm"
 #: The image's seed copy of Rei (``/app/skins`` is usually a volume that starts empty).
 _SEED_MODEL = Path(".skins-seed") / "Rei" / "model.vrm"
 
-StateReader = Callable[[], tuple[dict[str, float], dict[str, Any] | None]]
+#: Reads the face the Karada state server has now, as VRM expression weights, given whether
+#: the SyntH's voice is playing.
+StateReader = Callable[[bool], dict[str, float]]
 
 
-def karada_state() -> tuple[dict[str, float], dict[str, Any] | None]:
-    """The Karada state server's emotion intensities and transient expression."""
+def karada_state(speaking: bool = False) -> dict[str, float]:
+    """The Karada state server's face (emotions, animation expressions, override) as VRM presets."""
     try:
         from core.animation_handler import get_karada_state_server
 
-        server = get_karada_state_server()
-        return server.get_face_values(), server.get_current_expression()
+        return get_karada_state_server().get_vrm_expression_weights(speaking=speaking)
     except Exception as exc:
         log_debug(f"[avatar_render] no Karada state: {exc!r}")
-        return {}, None
+        return {}
 
 
 def resolve_model_path(configured: str = "") -> Path | None:
@@ -166,11 +166,10 @@ class AvatarVideoSource:
                     self._speech = None
                 else:
                     level = speech.level_at(began)
-            face_values, override = self._state_reader()
             pose = self._animator.pose(
                 began - origin,
                 speech_level=level,
-                expressions=emotion_expressions(face_values, override),
+                expressions=self._state_reader(self._speech is not None),
             )
             try:
                 frame = await loop.run_in_executor(self._pool, self._render, pose)

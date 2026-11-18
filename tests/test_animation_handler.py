@@ -413,3 +413,69 @@ async def test_websocket_message_format(animation_handler, mock_webui):
     assert isinstance(msg.get("descriptor"), str)
     assert msg["descriptor"].endswith("/thinking")
     assert isinstance(msg.get("started_at"), (int, float))
+
+
+def test_vrm_expression_weights_follow_the_skin_not_a_fixed_emotion_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A renderer without a browser gets the face the clients get: the skin's own presets
+    (a 0.65 ``happy`` is a faint smile), the animation's timed expressions, the override."""
+    from datetime import datetime, timezone
+
+    server = KaradaStateServer()
+    monkeypatch.setattr(
+        server,
+        "_emotion_presets",
+        lambda: {"happy": {"mouth_smile": 0.25, "eyes_smile": 0.2}},
+    )
+    monkeypatch.setattr(
+        server,
+        "_persona_blendshape_map",
+        lambda: {
+            "mouth_smile": "happy",
+            "eyes_smile": "happy",
+            "eyes_closed": "blink",
+        },
+    )
+    server._current_face_values = {"happy": 0.8}
+    # At rest an emotion is a micro-expression (the WebUI never shows it full) ...
+    resting = server.get_vrm_expression_weights()
+    assert resting == {"happy": pytest.approx(0.05 + 0.2 * 0.13)}
+    # ... and while the voice plays it shows as the skin defines it.
+    assert server.get_vrm_expression_weights(speaking=True) == {
+        "happy": pytest.approx(0.2)
+    }
+
+    # A timed expression of the playing clip shows once its frame is reached.
+    started = datetime.fromtimestamp(1000.0, tz=timezone.utc)
+    server._current_animation_started_at = started
+    server._current_animation_descriptor = {
+        "fps": 30,
+        "expressions": [{"start_frame": 30, "targets": {"eyes_closed": 1.0}}],
+    }
+    assert "blink" not in server.get_vrm_expression_weights(now=1000.5)
+    assert server.get_vrm_expression_weights(now=1001.5)["blink"] == 1.0
+
+    # The transient override wins over what the emotions say.
+    server._current_expression = {
+        "type": "vrm_expression_set",
+        "targets": {"mouth_smile": 0.9},
+    }
+    assert server.get_vrm_expression_weights(now=1001.5)["happy"] == pytest.approx(0.9)
+
+
+def test_face_values_are_scaled_like_the_webui_does() -> None:
+    scale = KaradaStateServer.scale_face_value_for_state
+    assert scale("mouth_smile", 1.0, False) == pytest.approx(
+        0.18
+    )  # a resting micro-expression
+    assert scale("mouth_smile", 0.0, False) == 0.0
+    assert scale("happy", 1.0, False) == pytest.approx(
+        0.06
+    )  # mouth-opening: lower still
+    assert scale("happy", 1.0, True) == pytest.approx(0.12)  # and capped while speaking
+    assert scale("sad", 0.7, True) == pytest.approx(0.7)  # the others show in full
+    assert (
+        scale("eyes_closed", 1.0, False) == 1.0
+    )  # blinks, gaze and visemes are never scaled
+    assert scale("aa", 0.4, False) == pytest.approx(0.4)

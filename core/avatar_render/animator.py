@@ -1,9 +1,12 @@
-"""What the avatar does from one frame to the next: blinking, breathing, a little head sway,
-the mouth following the SyntH's voice, and the face following the Karada emotion state.
+"""What the avatar does from one frame to the next: blinking, breathing, the mouth following
+the SyntH's voice and, on top, the face the Karada state server says it has.
 
 Pure Python/numpy, no GL: ``AvatarAnimator.pose(...)`` turns the time and the inputs into an
-:class:`core.avatar_render.renderer.AvatarPose`. The inputs are structural: the numeric
-emotion intensities of the Karada state server and the loudness of the speech being played.
+:class:`core.avatar_render.renderer.AvatarPose`. The inputs are structural: the VRM expression
+weights from :meth:`core.animation_handler.KaradaStateServer.get_vrm_expression_weights` and the
+loudness of the speech being played. The animator adds no gesture of its own (no head turns):
+the Karada animation clips are not played here yet, and an invented motion would not be the one
+the WebUI shows.
 """
 
 from __future__ import annotations
@@ -13,74 +16,16 @@ import random
 import time
 import wave
 from pathlib import Path
-from typing import Any
-
 import numpy as np
 
 from core.avatar_render.renderer import AvatarPose
 
-#: Emotion names (the emotion manager's canonical set) that have a face. Values are VRM 1.0
-#: expression presets. Anything else (love, fear, ...) has no preset here and is ignored.
-EMOTION_EXPRESSIONS = {
-    "happy": "happy",
-    "sad": "sad",
-    "angry": "angry",
-    "relaxed": "relaxed",
-    "surprised": "surprised",
-}
-#: A transient expression override from the Karada server uses the same names (VRM 1.0
-#: names, or the VRM 0.x ones).
-_EXPRESSION_ALIASES = {
-    "joy": "happy",
-    "sorrow": "sad",
-    "fun": "relaxed",
-    "aa": "aa",
-}
 _BLINK_DURATION_S = 0.16
-_MAX_EMOTION_WEIGHT = (
-    0.7  # a full-intensity emotion is shown at this much of the preset
-)
 
 
 def _rot_x(a: float) -> np.ndarray:
     c, s = math.cos(a), math.sin(a)
     return np.array([[1, 0, 0], [0, c, -s], [0, s, c]], dtype=np.float32)
-
-
-def _rot_y(a: float) -> np.ndarray:
-    c, s = math.cos(a), math.sin(a)
-    return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]], dtype=np.float32)
-
-
-def emotion_expressions(
-    face_values: dict[str, float], override: dict[str, Any] | None = None
-) -> dict[str, float]:
-    """VRM expression weights for the Karada state's emotions and transient expression."""
-    out: dict[str, float] = {}
-    for name, value in (face_values or {}).items():
-        preset = EMOTION_EXPRESSIONS.get(str(name).lower())
-        if preset is None:
-            continue
-        try:
-            weight = max(0.0, min(1.0, float(value))) * _MAX_EMOTION_WEIGHT
-        except (TypeError, ValueError):
-            continue
-        out[preset] = max(out.get(preset, 0.0), weight)
-    if override and override.get("type") == "vrm_expression_set":
-        targets = override.get("targets")
-        pairs = (
-            targets.items()
-            if isinstance(targets, dict)
-            else [(override.get("name"), override.get("intensity", 1.0))]
-        )
-        for name, value in pairs:
-            key = str(name or "").lower()
-            preset = _EXPRESSION_ALIASES.get(key, key)
-            try:
-                out[preset] = max(0.0, min(1.0, float(value)))
-            except (TypeError, ValueError):
-                continue
-    return out
 
 
 class SpeechTrack:
@@ -172,16 +117,6 @@ class AvatarAnimator:
             weights["ee"] = max(
                 weights.get("ee", 0.0), 0.3 * level * max(0.0, math.sin(t * 4.3 + 1.7))
             )
-        # Smile a little when nothing else says how the face should be.
-        if not any(
-            weights.get(k, 0.0) > 0.05
-            for k in ("happy", "sad", "angry", "relaxed", "surprised")
-        ):
-            weights["relaxed"] = 0.12
-        deltas = {
-            "head": _rot_y(0.06 * math.sin(t * 0.9))
-            @ _rot_x(0.03 * math.sin(t * 0.67 + 0.8)),
-            "neck": _rot_y(0.02 * math.sin(t * 0.9)),
-            "chest": _rot_x(0.012 * math.sin(t * 1.57)),
-        }
+        # Only breathing: where the head and arms go is the Karada animation's business.
+        deltas = {"chest": _rot_x(0.012 * math.sin(t * 1.57))}
         return AvatarPose(expressions=weights, bone_deltas=deltas)

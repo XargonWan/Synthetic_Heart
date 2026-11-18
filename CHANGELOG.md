@@ -8,6 +8,14 @@
 
 **Location.** `interface/telegram/telegram_call.py`, `tests/test_telegram_call.py`.
 
+### fix(avatar-render): the server-drawn face follows the Karada face, and the avatar no longer shakes its head by itself
+
+**Before.** The headless renderer mapped five raw emotion names to VRM presets at a fixed 0.7 scale, ignored the skin's emotion presets, the animation's expressions (eyes closed while thinking) and the persona's `blendshape_map`, added a default smile, and swayed the head left and right on its own.
+
+**Now.** `KaradaStateServer.get_vrm_expression_weights()` gives the renderer the face the WebUI gets, including its state scaling (a resting emotion is a micro-expression, in full while the voice plays, mouth-opening presets capped: `scale_face_value_for_state`, a port of `_scaleRemoteEmotionForState`). The renderer only adds blinking, breathing and the mouth following the voice.
+
+**Location.** `core/animation_handler.py`, `core/avatar_render/animator.py`, `core/avatar_render/source.py`, `docs/call_service.rst`, `tests/test_avatar_render.py`, `tests/test_animation_handler.py`.
+
 ### fix(config): an engine and model picked in the WebUI are no longer replaced at the next start
 
 **Before.** Choosing an engine *and* a model for the Base Cortex stores `{"engine": ..., "model": ...}` in `BASE_CORTEX`. At startup `_heal_cortex_config` compared that whole JSON string with the known engine names, never found it, took it for a removed engine and overwrote it with `_pick_preferred_cortex(...)`: the first enabled external endpoint alphabetically unless its name contains "zen". On 14 Nov that was `fish-audio`, a Vox-only endpoint, so no Cortex could be loaded and every message on every interface was dropped until the value was fixed by hand. The scope overrides (`TRAINER_CORTEX`, `GRILLO_CORTEX`, `LIVE_CORTEX`, `DSP_CORTEX`) holding an engine+model were reset to `Default` the same way.
