@@ -1,3 +1,13 @@
+### fix(telegram): the SyntH no longer rings the caller back right after they hang up
+
+**Before.** When the caller hung up, the call was already forgotten when the hang-up tone (or a reply that was still being generated) was played; `py-tgcalls` `play()` on a chat that is not in a call starts a new outgoing call, so the phone rang again at once.
+
+**Now.** `TelegramCalls.play_file` plays only into a chat that has a call; otherwise it logs at debug level and returns. The hang-up tone for a caller who already left is skipped (nobody is there to hear it).
+
+**Not verified here.** Not run against a live Telegram account; the unit test drives a fake py-tgcalls.
+
+**Location.** `interface/telegram/telegram_call.py`, `tests/test_telegram_call.py`.
+
 ### fix(config): an engine and model picked in the WebUI are no longer replaced at the next start
 
 **Before.** Choosing an engine *and* a model for the Base Cortex stores `{"engine": ..., "model": ...}` in `BASE_CORTEX`. At startup `_heal_cortex_config` compared that whole JSON string with the known engine names, never found it, took it for a removed engine and overwrote it with `_pick_preferred_cortex(...)`: the first enabled external endpoint alphabetically unless its name contains "zen". On 14 Nov that was `fish-audio`, a Vox-only endpoint, so no Cortex could be loaded and every message on every interface was dropped until the value was fixed by hand. The scope overrides (`TRAINER_CORTEX`, `GRILLO_CORTEX`, `LIVE_CORTEX`, `DSP_CORTEX`) holding an engine+model were reset to `Default` the same way.

@@ -780,7 +780,16 @@ class TelegramCalls:
         if self._app is None or self._lib is None:
             return
         state = self._calls.get(chat_id)
-        video = state.get("video") if state is not None else None
+        if state is None:
+            # No call with this chat (the caller hung up, or we left): py-tgcalls' play()
+            # on a chat that is not in a call starts a new outgoing call, which would
+            # ring the person back right after they hung up. This happens for the end
+            # tone and for a reply that was still being generated.
+            log_debug(
+                f"[telegram_call] not playing {path.name}: no call with {chat_id}"
+            )
+            return
+        video = state.get("video")
         try:
             # While the call has video, every stream carries the external camera too.
             stream = (

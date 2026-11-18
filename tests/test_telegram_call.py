@@ -324,6 +324,22 @@ async def test_the_caller_hanging_up_ends_the_call() -> None:
 
 
 @pytest.mark.asyncio
+async def test_nothing_is_played_after_the_caller_hung_up(tmp_path: Path) -> None:
+    """py-tgcalls' play() on a chat with no call places a new one: never ring them back."""
+    calls, app = await _started()
+    await app.handlers[("chat_update", _Status.INCOMING_CALL)](
+        None, SimpleNamespace(chat_id=TRAINER, status=_Status.INCOMING_CALL)
+    )
+    ended = app.handlers[("chat_update", _Status.DISCARDED_CALL | _Status.LEFT_CALL)]
+    app.played.clear()
+    await ended(None, SimpleNamespace(chat_id=TRAINER, status=_Status.DISCARDED_CALL))
+    reply = tmp_path / "late.wav"
+    await calls.play_file(TRAINER, reply)  # a reply that finished after the hang-up
+
+    assert app.played == []  # neither the end tone nor the late reply
+
+
+@pytest.mark.asyncio
 async def test_we_hanging_up_leaves_the_call_after_the_end_tone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
