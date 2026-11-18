@@ -479,3 +479,36 @@ def test_face_values_are_scaled_like_the_webui_does() -> None:
         scale("eyes_closed", 1.0, False) == 1.0
     )  # blinks, gaze and visemes are never scaled
     assert scale("aa", 0.4, False) == pytest.approx(0.4)
+
+
+def test_the_playing_animation_is_offered_to_a_renderer_without_a_browser(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """File on disk, descriptor and start time: what the clients get in the Karada payload."""
+    import core.animation_handler as ah
+    from datetime import datetime, timezone
+
+    server = KaradaStateServer()
+    assert server.get_animation_for_render() is None  # nothing playing yet
+
+    root = tmp_path / "repo"
+    clip = root / "skins" / "Rei" / "animations" / "think" / "Thinking.fbx"
+    clip.parent.mkdir(parents=True)
+    clip.write_bytes(b"fbx")
+    monkeypatch.setattr(ah, "__file__", str(root / "core" / "animation_handler.py"))
+    monkeypatch.setattr(
+        server,
+        "_resolve_animation_descriptor_for_state",
+        lambda animation, state: ("/skins/Rei/animations/think/Thinking.fbx", None),
+    )
+    server._current_animation_file = "Thinking.fbx"
+    server._current_animation_started_at = datetime.fromtimestamp(
+        1234.0, tz=timezone.utc
+    )
+    server._current_animation_descriptor = {"fps": 30, "play_once": True}
+
+    playing = server.get_animation_for_render()
+    assert playing is not None
+    assert playing["path"] == clip
+    assert playing["started_at"] == pytest.approx(1234.0)
+    assert playing["descriptor"] == {"fps": 30, "play_once": True}

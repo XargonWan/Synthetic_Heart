@@ -2721,6 +2721,38 @@ class KaradaStateServer:
                     put(target, value, override=True)
         return out
 
+    def get_animation_for_render(self) -> Optional[Dict[str, Any]]:
+        """The playing animation as a renderer without a browser needs it, or ``None``.
+
+        ``{"path": local Path of the clip, "descriptor": dict | None, "started_at": epoch
+        seconds | None, "state": logical state name}``: the same facts the clients get in the
+        Karada v2 payload (state + descriptor + ``started_at``), with the file resolved to disk.
+        """
+        try:
+            animation = self._current_animation_file
+            if not animation:
+                return None
+            state = self.current_state.value if self.current_state else None
+            resolved, descriptor = self._resolve_animation_descriptor_for_state(
+                animation, state
+            )
+            root = Path(__file__).resolve().parent.parent
+            path = root / resolved.lstrip("/") if resolved else None
+            if path is None or not path.is_file():
+                return None
+            current = self._current_animation_descriptor
+            return {
+                "path": path,
+                "descriptor": current if isinstance(current, dict) else descriptor,
+                "started_at": self._started_at_epoch(
+                    self._current_animation_started_at
+                ),
+                "state": state,
+            }
+        except Exception as exc:  # pragma: no cover - best effort
+            log_debug(f"[KaradaStateServer] no animation for the renderer: {exc}")
+            return None
+
     def get_active_vrm_path(self) -> Optional[Path]:
         """Local path of the active VRM model, or ``None`` when it cannot be told."""
         try:

@@ -1,5 +1,5 @@
-"""The SyntH's face as a live video source: renders frames on a worker thread, at the
-call's frame rate, from the Karada state, and hands each one to a sink.
+"""The SyntH as a live video source: renders frames on a worker thread, at the call's frame
+rate, from the Karada state (face and playing animation), and hands each one to a sink.
 
 The GL context lives on one dedicated thread (a single-thread executor): it is created
 there, used there and released there.
@@ -12,8 +12,11 @@ import time
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 from core.avatar_render.animator import AvatarAnimator, SpeechTrack
+from core.avatar_render.fbx import load_mixamo_clip
+from core.avatar_render.motion import AnimationRequest, MotionPlayer
 from core.avatar_render.renderer import AvatarPose, AvatarRenderer
 from core.avatar_render.vrm import load_vrm
 from core.logging_utils import log_debug, log_info, log_warning
@@ -38,6 +41,29 @@ def karada_state(speaking: bool = False) -> dict[str, float]:
     except Exception as exc:
         log_debug(f"[avatar_render] no Karada state: {exc!r}")
         return {}
+
+
+#: Reads the animation the Karada state server says is playing (``None``: none).
+AnimationReader = Callable[[], AnimationRequest | None]
+
+
+def karada_animation() -> AnimationRequest | None:
+    """The Karada state server's playing animation: its file, descriptor and start time."""
+    try:
+        from core.animation_handler import get_karada_state_server
+
+        playing = get_karada_state_server().get_animation_for_render()
+    except Exception as exc:
+        log_debug(f"[avatar_render] no Karada animation: {exc!r}")
+        return None
+    if not playing:
+        return None
+    return AnimationRequest(
+        path=playing["path"],
+        descriptor=playing.get("descriptor"),
+        started_at=playing.get("started_at"),
+        state=playing.get("state"),
+    )
 
 
 def resolve_model_path(configured: str = "") -> Path | None:
@@ -71,12 +97,17 @@ class AvatarVideoSource:
         fps: int,
         state_reader: StateReader = karada_state,
         exposure: float = 1.0,
+        animation_reader: AnimationReader = karada_animation,
     ) -> None:
         self._model_path = model_path
         self._width, self._height = width, height
         self._exposure = exposure
         self._interval = 1.0 / max(1, fps)
         self._state_reader = state_reader
+        self._animation_reader = animation_reader
+        self._motion = MotionPlayer(set(), 0.0, False)
+        self._loading: set[Path] = set()
+        self._loads: set[asyncio.Task[None]] = set()
         self._pool = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="avatar-render"
         )
@@ -92,6 +123,12 @@ class AvatarVideoSource:
         model = load_vrm(self._model_path)
         self._renderer = AvatarRenderer(
             model, self._width, self._height, self._exposure
+        )
+        model = getattr(self._renderer, "model", None)
+        self._motion = MotionPlayer(
+            set(getattr(model, "humanoid", {}) or {}),
+            float(getattr(self._renderer, "hips_height", 0.0)),
+            bool(getattr(model, "faces_minus_z", False)),
         )
         return self._renderer.gl_renderer
 
@@ -122,6 +159,8 @@ class AvatarVideoSource:
         if task is not None and task is not asyncio.current_task():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        for load in list(self._loads):
+            load.cancel()
         renderer, self._renderer = self._renderer, None
         if renderer is not None:
             try:
@@ -140,6 +179,32 @@ class AvatarVideoSource:
                 f"[avatar_render] no loudness from {Path(path).name}; the mouth stays shut"
             )
         self._speech = track
+
+    # -- the body --------------------------------------------------------------
+
+    async def _load_clip(self, path: Path) -> None:
+        """Read one animation off the event loop (about a tenth of a second each)."""
+        try:
+            clip = await asyncio.get_running_loop().run_in_executor(
+                None, load_mixamo_clip, path
+            )
+        except Exception as exc:
+            log_warning(f"[avatar_render] cannot play {path.name}: {exc!r}")
+            clip = None
+        self._motion.set_clip(path, clip)
+        self._loading.discard(path)
+
+    def _body(self) -> tuple[dict[str, Any], Any]:
+        """The Karada animation as bone rotations; nothing until its clip has been read."""
+        request = self._animation_reader()
+        if request is not None and request.path is not None:
+            known, _clip = self._motion.clip(request.path)
+            if not known and request.path not in self._loading:
+                self._loading.add(request.path)
+                task = asyncio.ensure_future(self._load_clip(request.path))
+                self._loads.add(task)
+                task.add_done_callback(self._loads.discard)
+        return self._motion.sample(request)
 
     # -- the render loop -------------------------------------------------------
 
@@ -171,6 +236,7 @@ class AvatarVideoSource:
                 speech_level=level,
                 expressions=self._state_reader(self._speech is not None),
             )
+            pose.bone_rotations, pose.hips_position = self._body()
             try:
                 frame = await loop.run_in_executor(self._pool, self._render, pose)
             except asyncio.CancelledError:

@@ -205,11 +205,14 @@ class VrmModel:
     # -- skeleton -----------------------------------------------------------
 
     def local_matrix(
-        self, index: int, rotation: np.ndarray | None = None
+        self,
+        index: int,
+        rotation: np.ndarray | None = None,
+        translation: Any = None,
     ) -> np.ndarray:
-        """Local transform of node ``index``; ``rotation`` (3x3) replaces its own."""
+        """Local transform of node ``index``; ``rotation`` (3x3) and ``translation`` replace its own."""
         node = self.nodes[index]
-        if "matrix" in node and rotation is None:
+        if "matrix" in node and rotation is None and translation is None:
             return np.array(node["matrix"], dtype=np.float32).reshape(4, 4).T
         out = np.eye(4, dtype=np.float32)
         r = (
@@ -219,7 +222,14 @@ class VrmModel:
         )
         scale = node.get("scale", (1.0, 1.0, 1.0))
         out[:3, :3] = r * np.array(scale, dtype=np.float32)[None, :]
-        out[:3, 3] = node.get("translation", (0.0, 0.0, 0.0))
+        if translation is not None:
+            out[:3, 3] = translation
+        elif "matrix" in node:
+            out[:3, 3] = (
+                np.array(node["matrix"], dtype=np.float32).reshape(4, 4).T[:3, 3]
+            )
+        else:
+            out[:3, 3] = node.get("translation", (0.0, 0.0, 0.0))
         return out
 
     def rest_rotation(self, index: int) -> np.ndarray:
@@ -231,17 +241,20 @@ class VrmModel:
         return _quat_to_matrix(node.get("rotation", (0, 0, 0, 1)))
 
     def world_matrices(
-        self, rotations: dict[int, np.ndarray] | None = None
+        self,
+        rotations: dict[int, np.ndarray] | None = None,
+        translations: dict[int, Any] | None = None,
     ) -> list[np.ndarray]:
-        """World matrix of every node; ``rotations`` overrides local rotations."""
+        """World matrix of every node; ``rotations`` / ``translations`` override local ones."""
         rotations = rotations or {}
+        translations = translations or {}
         worlds: list[np.ndarray | None] = [None] * len(self.nodes)
 
         def world(i: int) -> np.ndarray:
             cached = worlds[i]
             if cached is not None:
                 return cached
-            local = self.local_matrix(i, rotations.get(i))
+            local = self.local_matrix(i, rotations.get(i), translations.get(i))
             parent = self.parents.get(i)
             result = local if parent is None else world(parent) @ local
             worlds[i] = result

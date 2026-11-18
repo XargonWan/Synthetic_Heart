@@ -366,6 +366,7 @@ class _FakeRenderer:
         self, model: Any, width: int, height: int, exposure: float = 1.0
     ) -> None:
         self.gl_renderer = "fake-gl"
+        self.model = model
         self.poses: list[AvatarPose] = []
         self.closed = False
 
@@ -385,6 +386,59 @@ def fake_gl(monkeypatch: pytest.MonkeyPatch) -> type[_FakeRenderer]:
     monkeypatch.setattr(src, "AvatarRenderer", _FakeRenderer)
     monkeypatch.setattr(src, "load_vrm", lambda path: object())
     return _FakeRenderer
+
+
+@pytest.mark.asyncio
+async def test_the_source_plays_the_animation_the_karada_names(
+    fake_gl: type[_FakeRenderer], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from core.avatar_render.fbx import MixamoClip
+    from core.avatar_render.motion import AnimationRequest
+
+    turn = np.array([0.0, 0.7071068, 0.0, 0.7071068])  # a quarter turn about Y
+    clip = MixamoClip(
+        2.0, {"head": (np.array([0.0, 2.0]), np.stack([turn, turn]))}, None, 0.0
+    )
+    asked: list[Path] = []
+
+    def _read(path: Path) -> MixamoClip:
+        asked.append(path)
+        return clip
+
+    monkeypatch.setattr(src, "load_mixamo_clip", _read)
+    monkeypatch.setattr(
+        src,
+        "load_vrm",
+        lambda path: SimpleNamespace(humanoid={"head": 1}, faces_minus_z=False),
+    )
+    request = AnimationRequest(Path("think/Thinking.fbx"), None, None, "think")
+    frames: list[bytes] = []
+    source = src.AvatarVideoSource(
+        Path("m.vrm"),
+        64,
+        48,
+        50,
+        state_reader=lambda speaking: {},
+        animation_reader=lambda: request,
+    )
+    await source.start(frames.append)
+    try:
+        renderer = source._renderer
+        assert isinstance(renderer, _FakeRenderer)
+        for _ in range(100):
+            if any(p.bone_rotations for p in renderer.poses):
+                break
+            await asyncio.sleep(0.02)
+        # The clip is read once (off the loop), and from then on the head follows it.
+        posed = [p for p in renderer.poses if p.bone_rotations]
+        assert posed and asked == [Path("think/Thinking.fbx")]
+        assert posed[-1].bone_rotations["head"] @ np.array(
+            [0, 0, 1.0]
+        ) == pytest.approx([1, 0, 0], abs=1e-4)
+    finally:
+        await source.stop()
 
 
 @pytest.mark.asyncio

@@ -341,13 +341,28 @@ render of the model. ``CALL_VIDEO_SOURCE`` says where the frames come from:
   around 1.3 m, pulled back in a narrow frame) and lights (ambient 0.6, key 1.2, fill 0.4). Colours
   are computed in linear light and written as sRGB, as three.js does, and the model's MToon
   data is used: shade colour and its light/shade ramp, emission and world-space outlines
-  (VRM 0.x ``materialProperties`` and VRM 1.0 ``VRMC_materials_mtoon``). The arms are lowered
-  from the T-pose.
-* The animation is its own and small, **not** the Karada animation engine: a little head sway
-  and breathing, blinking, the emotion intensities of the Karada state server as expressions
-  (happy, sad, angry, relaxed, surprised), and the mouth following the loudness of the
-  SyntH's voice while it speaks. No FBX animations, no rim light or per-pixel masks: it looks
-  like the browser render, it is not identical. If the face looks washed out or too dark,
+  (VRM 0.x ``materialProperties`` and VRM 1.0 ``VRMC_materials_mtoon``). Without a Karada
+  animation the arms are lowered from the T-pose by hand.
+* The face is the Karada's: the renderer asks the Karada state server for the same face the WebUI
+  gets (``get_vrm_expression_weights``: the skin's own emotion presets, the playing animation's
+  timed expressions such as the eyes closed while thinking, and the transient expression
+  override, all translated with the persona's ``blendshape_map``). Emotions are scaled like the
+  WebUI does: a micro-expression at rest, in full (mouth-opening presets capped) while the
+  voice plays. On top of it come blinking and the mouth following the loudness of the SyntH's
+  voice while it speaks.
+* The body is the Karada's too: ``get_animation_for_render`` gives the renderer what the clients
+  get in the Karada v2 payload (the clip file, its descriptor and ``started_at``).
+  ``core/avatar_render/fbx.py`` reads the Mixamo FBX in Python, retargets it to the VRM
+  normalized humanoid like ``loadMixamoAnimation.js`` does and ``core/avatar_render/motion.py``
+  times it like the WebUI: the intro once, then the ``loop`` section (``think`` without a
+  descriptor splits the clip 20/60/20; ``play_once`` holds the last pose); a new clip fades in
+  from the previous pose over 0.35 s. A ``mask: upper_body`` clip leaves the legs and the hips
+  alone. So when the SyntH thinks the call shows the Thinking clip, when it writes the writing
+  one. A clip is read once, off the event loop; until then (or when the file cannot be read)
+  the avatar stands in the rest pose. **Not done:** the ``outro`` and the ``loop`` cross-fade
+  of a clip, the animation overlays and the eye movement of the WebUI. The camera is the fixed
+  close-up, so the legs are out of the picture. No rim light or per-pixel masks: it looks like
+  the browser render, it is not identical. If the face looks washed out or too dark,
   ``CALL_VIDEO_EXPOSURE`` scales the brightness.
 * **Nothing to install in the Docker image.** The ``Dockerfile`` installs Mesa's EGL and
   software rasteriser (llvmpipe: ``libegl1``, ``libegl-mesa0``, ``libgl1``,

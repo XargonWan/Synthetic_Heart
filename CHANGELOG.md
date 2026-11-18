@@ -16,6 +16,16 @@
 
 **Location.** `core/animation_handler.py`, `core/avatar_render/animator.py`, `core/avatar_render/source.py`, `docs/call_service.rst`, `tests/test_avatar_render.py`, `tests/test_animation_handler.py`.
 
+### feat(avatar-render): the server-drawn avatar plays the animation the Karada state names
+
+**Before.** The headless renderer only breathed and blinked: on a call you could not tell whether the SyntH was thinking, writing or idle.
+
+**Now.** `KaradaStateServer.get_animation_for_render()` gives the renderer the playing clip, its descriptor and `started_at`. `core/avatar_render/fbx.py` reads the Mixamo FBX (binary, numpy only), retargets it to the VRM normalized humanoid as `loadMixamoAnimation.js` does (rest-world conjugation, hips translation scaled to the model, VRM 0.x flip), and `core/avatar_render/motion.py` times it as the WebUI does (intro once, then the loop; play-once holds; `think` default split; 0.35 s fade between clips; `mask: upper_body`). The renderer turns normalized-bone rotations into raw-bone ones like three-vrm.
+
+**Not changed.** The `outro` and the loop cross-fade of a clip, animation overlays and eye movement are not reproduced; the legs are out of the close-up anyway. Checked on the real Rei clips and VRM without GL (arms come down from the T-pose in Idle, rise to the face in Thinking); not seen on screen here, since this sandbox has no EGL.
+
+**Location.** `core/avatar_render/fbx.py` and `motion.py` (new), `renderer.py`, `vrm.py`, `source.py`, `core/animation_handler.py`, `docs/call_service.rst`, `tests/test_avatar_motion.py` (new), `tests/test_avatar_render.py`, `tests/test_animation_handler.py`.
+
 ### fix(config): an engine and model picked in the WebUI are no longer replaced at the next start
 
 **Before.** Choosing an engine *and* a model for the Base Cortex stores `{"engine": ..., "model": ...}` in `BASE_CORTEX`. At startup `_heal_cortex_config` compared that whole JSON string with the known engine names, never found it, took it for a removed engine and overwrote it with `_pick_preferred_cortex(...)`: the first enabled external endpoint alphabetically unless its name contains "zen". On 14 Nov that was `fish-audio`, a Vox-only endpoint, so no Cortex could be loaded and every message on every interface was dropped until the value was fixed by hand. The scope overrides (`TRAINER_CORTEX`, `GRILLO_CORTEX`, `LIVE_CORTEX`, `DSP_CORTEX`) holding an engine+model were reset to `Default` the same way.

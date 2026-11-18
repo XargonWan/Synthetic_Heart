@@ -54,6 +54,12 @@ class AvatarPose:
     expressions: dict[str, float] = field(default_factory=dict)
     #: humanoid bone name -> 3x3 rotation, in the parent's frame, applied on top of rest
     bone_deltas: dict[str, np.ndarray] = field(default_factory=dict)
+    #: humanoid bone name -> 3x3 rotation of the VRM *normalized* bone (rest = identity, the
+    #: frame a Mixamo clip is retargeted to). Bones named here replace the rest pose, which
+    #: also stops the arms being lowered by hand: the clip puts them where they go.
+    bone_rotations: dict[str, np.ndarray] = field(default_factory=dict)
+    #: where the animation puts the hips (the model's local units), or ``None``
+    hips_position: np.ndarray | None = None
 
 
 def create_context() -> Any:
@@ -221,6 +227,26 @@ class AvatarRenderer:
         self._ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
 
         self._rest_rotations: dict[int, np.ndarray] = self._arm_rest_rotations()
+        # Rest world rotation of every node's parent: a normalized bone rotation Q becomes a
+        # raw bone rotation as parent^-1 * Q * parent * rest (what three-vrm does).
+        rest_worlds = model.world_matrices()
+        self._parent_rest: dict[int, np.ndarray] = {}
+        for index in model.humanoid.values():
+            parent = model.parents.get(index)
+            rot = (
+                rest_worlds[parent][:3, :3]
+                if parent is not None
+                else np.eye(3, dtype=np.float32)
+            )
+            scale = np.linalg.norm(rot, axis=0)
+            self._parent_rest[index] = (rot / np.where(scale == 0, 1, scale)).astype(
+                np.float32
+            )
+        hips = model.humanoid.get("hips")
+        #: height of the model's hips at rest, to scale a clip's hips translation to it
+        self.hips_height: float = (
+            float(abs(rest_worlds[hips][1, 3])) if hips is not None else 0.0
+        )
         self._prog["mvp"].write(self._camera(width / height).T.tobytes())
         # A VRM 0.x model faces -Z and three-vrm turns it to face +Z; here the model stays
         # put, so the lights (like the camera) are turned half a circle instead.
@@ -301,13 +327,25 @@ class AvatarRenderer:
     def render(self, pose: AvatarPose) -> bytes:
         """Draw ``pose`` and return the frame as planar I420 bytes."""
         model = self.model
-        rotations = dict(self._rest_rotations)
+        rotations = {} if pose.bone_rotations else dict(self._rest_rotations)
+        translations: dict[int, Any] = {}
+        for name, rotation in pose.bone_rotations.items():
+            node = model.humanoid.get(name)
+            if node is None:
+                continue
+            parent = self._parent_rest[node]
+            rotations[node] = (
+                parent.T @ rotation @ parent @ model.rest_rotation(node)
+            ).astype(np.float32)
+        hips_node = model.humanoid.get("hips")
+        if pose.hips_position is not None and hips_node is not None:
+            translations[hips_node] = np.asarray(pose.hips_position, dtype=np.float32)
         for name, delta in pose.bone_deltas.items():
             node = model.humanoid.get(name)
             if node is not None:
                 base = rotations.get(node, model.rest_rotation(node))
                 rotations[node] = (delta @ base).astype(np.float32)
-        worlds = model.world_matrices(rotations)
+        worlds = model.world_matrices(rotations, translations)
 
         # Morph weights per (glTF mesh, target) from the expressions.
         weights: dict[tuple[int, int], float] = {}
