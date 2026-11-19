@@ -194,6 +194,8 @@ class SoulRepository(Protocol):
 
     async def upsert_memcell(self, cell: MemCell) -> None: ...
 
+    async def get_memcell(self, cell_id: str) -> MemCell | None: ...
+
     async def list_unconsolidated_memcells(self, limit: int = 200) -> list[MemCell]: ...
 
     async def set_memcell_scene(self, cell_id: str, scene_id: str) -> None: ...
@@ -260,6 +262,8 @@ class SoulRepository(Protocol):
         linked_session_ids: Collection[str] | None = None,
         limit: int = 5,
         candidate_limit: int | None = None,
+        source_kinds: Collection[str] | None = None,
+        session_prefixes: Collection[str] | None = None,
     ) -> list[MemCellRecall]: ...
 
     async def get_active_dsp(self) -> DspVersion | None: ...
@@ -270,7 +274,26 @@ class SoulRepository(Protocol):
         self, *, today: date, limit: int = 5000
     ) -> list[MemCellSummary]: ...
 
-    async def delete_memcells(self, ids: list[str]) -> int: ...
+    async def delete_memcells(
+        self, ids: list[str], *, reason: str = "evicted", merged_into: str | None = None
+    ) -> int: ...
+
+    async def purge_archive(
+        self, *, older_than: datetime, reason: str | None = None
+    ) -> int: ...
+
+    async def list_recent_memcells(
+        self, session_id: str, limit: int = 50
+    ) -> list[MemCell]: ...
+
+    async def list_recent_shared_memcells(
+        self, *, exclude_session_id: str, limit: int = 200
+    ) -> list[MemCell]: ...
+
+
+# A trace longer than this is a transcript, not a memory: it is never a duplicate
+# candidate (it would match on its format, not on its subject).
+_SHARED_CANDIDATE_MAX_CHARS = 3000
 
 
 @dataclass(slots=True)
@@ -278,6 +301,10 @@ class InMemorySoulRepository:
     """Simple in-memory repository for tests and local dry runs."""
 
     memcells: dict[str, MemCell] = field(default_factory=dict)
+    # Cells removed by ``delete_memcells``, mirroring ``mem_cells_archive``; the
+    # metadata says why, into what and when.
+    evicted_memcells: dict[str, MemCell] = field(default_factory=dict)
+    evicted_meta: dict[str, dict[str, Any]] = field(default_factory=dict)
     scenes: dict[str, MemScene] = field(default_factory=dict)
     kg_triples: list[KgTriple] = field(default_factory=list)
     foresight_signals: list[ForesightSignal] = field(default_factory=list)
@@ -288,6 +315,9 @@ class InMemorySoulRepository:
 
     async def upsert_memcell(self, cell: MemCell) -> None:
         self.memcells[cell.id] = cell
+
+    async def get_memcell(self, cell_id: str) -> MemCell | None:
+        return self.memcells.get(cell_id)
 
     async def list_unconsolidated_memcells(self, limit: int = 200) -> list[MemCell]:
         cells = [c for c in self.memcells.values() if not c.consolidated]
@@ -472,6 +502,8 @@ class InMemorySoulRepository:
         linked_session_ids: Collection[str] | None = None,
         limit: int = 5,
         candidate_limit: int | None = None,
+        source_kinds: Collection[str] | None = None,
+        session_prefixes: Collection[str] | None = None,
     ) -> list[MemCellRecall]:
         del limit
         candidate_cap = max(1, candidate_limit or 20)
@@ -481,6 +513,12 @@ class InMemorySoulRepository:
 
         for cell in self.memcells.values():
             if not cell.episodic_trace.strip():
+                continue
+            if source_kinds and cell.source_kind not in source_kinds:
+                continue
+            if session_prefixes and not str(cell.session_id).startswith(
+                tuple(session_prefixes)
+            ):
                 continue
             similarity = _cosine_similarity(query_embedding, cell.embedding)
             lexical_score = _lexical_overlap_score(query_tokens, cell)
@@ -518,6 +556,8 @@ class InMemorySoulRepository:
     ) -> list[MemCellSummary]:
         summaries: list[MemCellSummary] = []
         for cell in self.memcells.values():
+            if cell.source_kind != "chat":
+                continue
             has_foresight = any(s.valid_until >= today for s in cell.foresight_signals)
             summaries.append(
                 MemCellSummary(
@@ -533,13 +573,55 @@ class InMemorySoulRepository:
         summaries.sort(key=lambda s: s.event_timestamp)
         return summaries[:limit]
 
-    async def delete_memcells(self, ids: list[str]) -> int:
+    async def delete_memcells(
+        self, ids: list[str], *, reason: str = "evicted", merged_into: str | None = None
+    ) -> int:
         removed = 0
         for cell_id in ids:
             if cell_id in self.memcells:
-                del self.memcells[cell_id]
+                self.evicted_memcells[cell_id] = self.memcells.pop(cell_id)
+                self.evicted_meta[cell_id] = {
+                    "reason": reason,
+                    "merged_into": merged_into,
+                    "evicted_at": datetime.now(timezone.utc),
+                }
                 removed += 1
         return removed
+
+    async def purge_archive(
+        self, *, older_than: datetime, reason: str | None = None
+    ) -> int:
+        doomed = [
+            cell_id
+            for cell_id, meta in self.evicted_meta.items()
+            if meta["evicted_at"] < older_than
+            and (reason is None or meta["reason"] == reason)
+        ]
+        for cell_id in doomed:
+            self.evicted_memcells.pop(cell_id, None)
+            self.evicted_meta.pop(cell_id, None)
+        return len(doomed)
+
+    async def list_recent_memcells(
+        self, session_id: str, limit: int = 50
+    ) -> list[MemCell]:
+        cells = [c for c in self.memcells.values() if c.session_id == session_id]
+        cells.sort(key=lambda c: c.event_timestamp, reverse=True)
+        return cells[:limit]
+
+    async def list_recent_shared_memcells(
+        self, *, exclude_session_id: str, limit: int = 200
+    ) -> list[MemCell]:
+        cells = [
+            c
+            for c in self.memcells.values()
+            if c.session_id != exclude_session_id
+            and c.visibility == "shared"
+            and c.source_kind == "chat"
+            and len(c.episodic_trace) <= _SHARED_CANDIDATE_MAX_CHARS
+        ]
+        cells.sort(key=lambda c: c.event_timestamp, reverse=True)
+        return cells[:limit]
 
 
 @dataclass(slots=True)
@@ -610,6 +692,16 @@ class PostgresSoulRepository:
             # NULL means "written before the distilling extractor existed", which
             # is exactly the set the WebUI's re-distil button has to catch up.
             "ALTER TABLE mem_cells ADD COLUMN IF NOT EXISTS distilled_at TIMESTAMPTZ",
+            # Provenance of ingested (non-chat) cells; see ``MemCell.source_kind``.
+            "ALTER TABLE mem_cells ADD COLUMN IF NOT EXISTS source_kind TEXT NOT NULL DEFAULT 'chat'",
+            "ALTER TABLE mem_cells ADD COLUMN IF NOT EXISTS source_key TEXT",
+            "ALTER TABLE mem_cells ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'shared'",
+            "ALTER TABLE mem_cells ADD COLUMN IF NOT EXISTS participants JSONB NOT NULL DEFAULT '[]'::jsonb",
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_mem_cells_source_key
+                ON mem_cells (source_key) WHERE source_key IS NOT NULL
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_mem_cells_source_kind ON mem_cells (source_kind)",
             "CREATE INDEX IF NOT EXISTS idx_mem_cells_distilled_at ON mem_cells (distilled_at)",
             """
             CREATE TABLE IF NOT EXISTS mem_cell_vectors (
@@ -643,6 +735,46 @@ class PostgresSoulRepository:
                 updated_at TIMESTAMPTZ NOT NULL
             )
             """,
+            # Curator evictions land here before the row is deleted, so a cell the
+            # curator removes can always be put back (see
+            # ``scripts/restore_curator_evicted_cells.py``). Before this table the
+            # delete was final: a live store had lost ~95 % of everything it ever
+            # compiled, leaving only ``mem_scenes`` as a tombstone.
+            """
+            CREATE TABLE IF NOT EXISTS mem_cells_archive (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                episodic_trace TEXT NOT NULL,
+                atomic_facts JSONB NOT NULL DEFAULT '[]'::jsonb,
+                emotional_tag JSONB NOT NULL,
+                foresight_signals JSONB NOT NULL DEFAULT '[]'::jsonb,
+                event_timestamp TIMESTAMPTZ NOT NULL,
+                retrieval_count INTEGER NOT NULL DEFAULT 0,
+                explicit_importance REAL NOT NULL DEFAULT 0,
+                consolidated BOOLEAN NOT NULL DEFAULT FALSE,
+                scene_id TEXT,
+                distilled_at TIMESTAMPTZ,
+                source_kind TEXT NOT NULL DEFAULT 'chat',
+                source_key TEXT,
+                visibility TEXT NOT NULL DEFAULT 'shared',
+                participants JSONB NOT NULL DEFAULT '[]'::jsonb,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                evicted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                reason TEXT NOT NULL DEFAULT 'evicted',
+                merged_into TEXT
+            )
+            """,
+            # The archive is not forever: rows are purged by age (see purge_archive).
+            # Columns the archive gained after it was first created: ``CREATE TABLE IF
+            # NOT EXISTS`` leaves an existing table as it was, so each needs its ALTER.
+            "ALTER TABLE mem_cells_archive ADD COLUMN IF NOT EXISTS source_kind TEXT NOT NULL DEFAULT 'chat'",
+            "ALTER TABLE mem_cells_archive ADD COLUMN IF NOT EXISTS source_key TEXT",
+            "ALTER TABLE mem_cells_archive ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'shared'",
+            "ALTER TABLE mem_cells_archive ADD COLUMN IF NOT EXISTS participants JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE mem_cells_archive ADD COLUMN IF NOT EXISTS reason TEXT NOT NULL DEFAULT 'evicted'",
+            "ALTER TABLE mem_cells_archive ADD COLUMN IF NOT EXISTS merged_into TEXT",
+            "CREATE INDEX IF NOT EXISTS idx_mem_cells_archive_evicted_at ON mem_cells_archive (evicted_at)",
             """
             CREATE TABLE IF NOT EXISTS kg_triples (
                 id BIGSERIAL PRIMARY KEY,
@@ -740,6 +872,7 @@ class PostgresSoulRepository:
                 resolved_at TIMESTAMPTZ
             )
             """,
+            "ALTER TABLE situational_notes ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'shared'",
             "CREATE INDEX IF NOT EXISTS idx_situational_active ON situational_notes(status, valid_until) WHERE status='active'",
             "CREATE INDEX IF NOT EXISTS idx_situational_subject ON situational_notes(subject)",
             "CREATE INDEX IF NOT EXISTS idx_situational_valid_until ON situational_notes(valid_until)",
@@ -780,11 +913,12 @@ class PostgresSoulRepository:
                 INSERT INTO mem_cells (
                     id, session_id, episodic_trace, atomic_facts, emotional_tag,
                     foresight_signals, event_timestamp, retrieval_count, explicit_importance,
-                    consolidated, scene_id, distilled_at, updated_at
+                    consolidated, scene_id, distilled_at, source_kind, source_key,
+                    visibility, participants, updated_at
                 )
                 VALUES (
                     $1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7,
-                    $8, $9, $10, $11, $12, NOW()
+                    $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, NOW()
                 )
                 ON CONFLICT (id)
                 DO UPDATE SET
@@ -802,6 +936,14 @@ class PostgresSoulRepository:
                     -- does not carry a stamp (a backfill, an embedding repair) must
                     -- never clear one.
                     distilled_at = COALESCE(EXCLUDED.distilled_at, mem_cells.distilled_at),
+                    source_kind = EXCLUDED.source_kind,
+                    source_key = COALESCE(EXCLUDED.source_key, mem_cells.source_key),
+                    visibility = EXCLUDED.visibility,
+                    participants = CASE
+                        WHEN EXCLUDED.participants = '[]'::jsonb
+                        THEN mem_cells.participants
+                        ELSE EXCLUDED.participants
+                    END,
                     updated_at = NOW()
                 """,
                 cell.id,
@@ -835,6 +977,10 @@ class PostgresSoulRepository:
                 cell.consolidated,
                 cell.scene_id,
                 cell.distilled_at,
+                cell.source_kind,
+                cell.source_key,
+                cell.visibility,
+                json.dumps(cell.participants),
             )
 
             if cell.embedding:
@@ -849,6 +995,23 @@ class PostgresSoulRepository:
                     cell.id,
                     vector_literal,
                 )
+
+    async def get_memcell(self, cell_id: str) -> MemCell | None:
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
+                    c.foresight_signals, c.event_timestamp, c.retrieval_count,
+                    c.explicit_importance, c.consolidated, c.scene_id,
+                    c.distilled_at, c.source_kind, c.source_key, c.visibility, c.participants
+                FROM mem_cells c
+                WHERE c.id = $1
+                """,
+                cell_id,
+            )
+        return self._row_to_memcell(row) if row is not None else None
 
     async def list_unconsolidated_memcells(self, limit: int = 200) -> list[MemCell]:
         pool = await self._get_pool()
@@ -1035,10 +1198,10 @@ class PostgresSoulRepository:
                 INSERT INTO situational_notes (
                     id, note_type, subject, summary, priority, confidence,
                     valid_from, valid_until, effective_at, expired_at,
-                    source, status, session_id, created_at, updated_at
+                    source, status, session_id, visibility, created_at, updated_at
                 )
                 VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW()
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW(), NOW()
                 )
                 ON CONFLICT (id)
                 DO UPDATE SET
@@ -1054,6 +1217,7 @@ class PostgresSoulRepository:
                     source = EXCLUDED.source,
                     status = EXCLUDED.status,
                     session_id = EXCLUDED.session_id,
+                    visibility = EXCLUDED.visibility,
                     updated_at = NOW()
                 """,
                 note.id,
@@ -1069,6 +1233,7 @@ class PostgresSoulRepository:
                 note.source,
                 note.status,
                 note.session_id,
+                note.visibility,
             )
         return note.id
 
@@ -1085,7 +1250,7 @@ class PostgresSoulRepository:
                     SELECT id, note_type, subject, summary, priority, confidence,
                            valid_from, valid_until, effective_at, expired_at,
                            source, status, session_id, created_at, updated_at,
-                           resolved_at
+                           resolved_at, visibility
                     FROM situational_notes
                     WHERE status = 'active'
                       AND valid_until > $1
@@ -1102,7 +1267,7 @@ class PostgresSoulRepository:
                     SELECT id, note_type, subject, summary, priority, confidence,
                            valid_from, valid_until, effective_at, expired_at,
                            source, status, session_id, created_at, updated_at,
-                           resolved_at
+                           resolved_at, visibility
                     FROM situational_notes
                     WHERE status = 'active'
                       AND valid_until > $1
@@ -1291,7 +1456,8 @@ class PostgresSoulRepository:
                 SELECT
                     c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
                     c.foresight_signals, c.event_timestamp, c.retrieval_count, c.explicit_importance,
-                    c.consolidated, c.scene_id, c.distilled_at
+                    c.consolidated, c.scene_id, c.distilled_at,
+                    c.source_kind, c.source_key, c.visibility, c.participants
                 FROM mem_cells c
                 LEFT JOIN mem_cell_vectors v ON v.mem_cell_id = c.id
                 WHERE v.mem_cell_id IS NULL
@@ -1314,7 +1480,8 @@ class PostgresSoulRepository:
                 SELECT
                     c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
                     c.foresight_signals, c.event_timestamp, c.retrieval_count, c.explicit_importance,
-                    c.consolidated, c.scene_id, c.distilled_at
+                    c.consolidated, c.scene_id, c.distilled_at,
+                    c.source_kind, c.source_key, c.visibility, c.participants
                 FROM mem_cells c
                 WHERE c.event_timestamp < $1
                   AND c.episodic_trace IS NOT NULL
@@ -1351,7 +1518,8 @@ class PostgresSoulRepository:
                 SELECT
                     c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
                     c.foresight_signals, c.event_timestamp, c.retrieval_count, c.explicit_importance,
-                    c.consolidated, c.scene_id, c.distilled_at
+                    c.consolidated, c.scene_id, c.distilled_at,
+                    c.source_kind, c.source_key, c.visibility, c.participants
                 FROM mem_cells c
                 WHERE c.distilled_at IS NULL
                   AND c.episodic_trace IS NOT NULL
@@ -1372,6 +1540,8 @@ class PostgresSoulRepository:
         linked_session_ids: Collection[str] | None = None,
         limit: int = 5,
         candidate_limit: int | None = None,
+        source_kinds: Collection[str] | None = None,
+        session_prefixes: Collection[str] | None = None,
     ) -> list[MemCellRecall]:
         del limit
         normalized_query = " ".join((query_text or "").split())[:400]
@@ -1381,6 +1551,17 @@ class PostgresSoulRepository:
         candidate_cap = max(1, candidate_limit or 20)
         query_tokens = _tokenize_search_text(normalized_query)
         vector_literal = self._vector_literal(query_embedding)
+        kinds_filter = sorted(source_kinds) if source_kinds else None
+        # Prefix match on the session id, as LIKE patterns; ``_`` and ``%`` in a
+        # prefix are escaped so a session name is never read as a wildcard.
+        session_filter = (
+            [
+                p.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+                for p in sorted(session_prefixes)
+            ]
+            if session_prefixes
+            else None
+        )
         pool = await self._get_pool()
         async with pool.acquire() as conn:
             vector_rows = await conn.fetch(
@@ -1390,6 +1571,12 @@ class PostgresSoulRepository:
                         v.mem_cell_id,
                         (1 - (v.embedding <=> $1::vector)) AS vector_similarity
                     FROM mem_cell_vectors v
+                    JOIN mem_cells kc ON kc.id = v.mem_cell_id
+                    -- The kind filter belongs INSIDE the candidate window: applied
+                    -- after the LIMIT it would starve a "journal only" recall of
+                    -- every candidate that happened to be a chat cell.
+                    WHERE ($3::text[] IS NULL OR kc.source_kind = ANY($3::text[]))
+                      AND ($4::text[] IS NULL OR kc.session_id LIKE ANY($4::text[]))
                     ORDER BY v.embedding <=> $1::vector ASC
                     LIMIT $2
                 )
@@ -1397,6 +1584,7 @@ class PostgresSoulRepository:
                     c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
                     c.foresight_signals, c.event_timestamp, c.retrieval_count, c.explicit_importance,
                     c.consolidated, c.scene_id, c.distilled_at,
+                    c.source_kind, c.source_key, c.visibility, c.participants,
                     vc.vector_similarity
                 FROM vector_candidates vc
                 JOIN mem_cells c ON c.id = vc.mem_cell_id
@@ -1406,6 +1594,8 @@ class PostgresSoulRepository:
                 """,
                 vector_literal,
                 candidate_cap,
+                kinds_filter,
+                session_filter,
             )
 
             text_rows: list[Any] = []
@@ -1420,10 +1610,13 @@ class PostgresSoulRepository:
                             c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
                             c.foresight_signals, c.event_timestamp, c.retrieval_count, c.explicit_importance,
                             c.consolidated, c.scene_id, c.distilled_at,
+                    c.source_kind, c.source_key, c.visibility, c.participants,
                             COALESCE((1 - (v.embedding <=> $2::vector)), 0.0) AS vector_similarity
                         FROM mem_cells c
                         LEFT JOIN mem_cell_vectors v ON v.mem_cell_id = c.id
                         WHERE c.episodic_trace <> ''
+                          AND ($4::text[] IS NULL OR c.source_kind = ANY($4::text[]))
+                          AND ($5::text[] IS NULL OR c.session_id LIKE ANY($5::text[]))
                           AND (
                               c.episodic_trace % $1
                               OR to_tsvector('simple', c.episodic_trace)
@@ -1442,6 +1635,8 @@ class PostgresSoulRepository:
                         normalized_query,
                         vector_literal,
                         candidate_cap,
+                        kinds_filter,
+                        session_filter,
                     )
                 )
 
@@ -1526,6 +1721,11 @@ class PostgresSoulRepository:
                         WHERE (fs->>'valid_until')::DATE >= $2
                     ) AS has_active_foresight
                 FROM mem_cells c
+                -- Only conversation cells are curated. Ingested cells (diary
+                -- blocks, day summaries, legacy memories) have their origin in
+                -- another table and are not a chat's leftovers: with them counted
+                -- the cap would archive the calmest diary blocks.
+                WHERE c.source_kind = 'chat'
                 ORDER BY c.event_timestamp ASC
                 LIMIT $1
                 """,
@@ -1545,19 +1745,112 @@ class PostgresSoulRepository:
             for row in rows
         ]
 
-    async def delete_memcells(self, ids: list[str]) -> int:
+    async def delete_memcells(
+        self, ids: list[str], *, reason: str = "evicted", merged_into: str | None = None
+    ) -> int:
         if not ids:
             return 0
         pool = await self._get_pool()
         async with pool.acquire() as conn:
-            status = await conn.execute(
-                "DELETE FROM mem_cells WHERE id = ANY($1::text[])",
-                ids,
-            )
+            async with conn.transaction():
+                # Archive first, in the same transaction: a failed copy aborts the
+                # delete, so a cell is never lost without a restorable copy.
+                await conn.execute(
+                    """
+                    INSERT INTO mem_cells_archive (
+                        id, session_id, episodic_trace, atomic_facts,
+                        emotional_tag, foresight_signals, event_timestamp,
+                        retrieval_count, explicit_importance, consolidated,
+                        scene_id, distilled_at, source_kind, source_key, visibility,
+                        participants, created_at, updated_at, reason, merged_into
+                    )
+                    SELECT
+                        id, session_id, episodic_trace, atomic_facts,
+                        emotional_tag, foresight_signals, event_timestamp,
+                        retrieval_count, explicit_importance, consolidated,
+                        scene_id, distilled_at, source_kind, source_key, visibility,
+                        participants, created_at, updated_at, $2, $3
+                    FROM mem_cells
+                    WHERE id = ANY($1::text[])
+                    ON CONFLICT (id) DO NOTHING
+                    """,
+                    ids,
+                    reason,
+                    merged_into,
+                )
+                status = await conn.execute(
+                    "DELETE FROM mem_cells WHERE id = ANY($1::text[])",
+                    ids,
+                )
         parts = str(status).split()
         if len(parts) == 2 and parts[0].upper() == "DELETE":
             return int(parts[1])
         return 0
+
+    async def purge_archive(
+        self, *, older_than: datetime, reason: str | None = None
+    ) -> int:
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            status = await conn.execute(
+                """
+                DELETE FROM mem_cells_archive
+                WHERE evicted_at < $1 AND ($2::text IS NULL OR reason = $2)
+                """,
+                older_than,
+                reason,
+            )
+        return _affected_rows(status, "DELETE")
+
+    async def list_recent_memcells(
+        self, session_id: str, limit: int = 50
+    ) -> list[MemCell]:
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
+                    c.foresight_signals, c.event_timestamp, c.retrieval_count,
+                    c.explicit_importance, c.consolidated, c.scene_id,
+                    c.distilled_at, c.source_kind, c.source_key, c.visibility,
+                    c.participants
+                FROM mem_cells c
+                WHERE c.session_id = $1
+                ORDER BY c.event_timestamp DESC
+                LIMIT $2
+                """,
+                session_id,
+                limit,
+            )
+        return [self._row_to_memcell(row) for row in rows]
+
+    async def list_recent_shared_memcells(
+        self, *, exclude_session_id: str, limit: int = 200
+    ) -> list[MemCell]:
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    c.id, c.session_id, c.episodic_trace, c.atomic_facts, c.emotional_tag,
+                    c.foresight_signals, c.event_timestamp, c.retrieval_count,
+                    c.explicit_importance, c.consolidated, c.scene_id,
+                    c.distilled_at, c.source_kind, c.source_key, c.visibility,
+                    c.participants
+                FROM mem_cells c
+                WHERE c.session_id <> $1
+                  AND c.visibility = 'shared'
+                  AND c.source_kind = 'chat'
+                  AND length(c.episodic_trace) <= $3
+                ORDER BY c.event_timestamp DESC
+                LIMIT $2
+                """,
+                exclude_session_id,
+                limit,
+                _SHARED_CANDIDATE_MAX_CHARS,
+            )
+        return [self._row_to_memcell(row) for row in rows]
 
     async def set_active_dsp(self, dsp: DspVersion) -> None:
         pool = await self._get_pool()
@@ -1664,7 +1957,27 @@ class PostgresSoulRepository:
             consolidated=bool(row["consolidated"]),
             scene_id=cast(str | None, row["scene_id"]),
             distilled_at=cast(datetime | None, _optional_column(row, "distilled_at")),
+            source_kind=str(_optional_column(row, "source_kind") or "chat"),
+            source_key=cast(str | None, _optional_column(row, "source_key")),
+            visibility=str(_optional_column(row, "visibility") or "shared"),
+            participants=self._as_people(_optional_column(row, "participants")),
         )
+
+    @staticmethod
+    def _as_people(value: Any) -> list[dict[str, str]]:
+        """The ``participants`` column as a list of ``{"id", "name"}`` dicts."""
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except ValueError:
+                return []
+        if not isinstance(value, list):
+            return []
+        return [
+            {str(k): str(v) for k, v in item.items()}
+            for item in value
+            if isinstance(item, dict)
+        ]
 
     @staticmethod
     def _as_dict_container(value: Any) -> dict[str, Any]:
@@ -1740,4 +2053,5 @@ class PostgresSoulRepository:
             created_at=_to_dt(row["created_at"]),
             updated_at=_to_dt(row["updated_at"]),
             resolved_at=_to_dt(row["resolved_at"]),
+            visibility=str(_optional_column(row, "visibility") or "shared"),
         )

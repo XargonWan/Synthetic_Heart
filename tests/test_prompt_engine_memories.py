@@ -1286,3 +1286,104 @@ def test_memory_merge_key_keeps_distinct_empty_snippets_apart():
     first = [{"source": "memories", "id": 1, "snippet": ""}]
     second = [{"source": "memories", "id": 2, "snippet": ""}]
     assert len(pe._merge_memory_entries(first, second)) == 2
+
+
+@pytest.mark.asyncio
+async def test_search_memories_skips_the_legacy_tiers_once_soul_holds_them(
+    monkeypatch,
+) -> None:
+    """With MEMORY_LEGACY_TIERS_ENABLED off only the raw chat tier is queried."""
+
+    class DummyCursor:
+        def __init__(self) -> None:
+            self.queries: list[str] = []
+            self.params: list[list] = []
+
+        async def execute(self, sql: str, params=None) -> None:
+            self.queries.append(sql)
+            self.params.append(list(params) if params else [])
+
+        async def fetchall(self) -> list:
+            return []
+
+        async def __aenter__(self) -> "DummyCursor":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    class DummyConn:
+        def __init__(self) -> None:
+            self.cursor_obj = DummyCursor()
+
+        async def __aenter__(self) -> "DummyConn":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def cursor(self) -> DummyCursor:
+            return self.cursor_obj
+
+    conn_instance = DummyConn()
+    monkeypatch.setattr(scm, "get_conn_ctx", lambda: conn_instance)
+    monkeypatch.setattr(scm, "_get_db_type", lambda: "postgres")
+    monkeypatch.setattr(scm, "_legacy_tiers_enabled", lambda: False)
+
+    await scm.search_memories(keywords=["garden"], limit=5)
+
+    queries = conn_instance.cursor_obj.queries
+    # The chat tier is all that is left, so it is capped (limit 5 would be 15 rows).
+    assert any(
+        params and params[-1] == scm._CHAT_ONLY_LIMIT * 3
+        for params in conn_instance.cursor_obj.params
+    )
+    assert queries, "the chat tier must still run"
+    assert not any("FROM memories" in sql for sql in queries)
+    assert not any("FROM ai_diary" in sql for sql in queries)
+    assert any("FROM chat_history_cache" in sql for sql in queries)
+
+
+@pytest.mark.asyncio
+async def test_search_memories_never_returns_observer_copies(monkeypatch) -> None:
+    class DummyCursor:
+        def __init__(self) -> None:
+            self.queries: list[str] = []
+
+        async def execute(self, sql: str, params=None) -> None:
+            self.queries.append(sql)
+
+        async def fetchall(self) -> list:
+            return []
+
+        async def __aenter__(self) -> "DummyCursor":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    class DummyConn:
+        def __init__(self) -> None:
+            self.cursor_obj = DummyCursor()
+
+        async def __aenter__(self) -> "DummyConn":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def cursor(self) -> DummyCursor:
+            return self.cursor_obj
+
+    conn_instance = DummyConn()
+    monkeypatch.setattr(scm, "get_conn_ctx", lambda: conn_instance)
+    monkeypatch.setattr(scm, "_get_db_type", lambda: "postgres")
+    monkeypatch.setattr(scm, "_legacy_tiers_enabled", lambda: True)
+
+    await scm.search_memories(tags=["food"], limit=5)
+
+    memory_queries = [
+        q for q in conn_instance.cursor_obj.queries if "FROM memories" in q
+    ]
+    assert memory_queries
+    assert all("<> 'grillo_observer'" in q for q in memory_queries)

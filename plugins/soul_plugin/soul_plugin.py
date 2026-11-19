@@ -36,6 +36,11 @@ from core.soul.repository import (
     PostgresSoulRepository,
     SoulRepository,
 )
+from core.soul.service import (
+    is_housekeeping_session,
+    on_demand_session_prefixes,
+    source_base,
+)
 from core.soul.situational import is_same_circumstance, subject_tokens
 from core.soul.strategies import (
     RuleBasedDspExtractor,
@@ -193,6 +198,92 @@ register_exposed_var(
 )
 
 register_exposed_var(
+    "SOUL_CURATOR_MAX_MEMORIES",
+    label="Curator memory cap",
+    default=5000,
+    value_type=int,
+    ui_type="number",
+    description=(
+        "How many MemCells the store may hold before the curator evicts the "
+        "calmest ones. The previous hard-coded 500 was roughly a month of "
+        "conversation. Evicted cells are archived (mem_cells_archive), never "
+        "lost."
+    ),
+    scope="plugins",
+    component="soul_plugin",
+    advanced=True,
+)
+
+register_exposed_var(
+    "SOUL_CURATOR_EVICT_ONLY_OVER_CAP",
+    label="Curator evicts only over the cap",
+    default=1,
+    value_type=int,
+    ui_type="bool",
+    description=(
+        "On: a calm memory is kept while the store is under its cap and is the "
+        "first to go once it is over. Off: the old rule, where every memory "
+        "below the salience threshold is deleted after its grace period "
+        "whatever the store size (a live store lost ~95% of its memories that "
+        "way, and kept mostly what had already been recalled)."
+    ),
+    scope="plugins",
+    component="soul_plugin",
+    advanced=True,
+)
+
+register_exposed_var(
+    "MEMORY_LEGACY_TIERS_ENABLED",
+    label="Keyword-search the legacy memories and diary",
+    default=1,
+    value_type=int,
+    ui_type="bool",
+    description=(
+        "On: every turn also keyword-searches the legacy `memories` table and the "
+        "AI diary. Turn it OFF once scripts/ingest_legacy_into_soul.py has filed "
+        "them in SOUL: SOUL's recall then returns the same entries ranked by "
+        "meaning, and leaving the keyword tiers on injects them a second time. "
+        "Raw chat history is still searched either way."
+    ),
+    scope="plugins",
+    component="soul_plugin",
+    advanced=True,
+)
+
+register_exposed_var(
+    "SOUL_ARCHIVE_RETENTION_DAYS",
+    label="Memory archive retention (days)",
+    default=365,
+    value_type=int,
+    ui_type="number",
+    description=(
+        "How long a memory the curator evicted or a consolidation merged away stays "
+        "in the archive before the daily job deletes it for good. The archive is a "
+        "safety net, not storage: without an expiry it only grows. 0 keeps "
+        "everything."
+    ),
+    scope="plugins",
+    component="soul_plugin",
+    advanced=True,
+)
+
+register_exposed_var(
+    "SOUL_ARCHIVE_COPY_RETENTION_DAYS",
+    label="Archive retention for repeats and system text (days)",
+    default=30,
+    value_type=int,
+    ui_type="number",
+    description=(
+        "Archived cells that were repeats of another cell, or system text that "
+        "should never have been a memory, hold nothing the surviving cell lacks, so "
+        "they expire sooner. 0 keeps everything."
+    ),
+    scope="plugins",
+    component="soul_plugin",
+    advanced=True,
+)
+
+register_exposed_var(
     "SOUL_TEMPORAL_INJECT_LIMIT",
     label="Situational notes injected per prompt",
     default=8,
@@ -316,9 +407,26 @@ class _SessionState:
     last_decay_applied: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
+    # ``dm`` / ``group`` as the interface reported it for the latest message
+    # (``core.chat_context.resolve_chat_kind``), or None when it could not tell.
+    chat_kind: str | None = None
+    # Set by the Debrief when it judges the current exchange to have been shared in
+    # confidence. Everything compiled from the current buffer window is then
+    # ``private`` whatever kind of chat it was; cleared once that window compiles.
+    force_private: bool = False
+    # Humans who spoke in the current buffer window, by id (name as last seen). It
+    # is stamped on the cells compiled from the window as ``participants``.
+    window_participants: dict[str, str] = field(default_factory=dict)
 
 
 _SOUL_RECALL_LIMIT = 5
+# At most this many of those slots go to ingested cells (diary entries, day
+# summaries, retired memories). They hold the persona's own narrative and rank well
+# against almost any question, so uncapped they filled the whole block and no
+# conversation memory got in (seen on the first A/B pair: 5 of 5 diary cells).
+# Unused slots still fall through to them, so a store with few chat cells is not
+# left empty.
+_SOUL_RECALL_INGESTED_MAX = 2
 _SOUL_RECALL_CANDIDATE_LIMIT = 24
 _SOUL_CONSOLIDATE_COOLDOWN_SECONDS = 900
 # How far before a buffer's first line a compile looks in `chat_history_cache`.
@@ -465,6 +573,17 @@ class SoulPlugin(PluginBase):
     display_name = "SOUL Plugin"
     allow_static_injection_stale_fallback = True
     static_injection_cache_ttl_seconds = 300.0
+    # The stale-fallback payload is scoped to the conversation it was built for
+    # (recalled memories, session state, the emotion delta and the situational notes,
+    # some of which may be private to that chat). Nothing is shared across chats on a
+    # timeout; on the normal path shared notes still reach every chat.
+    static_injection_global_keys: frozenset[str] = frozenset()
+
+    def static_injection_scope(
+        self, message: Any = None, context_memory: dict[str, Any] | None = None
+    ) -> str:
+        """Cache scope for ``gather_static_injections``: the chat's interface path."""
+        return self._extract_interface_path(message, context_memory)
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         super().__init__(config)
@@ -491,6 +610,8 @@ class SoulPlugin(PluginBase):
         self._recall_cooldown_at: dict[str, float] = {}
         self._scheduler_task: asyncio.Task[None] | None = None
         self._last_rollup_date: date | None = None
+        self._last_curator_date: date | None = None
+        self._schedule_state_loaded = False
         self._last_consolidated_at: datetime | None = None
         # Manual re-distil pass (WebUI button): the task and its live counters.
         self._redistil_task: asyncio.Task[None] | None = None
@@ -678,7 +799,19 @@ class SoulPlugin(PluginBase):
         if self._scheduler_task and not self._scheduler_task.done():
             return
         self._scheduler_task = asyncio.create_task(self._scheduler_loop())
-        asyncio.create_task(self._run_curator_background())
+        # No curator pass here: the scheduler tick runs it once a day, and it only
+        # does so after the config store is readable. A run at start() read the
+        # "last ran" day before the store was ready, saw none, and repeated the
+        # pass on every restart.
+        if isinstance(self._repo, InMemorySoulRepository):
+            # Everything SOUL learns would be gone at the next restart. Say so at
+            # error level: a deployment on a non-PostgreSQL main database used to
+            # fall back to this without a word.
+            log_error(
+                "[soul_plugin] Long-term memory is NOT persistent: the repository is "
+                "in memory (the main database is not PostgreSQL, or its DSN is empty). "
+                "Memories, notes and retractions will be lost on restart."
+            )
         log_info("[soul_plugin] Started")
 
     async def stop(self) -> None:
@@ -753,6 +886,23 @@ class SoulPlugin(PluginBase):
             )
             session.last_decay_applied = now
 
+        # The emotional subsystem can be switched off for a whole deployment
+        # (README: Plugins tab -> Emotion Manager -> off, needed to comply with the
+        # anthropomorphic-AI rules some jurisdictions apply). SOUL's own mood engine
+        # is part of that subsystem: left running it would still tag turns with
+        # joy/fear/sad/anger and bias recall by mood.
+        emotions_on = self._emotions_enabled()
+
+        if message is not None:
+            try:
+                from core.chat_context import resolve_chat_kind
+
+                kind = resolve_chat_kind(message, interface_path)
+                if kind:
+                    session.chat_kind = kind
+            except Exception:
+                pass
+
         incoming_text = self._extract_message_text(message)
         if incoming_text:
             # Buffer the line WITH its speaker. The rule-based extractor stores
@@ -763,10 +913,12 @@ class SoulPlugin(PluginBase):
             self._append_buffer(
                 interface_path, self._labelled_buffer_line(message, incoming_text)
             )
-            event = self._infer_emotional_event(incoming_text)
-            session.emotional_state = self._emotion_engine.apply_event(
-                session.emotional_state, event
-            )
+            self._note_participant(session, message)
+            if emotions_on:
+                event = self._infer_emotional_event(incoming_text)
+                session.emotional_state = self._emotion_engine.apply_event(
+                    session.emotional_state, event
+                )
 
         session.last_seen = now
 
@@ -791,11 +943,14 @@ class SoulPlugin(PluginBase):
         ]
         foresight_text = "\n".join(foresight_lines) if foresight_lines else "- None"
 
+        emotion_line = (
+            f"emotion_snapshot: {json.dumps(turn_delta['e'])}\n" if emotions_on else ""
+        )
         session_state = (
             "<session_state>\n"
             f"interface_path: {interface_path}\n"
             f"active_foresight:\n{foresight_text}\n"
-            f"emotion_snapshot: {json.dumps(turn_delta['e'])}\n"
+            f"{emotion_line}"
             "</session_state>"
         )
 
@@ -804,7 +959,7 @@ class SoulPlugin(PluginBase):
             if active_dsp
             else "<user_profile>No profile compiled yet.</user_profile>",
             "soul_session_state": session_state,
-            "soul_turn_emotion_delta": json.dumps(turn_delta),
+            "soul_turn_emotion_delta": json.dumps(turn_delta) if emotions_on else "{}",
             "soul_active_foresight": [
                 {
                     "content": signal.content,
@@ -814,10 +969,14 @@ class SoulPlugin(PluginBase):
                 for signal in foresight[:8]
             ],
             "soul_recalled_memories": recalled_memories,
-            "soul_temporal_context": await self._get_temporal_context(now),
+            "soul_temporal_context": await self._get_temporal_context(
+                now, session_id=self._normalize_session_id(interface_path)
+            ),
         }
 
-    async def _get_temporal_context(self, now: datetime) -> list[dict[str, Any]]:
+    async def _get_temporal_context(
+        self, now: datetime, session_id: str | None = None
+    ) -> list[dict[str, Any]]:
         """Return active situational notes as renderable dicts.
 
         Gated on ``SOUL_TEMPORAL_ENABLED``; fail-safe on any error.
@@ -834,6 +993,9 @@ class SoulPlugin(PluginBase):
             result: list[dict[str, Any]] = []
             for note in notes:
                 if note.created_at and note.created_at < cutoff:
+                    continue
+                if note.visibility == "private" and note.session_id != session_id:
+                    # Told in confidence in another chat: not shown here.
                     continue
                 result.append(
                     {
@@ -1010,8 +1172,58 @@ class SoulPlugin(PluginBase):
                 log_error(f"[soul_plugin] Scheduler tick failed: {exc}")
             await asyncio.sleep(max(5, self._get_scheduler_interval()))
 
+    _ROLLUP_DATE_KEY = "SOUL_LAST_ROLLUP_DATE"
+    _CURATOR_DATE_KEY = "SOUL_LAST_CURATOR_DATE"
+
+    @staticmethod
+    async def _read_persisted_date(key: str) -> date | None:
+        # ``get_persisted_value`` reads the database itself. ``get_value`` called
+        # from the event loop answers with the default until the async load has
+        # run, which at startup is always: a restart then looked like "never ran
+        # today" and repeated the rollup and the curator.
+        try:
+            from core.config_manager import config_registry
+
+            raw = str(await config_registry.get_persisted_value(key, "") or "").strip()
+            return date.fromisoformat(raw) if raw else None
+        except Exception:
+            return None
+
+    @staticmethod
+    async def _persist_date(key: str, value: date) -> None:
+        try:
+            from core.config_manager import config_registry
+
+            await config_registry.set_value(
+                key, value.isoformat(), require_persist=True
+            )
+        except Exception as exc:
+            log_debug(f"[soul_plugin] Could not persist {key}: {exc}")
+
+    async def _load_schedule_state(self) -> None:
+        """Restore the last rollup/curator day so a restart does not repeat them.
+
+        ``_last_rollup_date`` used to live only in memory: every process start ran
+        the nightly rollup again, writing a fresh evidence row from the same 24 h
+        window each time. The DSP builders count a fact as stable after two
+        occurrences, so restarts inflated that count (40 profile rebuilds in
+        four months on the live store).
+        """
+        if self._schedule_state_loaded:
+            return
+        self._schedule_state_loaded = True
+        if self._last_rollup_date is None:
+            self._last_rollup_date = await self._read_persisted_date(
+                self._ROLLUP_DATE_KEY
+            )
+        if self._last_curator_date is None:
+            self._last_curator_date = await self._read_persisted_date(
+                self._CURATOR_DATE_KEY
+            )
+
     async def _tick_scheduler(self) -> None:
         now = datetime.now(timezone.utc)
+        await self._load_schedule_state()
 
         idle_cutoff_seconds = self._get_compile_idle_seconds()
         for interface_path, session in list(self._sessions.items()):
@@ -1019,7 +1231,14 @@ class SoulPlugin(PluginBase):
             if idle_seconds >= idle_cutoff_seconds and self._buffers.get(
                 interface_path
             ):
-                await self._compile_interface(interface_path)
+                # One interface failing must not skip the others, the backfill or
+                # the daily jobs below: the failure is retried on the next tick.
+                try:
+                    await self._compile_interface(interface_path)
+                except Exception as exc:
+                    log_warning(
+                        f"[soul_plugin] Compile failed for {interface_path}: {exc}"
+                    )
 
         backfilled = await self._compiler.backfill_embeddings(limit=50)
         if backfilled > 0:
@@ -1031,6 +1250,13 @@ class SoulPlugin(PluginBase):
         if self._last_rollup_date != today:
             await self._run_rollup_now()
             self._last_rollup_date = today
+            await self._persist_date(self._ROLLUP_DATE_KEY, today)
+
+        if self._last_curator_date != today:
+            await self._run_curator_now()
+            self._last_curator_date = today
+            await self._persist_date(self._CURATOR_DATE_KEY, today)
+            await self._purge_archive_now(now)
 
     async def _compile_interface(
         self,
@@ -1038,39 +1264,93 @@ class SoulPlugin(PluginBase):
         *,
         force_consolidate: bool = False,
     ) -> int:
-        lines = self._buffers.get(interface_path, [])
+        lines = list(self._buffers.get(interface_path, []))
         if not lines:
             return 0
+        # Lines arrive on the live path (``get_static_injection``) while this
+        # compile awaits the LLM, the embedder and the consolidation. Only the
+        # lines compiled here are dropped afterwards; anything appended meanwhile
+        # stays queued for the next pass instead of being wiped with the buffer.
 
         # Roleplay/explicit turns stay in the buffer (they still drive emotion
         # and memory recall) but are excluded from what gets compiled into
         # memcells — in-character fiction is not a durable event record.
         from core.soul.roleplay import strip_roleplay_lines
 
+        if is_housekeeping_session(self._normalize_session_id(interface_path)):
+            # System text (the diary consolidator's transcripts, web-search notices)
+            # is not a conversation: compiled, it filled a live store with 354
+            # near-identical cells that recall then had to be told to ignore.
+            self._drop_compiled_lines(interface_path, lines)
+            return 0
+
         transcript = strip_roleplay_lines(
             await self._compile_transcript(interface_path, lines)
         )
         if not transcript.strip():
-            self._buffers[interface_path] = []
-            self._buffer_started.pop(interface_path, None)
+            self._drop_compiled_lines(interface_path, lines)
             return 0
 
         safe_session_id = self._normalize_session_id(interface_path)
 
+        # What was said in a one-to-one chat stays in that chat (MemCell.visibility).
+        session = self._sessions.get(interface_path)
+        private_window = bool(session and session.force_private)
+        visibility = (
+            "private"
+            if session and (session.chat_kind == "dm" or session.force_private)
+            else "shared"
+        )
         created = await self._compiler.post_session_compile(
             current_date=datetime.now(timezone.utc).date(),
             transcript=transcript,
             session_id=safe_session_id,
+            visibility=visibility,
+            participants=[
+                {"id": pid, "name": name}
+                for pid, name in (
+                    session.window_participants.items() if session else ()
+                )
+            ],
         )
         consolidated = await self._maybe_consolidate(force=force_consolidate)
 
-        self._buffers[interface_path] = []
-        self._buffer_started.pop(interface_path, None)
+        self._drop_compiled_lines(interface_path, lines)
+        if session is not None:
+            session.window_participants.clear()
+        if private_window and session is not None:
+            session.force_private = False
         log_info(
             f"[soul_plugin] Compiled {len(created)} memcells for {interface_path} "
             f"(consolidated {consolidated} scene(s))"
         )
         return len(created)
+
+    def _drop_compiled_lines(self, interface_path: str, compiled: list[str]) -> None:
+        """Remove the lines that were compiled, keep anything that arrived since.
+
+        The buffer is trimmed from the front once it passes 200 lines, so while a
+        slow compile ran the compiled lines may have moved: they are matched by
+        content (the longest tail of the compiled lines that still opens the
+        buffer), not by position.
+        """
+        current = list(self._buffers.get(interface_path, []))
+        dropped = 0
+        for offset in range(len(compiled) + 1):
+            tail = compiled[offset:]
+            if tail and current[: len(tail)] == tail:
+                dropped = len(tail)
+                break
+        remaining = current[dropped:]
+        self._buffers[interface_path] = remaining
+        if remaining:
+            # Re-anchor on the leftovers: they arrived after the compiled window.
+            # (The cache read still reaches back a 30-minute margin before this
+            # anchor, so the next compile may repeat a few already-compiled lines
+            # rather than drop any.)
+            self._buffer_started[interface_path] = datetime.now(timezone.utc)
+        else:
+            self._buffer_started.pop(interface_path, None)
 
     async def _compile_transcript(self, interface_path: str, lines: list[str]) -> str:
         """Both sides of the conversation, or the buffered lines when they are all
@@ -1213,15 +1493,81 @@ class SoulPlugin(PluginBase):
         log_info(f"[soul_plugin] Nightly rollup result: {result}")
         return result
 
-    async def _run_curator_now(self, *, max_memories: int = 500) -> dict[str, int]:
+    @staticmethod
+    def _get_curator_max_memories() -> int:
+        try:
+            from core.config_manager import config_registry
+
+            return max(
+                1,
+                int(
+                    config_registry.get_value(
+                        "SOUL_CURATOR_MAX_MEMORIES", 5000, value_type=int
+                    )
+                ),
+            )
+        except Exception:
+            return 5000
+
+    @staticmethod
+    def _is_curator_over_cap_only() -> bool:
+        try:
+            from core.config_manager import config_registry
+
+            return bool(
+                int(
+                    config_registry.get_value(
+                        "SOUL_CURATOR_EVICT_ONLY_OVER_CAP", 1, value_type=int
+                    )
+                )
+            )
+        except Exception:
+            return True
+
+    @staticmethod
+    def _archive_retention_days(key: str, default: int) -> int:
+        try:
+            from core.config_manager import config_registry
+
+            return max(0, int(config_registry.get_value(key, default, value_type=int)))
+        except Exception:
+            return default
+
+    async def _purge_archive_now(self, now: datetime) -> dict[str, int]:
+        """Delete archived cells past their retention (once a day, after the curator)."""
+        removed = {"copies": 0, "evicted": 0}
+        copy_days = self._archive_retention_days("SOUL_ARCHIVE_COPY_RETENTION_DAYS", 30)
+        if copy_days:
+            for reason in ("duplicate", "housekeeping"):
+                removed["copies"] += await self._repo.purge_archive(
+                    older_than=now - timedelta(days=copy_days), reason=reason
+                )
+        days = self._archive_retention_days("SOUL_ARCHIVE_RETENTION_DAYS", 365)
+        if days:
+            removed["evicted"] = await self._repo.purge_archive(
+                older_than=now - timedelta(days=days)
+            )
+        if removed["copies"] or removed["evicted"]:
+            log_info(f"[soul_plugin] Archive purge: {removed}")
+        return removed
+
+    async def _run_curator_now(
+        self, *, max_memories: int | None = None
+    ) -> dict[str, int]:
         result = await self._compiler.run_curator(
             current_date=datetime.now(timezone.utc).date(),
-            max_memories=max_memories,
+            max_memories=(
+                max_memories
+                if max_memories is not None
+                else self._get_curator_max_memories()
+            ),
+            evict_only_over_cap=self._is_curator_over_cap_only(),
         )
         log_info(
             f"[soul_plugin] Memory Curator: inspected={result.inspected} "
             f"removed={result.removed} retained={result.retained} "
-            f"(future={result.kept_future} important={result.kept_important})"
+            f"(future={result.kept_future} important={result.kept_important} "
+            f"calm={result.kept_calm})"
         )
         return {
             "inspected": result.inspected,
@@ -1230,12 +1576,6 @@ class SoulPlugin(PluginBase):
             "kept_future": result.kept_future,
             "kept_important": result.kept_important,
         }
-
-    async def _run_curator_background(self) -> None:
-        try:
-            await self._run_curator_now()
-        except Exception as exc:
-            log_warning(f"[soul_plugin] Background curator run failed: {exc}")
 
     async def _get_status(self) -> dict[str, object]:
         dsp = await self._repo.get_active_dsp()
@@ -1265,12 +1605,14 @@ class SoulPlugin(PluginBase):
                                 interface_path LIKE 'vessel/%'
                              OR interface_path LIKE 'grillo/%'
                           ))
-                        ORDER BY created_at ASC
+                        ORDER BY created_at DESC
                         LIMIT 500
                         """,
                         (cutoff,),
                     )
-                    rows = await cur.fetchall()
+                    # Newest 500 of the window, replayed oldest-first: ASC + LIMIT
+                    # kept the OLDEST 500 and dropped the end of a busy day.
+                    rows = list(reversed(await cur.fetchall()))
                     parts: list[str] = []
                     for row in rows:
                         if not row or not row[2]:
@@ -1368,6 +1710,15 @@ class SoulPlugin(PluginBase):
         return "user"
 
     @classmethod
+    def _note_participant(cls, session: "_SessionState", message: Any) -> None:
+        """Remember who spoke in this window (humans only, never a bot)."""
+        user = getattr(message, "from_user", None)
+        identity = getattr(user, "id", None)
+        if user is None or identity is None or getattr(user, "is_bot", False):
+            return
+        session.window_participants[str(identity)] = cls._buffer_speaker(message)
+
+    @classmethod
     def _labelled_buffer_line(cls, message: Any, text: str) -> str:
         """Prefix a buffered line with who said it.
 
@@ -1401,11 +1752,12 @@ class SoulPlugin(PluginBase):
 
         query_embedding = await self._compiler.embedder.embed(normalized_query)
         safe_session_id = self._normalize_session_id(interface_path)
+        linked_sessions = self._linked_recall_sessions(safe_session_id)
         candidates = await self._repo.recall_memories(
             query_text=normalized_query,
             query_embedding=query_embedding,
             session_id=safe_session_id,
-            linked_session_ids=self._linked_recall_sessions(safe_session_id),
+            linked_session_ids=linked_sessions,
             limit=_SOUL_RECALL_LIMIT,
             candidate_limit=_SOUL_RECALL_CANDIDATE_LIMIT,
         )
@@ -1427,6 +1779,18 @@ class SoulPlugin(PluginBase):
                 continue
             if self._should_exclude_recalled_memory(cell):
                 continue
+            # TODO(privacy): ``visibility`` only covers cells compiled from a chat the
+            # interface reports as one-to-one (and the Telegram cells backfilled by
+            # scripts/backfill_cell_visibility.py). Cells from other interfaces are
+            # still ``shared`` unless the Debrief judges the exchange confidential,
+            # and journal cells carry no audience at all.
+            if (
+                cell.visibility == "private"
+                and cell.session_id != safe_session_id
+                and cell.session_id not in (linked_sessions or ())
+            ):
+                # A memory of someone else's private chat: not repeated here.
+                continue
             if skip_undistilled and cell.distilled_at is None:
                 continue
             # Roleplay/explicit exchanges are in-character fiction, not a stable
@@ -1446,7 +1810,7 @@ class SoulPlugin(PluginBase):
             memory_emotion = self._normalize_memory_emotion(
                 cell.emotional_tag.dominant_emotion
             )
-            if memory_emotion is not None:
+            if memory_emotion is not None and self._emotions_enabled():
                 match.score = self._emotion_engine.mood_congruent_boost(
                     session.emotional_state,
                     memory_emotion,
@@ -1465,10 +1829,14 @@ class SoulPlugin(PluginBase):
         )
         selected: list[MemCellRecall] = []
         seen_traces: set[str] = set()
+        seen_sources: set[str] = set()
         # Cells held back only because they were injected moments ago. They are
         # kept as a fallback so a small or very repetitive store still fills the
         # block rather than going empty.
         cooling: list[MemCellRecall] = []
+        # Ingested cells beyond their share; only used if slots are left over.
+        overflow: list[MemCellRecall] = []
+        ingested_selected = 0
         cooldown_seconds = _soul_recall_cooldown_seconds()
         now_cooldown = time.monotonic()
         for match in reranked:
@@ -1479,19 +1847,44 @@ class SoulPlugin(PluginBase):
             if key and key in seen_traces:
                 continue
             seen_traces.add(key)
+            is_ingested = match.cell.source_kind != "chat"
+            if is_ingested and match.cell.source_key:
+                # Blocks of one long diary entry all match the same topic: one of
+                # them is enough, the rest would tell the same day again.
+                source = (
+                    f"{match.cell.source_kind}:{source_base(match.cell.source_key)}"
+                )
+                if source in seen_sources:
+                    continue
+                seen_sources.add(source)
+            if is_ingested and ingested_selected >= _SOUL_RECALL_INGESTED_MAX:
+                overflow.append(match)
+                continue
             if cooldown_seconds > 0.0:
                 cooldown_key = _recall_cooldown_key(safe_session_id, match.cell.id)
-                last_recall = self._recall_cooldown_at.get(cooldown_key, 0.0)
-                if now_cooldown - last_recall < cooldown_seconds:
+                # ``time.monotonic()`` counts from the machine's boot, so a default of
+                # 0.0 made every never-seen cell look "recalled just now" during the
+                # first ``cooldown_seconds`` after a boot and recall returned nothing.
+                last_recall = self._recall_cooldown_at.get(cooldown_key)
+                if (
+                    last_recall is not None
+                    and now_cooldown - last_recall < cooldown_seconds
+                ):
                     cooling.append(match)
                     continue
             selected.append(match)
+            if is_ingested:
+                ingested_selected += 1
             if len(selected) >= _SOUL_RECALL_LIMIT:
                 break
 
         # Nothing (or too little) new to show: fall back to the freshest held-back
         # cells instead of recalling nothing at all.
         for match in cooling:
+            if len(selected) >= _SOUL_RECALL_LIMIT:
+                break
+            selected.append(match)
+        for match in overflow:
             if len(selected) >= _SOUL_RECALL_LIMIT:
                 break
             selected.append(match)
@@ -1512,8 +1905,12 @@ class SoulPlugin(PluginBase):
         for match in selected:
             try:
                 cell_id = str(match.cell.id)
-                last_bump = self._retrieval_bump_at.get(cell_id, 0.0)
-                if now_monotonic - last_bump < _SOUL_RETRIEVAL_BUMP_MIN_INTERVAL_SEC:
+                last_bump = self._retrieval_bump_at.get(cell_id)
+                if (
+                    last_bump is not None
+                    and now_monotonic - last_bump
+                    < _SOUL_RETRIEVAL_BUMP_MIN_INTERVAL_SEC
+                ):
                     # Already counted recently: a turn builds several prompts, so
                     # an unthrottled bump counts one decision many times.
                     continue
@@ -1586,7 +1983,12 @@ class SoulPlugin(PluginBase):
         session_id = str(cell.session_id or "").strip().lower()
         trace = " ".join(str(cell.episodic_trace or "").split()).lower()
 
-        if session_id == "nightly" or session_id.startswith("diary_merge:"):
+        # Housekeeping sessions hold system text, not a conversation (see
+        # ``core.soul.service.is_housekeeping_session``); on-demand sessions only
+        # matter when the conversation is about their subject.
+        if is_housekeeping_session(session_id) or session_id.startswith(
+            on_demand_session_prefixes()
+        ):
             return True
 
         # Grillo self-initiated proactive entries store the routing preamble as
@@ -1641,7 +2043,16 @@ class SoulPlugin(PluginBase):
             "SOUL recalled memory",
             cell.event_timestamp.astimezone(timezone.utc).date().isoformat(),
         ]
-        if cell.session_id == active_session_id:
+        kind_label = {
+            "journal": "my diary",
+            "diary_day": "my diary, day summary",
+            "legacy_memory": "older memory",
+        }.get(cell.source_kind)
+        if kind_label:
+            # An ingested cell belongs to no conversation. Say what it is: a diary
+            # line is what the persona itself thought, not something a user said.
+            header_parts.append(kind_label)
+        elif cell.session_id == active_session_id:
             header_parts.append("same chat")
         else:
             # Recall is not scoped to the active conversation, so say which
@@ -1975,6 +2386,49 @@ class SoulPlugin(PluginBase):
         private attribute.
         """
         return self._repo
+
+    @staticmethod
+    def _emotions_enabled() -> bool:
+        """False when the Emotion Manager plugin has been switched off."""
+        try:
+            from core.config_manager import config_registry
+
+            return bool(
+                config_registry.get_value(
+                    "PLUGIN_ENABLED__emotion_manager", True, value_type=bool
+                )
+            )
+        except Exception:
+            return True
+
+    def session_id_for(self, interface_path: str) -> str:
+        """The session id SOUL files an interface path under (what cells and private
+        notes carry as ``session_id``)."""
+        return self._normalize_session_id(interface_path)
+
+    def mark_conversation_private(self, interface_path: str) -> None:
+        """Mark what is being said in this chat as shared in confidence.
+
+        Called by the Debrief when it judges the exchange confidential. The cells
+        compiled from the current buffer window become ``private`` (recalled only in
+        this chat), which covers interfaces that cannot say whether a chat is one to
+        one. Conservative on purpose: the whole window is marked, not one line.
+        """
+        session = self._sessions.get(interface_path)
+        if session is None:
+            session = _SessionState()
+            self._sessions[interface_path] = session
+        session.force_private = True
+
+    def get_service(self) -> Any:
+        """The :class:`core.soul.service.SoulService` over this plugin's store.
+
+        What other components use to file text for later recall or to rank stored
+        cells; prefer it to ``get_repository`` for anything but notes/retractions.
+        """
+        from core.soul.service import SoulService
+
+        return SoulService(self._repo, self._compiler.embedder)
 
     def _build_repository(self) -> SoulRepository:
         backend = self._get_repository_backend()

@@ -199,3 +199,54 @@ async def test_soul_cutover_updates_state(
         "premigration-legacy-soul-postgres-soul_memory-"
     )
     assert await_args.kwargs["reason"] == "pre_soul_migration"
+
+
+@pytest.mark.asyncio
+async def test_soul_cutover_keeps_distillation_and_retractions() -> None:
+    """The copy must carry ``distilled_at`` and the ``retracted_claims`` table.
+
+    Both used to be missing from the specs: every migrated cell then read as
+    undistilled (hidden from recall until a re-distil) and every retraction the
+    trainer had made vanished.
+    """
+    from core import db_cutover
+
+    by_name = {spec.name: spec for spec in db_cutover._SOUL_TABLE_SPECS}
+    assert "distilled_at" in by_name["mem_cells"].columns
+    assert "retracted_claims" in by_name
+    assert "status" in by_name["retracted_claims"].columns
+
+
+@pytest.mark.asyncio
+async def test_soul_cutover_copies_only_columns_the_source_has() -> None:
+    from core import db_cutover
+
+    class _Source:
+        async def fetch(self, query: str, *args: object) -> list[dict[str, str]]:
+            # An old source schema, before distillation and provenance existed.
+            return [
+                {"column_name": name}
+                for name in (
+                    "id",
+                    "session_id",
+                    "episodic_trace",
+                    "atomic_facts",
+                    "emotional_tag",
+                    "foresight_signals",
+                    "event_timestamp",
+                    "retrieval_count",
+                    "explicit_importance",
+                    "consolidated",
+                    "scene_id",
+                    "created_at",
+                    "updated_at",
+                )
+            ]
+
+    spec = next(s for s in db_cutover._SOUL_TABLE_SPECS if s.name == "mem_cells")
+    restricted = await db_cutover._restrict_to_source_columns(_Source(), spec, "public")
+
+    assert "distilled_at" not in restricted.columns
+    assert "source_kind" not in restricted.columns
+    assert restricted.columns[0] == "id"
+    assert "episodic_trace" in restricted.columns

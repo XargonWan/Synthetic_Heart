@@ -9,6 +9,11 @@ from typing import Any, Callable, Protocol, cast
 
 from core.logging_utils import log_debug, log_info, log_warning
 
+from .dedupe import (
+    content_words,
+    find_near_duplicate,
+    union_participants,
+)
 from .models import (
     CurationResult,
     CuratorDecision,
@@ -82,6 +87,14 @@ class LangfuseTraceLike(Protocol):
 
 _FUTURE_DATE_RE = re.compile(r"\b(20\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))\b")
 _CURATOR_SALIENCE_KEEP_THRESHOLD = 0.4
+# How many of a session's latest cells a new one is compared against for repeats.
+_DEDUPE_LOOKBACK_CELLS = 60
+# How many recent ``shared`` cells of other chats a new shared cell is compared with.
+_DEDUPE_SHARED_LOOKBACK_CELLS = 200
+# A distilled cell with at most this many content words and no fact or dated plan
+# says too little to be worth a memory (a leftover greeting, a lone word).
+_MIN_CONTENT_WORDS = 2
+
 _CURATOR_HALF_LIFE_SECONDS = 14 * 24 * 3600
 # Grace period before a cell may be removed for low salience (7 days by default).
 # Reason: recency contributes at most 0.2 to the salience formula while the
@@ -238,14 +251,34 @@ class SoulCompiler:
         current_date: date,
         transcript: str,
         session_id: str,
+        visibility: str = "shared",
+        participants: list[dict[str, str]] | None = None,
     ) -> list[str]:
         """Extract and persist MemCells after a session.
 
         Relative temporal language is converted to absolute dates before storing.
+        ``visibility`` is stamped on every cell: ``private`` for a one-to-one chat
+        (see ``MemCell.visibility``), ``shared`` otherwise. ``participants`` (who
+        spoke in the window) is stamped too.
+
+        A cell that repeats one already filed for the same session (almost every word
+        shared, same audience) is not written again: the existing cell absorbs it,
+        keeping the more complete text and the union of the participants.
         """
 
         resolver = AbsoluteTimeResolver(current_date=current_date)
         created_ids: list[str] = []
+        people = list(participants or [])
+        try:
+            recent = list(
+                await self.repository.list_recent_memcells(
+                    session_id, limit=_DEDUPE_LOOKBACK_CELLS
+                )
+            )
+        except Exception:
+            recent = []
+        recent.extend(await self._shared_candidates(session_id, visibility))
+        skipped_small = 0
 
         with maybe_langfuse_trace(
             "post_session_compile",
@@ -259,11 +292,27 @@ class SoulCompiler:
             for raw_cell in extracted:
                 episodic_trace = resolver.resolve_text(raw_cell.episodic_trace)
                 atomic_facts = [resolver.resolve_text(f) for f in raw_cell.atomic_facts]
+                if (
+                    not atomic_facts
+                    and not raw_cell.foresight_signals
+                    and len(content_words(episodic_trace)) <= _MIN_CONTENT_WORDS
+                ):
+                    skipped_small += 1
+                    continue
                 embedding = await self.embedder.embed(episodic_trace)
 
                 cell_timestamp = raw_cell.timestamp
                 if cell_timestamp.tzinfo is None:
                     cell_timestamp = cell_timestamp.replace(tzinfo=now_utc().tzinfo)
+
+                repeat = find_near_duplicate(
+                    episodic_trace, recent, visibility=visibility
+                )
+                if repeat is not None:
+                    await self._absorb_repeat(
+                        repeat, episodic_trace, atomic_facts, embedding, people
+                    )
+                    continue
 
                 memcell = MemCell(
                     id=new_memcell_id(session_id, cell_timestamp),
@@ -274,6 +323,8 @@ class SoulCompiler:
                     event_timestamp=cell_timestamp,
                     session_id=session_id,
                     embedding=embedding,
+                    visibility=visibility,
+                    participants=list(people),
                     distilled_at=(
                         now_utc()
                         if getattr(self.memcell_extractor, "distils_content", False)
@@ -281,6 +332,7 @@ class SoulCompiler:
                     ),
                 )
                 await self.repository.upsert_memcell(memcell)
+                recent.insert(0, memcell)
 
                 for signal in memcell.foresight_signals:
                     await self.repository.upsert_foresight_signal(signal)
@@ -639,6 +691,7 @@ class SoulCompiler:
         *,
         current_date: date,
         max_memories: int = 500,
+        evict_only_over_cap: bool = False,
     ) -> CurationResult:
         """Classify all MemCells and delete low-value ones.
 
@@ -646,6 +699,14 @@ class SoulCompiler:
         If the retained count still exceeds max_memories, the lowest-salience
         KEEP_IMPORTANT entries are evicted until the limit is met.
         KEEP_FUTURE entries are never evicted by the overflow pass.
+
+        With ``evict_only_over_cap`` a ``REMOVE`` verdict stops being a deletion
+        order and becomes an eviction *preference*: calm cells survive while the
+        store is under ``max_memories`` and are the first to go once it is over.
+        The salience rule alone deleted cells on age however empty the store was
+        (a live store sat at 94 cells against a cap of 500 after ~2,150 evictions)
+        and, because retrievals feed salience, kept only what had already been
+        recalled. Every deletion is archived by the repository either way.
         """
         effective_curator: MemCellCurator = self.curator or RuleBasedMemCellCurator()
 
@@ -669,10 +730,15 @@ class SoulCompiler:
             to_remove: list[str] = []
             kept_future: list[tuple[str, MemCellSummary]] = []
             kept_important: list[tuple[str, MemCellSummary]] = []
+            calm_ids: set[str] = set()
 
             for cell_id, decision in decisions:
                 if decision == CuratorDecision.REMOVE:
-                    to_remove.append(cell_id)
+                    if evict_only_over_cap:
+                        calm_ids.add(cell_id)
+                        kept_important.append((cell_id, summary_by_id[cell_id]))
+                    else:
+                        to_remove.append(cell_id)
                 elif decision == CuratorDecision.KEEP_FUTURE:
                     kept_future.append((cell_id, summary_by_id[cell_id]))
                 else:
@@ -725,7 +791,13 @@ class SoulCompiler:
                 # minutes after they are compiled while the store sits pinned at
                 # the cap. Inside the window a cell is evicted only once nothing
                 # outside it is left to evict.
-                kept_important.sort(key=lambda t: (_in_grace(t[1]), _salience(t[1])))
+                kept_important.sort(
+                    key=lambda t: (
+                        _in_grace(t[1]),
+                        t[0] not in calm_ids,
+                        _salience(t[1]),
+                    )
+                )
                 overage = retained_count - max_memories
                 evicted = kept_important[:overage]
                 kept_important = kept_important[overage:]
@@ -738,6 +810,7 @@ class SoulCompiler:
                 retained=len(kept_future) + len(kept_important),
                 kept_future=len(kept_future),
                 kept_important=len(kept_important),
+                kept_calm=sum(1 for cid, _ in kept_important if cid in calm_ids),
             )
 
             if trace is not None:
@@ -755,6 +828,63 @@ class SoulCompiler:
                     pass
 
         return result
+
+    async def _shared_candidates(
+        self, session_id: str, visibility: str
+    ) -> list[MemCell]:
+        """Recent ``shared`` cells of OTHER chats a new shared cell may repeat.
+
+        The same subject comes back from other people and other chats. A ``shared``
+        cell may be recalled anywhere, so folding a repeat of it into another
+        ``shared`` cell changes nobody's audience. A ``private`` cell is never
+        compared across chats (its audience is its own chat), and system sessions
+        (the radio's, the diary consolidator's) never take part.
+        """
+        from core.soul.service import (
+            is_housekeeping_session,
+            on_demand_session_prefixes,
+        )
+
+        def system(sid: str) -> bool:
+            return is_housekeeping_session(sid) or sid.lower().startswith(
+                on_demand_session_prefixes()
+            )
+
+        if visibility != "shared" or system(session_id):
+            return []
+        lister = getattr(self.repository, "list_recent_shared_memcells", None)
+        if lister is None:
+            return []
+        try:
+            others = await lister(
+                exclude_session_id=session_id, limit=_DEDUPE_SHARED_LOOKBACK_CELLS
+            )
+        except Exception:
+            return []
+        return [c for c in others if not system(c.session_id)]
+
+    async def _absorb_repeat(
+        self,
+        existing: MemCell,
+        trace: str,
+        atomic_facts: list[str],
+        embedding: list[float] | None,
+        people: list[dict[str, str]],
+    ) -> None:
+        """Fold a repeated cell into the one already filed instead of adding a copy."""
+        existing.participants = union_participants(existing.participants, people)
+        if (
+            len(content_words(trace))
+            > len(content_words(existing.episodic_trace)) * 1.2
+        ):
+            # The new wording carries clearly more: keep it, and its facts.
+            existing.episodic_trace = trace
+            existing.atomic_facts = list(
+                dict.fromkeys([*existing.atomic_facts, *atomic_facts])
+            )
+            if embedding is not None:
+                existing.embedding = embedding
+        await self.repository.upsert_memcell(existing)
 
     @staticmethod
     def _to_emotional_tag(raw_cell: MemCellExtractionModel) -> EmotionalTag:

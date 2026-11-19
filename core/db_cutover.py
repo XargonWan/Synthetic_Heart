@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -70,6 +70,12 @@ _SOUL_TABLE_SPECS: tuple[_SoulTableSpec, ...] = (
             "explicit_importance",
             "consolidated",
             "scene_id",
+            # Added after the first schema; copied only when the source has them
+            # (see ``_present_columns``). Without ``distilled_at`` every migrated
+            # cell looked undistilled and was hidden from recall until a re-distil.
+            "distilled_at",
+            "source_kind",
+            "source_key",
             "created_at",
             "updated_at",
         ),
@@ -157,6 +163,22 @@ _SOUL_TABLE_SPECS: tuple[_SoulTableSpec, ...] = (
         name="soul_metrics",
         columns=("metric_key", "metric_value", "measured_at"),
         conflict_keys=("metric_key", "measured_at"),
+    ),
+    _SoulTableSpec(
+        name="retracted_claims",
+        columns=(
+            "id",
+            "subject",
+            "claim",
+            "reason",
+            "status",
+            "asserted_by",
+            "source_ref",
+            "created_at",
+            "updated_at",
+            "lifted_at",
+        ),
+        conflict_keys=("id",),
     ),
     _SoulTableSpec(
         name="situational_notes",
@@ -374,6 +396,35 @@ async def _set_target_sequence_if_needed(
     )
 
 
+async def _restrict_to_source_columns(
+    source_conn: Any, spec: _SoulTableSpec, source_schema: str
+) -> _SoulTableSpec:
+    """The spec limited to the columns the source table actually has.
+
+    Columns are added to the SOUL schema over time, so a legacy source can predate
+    some of them. Selecting a missing column aborts the whole table, and silently
+    dropping the table is worse; copying what exists and leaving the rest to its
+    default is the migration the operator expects. A custom ``source_query``
+    names its own columns and is left alone.
+    """
+    if spec.source_query:
+        return spec
+    rows = await source_conn.fetch(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = $1 AND table_name = $2",
+        source_schema,
+        spec.name,
+    )
+    present = {str(row["column_name"]) for row in rows}
+    if not present:
+        return spec
+    kept = tuple(column for column in spec.columns if column in present)
+    missing = [column for column in spec.columns if column not in present]
+    if missing:
+        log_info(f"[db_cutover] {spec.name}: source has no {missing}; copying the rest")
+    return replace(spec, columns=kept)
+
+
 async def _migrate_legacy_soul_tables(
     *, source_dsn: str, source_schema: str, target_dsn: str
 ) -> dict[str, int]:
@@ -392,6 +443,9 @@ async def _migrate_legacy_soul_tables(
                     migrated[spec.name] = 0
                     continue
 
+                spec = await _restrict_to_source_columns(
+                    source_conn, spec, source_schema
+                )
                 selected_columns = ", ".join(f'"{column}"' for column in spec.columns)
                 source_query = spec.source_query or (
                     f'SELECT {selected_columns} FROM "{source_schema}"."{spec.name}"'
