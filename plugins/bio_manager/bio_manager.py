@@ -11,6 +11,7 @@ from core.db import get_conn_ctx, _get_db_type, DictCursor
 from core.logging_utils import log_error, log_info, log_debug, log_warning
 from core.core_initializer import register_plugin
 from core.user_utils import get_user_display_name, get_user_usertag
+from core.bio_people import is_private
 
 
 # Injection priority for participant bios
@@ -19,6 +20,12 @@ INJECTION_PRIORITY = 5  # Medium priority - keep essential participant info
 # Global flag to track if table has been initialized
 _table_initialized = False
 _table_lock = threading.Lock()
+
+
+def _requester_id(message: Any) -> str:
+    """Id of whoever sent ``message`` (empty when it cannot be told)."""
+    sender = getattr(message, "from_user", None)
+    return str(getattr(sender, "id", "") or "")
 
 
 def register_injection_priority():
@@ -484,7 +491,8 @@ async def _get_bio_light_async(user_id: str) -> dict:
     """Async version of get_bio_light - returns a lightweight bio for the user."""
     try:
         row = await _fetchone(
-            "SELECT known_as, likes, not_likes, feelings, information FROM bio WHERE id=%s",
+            "SELECT known_as, likes, not_likes, feelings, information, privacy "
+            "FROM bio WHERE id=%s",
             (user_id,),
         )
         if not row:
@@ -502,6 +510,7 @@ async def _get_bio_light_async(user_id: str) -> dict:
                 row.get("feelings"), "feelings", DEFAULTS["feelings"]
             ),
             "information": row.get("information") or "",
+            "privacy": row.get("privacy") or "default",
         }
 
         # Ensure all expected fields exist and are of correct types
@@ -1516,15 +1525,22 @@ class BioPlugin:
                     bio = {}
 
                 short_info = bio.get("information", "")[:200]
+                nicknames = bio.get("known_as", [])
+                feelings = bio.get("feelings", [])
+                if is_private(bio.get("privacy")) and not p.get("is_sender"):
+                    # What a person confided stays between them and the persona: a
+                    # private profile is shown only while that person is the one
+                    # talking, never to someone else in the same conversation.
+                    short_info, nicknames, feelings = "", [], []
                 entry = {
                     "id": p["id"],
                     "username": p.get("username"),
                     "usertag": p.get("usertag"),
                     "is_sender": bool(p.get("is_sender")),
                     "is_bot": bool(p.get("is_bot")),
-                    "nicknames": bio.get("known_as", []),
+                    "nicknames": nicknames,
                     "short_bio": short_info,
-                    "feelings": bio.get("feelings", []),
+                    "feelings": feelings,
                 }
 
                 # Update last_accessed in parallel too
@@ -1607,10 +1623,21 @@ class BioPlugin:
                 targets = [t.strip() for t in targets.split(",") if t.strip()]
 
             bios = []
+            requester = _requester_id(original_message)
             for t in targets:
                 uid = await self._resolve_target_async(t)
                 if uid:
-                    bios.append(await _get_bio_full_async(uid))
+                    bio = await _get_bio_full_async(uid)
+                    if is_private(bio.get("privacy")) and str(uid) != requester:
+                        # A private profile is only handed to the person it is
+                        # about: anyone else gets no detail, not even contacts.
+                        bio = {
+                            "id": bio.get("id"),
+                            "privacy": bio.get("privacy"),
+                            "information": "",
+                            "note": "this person asked to keep their profile private",
+                        }
+                    bios.append(bio)
             if bios:
                 # Return the bios data instead of trying to send directly
                 return {

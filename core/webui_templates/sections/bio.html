@@ -1,0 +1,192 @@
+<section class="tab-panel" id="tab-bio" data-tab="bio" role="tabpanel">
+    <div class="bio-wrapper">
+        <header class="bio-header">
+            <h2>People</h2>
+            <p class="bio-hint">Everyone the persona keeps a profile for. A <strong>private</strong> profile is shown only to the person it is about. <strong>Delete</strong> forgets the profile; conversations that mention the person are history and stay as they are.</p>
+            <div class="bio-controls">
+                <input type="text" id="bio-search" placeholder="Search people..." />
+                <label><input type="checkbox" id="bio-hide-system" checked="checked" /> Hide API and anonymous sessions</label>
+                <button type="button" id="bio-refresh">Refresh</button>
+            </div>
+        </header>
+        <div id="bio-status" class="bio-status" role="status"></div>
+        <div class="bio-columns">
+            <ul id="bio-list" class="bio-list" aria-label="People"></ul>
+            <aside id="bio-detail" class="bio-detail" aria-live="polite">
+                <p class="bio-empty">Select a person to see their profile.</p>
+            </aside>
+        </div>
+    </div>
+
+    <style>
+        .bio-wrapper { padding: 1rem min(4vw, 2.4rem); display: flex; flex-direction: column; gap: 0.8rem; height: 100%; overflow: hidden; }
+        .bio-header h2 { margin: 0 0 0.3rem 0; }
+        .bio-hint { color: var(--text-soft); margin: 0 0 0.6rem 0; max-width: 70ch; }
+        .bio-controls { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
+        .bio-controls input[type="text"] { padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border); background: rgba(12, 12, 20, 0.58); color: inherit; min-width: 220px; }
+        .bio-status { min-height: 1.2rem; color: var(--text-soft); }
+        .bio-columns { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(280px, 1.4fr); gap: 1rem; flex: 1; min-height: 0; }
+        .bio-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; }
+        .bio-list li { padding: 0.6rem 0.8rem; border-bottom: 1px solid var(--border); cursor: pointer; }
+        .bio-list li:hover, .bio-list li.selected { background: var(--accent-soft); }
+        .bio-name { font-weight: 600; }
+        .bio-id { color: var(--text-soft); font-size: 0.8rem; word-break: break-all; }
+        .bio-badge { display: inline-block; margin-left: 0.4rem; padding: 0 0.4rem; border-radius: 999px; border: 1px solid var(--border-strong); font-size: 0.7rem; color: var(--text-soft); }
+        .bio-badge.private { border-color: var(--accent); color: var(--accent); }
+        .bio-detail { border: 1px solid var(--border); border-radius: 8px; padding: 0.8rem 1rem; overflow-y: auto; background: var(--panel-bg); }
+        .bio-detail h3 { margin-top: 0; }
+        .bio-detail dt { color: var(--text-soft); font-size: 0.8rem; margin-top: 0.6rem; }
+        .bio-detail dd { margin: 0; white-space: pre-wrap; word-break: break-word; }
+        .bio-actions { display: flex; gap: 0.6rem; margin-top: 1rem; flex-wrap: wrap; }
+        .bio-actions button.danger { border-color: #e66; color: #e66; }
+        .bio-empty { color: var(--text-soft); }
+        @media (max-width: 760px) { .bio-columns { grid-template-columns: 1fr; } }
+    </style>
+
+    <script>
+    (function () {
+        const apiBase = (window.__getApiBase ? window.__getApiBase() : '');
+        const listEl = document.getElementById('bio-list');
+        const detailEl = document.getElementById('bio-detail');
+        const statusEl = document.getElementById('bio-status');
+        const searchEl = document.getElementById('bio-search');
+        const hideSystemEl = document.getElementById('bio-hide-system');
+        let people = [];
+        let selectedId = null;
+
+        function say(text, isError) {
+            statusEl.textContent = text || '';
+            statusEl.style.color = isError ? '#e66' : '';
+        }
+
+        // Everything from the server is placed with textContent, never as HTML.
+        function el(tag, className, text) {
+            const node = document.createElement(tag);
+            if (className) node.className = className;
+            if (text !== undefined) node.textContent = text;
+            return node;
+        }
+
+        async function api(path, options) {
+            const response = await fetch(apiBase + path, options);
+            let body = null;
+            try { body = await response.json(); } catch (e) { /* not JSON */ }
+            if (!response.ok) {
+                throw new Error((body && body.detail) || ('HTTP ' + response.status));
+            }
+            return body;
+        }
+
+        function visiblePeople() {
+            const term = searchEl.value.trim().toLowerCase();
+            return people.filter(function (p) {
+                if (hideSystemEl.checked && (p.kind === 'api' || p.kind === 'session')) return false;
+                if (!term) return true;
+                const hay = [p.id, p.user_name].concat(p.known_as || []).join(' ').toLowerCase();
+                return hay.indexOf(term) !== -1;
+            });
+        }
+
+        function renderList() {
+            listEl.replaceChildren();
+            const shown = visiblePeople();
+            shown.forEach(function (p) {
+                const item = el('li', p.id === selectedId ? 'selected' : '');
+                const name = el('div', 'bio-name', p.user_name || (p.known_as && p.known_as[0]) || 'Unnamed');
+                if (p.privacy === 'private') name.appendChild(el('span', 'bio-badge private', 'private'));
+                if (p.kind !== 'person') name.appendChild(el('span', 'bio-badge', p.kind));
+                item.appendChild(name);
+                item.appendChild(el('div', 'bio-id', p.id));
+                if (p.information_preview) item.appendChild(el('div', 'bio-id', p.information_preview));
+                item.addEventListener('click', function () { selectPerson(p.id); });
+                listEl.appendChild(item);
+            });
+            say(shown.length + ' of ' + people.length + ' profiles shown');
+        }
+
+        function field(dl, label, value) {
+            if (value === undefined || value === null || value === '' ||
+                (Array.isArray(value) && !value.length)) return;
+            dl.appendChild(el('dt', '', label));
+            const text = (typeof value === 'object') ? JSON.stringify(value, null, 1) : String(value);
+            dl.appendChild(el('dd', '', text));
+        }
+
+        async function selectPerson(id) {
+            selectedId = id;
+            renderList();
+            try {
+                const data = await api('/api/bio/' + encodeURIComponent(id));
+                renderDetail(data.person);
+            } catch (e) {
+                say('Could not load the profile: ' + e.message, true);
+            }
+        }
+
+        function renderDetail(p) {
+            detailEl.replaceChildren();
+            detailEl.appendChild(el('h3', '', p.user_name || 'Unnamed'));
+            const dl = el('dl');
+            field(dl, 'Id', p.id);
+            field(dl, 'Kind', p.kind);
+            field(dl, 'Also known as', (p.known_as || []).join(', '));
+            field(dl, 'Information', p.information);
+            field(dl, 'Likes', (p.likes || []).join(', '));
+            field(dl, 'Dislikes', (p.not_likes || []).join(', '));
+            field(dl, 'Past events', p.past_events);
+            field(dl, 'Feelings', p.feelings);
+            field(dl, 'Contacts', p.contacts);
+            field(dl, 'Privacy', p.privacy);
+            field(dl, 'Last seen', p.last_accessed);
+            field(dl, 'Last updated', p.last_update);
+            detailEl.appendChild(dl);
+
+            const actions = el('div', 'bio-actions');
+            const toggle = el('button', '', p.privacy === 'private' ? 'Make shareable' : 'Make private');
+            toggle.type = 'button';
+            toggle.addEventListener('click', async function () {
+                try {
+                    await api('/api/bio/' + encodeURIComponent(p.id) + '/privacy', {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ privacy: p.privacy === 'private' ? 'default' : 'private' })
+                    });
+                    await load();
+                    await selectPerson(p.id);
+                } catch (e) { say('Could not change privacy: ' + e.message, true); }
+            });
+            const del = el('button', 'danger', 'Delete profile');
+            del.type = 'button';
+            del.addEventListener('click', async function () {
+                const label = p.user_name || p.id;
+                if (!window.confirm('Forget ' + label + '? Their profile is deleted. Conversations that mention them are not changed.')) return;
+                try {
+                    const result = await api('/api/bio/' + encodeURIComponent(p.id), { method: 'DELETE' });
+                    selectedId = null;
+                    detailEl.replaceChildren(el('p', 'bio-empty', 'Select a person to see their profile.'));
+                    await load();
+                    say(result.note || 'Profile deleted.');
+                } catch (e) { say('Could not delete: ' + e.message, true); }
+            });
+            actions.appendChild(toggle);
+            actions.appendChild(del);
+            detailEl.appendChild(actions);
+        }
+
+        async function load() {
+            try {
+                const data = await api('/api/bio');
+                people = data.people || [];
+                renderList();
+            } catch (e) {
+                say('Could not load people: ' + e.message, true);
+            }
+        }
+
+        searchEl.addEventListener('input', renderList);
+        hideSystemEl.addEventListener('change', renderList);
+        document.getElementById('bio-refresh').addEventListener('click', load);
+        load();
+    })();
+    </script>
+</section>

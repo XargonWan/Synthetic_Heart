@@ -1031,6 +1031,15 @@ class SynthWebUIInterface:
         # one, and confirm / reject / lift / restore a stored one.
         self.app.get("/api/soul/retractions")(self.get_retractions)
         self.app.post("/api/soul/retractions")(self.post_retraction)
+        # Bio tab: the people the persona has a profile for. View them, mark a
+        # profile private, or forget someone.
+        # TODO(privacy): these routes follow the other /api/... routes and do not
+        # require the API token; confirm the WebUI's own auth covers them, or add
+        # ``dependencies=[Depends(_require_api_token)]`` (see "Privacy" in TODO-TOFIX.md).
+        self.app.get("/api/bio")(self.list_bio_people)
+        self.app.get("/api/bio/{person_id}")(self.get_bio_person)
+        self.app.put("/api/bio/{person_id}/privacy")(self.put_bio_privacy)
+        self.app.delete("/api/bio/{person_id}")(self.delete_bio_person)
         # Synth avatar (Settings → Synth Avatar): stored by core, pushed to interfaces.
         from core import synth_avatar as _synth_avatar  # noqa: F401  (registers SYNTH_AVATAR)
         from core.karada_api import _require_api_token as _avatar_token
@@ -3419,6 +3428,7 @@ class SynthWebUIInterface:
                 "navbar",
                 "agent",
                 "engines",
+                "bio",
             }
             if section not in allowed_sections:
                 raise HTTPException(
@@ -10737,6 +10747,73 @@ class SynthWebUIInterface:
             "updated_at": _iso(claim.updated_at),
             "lifted_at": _iso(claim.lifted_at),
         }
+
+    async def list_bio_people(self) -> JSONResponse:
+        """Every person the persona holds a profile for, most recently seen first."""
+        from core import bio_people
+
+        try:
+            people = await bio_people.list_people()
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to list bio profiles: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return JSONResponse({"success": True, "people": people})
+
+    async def get_bio_person(self, person_id: str) -> JSONResponse:
+        """One person's whole profile."""
+        from core import bio_people
+
+        try:
+            person = await bio_people.get_person(person_id)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to read bio profile: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        if person is None:
+            raise HTTPException(status_code=404, detail="unknown person")
+        return JSONResponse({"success": True, "person": person})
+
+    async def put_bio_privacy(self, person_id: str, request: Request) -> JSONResponse:
+        """Set a profile ``default`` or ``private`` (shown only to that person)."""
+        from core import bio_people
+
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="a JSON object is required")
+        try:
+            await bio_people.set_privacy(person_id, str(payload.get("privacy") or ""))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to set bio privacy: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        log_info(f"{LOG_PREFIX} Bio privacy of {person_id} -> {payload.get('privacy')}")
+        return JSONResponse({"success": True})
+
+    async def delete_bio_person(self, person_id: str) -> JSONResponse:
+        """Forget a person: remove their profile row.
+
+        Memories in SOUL that mention them are conversation history and are not
+        touched here; the response says so, so the operator is told what was done.
+        """
+        from core import bio_people
+
+        try:
+            removed = await bio_people.delete_person(person_id)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to delete bio profile: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        if not removed:
+            raise HTTPException(status_code=404, detail="unknown person")
+        return JSONResponse(
+            {
+                "success": True,
+                "note": "The profile was deleted. Conversations and memories that "
+                "mention this person are history and were not changed.",
+            }
+        )
 
     async def get_retractions(self) -> JSONResponse:
         """List every stored retraction, newest first, whatever its status."""
