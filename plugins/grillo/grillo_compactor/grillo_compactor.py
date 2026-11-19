@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 
 from core.core_initializer import register_plugin
+from core.time_zone_utils import get_local_timezone
 from core.logging_utils import log_info, log_debug, log_warning, log_error
 from core.config_manager import config_registry
 from core.json_utils import extract_json_from_text
@@ -678,12 +679,19 @@ class GrilloCompactorPlugin:
         except Exception:
             hour, minute = 3, 0
 
-        # Local time arithmetic - keep it simple and use UTC-aware math
-        now = datetime.now(timezone.utc)
-        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if target <= now:
-            target = target + timedelta(days=1)
-        delta = (target - now).total_seconds()
+        # ``GRILLO_COMPACT_TIME`` is a wall-clock time in the configured timezone
+        # (``TZ``), which is what its label has always said; it was computed as UTC
+        # instead, so "03:00" ran at 04:00 or 05:00 local. The database and every
+        # timestamp stay UTC: only the moment the clock is read is local.
+        now_local = datetime.now(get_local_timezone())
+        target_local = now_local.replace(
+            hour=hour, minute=minute, second=0, microsecond=0
+        )
+        if target_local <= now_local:
+            target_local = target_local + timedelta(days=1)
+        delta = (
+            target_local.astimezone(timezone.utc) - datetime.now(timezone.utc)
+        ).total_seconds()
         return max(0, int(delta))
 
     # ------------------------------------------------------------------ day-unit level-1 pass
