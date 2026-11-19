@@ -196,8 +196,10 @@ subsystem, silences SOUL's emotion output too.
 People (Bio)
 ------------
 
-The **People** tab lists every profile, shows it, marks it ``private`` and deletes
-it. A private profile is shown to the model, and returned by ``bio_full_request``,
+The **People** sub-tab of **Activity** lists every profile, shows it, marks it
+``private`` and deletes it. It is covered by the WebUI's access gate like the rest of
+``/api`` (off by default: set ``SYNTH_WEBUI_AUTH=enabled`` or ``SYNTH_WEBUI_API_TOKEN``
+before exposing the WebUI beyond a trusted network). A private profile is shown to the model, and returned by ``bio_full_request``,
 only when that same person is the one talking. Deleting removes the profile; the
 conversations that mention the person are history and are not changed.
 

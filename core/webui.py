@@ -1031,11 +1031,11 @@ class SynthWebUIInterface:
         # one, and confirm / reject / lift / restore a stored one.
         self.app.get("/api/soul/retractions")(self.get_retractions)
         self.app.post("/api/soul/retractions")(self.post_retraction)
-        # Bio tab: the people the persona has a profile for. View them, mark a
-        # profile private, or forget someone.
-        # TODO(privacy): these routes follow the other /api/... routes and do not
-        # require the API token; confirm the WebUI's own auth covers them, or add
-        # ``dependencies=[Depends(_require_api_token)]`` (see "Privacy" in TODO-TOFIX.md).
+        # Activity -> People: the people the persona has a profile for. View them,
+        # mark a profile private, or forget someone. Like every /api/... route these
+        # are covered by the ASGI gate in core/webui_auth.py, which is off by default:
+        # turn it on (SYNTH_WEBUI_AUTH=enabled or SYNTH_WEBUI_API_TOKEN) before
+        # exposing the WebUI beyond a trusted network.
         self.app.get("/api/bio")(self.list_bio_people)
         self.app.get("/api/bio/{person_id}")(self.get_bio_person)
         self.app.put("/api/bio/{person_id}/privacy")(self.put_bio_privacy)
@@ -3428,7 +3428,6 @@ class SynthWebUIInterface:
                 "navbar",
                 "agent",
                 "engines",
-                "bio",
             }
             if section not in allowed_sections:
                 raise HTTPException(

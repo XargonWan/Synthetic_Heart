@@ -1,3 +1,11 @@
+### minor(webui): the People tab is now a sub-tab of Activity
+
+**Before.** People (the profiles Bio Manager keeps) had a tab of its own in the top bar.
+
+**Now.** It is the last sub-tab of Activity, loaded when it is opened (`window.SynthWebUI.initPeopleTab`, called by `loadHistoryData('people')`), so the list is read only when someone looks at it. The top-level tab, its panel and the `bio` template section are gone. The comment that said the `/api/bio*` routes lack a token gate is corrected: they are covered by the ASGI gate in `core/webui_auth.py` like every `/api/*` route, which is off by default.
+
+**Location.** `core/webui_templates/sections/history.html`, `core/webui_templates/synth_webui_shell.html`, `res/synth_webui/js/history.js`, `core/webui.py`, `core/webui_templates/sections/bio.html` (deleted), `docs/soul_memory.rst`.
+
 ### feat(soul): long diary entries are filed as blocks, and a recalled diary day appears once
 
 **Before.** Every diary entry was one cell. The embedder reads only the start of a text, so a detail from the middle of a long entry could not be found; and the ingest cut each entry at 4,000 characters, so on a copy of the live store 363 of 631 journal cells had lost whatever followed. In the decision experiment (`scripts/compaction_gate.py`) blocks of about 1,500 characters raised the share of questions answered in the top 5 from 27% to 50%.
