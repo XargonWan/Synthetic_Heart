@@ -98,6 +98,39 @@ Platform-specific behavior must be:
 
 ---
 
+## 3a. Memory, context and profile: where things live
+
+This is the routing table for anything that remembers, recalls, profiles a person or
+tracks a mood. **Extend the owner; do not add a second store.** Duplicate memory
+subsystems have been built here before because the owner was hard to find, and
+consolidating them cost a full audit (see `TODO-Soul-Refactor.md`).
+
+| You need to... | Use | Never |
+|---|---|---|
+| Make the persona able to **recall** something later (a diary entry, a day summary, an imported note) | `SoulService.ingest_summary(kind, source_key, text, ...)` (`core/soul/service.py`; get it with `SoulService.from_registry()`, which returns `None` when SOUL is off, so handle that) | Insert into `memories`, add a table, or add a plugin that stores text |
+| **Retrieve** memories for a query, optionally by source or date | `SoulService.recall(query, sources=..., date_from=..., date_to=...)` | New `LIKE` searches over `memories` / `ai_diary`; `search_memories` is the legacy keyword path and is being retired |
+| Record a **short-lived situation** ("travelling this week") or a **correction** | The Debrief situational-notes plugin, which writes through `soul_plugin.get_repository()` to SOUL's `situational_notes` / `retracted_claims` | A config key or a diary line |
+| Know **who a person is** (nicknames, bio, contacts) | `bio_manager` (per-participant, separately switchable for privacy). SOUL's DSP is one global profile, not a per-person one | Putting person data into SOUL cells or `memories` |
+| Track or inject **mood and emotion** | `emotion_manager` (owns the vocabulary, decay, avatar push and the `update_emotion_state` action). SOUL only consumes it, and goes quiet when it is off (`PLUGIN_ENABLED__emotion_manager`) | A second emotion store or engine |
+| Write the persona's **own first-person narrative** | `ai_diary` (journal only). Every diary write is mirrored into SOUL as a `journal` cell automatically | Storing facts about users in the diary as if they were memory |
+| **Schedule** a reflection or autonomous activity | GRILLO (`plugins/grillo/`). It consumes SOUL and the diary; it must not keep its own long-term store | A new background loop that writes memory |
+| Change what goes into the **prompt** | Return a context key from `get_static_injection`; budget and ordering are the prompt engine's job | Concatenating text into the prompt from a plugin |
+
+Rules that follow from this:
+
+1. **SOUL owns long-term memory.** Its tables (`mem_cells`, `mem_scenes`, `situational_notes`, `retracted_claims`, `dsp_*`, `foresight_signals`) are read and written through `core/soul/` and `SoulService`. No other module issues SQL against them.
+2. **Everything ingested has a stable `source_key`.** Running an ingest twice must update one cell, never create two.
+3. **Deleting is archiving.** Anything removed from memory (curator evictions, retired diary fragments) lands in `mem_cells_archive` first. Do not add a hard delete.
+4. **Time:** the database and every scheduler work in UTC; the *prompt* shows time converted to the configured `TZ`. Do not interpret configured clock times (`*_TIME` settings) as UTC without saying so in the label.
+5. **Privacy:** what someone confides in a private chat must not be repeated to others. Memory that can leave its chat needs an audience check (`MemCell.visibility`: one-to-one chats are `private`, recalled only in their own chat), and a person's data must be deletable (WebUI People tab). Do not build recall paths that skip it.
+6. **Do not resurrect these** (retired or being retired): the `memory_search` action plugin, `core/presence_manager.py` and `core/trigger_processor.py` (all three deleted in commit `3d5cfa10`; find them with `git log --diff-filter=D -- <path>`), `prompt_engine.search_memories` / `free_memory_search`, the observer's raw copies in `memories` (`GRILLO_OBSERVER_STORE_MEMORIES`, off by default), `SOUL_REPOSITORY_BACKEND`, and any MariaDB-specific path. Production is PostgreSQL + pgvector.
+7. **A plugin registers its own Recon, Debrief and prompt knowledge; the core names no plugin.** The Recon hooks (`get_recon_key`/`parse_recon_response`), the Debrief hook (`on_debrief`), the actions a plugin always needs in full (`core.action_tiers.register_always_full_actions`), the state that calls for one of its actions (`register_state_actions`) and the session ids that only matter on its subject (`core.soul.service.register_on_demand_session_prefixes`) are all declared from the plugin's own module. If you catch yourself writing a plugin's name, action or session prefix into `core/`, add a registration point instead.
+8. **Retractions never delete history.** A retracted claim retires situational notes, goals and growth proposals; diary, memories and scenes stay as history and the prompt labels them as recorded mistakes. Do not "fix" that by filtering recall.
+
+Repository maintenance scripts: `scripts/ingest_legacy_into_soul.py` (file the old diary and `memories` into SOUL, idempotent), `scripts/ab_compare.py` (send the same prompts to two instances and compare the prompts they build), `scripts/restore_curator_evicted_cells.py` (rebuild cells the old curator deleted), `scripts/backfill_cell_visibility.py` (mark old private-chat cells private), `scripts/dedupe_soul_cells.py` (archive system-text cells and repeats, preview by default), `scripts/knowledge_merge_experiment.py` (would merging cells by topic keep every fact? clusters + LLM-checked sample, read-only), `scripts/compaction_gate.py` (does a representation of the diary help recall? the experiment that decided the compactor's fate).
+
+---
+
 ## 4. Component Contracts
 
 ### Plugins
@@ -900,12 +933,12 @@ The AFFiNE board is a shared planning system.
 | `chat_archives` | `core/chat_archives_db.py` | Long-term archived chat history |
 | `ai_diary` | `plugins/ai_diary.py` | Synth's diary entries. Two competing CREATEs in the same file: `init_diary_table()` uses `content TEXT` + `user_message TEXT`; the lazy-init fallback uses `content LONGTEXT`. See §12 for the `user_message` overflow issue |
 | `ai_diary_archive` | `plugins/ai_diary.py` | Archived diary entries |
-| `memories` | `plugins/ai_diary.py` | Long-term memory entries (`content`, `author`, `tags`, `scope`, `emotion`) |
+| `memories` | `plugins/ai_diary/` (legacy DDL) | **Legacy**, being retired into SOUL: compaction summaries and voice memories. Do not write new rows; use `SoulService.ingest_summary` |
 | `emotion_state` | `plugins/emotion_manager.py` | Current emotion intensities with timestamps for decay |
 | `emotion_diary` | `plugins/emotion_manager.py` | Historical emotion snapshots |
-| `bio` | `plugins/bio_manager.py` | Synth's self-knowledge: likes, contacts, past events, feelings (JSON arrays stored as TEXT) |
+| `bio` | `plugins/bio_manager/` | Per-participant profile: nicknames, likes, contacts, past events, feelings (JSON arrays stored as TEXT). One row per person id; not the persona's self-knowledge |
 | `recent_chats` | `plugins/recent_chats.py` / `core/db.py` | Rolling recent conversation summaries |
-| `grillo_beats` | `init-db.sql` | Scheduled autonomous beat timers (`beat_type`, `next_beat`, `enabled`) |
+| `grillo_beats` | `init-db.sql` | **Unused**: no runtime writer, 0 rows on the live store. Beat scheduling is in memory in `plugins/grillo/grillo_impl.py` |
 | `grillo_activity_log` | `init-db.sql` | Log of executed Grillo beats with prompt/response text |
 | `grillo_action_execs` | `init-db.sql` | Individual action executions within a Grillo beat |
 | `agent_tasks` | `init-db.sql` | Agentic Runtime 2.0 task records with I/O JSON (`engine`, `status`, `input`, `output`, `iterations_meta`) |
@@ -974,10 +1007,12 @@ Before finishing a code task, verify:
 | `EMOTION_MAX_DISPLAY` | Max emotions to display in UI |
 | `SOUL_COMPILE_IDLE_SECONDS` | Idle seconds before SOUL compiles buffered transcript |
 | `SOUL_SCHEDULER_INTERVAL_SECONDS` | Scheduler tick interval for SOUL compile/rollup checks |
-| `SOUL_REPOSITORY_BACKEND` | SOUL persistence backend selector (`memory` or `postgres`) |
+| `SOUL_REPOSITORY_BACKEND` | **Ignored** (kept for old configs). The backend follows the main DB: PostgreSQL persists, anything else is in-memory |
 | `SOUL_POSTGRES_DSN` | PostgreSQL DSN used when SOUL backend is `postgres` |
 | `SOUL_EMBEDDER_ID` | FastEmbed model for Soul vectors (default `BAAI/bge-base-en-v1.5`) |
-| `MEMORY_SEARCH_MAX_RESULTS` | Max memories returned per query |
+| `MEMORY_LEGACY_TIERS_ENABLED` | Whether `search_memories` still keyword-searches the legacy `memories` / `ai_diary` tables (turn off once SOUL holds them) |
+| `SOUL_CURATOR_MAX_MEMORIES` | Memory cap before the SOUL curator evicts the calmest cells (default 5000; evictions are archived) |
+| `SOUL_CURATOR_EVICT_ONLY_OVER_CAP` | Keep calm memories while under the cap (default on) |
 | `GRILLO_ALLOWED_ACTIONS` | Actions Grillo is permitted to execute |
 | `GRILLO_ALLOWED_SECURITY_LEVEL` | Max security level for Grillo actions |
 | `AUTONOMY_ALLOWED_ACTIONS` | Actions allowed in autonomy mode |

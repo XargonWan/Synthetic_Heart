@@ -1,3 +1,207 @@
+### feat(soul): long diary entries are filed as blocks, and a recalled diary day appears once
+
+**Before.** Every diary entry was one cell. The embedder reads only the start of a text, so a detail from the middle of a long entry could not be found; and the ingest cut each entry at 4,000 characters, so on a copy of the live store 363 of 631 journal cells had lost whatever followed. In the decision experiment (`scripts/compaction_gate.py`) blocks of about 1,500 characters raised the share of questions answered in the top 5 from 27% to 50%.
+
+**Now.** `SoulService.ingest_chunked` files a text of about 1,500 characters or less exactly as before (one cell) and a longer one as blocks `<kind>:<key>#0`, `#1`, ... (paragraphs kept whole, a long paragraph cut at whitespace, nothing but whitespace and length looked at; at most 40 blocks). Whichever shape an entry had before, the other is archived (`reason='rechunked'`), so an entry that grows or shrinks never leaves both; `retire_source` removes every block. Recall returns at most one block per source, in the service and in the plugin's passive recall, so a topic that matches six blocks of one day shows that day once. The diary sync and `scripts/ingest_legacy_into_soul.py` use it; running the script again re-files the existing long entries in full.
+
+**Measured.** On the copy the 363 long entries (cut at 4,000 characters) became 5,845 blocks of a median 1,496 characters (largest 2,244), so the journal went from 631 to 6,118 cells; filing them took about 33 minutes (embedding). Offline recall over 30 prompts taken from the chat history: no empty answer, 150 slots, 142 distinct, 47 of them diary. (A different prompt set from the earlier checks, so the diary share is not comparable with them.)
+
+**Also.** The curator now counts and evicts only `chat` cells: the blocks (a copy of the live diary filed in full came to roughly 8,000 cells, above the 5,000 cap) are not a chat's leftovers and the cap would have archived the calmest of them (`list_memcell_summaries` filters on `source_kind = 'chat'`).
+
+**Not changed.** Short entries, `diary_day` and `legacy_memory` cells keep their keys. The embedder's window is unchanged.
+
+**Location.** `core/soul/service.py`, `core/soul/legacy_ingest.py`, `plugins/ai_diary/ai_diary.py`, `plugins/soul_plugin/soul_plugin.py`, `docs/soul_memory.rst`, `tests/soul/test_service.py`.
+
+### feat(soul): small talk and one-off commands are not stored as memories, and a shared memory repeated in another chat is absorbed
+
+**Before.** On a copy of the live store 13% of the conversation cells said almost nothing (a greeting, a command given once) and the same shared notion was stored again for every chat it came back in: the write-time repeat check only looked inside one chat.
+
+**Now.** (1) The extraction prompt asks for a `kind` per entry (`fact`, `preference`, `plan`, `event`, `small_talk`, `one_off_command`, `joke`); entries the model labels `small_talk`, `one_off_command` or `joke` are dropped, unless the session holds a dated plan. Dropping every entry stores nothing instead of falling back to the verbatim transcript. A distilled cell with two content words or fewer and no fact or dated plan is not stored either. (2) A new `shared` cell is compared with the last 200 shared cells of other chats as well as the last 60 of its own chat (`list_recent_shared_memcells`); a repeat is absorbed and the people who said it are added to `participants`. `private` cells are still compared only inside their own chat, and system sessions (diary consolidator, the radio's) never take part. `scripts/dedupe_soul_cells.py` applies the same rule to an existing store.
+
+**Measured.** On the copy the clean-up archived 38 more repeats (`reason='duplicate'`, `merged_into` set). On three probe conversations with the live model: a greeting stored nothing, a real fact kept two cells, a one-off command was still kept (the model did not label it), so the filter is cautious, not complete.
+
+**Not changed.** Nothing already stored is judged by `kind`; the model's label is not stored on the cell. No word lists: the model classifies, the code counts words of three letters or more.
+
+**Location.** `core/soul/llm_strategies.py`, `core/soul/compiler.py`, `core/soul/repository.py`, `scripts/dedupe_soul_cells.py`, `docs/soul_memory.rst`, `tests/soul/test_llm_memcell.py`, `tests/soul/test_dedupe_and_archive.py`.
+
+### fix(soul_plugin): recall and retrieval counting did nothing in the first 15 minutes after the machine booted
+
+**Root cause.** The per-chat recall cooldown and the retrieval-count throttle compared `time.monotonic()` with a stored time, using `0.0` for a cell not yet seen. `monotonic()` counts from the machine's boot, so with an uptime under the window (900 s for the cooldown) every unseen cell looked "recalled just now": recall returned no memory and the retrieval count was not bumped. A restarted container on a host that had been up for hours was unaffected, which is why it went unnoticed; it showed up in tests right after the development machine rebooted.
+
+**Fix.** An unseen cell has no entry (`None`), not time zero. `tests/soul/test_soul_plugin.py::test_recall_works_right_after_the_machine_booted` fixes the clock at 120 s.
+
+**Location.** `plugins/soul_plugin/soul_plugin.py`, `tests/soul/test_soul_plugin.py`.
+
+### chore(core): remove the dormant memory_search plugin, the presence/trigger chain and the db helpers only it used
+
+**Before.** `plugins/memory_search` (`PLUGIN_CLASS = None`, no callers; no call of it in 7 days of live logs and none in `grillo_action_execs`), `core/presence_manager.py` and `core/trigger_processor.py` (no importers) and five helpers in `core/db.py` that only the presence chain called were kept "just in case", and agents kept finding them and building on them.
+
+**Now.** All of it is deleted, with the plugin's five test files and `docs/memory_search.rst`. The Recon call keeps its `memory_search` key (answered from SOUL by `recon_memory_recollector`); the time-window parser already lives in `core/time_window.py`. Removed from `core/db.py`: `get_active_emotions`, `update_emotion_intensity`, `mark_emotion_resolved`, `crystallize_emotion`, `get_recent_responses`.
+
+**Not changed.** `prompt_engine.search_memories` / `free_memory_search` stay until `grillo_growth` reads through `SoulService`.
+
+**Recovery.** `git log --diff-filter=D -- <path>` finds the deleting commit.
+
+**Location.** `plugins/memory_search/`, `core/presence_manager.py`, `core/trigger_processor.py`, `core/db.py`, `tests/test_core_initializer_tts.py`, `docs/memory_search_and_management.rst`, `AGENTS.md`.
+
+### feat(soul): a memory that repeats an existing one is absorbed, the archive keeps who said it, and archived rows expire
+
+**Before.** Talking about the same subject on several days, or with several people, stored the same notion again each time. On a copy of the live store 2,274 chat cells held 363 that were system text (radio host, diary merge, vessel sessions) and 410 near-copies of 86 fuller cells. The archive of evicted cells never expired and did not say why a cell had left.
+
+**Now.** `post_session_compile` compares a new cell with the last 60 cells of the same audience and, when their word sets overlap by 0.8 or more (`core/soul/dedupe.py`, no word lists), keeps the fuller one and archives the other with `reason='duplicate'` and `merged_into`. Cells carry `participants` (who said it, when), unioned on absorption. Housekeeping sessions are no longer compiled. `mem_cells_archive` gains `reason`, `merged_into`, `participants`, `source_kind`, `source_key` and `visibility` (each with its own `ALTER`, since `CREATE TABLE IF NOT EXISTS` leaves an existing archive as it was; a test pins this), and the daily job purges it (`SOUL_ARCHIVE_RETENTION_DAYS` 365, `SOUL_ARCHIVE_COPY_RETENTION_DAYS` 30). `scripts/dedupe_soul_cells.py` applies the same rule to an existing store (preview by default).
+
+**Measured.** On the copy, `--apply` archived 363 system-text cells and 410 repeats (none of the 410 `merged_into` links dangles); offline recall over 30 prompts still returned 150 distinct slots, none empty.
+
+**Not changed.** Cells with a different audience are never merged. Nothing is deleted without an archive row.
+
+**Location.** `core/soul/dedupe.py` (new), `core/soul/compiler.py`, `core/soul/repository.py`, `core/soul/models.py`, `plugins/soul_plugin/soul_plugin.py`, `scripts/dedupe_soul_cells.py` (new), `docs/soul_memory.rst`, `tests/soul/test_dedupe_and_archive.py`.
+
+### feat(recon): a question about a specific period recalls that period from SOUL, and the time-window parser lives in core
+
+**Before.** SOUL's passive recall ranks by the incoming text alone and has no notion of "last week" or "in March"; the only code that understood a period was the dormant `memory_search` plugin.
+
+**Now.** The Recon memory recollector asks the shared Recon call for an optional `time_window` (it is told today's date and asked for an absolute ISO interval, in whatever language the human wrote). When one comes back, keyword hits outside it are dropped and SOUL is asked for that period (`SoulService.recall(date_from, date_to)`), up to four memories, labelled `my diary`, `conversation memory`, `older memory`. The parser moved to `core/time_window.py` (`parse_time_window`); `memory_search` imports it from there, so that plugin can now be deleted without losing it. The parser understands only language-neutral structure (ISO interval, single ISO date, `start`/`end` objects, numeric durations): the English words and units it used to accept (`yesterday`, `last week`, `48 hours`, `7d`) are gone, because the synth is multilingual and relative words are the Recon model's job, as `AGENTS.md` requires. `SoulService.recall` applies the same rules as passive recall: system sessions never, the radio's sessions only when asked for by prefix, and a memory told in confidence only back in its own chat (no chat given means no private cell).
+
+**Not changed.** Without a `time_window` the recollector behaves as before. Dated questions add up to four hits, so a prompt can carry a few lines more on those turns.
+
+**Location.** `core/time_window.py` (new), `plugins/recon/recon_memory_recollector.py`, `core/soul/service.py`, `plugins/soul_plugin/soul_plugin.py`, `plugins/memory_search/memory_search.py`, `tests/test_recon_memory_window.py` (new), `tests/soul/test_service.py`.
+
+### feat(debrief): the Debrief judges whether an exchange was shared in confidence, and what it learned stays in that chat
+
+**Before.** Nothing assessed the privacy of what a person told the persona. Only chats an interface reported as one to one got private memories, and every situational note was injected into every chat.
+
+**Now.** The Debrief's existing per-turn call also returns `privacy.confidential` (a secret, something the human asked to keep to themselves, sensitive health/family/money/legal matters or a third party's details; judged from the whole exchange, never from words). On a confidential exchange SOUL marks the cells compiled from the current window `private` (`SoulPlugin.mark_conversation_private`), which also covers interfaces that cannot say whether a chat is one to one, and the notes filed that turn get `visibility='private'` with the chat's session id: they are injected only in that chat, and not in Grillo beats. A broken or missing verdict means "not confidential". `soul_temporal_context` is no longer shared through the timeout fallback cache, because it can now hold a private note.
+
+**Not changed.** The verdict is per exchange, so a window with one confidential turn is private as a whole (conservative on purpose). Cells already stored are not re-judged. The model's judgement was verified with stubbed answers; its quality on real confidences has not been measured.
+
+**Location.** `plugins/debrief/debrief_situational_notes.py`, `plugins/soul_plugin/soul_plugin.py`, `core/soul/models.py`, `core/soul/repository.py`, `docs/soul_memory.rst`, `tests/test_debrief_situational_notes.py`, `tests/soul/test_soul_plugin.py`.
+
+### feat(prompt): the action catalogue is sent in two tiers, and Recon chooses which optional actions get their full schema
+
+**Before.** Every chat prompt carried the full JSON schema of all 39 actions in scope: about 37,000 of 65,000 characters, against about 5,000 for the recalled memories. Most turns use two or three.
+
+**Now.** With `PROMPT_ACTIONS_TIERED` (default on) the actions every turn needs (`send_message`, the `message_*` actions, `use_animation`, and whatever each plugin registers: the diary entry, the emotion update) keep their full schema, as does any action the turn's state calls for (a pending growth proposal) and any the new `recon_action_needs` plugin picked from the shared Recon call. The rest are sent compact: brief, payload field names and required fields, as in Prompt Lite Mode, and the full definition still validates the reply. If Recon gives no usable verdict the whole catalogue is sent, so a failed call costs tokens, never an action. The Recon instruction asks the model to err on the side of listing, because an action left out cannot be used that turn. Each plugin registers its own entries from its own module (`core.action_tiers.register_always_full_actions` / `register_state_actions`); the core names no plugin's action.
+
+**Verified (arm B on the database copy, same Gemini front end).**
+
+| turn | Recon picked | actions block | prompt |
+|---|---|---|---|
+| plain chat | none | 18,268 chars (was 40,026) | 44,873 chars (was about 66,300) |
+| "create a goal for yourself" | `goal_set` | 19,638 | n/a |
+| "remind me tomorrow at 9..." | `event`, `schedule_message` | 19,432 | n/a |
+
+The model emitted `goal_set` and `event` with valid payloads. A message introducing a person did not produce `bio_update` on either the tiered or the whole catalogue (one sample each). With the first wording of the Recon instruction (which leaned towards "none") Recon missed `goal_set` for the goal request and the model did not create the goal; the wording was changed and the miss did not recur in the cases run, which is three action turns and not a measure of Recon's recall.
+
+**Not changed.** Lite mode and Vessel turns; turns where Recon does not run (internal Grillo beats) keep the whole catalogue.
+
+**Also.** Sessions of the radio plugin are left out of passive recall and are recalled on request by the radio's own Recon plugin when the turn is about the radio (the plugin registers its session prefixes with SOUL, so the core names no plugin).
+
+**Location.** `core/action_tiers.py` (new), `core/prompt_engine.py`, `plugins/recon/recon_action_needs.py` (new), `plugins/ai_diary/ai_diary.py`, `plugins/emotion_manager/emotion_manager.py`, `plugins/grillo/grillo_growth/grillo_growth.py`, `plugins/radio_host/recon_radio_status.py`, `core/soul/service.py`, `core/soul/repository.py`, `docs/prompt_engine_json_prompt.rst`, `tests/test_action_tiers.py` (new), `tests/test_recon_radio_memories.py` (new).
+
+### feat(soul): what is said in a one-to-one chat is not recalled in another conversation, and housekeeping sessions are never recalled
+
+**Before.** A memory from someone's private chat could be recalled in a group or in another person's chat (with an "other chat" label only), and the exclusion of housekeeping sessions matched `diary_merge:` while real session ids are stored normalised (`diary_merge_-1`), so 354 diary-consolidation transcripts on the live store were recallable. Web-search notices were recallable too.
+
+**Now.** `MemCell.visibility` (`shared` / `private`): cells compiled from a chat the interface reports as one-to-one (`core/chat_context.resolve_chat_kind`) are `private` and are recalled only in their own chat (or a linked one). `scripts/backfill_cell_visibility.py` marks the existing Telegram private-chat cells (positive chat id in the session id; preview by default). Sessions `diary_merge*` and `web_search*` are excluded from recall in both spellings.
+
+**Not changed.** Cells from other interfaces already stored stay `shared` (their session id carries no private/group signal), `journal` cells and situational notes are not audience-filtered, and `radio_host` sessions (552 cells on the live store) are still recallable pending a decision.
+
+**Verified.** On the database copy: 303 of 2,270 chat cells marked private; recall of 30 real prompts from an unrelated chat returned none of them, and no diary-consolidation session.
+
+**Location.** `core/soul/models.py`, `core/soul/repository.py`, `core/soul/compiler.py`, `plugins/soul_plugin/soul_plugin.py`, `scripts/backfill_cell_visibility.py` (new), `tests/soul/test_soul_plugin.py`.
+
+### fix(ai-diary): archiving or restoring a diary row keeps who it was about
+
+**Before.** `archive_diary_entries` and `unarchive_diary_entries` listed every column except `involved_users`, so each row moved to the archive, and each one restored from it, lost that field. The consolidator archives the fragments it folds into a day, so the loss was routine.
+
+**Now.** Both copy `involved_users` too, and fall back to the other columns on a schema without it (the MariaDB archive DDL), so the archive never fails because of it. Rows already archived without it are not repaired.
+
+**Location.** `plugins/ai_diary/ai_diary.py`, `tests/test_ai_diary_archive_copy.py` (new).
+
+### chore(agents): the obsolete GitNexus instructions are gone from `CLAUDE.md` and the README
+
+`.mcp.json` registers `tencentdb-knowledge`, not GitNexus, and the `.gitnexus*` folders and `.claude/skills/gitnexus/` skills do not exist, yet `CLAUDE.md` carried 50 references (including "MUST run `gitnexus_impact` before editing") that could not be followed and the README told contributors to run `npx gitnexus analyze`. `CLAUDE.md` now points at the `tencentdb-knowledge` tools and `AGENTS.md` §8. `scripts/windows_setup.py` still has a GitNexus stage; it was left alone.
+
+### feat(soul): the diary and the old `memories` are recalled by meaning through one service, `SoulService`
+
+**Before.** SOUL and the legacy memory path never read each other. The persona's diary (604 live rows, 925 archived) and the `memories` table were reachable only by keyword search, so about eight months of the persona's own narrative could not be recalled by meaning, and the nightly compactor that was meant to summarise it had stalled (601 raw diary rows older than two days, none compacted since March).
+
+**Now.** `core/soul/service.py` is the one door: `ingest_summary(kind, source_key, text, ...)` files text as a recallable cell under a stable key (a second call updates, never duplicates), `recall(query, sources=, date_from=, date_to=)` ranks cells, `retire_source` removes one (archived). Cells carry `source_kind` (`chat`, `journal`, `diary_day`, `legacy_memory`) and `source_key`. `scripts/ingest_legacy_into_soul.py` files the diary (one cell per archived day, not per fragment), the compaction summaries and the voice memories; observer copies of chat are skipped. Every diary write is mirrored into SOUL in the background, and rows the consolidator folds into a day are retired. Recalled diary lines read `my diary`, and at most two of the five recall slots go to ingested cells so they cannot push every conversation memory out. `MEMORY_LEGACY_TIERS_ENABLED=0` stops `search_memories` returning the same entries a second time.
+
+**Not changed.** `memories`, `archived_memories` and `ai_diary_archive` are still written and still exist; they are removed in a later step, after the new recall has run alongside the old one.
+
+**Verified.** On a copy of the live database: 1,152 cells filed in three minutes, a second run created nothing, and an A/B of the same prompts against the previous engine. Unit tests for the service, the ingest idempotence, the recall quota and the keyword-tier switch.
+
+**Location.** `core/soul/service.py` (new), `core/soul/legacy_ingest.py` (new), `core/soul/models.py`, `core/soul/repository.py`, `plugins/soul_plugin/soul_plugin.py`, `plugins/ai_diary/ai_diary.py`, `core/synth_core_memory.py`, `scripts/ingest_legacy_into_soul.py` (new), `docs/soul_memory.rst` (new), `tests/soul/test_service.py` (new).
+
+### fix(soul): the curator keeps calm memories while the store is under its cap, and archives what it removes
+
+**Before.** Every memory under a salience threshold was deleted a week after it was written, whatever the store size, and the delete was final. A live store held 94 cells against a cap of 500 after about 2,150 evictions (the scenes that remained referenced 2,258 cells, 107 of which existed), and because retrievals raise salience it kept mostly what had already been recalled (one cell was recalled 2,536 times).
+
+**Now.** `SOUL_CURATOR_EVICT_ONLY_OVER_CAP` (default on): a calm memory survives while the store is under `SOUL_CURATOR_MAX_MEMORIES` (default 5000, was a fixed 500) and is the first to go once it is over. `delete_memcells` copies each cell to `mem_cells_archive` in the same transaction before deleting it.
+
+**Not changed.** Cells already evicted are not restored automatically; `scripts/restore_curator_evicted_cells.py` can rebuild them from `mem_scenes`.
+
+**Location.** `core/soul/compiler.py`, `core/soul/repository.py`, `core/soul/models.py`, `plugins/soul_plugin/soul_plugin.py`, `tests/soul/test_compiler.py`.
+
+### fix(soul): the nightly rollup and the curator run once a day, not once per restart, and a compile no longer drops lines that arrive while it runs
+
+**Before.** The day of the last rollup lived only in memory, so every start repeated it and wrote another evidence row from the same 24 hours (the DSP builders count a fact as stable after two occurrences: 40 profile rebuilds in four months). The curator also ran at every start. A compile cleared its buffer after awaiting the LLM, so lines appended meanwhile were lost; the daily transcript took the *oldest* 500 messages of the window; one interface failing a compile skipped the others and the daily jobs for that tick.
+
+**Now.** `SOUL_LAST_ROLLUP_DATE` and `SOUL_LAST_CURATOR_DATE` are stored and read back with `get_persisted_value` (a plain `get_value` inside the event loop returns the default until the async load has run). A compile removes only the lines it compiled, the daily transcript takes the newest 500, and a failing interface is logged and retried on the next tick.
+
+**Verified.** Restarting a running instance on the database copy left the rollup count unchanged (2 to 2) and the curator count unchanged (3 to 3).
+
+**Location.** `plugins/soul_plugin/soul_plugin.py`, `tests/soul/test_soul_plugin.py`.
+
+### fix(core): a timed-out static injection no longer serves one chat's recalled memories to another
+
+**Before.** The stale-fallback cache was keyed by plugin class alone, so the last payload built for any chat was served to whichever chat timed out next.
+
+**Now.** A plugin may declare `static_injection_scope` (the chat) and `static_injection_global_keys`. SOUL scopes its payload to the chat and shares only `soul_temporal_context` (situational notes are true in every chat), so the persona stays aware of what is happening outside the conversation it is in.
+
+**Location.** `core/action_parser.py`, `plugins/soul_plugin/soul_plugin.py`, `tests/test_action_parser_static_injections.py`.
+
+### fix(soul): SOUL's own mood engine goes quiet when the Emotion Manager plugin is switched off
+
+**Before.** Switching Emotion Manager off (the README's way to run without an emotional subsystem) left SOUL tagging turns with joy/fear/sad/anger and biasing recall by mood.
+
+**Now.** With `PLUGIN_ENABLED__emotion_manager` off SOUL applies no mood event, injects no emotion delta or snapshot, and does not boost recall by mood. The Emotion Manager's startup sync also normalises diary emotion names, so `joy` is no longer dropped at restart while the live sync kept it.
+
+**Not verified here.** The startup-sync normalisation has no test of its own.
+
+**Location.** `plugins/soul_plugin/soul_plugin.py`, `plugins/emotion_manager/emotion_manager.py`, `tests/soul/test_soul_plugin.py`.
+
+### feat(webui): a People tab lists, shows, marks private and deletes the profiles Bio Manager keeps
+
+**Before.** There was no way to see who the persona had a profile for or to forget someone, and the `privacy` column was stored but never read: a profile was shown to everyone in the conversation and `bio_full_request` returned contacts and accounts unconditionally. Of 111 profiles on the live store 9 are real platform ids; the rest are API pseudo-users and anonymous sessions.
+
+**Now.** `/api/bio` (list, show, set privacy, delete) and a People tab; API and anonymous-session profiles are hidden by default. A `private` profile is shown to the model, and returned by `bio_full_request`, only when that same person is the one talking. Deleting removes the profile and says so; conversations that mention the person are not changed.
+
+**Not changed.** The new routes follow the other `/api/...` routes and do not require the API token. Memories in SOUL that mention a deleted person are not purged.
+
+**Location.** `core/bio_people.py` (new), `core/webui.py`, `core/webui_templates/sections/bio.html` (new), `core/webui_templates/synth_webui_shell.html`, `plugins/bio_manager/bio_manager.py`, `tests/test_bio_people_admin.py` (new).
+
+### fix(grillo): the chat observer no longer copies chat lines into `memories`, and clock-time settings use the configured timezone
+
+**Before.** `GRILLO_OBSERVER_STORE_MEMORIES` defaulted on: 21,698 of the 22,220 `memories` rows were raw copies of chat that `chat_history_cache` already holds, and most of what keyword recall injected into a prompt (11,647 of the matched rows over two weeks). `GRILLO_COMPACT_TIME`, the weekly review and the growth schedule were computed in UTC while labelled local.
+
+**Now.** The observer setting defaults off, and `search_memories` never returns observer rows. The three schedules read their time on the configured `TZ` clock; the database and every timestamp stay UTC.
+
+**Location.** `plugins/grillo/grillo_chat_observer/grillo_chat_observer.py`, `core/synth_core_memory.py`, `plugins/grillo/grillo_compactor/grillo_compactor.py`, `plugins/grillo/grillo_weekly_review/grillo_weekly_review.py`, `plugins/grillo/grillo_growth/grillo_growth.py`, `tests/test_grillo_schedule_timezone.py` (new).
+
+### fix(db): the SOUL database cutover keeps `distilled_at` and the retractions
+
+**Before.** The cutover copied `mem_cells` without `distilled_at` (every migrated cell then looked undistilled and was hidden from recall) and did not copy `retracted_claims` at all.
+
+**Now.** Both are copied, and only the columns the source table actually has, so an older source no longer aborts a table.
+
+**Location.** `core/db_cutover.py`, `tests/test_db_cutover.py`.
+
+### docs(agents): `AGENTS.md` says where memory, profiles and emotion live
+
+New section 3a is the routing table for anything that remembers, recalls, profiles a person or tracks a mood, with the rules that follow (SOUL owns long-term memory, every ingest has a stable key, deleting is archiving, time zones, privacy, what not to resurrect). Stale rows for `memories`, `bio`, `grillo_beats` and the SOUL settings are corrected. See also `docs/soul_memory.rst` and `scripts/ab_compare.py`.
+
 ### fix(telegram): the SyntH no longer rings the caller back right after they hang up
 
 **Before.** When the caller hung up, the call was already forgotten when the hang-up tone (or a reply that was still being generated) was played; `py-tgcalls` `play()` on a chat that is not in a call starts a new outgoing call, so the phone rang again at once.
@@ -25,6 +229,7 @@
 **Not changed.** The `outro` and the loop cross-fade of a clip, animation overlays and eye movement are not reproduced; the legs are out of the close-up anyway. Checked on the real Rei clips and VRM without GL (arms come down from the T-pose in Idle, rise to the face in Thinking); not seen on screen here, since this sandbox has no EGL.
 
 **Location.** `core/avatar_render/fbx.py` and `motion.py` (new), `renderer.py`, `vrm.py`, `source.py`, `core/animation_handler.py`, `docs/call_service.rst`, `tests/test_avatar_motion.py` (new), `tests/test_avatar_render.py`, `tests/test_animation_handler.py`.
+
 
 ### fix(config): an engine and model picked in the WebUI are no longer replaced at the next start
 

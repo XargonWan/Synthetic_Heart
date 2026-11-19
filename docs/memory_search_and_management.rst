@@ -4,8 +4,18 @@ Memory Search and Management
 This page describes how Synthetic Heart looks up stored memories, prepares them
 for the prompt, and manages memory-related context during prompt construction.
 
-This is a developer-focused explanation of the internal memory pipeline, not the
-public `memory_search` action plugin.
+This is a developer-focused explanation of the internal memory pipeline. (The
+``memory_search`` action plugin that used to sit next to it was removed; the Recon
+call still has a ``memory_search`` key, which is answered from SOUL.)
+
+.. note::
+
+   This page describes the **legacy keyword path** (``search_memories`` over
+   ``memories``, ``ai_diary`` and ``chat_history_cache``). Long-term memory now
+   lives in SOUL and is recalled by meaning; see :doc:`soul_memory`. The
+   ``memories`` and ``ai_diary`` tiers described here stop running when
+   ``MEMORY_LEGACY_TIERS_ENABLED`` is ``0``, which is the intended state once
+   ``scripts/ingest_legacy_into_soul.py`` has filed them in SOUL.
 
 How memory search is triggered
 -----------------------------
@@ -116,8 +126,7 @@ The memory storage path is separate from the prompt search path, but the same
 Developer notes
 ---------------
 
-- The prompt-side memory search is part of the JSON prompt construction flow,
-  not the same as the `memory_search` plugin action.
+- The prompt-side memory search is part of the JSON prompt construction flow.
 - The relevant sources are:
   - `core.prompt_engine.build_json_prompt`
   - `core.synth_core_memory.search_memories`
