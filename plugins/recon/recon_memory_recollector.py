@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from typing import List
+from datetime import datetime, timezone
+from typing import Any, List
 
 from core.config_manager import config_registry
 from core.logging_utils import log_info, log_warning
+from core.time_window import parse_time_window
 from core.transport_layer import extract_json_from_text
 from core.synth_core_memory import search_memories
 from core.interface_path_utils import is_vessel_history_entry, is_vessel_interface_path
@@ -52,10 +54,21 @@ class ReconMemoryRecollectorPlugin:
     def get_recon_key(self) -> str:
         return "memory_search"
 
-    def get_recon_instruction(self) -> str:
+    def get_recon_instruction(
+        self, message: Any | None = None, context_memory: Any | None = None
+    ) -> str:
+        now = datetime.now(timezone.utc).date().isoformat()
         return (
             "Extract 2-6 short tags and 2-6 short keywords for memory search. "
-            'Return as an object: {"tags": ["tag"], "keywords": ["kw"]}.'
+            "If the message is about a SPECIFIC PERIOD of the past, in whatever "
+            "language it is written (a day, a week, a month, a season, a date), "
+            "also give time_window: work the period out from today's date and write "
+            f"it as an ABSOLUTE ISO interval, start/end. Today is {now}. For "
+            'example "2026-03-01/2026-03-31"; a single day is "2026-03-10". Never '
+            "write a relative word. If the message is not about a specific past "
+            "period, leave time_window out. "
+            'Return as an object: {"tags": ["tag"], "keywords": ["kw"], '
+            '"time_window": "2026-03-01/2026-03-31"}.'
         )
 
     async def parse_recon_response(
@@ -98,7 +111,8 @@ class ReconMemoryRecollectorPlugin:
         tags = [str(t).strip() for t in raw_tags if str(t).strip()][:6]
         keywords = [str(k).strip() for k in raw_keywords if str(k).strip()][:6]
 
-        if not tags and not keywords:
+        window = self._parse_window(data)
+        if not tags and not keywords and window is None:
             return []
 
         # The message currently being answered is already persisted to
@@ -117,21 +131,26 @@ class ReconMemoryRecollectorPlugin:
                 pass
         _excluded_paths = [str(_cur_path)] if _cur_path else None
 
-        try:
-            results = await search_memories(
-                tags=tags,
-                keywords=keywords,
-                include_chat=True,
-                limit=max_results,
-                exclude_interface_paths=_excluded_paths,
-            )
-        except Exception as e:
-            log_warning(f"[recon_memory] search_memories failed: {e}")
-            return []
+        results: list[Any] = []
+        if tags or keywords:
+            try:
+                results = await search_memories(
+                    tags=tags,
+                    keywords=keywords,
+                    include_chat=True,
+                    limit=max_results,
+                    exclude_interface_paths=_excluded_paths,
+                )
+            except Exception as e:
+                log_warning(f"[recon_memory] search_memories failed: {e}")
+                if window is None:
+                    return []
 
         contributions = []
         for row in results:
             if not isinstance(row, dict):
+                continue
+            if window is not None and not self._in_window(row.get("timestamp"), window):
                 continue
             contributions.append(
                 {
@@ -142,10 +161,118 @@ class ReconMemoryRecollectorPlugin:
                 }
             )
 
+        if window is not None:
+            contributions.extend(
+                await self._soul_contributions(
+                    text=text,
+                    tags=tags,
+                    keywords=keywords,
+                    window=window,
+                    interface_path=str(_cur_path) if _cur_path else None,
+                    limit=max_results,
+                )
+            )
+
         log_info(
             f"[recon_memory] Collected {len(contributions)} memory contribution(s)"
         )
         return contributions
+
+    @staticmethod
+    def _parse_window(data: Any) -> tuple[datetime, datetime] | None:
+        """The ``(start, end)`` the Recon model gave for a dated question, or None."""
+        if not isinstance(data, dict):
+            return None
+        spec = data.get("time_window")
+        if spec in (None, "", {}, []):
+            return None
+        try:
+            return parse_time_window(spec)
+        except Exception as e:
+            log_warning(f"[recon_memory] unusable time_window {spec!r}: {e}")
+            return None
+
+    @staticmethod
+    def _in_window(value: Any, window: tuple[datetime, datetime]) -> bool:
+        """Whether a hit's timestamp falls in the window (unparseable ones stay out)."""
+        try:
+            when = (
+                value
+                if isinstance(value, datetime)
+                else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            )
+        except Exception:
+            return False
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return window[0] <= when <= window[1]
+
+    # Source strings the prompt engine renders as ``source.replace("_", " ")``.
+    _SOUL_SOURCE_LABELS = {
+        "chat": "conversation_memory",
+        "journal": "my_diary",
+        "diary_day": "my_diary_day_summary",
+        "legacy_memory": "older_memory",
+    }
+
+    async def _soul_contributions(
+        self,
+        *,
+        text: str,
+        tags: List[str],
+        keywords: List[str],
+        window: tuple[datetime, datetime],
+        interface_path: str | None,
+        limit: int,
+    ) -> list[dict]:
+        """What SOUL remembers from the period the message is about.
+
+        SOUL's passive recall ranks by the incoming text alone and has no notion of
+        "last week"; a dated question asks for it here, with the window as a filter.
+        What was told in confidence in another chat is never returned (the chat is
+        passed so only its own private memories come back).
+        """
+        try:
+            from core.core_initializer import PLUGIN_REGISTRY
+            from core.soul.service import SoulService
+
+            service = SoulService.from_registry()
+            if service is None:
+                return []
+            soul = PLUGIN_REGISTRY.get("soul_plugin")
+            session_id = (
+                soul.session_id_for(interface_path)
+                if soul is not None and interface_path
+                else None
+            )
+            query = " ".join([*keywords, *tags]).strip() or text
+            hits = await service.recall(
+                query,
+                date_from=window[0],
+                date_to=window[1],
+                session_id=session_id,
+                limit=max(1, min(int(limit or 3), 4)),
+            )
+        except Exception as e:
+            log_warning(f"[recon_memory] SOUL recall for a dated question failed: {e}")
+            return []
+        return [
+            {
+                "type": "memory",
+                "content": {
+                    "source": self._SOUL_SOURCE_LABELS.get(
+                        hit.cell.source_kind, "conversation_memory"
+                    ),
+                    "id": hit.cell.id,
+                    "timestamp": hit.cell.event_timestamp.isoformat(),
+                    "snippet": " ".join(hit.cell.episodic_trace.split())[:400],
+                    "tags": [],
+                },
+                "source": "memory_recollector",
+                "priority": int(self.recon_priority),
+            }
+            for hit in hits
+        ]
 
     async def get_recon_contributions(
         self,
