@@ -3605,6 +3605,19 @@ class AgentLoopManager:
                 )
                 source_block = "\n".join(lines)
 
+        # The message the user is replying to (set per turn by the message queue
+        # from the platform's reply payload). Without it an agentic turn answers
+        # "that message" / "the second one" without knowing what it points at.
+        quote_block = ""
+        if isinstance(context, dict):
+            quoted = context.get("reply_context")
+            if isinstance(quoted, dict) and str(quoted.get("text") or "").strip():
+                quote_block = (
+                    "QUOTED MESSAGE (the user is replying to this earlier message "
+                    f"from {quoted.get('sender_name') or 'Unknown'}):\n"
+                    f"{quoted['text']}"
+                )
+
         # Inbound attachments materialized to sandbox paths (documents/audio
         # uploaded by the user in this conversation). The agent tools
         # (agent_read_file / stt_transcribe) can only read real files, so the
@@ -3700,6 +3713,8 @@ class AgentLoopManager:
         )
         source_prefix = f"{source_block}\n\n" if source_block else ""
         attachment_prefix = f"{attachment_block}\n\n" if attachment_block else ""
+        if quote_block:
+            attachment_prefix = f"{quote_block}\n\n{attachment_prefix}"
         prompt = {
             "input": {
                 "payload": {

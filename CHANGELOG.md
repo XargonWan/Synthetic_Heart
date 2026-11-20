@@ -1,3 +1,13 @@
+### fix(chat): a reply to a photo or voice note quotes what was in it, quotes are no longer cut at 400 characters, and the Agent Lane sees the quote
+
+**Before.** The quote of a reply reached the model only as text or caption: a reply to a photo without caption (or a sticker, voice note, Discord/Fluxer image) quoted nothing at all, the quote of a text message was cut at 400 characters, and the Agent Lane never saw the quote even though the message queue set it for it (the block that was meant to render it, announced in the commit that added it, was never written).
+
+**Now.** `core/quoted_message.py` builds the quote: the message's text or caption (up to 2,000 characters, cut on a word with an ellipsis), else what Iris saw in the media (stored by `core/media_descriptions.py`, table `media_descriptions`, per chat and message id, kept 30 days; written whenever Iris describes a photo, under the id of the message that really carries it: Telegram marks a photo promoted from the replied message with `media_source_message_id`), else the kind of media ("photo; its content is not available"). The Fast Lane prefix, the Agent Lane (`QUOTED MESSAGE` block in `_build_agent_prompt`) and the queue's `reply_context` all use it. Discord and Fluxer now pass the quoted message's attachments so the kind can be named.
+
+**Not changed.** Matrix: the quote comes from the reply fallback text only, so a reply to media there is still not quoted. The `[replied to ...]` annotation in the history stays at 200 characters.
+
+**Location.** `core/quoted_message.py`, `core/media_descriptions.py`, `core/prompt_engine.py`, `core/message_queue.py`, `core/agent_core.py`, `core/plugin_instance.py`, `plugins/iris_base.py`, `interface/telegram/telegram.py`, `interface/discord_interface/discord_interface.py`, `interface/fluxer_interface/fluxer_interface.py`, `tests/test_quoted_message.py`.
+
 ### feat(iris): the model selector lists only models that declare vision or pass the image probe
 
 **Before.** The Iris model selector kept every model whose metadata said nothing about vision ("permissive when unknown"), so on Harmony it offered speech and embedding models next to the two vision ones, and nothing showed which of them could actually answer a photo.

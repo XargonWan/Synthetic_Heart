@@ -2659,6 +2659,9 @@ class DiscordInterface:
                         message_id=getattr(replied, "id", None),
                         text=getattr(replied, "content", None),
                         caption=None,
+                        # Media on the quoted message (an image posted without text):
+                        # the quote builder reads it to say what kind of media it is.
+                        attachments=list(getattr(replied, "attachments", None) or []),
                         date=getattr(replied, "created_at", None),
                         from_user=SimpleNamespace(
                             id=getattr(replied.author, "id", None),

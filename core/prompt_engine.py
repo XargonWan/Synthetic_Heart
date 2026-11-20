@@ -2390,8 +2390,9 @@ def _assemble_prompt_request(  # noqa: PLR0913
         _rq_sender = str((reply_to_dict.get("from") or {}).get("username") or "Unknown")
         _rq_text = str(reply_to_dict.get("text") or "").strip()
         if _rq_text and _rq_text != "[Non-text content]":
-            if len(_rq_text) > 400:
-                _rq_text = _rq_text[:400] + "\u2026"
+            from core.quoted_message import clip
+
+            _rq_text = clip(_rq_text)
             _rq_safe = _rq_text.replace('"', "'").replace("\n", " ")
             _reply_quote_prefix = (
                 f'[The user is replying to {_rq_sender}\'s message: "{_rq_safe}"]\n'
@@ -3305,9 +3306,11 @@ async def build_prompt_request(
 
     reply = getattr(message, "reply_to_message", None)
     if reply:
-        reply_text = getattr(reply, "text", None) or getattr(reply, "caption", None)
-        if not reply_text:
-            reply_text = "[Non-text content]"
+        # What the user quotes: its text, or for a photo/sticker/voice note what
+        # Iris saw in it (see core.quoted_message).
+        from core.quoted_message import quote_text
+
+        reply_text = await quote_text(reply, interface_path) or "[Non-text content]"
         reply_date = getattr(reply, "date", None)
         reply_timestamp = reply_date.isoformat() if reply_date else ""
         reply_from = getattr(reply, "from_user", None)

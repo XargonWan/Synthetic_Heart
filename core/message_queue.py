@@ -342,7 +342,7 @@ def _extract_grillo_activity_log_id(message: object) -> int | None:
         return None
 
 
-def _reply_context_from_message(message: object) -> dict[str, str] | None:
+async def _reply_context_from_message(message: object) -> dict[str, str] | None:
     """Extract the quoted-reply context from a queued inbound message.
 
     When the user REPLIES to an earlier message, the interfaces attach the
@@ -350,15 +350,17 @@ def _reply_context_from_message(message: object) -> dict[str, str] | None:
     Discord SimpleNamespace, Matrix fallback-parse namespace, Fluxer extraction).
     The Agent Lane never sees that attribute — its prompt is built only from
     goal + observations + context — so without this the model answers a quote
-    it cannot read. Returns ``{"sender_name", "text"}`` or None. Purely
-    structural (attribute reads), no keyword logic.
+    it cannot read. Returns ``{"sender_name", "text"}`` or None. The text is the
+    quoted message's text, or for media what Iris saw in it
+    (``core.quoted_message.quote_text``). Purely structural (attribute reads),
+    no keyword logic.
     """
     reply = getattr(message, "reply_to_message", None)
     if reply is None:
         return None
-    text = str(
-        getattr(reply, "text", None) or getattr(reply, "caption", None) or ""
-    ).strip()
+    from core.quoted_message import quote_text
+
+    text = await quote_text(reply, getattr(message, "interface_path", None))
     if not text:
         return None
     sender = getattr(reply, "from_user", None)
@@ -2276,7 +2278,7 @@ async def _consumer_loop() -> None:
                         # Agent Lane (agent_router.route → run_agentic_turn →
                         # _build_agent_prompt renders a QUOTED MESSAGE block).
                         # Written/cleared every turn so a stale value never lingers.
-                        _reply_ctx = _reply_context_from_message(_queued_msg)
+                        _reply_ctx = await _reply_context_from_message(_queued_msg)
                         if _reply_ctx is not None:
                             context["reply_context"] = _reply_ctx
                         else:

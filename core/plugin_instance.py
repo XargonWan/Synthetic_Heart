@@ -748,6 +748,27 @@ async def handle_incoming_message(
                             "[plugin_instance] Appended Iris vision analysis to prompt text"
                         )
 
+                        # Keep what Iris saw under the id of the message that
+                        # carried the media, so a later reply to that message can
+                        # quote it (a photo without a caption leaves no history
+                        # text to quote). A promoted reply (Telegram hands the
+                        # replied photo to the replying message) names the id of
+                        # the message the photo really belongs to.
+                        if not getattr(iris_result, "is_placeholder", False):
+                            _media_ref = getattr(
+                                message, "media_source_message_id", None
+                            ) or getattr(message, "message_id", None)
+                            _media_path = getattr(message, "interface_path", None) or (
+                                context_memory_or_prompt.get("interface_path")
+                                if isinstance(context_memory_or_prompt, dict)
+                                else None
+                            )
+                            from core import media_descriptions
+
+                            await media_descriptions.remember(
+                                _media_path, _media_ref, iris_result.description
+                            )
+
                         # Persist the enriched text into the already-saved
                         # chat-history row so the description survives across
                         # turns (the raw caption was saved upstream by the
@@ -1882,6 +1903,7 @@ async def _describe_attachment_images_with_iris(
                     is_sticker=first_media_is_sticker,
                 ),
                 is_sticker=first_media_is_sticker,
+                is_placeholder=True,
             )
         # Refresh config before reading _active_engine_name so we get the
         # DB-loaded value rather than the hard-coded startup default ("disabled").
@@ -1901,6 +1923,7 @@ async def _describe_attachment_images_with_iris(
                     is_sticker=first_media_is_sticker,
                 ),
                 is_sticker=first_media_is_sticker,
+                is_placeholder=True,
             )
         log_info(
             f"[plugin_instance] Iris active engine: '{active_engine}', processing {len(attachments)} attachment(s)"
@@ -1914,6 +1937,7 @@ async def _describe_attachment_images_with_iris(
                 is_sticker=first_media_is_sticker,
             ),
             is_sticker=first_media_is_sticker,
+            is_placeholder=True,
         )
 
     failure_reason = "error"
@@ -2081,6 +2105,7 @@ async def _describe_attachment_images_with_iris(
             is_sticker=first_media_is_sticker,
         ),
         is_sticker=first_media_is_sticker,
+        is_placeholder=True,
     )
 
 
