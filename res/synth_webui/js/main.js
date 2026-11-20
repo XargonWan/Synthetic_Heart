@@ -5083,12 +5083,44 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     const irisModelSel = document.getElementById('iris-model-select');
                     const irisEngineSel = document.getElementById('iris-engine-select');
 
+                    const irisProbeBtn = document.getElementById('iris-probe-models-btn');
+                    const irisHint = document.getElementById('iris-model-hint');
+
+                    // The selector offers a model that declares vision, or one whose
+                    // image probe passed. A model with neither (a speech or embedding
+                    // model, one that cannot answer a photo) is not listed.
+                    const irisListed = (meta) => {
+                        if (!meta) return false;
+                        const caps = meta.capabilities || {};
+                        const probe = meta.vision_probe || {};
+                        return !!caps.vision || !!probe.ok;
+                    };
+
                     const populateIrisModelSelect = (engineName) => {
                         if (!irisModelSel) return;
                         const engine = (data.iris || []).find((e) => e.name === engineName);
                         const allModels = (engine && engine.available_models) ? engine.available_models : [];
-                        const metaList = (engine && engine.models_meta) ? engine.models_meta : [];
-                        const entries = filterModelsByCapability(allModels, metaList, 'vision');
+                        const metaById = new Map();
+                        ((engine && engine.models_meta) || []).forEach((m) => {
+                            if (m && (m.id || m.model_id)) metaById.set(m.id || m.model_id, m);
+                        });
+                        const entries = allModels
+                            .map((id) => ({ id, meta: metaById.get(id) || null }))
+                            .filter(({ meta }) => irisListed(meta));
+                        const hidden = allModels.length - entries.length;
+
+                        // Models nobody has probed yet can still earn a place: offer to probe them.
+                        const canProbe = !!(engine && engine.endpoint_id != null && hidden > 0);
+                        if (irisProbeBtn) {
+                            irisProbeBtn.style.display = canProbe ? '' : 'none';
+                            irisProbeBtn.textContent = `🔍 Probe ${hidden} other model${hidden === 1 ? '' : 's'}`;
+                            irisProbeBtn.dataset.endpointId = canProbe ? String(engine.endpoint_id) : '';
+                        }
+                        if (irisHint) {
+                            irisHint.style.display = hidden > 0 ? '' : 'none';
+                            irisHint.textContent = `${hidden} hidden: no vision skill and no passing image probe`;
+                        }
+
                         if (!entries.length) {
                             irisModelSel.style.display = 'none';
                             irisModelSel.innerHTML = '';
@@ -5107,6 +5139,34 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         irisModelSel.value = ids.includes(saved) ? saved : ids[0];
                         irisModelSel.style.display = '';
                     };
+
+                    if (irisProbeBtn && !irisProbeBtn.dataset.bound) {
+                        irisProbeBtn.addEventListener('click', async () => {
+                            const id = irisProbeBtn.dataset.endpointId;
+                            if (!id) return;
+                            irisProbeBtn.disabled = true;
+                            const label = irisProbeBtn.textContent;
+                            irisProbeBtn.textContent = 'Probing… (up to 30s per model)';
+                            try {
+                                const res = await fetch(`/api/external-endpoints/${id}/vision-probe-models`, { method: 'POST' });
+                                const out = await res.json();
+                                if (!res.ok) throw new Error(out.detail || res.statusText);
+                                window.showToast && window.showToast(`Image probe: ${out.passed} of ${out.probed} models answered`);
+                                if (typeof window.loadEnginesSummary === 'function') {
+                                    await window.loadEnginesSummary();
+                                } else if (window.SynthWebUI && window.SynthWebUI.loadEnginesSummary) {
+                                    await window.SynthWebUI.loadEnginesSummary();
+                                }
+                            } catch (e) {
+                                console.error('[synth_webui] Iris image probe failed', e);
+                                window.showToast && window.showToast('Image probe failed: ' + e.message, true);
+                                irisProbeBtn.textContent = label;
+                            } finally {
+                                irisProbeBtn.disabled = false;
+                            }
+                        });
+                        irisProbeBtn.dataset.bound = '1';
+                    }
 
                     if (irisEngineSel) {
                         populateIrisModelSelect(irisEngineSel.value);

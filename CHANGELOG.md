@@ -1,3 +1,11 @@
+### feat(iris): the model selector lists only models that declare vision or pass the image probe
+
+**Before.** The Iris model selector kept every model whose metadata said nothing about vision ("permissive when unknown"), so on Harmony it offered speech and embedding models next to the two vision ones, and nothing showed which of them could actually answer a photo.
+
+**Now.** A model is listed when its endpoint declares the `vision` skill for it, or when it passed the image probe (a photo sent through the Iris path came back as a description). Anything else is hidden, with a note "N hidden: no vision skill and no passing image probe" and a button that probes those models one by one (30 s each, `POST /api/external-endpoints/{id}/vision-probe-models`) and stores each outcome in the model's metadata (`vision_probe`: `ok`, `elapsed_ms`, `at`). The "Test Vision" button stores its result the same way, and a refresh of the endpoint's model list keeps the stored results. A model that declares vision stays listed even if its probe failed or was slow: the test button reports that, the selector does not hide it.
+
+**Location.** `core/external_endpoints/vision_filter.py`, `core/external_endpoints/vision_probe.py`, `core/external_endpoints/registry.py`, `core/webui.py`, `core/webui_templates/sections/engines.html`, `res/synth_webui/js/main.js`, `tests/test_vision_filter.py`, `tests/test_ext_model_persistence.py`.
+
 ### fix(bio): people have a name: the one the platform reports, stored once, and shown in the People tab
 
 **Before.** A profile got a name only if the model wrote one with `bio_update`, and it never did: on the live store all 111 profiles had no `user_name`, no nicknames and no other content, so the People tab listed everybody as unnamed even though every message carries the sender's name (and the chat history knows it).

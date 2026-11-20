@@ -801,3 +801,37 @@ async def test_vision_test_picked_model_beats_the_endpoints_iris_model() -> None
     first, second = describe_image.await_args_list
     assert first.kwargs["model"] == "picked"
     assert second.kwargs["model"] == "iris-m"
+
+
+@pytest.mark.asyncio
+async def test_set_probe_result_keeps_the_stored_image_probes(monkeypatch) -> None:
+    """Re-listing an endpoint's models must not erase which models passed the image probe."""
+    captured: dict = {}
+    registry = ExternalEndpointRegistry()
+    stored = _make_endpoint(default_model="model-a")
+    stored.models_metadata = [
+        {"id": "model-a", "capabilities": {}, "vision_probe": {"ok": True}}
+    ]
+
+    monkeypatch.setattr(
+        "core.external_endpoints.registry._ensure_table", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr("core.db.get_conn_ctx", lambda: _CapturingConnCtx(captured))
+    monkeypatch.setattr(registry, "get_endpoint", AsyncMock(return_value=stored))
+    monkeypatch.setattr(registry, "_sync_registries", AsyncMock(return_value=None))
+
+    await registry.set_probe_result(
+        endpoint_id=7,
+        status="success",
+        capabilities={"cortex": True},
+        models=["model-a", "model-b"],
+        models_metadata=[
+            {"id": "model-a", "capabilities": {}},
+            {"id": "model-b", "capabilities": {}},
+        ],
+    )
+
+    _query, params = _statement_matching(captured, "models_metadata = %s")
+    written = json.loads(params[3])
+    assert written[0]["vision_probe"] == {"ok": True}
+    assert "vision_probe" not in written[1]

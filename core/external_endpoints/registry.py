@@ -331,6 +331,40 @@ class ExternalEndpointRegistry:
             await self._sync_registries(ep)
         log_debug(f"[ext_endpoints] Updated subsystem_map for id={endpoint_id}")
 
+    async def record_vision_probes(
+        self, endpoint_id: int, outcomes: list[tuple[str, bool, int]]
+    ) -> None:
+        """Store image-probe outcomes ``(model_id, ok, elapsed_ms)`` on the endpoint.
+
+        The Iris model selector reads them (see ``vision_filter``). Registries are
+        re-synced so the engine instance the WebUI lists from carries the new data.
+        """
+        from core.db import get_conn_ctx
+        from core.external_endpoints.vision_filter import record_probe
+
+        if not outcomes:
+            return
+        await self._ensure()
+        ep = await self.get_endpoint(endpoint_id)
+        if ep is None:
+            return
+        metadata = list(ep.models_metadata or [])
+        for model_id, ok, elapsed_ms in outcomes:
+            metadata = record_probe(metadata, model_id, ok=ok, elapsed_ms=elapsed_ms)
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE external_endpoints SET models_metadata = %s WHERE id = %s",
+                    (json.dumps(metadata), endpoint_id),
+                )
+            try:
+                await conn.commit()
+            except Exception:
+                pass
+        refreshed = await self.get_endpoint(endpoint_id)
+        if refreshed is not None:
+            await self._sync_registries(refreshed)
+
     async def set_probe_result(
         self,
         endpoint_id: int,
@@ -364,6 +398,14 @@ class ExternalEndpointRegistry:
         capabilities_json = json.dumps(
             stored_capabilities if keep_capabilities else capabilities
         )
+        if models:
+            # The provider's list knows nothing of our image probes: keep them.
+            from core.external_endpoints.vision_filter import carry_over_probes
+
+            previous = await self.get_endpoint(endpoint_id)
+            models_metadata = carry_over_probes(
+                models_metadata, previous.models_metadata if previous else []
+            )
 
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:

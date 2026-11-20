@@ -78,9 +78,8 @@ import mimetypes
 BRAND_NAME = "Synthetic Heart"
 INTERFACE_NAME = "synth_webui"
 EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS = 300.0
-# A vision probe slower than this still passes but is flagged "slow": a chat photo
-# is cut at 120 s, and an answer near that is a stall waiting to happen.
-VISION_PROBE_SLOW_MS = 30_000
+# Per-model deadline of the bulk image probe behind the Iris model selector.
+VISION_BULK_PROBE_TIMEOUT_SECONDS = 30.0
 
 # exposed configuration variable to toggle experimental multi-session mode
 register_exposed_var(
@@ -1145,6 +1144,9 @@ class SynthWebUIInterface:
         )
         self.app.post("/api/external-endpoints/{ep_id}/vision-test")(
             self.test_external_endpoint_vision
+        )
+        self.app.post("/api/external-endpoints/{ep_id}/vision-probe-models")(
+            self.probe_external_endpoint_vision_models
         )
         self.app.post("/api/external-endpoints/{ep_id}/enable")(
             self.enable_external_endpoint
@@ -7426,16 +7428,13 @@ class SynthWebUIInterface:
         long it took, so the WebUI can tell "understands images" from "answers a
         64x64 gradient quickly but stalls on a real photo". The previous probe sent
         a few-kilobyte PNG straight to the adapter and reported "ok" while every
-        real photo timed out. Never mutates endpoint state.
+        real photo timed out. The outcome is stored on the model (the Iris model
+        selector reads it); nothing else about the endpoint changes.
 
         Body: ``{"model"?: ...}`` — optional model override; otherwise the
         endpoint's ``iris_model`` / default model is used, falling back to a probed
         model flagged vision-capable.
         """
-        import os as _os
-        import tempfile
-        import time as _time
-
         try:
             body: dict = {}
             try:
@@ -7444,14 +7443,12 @@ class SynthWebUIInterface:
                 pass
             model = str(body.get("model") or "").strip() or None
 
-            from core.external_endpoints.bridges.iris_bridge import (
-                ExternalIrisEngine,
-            )
             from core.external_endpoints.crypto import decrypt_api_key
             from core.external_endpoints.probe import get_adapter_for_endpoint
             from core.external_endpoints.registry import (
                 get_external_endpoint_registry,
             )
+            from core.external_endpoints.vision_probe import run_vision_probe
 
             reg = get_external_endpoint_registry()
             ep = await reg.get_endpoint(ep_id)
@@ -7476,105 +7473,91 @@ class SynthWebUIInterface:
                 else:
                     model = ep.available_models[0]
 
-            api_key = decrypt_api_key(ep.api_key_enc or "")
-            adapter = get_adapter_for_endpoint(ep, api_key)
-            probe_ep = ep
-            if model and (ep.extra_config or {}).get("iris_model"):
-                # The engine prefers the endpoint's ``iris_model`` over a caller's
-                # model. A probe of a model the person picked must test THAT model.
-                import dataclasses
-
-                probe_ep = dataclasses.replace(
-                    ep,
-                    extra_config={
-                        k: v for k, v in ep.extra_config.items() if k != "iris_model"
-                    },
-                )
-            engine = ExternalIrisEngine(probe_ep, adapter)
-
-            from core.vision_probe_image import build_probe_photo
-
-            image_bytes = build_probe_photo()
-            prompt: str = "Describe this image."
-            try:
-                from plugins.iris_plugin.iris_plugin import (
-                    _IRIS_DEFAULT_PROMPT_TEXT,
-                )
-
-                prompt = str(_IRIS_DEFAULT_PROMPT_TEXT)
-            except Exception:
-                pass
-
-            effective_model = (
-                model
-                or (ep.extra_config or {}).get("iris_model")
-                or ep.default_model
-                or ""
+            adapter = get_adapter_for_endpoint(
+                ep, decrypt_api_key(ep.api_key_enc or "")
             )
-            # The engine applies its own deadline (extra_config ``timeout``, 120 s)
-            # and answers None when it expires; the outer one only guards a hang.
-            deadline = engine._get_request_timeout() + 10.0
-            started = _time.monotonic()
-            path = ""
-            try:
-                with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-                    tmp.write(image_bytes)
-                    path = tmp.name
-                result = await asyncio.wait_for(
-                    engine.describe_image(
-                        path, "image/jpeg", prompt, model=effective_model or None
-                    ),
-                    timeout=deadline,
-                )
-            except asyncio.TimeoutError:
-                result = None
-            except Exception as exc:
-                return JSONResponse(
-                    {
-                        "ok": False,
-                        "model": effective_model,
-                        "elapsed_ms": int((_time.monotonic() - started) * 1000),
-                        "image_bytes": len(image_bytes),
-                        "error": str(exc),
-                    }
-                )
-            finally:
-                if path:
-                    try:
-                        _os.remove(path)
-                    except OSError:
-                        pass
-            elapsed_ms = int((_time.monotonic() - started) * 1000)
+            outcome = await run_vision_probe(ep, adapter, model)
+            if outcome.model:
+                try:
+                    await reg.record_vision_probes(
+                        ep_id, [(outcome.model, outcome.ok, outcome.elapsed_ms)]
+                    )
+                except Exception as exc:
+                    log_warning(f"{LOG_PREFIX} could not store the vision probe: {exc}")
 
-            desc = ((result.description if result else "") or "").strip()
-            if not desc:
-                return JSONResponse(
-                    {
-                        "ok": False,
-                        "model": effective_model,
-                        "elapsed_ms": elapsed_ms,
-                        "image_bytes": len(image_bytes),
-                        "error": (
-                            f"No description after {elapsed_ms / 1000:.0f}s for a "
-                            f"{len(image_bytes) // 1024} KB photo — timed out or the "
-                            "model/endpoint does not accept images (see the log)"
-                        ),
-                    }
+            payload: dict[str, Any] = {
+                "ok": outcome.ok,
+                "model": outcome.model,
+                "elapsed_ms": outcome.elapsed_ms,
+                "image_bytes": outcome.image_bytes,
+            }
+            if outcome.ok:
+                payload["description"] = outcome.description
+                payload["slow"] = outcome.slow
+            else:
+                payload["error"] = outcome.error
+            return JSONResponse(payload)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} test_external_endpoint_vision failed: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def probe_external_endpoint_vision_models(self, ep_id: int) -> JSONResponse:
+        """POST /api/external-endpoints/{ep_id}/vision-probe-models.
+
+        Probes every model the endpoint does not declare vision for, one at a time
+        with a short deadline, and stores each outcome. The Iris model selector
+        lists a model only if it declares vision or passed this probe, so this is
+        how a model without the skill earns a place (or is shown not to belong).
+        """
+        try:
+            from core.external_endpoints.crypto import decrypt_api_key
+            from core.external_endpoints.probe import get_adapter_for_endpoint
+            from core.external_endpoints.registry import (
+                get_external_endpoint_registry,
+            )
+            from core.external_endpoints.vision_filter import models_to_probe
+            from core.external_endpoints.vision_probe import run_vision_probe
+
+            reg = get_external_endpoint_registry()
+            ep = await reg.get_endpoint(ep_id)
+            if ep is None:
+                raise HTTPException(status_code=404, detail="Endpoint not found")
+            candidates = models_to_probe(
+                list(ep.available_models or []), ep.models_metadata
+            )
+            adapter = get_adapter_for_endpoint(
+                ep, decrypt_api_key(ep.api_key_enc or "")
+            )
+            outcomes: list[tuple[str, bool, int]] = []
+            summary: list[dict[str, Any]] = []
+            for model in candidates:
+                result = await run_vision_probe(
+                    ep,
+                    adapter,
+                    model,
+                    timeout_seconds=VISION_BULK_PROBE_TIMEOUT_SECONDS,
                 )
+                outcomes.append((model, result.ok, result.elapsed_ms))
+                summary.append(
+                    {"model": model, "ok": result.ok, "elapsed_ms": result.elapsed_ms}
+                )
+            await reg.record_vision_probes(ep_id, outcomes)
             return JSONResponse(
                 {
                     "ok": True,
-                    "model": effective_model,
-                    "description": desc,
-                    "elapsed_ms": elapsed_ms,
-                    "image_bytes": len(image_bytes),
-                    "slow": elapsed_ms > VISION_PROBE_SLOW_MS,
+                    "probed": len(summary),
+                    "passed": sum(1 for r in summary if r["ok"]),
+                    "results": summary,
                 }
             )
         except HTTPException:
             raise
         except Exception as exc:
-            log_error(f"{LOG_PREFIX} test_external_endpoint_vision failed: {exc}")
+            log_error(
+                f"{LOG_PREFIX} probe_external_endpoint_vision_models failed: {exc}"
+            )
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     async def enable_external_endpoint(self, ep_id: int) -> JSONResponse:
@@ -13528,9 +13511,11 @@ class SynthWebUIInterface:
                 _available_models: list[str] = []
                 _default_model: str | None = None
                 _models_meta: list[dict] = []
+                _endpoint_id: int | None = None
                 _instance = IRIS_REGISTRY.get_instance(_name)
                 if _instance is not None and hasattr(_instance, "_endpoint"):
                     _ep = _instance._endpoint
+                    _endpoint_id = getattr(_ep, "id", None)
                     _available_models = list(
                         getattr(_ep, "available_models", None) or []
                     )
@@ -13550,6 +13535,7 @@ class SynthWebUIInterface:
                         "available_models": _available_models,
                         "default_model": _default_model,
                         "models_meta": _models_meta,
+                        "endpoint_id": _endpoint_id,
                     }
                 )
         except Exception as exc:
