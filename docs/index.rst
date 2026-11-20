@@ -69,6 +69,7 @@ getting started.
    config_management
    prompt_engine_json_prompt
    memory_search_and_management
+   soul_memory
    CHANGELOG
    contributing
 

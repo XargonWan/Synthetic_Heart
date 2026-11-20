@@ -29,10 +29,16 @@ from plugins.grillo.common_instructions import (
 register_exposed_var(
     "GRILLO_OBSERVER_STORE_MEMORIES",
     label="Grillo Observer Store Memories",
-    default=True,
+    default=False,
     value_type=bool,
     ui_type="boolean",
-    description="When enabled, observer snippets are stored as passive memories",
+    description=(
+        "When enabled, observer snippets are copied into the legacy `memories` "
+        "table. Off by default: those rows are raw copies of chat lines that "
+        "chat_history_cache already holds and SOUL's compiler already reads, and "
+        "on a live store they made up 97% of `memories` and most of what keyword "
+        "recall injected into prompts."
+    ),
     scope="plugins",
     component="grillo_chat_observer",
     tags=["plugin"],
@@ -169,7 +175,7 @@ class GrilloChatObserverPlugin:
         )
         self.store_memories = config_registry.get_value(
             "GRILLO_OBSERVER_STORE_MEMORIES",
-            True,
+            False,
             label="Grillo Observer Store Memories",
             description="Store observer snippets as passive memories",
             value_type=bool,

@@ -704,6 +704,10 @@ function loadHistoryData(subtab) {
         try { if (window.SynthWebUI && typeof window.SynthWebUI.initAgentTab === 'function') window.SynthWebUI.initAgentTab(); } catch (e) { /* ignore */ }
         return;
     }
+    if (subtab === 'people') {
+        try { if (window.SynthWebUI && typeof window.SynthWebUI.initPeopleTab === 'function') window.SynthWebUI.initPeopleTab(); } catch (e) { /* ignore */ }
+        return;
+    }
 }
 
 async function loadHistoryDiary() {

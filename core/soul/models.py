@@ -60,6 +60,10 @@ class SituationalNote:
     created_at: datetime | None = None
     updated_at: datetime | None = None
     resolved_at: datetime | None = None
+    # ``private`` when the Debrief judged the exchange it came from to be shared in
+    # confidence: the note is then only injected in the chat it was told in
+    # (``session_id`` holds that chat), never in another conversation.
+    visibility: str = "shared"
 
     def is_active(self, now: datetime) -> bool:
         """Return True when ``now`` falls within [valid_from, valid_until)."""
@@ -122,6 +126,27 @@ class MemCell:
     # NULL means the row predates distillation (raw transcript as the trace), which
     # is the set the operator re-distil pass has to catch up.
     distilled_at: datetime | None = None
+    # Where the cell came from. ``chat`` is a cell compiled from a conversation
+    # (the original and default kind); the others are ingested through
+    # ``SoulService.ingest_summary`` and carry a stable ``source_key`` so a
+    # re-run updates the cell instead of duplicating it:
+    #   ``journal``       - an entry of the persona's own diary (first person; a
+    #                       statement of what the persona thought, never a fact
+    #                       about a user)
+    #   ``diary_day``     - a compacted day summary of that diary
+    #   ``legacy_memory`` - a row of the retired ``memories`` table
+    source_kind: str = "chat"
+    source_key: str | None = None
+    # Who may be reminded of this cell. ``shared`` (the default, and what every
+    # cell written before this field is) can be recalled in any conversation.
+    # ``private`` is a memory of a one-to-one chat: it is only recalled in that
+    # same conversation, so what someone confided to the persona is not repeated
+    # to anyone else, in a group or in another person's chat.
+    visibility: str = "shared"
+    # Who spoke in the window this cell came from: ``[{"id": ..., "name": ...}]``,
+    # the humans only. It is the provenance a consolidated memory needs ("told by A
+    # in March and B in April") and the audience a person's data can be found by.
+    participants: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -302,6 +327,10 @@ class CurationResult:
     retained: int
     kept_future: int
     kept_important: int
+    # Calm cells (curator verdict REMOVE) that survived because the store is
+    # under its cap; only non-zero with ``evict_only_over_cap``. Already counted
+    # inside ``kept_important``.
+    kept_calm: int = 0
 
 
 def compute_memcell_salience(
@@ -396,6 +425,7 @@ def situational_note_from_extraction(
     session_id: str | None = None,
     now: datetime | None = None,
     default_ttl_hours: int = 24,
+    visibility: str = "shared",
 ) -> "SituationalNote":
     """Build a persistable note from extracted fields, normalising the window.
 
@@ -434,6 +464,7 @@ def situational_note_from_extraction(
         created_at=anchor,
         updated_at=anchor,
         resolved_at=None,
+        visibility=visibility,
     )
 
 

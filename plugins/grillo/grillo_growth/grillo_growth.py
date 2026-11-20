@@ -52,6 +52,7 @@ from core.growth_state import (
     save_growth_state,
 )
 from core.json_utils import extract_json_from_text
+from core.time_zone_utils import get_local_timezone
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.soul.retractions import (
     claim_matching,
@@ -138,7 +139,7 @@ class GrilloGrowthPlugin:
             default="03:00",
             value_type=str,
             ui_type="string",
-            description="Time (HH:MM, UTC) the weekly self-growth reflection runs.",
+            description="Time (HH:MM, in the configured timezone) the weekly self-growth reflection runs.",
             scope="grillo",
             component="grillo_growth",
         )
@@ -549,7 +550,7 @@ class GrilloGrowthPlugin:
     def _seconds_until_next_run(
         self, day_name: str, hhmm: str, *, now: datetime | None = None
     ) -> int:
-        """Seconds until the next occurrence of ``day_name`` at ``hhmm`` (UTC)."""
+        """Seconds until the next ``day_name`` at ``hhmm`` in the configured timezone."""
         try:
             parts = str(hhmm).split(":")
             hour = int(parts[0])
@@ -559,13 +560,18 @@ class GrilloGrowthPlugin:
 
         target_weekday = _WEEKDAY_INDEX.get(str(day_name).strip().lower(), 6)
 
-        now = now or datetime.now(timezone.utc)
+        # Day and time are read on the configured wall clock (``TZ``); timestamps
+        # and the scheduler's arithmetic stay UTC.
+        now_utc = now or datetime.now(timezone.utc)
+        now = now_utc.astimezone(get_local_timezone())
         target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         days_ahead = (target_weekday - now.weekday()) % 7
         target = target + timedelta(days=days_ahead)
         if target <= now:
             target = target + timedelta(days=7)
-        delta = (target - now).total_seconds()
+        delta = (
+            target.astimezone(timezone.utc) - now_utc.astimezone(timezone.utc)
+        ).total_seconds()
         return max(0, int(delta))
 
     # -------------------------------------------------------- reflection build
@@ -1617,5 +1623,11 @@ class GrilloGrowthPlugin:
             "proposal": proposal,
         }
 
+
+# A pending growth proposal is in the context this turn only when it needs a verdict,
+# and ``apply_growth_proposal`` is how the model gives it: send that schema in full.
+from core.action_tiers import register_state_actions  # noqa: E402
+
+register_state_actions("self_growth_pending_proposal", "apply_growth_proposal")
 
 PLUGIN_CLASS = GrilloGrowthPlugin

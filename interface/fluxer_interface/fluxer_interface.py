@@ -815,6 +815,7 @@ class FluxerInterface:
                 message_id=str(_ref.get("id")),
                 text=_ref_text or None,
                 caption=None,
+                attachments=list(_ref.get("attachments") or []),
                 date=None,
                 from_user=SimpleNamespace(
                     id=(

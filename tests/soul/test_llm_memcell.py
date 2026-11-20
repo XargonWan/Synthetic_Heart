@@ -455,3 +455,52 @@ async def test_relative_time_boilerplate_is_not_injected_as_foresight() -> None:
     triggers = [signal.trigger for signal in cells[0].foresight_signals]
     assert "relative_time_mention" not in triggers
     assert "date_mention" in triggers
+
+
+@pytest.mark.asyncio
+async def test_entries_the_model_labels_forgettable_are_not_stored() -> None:
+    """Greetings, one-off commands and jokes are labelled by the model and dropped."""
+    engine = FakeEngine(
+        '{"memories": ['
+        '{"trace": "Scar greeted the persona and asked how she was.", "facts": [], "kind": "small_talk"},'
+        '{"trace": "Scar will be on vacation next week and mostly unavailable.", "facts": [], "kind": "plan"}'
+        "]}"
+    )
+    cells = await _extractor(engine).extract_memcells(
+        transcript=TRANSCRIPT, current_date=date(2026, 9, 1)
+    )
+    assert [c.episodic_trace for c in cells] == [
+        "Scar will be on vacation next week and mostly unavailable."
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_session_of_only_forgettable_entries_stores_nothing_not_the_transcript() -> (
+    None
+):
+    """Dropping every entry must not fall back to the verbatim deterministic cell."""
+    engine = FakeEngine(
+        '{"memories": [{"trace": "Scar said hello to the persona.", "facts": [], "kind": "small_talk"}]}'
+    )
+    cells = await _extractor(engine).extract_memcells(
+        transcript="Scar: hello\nSynth: hi\n", current_date=date(2026, 9, 1)
+    )
+    assert cells == []
+
+
+@pytest.mark.asyncio
+async def test_a_dated_plan_in_the_session_outranks_the_forgettable_label() -> None:
+    engine = FakeEngine(
+        '{"memories": [{"trace": "Scar will visit the dentist on 2026-09-05.", "facts": [], "kind": "one_off_command"}]}'
+    )
+    cells = await _extractor(engine).extract_memcells(
+        transcript="Scar: remind me, dentist on 2026-09-05\n",
+        current_date=date(2026, 9, 1),
+    )
+    assert len(cells) == 1
+
+
+def test_the_extraction_prompt_asks_for_a_kind() -> None:
+    instructions = _extractor(None)._build_extract_instructions()
+    assert "KIND of each entry" in instructions
+    assert "one_off_command" in instructions

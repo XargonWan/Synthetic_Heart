@@ -3159,6 +3159,26 @@ async def _add_retraction_injections(injections: dict[str, Any]) -> dict[str, An
     return injections
 
 
+_STATIC_INJECTION_CACHE_MAX = 512
+
+
+def _prune_static_injection_cache(now: float, ttl_seconds: float) -> None:
+    """Drop expired entries once the cache has grown past its soft cap.
+
+    The cache holds one entry per (plugin, chat) for plugins that scope their
+    fallback to a conversation, so it grows with the number of chats seen.
+    """
+    if len(_STATIC_INJECTION_CACHE) <= _STATIC_INJECTION_CACHE_MAX:
+        return
+    horizon = max(float(ttl_seconds or 0.0), 600.0)
+    for key in [
+        key
+        for key, (stored_at, _payload) in _STATIC_INJECTION_CACHE.items()
+        if now - stored_at > horizon
+    ]:
+        _STATIC_INJECTION_CACHE.pop(key, None)
+
+
 async def gather_static_injections(message=None, context_memory=None):
     """Gathers static contextual data from all plugins that support 'static_inject'.
 
@@ -3199,7 +3219,28 @@ async def gather_static_injections(message=None, context_memory=None):
             async def _run_injection(p=plugin):
                 name = p.__class__.__name__
                 start = time.time()
-                cache_key = f"{p.__class__.__module__}.{p.__class__.__qualname__}"
+                base_key = f"{p.__class__.__module__}.{p.__class__.__qualname__}"
+                # A plugin may scope its stale-fallback entry to one conversation
+                # (``static_injection_scope``): a payload that carries recalled
+                # memories, session state or a profile belongs to the chat it was
+                # built for, and serving it to another chat on a timeout leaked
+                # one conversation into the next. Keys the plugin lists in
+                # ``static_injection_global_keys`` are global by construction
+                # (e.g. a situational note that is true in every chat) and keep
+                # riding across chats, so the persona stays aware of what is
+                # happening outside the current conversation.
+                scope = ""
+                scope_fn = getattr(p, "static_injection_scope", None)
+                if callable(scope_fn):
+                    try:
+                        scope = str(scope_fn(message, context_memory) or "")
+                    except Exception:
+                        scope = ""
+                global_keys = frozenset(
+                    getattr(p, "static_injection_global_keys", None) or ()
+                )
+                cache_key = f"{base_key}|{scope}" if scope else base_key
+                global_cache_key = f"{base_key}|*"
                 allow_stale_fallback = bool(
                     getattr(p, "allow_static_injection_stale_fallback", False)
                 )
@@ -3211,23 +3252,33 @@ async def gather_static_injections(message=None, context_memory=None):
                     if not allow_stale_fallback:
                         return {}
 
-                    cached_entry = _STATIC_INJECTION_CACHE.get(cache_key)
-                    if not cached_entry:
-                        return {}
+                    payload: dict[str, Any] = {}
+                    freshest_age: float | None = None
+                    for key in dict.fromkeys((cache_key, global_cache_key)):
+                        if key == global_cache_key and not global_keys:
+                            continue
+                        cached_entry = _STATIC_INJECTION_CACHE.get(key)
+                        if not cached_entry:
+                            continue
+                        cached_at, cached_payload = cached_entry
+                        age_seconds = time.time() - cached_at
+                        if cache_ttl_seconds > 0 and age_seconds > cache_ttl_seconds:
+                            _STATIC_INJECTION_CACHE.pop(key, None)
+                            log_warning(
+                                f"[action_parser] Stale static injection cache for {name} expired after {age_seconds:.1f}s"
+                            )
+                            continue
+                        payload.update(cached_payload)
+                        if freshest_age is None or age_seconds < freshest_age:
+                            freshest_age = age_seconds
 
-                    cached_at, cached_payload = cached_entry
-                    age_seconds = time.time() - cached_at
-                    if cache_ttl_seconds > 0 and age_seconds > cache_ttl_seconds:
-                        _STATIC_INJECTION_CACHE.pop(cache_key, None)
-                        log_warning(
-                            f"[action_parser] Stale static injection cache for {name} expired after {age_seconds:.1f}s"
-                        )
+                    if not payload or freshest_age is None:
                         return {}
 
                     log_warning(
-                        f"[action_parser] Using cached static injection for {name} after {reason} ({age_seconds:.1f}s old)"
+                        f"[action_parser] Using cached static injection for {name} after {reason} ({freshest_age:.1f}s old)"
                     )
-                    return dict(cached_payload)
+                    return payload
 
                 try:
                     # Enforce a strict timeout per-plugin to prevent hangs
@@ -3263,10 +3314,26 @@ async def gather_static_injections(message=None, context_memory=None):
 
                     if isinstance(res, dict):
                         if allow_stale_fallback:
-                            _STATIC_INJECTION_CACHE[cache_key] = (
-                                time.time(),
-                                dict(res),
-                            )
+                            stamp = time.time()
+                            if global_keys:
+                                _STATIC_INJECTION_CACHE[cache_key] = (
+                                    stamp,
+                                    {
+                                        k: v
+                                        for k, v in res.items()
+                                        if k not in global_keys
+                                    },
+                                )
+                                _STATIC_INJECTION_CACHE[global_cache_key] = (
+                                    stamp,
+                                    {k: v for k, v in res.items() if k in global_keys},
+                                )
+                            else:
+                                _STATIC_INJECTION_CACHE[cache_key] = (
+                                    stamp,
+                                    dict(res),
+                                )
+                            _prune_static_injection_cache(stamp, cache_ttl_seconds)
                         return res
                     return {}
                 except Exception as e:

@@ -312,6 +312,39 @@ Protected data that is never removed:
 The reducer excludes attachment base64 data from the size calculation, since
 LLM engines send multimodal content natively and not as part of the character budget.
 
+The action catalogue is tiered
+------------------------------
+
+The ``actions`` block used to carry the full JSON schema of every action the scope
+gate left visible: on a live store 39 actions and about 37,000 of a 65,000-character
+chat prompt (recalled memories were about 5,000). With ``PROMPT_ACTIONS_TIERED``
+(default on) the catalogue is sent in two forms:
+
+- **full** (brief and schema) for the actions every turn may need, and for the ones
+  a turn calls for;
+- **compact** (brief, payload field names and required fields) for the rest. The
+  model still sees that the action exists and what it takes, and the full
+  definition still validates its reply, as in Prompt Lite Mode.
+
+*Which* optional actions a turn needs is decided by the Recon call: the
+``recon_action_needs`` plugin shows it a one-line list of the optional actions and
+the model answers ``{"actions": [...]}``. The instruction asks it to err on the side
+of listing, because an action left out cannot be used that turn. If the answer is
+missing or unusable the plugin gives no verdict and the whole catalogue is sent in
+full, as before. Lite mode (small models, Vessel turns) is unchanged.
+
+Nothing in the core names a plugin's action. Each plugin registers its own, from its
+own module::
+
+    from core.action_tiers import register_always_full_actions, register_state_actions
+
+    register_always_full_actions("update_emotion_state")   # needed every turn
+    register_state_actions("self_growth_pending_proposal", "apply_growth_proposal")
+
+The core registers only what it owns: ``send_message``, the per-interface
+``message_*`` actions and ``use_animation``. A turn's context key in
+``register_state_actions`` is structural (the state exists), never message text.
+
 Developer notes
 ---------------
 
@@ -320,6 +353,8 @@ Key implementation references:
 - `core.prompt_engine.build_json_prompt`
 - `core.prompt_engine.reduce_prompt_for_llm_limit`
 - `core.prompt_engine.minify_actions_block`
+- `core.action_tiers` (tiering rules and registration points)
+- `plugins.recon.recon_action_needs` (the Recon plugin that picks the optional actions)
 - `core.action_parser.gather_static_injections`
 - `core.history_engine.HistoryEngine.build_context`
 - `core.recon.gather_recon_contributions`

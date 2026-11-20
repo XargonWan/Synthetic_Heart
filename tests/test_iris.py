@@ -1077,3 +1077,76 @@ async def test_iris_plugin_describe_tries_fallback_engines_in_order(tmp_path) ->
     assert result is not None and result.description == "a red cat"
     # The active engine's model pin is not forwarded to the fallback.
     assert calls == [("primary", "pinned-model"), ("fb", None)]
+
+
+@pytest.mark.asyncio
+async def test_describe_attachment_images_with_iris_timeout_is_not_reported_as_offline() -> (
+    None
+):
+    """A late engine must read as "try again", not as "vision is not available"."""
+    import asyncio
+
+    from core.iris_registry import IrisRegistry
+    from core.plugin_instance import _describe_attachment_images_with_iris
+    from plugins.iris_base import IrisEngineBase
+    from plugins.iris_plugin import IrisPlugin
+
+    class SlowEngine(IrisEngineBase):
+        async def describe_image(
+            self, file_path, mime_type=None, prompt=None, model=None
+        ):  # type: ignore[override]
+            return None
+
+    reg = IrisRegistry()
+    reg.register_instance(
+        "slow", SlowEngine(), label="Slow", capabilities={"vision": True}
+    )
+    plugin = IrisPlugin.__new__(IrisPlugin)
+    plugin._active_engine_name = "slow"
+    plugin._engine_settings = {}
+    plugin._default_prompt = "Describe this image."
+    plugin._default_model = ""
+
+    async def _always_late(awaitable, timeout):  # noqa: ANN001
+        awaitable.close()
+        raise asyncio.TimeoutError
+
+    attachment = {"mime_type": "image/png", "data": "ZmFrZQ=="}
+    with (
+        patch("plugins.iris_plugin.IRIS_REGISTRY", reg),
+        patch.object(plugin, "refresh_config"),
+        patch.dict(
+            "core.core_initializer.PLUGIN_REGISTRY",
+            {"iris_plugin": plugin},
+            clear=True,
+        ),
+        patch("core.plugin_instance.asyncio.wait_for", _always_late),
+    ):
+        result = await _describe_attachment_images_with_iris(
+            [attachment], prompt="Describe this image."
+        )
+
+    assert result is not None
+    assert "did not answer in time" in result.description
+    assert "send it again" in result.description
+    assert "not available" not in result.description
+
+
+@pytest.mark.asyncio
+async def test_iris_outer_deadline_leaves_room_for_the_fallback_engines() -> None:
+    """The outer limit used to equal the first engine's, so no fallback ever ran."""
+    from core import plugin_instance
+
+    async def _two() -> list[str]:
+        return ["a", "b"]
+
+    async def _none() -> list[str]:
+        return []
+
+    with patch("core.config.get_iris_fallback_engines_async", _none):
+        alone = await plugin_instance._iris_total_deadline_seconds()
+    with patch("core.config.get_iris_fallback_engines_async", _two):
+        with_two = await plugin_instance._iris_total_deadline_seconds()
+
+    assert alone > 120.0, "must exceed the active engine's own 120 s"
+    assert with_two >= alone + 2 * 120.0

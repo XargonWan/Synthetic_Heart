@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from typing import Any, cast
 
+import time
+
 import pytest
 
+import plugins.radio_host.recon_radio_status  # noqa: F401  (registers the radio's on-demand sessions)
 from plugins.soul_plugin import SoulPlugin
 from plugins.soul_plugin import _SessionState
 from core.plugin_base import PluginBase
@@ -122,6 +125,8 @@ async def test_static_injection_provides_passive_context_for_grillo_beat() -> No
     plugin._repo.get_active_dsp.assert_awaited_once()
     plugin._repo.list_active_foresight_signals.assert_awaited_once()
     recall_memories_mock.assert_awaited_once()
+    # A beat nobody asked for must not count as a person finding the memory useful.
+    assert recall_memories_mock.await_args.kwargs["count_retrieval"] is False
     # Session tracking must NOT happen — no _sessions entry for grillo beats
     assert "grillo/-1" not in plugin._sessions
     assert "grillo/beat" not in plugin._sessions
@@ -1686,3 +1691,421 @@ def test_build_embedder_honours_soul_embedder_id(
     plugin = SoulPlugin()
     plugin._build_embedder()
     assert captured["model_id"] == "custom/model"
+
+
+@pytest.mark.asyncio
+async def test_compile_keeps_lines_that_arrive_while_it_awaits() -> None:
+    """Lines appended during the (slow) compile stay queued for the next pass."""
+    plugin = SoulPlugin()
+    iface = "telegram_bot/91"
+
+    async def _slow_compile(**_: Any) -> list[str]:
+        # The live path appends while the extractor is awaiting the LLM.
+        plugin._buffers[iface].append("arrived during compile")
+        return ["cell-1"]
+
+    plugin._compiler = SimpleNamespace(
+        post_session_compile=AsyncMock(side_effect=_slow_compile),
+        async_consolidate=AsyncMock(return_value=[]),
+    )
+    plugin._buffers[iface] = ["first line", "second line"]
+
+    await plugin._compile_interface(iface)
+
+    assert plugin._buffers[iface] == ["arrived during compile"]
+    assert iface in plugin._buffer_started
+
+
+@pytest.mark.asyncio
+async def test_scheduler_runs_the_daily_jobs_once_and_remembers_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restart must not repeat the nightly rollup or the curator for today."""
+    plugin = SoulPlugin()
+    today = datetime.now(timezone.utc).date()
+    saved: dict[str, date] = {}
+
+    async def _read(key: str) -> date | None:
+        return saved.get(key)
+
+    monkeypatch.setattr(SoulPlugin, "_read_persisted_date", staticmethod(_read))
+
+    async def _persist(key: str, value: date) -> None:
+        saved[key] = value
+
+    monkeypatch.setattr(SoulPlugin, "_persist_date", staticmethod(_persist))
+    plugin._compiler = SimpleNamespace(backfill_embeddings=AsyncMock(return_value=0))
+    plugin._run_rollup_now = AsyncMock(return_value={})  # type: ignore[method-assign]
+    plugin._run_curator_now = AsyncMock(return_value={})  # type: ignore[method-assign]
+
+    await plugin._tick_scheduler()
+    await plugin._tick_scheduler()
+    assert plugin._run_rollup_now.await_count == 1
+    assert plugin._run_curator_now.await_count == 1
+    assert saved[SoulPlugin._ROLLUP_DATE_KEY] == today
+    assert saved[SoulPlugin._CURATOR_DATE_KEY] == today
+
+    # A fresh process reads the persisted days and repeats nothing.
+    restarted = SoulPlugin()
+    restarted._compiler = plugin._compiler
+    restarted._run_rollup_now = AsyncMock(return_value={})  # type: ignore[method-assign]
+    restarted._run_curator_now = AsyncMock(return_value={})  # type: ignore[method-assign]
+    await restarted._tick_scheduler()
+    assert restarted._run_rollup_now.await_count == 0
+    assert restarted._run_curator_now.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_soul_emotions_go_quiet_when_the_emotion_manager_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Switching Emotion Manager off must silence SOUL's own mood engine too."""
+    plugin = SoulPlugin()
+    message = SimpleNamespace(
+        interface_path="telegram_bot/55",
+        text="I am so furious and scared right now",
+        caption=None,
+        from_user=SimpleNamespace(id=1, first_name="Ann", username="ann"),
+    )
+
+    monkeypatch.setattr(SoulPlugin, "_emotions_enabled", staticmethod(lambda: False))
+    payload = await plugin.get_static_injection(message, {})
+
+    assert payload["soul_turn_emotion_delta"] == "{}"
+    assert "emotion_snapshot" not in str(payload["soul_session_state"])
+    state = plugin._sessions["telegram_bot/55"].emotional_state
+    assert (state.joy, state.fear, state.sad, state.anger) == (0.0, 0.0, 0.0, 0.0)
+
+    monkeypatch.setattr(SoulPlugin, "_emotions_enabled", staticmethod(lambda: True))
+    payload = await plugin.get_static_injection(message, {})
+    assert payload["soul_turn_emotion_delta"] != "{}"
+
+
+@pytest.mark.asyncio
+async def test_recall_leaves_room_for_conversation_memories_beside_the_diary() -> None:
+    """Diary cells must not fill every recall slot.
+
+    They hold the persona's own narrative and rank well against most questions,
+    so without a cap five diary entries pushed every conversation memory out.
+    """
+    from core.soul.compiler import NoopEmbedder
+    from core.soul.models import EmotionalTag
+
+    repo = InMemorySoulRepository()
+    embedder = NoopEmbedder()
+    when = datetime.now(timezone.utc)
+
+    def _cell(cell_id: str, kind: str, text: str, session: str) -> MemCell:
+        return MemCell(
+            id=cell_id,
+            episodic_trace=text,
+            atomic_facts=[],
+            emotional_tag=EmotionalTag(
+                state_snapshot={"joy": 0.0, "fear": 0.0, "sad": 0.0, "anger": 0.0},
+                dominant_emotion="neutral",
+                intensity=0.0,
+                valence=0.0,
+            ),
+            foresight_signals=[],
+            event_timestamp=when,
+            session_id=session,
+            embedding=None,
+            consolidated=True,
+            distilled_at=when,
+            source_kind=kind,
+        )
+
+    for i in range(5):
+        repo.memcells[f"j{i}"] = _cell(
+            f"j{i}",
+            "journal",
+            f"garden roses diary entry {i} about the garden",
+            "journal",
+        )
+    for i in range(3):
+        repo.memcells[f"c{i}"] = _cell(
+            f"c{i}",
+            "chat",
+            f"we talked about the garden roses number {i}",
+            "telegram_bot_9",
+        )
+    for cell in repo.memcells.values():
+        cell.embedding = await embedder.embed(cell.episodic_trace)
+
+    plugin = SoulPlugin()
+    plugin._repo = repo
+    plugin._compiler = SimpleNamespace(embedder=embedder)
+
+    recalled = await plugin._recall_memories(
+        interface_path="telegram_bot/9",
+        incoming_text="tell me about the garden roses",
+        session=_SessionState(),
+    )
+
+    diary = [line for line in recalled if "my diary" in line]
+    assert len(recalled) == 5
+    assert len(diary) <= 2
+    assert len(recalled) - len(diary) >= 3
+
+
+@pytest.mark.asyncio
+async def test_start_says_so_loudly_when_memory_is_not_persistent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import plugins.soul_plugin as soul_module
+
+    errors: list[str] = []
+    monkeypatch.setattr(soul_module, "log_error", lambda msg: errors.append(str(msg)))
+    plugin = SoulPlugin()
+    plugin._repo = InMemorySoulRepository()
+    plugin._scheduler_loop = AsyncMock()  # type: ignore[method-assign]
+
+    await plugin.start()
+    await plugin.stop()
+
+    assert any("NOT persistent" in message for message in errors)
+
+
+def test_drop_compiled_lines_survives_the_buffer_being_trimmed_meanwhile() -> None:
+    """The buffer is cut from the front past 200 lines; match by content, not index."""
+    plugin = SoulPlugin()
+    iface = "telegram_bot/93"
+    compiled = [f"line {i}" for i in range(200)]
+    # While the compile ran, 3 new lines arrived and the oldest 3 were trimmed off.
+    plugin._buffers[iface] = compiled[3:] + ["new a", "new b", "new c"]
+
+    plugin._drop_compiled_lines(iface, compiled)
+
+    assert plugin._buffers[iface] == ["new a", "new b", "new c"]
+
+
+def _cell_for(cell_id: str, session: str, text: str, visibility: str) -> MemCell:
+    from core.soul.models import EmotionalTag
+
+    when = datetime.now(timezone.utc)
+    return MemCell(
+        id=cell_id,
+        episodic_trace=text,
+        atomic_facts=[],
+        emotional_tag=EmotionalTag(
+            state_snapshot={"joy": 0.0, "fear": 0.0, "sad": 0.0, "anger": 0.0},
+            dominant_emotion="neutral",
+            intensity=0.0,
+            valence=0.0,
+        ),
+        foresight_signals=[],
+        event_timestamp=when,
+        session_id=session,
+        consolidated=True,
+        distilled_at=when,
+        visibility=visibility,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_private_chats_memories_are_not_recalled_in_another_chat() -> None:
+    """What was said one-to-one stays in that chat; groups' memories travel."""
+    from core.soul.compiler import NoopEmbedder
+
+    repo = InMemorySoulRepository()
+    embedder = NoopEmbedder()
+    secret = _cell_for(
+        "dm1",
+        "telegram_bot_111",
+        "Ann confided the surprise party plan to me",
+        "private",
+    )
+    open_one = _cell_for(
+        "g1",
+        "telegram_bot_-222",
+        "the group planned the surprise party venue",
+        "shared",
+    )
+    for cell in (secret, open_one):
+        cell.embedding = await embedder.embed(cell.episodic_trace)
+        repo.memcells[cell.id] = cell
+
+    plugin = SoulPlugin()
+    plugin._repo = repo
+    plugin._compiler = SimpleNamespace(embedder=embedder)
+
+    elsewhere = await plugin._recall_memories(
+        interface_path="telegram_bot/-999",
+        incoming_text="tell me about the surprise party",
+        session=_SessionState(),
+    )
+    assert any("group planned" in line for line in elsewhere)
+    assert not any("confided" in line for line in elsewhere)
+
+    same_chat = await plugin._recall_memories(
+        interface_path="telegram_bot/111",
+        incoming_text="tell me about the surprise party",
+        session=_SessionState(),
+    )
+    assert any("confided" in line for line in same_chat)
+
+
+@pytest.mark.asyncio
+async def test_compile_marks_cells_from_a_dm_private() -> None:
+    plugin = SoulPlugin()
+    iface = "telegram_bot/444"
+    compiler = SimpleNamespace(
+        post_session_compile=AsyncMock(return_value=["c"]),
+        async_consolidate=AsyncMock(return_value=[]),
+    )
+    plugin._compiler = compiler
+    session = _SessionState()
+    session.chat_kind = "dm"
+    plugin._sessions[iface] = session
+    plugin._buffers[iface] = ["a private line"]
+
+    await plugin._compile_interface(iface)
+    assert compiler.post_session_compile.await_args.kwargs["visibility"] == "private"
+
+    session.chat_kind = "group"
+    plugin._buffers[iface] = ["a group line"]
+    await plugin._compile_interface(iface)
+    assert compiler.post_session_compile.await_args.kwargs["visibility"] == "shared"
+
+
+@pytest.mark.parametrize(
+    ("session_id", "excluded"),
+    [
+        ("nightly", True),
+        ("diary_merge:5", True),
+        ("diary_merge_-1", True),  # how an interface path is stored once normalised
+        ("web_search_-1", True),
+        ("telegram_bot_111", False),
+        ("radio_host_-2", True),  # on demand only: the radio plugin registers it
+        ("journal", False),
+    ],
+)
+def test_housekeeping_sessions_are_never_recalled(
+    session_id: str, excluded: bool
+) -> None:
+    cell = _cell_for("x", session_id, "some text", "shared")
+    assert SoulPlugin._should_exclude_recalled_memory(cell) is excluded
+
+
+@pytest.mark.asyncio
+async def test_a_confidential_window_compiles_private_even_in_an_unknown_chat() -> None:
+    """The Debrief's verdict covers interfaces that cannot say a chat is one to one."""
+    plugin = SoulPlugin()
+    iface = "discord_bot/777"
+    compiler = SimpleNamespace(
+        post_session_compile=AsyncMock(return_value=["c"]),
+        async_consolidate=AsyncMock(return_value=[]),
+    )
+    plugin._compiler = compiler
+    plugin._sessions[iface] = _SessionState()  # chat_kind unknown
+    plugin._buffers[iface] = ["something told in confidence"]
+
+    plugin.mark_conversation_private(iface)
+    await plugin._compile_interface(iface)
+    assert compiler.post_session_compile.await_args.kwargs["visibility"] == "private"
+
+    # The flag covers that window only: the next one is shared again.
+    plugin._buffers[iface] = ["an ordinary line"]
+    await plugin._compile_interface(iface)
+    assert compiler.post_session_compile.await_args.kwargs["visibility"] == "shared"
+
+
+@pytest.mark.asyncio
+async def test_private_notes_are_only_injected_in_the_chat_they_were_told_in() -> None:
+    from core.soul.models import situational_note_from_extraction
+
+    repo = InMemorySoulRepository()
+    for subject, visibility, session in (
+        ("public plan", "shared", "sess-1"),
+        ("secret plan", "private", "telegram_bot_111"),
+    ):
+        note = situational_note_from_extraction(
+            note_type="STATE",
+            subject=subject,
+            summary=f"{subject} summary",
+            valid_until=datetime.now(timezone.utc) + timedelta(days=2),
+            session_id=session,
+            visibility=visibility,
+        )
+        await repo.upsert_situational_note(note)
+
+    plugin = SoulPlugin()
+    plugin._repo = repo
+    now = datetime.now(timezone.utc)
+
+    elsewhere = await plugin._get_temporal_context(now, session_id="telegram_bot_999")
+    assert [n["subject"] for n in elsewhere] == ["public plan"]
+
+    there = await plugin._get_temporal_context(now, session_id="telegram_bot_111")
+    assert {n["subject"] for n in there} == {"public plan", "secret plan"}
+
+    # A Grillo beat has no chat: private notes never show.
+    beat = await plugin._get_temporal_context(now)
+    assert [n["subject"] for n in beat] == ["public plan"]
+
+
+@pytest.mark.asyncio
+async def test_recall_works_right_after_the_machine_booted(monkeypatch) -> None:
+    """``time.monotonic()`` is small just after a boot; unseen cells are not cooling.
+
+    The cooldown compared ``monotonic() - 0.0`` with its window for a cell it had never
+    shown, so for the first 15 minutes of a machine's uptime every cell counted as
+    "recalled just now" and no memory was injected at all.
+    """
+    import plugins.soul_plugin as module
+
+    class _JustBooted:
+        """The ``time`` module with only ``monotonic`` replaced (the loop keeps its own)."""
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(time, name)
+
+        @staticmethod
+        def monotonic() -> float:
+            return 120.0
+
+    monkeypatch.setattr(module, "time", _JustBooted())
+    cells = [
+        _recall_cell(
+            f"cell-{i}", f"Alice keeps jasmine tea tin number {i}.", distilled=True
+        )
+        for i in range(3)
+    ]
+    plugin = _recall_only_plugin(cells, distils=True)
+
+    assert len(await _recall_once(plugin)) == 3
+
+
+def test_schedule_day_markers_are_registered_config_keys() -> None:
+    """An unregistered key cannot be persisted, so a restart repeated the jobs."""
+    from core.config_manager import config_registry
+
+    for key in (SoulPlugin._ROLLUP_DATE_KEY, SoulPlugin._CURATOR_DATE_KEY):
+        assert key in config_registry._definitions, key
+
+
+@pytest.mark.asyncio
+async def test_retrieval_is_counted_once_a_day_and_survives_a_restart() -> None:
+    """The interval lives with the cell, so a new plugin instance does not recount."""
+    first = SoulPlugin()
+    interface_path = "telegram_bot/778"
+    seed = SimpleNamespace(
+        interface_path=interface_path,
+        text="Alice mentioned jasmine tea in the rain.",
+        caption=None,
+    )
+    await first.get_static_injection(seed, {"interface_path": interface_path})
+    await first._compile_interface(interface_path)
+    recall = SimpleNamespace(
+        interface_path=interface_path,
+        text="What did Alice mention about tea?",
+        caption=None,
+    )
+    await first.get_static_injection(recall, {"interface_path": interface_path})
+
+    restarted = SoulPlugin()
+    restarted._repo = first._repo  # the same store, a fresh process
+    await restarted.get_static_injection(recall, {"interface_path": interface_path})
+
+    counts = [cell.retrieval_count for cell in first._repo.memcells.values()]
+    assert max(counts) == 1, "a restart counted the same day again"

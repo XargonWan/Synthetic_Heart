@@ -7,6 +7,18 @@ from core.logging_utils import log_debug, log_info, log_warning
 
 display_name = "Recon Radio Status"
 
+# The radio's chatter is real memory but only matters when the conversation is about
+# the radio, so passive recall leaves these sessions out and this plugin asks for
+# them back on a radio turn (see ``_radio_memories``). Declared here, by the plugin
+# that owns the subject, not in the core.
+RADIO_SESSION_PREFIXES: tuple[str, ...] = ("radio_host:", "radio_host_")
+try:
+    from core.soul.service import register_on_demand_session_prefixes
+
+    register_on_demand_session_prefixes(*RADIO_SESSION_PREFIXES)
+except Exception:  # pragma: no cover - SOUL absent
+    pass
+
 # UI-exposed switch to enable/disable this recon plugin. The config key is
 # derived by the recon dispatcher from this module's basename uppercased
 # (core/recon.py:_plugin_key) + "_RECON_ENABLED", so it MUST be named
@@ -169,13 +181,53 @@ class ReconRadioStatusPlugin:
         content = self._format_status(status)
         log_info("[recon_radio_status] Injecting live radio status into prompt")
 
-        return [
+        contributions: list[dict] = [
             {
                 "type": "snippet",
                 "content": content,
                 "source": "recon_radio_status",
                 "priority": int(self.recon_priority),
             }
+        ]
+        contributions.extend(await self._radio_memories(text))
+        return contributions
+
+    async def _radio_memories(self, text: str | None) -> list[dict]:
+        """What the persona remembers from its own broadcasts, for a radio turn.
+
+        The radio's sessions are left out of passive recall (they would surface in
+        unrelated chats), so a conversation about the radio has to ask for them.
+        This runs only when the recon verdict above says the turn is about it.
+        """
+        query = " ".join(str(text or "").split())
+        if len(query) < 5:
+            return []
+        try:
+            from core.soul.service import SoulService
+
+            service = SoulService.from_registry()
+            if service is None:
+                return []
+            hits = await service.recall(
+                query, session_prefixes=RADIO_SESSION_PREFIXES, limit=3
+            )
+        except Exception as e:
+            log_warning(f"[recon_radio_status] radio memory recall failed: {e}")
+            return []
+        return [
+            {
+                "type": "memory",
+                "content": {
+                    "source": "radio_memory",
+                    "id": hit.cell.id,
+                    "timestamp": hit.cell.event_timestamp.isoformat(),
+                    "snippet": " ".join(hit.cell.episodic_trace.split())[:400],
+                    "tags": [],
+                },
+                "source": "recon_radio_status",
+                "priority": int(self.recon_priority),
+            }
+            for hit in hits
         ]
 
     async def get_recon_contributions(

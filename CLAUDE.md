@@ -151,16 +151,17 @@ In-repo server (`mcp_servers/synth_langfuse.py`); credentials come from this wor
 
 Keep using the `langfuse` server for metrics, costs, and aggregate queries — this one is for reading payloads.
 
-### gitnexus — code intelligence
+### tencentdb-knowledge — code intelligence
+
+Developer MCP (`.mcp.json`, launcher `scripts/tencentdb_knowledge_mcp.py`; the old GitNexus server is no longer registered). Query-only code graph and repository wiki. The rules, tool names and the "impact before editing" requirement live in `AGENTS.md` §8; the setup is in `docs/developer_memory.rst`.
 
 | Task | Call |
 |------|------|
-| Understand unfamiliar code | `gitnexus_query("concept")` before grepping |
-| Before editing any function | `gitnexus_impact("name", direction="upstream")` |
-| Full callers/callees of a symbol | `gitnexus_context("name")` |
-| Safe rename | `gitnexus_rename(symbol_name="old", new_name="new", dry_run=True)` |
-
-Full reference in the GitNexus section below.
+| Find code by concept | `code_search` / `code_explore` before grepping |
+| Before editing a function or class | `code_impact` (review direct callers; warn on HIGH/CRITICAL) |
+| Callers / callees of a symbol | `code_callers`, `code_callees`, `code_node` |
+| Is the graph usable? | `code_status` (if it is down or stale, say so and fall back to source search and tests) |
+| Repository documentation | `wiki_search`, `wiki_read` (navigation only; the source and tests win when they disagree) |
 
 ### affine — project planning board (https://board.zwiz.town)
 
@@ -177,15 +178,15 @@ Always follow this order — it prevents reading code you don't need:
 3. `cortex_sessions(limit=20)` then `cortex_analyze(N)` — inspect prompt assembly + LLM actions
 4. `traces_recent()` then `trace_full(id)` (synth-langfuse) — when you need the literal prompt/response text, including the system prompt that `cortex_api.log` never records
 5. `get_config()` / `get_emotion_state()` / `get_memories()` — inspect live DB state if relevant
-6. `gitnexus_query("<error keyword or symptom>")` — find the relevant execution flow
-7. `gitnexus_context("<suspect function>")` — full caller/callee map before touching anything
+6. `code_search("<error keyword or symptom>")` (tencentdb-knowledge) — find the relevant execution flow
+7. `code_callers` / `code_callees` on the suspect function — the caller/callee map before touching anything
 8. Read source files last, scoped only to what the above pointed at
 
 ## Token Traps — Never Do These
 
 - Don't explore `.venv/` — enormous (torch, torchaudio etc.), never relevant
 - Don't read `logs/*.wav` — binary audio test fixtures
-- Don't grep across `plugins/` (40 files) — use `gitnexus_query` instead
+- Don't grep across `plugins/` (40 files) — use `code_search` instead
 - Don't read all of `init-db.sql` — grep for the specific `CREATE TABLE <name>`, or consult `docs/wiki/en/content/Database Design.md`
 - Don't read full active `synth.log` — it rotates constantly, use MCP tools
 - Don't run `uv run ty check .` on the whole repo — scope to edited files only
@@ -202,100 +203,8 @@ Always follow this order — it prevents reading code you don't need:
 
 See `AGENTS.md` for durable architecture constraints and component contracts. Use `docs/wiki/en/content/` for architecture orientation, `docs/wiki/knowledge/en/` for generated subsystem detail, and source/tests as final evidence.
 
-<!-- gitnexus:start -->
-# GitNexus — Code Intelligence
+## Code intelligence
 
-This project is indexed by GitNexus as **synthetic_heart**. Use the GitNexus MCP tools to understand code, assess impact, and navigate safely. The index and registry are **per-workspace** (`.gitnexus/` + `.gitnexus-home/`, both gitignored) — see AGENTS.md §8 for the one-time setup each clone needs.
+Use the `tencentdb-knowledge` MCP tools described above and in `AGENTS.md` §8. The GitNexus index, its registry (`.gitnexus/`, `.gitnexus-home/`), the `gitnexus_*` tools and the `.claude/skills/gitnexus/` skills no longer exist in this workspace; do not try to run, re-index or cite them.
 
-> If any GitNexus tool warns the index is stale (or errors with "No indexed repositories"), re-run the per-workspace analyze command from AGENTS.md §8 first.
-
-## Always Do
-
-- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `gitnexus_impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
-- **MUST run `gitnexus_detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows.
-- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
-- When exploring unfamiliar code, use `gitnexus_query({query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
-- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `gitnexus_context({name: "symbolName"})`.
-
-## When Debugging
-
-1. `gitnexus_query({query: "<error or symptom>"})` — find execution flows related to the issue
-2. `gitnexus_context({name: "<suspect function>"})` — see all callers, callees, and process participation
-3. `READ gitnexus://repo/synthetic_heart/process/{processName}` — trace the full execution flow step by step
-4. For regressions: `gitnexus_detect_changes({scope: "compare", base_ref: "main"})` — see what your branch changed
-
-## When Refactoring
-
-- **Renaming**: MUST use `gitnexus_rename({symbol_name: "old", new_name: "new", dry_run: true})` first. Review the preview — graph edits are safe, text_search edits need manual review. Then run with `dry_run: false`.
-- **Extracting/Splitting**: MUST run `gitnexus_context({name: "target"})` to see all incoming/outgoing refs, then `gitnexus_impact({target: "target", direction: "upstream"})` to find all external callers before moving code.
-- After any refactor: run `gitnexus_detect_changes({scope: "all"})` to verify only expected files changed.
-
-## Never Do
-
-- NEVER edit a function, class, or method without first running `gitnexus_impact` on it.
-- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
-- NEVER rename symbols with find-and-replace — use `gitnexus_rename` which understands the call graph.
-- NEVER commit changes without running `gitnexus_detect_changes()` to check affected scope.
-
-## Tools Quick Reference
-
-| Tool | When to use | Command |
-|------|-------------|---------|
-| `query` | Find code by concept | `gitnexus_query({query: "auth validation"})` |
-| `context` | 360-degree view of one symbol | `gitnexus_context({name: "validateUser"})` |
-| `impact` | Blast radius before editing | `gitnexus_impact({target: "X", direction: "upstream"})` |
-| `detect_changes` | Pre-commit scope check | `gitnexus_detect_changes({scope: "staged"})` |
-| `rename` | Safe multi-file rename | `gitnexus_rename({symbol_name: "old", new_name: "new", dry_run: true})` |
-| `cypher` | Custom graph queries | `gitnexus_cypher({query: "MATCH ..."})` |
-
-## Impact Risk Levels
-
-| Depth | Meaning | Action |
-|-------|---------|--------|
-| d=1 | WILL BREAK — direct callers/importers | MUST update these |
-| d=2 | LIKELY AFFECTED — indirect deps | Should test |
-| d=3 | MAY NEED TESTING — transitive | Test if critical path |
-
-## Resources
-
-| Resource | Use for |
-|----------|---------|
-| `gitnexus://repo/synthetic_heart/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/synthetic_heart/clusters` | All functional areas |
-| `gitnexus://repo/synthetic_heart/processes` | All execution flows |
-| `gitnexus://repo/synthetic_heart/process/{name}` | Step-by-step execution trace |
-
-## Self-Check Before Finishing
-
-Before completing any code modification task, verify:
-1. `gitnexus_impact` was run for all modified symbols
-2. No HIGH/CRITICAL risk warnings were ignored
-3. `gitnexus_detect_changes()` confirms changes match expected scope
-4. All d=1 (WILL BREAK) dependents were updated
-
-## Keeping the Index Fresh
-
-After committing code changes, the GitNexus index becomes stale. Re-run analyze to update it — **always with the per-workspace registry and `--skip-agents-md`** (see AGENTS.md §8 for why):
-
-```bash
-GITNEXUS_HOME=.gitnexus-home npx gitnexus analyze --skip-agents-md
-```
-
-PowerShell: `$env:GITNEXUS_HOME=".gitnexus-home"; npx gitnexus analyze --skip-agents-md`
-
-If the index previously included embeddings, preserve them by adding `--embeddings`. To check whether embeddings exist, inspect `.gitnexus/meta.json` — the `stats.embeddings` field shows the count (0 means no embeddings). **Running analyze without `--embeddings` will delete any previously generated embeddings.**
-
-> There is no automatic reindex hook in these workspaces — re-run the command above manually after committing.
-
-## CLI
-
-| Task | Read this skill file |
-|------|---------------------|
-| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
-| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
-| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
-| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
-| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
-| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
-
-<!-- gitnexus:end -->
+Before finishing a code change: run `code_impact` for each materially changed symbol (when the graph is available), update every direct dependent it reports, and re-check before a requested commit if the tree changed since.

@@ -152,6 +152,48 @@ def _is_self_initiated(context_memory: dict[str, Any] | None) -> bool:
     return False
 
 
+# The persona's own line is stored under one of these sender labels (the same set
+# core/history_engine.py renders as "self (you)").
+_OWN_SENDER_LABELS = frozenset({"self", "me", "assistant", "synt", "synth", "bot"})
+_OWN_REPLIES_MAX_LINES = 4
+_OWN_REPLIES_MAX_CHARS = 700
+
+
+async def _own_replies_since_last_turn(interface_path: str | None) -> list[str]:
+    """What the persona already said in a chat since the last person spoke.
+
+    The search is started by the message it answers, in parallel with the reply to
+    that message, so by the time the results arrive the persona has usually
+    already answered. The delivery turn must continue from that answer, not write
+    a stand-alone report. This is the trailing run of the persona's own lines in
+    the stored history (structural: it needs no timestamps and no text matching).
+    Returns the lines oldest first, capped; an empty list on any failure.
+    """
+    if not interface_path:
+        return []
+    try:
+        from core.chat_history_cache import load_chat_history
+
+        history = await load_chat_history(
+            interface_path, limit=12, match_chat_level=True
+        )
+    except Exception as exc:
+        log_debug(f"[web_search] own-replies lookup skipped: {exc}")
+        return []
+    own: list[str] = []
+    for entry in reversed(list(history)):
+        sender = str(entry.get("sender_name") or "").strip().casefold()
+        if sender not in _OWN_SENDER_LABELS:
+            break
+        text = " ".join(str(entry.get("text") or "").split())
+        if text:
+            own.append(text[:_OWN_REPLIES_MAX_CHARS])
+        if len(own) >= _OWN_REPLIES_MAX_LINES:
+            break
+    own.reverse()
+    return own
+
+
 async def _init_table() -> None:
     """Create the ``web_search_tasks`` table if it does not exist (backend-aware)."""
     from core.db import get_conn_ctx
@@ -726,6 +768,22 @@ class SearchOrchestrator:
                     "requested' register. "
                     f"{_style_rule}"
                 )
+            already_said = ""
+            own_replies = await _own_replies_since_last_turn(interface_path)
+            if own_replies:
+                quoted = "\n".join(f'- "{line}"' for line in own_replies)
+                already_said = (
+                    "YOU HAVE ALREADY REPLIED in that chat while this search ran. "
+                    "Your messages since the person last spoke, verbatim:\n"
+                    f"{quoted}\n"
+                    "This message continues THAT reply, it does not start over. "
+                    "Do not repeat it, do not contradict it without saying so, "
+                    "and do not ask a new question if your last message already "
+                    "asked one. Say only what the search adds or changes: "
+                    "confirm, correct (own it if you claimed something the search "
+                    "does not support) or enrich what you already said. If the "
+                    "search adds nothing, keep it to a very short note.\n\n"
+                )
             prompt = (
                 "=== WEB SEARCH RESULTS ===\n"
                 f"{framing}"
@@ -734,6 +792,7 @@ class SearchOrchestrator:
                 "could not be visited, tell which specific ones failed "
                 "(and why) while still reporting everything that succeeded.\n\n"
                 f"{origin_note}"
+                f"{already_said}"
                 f"Search intent: {search_context}\n"
                 f"Queries: {', '.join(queries)}\n"
                 f"{links_line}"

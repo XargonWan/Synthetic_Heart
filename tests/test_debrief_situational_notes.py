@@ -814,3 +814,135 @@ def test_extract_instructions_forbid_filing_a_denied_circumstance() -> None:
 
     assert "DENIES" in _EXTRACT_INSTRUCTIONS
     assert "[n3]" in _EXTRACT_INSTRUCTIONS
+
+
+# --- privacy judgement ------------------------------------------------------
+
+
+def test_the_confidential_verdict_is_read_from_the_privacy_object() -> None:
+    read = DebriefSituationalNotesPlugin._extract_confidential
+    assert read('{"notes": [], "privacy": {"confidential": true, "reason": "r"}}')
+    assert read('{"privacy": {"confidential": "true"}}')
+    assert not read('{"privacy": {"confidential": false}}')
+    # Anything unreadable counts as "not confidential": the flag only tightens.
+    assert not read("not json at all")
+    assert not read('{"notes": []}')
+    assert not read('{"privacy": "maybe"}')
+
+
+def test_extract_instructions_ask_for_a_privacy_judgement() -> None:
+    from plugins.debrief.debrief_situational_notes import _EXTRACT_INSTRUCTIONS
+
+    assert "PRIVACY" in _EXTRACT_INSTRUCTIONS
+    assert '"privacy": {"confidential"' in _EXTRACT_INSTRUCTIONS
+    # Judged from the exchange, never from words.
+    assert "never from single words" in _EXTRACT_INSTRUCTIONS
+
+
+@pytest.mark.asyncio
+async def test_a_confidential_exchange_keeps_its_notes_and_memories_in_that_chat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _RecordingRepository()
+    _install(
+        monkeypatch,
+        llm_text=(
+            '{"notes":[{"note_type":"STATE","subject":"surprise plan",'
+            '"summary":"Planning a surprise for a relative, told in confidence",'
+            '"priority":1,"confidence":0.8,'
+            '"valid_until":"2026-09-12T00:00:00+00:00"}],'
+            '"privacy":{"confidential":true,"reason":"asked to keep it secret"}}'
+        ),
+        repository=repo,
+    )
+    marked: list[str] = []
+    soul = SimpleNamespace(
+        get_repository=lambda: repo,
+        mark_conversation_private=marked.append,
+        session_id_for=lambda path: f"sid:{path}",
+    )
+    monkeypatch.setattr("core.core_initializer.PLUGIN_REGISTRY", {"soul_plugin": soul})
+
+    original_message, context = _turn()
+    await DebriefSituationalNotesPlugin().on_debrief(
+        processed_actions=[],
+        failed_actions=[],
+        results={},
+        context=context,
+        original_message=original_message,
+    )
+
+    assert marked == ["telegram/42"], "SOUL must be told the window is confidential"
+    assert len(repo.notes) == 1
+    note = repo.notes[0]
+    assert note.visibility == "private"
+    # The note belongs to this chat, so only this chat is shown it.
+    assert note.session_id == "sid:telegram/42"
+
+
+@pytest.mark.asyncio
+async def test_the_privacy_flag_applies_even_when_no_note_is_filed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _RecordingRepository()
+    _install(
+        monkeypatch,
+        llm_text='{"notes":[],"privacy":{"confidential":true,"reason":"secret"}}',
+        repository=repo,
+    )
+    marked: list[str] = []
+    soul = SimpleNamespace(
+        get_repository=lambda: repo,
+        mark_conversation_private=marked.append,
+        session_id_for=lambda path: path,
+    )
+    monkeypatch.setattr("core.core_initializer.PLUGIN_REGISTRY", {"soul_plugin": soul})
+
+    original_message, context = _turn()
+    await DebriefSituationalNotesPlugin().on_debrief(
+        processed_actions=[],
+        failed_actions=[],
+        results={},
+        context=context,
+        original_message=original_message,
+    )
+
+    assert marked == ["telegram/42"]
+    assert repo.notes == []
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_exchange_stays_shared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _RecordingRepository()
+    _install(
+        monkeypatch,
+        llm_text=(
+            '{"notes":[{"note_type":"EVENT","subject":"dentist",'
+            '"summary":"Dentist tomorrow","priority":1,"confidence":0.8,'
+            '"valid_until":"2026-09-12T00:00:00+00:00"}],'
+            '"privacy":{"confidential":false,"reason":""}}'
+        ),
+        repository=repo,
+    )
+    marked: list[str] = []
+    soul = SimpleNamespace(
+        get_repository=lambda: repo,
+        mark_conversation_private=marked.append,
+        session_id_for=lambda path: path,
+    )
+    monkeypatch.setattr("core.core_initializer.PLUGIN_REGISTRY", {"soul_plugin": soul})
+
+    original_message, context = _turn()
+    await DebriefSituationalNotesPlugin().on_debrief(
+        processed_actions=[],
+        failed_actions=[],
+        results={},
+        context=context,
+        original_message=original_message,
+    )
+
+    assert marked == []
+    assert repo.notes[0].visibility == "shared"
+    assert repo.notes[0].session_id == "sess-1"

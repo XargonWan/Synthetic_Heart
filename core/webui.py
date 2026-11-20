@@ -78,6 +78,8 @@ import mimetypes
 BRAND_NAME = "Synthetic Heart"
 INTERFACE_NAME = "synth_webui"
 EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS = 300.0
+# Per-model deadline of the bulk image probe behind the Iris model selector.
+VISION_BULK_PROBE_TIMEOUT_SECONDS = 30.0
 
 # exposed configuration variable to toggle experimental multi-session mode
 register_exposed_var(
@@ -1031,6 +1033,15 @@ class SynthWebUIInterface:
         # one, and confirm / reject / lift / restore a stored one.
         self.app.get("/api/soul/retractions")(self.get_retractions)
         self.app.post("/api/soul/retractions")(self.post_retraction)
+        # Activity -> People: the people the persona has a profile for. View them,
+        # mark a profile private, or forget someone. Like every /api/... route these
+        # are covered by the ASGI gate in core/webui_auth.py, which is off by default:
+        # turn it on (SYNTH_WEBUI_AUTH=enabled or SYNTH_WEBUI_API_TOKEN) before
+        # exposing the WebUI beyond a trusted network.
+        self.app.get("/api/bio")(self.list_bio_people)
+        self.app.get("/api/bio/{person_id}")(self.get_bio_person)
+        self.app.put("/api/bio/{person_id}/privacy")(self.put_bio_privacy)
+        self.app.delete("/api/bio/{person_id}")(self.delete_bio_person)
         # Synth avatar (Settings → Synth Avatar): stored by core, pushed to interfaces.
         from core import synth_avatar as _synth_avatar  # noqa: F401  (registers SYNTH_AVATAR)
         from core.karada_api import _require_api_token as _avatar_token
@@ -1133,6 +1144,9 @@ class SynthWebUIInterface:
         )
         self.app.post("/api/external-endpoints/{ep_id}/vision-test")(
             self.test_external_endpoint_vision
+        )
+        self.app.post("/api/external-endpoints/{ep_id}/vision-probe-models")(
+            self.probe_external_endpoint_vision_models
         )
         self.app.post("/api/external-endpoints/{ep_id}/enable")(
             self.enable_external_endpoint
@@ -7408,44 +7422,19 @@ class SynthWebUIInterface:
     ) -> JSONResponse:
         """POST /api/external-endpoints/{ep_id}/vision-test — test vision support.
 
-        Sends a small generated test image through the endpoint's
-        ``describe_image`` adapter and returns the resulting description, so
-        the WebUI can verify the endpoint actually understands images (not just
-        the probe's capability flag).  Never mutates endpoint state.
+        Sends a photo-sized test image through the SAME path a chat photo takes
+        (``ExternalIrisEngine``: the endpoint's ``iris_model``, the Iris default
+        prompt and the engine's own deadline) and returns the description with how
+        long it took, so the WebUI can tell "understands images" from "answers a
+        64x64 gradient quickly but stalls on a real photo". The previous probe sent
+        a few-kilobyte PNG straight to the adapter and reported "ok" while every
+        real photo timed out. The outcome is stored on the model (the Iris model
+        selector reads it); nothing else about the endpoint changes.
 
         Body: ``{"model"?: ...}`` — optional model override; otherwise the
-        endpoint's default model is used, falling back to a probed model
-        flagged vision-capable.
+        endpoint's ``iris_model`` / default model is used, falling back to a probed
+        model flagged vision-capable.
         """
-        import struct
-        import zlib
-
-        def _test_image_bytes() -> bytes:
-            """Build a small 64x64 RGB gradient PNG in pure Python."""
-            width = 64
-            height = 64
-
-            def _chunk(tag: bytes, data: bytes) -> bytes:
-                return (
-                    struct.pack(">I", len(data))
-                    + tag
-                    + data
-                    + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
-                )
-
-            rows = bytearray()
-            for y in range(height):
-                rows.append(0)  # filter: none
-                for x in range(width):
-                    rows.extend(((x * 255) // width, (y * 255) // height, 128))
-            ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
-            return (
-                b"\x89PNG\r\n\x1a\n"
-                + _chunk(b"IHDR", ihdr)
-                + _chunk(b"IDAT", zlib.compress(bytes(rows)))
-                + _chunk(b"IEND", b"")
-            )
-
         try:
             body: dict = {}
             try:
@@ -7459,15 +7448,14 @@ class SynthWebUIInterface:
             from core.external_endpoints.registry import (
                 get_external_endpoint_registry,
             )
+            from core.external_endpoints.vision_probe import run_vision_probe
 
             reg = get_external_endpoint_registry()
             ep = await reg.get_endpoint(ep_id)
             if ep is None:
                 raise HTTPException(status_code=404, detail="Endpoint not found")
 
-            if not model and ep.default_model:
-                model = ep.default_model
-            if not model and ep.available_models:
+            if not model and ep.available_models and not ep.default_model:
                 # Prefer a probed model flagged vision-capable (structural).
                 for candidate in ep.available_models:
                     meta = next(
@@ -7485,59 +7473,91 @@ class SynthWebUIInterface:
                 else:
                     model = ep.available_models[0]
 
-            api_key = decrypt_api_key(ep.api_key_enc or "")
-            adapter = get_adapter_for_endpoint(ep, api_key)
-
-            prompt = "Describe what you see in this image in one short sentence."
-            timeout_seconds = float(
-                os.getenv(
-                    "EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS",
-                    str(EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS),
-                )
+            adapter = get_adapter_for_endpoint(
+                ep, decrypt_api_key(ep.api_key_enc or "")
             )
-            description: str | None = None
-            try:
-                description = await asyncio.wait_for(
-                    adapter.describe_image(
-                        _test_image_bytes(),
-                        "image/png",
-                        prompt,
-                        model=model,
-                    ),
-                    timeout=timeout_seconds,
-                )
-            except asyncio.TimeoutError:
-                return JSONResponse(
-                    {
-                        "ok": False,
-                        "model": model or "",
-                        "error": (
-                            f"Vision request timed out after {timeout_seconds:.0f}s"
-                        ),
-                    }
-                )
-            except Exception as exc:
-                return JSONResponse(
-                    {"ok": False, "model": model or "", "error": str(exc)}
-                )
+            outcome = await run_vision_probe(ep, adapter, model)
+            if outcome.model:
+                try:
+                    await reg.record_vision_probes(
+                        ep_id, [(outcome.model, outcome.ok, outcome.elapsed_ms)]
+                    )
+                except Exception as exc:
+                    log_warning(f"{LOG_PREFIX} could not store the vision probe: {exc}")
 
-            desc = (description or "").strip()
-            if not desc:
-                return JSONResponse(
-                    {
-                        "ok": False,
-                        "model": model or "",
-                        "error": (
-                            "No description returned — the model/endpoint may "
-                            "not support vision"
-                        ),
-                    }
-                )
-            return JSONResponse({"ok": True, "model": model or "", "description": desc})
+            payload: dict[str, Any] = {
+                "ok": outcome.ok,
+                "model": outcome.model,
+                "elapsed_ms": outcome.elapsed_ms,
+                "image_bytes": outcome.image_bytes,
+            }
+            if outcome.ok:
+                payload["description"] = outcome.description
+                payload["slow"] = outcome.slow
+            else:
+                payload["error"] = outcome.error
+            return JSONResponse(payload)
         except HTTPException:
             raise
         except Exception as exc:
             log_error(f"{LOG_PREFIX} test_external_endpoint_vision failed: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def probe_external_endpoint_vision_models(self, ep_id: int) -> JSONResponse:
+        """POST /api/external-endpoints/{ep_id}/vision-probe-models.
+
+        Probes every model the endpoint does not declare vision for, one at a time
+        with a short deadline, and stores each outcome. The Iris model selector
+        lists a model only if it declares vision or passed this probe, so this is
+        how a model without the skill earns a place (or is shown not to belong).
+        """
+        try:
+            from core.external_endpoints.crypto import decrypt_api_key
+            from core.external_endpoints.probe import get_adapter_for_endpoint
+            from core.external_endpoints.registry import (
+                get_external_endpoint_registry,
+            )
+            from core.external_endpoints.vision_filter import models_to_probe
+            from core.external_endpoints.vision_probe import run_vision_probe
+
+            reg = get_external_endpoint_registry()
+            ep = await reg.get_endpoint(ep_id)
+            if ep is None:
+                raise HTTPException(status_code=404, detail="Endpoint not found")
+            candidates = models_to_probe(
+                list(ep.available_models or []), ep.models_metadata
+            )
+            adapter = get_adapter_for_endpoint(
+                ep, decrypt_api_key(ep.api_key_enc or "")
+            )
+            outcomes: list[tuple[str, bool, int]] = []
+            summary: list[dict[str, Any]] = []
+            for model in candidates:
+                result = await run_vision_probe(
+                    ep,
+                    adapter,
+                    model,
+                    timeout_seconds=VISION_BULK_PROBE_TIMEOUT_SECONDS,
+                )
+                outcomes.append((model, result.ok, result.elapsed_ms))
+                summary.append(
+                    {"model": model, "ok": result.ok, "elapsed_ms": result.elapsed_ms}
+                )
+            await reg.record_vision_probes(ep_id, outcomes)
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "probed": len(summary),
+                    "passed": sum(1 for r in summary if r["ok"]),
+                    "results": summary,
+                }
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(
+                f"{LOG_PREFIX} probe_external_endpoint_vision_models failed: {exc}"
+            )
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     async def enable_external_endpoint(self, ep_id: int) -> JSONResponse:
@@ -10738,6 +10758,73 @@ class SynthWebUIInterface:
             "lifted_at": _iso(claim.lifted_at),
         }
 
+    async def list_bio_people(self) -> JSONResponse:
+        """Every person the persona holds a profile for, most recently seen first."""
+        from core import bio_people
+
+        try:
+            people = await bio_people.list_people()
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to list bio profiles: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return JSONResponse({"success": True, "people": people})
+
+    async def get_bio_person(self, person_id: str) -> JSONResponse:
+        """One person's whole profile."""
+        from core import bio_people
+
+        try:
+            person = await bio_people.get_person(person_id)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to read bio profile: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        if person is None:
+            raise HTTPException(status_code=404, detail="unknown person")
+        return JSONResponse({"success": True, "person": person})
+
+    async def put_bio_privacy(self, person_id: str, request: Request) -> JSONResponse:
+        """Set a profile ``default`` or ``private`` (shown only to that person)."""
+        from core import bio_people
+
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = None
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="a JSON object is required")
+        try:
+            await bio_people.set_privacy(person_id, str(payload.get("privacy") or ""))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to set bio privacy: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        log_info(f"{LOG_PREFIX} Bio privacy of {person_id} -> {payload.get('privacy')}")
+        return JSONResponse({"success": True})
+
+    async def delete_bio_person(self, person_id: str) -> JSONResponse:
+        """Forget a person: remove their profile row.
+
+        Memories in SOUL that mention them are conversation history and are not
+        touched here; the response says so, so the operator is told what was done.
+        """
+        from core import bio_people
+
+        try:
+            removed = await bio_people.delete_person(person_id)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to delete bio profile: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        if not removed:
+            raise HTTPException(status_code=404, detail="unknown person")
+        return JSONResponse(
+            {
+                "success": True,
+                "note": "The profile was deleted. Conversations and memories that "
+                "mention this person are history and were not changed.",
+            }
+        )
+
     async def get_retractions(self) -> JSONResponse:
         """List every stored retraction, newest first, whatever its status."""
         repository = self._soul_plugin().get_repository()
@@ -13424,9 +13511,11 @@ class SynthWebUIInterface:
                 _available_models: list[str] = []
                 _default_model: str | None = None
                 _models_meta: list[dict] = []
+                _endpoint_id: int | None = None
                 _instance = IRIS_REGISTRY.get_instance(_name)
                 if _instance is not None and hasattr(_instance, "_endpoint"):
                     _ep = _instance._endpoint
+                    _endpoint_id = getattr(_ep, "id", None)
                     _available_models = list(
                         getattr(_ep, "available_models", None) or []
                     )
@@ -13446,6 +13535,7 @@ class SynthWebUIInterface:
                         "available_models": _available_models,
                         "default_model": _default_model,
                         "models_meta": _models_meta,
+                        "endpoint_id": _endpoint_id,
                     }
                 )
         except Exception as exc:
