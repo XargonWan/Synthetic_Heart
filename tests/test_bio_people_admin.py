@@ -13,13 +13,16 @@ class _Cursor:
     def __init__(self, rows: list[dict[str, Any]], log: list[tuple[str, tuple]]):
         self._rows = rows
         self._log = log
+        self._last_sql = ""
         self.rowcount = 1
 
     async def execute(self, sql: str, params: tuple = ()) -> None:
+        self._last_sql = sql
         self._log.append((sql, params))
 
     async def fetchall(self) -> list[dict[str, Any]]:
-        return self._rows
+        # The chat-history lookup (names the chat has for people) is its own query.
+        return [] if "chat_history_cache" in self._last_sql else self._rows
 
     async def fetchone(self) -> dict[str, Any] | None:
         return self._rows[0] if self._rows else None
@@ -146,3 +149,75 @@ async def test_a_private_profile_is_only_given_to_the_person_it_is_about(
     owner = SimpleNamespace(from_user=SimpleNamespace(id=123))
     result = await plugin.execute_action(action, {}, None, owner)
     assert result["data"][0]["information"] == "a confidence"
+
+
+class _TwoTableConn(_Conn):
+    """``bio`` rows for the profile query, ``seen`` rows for the chat-history one."""
+
+    def __init__(self, bio_rows: list[dict[str, Any]], seen: list[dict[str, Any]]):
+        super().__init__(bio_rows)
+        self._seen = seen
+
+    def cursor(self, *_: object) -> _Cursor:
+        outer = self
+
+        class _C(_Cursor):
+            async def fetchall(self) -> list[dict[str, Any]]:
+                return (
+                    outer._seen
+                    if "chat_history_cache" in self._last_sql
+                    else outer._rows
+                )
+
+        return _C(self._rows, self.log)
+
+
+@pytest.mark.asyncio
+async def test_a_nameless_profile_is_shown_under_the_name_the_chat_has_for_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All live profiles had no stored name, so the People tab showed nobody."""
+    conn = _TwoTableConn(
+        [
+            {"id": "1", "user_name": "", "known_as": "[]", "privacy": "default"},
+            {"id": "2", "user_name": "Ann", "known_as": "[]", "privacy": "default"},
+            {"id": "3", "user_name": "", "known_as": '["Bee"]', "privacy": "default"},
+            {"id": "4", "user_name": "", "known_as": "[]", "privacy": "default"},
+        ],
+        [{"sender_id": "1", "sender_name": "Jay Cheshire"}],
+    )
+    monkeypatch.setattr(people_admin, "get_conn_ctx", lambda: conn)
+
+    people = {p["id"]: p for p in await people_admin.list_people()}
+
+    assert people["1"]["display_name"] == "Jay Cheshire"
+    assert people["1"]["user_name"] == "", "the stored name is not invented"
+    assert people["2"]["display_name"] == "Ann"
+    assert people["3"]["display_name"] == "Bee"
+    assert people["4"]["display_name"] == ""
+    # Only the nameless profiles without a nickname are looked up in the chat history.
+    lookup = [params for sql, params in conn.log if "chat_history_cache" in sql]
+    assert lookup == [("1", "4")]
+
+
+@pytest.mark.asyncio
+async def test_the_display_name_the_platform_reports_is_stored_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executed: list[tuple[str, tuple]] = []
+
+    async def _execute(sql: str, params: tuple = ()) -> None:
+        executed.append((sql, params))
+
+    monkeypatch.setattr(bio_manager, "_execute", _execute)
+
+    await bio_manager._remember_display_name_async("31321637", "  Jay   Cheshire ")
+    await bio_manager._remember_display_name_async("-1", "Web Search")
+    await bio_manager._remember_display_name_async("5", "")
+
+    assert len(executed) == 1
+    sql, params = executed[0]
+    assert params == ("Jay Cheshire", "31321637")
+    assert "user_name IS NULL OR user_name = ''" in sql, (
+        "a set name is never overwritten"
+    )

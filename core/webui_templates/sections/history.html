@@ -351,7 +351,7 @@
             return people.filter(function (p) {
                 if (hideSystemEl.checked && (p.kind === 'api' || p.kind === 'session')) return false;
                 if (!term) return true;
-                const hay = [p.id, p.user_name].concat(p.known_as || []).join(' ').toLowerCase();
+                const hay = [p.id, p.user_name, p.display_name].concat(p.known_as || []).join(' ').toLowerCase();
                 return hay.indexOf(term) !== -1;
             });
         }
@@ -361,7 +361,7 @@
             const shown = visiblePeople();
             shown.forEach(function (p) {
                 const item = el('li', p.id === selectedId ? 'selected' : '');
-                const name = el('div', 'bio-name', p.user_name || (p.known_as && p.known_as[0]) || 'Unnamed');
+                const name = el('div', 'bio-name', p.display_name || p.user_name || (p.known_as && p.known_as[0]) || 'Unnamed');
                 if (p.privacy === 'private') name.appendChild(el('span', 'bio-badge private', 'private'));
                 if (p.kind !== 'person') name.appendChild(el('span', 'bio-badge', p.kind));
                 item.appendChild(name);
@@ -394,7 +394,7 @@
 
         function renderDetail(p) {
             detailEl.replaceChildren();
-            detailEl.appendChild(el('h3', '', p.user_name || 'Unnamed'));
+            detailEl.appendChild(el('h3', '', p.display_name || p.user_name || 'Unnamed'));
             const dl = el('dl');
             field(dl, 'Id', p.id);
             field(dl, 'Kind', p.kind);
@@ -427,7 +427,7 @@
             const del = el('button', 'danger', 'Delete profile');
             del.type = 'button';
             del.addEventListener('click', async function () {
-                const label = p.user_name || p.id;
+                const label = p.display_name || p.user_name || p.id;
                 if (!window.confirm('Forget ' + label + '? Their profile is deleted. Conversations that mention them are not changed.')) return;
                 try {
                     const result = await api('/api/bio/' + encodeURIComponent(p.id), { method: 'DELETE' });

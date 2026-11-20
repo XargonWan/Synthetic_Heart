@@ -948,6 +948,33 @@ async def _update_last_accessed_async(user_id: str, timestamp: str) -> None:
         )
 
 
+# Pseudo-users the system speaks as (internal beats, the web-search delivery): they
+# have no name worth keeping on a profile.
+_INTERNAL_SENDER_IDS = frozenset({"-1", "0", "0.0"})
+
+
+async def _remember_display_name_async(user_id: str, display_name: Any) -> None:
+    """Keep the platform's display name of a person on a profile that has none.
+
+    Every message carries the sender's name, but a profile used to get a name only
+    if the model chose to write one with ``bio_update``, and it never did: all 111
+    profiles on the live store were nameless, so the People tab listed everybody
+    as unnamed. The name the platform reports is stored once, when the profile has
+    no name; a name the person or the model has set is never overwritten.
+    """
+    clean = " ".join(str(display_name or "").split())[:255]
+    if not clean or str(user_id) in _INTERNAL_SENDER_IDS:
+        return
+    try:
+        await _execute(
+            "UPDATE bio SET user_name = %s WHERE id = %s "
+            "AND (user_name IS NULL OR user_name = '')",
+            (clean, str(user_id)),
+        )
+    except Exception as e:
+        log_warning(f"[bio_manager] Failed to store the name of user {user_id}: {e}")
+
+
 async def _update_bio_fields_async(user_id: str, updates: dict) -> None:
     """Safely update multiple fields in the user's bio (async, loop-safe).
 
@@ -1523,6 +1550,9 @@ class BioPlugin:
                         f"[bio_manager] _get_bio_light_async returned non-dict for user {p['id']}: {type(bio)}"
                     )
                     bio = {}
+
+                if p.get("username") and not p.get("is_bot"):
+                    await _remember_display_name_async(p["id"], p.get("username"))
 
                 short_info = bio.get("information", "")[:200]
                 nicknames = bio.get("known_as", [])

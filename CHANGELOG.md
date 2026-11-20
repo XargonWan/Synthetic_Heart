@@ -1,3 +1,13 @@
+### fix(bio): people have a name: the one the platform reports, stored once, and shown in the People tab
+
+**Before.** A profile got a name only if the model wrote one with `bio_update`, and it never did: on the live store all 111 profiles had no `user_name`, no nicknames and no other content, so the People tab listed everybody as unnamed even though every message carries the sender's name (and the chat history knows it).
+
+**Now.** When a person writes (or is in the chat), Bio Manager stores the display name the platform reports on their profile if it has none (`_remember_display_name_async`: never overwrites a name that is set, skips bots and the internal pseudo-users `-1`, `0`, `0.0`). The People tab shows `display_name`: the stored name, else the first nickname, else the name the chat history has for that id, so people who are not talking right now are named too, without writing anything.
+
+**Not changed.** What the model is told in the prompt (it already received the sender's name). The profile content (likes, information, feelings) stays whatever `bio_update` writes: it is empty for everybody today.
+
+**Location.** `plugins/bio_manager/bio_manager.py`, `core/bio_people.py`, `core/webui_templates/sections/history.html`, `tests/test_bio_people_admin.py`.
+
 ### fix(iris): a slow vision engine is reported as late, its fallbacks get to run, and the WebUI test uses a real photo
 
 **Before.** On .42 no photo was described for a week: the active engine (Harmony, `gemma4-meromero-26b-a4b`) answers `HTTP 504 inference request timed out` after about 122 s for a 120 KB photo, but the engine bridge and the plugin both cut the call at 120 s, so the 504 never showed, the configured fallback engines (`IRIS_FALLBACK_ENGINES`) were never tried (the outer limit fired at the same instant as the first engine's), and the prompt told the persona "the Iris vision subsystem is currently error ... vision capabilities are not available right now", so she said her vision was offline and wrote about it in her diary. The WebUI "Test Vision" button sent a generated 64x64 PNG straight to the adapter and reported success in a second.

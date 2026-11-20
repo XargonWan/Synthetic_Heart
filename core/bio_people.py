@@ -67,14 +67,40 @@ def classify_person_id(person_id: str) -> str:
     return "other"
 
 
-def _summary(row: dict[str, Any]) -> dict[str, Any]:
+def _display_name(user_name: str, known_as: list[Any], seen_name: str) -> str:
+    """The name to show for a profile: the one set on it, a nickname, or how the chat shows them."""
+    return user_name or (str(known_as[0]) if known_as else "") or seen_name
+
+
+async def _latest_seen_names(ids: list[str]) -> dict[str, str]:
+    """Most recent chat-history name of each id (what the platform called them)."""
+    if not ids:
+        return {}
+    marks = ", ".join(["%s"] * len(ids))
+    async with get_conn_ctx() as conn:
+        async with conn.cursor(DictCursor) as cur:
+            await cur.execute(
+                "SELECT DISTINCT ON (sender_id) sender_id, sender_name "
+                f"FROM chat_history_cache WHERE sender_id IN ({marks}) "
+                "AND sender_name IS NOT NULL AND sender_name <> '' "
+                "ORDER BY sender_id, id DESC",
+                tuple(ids),
+            )
+            rows = await cur.fetchall()
+    return {str(r["sender_id"]): str(r["sender_name"]) for r in rows or []}
+
+
+def _summary(row: dict[str, Any], seen_name: str = "") -> dict[str, Any]:
     known_as = _load_json_field(row.get("known_as"), "known_as", [])
+    known_as = known_as if isinstance(known_as, list) else []
     information = str(row.get("information") or "")
+    user_name = row.get("user_name") or ""
     return {
         "id": str(row.get("id")),
         "kind": classify_person_id(str(row.get("id"))),
-        "user_name": row.get("user_name") or "",
-        "known_as": known_as if isinstance(known_as, list) else [],
+        "user_name": user_name,
+        "display_name": _display_name(user_name, known_as, seen_name),
+        "known_as": known_as,
         "information_preview": information[:160],
         "has_information": bool(information.strip()),
         "privacy": row.get("privacy") or "default",
@@ -94,7 +120,15 @@ async def list_people() -> list[dict[str, Any]]:
                 "ORDER BY last_accessed DESC"
             )
             rows = await cur.fetchall()
-    return [_summary(dict(row)) for row in rows or []]
+    people = [dict(row) for row in rows or []]
+    # A profile that has no name yet is still somebody the chat has a name for.
+    nameless = [
+        str(p["id"])
+        for p in people
+        if not (p.get("user_name") or "") and p.get("known_as") in (None, "", "[]")
+    ]
+    seen = await _latest_seen_names(nameless)
+    return [_summary(p, seen.get(str(p["id"]), "")) for p in people]
 
 
 async def get_person(person_id: str) -> dict[str, Any] | None:
@@ -106,7 +140,8 @@ async def get_person(person_id: str) -> dict[str, Any] | None:
     if not row:
         return None
     row = dict(row)
-    detail = _summary(row)
+    seen = await _latest_seen_names([str(row.get("id"))])
+    detail = _summary(row, seen.get(str(row.get("id")), ""))
     detail["information"] = str(row.get("information") or "")
     for column in _LIST_COLUMNS:
         detail[column] = _load_json_field(row.get(column), column, [])
