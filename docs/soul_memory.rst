@@ -80,6 +80,13 @@ go to ingested cells (diary, day summaries, retired memories); unused slots fall
 through to them. Diary lines are shown as ``my diary``: what the persona itself
 thought, never a fact about a user.
 
+Each cell keeps a recall count: on how many days a person's turn brought it back
+(at most one a day, kept with the cell in ``mem_cells.last_retrieved_at`` so a restart
+does not recount; a Grillo beat recalls without counting). The curator reads it as
+evidence of use; recall ranking uses it only as a bounded penalty so the same few
+cells do not fill every prompt. After upgrading, ``scripts/recompute_retrieval_counts.py``
+(preview, then ``--apply``) limits the older, inflated counts to each cell's age.
+
 The curator
 -----------
 

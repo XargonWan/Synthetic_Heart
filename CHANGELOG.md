@@ -1,3 +1,39 @@
+### fix(iris): a slow vision engine is reported as late, its fallbacks get to run, and the WebUI test uses a real photo
+
+**Before.** On .42 no photo was described for a week: the active engine (Harmony, `gemma4-meromero-26b-a4b`) answers `HTTP 504 inference request timed out` after about 122 s for a 120 KB photo, but the engine bridge and the plugin both cut the call at 120 s, so the 504 never showed, the configured fallback engines (`IRIS_FALLBACK_ENGINES`) were never tried (the outer limit fired at the same instant as the first engine's), and the prompt told the persona "the Iris vision subsystem is currently error ... vision capabilities are not available right now", so she said her vision was offline and wrote about it in her diary. The WebUI "Test Vision" button sent a generated 64x64 PNG straight to the adapter and reported success in a second.
+
+**Now.** (1) The outer limit is the active engine's 120 s plus 120 s for each fallback engine plus a margin (`_iris_total_deadline_seconds`). (2) A timeout reaches the persona as "the image could not be read in time, they can send it again", not as vision being off. (3) The test button sends a deterministic photo-sized JPEG (about 160 KB, `core/vision_probe_image.py`) through the same engine path as a chat photo (`iris_model`, Iris default prompt, the engine's own deadline), shows how long it took, flags an answer slower than 30 s, and tests the model that was picked instead of silently using `iris_model`.
+
+**Not changed.** Which engine is active and the fallback list: they are settings (WebUI, Engines).
+
+**Location.** `core/plugin_instance.py`, `core/webui.py`, `core/vision_probe_image.py`, `res/synth_webui/js/engines.js`, `tests/test_iris.py`, `tests/test_ext_model_persistence.py`.
+
+### fix(soul): a memory's recall count is one per day, from a person's turn only, and is written atomically
+
+**Before.** `mem_cells.retrieval_count` rose up to 24 times a day per cell (once an hour), so it measured how often a memory matches, not whether it helps: live cells reached 190 to 393 within weeks and two reached 2,536 and 906 (48% of the total) before the throttle existed. Autonomous turns counted too (the vessel's "nobody is talking to you" cells reached 209 to 228). The bump rewrote the whole cell from an in-memory copy, which could overwrite a concurrent change, and its throttle was forgotten at every restart.
+
+**Now.** The count means "on how many days did a person's turn bring this memory back". `touch_memcell_retrieval` raises it with a single `UPDATE` at most once a day per cell, keeping the time in the new additive column `mem_cells.last_retrieved_at` (so a restart does not reset it, and `updated_at` is left alone). A Grillo beat recalls without counting (`_recall_memories(count_retrieval=False)`). `scripts/recompute_retrieval_counts.py` (preview, then `--apply`; back up first, run it after the new code is deployed) limits the older inflated counts to the age of each cell in days.
+
+**Not changed.** The recall ranking: the fatigue penalty is still capped and the curator's bonus still saturates at 10.
+
+**Location.** `core/soul/repository.py`, `plugins/soul_plugin/soul_plugin.py`, `scripts/recompute_retrieval_counts.py`, `tests/soul/test_retrieval_count.py`, `tests/soul/test_soul_plugin.py`.
+
+### fix(web_search): the delivery turn continues the reply she already gave
+
+**Before.** A search starts from the message it answers, in parallel with the reply to that message. When the results arrived, the delivery turn was told only "a background web search you announced earlier has completed, report the findings". Seen live (2026-11-20): she answered "of course I remember it", the search then reported that the video could not be read, and the second message ignored the first and asked a new question.
+
+**Now.** The delivery prompt carries a block with the persona's own lines since the person last spoke (the trailing run of her lines in the chat history, at most 4 of 700 characters; no timestamps, no text matching) and tells her to continue that reply: not to repeat it, to correct it if the search does not support it, and not to ask a second question when her last message already asked one.
+
+**Location.** `plugins/web_search/search_orchestrator.py` (`_own_replies_since_last_turn`, `_deliver`), `tests/test_web_search_orchestrator.py`.
+
+### fix(soul): the nightly rollup and curator day markers are saved
+
+**Before.** `SOUL_LAST_ROLLUP_DATE` and `SOUL_LAST_CURATOR_DATE` were never registered as config keys, so every attempt to save them failed (`Unknown configuration key`, only at debug level) and each restart ran the rollup and the curator again, which re-counts the same 24 h in the DSP evidence.
+
+**Now.** Both are registered (hidden, internal), so the marker is stored and a restart does not repeat the job that already ran that day.
+
+**Location.** `plugins/soul_plugin/soul_plugin.py`, `tests/soul/test_soul_plugin.py`.
+
 ### minor(webui): the People tab is now a sub-tab of Activity
 
 **Before.** People (the profiles Bio Manager keeps) had a tab of its own in the top bar.
