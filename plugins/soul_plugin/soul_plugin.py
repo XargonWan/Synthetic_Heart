@@ -250,6 +250,26 @@ register_exposed_var(
     advanced=True,
 )
 
+# Day markers of the nightly jobs. A key must be registered to be persisted at all
+# (``set_value`` refuses an unknown one), and an unpersisted marker made every
+# restart repeat the rollup and the curator. Internal state, not a setting: hidden.
+for _marker_key, _marker_label in (
+    ("SOUL_LAST_ROLLUP_DATE", "Last nightly rollup (UTC date)"),
+    ("SOUL_LAST_CURATOR_DATE", "Last curator pass (UTC date)"),
+):
+    register_exposed_var(
+        _marker_key,
+        label=_marker_label,
+        default="",
+        value_type=str,
+        ui_type="string",
+        description="Internal marker so a restart does not repeat the job today.",
+        scope="plugins",
+        component="soul_plugin",
+        advanced=True,
+        hidden=True,
+    )
+
 register_exposed_var(
     "SOUL_ARCHIVE_RETENTION_DAYS",
     label="Memory archive retention (days)",
@@ -438,9 +458,12 @@ _SOUL_COMPILE_TRANSCRIPT_LOOKBACK_SECONDS = 1800
 # A cell's retrieval count is evidence of usefulness, so it must not be inflated
 # by the several prompt builds a single turn performs (recon, main reply,
 # situational extractor, Grillo beats): live cells reached counts of 70 and 164
-# within hours. One bump per cell per window is enough signal.
-_SOUL_RETRIEVAL_BUMP_MIN_INTERVAL_SEC = 3600.0
-_SOUL_RETRIEVAL_BUMP_TRACK_MAX = 512
+# within hours, then 2,536 and 906. The count is "on how many days did a person's
+# turn bring this memory back": one bump per cell per day. At one an hour a cell
+# that matched every conversation counted up to 24 a day (live: 190 to 393 within
+# weeks), which measured how often it matches, not how useful it is. The interval
+# is kept in the row (``mem_cells.last_retrieved_at``), so a restart does not reset it.
+_SOUL_RETRIEVAL_BUMP_MIN_INTERVAL_SEC = 86400.0
 
 # Recall rotation. Semantic similarity is 58% of the recall score and it does not
 # move while the same person keeps talking about the same things, so without a
@@ -604,7 +627,6 @@ class SoulPlugin(PluginBase):
         # window holds exactly what the buffer holds — plus the other side.
         self._buffer_started: dict[str, datetime] = {}
         self._sessions: dict[str, _SessionState] = {}
-        self._retrieval_bump_at: dict[str, float] = {}
         # When each cell was last injected into a prompt, used to rotate the
         # recalled set. In-process only: an ordering hint, never state.
         self._recall_cooldown_at: dict[str, float] = {}
@@ -1131,6 +1153,7 @@ class SoulPlugin(PluginBase):
                     interface_path="grillo/beat",
                     incoming_text=incoming_text,
                     session=_SessionState(),
+                    count_retrieval=False,
                 )
             except Exception as exc:
                 log_debug(f"[soul_plugin] Grillo beat memory recall failed: {exc}")
@@ -1745,7 +1768,13 @@ class SoulPlugin(PluginBase):
         interface_path: str,
         incoming_text: str,
         session: _SessionState,
+        count_retrieval: bool = True,
     ) -> list[str]:
+        """Recall memories for a prompt.
+
+        ``count_retrieval`` is False for turns nobody asked for (a Grillo beat): a
+        memory those bring back says nothing about its usefulness to a person.
+        """
         normalized_query = self._normalize_query_text(incoming_text)
         if len(normalized_query) < 5:
             return []
@@ -1901,32 +1930,16 @@ class SoulPlugin(PluginBase):
                     if now_cooldown - seen_at < cooldown_seconds
                 }
 
-        now_monotonic = time.monotonic()
-        for match in selected:
-            try:
-                cell_id = str(match.cell.id)
-                last_bump = self._retrieval_bump_at.get(cell_id)
-                if (
-                    last_bump is not None
-                    and now_monotonic - last_bump
-                    < _SOUL_RETRIEVAL_BUMP_MIN_INTERVAL_SEC
-                ):
-                    # Already counted recently: a turn builds several prompts, so
-                    # an unthrottled bump counts one decision many times.
-                    continue
-                self._retrieval_bump_at[cell_id] = now_monotonic
-                if len(self._retrieval_bump_at) > _SOUL_RETRIEVAL_BUMP_TRACK_MAX:
-                    self._retrieval_bump_at = {
-                        cid: ts
-                        for cid, ts in self._retrieval_bump_at.items()
-                        if now_monotonic - ts < _SOUL_RETRIEVAL_BUMP_MIN_INTERVAL_SEC
-                    }
-                match.cell.retrieval_count += 1
-                await self._repo.upsert_memcell(match.cell)
-            except Exception as exc:
-                log_debug(
-                    f"[soul_plugin] Failed to persist retrieval count for {match.cell.id}: {exc}"
-                )
+        if count_retrieval:
+            for match in selected:
+                try:
+                    await self._repo.touch_memcell_retrieval(
+                        str(match.cell.id), _SOUL_RETRIEVAL_BUMP_MIN_INTERVAL_SEC
+                    )
+                except Exception as exc:
+                    log_debug(
+                        f"[soul_plugin] Failed to persist retrieval count for {match.cell.id}: {exc}"
+                    )
 
         return [
             self._format_recalled_memory(match, active_session_id=safe_session_id)

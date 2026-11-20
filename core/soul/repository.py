@@ -196,6 +196,10 @@ class SoulRepository(Protocol):
 
     async def get_memcell(self, cell_id: str) -> MemCell | None: ...
 
+    async def touch_memcell_retrieval(
+        self, cell_id: str, min_interval_seconds: float
+    ) -> bool: ...
+
     async def list_unconsolidated_memcells(self, limit: int = 200) -> list[MemCell]: ...
 
     async def set_memcell_scene(self, cell_id: str, scene_id: str) -> None: ...
@@ -309,6 +313,7 @@ class InMemorySoulRepository:
     kg_triples: list[KgTriple] = field(default_factory=list)
     foresight_signals: list[ForesightSignal] = field(default_factory=list)
     situational_notes: dict[str, SituationalNote] = field(default_factory=dict)
+    last_retrieved_at: dict[str, datetime] = field(default_factory=dict)
     retracted_claims: dict[str, RetractedClaim] = field(default_factory=dict)
     dsp_extractions: list[DspExtraction] = field(default_factory=list)
     active_dsp: DspVersion | None = None
@@ -318,6 +323,21 @@ class InMemorySoulRepository:
 
     async def get_memcell(self, cell_id: str) -> MemCell | None:
         return self.memcells.get(cell_id)
+
+    async def touch_memcell_retrieval(
+        self, cell_id: str, min_interval_seconds: float
+    ) -> bool:
+        """Count one recall of ``cell_id`` unless one was counted within the interval."""
+        cell = self.memcells.get(cell_id)
+        if cell is None:
+            return False
+        now = datetime.now(timezone.utc)
+        last = self.last_retrieved_at.get(cell_id)
+        if last is not None and (now - last).total_seconds() < min_interval_seconds:
+            return False
+        self.last_retrieved_at[cell_id] = now
+        cell.retrieval_count += 1
+        return True
 
     async def list_unconsolidated_memcells(self, limit: int = 200) -> list[MemCell]:
         cells = [c for c in self.memcells.values() if not c.consolidated]
@@ -693,6 +713,7 @@ class PostgresSoulRepository:
             # is exactly the set the WebUI's re-distil button has to catch up.
             "ALTER TABLE mem_cells ADD COLUMN IF NOT EXISTS distilled_at TIMESTAMPTZ",
             # Provenance of ingested (non-chat) cells; see ``MemCell.source_kind``.
+            "ALTER TABLE mem_cells ADD COLUMN IF NOT EXISTS last_retrieved_at TIMESTAMPTZ",
             "ALTER TABLE mem_cells ADD COLUMN IF NOT EXISTS source_kind TEXT NOT NULL DEFAULT 'chat'",
             "ALTER TABLE mem_cells ADD COLUMN IF NOT EXISTS source_key TEXT",
             "ALTER TABLE mem_cells ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'shared'",
@@ -995,6 +1016,33 @@ class PostgresSoulRepository:
                     cell.id,
                     vector_literal,
                 )
+
+    async def touch_memcell_retrieval(
+        self, cell_id: str, min_interval_seconds: float
+    ) -> bool:
+        """Count one recall of ``cell_id`` unless one was counted within the interval.
+
+        One statement, so concurrent writers (the compiler, a dedupe pass) cannot
+        lose the increment the way a read-modify-write of the whole cell did, and
+        the interval is kept in the row so a restart does not reset it. It leaves
+        ``updated_at`` alone: a recall is not a change to the memory.
+        """
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            counted = await conn.fetchval(
+                """
+                UPDATE mem_cells
+                SET retrieval_count = retrieval_count + 1,
+                    last_retrieved_at = now()
+                WHERE id = $1
+                  AND (last_retrieved_at IS NULL
+                       OR last_retrieved_at < now() - make_interval(secs => $2))
+                RETURNING 1
+                """,
+                cell_id,
+                float(max(min_interval_seconds, 0.0)),
+            )
+        return counted is not None
 
     async def get_memcell(self, cell_id: str) -> MemCell | None:
         pool = await self._get_pool()

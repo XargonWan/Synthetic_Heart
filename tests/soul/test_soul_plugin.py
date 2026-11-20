@@ -125,6 +125,8 @@ async def test_static_injection_provides_passive_context_for_grillo_beat() -> No
     plugin._repo.get_active_dsp.assert_awaited_once()
     plugin._repo.list_active_foresight_signals.assert_awaited_once()
     recall_memories_mock.assert_awaited_once()
+    # A beat nobody asked for must not count as a person finding the memory useful.
+    assert recall_memories_mock.await_args.kwargs["count_retrieval"] is False
     # Session tracking must NOT happen — no _sessions entry for grillo beats
     assert "grillo/-1" not in plugin._sessions
     assert "grillo/beat" not in plugin._sessions
@@ -2072,3 +2074,38 @@ async def test_recall_works_right_after_the_machine_booted(monkeypatch) -> None:
     plugin = _recall_only_plugin(cells, distils=True)
 
     assert len(await _recall_once(plugin)) == 3
+
+
+def test_schedule_day_markers_are_registered_config_keys() -> None:
+    """An unregistered key cannot be persisted, so a restart repeated the jobs."""
+    from core.config_manager import config_registry
+
+    for key in (SoulPlugin._ROLLUP_DATE_KEY, SoulPlugin._CURATOR_DATE_KEY):
+        assert key in config_registry._definitions, key
+
+
+@pytest.mark.asyncio
+async def test_retrieval_is_counted_once_a_day_and_survives_a_restart() -> None:
+    """The interval lives with the cell, so a new plugin instance does not recount."""
+    first = SoulPlugin()
+    interface_path = "telegram_bot/778"
+    seed = SimpleNamespace(
+        interface_path=interface_path,
+        text="Alice mentioned jasmine tea in the rain.",
+        caption=None,
+    )
+    await first.get_static_injection(seed, {"interface_path": interface_path})
+    await first._compile_interface(interface_path)
+    recall = SimpleNamespace(
+        interface_path=interface_path,
+        text="What did Alice mention about tea?",
+        caption=None,
+    )
+    await first.get_static_injection(recall, {"interface_path": interface_path})
+
+    restarted = SoulPlugin()
+    restarted._repo = first._repo  # the same store, a fresh process
+    await restarted.get_static_injection(recall, {"interface_path": interface_path})
+
+    counts = [cell.retrieval_count for cell in first._repo.memcells.values()]
+    assert max(counts) == 1, "a restart counted the same day again"
