@@ -78,6 +78,9 @@ import mimetypes
 BRAND_NAME = "Synthetic Heart"
 INTERFACE_NAME = "synth_webui"
 EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS = 300.0
+# A vision probe slower than this still passes but is flagged "slow": a chat photo
+# is cut at 120 s, and an answer near that is a stall waiting to happen.
+VISION_PROBE_SLOW_MS = 30_000
 
 # exposed configuration variable to toggle experimental multi-session mode
 register_exposed_var(
@@ -7417,43 +7420,21 @@ class SynthWebUIInterface:
     ) -> JSONResponse:
         """POST /api/external-endpoints/{ep_id}/vision-test — test vision support.
 
-        Sends a small generated test image through the endpoint's
-        ``describe_image`` adapter and returns the resulting description, so
-        the WebUI can verify the endpoint actually understands images (not just
-        the probe's capability flag).  Never mutates endpoint state.
+        Sends a photo-sized test image through the SAME path a chat photo takes
+        (``ExternalIrisEngine``: the endpoint's ``iris_model``, the Iris default
+        prompt and the engine's own deadline) and returns the description with how
+        long it took, so the WebUI can tell "understands images" from "answers a
+        64x64 gradient quickly but stalls on a real photo". The previous probe sent
+        a few-kilobyte PNG straight to the adapter and reported "ok" while every
+        real photo timed out. Never mutates endpoint state.
 
         Body: ``{"model"?: ...}`` — optional model override; otherwise the
-        endpoint's default model is used, falling back to a probed model
-        flagged vision-capable.
+        endpoint's ``iris_model`` / default model is used, falling back to a probed
+        model flagged vision-capable.
         """
-        import struct
-        import zlib
-
-        def _test_image_bytes() -> bytes:
-            """Build a small 64x64 RGB gradient PNG in pure Python."""
-            width = 64
-            height = 64
-
-            def _chunk(tag: bytes, data: bytes) -> bytes:
-                return (
-                    struct.pack(">I", len(data))
-                    + tag
-                    + data
-                    + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
-                )
-
-            rows = bytearray()
-            for y in range(height):
-                rows.append(0)  # filter: none
-                for x in range(width):
-                    rows.extend(((x * 255) // width, (y * 255) // height, 128))
-            ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
-            return (
-                b"\x89PNG\r\n\x1a\n"
-                + _chunk(b"IHDR", ihdr)
-                + _chunk(b"IDAT", zlib.compress(bytes(rows)))
-                + _chunk(b"IEND", b"")
-            )
+        import os as _os
+        import tempfile
+        import time as _time
 
         try:
             body: dict = {}
@@ -7463,6 +7444,9 @@ class SynthWebUIInterface:
                 pass
             model = str(body.get("model") or "").strip() or None
 
+            from core.external_endpoints.bridges.iris_bridge import (
+                ExternalIrisEngine,
+            )
             from core.external_endpoints.crypto import decrypt_api_key
             from core.external_endpoints.probe import get_adapter_for_endpoint
             from core.external_endpoints.registry import (
@@ -7474,9 +7458,7 @@ class SynthWebUIInterface:
             if ep is None:
                 raise HTTPException(status_code=404, detail="Endpoint not found")
 
-            if not model and ep.default_model:
-                model = ep.default_model
-            if not model and ep.available_models:
+            if not model and ep.available_models and not ep.default_model:
                 # Prefer a probed model flagged vision-capable (structural).
                 for candidate in ep.available_models:
                     meta = next(
@@ -7496,53 +7478,99 @@ class SynthWebUIInterface:
 
             api_key = decrypt_api_key(ep.api_key_enc or "")
             adapter = get_adapter_for_endpoint(ep, api_key)
+            probe_ep = ep
+            if model and (ep.extra_config or {}).get("iris_model"):
+                # The engine prefers the endpoint's ``iris_model`` over a caller's
+                # model. A probe of a model the person picked must test THAT model.
+                import dataclasses
 
-            prompt = "Describe what you see in this image in one short sentence."
-            timeout_seconds = float(
-                os.getenv(
-                    "EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS",
-                    str(EXTERNAL_ENDPOINT_PROBE_TIMEOUT_SECONDS),
+                probe_ep = dataclasses.replace(
+                    ep,
+                    extra_config={
+                        k: v for k, v in ep.extra_config.items() if k != "iris_model"
+                    },
                 )
-            )
-            description: str | None = None
+            engine = ExternalIrisEngine(probe_ep, adapter)
+
+            from core.vision_probe_image import build_probe_photo
+
+            image_bytes = build_probe_photo()
+            prompt: str = "Describe this image."
             try:
-                description = await asyncio.wait_for(
-                    adapter.describe_image(
-                        _test_image_bytes(),
-                        "image/png",
-                        prompt,
-                        model=model,
+                from plugins.iris_plugin.iris_plugin import (
+                    _IRIS_DEFAULT_PROMPT_TEXT,
+                )
+
+                prompt = str(_IRIS_DEFAULT_PROMPT_TEXT)
+            except Exception:
+                pass
+
+            effective_model = (
+                model
+                or (ep.extra_config or {}).get("iris_model")
+                or ep.default_model
+                or ""
+            )
+            # The engine applies its own deadline (extra_config ``timeout``, 120 s)
+            # and answers None when it expires; the outer one only guards a hang.
+            deadline = engine._get_request_timeout() + 10.0
+            started = _time.monotonic()
+            path = ""
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+                    tmp.write(image_bytes)
+                    path = tmp.name
+                result = await asyncio.wait_for(
+                    engine.describe_image(
+                        path, "image/jpeg", prompt, model=effective_model or None
                     ),
-                    timeout=timeout_seconds,
+                    timeout=deadline,
                 )
             except asyncio.TimeoutError:
+                result = None
+            except Exception as exc:
                 return JSONResponse(
                     {
                         "ok": False,
-                        "model": model or "",
-                        "error": (
-                            f"Vision request timed out after {timeout_seconds:.0f}s"
-                        ),
+                        "model": effective_model,
+                        "elapsed_ms": int((_time.monotonic() - started) * 1000),
+                        "image_bytes": len(image_bytes),
+                        "error": str(exc),
                     }
                 )
-            except Exception as exc:
-                return JSONResponse(
-                    {"ok": False, "model": model or "", "error": str(exc)}
-                )
+            finally:
+                if path:
+                    try:
+                        _os.remove(path)
+                    except OSError:
+                        pass
+            elapsed_ms = int((_time.monotonic() - started) * 1000)
 
-            desc = (description or "").strip()
+            desc = ((result.description if result else "") or "").strip()
             if not desc:
                 return JSONResponse(
                     {
                         "ok": False,
-                        "model": model or "",
+                        "model": effective_model,
+                        "elapsed_ms": elapsed_ms,
+                        "image_bytes": len(image_bytes),
                         "error": (
-                            "No description returned — the model/endpoint may "
-                            "not support vision"
+                            f"No description after {elapsed_ms / 1000:.0f}s for a "
+                            f"{len(image_bytes) // 1024} KB photo — timed out or the "
+                            "model/endpoint does not accept images (see the log)"
                         ),
                     }
                 )
-            return JSONResponse({"ok": True, "model": model or "", "description": desc})
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "model": effective_model,
+                    "description": desc,
+                    "elapsed_ms": elapsed_ms,
+                    "image_bytes": len(image_bytes),
+                    "slow": elapsed_ms > VISION_PROBE_SLOW_MS,
+                }
+            )
         except HTTPException:
             raise
         except Exception as exc:
