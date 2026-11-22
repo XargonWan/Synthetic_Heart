@@ -11,6 +11,20 @@
 
     const normalize = (val) => (val === null || val === undefined) ? '' : String(val).toLowerCase();
 
+    // The value a setting holds now (its default while unset), as text, so a search
+    // for "500" finds every setting at 500 and "telegram_bot" every setting that
+    // names it. Secrets (tokens, keys, passwords) are never searched by value.
+    const valueText = (item) => {
+        if (item.ui_type === 'password' || item.sensitive) return '';
+        let v = item.value;
+        if (v === null || v === undefined || v === '') v = item.default;
+        if (v === null || v === undefined) return '';
+        if (typeof v === 'object') {
+            try { return JSON.stringify(v); } catch (e) { return ''; }
+        }
+        return String(v);
+    };
+
     const buildHaystack = (item) => {
         return [
             item.key,
@@ -20,7 +34,8 @@
             item.component,
             item.component_description,
             item.group,
-            item.group_label
+            item.group_label,
+            valueText(item)
         ].map(normalize).join(' ');
     };
 
@@ -81,4 +96,5 @@
     window.SynthSettings = window.SynthSettings || {};
     window.SynthSettings.bindConfigSearch = bindConfigSearch;
     window.SynthSettings.applyConfigSearch = applyFilter;
+    window.SynthSettings.filterList = filterList;
 })();

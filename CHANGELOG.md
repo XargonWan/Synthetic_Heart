@@ -1,3 +1,11 @@
+### minor(webui): the Settings search also matches the value a setting holds
+
+**Before.** The search box in Settings looked only at a setting's name, label, description and group, so "500" or "telegram_bot" found nothing unless a name or description happened to contain it.
+
+**Now.** It also looks at the value the setting holds now (its default while unset): "500" lists the settings at 500 (and any value containing 500, such as 5000), "telegram_bot" every setting that mentions it, lists and objects included. Several words must all match, as before. Settings that hold a secret (password fields, anything marked sensitive) are never searched by value.
+
+**Location.** `res/synth_webui/js/settings.js`, `core/webui_templates/sections/settings.html`, `tests/test_webui_settings_search_js.py`.
+
 ### fix(chat): a reply to a photo or voice note quotes what was in it, quotes are no longer cut at 400 characters, and the Agent Lane sees the quote
 
 **Before.** The quote of a reply reached the model only as text or caption: a reply to a photo without caption (or a sticker, voice note, Discord/Fluxer image) quoted nothing at all, the quote of a text message was cut at 400 characters, and the Agent Lane never saw the quote even though the message queue set it for it (the block that was meant to render it, announced in the commit that added it, was never written).
