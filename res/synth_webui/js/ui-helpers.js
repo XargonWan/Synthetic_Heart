@@ -68,6 +68,20 @@ function applyDefaultWindowPositions() {
     } catch (e) { /* ignore */ }
 }
 
+// UI-type registry. An exposed variable declares how it is rendered with its
+// `ui_type`; a widget that owns its own editor (the synth avatar, for one)
+// registers a factory for that type here, and every settings renderer looks the
+// type up instead of hard-coding it. `selfSaving` widgets talk to their own
+// endpoint, so the renderer must not attach its generic auto-save to them.
+window.SynthUiTypes = window.SynthUiTypes || {};
+window.registerUiType = window.registerUiType || function registerUiType(uiType, factory, options) {
+    if (!uiType || typeof factory !== 'function') { return; }
+    window.SynthUiTypes[uiType] = { create: factory, selfSaving: !!(options && options.selfSaving) };
+};
+window.getUiType = window.getUiType || function getUiType(uiType) {
+    return (uiType && window.SynthUiTypes[uiType]) || null;
+};
+
 // Expose to global scope for legacy callers
 window.resetWindowPositions = window.resetWindowPositions || resetWindowPositions;
 window.addCardCollapsers = window.addCardCollapsers || addCardCollapsers;

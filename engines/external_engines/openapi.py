@@ -20,6 +20,7 @@ Use cases:
 
 from __future__ import annotations
 
+from core import stats_registry
 import asyncio
 import base64
 import copy
@@ -799,6 +800,7 @@ class OpenAPIPlugin(AIPluginBase):
         finally:
             self._current_request_meta = None
 
+    @stats_registry.tracked_engine("cortex", "openapi")
     async def generate_response(self, prompt):  # type: ignore[override]
         """Send prompt to OpenAPI endpoint and return response text."""
         base_url = str(OPENAPI_BASE_URL).strip()

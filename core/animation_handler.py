@@ -40,6 +40,12 @@ class AnimationState(Enum):
     WRITE = "write"
     TALK = "talk"
     SKIN_CHANGE = "skin_change"
+    # Postures and activities of a body that has legs and hands to use. On the WebUI each plays its own
+    # clip like any state; an embodied client (RetroXR) can do more with the descriptor's ``mask``.
+    SIT = "sit"  # sitting down (a chair, a sofa; bed variants live in sit/bed/)
+    CROUCH = "crouch"  # crouching, e.g. to reach something on the floor (its play_once clip stands her up)
+    GAMING = "gaming"  # playing a game with a controller: the clip moves the upper body only (mask)
+    GIVE = "give"  # holding something out in both hands to someone: the upper body only (mask), tools/make_give_clip.py
 
 
 AnimationStateChangedCallback = Callable[
@@ -52,6 +58,10 @@ AnimationStateChangedCallback = Callable[
 # Higher = more important, cannot be interrupted by lower priority animations
 ANIMATION_STATE_PRIORITIES = {
     AnimationState.IDLE: 0,  # Idle - lowest priority
+    AnimationState.SIT: 1,  # Postures give way to everything that talks or thinks
+    AnimationState.CROUCH: 1,
+    AnimationState.GAMING: 2,
+    AnimationState.GIVE: 2,
     AnimationState.WRITE: 3,  # Writing - low priority
     AnimationState.TALK: 5,  # Talking - medium priority
     AnimationState.THINK: 10,  # Thinking - highest priority, cannot be interrupted
@@ -187,6 +197,11 @@ class KaradaStateServer:
         # periodic state refresh so every viewer of the shared avatar converges
         # on the same expression. ``None`` means no expression override active.
         self._current_expression: Optional[Dict[str, Any]] = None
+        # Presence: ``"summon"`` while a world is introducing her into itself (a Rift Vessel
+        # connecting), ``None`` otherwise. It is not an animation: the WebUI avatar goes on
+        # doing what it does. An embodied client (RetroXR) holds back her think/write poses
+        # while she is arriving. Any vessel may use it.
+        self._presence: Optional[str] = None
 
         # Priority registration: maps state names to their priority values.
         # Starts from ANIMATION_STATE_PRIORITIES and can be extended at runtime.
@@ -301,6 +316,61 @@ class KaradaStateServer:
     # Face / expression helpers
     # ------------------------------------------------------------------
 
+    def _emotion_presets(self) -> Dict[str, Dict[str, float]]:
+        """The active skin's ``emotions`` from its persona.json: emotion name -> logical blendshape targets.
+
+        Every skin defines its own (one is more "sad" than another, a ``happy`` is a different smile), which is why
+        the SERVER turns an emotion into weights and not each client. {} when there is no persona or no section.
+        """
+        try:
+            import sys
+
+            pm_mod = sys.modules.get("core.persona_manager")
+            pm = (
+                pm_mod.get_persona_manager()
+                if pm_mod and hasattr(pm_mod, "get_persona_manager")
+                else None
+            )
+            current = getattr(pm, "_current_persona", None) if pm else None
+            name = getattr(current, "name", None) if current else None
+            if not name:
+                return {}
+            data = pm._load_persona_json(name)
+            emotions = data.get("emotions") if isinstance(data, dict) else None
+            if not isinstance(emotions, dict):
+                return {}
+            return {
+                str(k): {str(t): float(w) for t, w in v.items()}
+                for k, v in emotions.items()
+                if isinstance(v, dict)
+            }
+        except Exception as exc:  # pragma: no cover - best effort
+            log_debug(f"[KaradaStateServer] no emotion presets: {exc}")
+            return {}
+
+    def resolve_face_values(self, values: Dict[str, float]) -> Dict[str, float]:
+        """What clients are sent for ``values`` (an emotion state): blendshape weights, resolved per skin.
+
+        ``happy: 0.65`` becomes the skin's own ``{mouth_smile: 0.25, eyes_smile: 0.2}`` scaled by 0.65; the same
+        target from two emotions keeps the stronger. A name the persona has no preset for (a raw blendshape or an
+        emotion this skin does not define) goes through unchanged. The authoritative emotion state
+        (``_current_face_values``) is never touched.
+        """
+        presets = self._emotion_presets()
+        if not presets:
+            return dict(values)
+        out: Dict[str, float] = {}
+        for name, value in values.items():
+            preset = presets.get(name)
+            if preset is None:
+                out[name] = max(out.get(name, 0.0), float(value))
+                continue
+            for target, weight in preset.items():
+                scaled = float(weight) * float(value)
+                if scaled > 0.0001:
+                    out[target] = max(out.get(target, 0.0), scaled)
+        return {k: round(v, 4) for k, v in out.items()}
+
     async def set_face_values(self, values: Dict[str, float]) -> None:
         """Broadcast raw face values to all connected clients.
 
@@ -333,13 +403,40 @@ class KaradaStateServer:
 
         if not self._has_any_transport():
             return
-        payload = {"type": "vrm_face", "values": dict(self._current_face_values)}
+        payload = {
+            "type": "vrm_face",
+            "values": self.resolve_face_values(self._current_face_values),
+        }
         for transport in self._transports:
             try:
                 await transport.broadcast_face(payload)
             except Exception as exc:  # pragma: no cover - best effort
                 log_warning(
                     f"[KaradaStateServer] failed to broadcast face_values via {type(transport).__name__}: {exc}"
+                )
+
+    PRESENCE_SUMMON = "summon"
+
+    def get_presence(self) -> Optional[str]:
+        """``"summon"`` while she is being introduced into a world, else ``None``."""
+        return self._presence
+
+    async def set_presence(self, name: Optional[str], source: str = "") -> None:
+        """Set (or clear, with ``None``) her presence and tell every transport."""
+        name = str(name).strip() or None if name is not None else None
+        if name == self._presence:
+            return
+        self._presence = name
+        log_info(
+            f"[KaradaStateServer] presence -> {name or 'idle'} ({source or 'unknown'})"
+        )
+        payload = {"type": "vrm_presence", "state": name or "idle"}
+        for transport in list(self._transports):
+            try:
+                await transport.broadcast_presence(payload)
+            except Exception as exc:  # pragma: no cover - best effort
+                log_warning(
+                    f"[KaradaStateServer] failed to broadcast presence via {type(transport).__name__}: {exc}"
                 )
 
     async def clear_face_values(self) -> None:
@@ -934,6 +1031,8 @@ class KaradaStateServer:
         # client renders the same face as everyone else.
         if self._current_expression:
             state["expression"] = dict(self._current_expression)
+        if self._presence:
+            state["presence"] = self._presence
         return state
 
     async def set_vrm_model(
@@ -2244,6 +2343,31 @@ class KaradaStateServer:
         except Exception:
             pass
 
+    async def broadcast_sfx(
+        self, audio_path: str, audio_duration_s: Optional[float] = None
+    ) -> None:
+        """Play a sound effect on every client — *not* the avatar speaking.
+
+        Unlike :meth:`broadcast_audio` this sends ``sfx-play``: no lip-sync, no TALK
+        animation, no "current audio" record for late joiners, and clients do not
+        attach it to a chat bubble. Used for signals such as the call's "message
+        received" chime. Best-effort; never raises.
+        """
+        payload: Dict[str, Any] = {
+            "type": "sfx-play",
+            "url": self._derive_audio_url(audio_path),
+        }
+        if audio_duration_s is not None:
+            payload["audio_duration_s"] = audio_duration_s
+        for transport in self._transports:
+            try:
+                await transport.broadcast_audio(payload)
+            except Exception as exc:  # pragma: no cover - best effort
+                log_warning(
+                    f"[KaradaStateServer] failed to broadcast sfx via "
+                    f"{type(transport).__name__}: {exc}"
+                )
+
     def _start_talk_animation(self, audio_duration_s: Optional[float]) -> None:
         """Play the TALK animation for the duration of the current audio clip.
 
@@ -2464,6 +2588,187 @@ class KaradaStateServer:
         return result
 
     # ------------------------------------------------------------------
+    # Read-only face/model accessors (used by server-side renderers such as
+    # ``core.avatar_render``, which draw the avatar without a browser)
+    # ------------------------------------------------------------------
+
+    def get_face_values(self) -> Dict[str, float]:
+        """Current emotion/face intensities (name -> 0..1), as shown to clients."""
+        return dict(self._current_face_values)
+
+    def get_current_expression(self) -> Optional[Dict[str, Any]]:
+        """The active transient expression override, or ``None``."""
+        return dict(self._current_expression) if self._current_expression else None
+
+    #: Face keys the WebUI never scales: visemes, blinks and gaze (driven by lipsync/blink).
+    _UNSCALED_FACE_KEYS = frozenset(
+        {
+            "aa", "ih", "ou", "ee", "oh", "neutral", "blink", "blinkleft",
+            "blinkright", "eyes_closed", "eyesclosed", "lookup", "lookdown",
+            "lookleft", "lookright",
+        }
+    )  # fmt: skip
+    #: Emotion presets that open the mouth: capped lower than the others (WebUI calibration).
+    _MOUTH_OPENING_FACE_KEYS = frozenset(
+        {"relaxed", "happy", "joy", "fun", "surprised", "surprise", "excited", "laugh"}
+    )
+
+    @classmethod
+    def scale_face_value_for_state(
+        cls, name: str, value: float, speaking: bool
+    ) -> float:
+        """What the WebUI shows of a server face value (``vrm-viewer.mjs``
+        ``_scaleRemoteEmotionForState``): a resting face is only a micro-expression; while the
+        voice plays the emotion is full, except the mouth-opening presets, which are capped so
+        they do not stack on the lipsync. Visemes, blinks and gaze are never scaled."""
+        v = max(0.0, min(1.0, float(value)))
+        key = str(name or "").lower()
+        if v <= 0.0 or key in cls._UNSCALED_FACE_KEYS:
+            return v
+        opens_mouth = key in cls._MOUTH_OPENING_FACE_KEYS
+        if speaking:
+            return min(v, 0.12) if opens_mouth else v
+        ceil, floor = (0.06, 0.02) if opens_mouth else (0.18, 0.05)
+        return min(ceil, floor + v * (ceil - floor))
+
+    def _persona_blendshape_map(self) -> Dict[str, str]:
+        """The active persona's ``blendshape_map``: logical target -> VRM expression preset."""
+        try:
+            import sys
+
+            pm_mod = sys.modules.get("core.persona_manager")
+            pm = (
+                pm_mod.get_persona_manager()
+                if pm_mod and hasattr(pm_mod, "get_persona_manager")
+                else None
+            )
+            current = getattr(pm, "_current_persona", None) if pm else None
+            name = getattr(current, "name", None) if current else None
+            data = pm._load_persona_json(name) if pm and name else None
+            raw = data.get("blendshape_map") if isinstance(data, dict) else None
+            if not isinstance(raw, dict):
+                return {}
+            return {str(k): v for k, v in raw.items() if isinstance(v, str)}
+        except Exception as exc:  # pragma: no cover - best effort
+            log_debug(f"[KaradaStateServer] no blendshape map: {exc}")
+            return {}
+
+    def get_vrm_expression_weights(
+        self, now: Optional[float] = None, speaking: bool = False
+    ) -> Dict[str, float]:
+        """The face as clients draw it, as VRM expression preset weights (0..1).
+
+        For renderers that have no browser pipeline (``core.avatar_render``): the emotion
+        state resolved by the skin's own presets (:meth:`resolve_face_values`), the current
+        animation's timed expressions (e.g. the eyes closed while thinking) and the
+        transient expression override (which wins), each logical target translated by the
+        persona's ``blendshape_map``. A target the map does not know passes through under
+        its own name. ``speaking`` tells whether the voice is playing (emotions show full
+        then, only a micro-expression at rest: :meth:`scale_face_value_for_state`).
+        """
+        blend_map = self._persona_blendshape_map()
+        out: Dict[str, float] = {}
+
+        def put(target: Any, value: Any, *, override: bool = False) -> None:
+            try:
+                weight = max(0.0, min(1.0, float(value)))
+            except (TypeError, ValueError):
+                return
+            preset = blend_map.get(str(target), str(target))
+            out[preset] = weight if override else max(out.get(preset, 0.0), weight)
+
+        # Emotions are scaled by what the avatar is doing, as in the WebUI.
+        for target, value in self.resolve_face_values(
+            self._current_face_values
+        ).items():
+            put(target, self.scale_face_value_for_state(target, value, speaking))
+
+        descriptor = self._current_animation_descriptor
+        started = self._current_animation_started_at
+        if isinstance(descriptor, dict) and started is not None:
+            moment = time.time() if now is None else now
+            elapsed = moment - (self._started_at_epoch(started) or moment)
+            try:
+                fps = float(descriptor.get("fps") or 30.0) or 30.0
+            except (TypeError, ValueError):
+                fps = 30.0
+            for entry in descriptor.get("expressions") or []:
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    begin = float(entry.get("start_frame", 0)) / fps
+                    end = entry.get("end_frame")
+                    until = float(end) / fps if end is not None else None
+                except (TypeError, ValueError):
+                    continue
+                if elapsed < begin or (until is not None and elapsed >= until):
+                    continue
+                targets = entry.get("targets")
+                if isinstance(targets, dict):
+                    for target, value in targets.items():
+                        put(target, value)
+
+        expression = self._current_expression
+        if expression and expression.get("type") == "vrm_expression_set":
+            targets = expression.get("targets")
+            pairs = (
+                targets.items()
+                if isinstance(targets, dict)
+                else [(expression.get("name"), expression.get("intensity", 1.0))]
+            )
+            for target, value in pairs:
+                if target:
+                    put(target, value, override=True)
+        return out
+
+    def get_animation_for_render(self) -> Optional[Dict[str, Any]]:
+        """The playing animation as a renderer without a browser needs it, or ``None``.
+
+        ``{"path": local Path of the clip, "descriptor": dict | None, "started_at": epoch
+        seconds | None, "state": logical state name}``: the same facts the clients get in the
+        Karada v2 payload (state + descriptor + ``started_at``), with the file resolved to disk.
+        """
+        try:
+            animation = self._current_animation_file
+            if not animation:
+                return None
+            state = self.current_state.value if self.current_state else None
+            resolved, descriptor = self._resolve_animation_descriptor_for_state(
+                animation, state
+            )
+            root = Path(__file__).resolve().parent.parent
+            path = root / resolved.lstrip("/") if resolved else None
+            if path is None or not path.is_file():
+                return None
+            current = self._current_animation_descriptor
+            return {
+                "path": path,
+                "descriptor": current if isinstance(current, dict) else descriptor,
+                "started_at": self._started_at_epoch(
+                    self._current_animation_started_at
+                ),
+                "state": state,
+            }
+        except Exception as exc:  # pragma: no cover - best effort
+            log_debug(f"[KaradaStateServer] no animation for the renderer: {exc}")
+            return None
+
+    def get_active_vrm_path(self) -> Optional[Path]:
+        """Local path of the active VRM model, or ``None`` when it cannot be told."""
+        try:
+            webui = self.webui
+            active = getattr(webui, "active_vrm", None) if webui else None
+            if not isinstance(active, str) or not active:
+                return None
+            root = Path(__file__).resolve().parent.parent
+            if active.startswith("/"):
+                return root / active.lstrip("/")
+            vrm_dir = getattr(webui, "vrm_dir", None)
+            return Path(vrm_dir) / active if vrm_dir else None
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------
     # Priority registration
     # ------------------------------------------------------------------
 
@@ -2538,7 +2843,10 @@ class KaradaStateServer:
         active expression override (or a clear if none is active) so all
         clients converge on the same shared-avatar face.
         """
-        face_payload = {"type": "vrm_face", "values": dict(self._current_face_values)}
+        face_payload = {
+            "type": "vrm_face",
+            "values": self.resolve_face_values(self._current_face_values),
+        }
         expr_payload = (
             dict(self._current_expression)
             if self._current_expression

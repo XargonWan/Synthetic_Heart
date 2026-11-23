@@ -123,3 +123,23 @@ def test_preset_apply_updates_visible_model_from_apply_response() -> None:
     apply_handler = text[apply_start:apply_end]
     assert "await loadComponentsSummary()" in apply_handler
     assert "syncAppliedEnginePreset(data)" in apply_handler
+
+
+def test_trainer_rows_are_saved_only_when_the_stored_value_changes():
+    """A half-filled trainer row must not be saved: saving disabled its interface list
+    (the click that opens it blurs the id field first) and re-rendered the row away."""
+    text = Path("res/synth_webui/js/main.js").read_text(encoding="utf-8")
+    start = text.index("item.ui_type === 'trainer-ids'")
+    end = text.index("item.ui_type === 'tags'", start)
+    block = text[start:end]
+    assert "saveIfChanged" in block
+    # Every save of the trainer list goes through the change check.
+    assert block.count("persistValue(") == 1, block.count("persistValue(")
+
+
+def test_trainer_row_is_a_single_non_wrapping_line():
+    js = Path("res/synth_webui/js/main.js").read_text(encoding="utf-8")
+    css = Path("core/webui_templates/sections/config.html").read_text(encoding="utf-8")
+    assert "repeatable-row repeatable-row--trainer" in js
+    rule = css[css.index(".repeatable-row--trainer {") :].split("}", 1)[0]
+    assert "display: flex" in rule and "flex-wrap: nowrap" in rule

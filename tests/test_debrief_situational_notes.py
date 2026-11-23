@@ -669,3 +669,148 @@ def test_extract_instructions_require_stale_filed_notes_to_be_reported() -> None
     # A summary is read on later days, so relative day words make it a lie.
     assert "ABSOLUTE date" in _EXTRACT_INSTRUCTIONS
     assert "never a bare relative word" in _EXTRACT_INSTRUCTIONS
+
+
+# --- retiring a note the human denied (live: trip to a made-up place) -------
+
+
+async def _run_turn(repo: Any, user_text: str, reply_text: str) -> None:
+    original_message = SimpleNamespace(
+        text=user_text,
+        chat_id=42,
+        thread_id=7,
+        interface_path="telegram/42",
+        from_cortex=True,
+        session_id="sess-1",
+    )
+    context = {
+        "from_cortex": True,
+        "original_user_message": user_text,
+        "llm_response_text": reply_text,
+        "interface_path": "telegram/42",
+        "session_id": "sess-1",
+    }
+    await DebriefSituationalNotesPlugin().on_debrief(
+        processed_actions=[],
+        failed_actions=[],
+        results={},
+        context=context,
+        original_message=original_message,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_reference_retires_a_note_whatever_language_the_subject_is_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The subject is filed in English, the correction arrives in Italian.
+
+    Matching by subject tokens cannot bridge that ("viaggio a Ca' Senz'Autobus"
+    vs "Trip to Ca' Senz'Autobus" share neither set containment), and the miss
+    used to be silent. The filed line carries a ``[nN]`` reference instead.
+    """
+    repo = _RecordingRepository()
+    repo.notes.append(
+        _note("tsc-trip", "Trip to Ca' Senz'Autobus", "The human is travelling there.")
+    )
+    calls = _install(
+        monkeypatch,
+        llm_text='{"notes":[],"ended":["[n1]"]}',
+        repository=repo,
+    )
+
+    await _run_turn(repo, "Non sto per fare nessun viaggio!", "Ah, nessun viaggio.")
+
+    user_part = next(m["content"] for m in calls["messages"] if m["role"] == "user")
+    assert "[n1] Trip to Ca' Senz'Autobus" in user_part
+    assert repo.resolved == [("tsc-trip", "resolved")]
+
+
+@pytest.mark.asyncio
+async def test_a_translated_subject_alone_retires_nothing_but_says_so(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The old failure mode, now loud: an unmatched ended item is logged."""
+    repo = _RecordingRepository()
+    repo.notes.append(
+        _note("tsc-trip", "Trip to Ca' Senz'Autobus", "The human is travelling there.")
+    )
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        "plugins.debrief.debrief_situational_notes.log_warning",
+        lambda message, *a, **k: warnings.append(str(message)),
+    )
+    _install(
+        monkeypatch,
+        llm_text='{"notes":[],"ended":["viaggio a Ca\' Senz\'Autobus"]}',
+        repository=repo,
+    )
+
+    await _run_turn(repo, "Non sto per fare nessun viaggio!", "Ah, nessun viaggio.")
+
+    assert repo.resolved == []
+    assert any("matched no active note" in line for line in warnings)
+
+
+@pytest.mark.asyncio
+async def test_a_circumstance_declared_over_is_not_refiled_in_the_same_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The persona's reply repeats the denied claim; the extractor re-files it."""
+    repo = _RecordingRepository()
+    repo.notes.append(
+        _note("tsc-trip", "Trip to Ca' Senz'Autobus", "The human is travelling there.")
+    )
+    _install(
+        monkeypatch,
+        llm_text=(
+            '{"notes":[{"note_type":"EVENT","subject":"Trip to Ca\' Senz\'Autobus",'
+            '"summary":"The human will travel to Ca\' Senz\'Autobus.",'
+            '"priority":0,"confidence":0.6,'
+            '"valid_from":"2026-09-18T12:00:00+00:00",'
+            '"valid_until":"2026-09-30T00:00:00+00:00"}],'
+            '"ended":["[n1]"]}'
+        ),
+        repository=repo,
+    )
+
+    await _run_turn(
+        repo, "Non sto per fare nessun viaggio!", "Il viaggio a Ca' Senz'Autobus?"
+    )
+
+    assert repo.resolved == [("tsc-trip", "resolved")]
+    # Only the original row exists: nothing new was stored.
+    assert [n.id for n in repo.notes] == ["tsc-trip"]
+
+
+@pytest.mark.asyncio
+async def test_filed_notes_shown_are_the_ones_the_exchange_is_about(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With more active notes than the prompt carries, relevance picks them.
+
+    Taking the first twelve by priority hid the stale note the correction was
+    about, so it could never be named for retirement.
+    """
+    repo = _RecordingRepository()
+    for index in range(15):
+        repo.notes.append(
+            _note(f"tsc-filler-{index}", f"Filler topic {index} alpha", "Unrelated.")
+        )
+    repo.notes.append(
+        _note("tsc-trip", "Trip to Ca' Senz'Autobus", "The human is travelling there.")
+    )
+    calls = _install(monkeypatch, llm_text='{"notes":[]}', repository=repo)
+
+    await _run_turn(repo, "Non vado a Ca' Senz'Autobus, era una battuta", "Ah!")
+
+    user_part = next(m["content"] for m in calls["messages"] if m["role"] == "user")
+    assert "Trip to Ca' Senz'Autobus" in user_part
+    assert "more filed notes not shown" in user_part
+
+
+def test_extract_instructions_forbid_filing_a_denied_circumstance() -> None:
+    from plugins.debrief.debrief_situational_notes import _EXTRACT_INSTRUCTIONS
+
+    assert "DENIES" in _EXTRACT_INSTRUCTIONS
+    assert "[n3]" in _EXTRACT_INSTRUCTIONS

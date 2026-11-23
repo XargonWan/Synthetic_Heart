@@ -178,6 +178,31 @@ class VesselConnectorBase(ABC):
     # there is no failure to report.
     last_error: str | None = None
 
+    #: True when this world is somewhere the vessel LIVES rather than a session it visits: the chat of one visit is
+    #: still there on the next (a person in a room; a Minecraft run is a fresh start each time, which is why the
+    #: default is False). :meth:`VesselInterface.end_session` skips the chat purge for a connector that sets it, and
+    #: the player clears it by hand (:meth:`forget_memory`). The lived-experience diary is unaffected either way.
+    remembers_chat: bool = False
+
+    async def forget_memory(self, environment: str, world: Any = None) -> bool:
+        """Clear this world's remembered chat (the in-memory context AND the durable history).
+
+        Generic for every rift adapter: the adapter passes its environment name (and its world identity, if it
+        has one); the Vessel interface owns where the chat lives. True when something was cleared.
+        """
+        try:
+            from core.core_initializer import INTERFACE_REGISTRY
+
+            iface = INTERFACE_REGISTRY.get("vessel")
+            if iface is None or not hasattr(iface, "forget_chat"):
+                return False
+            return bool(await iface.forget_chat(environment, world))
+        except Exception as exc:  # pragma: no cover - defensive
+            from core.logging_utils import log_warning
+
+            log_warning(f"[vessel_base] forget_memory({environment}) failed: {exc}")
+            return False
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -273,6 +298,89 @@ class VesselConnectorBase(ABC):
             return await self.act(action, payload)
         finally:
             self._deliberate_in_flight -= 1
+
+    async def get_embodiment_assets(
+        self, wanted_animations: List[str] | None = None
+    ) -> Dict[str, Any] | None:
+        """Describe Synth's **body** for a world that draws it (optional).
+
+        Most worlds draw the avatar themselves (Minecraft has its own player model)
+        and never need this. A world that renders Synth (RetroXR) asks for it:
+        the connector answers with the active skin's model, the animations the
+        world named (``wanted_animations``) and where to download them (the Karada
+        ``/skins`` files, plus the hash manifest to skip what is cached). See
+        :mod:`plugins.rift_vessel.embodiment_assets`. Nothing is ever pushed unasked.
+
+        Optional override. Defaults to ``None`` (this world takes no body).
+        """
+        return None
+
+    # A world whose body is a person in a room, not a bot with goals, opts into the IDLE
+    # beat (see core.vessel_beat) instead of the will/action/goal beats and the motor tick:
+    # when nobody is talking to Synth she is told what is around her and asked what she
+    # wants to do. The world never scripts her; it only describes.
+    uses_idle_beat: bool = False
+
+    # Which of the Vessel's world-agnostic core verbs (say, move, look, use, attack, follow,
+    # unfollow, respawn, status, observe) this world can really carry out. ``None`` means all of
+    # them (the Minecraft default). A world that implements only some must say which: Synth is
+    # shown nothing else, because an action she is offered and cannot do is an action she
+    # wastes a turn on (a RetroXR body offered ``attack`` and ``observe`` answered neither).
+    core_verbs: "frozenset[str] | None" = None
+
+    # Descriptions this world gives some core verbs in place of the generic ones (``{verb: text}``; ``{world}`` is
+    # filled in). The generic text is written for any world and reads like Minecraft: a world whose ``follow`` takes no
+    # target, say, says so here instead of promising one. Optional; empty means the generic text for every verb.
+    core_verb_descriptions: "Dict[str, str]" = {}
+
+    # ``combine`` (put one thing into/onto another: a cartridge into a console) is an OPT-IN core verb: a world gets it
+    # only by listing ``"combine"`` in ``core_verbs``. The connector then receives ``act("combine", {"target": ...,
+    # "item": ... (optional: default what the body holds), "how": ... (optional free words)})`` and answers like any
+    # other verb; what really happens is the world's own (a Minecraft connector would map it to crafting).
+
+    def describe_surroundings(self) -> str | None:
+        """Describe what is around the body, for the idle beat (optional).
+
+        Plain text for Synth: the objects near her with where they are, who is near, what
+        she holds. ``None`` or empty means there is nothing to say right now and no beat
+        is sent. Only read when :attr:`uses_idle_beat` is true. Must never raise.
+        """
+        return None
+
+    # Exploration (see plugins/rift_vessel/exploration.py): a connector that mixes in ``ExplorerMixin`` really
+    # walks; the others answer these two for the interface and do nothing.
+    explores: bool = False
+
+    def set_explore_budget(self, seconds: float) -> None:
+        """The interface tells the body how long a walk should last: until the next prompt. Default: ignored."""
+        return None
+
+    def idle_busy(self) -> bool:
+        """Is the body busy with something that will end in a prompt of its own (a walk)? Default: no."""
+        return False
+
+    def idle_ready_since(self) -> float | None:
+        """When the body became ready for idle beats, as ``time.monotonic()``; ``None`` = not yet (optional).
+
+        The idle beat's clock starts here, so a body still being introduced (RetroXR: climbing out of the
+        capsule) is not asked what it wants before it can do anything. Default: ready since always.
+        """
+        return 0.0
+
+    async def idle_intention(self) -> "dict[str, Any] | None":
+        """The aim Synth set herself and has not finished (``description``, ``note``), or ``None`` (optional).
+
+        Handed to her in the idle prompt so a quiet moment continues from it. Default: this world keeps none.
+        """
+        return None
+
+    def idle_journal(self) -> "list[tuple[float, str]]":
+        """What the body did lately, oldest first: ``(time.monotonic() stamp, plain text)`` (optional).
+
+        Handed back to Synth in the idle prompt as facts ("3 min ago: looked at the TV"), and counted by
+        the interface to tell whether a beat ended in an action. Must never raise. Default: nothing.
+        """
+        return []
 
     async def get_world_state(self) -> WorldState | None:
         """Return the current :class:`WorldState`, or ``None`` if unavailable.

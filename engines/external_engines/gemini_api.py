@@ -21,6 +21,7 @@ from core.config_manager import config_registry
 from core.cortex_api_logger import log_cortex_request, log_cortex_response
 from core.genai_client_utils import harden_genai_client_for_async_close
 from core.logging_utils import log_debug, log_info, log_warning, log_error
+from core import stats_registry
 import json
 import asyncio
 import time as _time
@@ -762,6 +763,7 @@ class GeminiAPIPlugin(AIPluginBase):
         finally:
             self._current_request_meta = None
 
+    @stats_registry.tracked_engine("cortex", "gemini_api")
     async def generate_response(self, messages: object) -> str:
         """Send prompt to Gemini API and receive the response.
 

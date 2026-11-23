@@ -22,6 +22,7 @@ from core import message_queue
 from core.command_registry import handle_command_message
 from core.core_initializer import register_interface
 from core.interfaces_registry import get_interface_registry
+from core.synth_avatar import register_interface_switch as _register_avatar_switch
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.config_manager import config_registry
 from core.config import get_trainer_id as core_get_trainer_id
@@ -121,6 +122,9 @@ def _quoted_sender_from_fallback(quoted_text: str) -> str:
     except Exception:
         pass
     return "Unknown"
+
+
+_avatar_switch = _register_avatar_switch(INTERFACE_NAME)
 
 
 class MatrixInterface:
@@ -303,6 +307,65 @@ class MatrixInterface:
     @staticmethod
     def get_interface_id() -> str:
         return INTERFACE_NAME
+
+    @staticmethod
+    def uses_synth_avatar() -> bool:
+        return _avatar_switch()
+
+    async def send_activity(self, interface_path: str, kind: str) -> None:
+        """Show "typing…" (Matrix has one indicator for every kind of work)."""
+        if self.client is None:
+            return
+        from core.interface_path_utils import parse_interface_path
+
+        _name, levels = parse_interface_path(interface_path)
+        if levels:
+            await self.client.room_typing(levels[0], True, timeout=6000)
+
+    async def set_avatar(
+        self,
+        image_bytes: Optional[bytes],
+        mime: Optional[str] = None,
+        version: Optional[str] = None,
+        force: bool = False,
+    ) -> bool:
+        """Upload the picture to the homeserver and make it the profile avatar.
+
+        Matrix has no portable "remove avatar", so a removal is not applied.
+        """
+        client = self.client
+        if client is None or not self.uses_synth_avatar():
+            return False
+        if image_bytes is None:
+            log_debug("[matrix_interface] avatar removal is not supported; skipped")
+            return False
+        import io
+
+        from nio import UploadResponse
+
+        try:
+            upload, _keys = await client.upload(
+                io.BytesIO(image_bytes),
+                content_type=mime or "image/png",
+                filename="avatar.png",
+                filesize=len(image_bytes),
+            )
+            if not isinstance(upload, UploadResponse):
+                log_warning(f"[matrix_interface] avatar upload failed: {upload}")
+                return False
+            result = await client.set_avatar(upload.content_uri)
+        except Exception as exc:
+            log_warning(f"[matrix_interface] avatar update failed: {type(exc).__name__}")
+            return False
+        ok = type(result).__name__ != "ProfileSetAvatarError"
+        if ok:
+            log_info("[matrix_interface] synth avatar applied to the account")
+        return ok
+
+    @staticmethod
+    def get_interface_path_hint() -> str:
+        """Destination format shown to the model when it asks about channels."""
+        return f"{INTERFACE_NAME}/<room_id>[/<thread_event>]"
 
     @staticmethod
     def get_action_types() -> List[str]:

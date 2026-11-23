@@ -1048,3 +1048,200 @@ def test_fmt_equipment_renders_held_item_or_bare_hands() -> None:
     assert "wooden axe" not in _fmt_equipment(
         {"equipped_item": None, "inventory_counts": {"dirt": 12}}
     )
+
+
+# ---------------------------------------------------------------------------
+# Idle beat pacing: counted from when she was done, timed from the measurements
+# ---------------------------------------------------------------------------
+
+from core import vessel_beat as _vb  # noqa: E402
+
+
+def _turn(count: int = 8, p50: float = 40.0, age: float = 5.0) -> dict:
+    return {"count": count, "p50": p50, "age": age}
+
+
+def test_idle_anchor_is_the_latest_of_four():
+    assert _vb.idle_anchor(100.0, 50.0, 130.0, 120.0) == 130.0
+    assert _vb.idle_anchor(100.0, 50.0, 90.0, 140.0) == 140.0
+    assert _vb.idle_anchor(100.0, 200.0, 90.0, 80.0) == 200.0
+
+
+def test_turn_longer_than_the_interval_is_not_due_before_turn_done_plus_gap():
+    # Beat asked at t=0, interval 40 s, the turn ends at t=70: counted from the beat's start it was due at once.
+    gap = 10.0
+    anchor = _vb.idle_anchor(0.0, 0.0, 70.0, 70.0)
+    assert not _vb.idle_beat_due(75.0, anchor, gap, 0.0, 0.0)
+    assert _vb.idle_beat_due(80.0, anchor, gap, 0.0, 0.0)
+
+
+def test_adaptive_interval_after_an_action_uses_the_active_gap():
+    base = _vb.adaptive_idle_interval(40, 20, 180, 180, since_ready=500, idle_streak=0)
+    assert base == 40.0
+    acted = _vb.adaptive_idle_interval(
+        40, 20, 180, 180, 500, 0, acted_last=True, active_gap=12.0
+    )
+    assert acted == 12.0
+    # No shortcut without an active gap, and never longer than the base.
+    assert (
+        _vb.adaptive_idle_interval(
+            40, 20, 180, 180, 500, 0, acted_last=True, active_gap=None
+        )
+        == 40.0
+    )
+    assert (
+        _vb.adaptive_idle_interval(
+            40, 20, 180, 180, 500, 0, acted_last=True, active_gap=90.0
+        )
+        == 40.0
+    )
+    # Beats that ended in nothing still stretch the interval.
+    assert (
+        _vb.adaptive_idle_interval(
+            40, 20, 180, 180, 500, 5, acted_last=False, active_gap=12.0
+        )
+        > 40.0
+    )
+
+
+def test_auto_pacing_follows_the_length_of_the_turns():
+    slow = _vb.auto_pacing(
+        turn=_turn(p50=40), first_verb=None, active_gap_cfg=None, base_interval=40
+    )
+    fast = _vb.auto_pacing(
+        turn=_turn(p50=15), first_verb=None, active_gap_cfg=None, base_interval=40
+    )
+    assert slow.mode == "auto" and fast.mode == "auto"
+    assert 16.0 < slow.gap < 18.0
+    assert 5.5 < fast.gap < 7.0
+    assert fast.gap < slow.gap
+
+
+def test_auto_pacing_is_bounded():
+    huge = _vb.auto_pacing(
+        turn=_turn(p50=600), first_verb=None, active_gap_cfg=None, base_interval=40
+    )
+    tiny = _vb.auto_pacing(
+        turn=_turn(p50=0.5), first_verb=None, active_gap_cfg=None, base_interval=40
+    )
+    assert huge.gap == 40.0
+    assert tiny.gap == _vb.MIN_GAP_SEC
+
+
+def test_auto_pacing_falls_back_without_enough_or_with_stale_samples():
+    few = _vb.auto_pacing(
+        turn=_turn(count=2), first_verb=None, active_gap_cfg=None, base_interval=40
+    )
+    old = _vb.auto_pacing(
+        turn=_turn(age=5000), first_verb=None, active_gap_cfg=None, base_interval=40
+    )
+    none = _vb.auto_pacing(
+        turn=None, first_verb=None, active_gap_cfg=None, base_interval=40
+    )
+    for p in (few, old, none):
+        assert p.mode == "fallback"
+        assert p.gap == _vb.FALLBACK_ACTIVE_GAP_SEC
+        assert p.lead == 0.0
+
+
+def test_manual_gap_bypasses_the_measurements():
+    p = _vb.auto_pacing(
+        turn=_turn(p50=40),
+        first_verb=_turn(p50=30),
+        active_gap_cfg=25.0,
+        base_interval=40,
+    )
+    assert (p.mode, p.gap, p.lead) == ("manual", 25.0, 0.0)
+    assert (
+        _vb.auto_pacing(
+            turn=None, first_verb=None, active_gap_cfg=1.0, base_interval=40
+        ).gap
+        == _vb.MIN_GAP_SEC
+    )
+    assert (
+        _vb.auto_pacing(
+            turn=None, first_verb=None, active_gap_cfg=99.0, base_interval=40
+        ).gap
+        == 40.0
+    )
+
+
+def test_lead_comes_from_the_first_verb_and_never_exceeds_the_turn():
+    p = _vb.auto_pacing(
+        turn=_turn(p50=40),
+        first_verb=_turn(p50=25),
+        active_gap_cfg=None,
+        base_interval=40,
+    )
+    assert p.lead == 25.0
+    capped = _vb.auto_pacing(
+        turn=_turn(p50=20),
+        first_verb=_turn(p50=60),
+        active_gap_cfg=None,
+        base_interval=40,
+    )
+    assert capped.lead == 20.0
+    unmeasured = _vb.auto_pacing(
+        turn=_turn(p50=40),
+        first_verb=_turn(count=1),
+        active_gap_cfg=None,
+        base_interval=40,
+    )
+    assert unmeasured.lead == 0.0
+
+
+def test_body_ready_for_ask():
+    assert _vb.body_ready_for_ask(True, None, 0.0)
+    assert not _vb.body_ready_for_ask(
+        False, None, 30.0
+    )  # busy with an unknown end: wait
+    assert _vb.body_ready_for_ask(False, 10.0, 25.0)  # done before the model can answer
+    assert not _vb.body_ready_for_ask(False, 40.0, 25.0)
+    assert not _vb.body_ready_for_ask(
+        False, 5.0, 0.0
+    )  # no lead measured: wait for the body
+
+
+def test_smooth_gap_does_not_jump():
+    assert _vb.smooth_gap(None, 20.0) == 20.0
+    moved = _vb.smooth_gap(10.0, 40.0)
+    assert 10.0 < moved < 25.0
+    values = [20.0]
+    for noisy in (8.0, 35.0, 9.0, 33.0):
+        values.append(_vb.smooth_gap(values[-1], noisy))
+    assert max(values) - min(values) < 15.0
+
+
+def test_parse_auto_or_number():
+    assert _vb.parse_auto_or_number("auto", 1, 30) is None
+    assert _vb.parse_auto_or_number("", 1, 30) is None
+    assert _vb.parse_auto_or_number(None, 1, 30) is None
+    assert _vb.parse_auto_or_number("nonsense", 1, 30) is None
+    assert _vb.parse_auto_or_number("12", 1, 30) == 12.0
+    assert _vb.parse_auto_or_number(500, 1, 30) == 30.0
+    assert _vb.parse_auto_or_number(0.1, 1, 30) == 1.0
+    assert _vb.parse_auto_or_number(True, 1, 30) is None
+
+
+def test_config_resolvers_default_to_auto_and_read_numbers():
+    assert _vb.resolve_idle_active_gap(lambda k, d: d) is None
+    assert _vb.resolve_tick(lambda k, d: d) is None
+    assert _vb.resolve_idle_active_gap(lambda k, d: "15") == 15.0
+    assert _vb.resolve_tick(lambda k, d: 2) == 2.0
+
+    def boom(k, d):
+        raise RuntimeError("config down")
+
+    assert _vb.resolve_tick(boom) is None
+    assert _vb.resolve_idle_engine_rest_sec(lambda k, d: d) == 3
+
+
+def test_next_wake():
+    assert _vb.next_wake(100.0, 130.0, False, None) == 10.0  # capped
+    assert _vb.next_wake(100.0, 103.0, False, None) == 3.0  # sleeps until due
+    assert _vb.next_wake(100.0, 100.0, False, None) == 0.25  # already due: look soon
+    assert (
+        _vb.next_wake(100.0, 130.0, True, None) == _vb.POLL_WAITING_SEC
+    )  # waiting: poll
+    assert _vb.next_wake(100.0, None, False, None) == _vb.POLL_MAX_SEC
+    assert _vb.next_wake(100.0, 130.0, True, 2.0) == 2.0  # a configured tick wins

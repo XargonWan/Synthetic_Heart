@@ -1,3 +1,237 @@
+### fix(telegram): the SyntH no longer rings the caller back right after they hang up
+
+**Before.** When the caller hung up, the call was already forgotten when the hang-up tone (or a reply that was still being generated) was played; `py-tgcalls` `play()` on a chat that is not in a call starts a new outgoing call, so the phone rang again at once.
+
+**Now.** `TelegramCalls.play_file` plays only into a chat that has a call; otherwise it logs at debug level and returns. The hang-up tone for a caller who already left is skipped (nobody is there to hear it).
+
+**Not verified here.** Not run against a live Telegram account; the unit test drives a fake py-tgcalls.
+
+**Location.** `interface/telegram/telegram_call.py`, `tests/test_telegram_call.py`.
+
+### fix(avatar-render): the server-drawn face follows the Karada face, and the avatar no longer shakes its head by itself
+
+**Before.** The headless renderer mapped five raw emotion names to VRM presets at a fixed 0.7 scale, ignored the skin's emotion presets, the animation's expressions (eyes closed while thinking) and the persona's `blendshape_map`, added a default smile, and swayed the head left and right on its own.
+
+**Now.** `KaradaStateServer.get_vrm_expression_weights()` gives the renderer the face the WebUI gets, including its state scaling (a resting emotion is a micro-expression, in full while the voice plays, mouth-opening presets capped: `scale_face_value_for_state`, a port of `_scaleRemoteEmotionForState`). The renderer only adds blinking, breathing and the mouth following the voice.
+
+**Location.** `core/animation_handler.py`, `core/avatar_render/animator.py`, `core/avatar_render/source.py`, `docs/call_service.rst`, `tests/test_avatar_render.py`, `tests/test_animation_handler.py`.
+
+### feat(avatar-render): the server-drawn avatar plays the animation the Karada state names
+
+**Before.** The headless renderer only breathed and blinked: on a call you could not tell whether the SyntH was thinking, writing or idle.
+
+**Now.** `KaradaStateServer.get_animation_for_render()` gives the renderer the playing clip, its descriptor and `started_at`. `core/avatar_render/fbx.py` reads the Mixamo FBX (binary, numpy only), retargets it to the VRM normalized humanoid as `loadMixamoAnimation.js` does (rest-world conjugation, hips translation scaled to the model, VRM 0.x flip), and `core/avatar_render/motion.py` times it as the WebUI does (intro once, then the loop; play-once holds; `think` default split; 0.35 s fade between clips; `mask: upper_body`). The renderer turns normalized-bone rotations into raw-bone ones like three-vrm.
+
+**Not changed.** The `outro` and the loop cross-fade of a clip, animation overlays and eye movement are not reproduced; the legs are out of the close-up anyway. Checked on the real Rei clips and VRM without GL (arms come down from the T-pose in Idle, rise to the face in Thinking); not seen on screen here, since this sandbox has no EGL.
+
+**Location.** `core/avatar_render/fbx.py` and `motion.py` (new), `renderer.py`, `vrm.py`, `source.py`, `core/animation_handler.py`, `docs/call_service.rst`, `tests/test_avatar_motion.py` (new), `tests/test_avatar_render.py`, `tests/test_animation_handler.py`.
+
+### fix(config): an engine and model picked in the WebUI are no longer replaced at the next start
+
+**Before.** Choosing an engine *and* a model for the Base Cortex stores `{"engine": ..., "model": ...}` in `BASE_CORTEX`. At startup `_heal_cortex_config` compared that whole JSON string with the known engine names, never found it, took it for a removed engine and overwrote it with `_pick_preferred_cortex(...)`: the first enabled external endpoint alphabetically unless its name contains "zen". On 14 Nov that was `fish-audio`, a Vox-only endpoint, so no Cortex could be loaded and every message on every interface was dropped until the value was fixed by hand. The scope overrides (`TRAINER_CORTEX`, `GRILLO_CORTEX`, `LIVE_CORTEX`, `DSP_CORTEX`) holding an engine+model were reset to `Default` the same way.
+
+**Now.** The healer compares only the `engine` part (`parse_cortex_scope_value`) for the base value and the overrides; a valid selection is left untouched, model included. An engine that is really gone is still repaired as before.
+
+**Not changed.** The replacement for a genuinely stale base engine can still be an endpoint that does not offer Cortex.
+
+**Location.** `core/db.py`, `tests/test_db_postgres_compat.py`.
+
+### fix(telegram): messages sent while the user account was offline are picked up at startup, whatever Telegram says about them being read
+
+**Before.** The Telethon client runs on a `StringSession`, which keeps no update state, so a message sent while the container was restarting was never delivered. On 14 Nov a reply to Rekku ("riprova ora", sent in the seconds the container was restarting) left no row in `chat_history_cache` and got no answer; the restart gap is the likely cause, not proven. Telegram's own unread flags were no help either: they are cleared by opening the account in any other client.
+
+**Now.** After connecting, `recover_missed_messages` re-reads each chat active within `TELEGRAM_RECOVERY_WINDOW_SECONDS` (default 3600, `0` = off) and sends every incoming text message that is not in `chat_history_cache` yet (matched on chat path, sender and timestamp, new `chat_message_exists`) through the normal path, oldest first. Past `TELEGRAM_BACKLOG_MAX_AGE_SECONDS` a message stays history-only, as before. Read/unread state is never consulted, so reading the account on a phone cannot hide a message. A per-process set of handled messages keeps recovery and live updates from processing the same one twice (it also drops a redelivered update).
+
+**Not verified here.** Not run against a live Telegram account; the unit tests drive a fake client. Media-only messages (voice, photo without caption) are not recovered: they leave no history row to tell them from handled ones.
+
+**Location.** `interface/telegram/telegram.py`, `core/chat_history_cache.py`, `docs/telegram_user_interface.rst`, `tests/test_telegram_recovery.py` (new), `tests/test_telegram_backlog.py` (unique message ids).
+
+### feat(queue): messages of the same chat that pile up behind a slow turn become one queue element
+
+**Before.** With a slow model every message queued as its own element and cost a whole turn: fifteen `player-chat` lines of `vessel/minecraft/192_168_1_42_25565` meant fifteen turns, and the Queue view listed all of them. Vessel player chat is `no_compact`, so even the consumer-side compaction never joined them.
+
+**Now.** `enqueue` folds a message into a *pending* element with the exact same `interface_path` (same interface, thread and priority band); the turn in flight is untouched. One turn answers all the lines, and the Queue view shows one element with `×N merged`, the first → last time and every line in the preview. Calls, scheduled/urgent events, vessel reflection/appraisal/idle beats, autonomous perceptions and anything awaited by a caller are never merged; a player chat merges only with other player chats. A merged vessel chat keeps no `from_user` (no bogus "group" speaker) and still carries `_vessel_player_chat`. Settings `QUEUE_COALESCE_ENABLED` and `QUEUE_COALESCE_MAX_ITEMS` (default 20).
+
+**Location.** `core/message_queue.py`, `res/synth_webui/js/history.js`, `docs/architecture.rst`, `tests/test_message_queue_coalesce.py` (new).
+
+### fix(minecraft): Synth stops digging blocks that cannot be broken
+
+**Before.** `mine`/`collect_block` kept digging the same block when it would not break. mineflayer's `dig()` sets the cell to air locally the moment a dig finishes and returns without waiting for the server, so a block in a protected area (spawn protection, a region plugin) looked broken while the server quietly put it back; the log shows hundreds of "Mined dirt/grass_block (no drop collected)" events. Only a bare `canDigBlock` check existed, which also fails on plain distance and says just "cannot dig".
+
+**Now.** `minecraft_bridge.js` (`whyNotBreakable`, `digBlockVerified`, `// BEGIN breakable-blocks`): a block is refused up front in `adventure`/`spectator`, or when minecraft-data says it is unbreakable (not in `creative`); after a dig the cell is re-read after `DIG_SETTLE_MS`, and a block the server restored is remembered as protected for 10 minutes. Targets are chosen among the nearest 16 matches skipping those, so a protected block no longer hides the next one. Failures say why (`reason`: `game_mode`/`unbreakable`/`protected`) and tell Synth not to retry. Falling blocks (sand, gravel, ...) refilling a cell are not mistaken for a revert. Also: both `block = obstruction` reassignments were on a `const` (a TypeError whenever a block stood in the way); they are `let` now.
+
+**Not verified here.** Not run against a real protected server (the bot has not spawned on one since); the revert timing (`DIG_SETTLE_MS`, 450 ms) is a judgement for normal latency, and the test drives the helpers with a simulated bot under `node`.
+
+**Location.** `plugins/rift_vessel/minecraft/minecraft_bridge.js`, `plugins/rift_vessel/minecraft/guide.md`, `tests/test_minecraft_bridge_breakable.py` (new).
+
+### feat(vessel): ask Rekku to join a named Minecraft server and she really goes there
+
+**Before.** "Rekku logga in minecraft su pvp.gentoobtw.fyi" connected to the configured default (a dead LAN address) while she announced the requested server. The model passed the address as `server`, a field `vessel_connect` did not have; host/port had been hidden from it (`9f123a81`) so provider names in its context could not become endpoints, and the unknown field was dropped without a word.
+
+**Now.** `vessel_connect` offers optional `host`/`port` again, told to use them only for a server the asker named. `VesselPlugin._vet_address_override` (called from `execute_action` with `_asking_text`: the triggering message, the turn's queued messages and the people's messages (never Synth's) among the last 60 stored in that chat — so "ok, riprova" after "logga su X" still works) keeps a host only when it appears there as a whole token (`rift.venice.ai` out of nowhere, or `gentoobtw.fyi` out of `pvp.gentoobtw.fyi`, is dropped), a port only when its digits appear too, and understands the `server`/`address`/`ip` spellings and `host:port`. A dropped address is logged and named in the action result, so the model stops claiming a server it is not on. Direct backend callers (`connect_world`, tests) are unchanged.
+
+**Location.** `plugins/rift_vessel/vessel_plugin.py`, `tests/test_vessel_connect_address.py` (new), `tests/test_vessel_action_namespacing.py`, `plugins/rift_vessel/guide.md`, `docs/rift_vessel.rst`.
+
+### fix(vessel): Minecraft was missing from the games `vessel_connect` offers while its plugin card was enabled
+
+**Before.** The Minecraft card showed enabled, but `vessel_connect` listed only `retroxr` ("Available games: retroxr"). Asked to log into Minecraft, the model sent `game: minecraft`, the connect was refused as `world_unavailable`, and the corrector kept retrying for minutes (finally swapping in `retroxr`, a game nobody asked for).
+
+**Now.** `VesselPlugin._world_enabled` reads `PLUGIN_ENABLED__<world>` (e.g. `PLUGIN_ENABLED__minecraft`), the key the plugin loader and the card toggle actually read and write. It used to read `PLUGIN_ENABLED__<world>_vessel`, an alias key the card cannot reach; a stale `false` left there (the live database had one from July) hid the world with no way to clear it from the UI. `interface/minecraft_provisioner.py::_is_enabled` had the same mismatch and now reads the same key. No database change is needed: the stale `_vessel` row is simply ignored.
+
+**Location.** `plugins/rift_vessel/vessel_plugin.py`, `interface/minecraft_provisioner.py`, `tests/test_vessel_world_enabled.py` (new), `tests/test_minecraft_provisioner.py`, `AGENTS.md`, `docs/rift_vessel.rst`, `plugins/rift_vessel/minecraft/guide.md`.
+
+### fix(vessel): a visit shows under its world in Activities, once, not as "Unknown"
+
+**Before.** A connect that failed after the 30 s disconnect grace had already closed its session rolled back through `VesselInterface.end_session`, which no longer tracked the session: it logged another `session_end` with an empty path and `environment = unknown` ("Left unknown (connect_failed)", once per retry). The Activities card is grouped by session and titled by its last row's environment, so the whole visit showed as "Unknown". A retried connect that reused the open session also logged a second "Embodied in minecraft".
+
+**Now.** `end_session` on a session that is no longer tracked only asks the (idempotent) manager to end it and records nothing; `begin_session` logs `session_start` only for a session it was not already tracking. Rows already in `vessel_activity_log` are not rewritten.
+
+**Location.** `interface/vessel_interface.py`, `tests/test_vessel_session_activity_log.py` (new).
+
+### feat(call,discord,telegram): every call is heard by speech-to-text and answered by a normal turn; the Live route is optional and off; Telegram user-account calls
+
+**Before.** Only the WebUI had calls that went through the turn queue. A Discord voice session always used the Gemini Live engine, which does its own recognition and voice and bypasses the queue, the priority, the "tu-din" and forced voice replies. Telegram had no calls.
+
+**Now.** `core/call_audio.py` is the default way a call hears, on every interface that gives the core raw audio: PCM frames -> voice detection (Silero, else a simple energy detector) -> one utterance -> Auris -> the "tu-din" -> a normal turn at `PRIORITY_CALL` (`CallProvider.deliver_turn`, `request_tts` forced). The reply is spoken by Vox and played into the call: `VoxPlugin._dispatch` first offers the clip to `CallManager.route_speech`, and a provider with `plays_speech_in_call` plays it (`play_speech`). The Live engine is now an opt-in route behind `CALL_LIVE_ENGINE_ENABLED` (default **off**), a call-wide switch.
+**Discord:** `_start_live_voice` is the one entry point and starts an ordinary call unless the switch is on; the call joins the channel, plays everything through one always-on buffer, and feeds each person's audio (48 kHz stereo -> 16 kHz mono, `CallVoiceSink`) to the pipeline.
+**Telegram (user account):** `interface/telegram/telegram_call.py` on py-tgcalls (installed on first use, `ensure_package("pytgcalls")`): answers incoming calls from the trainer or `TELEGRAM_CALL_ALLOWED_IDS` with the pickup tone, feeds the caller's frames to the pipeline, plays replies back, leaves after the hang-up tone. `request_call(..., announce=False)` lets a provider answer with the pickup tone itself.
+
+**Not verified here.** The Telegram part has never run: no account here, and py-tgcalls' private-call support is thinly documented (the library's own docs pages were unreachable; a 2.0.0 release with private-call methods was yanked). It follows `example/p2p_example` and the `stream_frame` filter; the incoming audio format (`TELEGRAM_CALL_RX_RATE`, `TELEGRAM_CALL_RX_CHANNELS`) and the end-of-call status names are guesses, and everything logs under `[telegram_call]`. Discord was tested with fakes, not a guild. The switch is only honoured where an interface has a Live implementation (Discord); the WebUI has none. Video is not implemented on Telegram.
+
+### feat(discord,call): a Discord voice session is a call (audio only); video and Telegram checked and not available
+
+**Checked.** Which interfaces can host a call: only the WebUI (audio and video) and Discord (audio). Discord's API gives bots no camera or Go Live video; the Telegram Bot API has no call methods; Telegram user accounts can only take calls through py-tgcalls/ntgcalls, whose private-call support is documented as not released and could not be tried without an account; Matrix, Fluxer, the OpenAI bridge and the Vessel have no call transport. See `docs/call_service.rst` (*Support per interface*).
+
+**Now.** `interface/discord_interface/discord_interface.py` registers a `DiscordCallProvider` (`discord_bot`, audio only) on start and removes it on stop. `_start_live_voice` opens a call for the guild's live session (`discord_live_<guild>`) and `_stop_live_voice` ends it first; the pickup and hang-up tones are mixed into the `LiveAudioBuffer` the Live model speaks through (a second voice-client source would cut the model off), and the model counts as speaking while that buffer plays. `start_call` / `end_call` on the interface advertise the `call` capability. A video request degrades to audio.
+
+**Not verified here.** Not run against a real Discord guild: the tests use the real `LiveAudioBuffer` with a fake live session. The conversation is still the Live engine's own; the turn-queue parts of a call (`PRIORITY_CALL`, the "tu-din", forced `request_tts`) do not apply to it. Not implemented: Telegram user-account calls (no verified library route), and a speech-recognition call pipeline for Discord without a Live engine.
+
+### feat(call): a pickup sound when a call starts and a hang-up tone when it ends
+
+**Now.** Starting a call plays a short rising three-note "pickup" and ending it a short falling hang-up tone (`core/call_ack_cache.py`: `render_signal("start")` / `("end")`, synthesised like the "tu-din", saved as `pickup-v1.wav` and `hangup-v1.wav` under `<VOX_OUTPUT_DIR>/call_ack/`). `CallManager.request_call` plays `start` and `end_call` plays `end` through the provider (in the WebUI as `sfx-play`: not speech, no lip-sync). A provider that cannot play audio never blocks a call. `CALL_SOUNDS_ENABLED` (default on) turns them off.
+
+**Not verified here.** Not heard: the notes (G5-C6-E6 up, C6-G5-C5 down, about 0.4 s) were chosen from the description, not compared with Skype's sounds, and the browser path was not run.
+
+### fix(call): in a call the reply is always spoken, on any interface
+
+**Before.** A call turn only carried `is_voice_input`, which `message_chain` weighs against the interface, `VOX_SPEAK_TEXT_REPLIES` and whether Vox is enabled at that moment; when any of them said no, the reply went out as chat text only.
+
+**Now.** `CallManager.mark_turn` forces `request_tts = True` (and `is_voice_input = True`) on every call turn. `message_queue` copies the explicit flag into the context and `message_chain` honours it for every interface, even voice-only ones (Telegram, Discord) and even while Vox is off (the Vox plugin then falls back to text only if synthesis itself fails). The WebUI no longer sets `is_voice_input` itself; it is done once, for every provider.
+
+**Not verified here.** Not run against a real reply: the flag path (`message_queue` -> context -> `message_chain` auto-inject) was read, not exercised end to end.
+
+### fix(call,queue): the call signal plays only after text was transcribed; the queue keeps the item being processed
+
+**Before.** The "message received" signal followed the VAD, so typing on the keyboard or a cough triggered it, each time followed by an empty clip. The History → Queue view listed only the pending backlog: a message disappeared the moment the consumer took it, so during a slow turn (the last call turn spent 300 s in the LLM before failing) the queue looked empty.
+
+**Now.** `POST /api/audio/upload` takes the call's `call_id`; the signal plays (`CallManager.on_message_transcribed`) only when Auris returned non-empty text. The VAD-driven path is gone (`notify_vad_signal`, `on_speech_start`, `/api/call/utterance_end`, the Silero `call_id`). `snapshot_queue()` lists the item in flight first (`status: "processing"`, `position: 0`, `processing_seconds`) until its turn is completed, then the pending items; the Queue tab marks it with a highlighted row and a "processing" tag, and flags call turns.
+
+**Not verified here.** Not run in a browser. A cough that Vosk transcribes into a word still triggers the signal; only an empty transcription is filtered.
+
+### fix(call,webui): the call signal is a sound effect, not speech, and only plays after real speech; in a video call Synth looks into the camera  <!-- 2026-11-13 -->
+
+**Before.** The "tu-din" went out as `tts-play`, so clients treated it as the avatar speaking: lip-sync, TALK animation, and its URL attached to the last chat bubble. It played "at random": every VAD `speech_end` triggered it, including noise and the signal's own echo in the microphone, and each one was followed by a recording that transcribed to nothing, shown as "❌ Transcription returned no text" for a moment. In a video call nothing made Synth look at the camera.
+
+**Now.** The signal is sent as `sfx-play` (`KaradaStateServer.broadcast_sfx`): no lip-sync, no TALK, no bubble. It plays only after a VAD speech of at least 0.6 s, never while the SyntH speaks (`CallProvider.is_agent_speaking`), at most every 3 s; the browser ignores the mic while it plays and drops "speech" shorter than 0.6 s instead of sending it, and an empty transcription in a call is ignored quietly. A call with the pop-out (webcam) open is a video call: Synth keeps looking into the camera (`window.__synthSetCameraGazeLock`).
+
+**Not verified here.** Not run in a browser, so the gaze lock, the muted-mic window and the thresholds (0.6 s, 3 s, 0.7 s) are untested against real audio; the Stage frontend (`frontend/`) does not handle `sfx-play` yet, so it will not play the signal.
+
+### fix(call,webui,auris): a "tu-din" signal instead of a spoken "Hmm", Vosk gets the right language, a webcam icon for the pop-out and a chat that is never tiny on load  <!-- 2026-11-13 -->
+
+**Before.** The call's "message received" sound was a spoken "Hmm" made by the TTS engine: it sounded wrong and was silent whenever Vox was off or slow. After vosk installed itself, every transcription still came back empty: the language is detected acoustically with Whisper (`faster-whisper`), that package was not installed either, so the language always fell back to `en-us` and Italian speech went to the English model. The pop-out button was a picture-frame emoji. The chat could still come back tiny on reload: a size saved by an earlier build (or taken from the content-fit) was restored as the user's choice.
+
+**Now.** The signal is a synthesised two-note "tu-din" (`core/call_ack_cache.py`, `render_chime`), ready at once, no TTS involved; the `language` argument added to `VoxPlugin.speak` for the "Hmm" is removed again. `faster-whisper` is installed on first use like vosk (`ensure_package("faster_whisper")` in `_get_whisper_lid_model`), so the spoken language is detected and the matching Vosk model is downloaded. The pop-out button is a webcam icon (inline SVG). On load the chat is raised to at least 45% of the viewport height (320 px minimum, never above the 65% cap), keeping its bottom edge, 0.4 s and 1.5 s after it opens.
+
+**Not verified here.** None of it ran in a browser or in the container: the first real `faster-whisper` install plus the Whisper-tiny and Vosk Italian model downloads happen on the next transcription once the container runs this code, and the sound was checked as numbers (length, level, no click), not by ear. A chat deliberately made smaller than the comfortable height is raised again on every load.
+
+### fix(auris,vox): engines install their package on first use again, and Vox is on by default  <!-- 2026-11-13 -->
+
+**Before.** Since the one-click install work (`249bddb1`, 2026-09-24) `vosk` and `kittentts` are extras, not base dependencies, but nothing installed them when an engine was used. Auris starts on `vosk`, so in the Docker image every transcription failed with "'vosk' package is not installed. Run: uv add vosk" and the WebUI said only "Transcription returned no text". Vox started `disabled` (a merge on 2026-07-10 changed the `kitten` default and its test), against the documentation, `webui.py`'s own fallbacks and the "downloaded on first use" design, so a fresh instance could neither hear nor speak, and a call had no "Hmm".
+
+**Now.** `core/package_installer.py` installs an engine's package on first use: only allowlisted requirements (`vosk`, `faster-whisper`), into `<data root>/pylibs` (`/config/pylibs` in the container, so it survives container recreation), appended to `sys.path` so the application environment is never shadowed, never through `uv add` (so `pyproject.toml` and `uv.lock` stay as they are). The Vosk engine calls it before importing; a failed install is not retried for 10 minutes; `AUTO_INSTALL_ENGINE_PACKAGES` turns it off. `ACTIVE_VOX_ENGINE` defaults to `kitten` again (`test_vox_defaults.py`, `test_vox_plugin.py` follow). `scripts/modules_registry.py` no longer says `vosk` is a core dependency.
+
+**Not verified here.** The install itself was not run: the command (`uv pip install --python /app/venv/bin/python --target /config/pylibs vosk>=0.3.45`) was dry-run inside the live container and resolves; the first real install, and the first Vosk model download after it, happen on the next transcription once the container runs this code. A fresh `kitten` Vox needs network (gTTS stub) or the `kittentts` extra; `test_vox_builtin_engines::test_builtin_vox_engines_registered` was already failing (the `http` engine has been imported unconditionally since 2026-07-09).
+
+### feat(webui): in a call the pop-out is the SyntH's webcam (close-up, landscape), the Call button moves to the chat header and the mic button goes away  <!-- 2026-11-13 -->
+
+**Before.** The Call button sat in the composer next to the mic, the pop-out was always a portrait full-body window, and "Transcription returned no text" did not say which Auris engine had been asked.
+
+**Now.** The 📞 Call button is at the top right of the chat, after *Open Archives*, and reads *End call* during a call. While a call is active the mic button is hidden (➤ still appears for typed text). The pop-out follows the call: close-up in a 640x360 landscape window during a call, full body in 360x640 otherwise, and it switches live when the call starts or ends (`window.__vrmFramingMode`, `fitCloseupFraming` in `vrm-viewer.mjs`; `resizeTo()` is tried and retried on the next click if Chrome refuses it without a gesture). `/api/call/status` and `/api/call/utterance_end` report why no "Hmm" played (`last_ack`), the `[call]` log says so, and the STT 422 now names the Auris engine and is logged with the clip size.
+
+**Not verified here.** Not run in a browser: whether Chrome lets `resizeTo()` resize a Document PiP window without a user gesture is unconfirmed, and the close-up distance and target (`CLOSEUP_DISTANCE`, `CLOSEUP_TARGET_Y`) were set from the model's height, not checked against the picture.
+
+### fix(webui): the chat window keeps the size you give it and opens taller by default  <!-- 2026-11-13 -->
+
+**Before.** Dragging a window's edge to resize it only updated its in-memory rectangle; the size reached `localStorage` only when the window was maximized, minimized, restored or dragged by its header. After a reload the chat came back at its content-fit height, which with a short history is a thin strip, so it had to be enlarged on every load.
+
+**Now.** A resize done with the window's handles is saved when the drag ends (`SynthWindowManager.create` in `res/synth_webui/js/main.js`); the chat's own auto-fit resizes are not saved as the user's choice. A chat nobody has resized yet opens at least 45% of the viewport high (320 px minimum, never above the existing 65% cap).
+
+**Not verified here.** Not run in a browser. A chat size already saved before this fix (from a maximize, minimize or drag) is kept as the user's choice, so a small one stays small until it is resized once or the saved `synth-webui-chat-rect-chat` entry is removed.
+
+### feat(core,webui): a central audio/video call service, a "Call" priority tier and a pre-recorded "Hmm" when the caller stops speaking  <!-- 2026-11-13 -->
+
+**Before.** There was no notion of a call. The WebUI took voice one clip at a time, Discord's Live voice was its own path, Telegram had nothing, and after the user stopped speaking nothing told them the message had been taken while the (slow) turn was prepared.
+
+**Now.** `core/call_manager.py` models a call once: an interface registers a `CallProvider` (`audio` / `video` / `screen_share` capabilities) and `request_call()` starts a `CallSession`; a video call on an audio-only provider degrades to audio. The WebUI is the first provider (`core/webui_call.py`: `/api/call/start|end|utterance_end|status`, `WS /api/call/screen`; a 📞 and a 🖥️ button in the chat window). Turns in a call are flagged `_call` and ranked at the new `PRIORITY_CALL` (9), between a rift/vessel reflection and every chat band (`REFLECTION` 10, `URGENT` 11, `EMERGENCY` 12; the others are unchanged). When the caller stops speaking (server VAD `speech_end`) the SyntH plays a short "Hmm..." in its own voice: `core/call_ack_cache.py` makes it in the background when the call is requested, once per language in `VOX_LANGUAGE_OVERRIDES` plus the default voice, through `VoxPlugin.speak(generate_only=True, language=...)` (new optional `language` argument), and keeps it under `<VOX_OUTPUT_DIR>/call_ack/`. Screen share reuses the RetroXR attachment shape: only the latest JPEG frame is kept (throttled, de-duplicated, downscaled) and rides on the next call turn. New settings: `CALL_ENABLED`, `CALL_ACK_ENABLED`, `CALL_SCREEN_FRAME_MIN_INTERVAL_SEC`, `CALL_SCREEN_MAX_EDGE_PX`. See `docs/call_service.rst`.
+
+**Not built yet.** Telegram and Discord providers (no call library is a dependency), the pop-out webcam (capturing the Karada render), and a screen-frame hand-over in the Telegram/Discord attachment extractors. Checked by tests (`tests/test_call_manager.py`, `test_call_ack_cache.py`, `test_webui_call.py`, `test_vessel_realtime.py`); the browser side (`call-client.mjs`, the buttons) was syntax-checked only, not run in a browser.
+
+### fix(ci): a push to develop keeps its versioned pre-release next to the single rolling `latest-develop`  <!-- 2026-11-13 -->
+
+**Before.** Every push to `develop` deleted the only pre-release (`latest-develop`) and made it again, so no earlier develop build stayed downloadable.
+
+**Now.** A push to `develop` publishes two pre-releases: `v<version>` (e.g. `v1.31.0-develop`), which is kept, and `latest-develop`, still the one rolling pre-release that is deleted and made again. Only `latest-develop` is ever deleted; `main` is unchanged. Neither tag is a plain `vX.Y.Z`, so neither counts as a release for `scripts/version.py`. `tests/test_release_workflow.py` and the docs (`contributing.rst`, `windows.rst`) follow.
+
+### feat(retroxr,vessel): she can set things down on a surface, hold them out to the player and decide what to do when they are not taken; `combine`; a follow that tells her when it fails  <!-- 2026-11-06 -->
+
+**Before.** She said she wanted to put the Game Boy down and did not. `put_down` ignored its `target` (it let go under her hands), `hand_over` waited 8 s and then put the thing down by itself, so a refusal was never hers to decide, and the pose was the same two hands together as for carrying. Nothing put one thing into another in the Vessel's core set (`operate`, which can, existed in the mod but was never offered to her). `follow` promised a `target` and a failure it never reported, `stop` did not stop it, and nothing said when it gave up.
+
+**Now.** `put_down {target?}` sets the thing on the flat top of what she names, and says where it ended up. `hand_over` / `bring` take `seconds` (her choice, 3 to 60, 30 by default) and `say` (spoken through the usual `say` path while she acts); a thing not taken stays in her hands and she is told so. The skin has a `give` clip (`skins/Rei/animations/give/`, made by `tools/make_give_clip.py` by writing new curves into a Mixamo FBX: a Blender export has other bone frames and paths and does nothing on the shared skeleton), shown as a layer while she holds something out. `combine {target, item?, how?}` is a new **opt-in** core verb of the Vessel (`VesselPlugin._OPT_IN_CORE_VERBS`): only a world that lists it in `core_verbs` is offered it; RetroXR maps it to the cartridge/tape slot and `operate` is offered too. Connectors can describe core verbs in their own words (`core_verb_descriptions`). Following: `stop` ends it, it waits for a routine, `extra.following` and `flags.following` say it, and `follow_lost` (`too_far`, `blocked`) tells her once. `AnimationState.GIVE` added.
+
+**Not verified here.** The mod's scene probes (they need RetroXR's native libraries, which do not load on this machine) and the retarget of `give` onto the VRM; the clip was checked on the shared Mixamo skeleton in Godot (hands 0.39 m ahead of the hips, 0.21 m up, 0.24 m apart). The mod half is in `xenu.synth_rift` (`~/gits/retroxr-mod-synth`).
+
+### fix(retroxr): her hands line says what she holds, or that she holds nothing, and that she just let go  <!-- 2026-11-06 -->
+
+**Before.** The idle prompt ended the surroundings with "Your hands are empty." On 2026-11-06 she kept saying she still held the Game Boy "da ieri": yesterday's chat (the player had to tell her "ce l'hai in mano", her body state was not reported then) still said so, the mod had restarted empty-handed, and the one terse line lost against it.
+
+**Now.** `describe_hands` (`plugins/rift_vessel/retroxr/retroxr.py`) writes "You are holding X.", or "Your hands are empty: you are not holding anything.", or for 60 s after a hold ended "Your hands are empty: you just let go of X." (`_LET_GO_SEC`; then it is gone: the history keeps the record, the prompt does not). The release is read from the 1 s `state.holding` diff, and a new socket counts as letting go. Nothing is tracked for what she wears: the mod reports only `holding`.
+
+### feat(stats,webui): a stat server that plugins register with, per-engine metrics and the average turn; Logs > Stats  <!-- 2026-11-06 -->
+
+**Before.** The Logs > Stats tab was written for the RetroXR idle beat: its sections and sentences lived in `main.js`, its pacing inputs sat on the page, and nothing said how long an engine took. A plugin that is off or not installed still had its place on the page.
+
+**Now.** `core/stats_registry.py` is a stat server: a plugin calls `register_section(source, title, build)` when it starts and `unregister_section` when it stops, and the page draws whatever blocks it gets (cards, timing tables, counters, day tables, notes). A block, a row or a whole section with no data in the chosen period is not sent. The period is 1 h / 24 h / 3 d / 7 d / 14 d / everything kept (`?period=`). The idle beat's tables and sentences are now the Vessel's own section (`core/vessel_stats.py`, registered by `interface/vessel_interface.py`) and the pacing inputs are gone from the page: `VESSEL_IDLE_BEAT_ACTIVE_GAP_SEC` and `VESSEL_TICK_SEC` are in the Vessel's settings. Every engine call is timed where it passes (cortex bridge and native engines, Vox, Auris, Iris) and filed globally and by router, engine, route (cortex scope) and purpose (chat, recon, debrief, agent rounds, vessel diary, soul, web search); an engine nobody called in the period does not appear. The *Turns* section shows the general average turn (every kind and interface, agent turns included, which the queue never timed). Chat turns now put the engine and model in the failure context, so `llm_failure_log.engine` is no longer NULL for them. See `docs/statistics.rst`.
+
+### feat(rift-vessel,webui): the idle beat is timed from when she and her body are done, from measured turns; Logs > Stats  <!-- 2026-11-05 -->
+
+**Before.** RetroXR's idle beat counted its interval from the START of the previous beat and then added a fixed 12 s engine rest, so with a turn longer than the interval the real cadence was "turn + 12 s + a 3 s tick", whatever she was doing. The server did not know when a clip or a voice had ended (`emote`/`say` answer at once), so a beat could land on an action still playing or come long after it. `consumer_idle_seconds(ignore_queued=True)` ignored the queue, and nothing measured any of it.
+
+**Now.** `idle_anchor` counts from the latest of the beat's start, her arrival, the end of the turn and the moment her body was last done (the mod's `state.extra.body.settled`, sent at once when it changes). A beat waits for her body unless it will be done before the model can answer (`lead`), and not while a turn of this world already waits in the queue. After an action the wait is `auto` (`VESSEL_IDLE_BEAT_ACTIVE_GAP_SEC`): from the measured turn length so the engine is busy ~70% of the time (40 s turn: ~17 s), 10 s until 5 turns are measured, or a fixed number. `VESSEL_TICK_SEC` (`auto`) makes the scheduler sleep until the next beat is due instead of a fixed tick. The engine rest default is 3 s (was 12 s).
+
+**Stats.** New `core/stats_registry.py` (counters per day, rolling timings, gauges; persisted in `stats.json`) fed by the queue consumer (`turns.ok/failed`, `turn.seconds`, `turn.wait_seconds`), `run_action`, the LLM failure log, the delivery guard, the RetroXR connector (`vessel.verb.*`, `body.busy_seconds`) and the beat (`beat.*`), served by `GET /api/stats` and shown in Logs > Stats, where the pacing can also be set. `/api/about` `messages_today` is now filled. Tests: `test_stats_registry.py`, `test_stats_instrumentation.py`, `test_vessel_beat.py` and `test_retroxr_body.py` extended. The mod half (`extra.body`) is in `xenu.synth_rift`.
+
+### feat(ci): a release cycle — every push publishes a release whose version and notes come from the commits  <!-- 2026-11-05 -->
+
+**Before.** GitVersion guessed the next version, the Windows installer was built on every push but only published when someone tagged `vX.Y.Z` (or ticked `publish_release`), and the release body was GitHub's generated one. The version a release was named after could disagree with the one the images carried.
+
+**Now.** `scripts/version.py` computes the version from the conventional commits since the newest plain `vX.Y.Z` tag (`feat` → minor, breaking → major, anything else → patch; `main` is plain, other branches carry their name). `build-release.yml` reads that one value for the image tags, the Docker `GITVERSION_TAG` build-arg, the installer name and the release tag. A push to `main` publishes the valid release `v<version>` (latest) with the installer and `SHA256SUMS`; a push to `develop` deletes and recreates one rolling pre-release, tag `latest-develop`, so it always holds the newest installer and never counts as a release; `feat/**` and `fix/**` publish no release. `scripts/release_notes.py` writes the body of both: *Changes* (`feat`, breaking) and *Fixes* (`fix`, `perf`, `minor`, `patch`, non-conventional), each line linked to its commit, under `.github/release-header.md`. The release job waits for the image manifest but accepts it being skipped (a fork has no Docker Hub secret). The `v*` tag trigger and the `publish_release` input are gone: the release makes the tag. Image tags: `main` → `<version>` + `latest`, `develop` → `<version>` + `latest-develop`, other branches → `<version>`.
+
+**Choices.** The existing `v1.0.0` tag is the starting point, so versions continue from 1.0.0 instead of restarting at 0.x from the whole history. A tag sitting on the commit itself is not a starting point, so re-running a push reproduces its own version and notes. `GitVersion.yml` and `build_installer.ps1`'s GitVersion fallback are kept for hand-built installers.
+
+**Validation.** `tests/test_release_cycle.py` runs both scripts as processes against throwaway repositories; `tests/test_release_workflow.py` runs the image-tag and installer-vetting steps extracted from the workflow and asserts the release job's shape. Not verified here: a real run on GitHub (Windows runner, Docker Hub, `softprops/action-gh-release`).
+
+### feat(docker): `docker-compose-dev.yml` override builds Synth and Zen from local sources  <!-- 2026-11-05 -->
+
+`docker compose -f docker-compose.yml -f docker-compose-dev.yml up -d --build` now builds `synth` from this checkout (`.`) and `synth-zen-llm-engine` from the sibling `../zen-llm-engine`, instead of pulling the published images. The override only sets `image` (local `synthetic_heart:dev` / `zen-llm-engine:dev` tags, so the published `xargonwan/*` images are never overwritten) and `build`; everything else is inherited from `docker-compose.yml`. Documented in `docs/installation.rst` and `README.md`; the development command in `AGENTS.md` §11 previously passed the dev file alone, which cannot work for an override. Checked with `docker compose config` on the host: the merged build contexts resolve to this checkout and the sibling `zen-llm-engine`; no image build was run.
+
+### feat(engines): ordered fallback engines for Auris, Iris and Cortex too  <!-- 2026-11-05 -->
+
+The Vox fallback list now exists on every route: `AURIS_FALLBACK_ENGINES` (`AurisPlugin.transcribe_audio`), `IRIS_FALLBACK_ENGINES` (`IrisPlugin.describe_media`; the active engine's model pin is not forwarded) and `CORTEX_FALLBACK_ENGINES` (tried by `core.cortex_fallback` after the legacy single `CORTEX_FALLBACK_ENGINE`, each under `CORTEX_FALLBACK_TIMEOUT_SEC`). The Engines tab shows one *Fallback* row list per route (shared widget in `main.js`), and the Vue voice settings gained it for Vox and Auris. When every Auris/Iris engine fails the callers keep using their existing placeholder text. Live engines have no fallback list yet; the Vue frontend change is untested (no `node_modules` in this checkout).
+
+### feat(vox): ordered fallback engines; when every engine fails the reply goes out as text and the Synth knows  <!-- 2026-11-05 -->
+
+`ACTIVE_VOX_ENGINE` was a single point of failure for voice: if the engine could not load or returned no audio, the turn ended with a bare text fallback and the Synth kept offering `send_as_voice`. A new `VOX_FALLBACK_ENGINES` list (Engines → Vox → Fallback, `＋` to add, arrows to reorder) is walked in order by `VoxPlugin.speak()` after the active engine (or language override) fails; fallbacks use their own model/voice. If all fail, text is delivered (`VOX_FALLBACK_TO_TEXT`) and voice is flagged unavailable for 3 minutes: `send_as_voice` is withheld and the Telegram/Discord/WebUI prompt says voice is unavailable (`core.optional_plugins.voice_unavailable_note`), mirroring how vision reports itself. Audio-only callers (radio, `generate_only`) still get an error result. Only Vox has a fallback list so far (Cortex keeps `CORTEX_FALLBACK_ENGINE`); the Vue frontend does not edit the list yet.
+
 ### fix(growth,vox,webui,media): self-growth proposals catch up after restarts, catalog samples use their own voice, interface edits restart the interface, generated audio persists  <!-- 2026-11-03 -->
 
 **Self-growth proposals stopped arriving.** The weekly scheduler only existed in memory: on every start it slept until the next `GROWTH_WEEKLY_DAY` / `GROWTH_WEEKLY_TIME` (the 2026-11-02 log shows three restarts in one day, each "Sleeping ~5 days"). A restart or outage across the slot skipped the whole week, a failed cycle (no usable LLM rewrite, delivery failure) was only logged, and a start with `GROWTH_MODE=off` never started the scheduler even if the mode was switched on later. The scheduler now ticks every minute, persists the last completed run (`GROWTH_LAST_RUN`, seeded from the newest `growth_states` row), catches up a missed slot, retries a failed cycle hourly (max 4 per slot) and re-reads the mode at run time. `GROWTH_WEEKLY_TIME` is UTC (the description said local time).

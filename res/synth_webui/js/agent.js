@@ -68,20 +68,121 @@ function _bubble(role, text){
   return `<div class="agent-msg ${role}">${_escapeHtml(text)}</div>`;
 }
 
+// The call as the shell command line that would have produced it:
+// `tool --key value`. This is what the agent actually ran, so it is always
+// shown, never hidden behind the result.
+function _formatToolCommand(name, args){
+  const parts = [String(name || 'tool')];
+  if(args && typeof args === 'object' && !Array.isArray(args)){
+    for(const [key, value] of Object.entries(args)){
+      if(value == null) continue;
+      const text = typeof value === 'object' ? JSON.stringify(value) : String(value);
+      const quoted = /^[A-Za-z0-9_@%+=:,./-]+$/.test(text)
+        ? text
+        : `'${text.replace(/'/g, `'\\''`)}'`;
+      parts.push(`--${key}`, quoted);
+    }
+  }
+  return parts.join(' ');
+}
+
+// Short results stay open so the stream reads as a session; long ones fold.
+const _AGENT_TOOL_OPEN_MAX_CHARS = 400;
+const _AGENT_TOOL_OPEN_MAX_LINES = 8;
+
+// ── Sub-agents ────────────────────────────────────────────────────────────
+// When an agent hands part of the work to a sub-agent (the spawn_drone tool),
+// say so in the conversation: a card with the goal, its steps and its answer,
+// instead of a bare tool row. The steps come from the sub-agent's own task and
+// are cached so the 5s poll does not make the card flicker.
+const _subTaskCache = {};
+
+function _parseDroneResult(result){
+  if(typeof result === 'string'){
+    try{ return JSON.parse(result) || {}; }catch(e){ return { final_text: result }; }
+  }
+  return result && typeof result === 'object' ? result : {};
+}
+
+function _subTaskBodyHtml(task){
+  const meta = Array.isArray(task.iterations_meta) ? task.iterations_meta : [];
+  const output = task.output && typeof task.output === 'object' ? task.output : {};
+  const parts = meta.map(renderTimelineEntry).filter(Boolean);
+  if(output.final_text){
+    parts.push(`<div class="agent-msg assistant"><strong>Sub-agent answer</strong>\n${_escapeHtml(output.final_text)}</div>`);
+  }
+  if(!parts.length){
+    parts.push(`<div class="agent-tool-none">${task.status === 'running' ? 'working…' : 'no steps recorded'}</div>`);
+  }
+  return parts.join('');
+}
+
+function _subAgentCard(item){
+  const goal = item.arguments && item.arguments.goal ? String(item.arguments.goal) : '';
+  const res = _parseDroneResult(item.result);
+  const id = res.task_id != null ? res.task_id : null;
+  const ok = !!item.ok && !item.error && res.ok !== false;
+  const badge = ok
+    ? '<span class="agent-tool-badge ok">done</span>'
+    : '<span class="agent-tool-badge err">error</span>';
+  const label = id != null ? `Sub-agent #${_escapeHtml(String(id))}` : 'Sub-agent';
+  const cached = id != null ? _subTaskCache[id] : null;
+  let body = cached ? cached.html : '';
+  if(!body){
+    body = res.final_text
+      ? `<div class="agent-msg assistant"><strong>Sub-agent answer</strong>\n${_escapeHtml(res.final_text)}</div>`
+      : '<div class="agent-tool-none">…</div>';
+  }
+  const err = item.error ? `<div class="agent-tool-err">${_escapeHtml(item.error)}</div>` : '';
+  const dataAttr = id != null ? ` data-subtask="${_escapeHtml(String(id))}"` : '';
+  return `<details class="agent-tool agent-subagent"${dataAttr} open>
+    <summary><span class="agent-tool-cmd-line" title="${_escapeHtml(goal)}">↳ ${label}: ${_escapeHtml(goal)}</span>${badge}</summary>
+    <div class="agent-subagent-body">${body}</div>${err}
+  </details>`;
+}
+
+// Fill each sub-agent card from its own task. Finished sub-agents are fetched
+// once; running ones are refreshed on every poll.
+async function _hydrateSubTasks(){
+  const cards = document.querySelectorAll('#agent-conversation [data-subtask]');
+  for(const card of cards){
+    const id = card.getAttribute('data-subtask');
+    const cached = _subTaskCache[id];
+    if(cached && cached.status !== 'running') continue;
+    try{
+      const resp = await fetch(_apiBase + `/api/agent/tasks/${encodeURIComponent(id)}`);
+      if(!resp.ok) continue;
+      const task = await resp.json();
+      const html = _subTaskBodyHtml(task);
+      _subTaskCache[id] = { html, status: task.status };
+      const body = card.querySelector('.agent-subagent-body');
+      if(body && body.__lastHtml !== html && !_userIsSelectingIn(body)){
+        body.__lastHtml = html;
+        body.innerHTML = html;
+      }
+    }catch(e){ console.error(e); }
+  }
+}
+
 function _toolRow(item){
-  const tool = _escapeHtml(item.tool || 'tool');
+  if(item && item.tool === 'spawn_drone') return _subAgentCard(item);
   const ok = !!item.ok && !item.error;
   const badge = ok
     ? '<span class="agent-tool-badge ok">ok</span>'
     : '<span class="agent-tool-badge err">error</span>';
+  const command = _formatToolCommand(item.tool, item.arguments);
   const resultText = item.result != null
     ? (typeof item.result === 'object' ? JSON.stringify(item.result, null, 2) : String(item.result))
     : '';
-  const bodyPre = resultText ? `<pre>${_escapeHtml(resultText)}</pre>` : '';
+  const short = resultText.length <= _AGENT_TOOL_OPEN_MAX_CHARS
+    && resultText.split('\n').length <= _AGENT_TOOL_OPEN_MAX_LINES;
+  const hasBody = !!(resultText || item.error);
+  const outputPre = resultText ? `<pre class="agent-tool-out">${_escapeHtml(resultText)}</pre>` : '';
   const errBody = item.error ? `<div class="agent-tool-err">${_escapeHtml(item.error)}</div>` : '';
-  return `<details class="agent-tool">
-    <summary><span class="agent-tool-name">${tool}</span>${badge}</summary>
-    ${bodyPre}${errBody}
+  const noOutput = hasBody ? '' : '<div class="agent-tool-none">(no output)</div>';
+  return `<details class="agent-tool"${short ? ' open' : ''}>
+    <summary><span class="agent-tool-cmd-line" title="${_escapeHtml(command)}">$ ${_escapeHtml(command)}</span>${badge}</summary>
+    ${outputPre}${errBody}${noOutput}
   </details>`;
 }
 
@@ -235,7 +336,12 @@ async function fetchAgentTasks(){
       const isSelected = idStr === _selectedAgentTaskId;
       const border = isSelected ? '2px solid var(--primary, #4f8cff)' : '1px solid var(--border)';
       const bg = isSelected ? 'var(--panel, rgba(79,140,255,0.08))' : 'var(--surface, transparent)';
-      const subtitle = t.created_at ? new Date(t.created_at).toLocaleString() : '';
+      const when = t.created_at ? new Date(t.created_at).toLocaleString() : '';
+      // Where the task came from, so two tasks from one message are not a mystery.
+      const origin = t.parent_task_id != null
+        ? `↳ sub-agent of #${t.parent_task_id}`
+        : (t.source === 'web_search' ? 'from a web search' : (t.source || ''));
+      const subtitle = origin ? `${origin} · ${when}` : when;
       const label = t.name ? _escapeHtml(t.name) : `<small>Task</small>`;
       const nameAttr = t.name ? _escapeHtml(t.name) : '';
       return `<div style="position:relative;margin-bottom:4px;">
@@ -389,6 +495,7 @@ async function loadAgentTask(id){
     // the user was trying to select or copy.
     const changed = _renderIfChanged(conv, parts.join(''));
 
+    _hydrateSubTasks();
     if(changed && wasNearBottom) _scrollConversationToBottom(true);
   }catch(e){ console.error(e); }
 }

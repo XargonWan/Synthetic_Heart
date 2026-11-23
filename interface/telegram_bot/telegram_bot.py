@@ -69,6 +69,7 @@ import core.plugin_instance as plugin_instance
 from core.core_initializer import register_interface
 from core.interfaces_registry import get_interface_registry
 from core.config_manager import config_registry
+from core.synth_avatar import register_interface_switch as _register_avatar_switch
 from core.variables_engine import register_exposed_var
 
 
@@ -1107,6 +1108,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         log_debug(f"[telegram_bot] resolve_and_touch failed (non-fatal): {e}")
 
+    from core.interface_aliases import remember_message_alias
+
+    await remember_message_alias("telegram_bot", message)
+
     try:
         from core.peer_policy import notify_message_arrived
 
@@ -1867,6 +1872,80 @@ async def _cleanup_failed_startup_app(app: object | None) -> None:
             )
 
 
+def _usable_application_builder() -> str | None:
+    """Make sure the module-level PTB names are the real, usable ones.
+
+    A stubbed or half-imported ``telegram.ext`` can leave ``ApplicationBuilder``
+    as an object that answers ``hasattr(..., "token")`` yet whose instances do
+    not, which is why the first chained call inside ``_build_application`` used
+    to fail with ``AttributeError("'ApplicationBuilder' object has no attribute
+    'token'")`` and nothing else.
+
+    Probe by instantiating. Outside pytest, when the probe fails, drop the cached
+    telegram modules, take the real package and rebind the names this module
+    imported so handlers and Bot/Update come from the real library too.
+
+    Returns a human readable note when something was replaced, else ``None``.
+    """
+    global ApplicationBuilder, Bot, Update, MessageHandler, ContextTypes, filters
+
+    if "pytest" in sys.modules:
+        return None
+
+    def _works(candidate: object) -> bool:
+        try:
+            return hasattr(candidate(), "token")
+        except Exception:
+            return False
+
+    if _works(ApplicationBuilder):
+        log_info(
+            "[telegram_bot] builder: "
+            f"{getattr(ApplicationBuilder, '__module__', None)}."
+            f"{getattr(ApplicationBuilder, '__qualname__', None)} from "
+            f"{getattr(sys.modules.get('telegram.ext'), '__file__', None)!r}"
+        )
+        return None
+
+    ext = sys.modules.get("telegram.ext")
+    detail = (
+        f"{ApplicationBuilder!r} (type {type(ApplicationBuilder).__name__}, "
+        f"module {getattr(ApplicationBuilder, '__module__', None)!r}), with "
+        f"telegram.ext from {getattr(ext, '__file__', None)!r}"
+    )
+
+    for name in ("telegram.ext", "telegram.error", "telegram"):
+        sys.modules.pop(name, None)
+
+    try:
+        import telegram as _telegram
+        import telegram.ext as _telegram_ext
+    except Exception as exc:  # pragma: no cover - dependency missing entirely
+        return f"python-telegram-bot cannot be imported: {exc!r}; was {detail}"
+
+    ApplicationBuilder = _telegram_ext.ApplicationBuilder
+    MessageHandler = _telegram_ext.MessageHandler
+    ContextTypes = _telegram_ext.ContextTypes
+    filters = _telegram_ext.filters
+    Bot = _telegram.Bot
+    Update = _telegram.Update
+
+    if not _works(ApplicationBuilder):
+        return (
+            "python-telegram-bot's ApplicationBuilder is still unusable after a "
+            f"fresh import; was {detail}"
+        )
+    return f"replaced an unusable ApplicationBuilder: {detail}"
+
+
+def _builder_instance_repr() -> str:
+    """``repr`` of one ApplicationBuilder instance, or the error creating it."""
+    try:
+        return repr(ApplicationBuilder())
+    except Exception as exc:
+        return f"<cannot instantiate: {exc!r}>"
+
+
 async def start_bot() -> bool:
     """Start the Telegram bot application.
 
@@ -1935,6 +2014,10 @@ async def start_bot() -> bool:
             )
 
         bot_token_str = str(BOTFATHER_TOKEN) if BOTFATHER_TOKEN else None
+
+        _builder_note = _usable_application_builder()
+        if _builder_note:
+            log_warning(f"[telegram_bot] {_builder_note}")
 
         app = (
             ApplicationBuilder()
@@ -2117,6 +2200,16 @@ async def start_bot() -> bool:
     except Exception as e:
         failure = last_error or e
         _bot_started = False
+        if "ApplicationBuilder" in repr(failure):
+            log_error(
+                "[telegram_bot] ApplicationBuilder diagnostic: "
+                f"global={ApplicationBuilder!r} "
+                f"module={getattr(ApplicationBuilder, '__module__', None)!r} "
+                f"instance={_builder_instance_repr()} "
+                f"telegram_ext={getattr(sys.modules.get('telegram.ext'), '__file__', None)!r} "
+                f"telegram_ext.builder="
+                f"{getattr(sys.modules.get('telegram.ext'), 'ApplicationBuilder', None)!r}"
+            )
         if telegram_interface is not None:
             telegram_interface.bot = None
             telegram_interface.is_enabled = False
@@ -2174,6 +2267,9 @@ async def _record_telegram_delivery_failure(
         await record_failure_entry(entry)
     except Exception as exc:  # pragma: no cover - diagnostics only
         log_debug(f"[telegram_interface] Could not record delivery failure: {exc}")
+
+
+_avatar_switch = _register_avatar_switch("telegram_bot")
 
 
 class TelegramInterface:
@@ -2319,6 +2415,88 @@ class TelegramInterface:
         return "telegram_bot"
 
     @staticmethod
+    def uses_synth_avatar() -> bool:
+        return _avatar_switch()
+
+    _ACTIVITY_ACTIONS = {
+        "typing": "typing",
+        "record_audio": "record_voice",
+        "upload_audio": "upload_voice",
+        "upload_file": "upload_document",
+    }
+
+    async def send_activity(self, interface_path: str, kind: str) -> None:
+        """Show "typing…" / "recording…" / "sending a file…" in a chat."""
+        if self.bot is None:
+            return
+        from core.interface_path_utils import extract_legacy_ids
+
+        ids = extract_legacy_ids(interface_path)
+        chat_id = ids.get("chat_id")
+        if not chat_id:
+            return
+        thread = ids.get("thread_id")
+        await self.bot.send_chat_action(
+            chat_id=int(chat_id),
+            action=self._ACTIVITY_ACTIONS.get(kind, "typing"),
+            message_thread_id=int(thread) if thread and str(thread).isdigit() else None,
+        )
+
+    async def set_avatar(
+        self,
+        image_bytes: Optional[bytes],
+        mime: Optional[str] = None,
+        version: Optional[str] = None,
+        force: bool = False,
+    ) -> bool:
+        """Set (or, for ``None``, remove) the bot's profile photo.
+
+        python-telegram-bot 22.6 predates ``setMyProfilePhoto`` /
+        ``removeMyProfilePhoto`` (Bot API 9.4), so they are called directly. A
+        Bot API server without them answers "not found" and this reports not
+        applied; the bot picture can then still be set through @BotFather.
+        """
+        bot = self.bot
+        if bot is None or not self.uses_synth_avatar():
+            return False
+        import json
+
+        import httpx
+
+        base = f"https://api.telegram.org/bot{bot.token}"
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as http:
+                if image_bytes is None:
+                    reply = await http.post(f"{base}/removeMyProfilePhoto")
+                else:
+                    reply = await http.post(
+                        f"{base}/setMyProfilePhoto",
+                        data={
+                            "photo": json.dumps(
+                                {"type": "static", "photo": "attach://avatar"}
+                            )
+                        },
+                        files={"avatar": ("avatar.png", image_bytes, "image/png")},
+                    )
+            body = reply.json()
+        except Exception as exc:
+            log_warning(f"[telegram_bot] avatar update failed: {type(exc).__name__}")
+            return False
+        if not body.get("ok"):
+            log_warning(
+                "[telegram_bot] avatar not applied by the Bot API: "
+                f"{body.get('error_code')} {body.get('description')}"
+            )
+            return False
+        log_info("[telegram_bot] synth avatar applied to the bot")
+        return True
+
+    @staticmethod
+    def get_interface_path_hint() -> str:
+        """Destination format shown to the model when it asks about channels."""
+        return "telegram_bot/<@username or chat_id>[/<thread_id>]"
+
+    @staticmethod
     def get_supported_actions() -> dict:
         """Return schema information for supported actions."""
         from core.message_registry import get_send_message_schema
@@ -2347,7 +2525,9 @@ class TelegramInterface:
                 "type": "string",
                 "example": "telegram_bot/123456789/456",
                 "description": (
-                    "Destination path 'telegram_bot/chat_id' or "
+                    "Destination path 'telegram_bot/@username' (preferred when the "
+                    "person or public group has one; only people who already wrote "
+                    "to the bot are known), 'telegram_bot/chat_id' or "
                     "'telegram_bot/chat_id/thread_id'. OPTIONAL when replying to an "
                     "incoming message (auto-routes to the origin conversation); "
                     "REQUIRED for spontaneous messages. Use "
@@ -2376,6 +2556,7 @@ class TelegramInterface:
             "Format: 'telegram_bot/chat_id' for regular chats or 'telegram_bot/chat_id/thread_id' for topics/threads",
             "Example: if input shows 'telegram_bot/-1003098886330/789', use EXACTLY that as interface_path in your payload",
             "Never use just chat_id or target - always use the complete interface_path format",
+            "A Telegram Bot API bot cannot message another bot, nor start a chat with someone who never wrote to it: to reach another bot use an interface that writes from a user account.",
         ]
         if vox_on:
             payload["send_as_voice"] = {
@@ -2387,6 +2568,11 @@ class TelegramInterface:
             important_notes.append(
                 "send_as_voice defaults to false. Only reply with voice when the user explicitly requested audio or sent you a voice message; when you do, keep using send_message with your full reply in 'text' and add send_as_voice=true - do NOT emit a separate audio action."
             )
+        else:
+            from core.optional_plugins import voice_unavailable_note
+
+            if voice_note := voice_unavailable_note():
+                important_notes.append(voice_note)
 
         return {
             "description": "Send a message via Telegram bot",
@@ -2861,7 +3047,7 @@ class TelegramInterface:
                 self.bot,
                 chat_id=None,
                 thread_id=None,
-                interface="telegram",
+                interface="telegram_bot",
             )
             return False
 
@@ -3024,7 +3210,7 @@ class TelegramInterface:
                     self.bot,
                     chat_id=chat_id,
                     thread_id=thread_id,
-                    interface="telegram",
+                    interface="telegram_bot",
                 )
                 return False
             else:
@@ -3036,7 +3222,7 @@ class TelegramInterface:
                     self.bot,
                     chat_id=chat_id,
                     thread_id=thread_id,
-                    interface="telegram",
+                    interface="telegram_bot",
                 )
                 return False
         except Exception as e:

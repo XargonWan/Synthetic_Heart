@@ -10,6 +10,7 @@ from core.beat_utils import is_outbound_beat
 from core.db import _get_db_type, get_conn_ctx
 from core.synth_tagging import extract_tags, expand_tags
 from core.logging_utils import log_debug, log_info, log_warning, log_error
+from core.message_registry import SEND_MESSAGE_ACTION
 from core.json_utils import dumps as json_dumps, redact_multimodal_for_logging
 from core.config_manager import config_registry
 from core.user_utils import get_user_display_name, get_user_usertag
@@ -705,7 +706,22 @@ def _derive_default_prompt_action_types(
         if _is_non_user_facing_action(action_def):
             continue
 
-        if current_interface or outbound_target_interfaces:
+        # ``send_message`` is the unified action that delivers through ANY
+        # connected chat interface (the destination rides in ``interface_path``).
+        # On a turn of a real interface that does not declare it itself (the
+        # WebUI answers with ``message_synth_webui``), it would otherwise be
+        # hidden, leaving the model no way to write to another interface such as
+        # the Telegram user account. Beats keep the strict rule: their
+        # synthetic interface is not in the registry and they carry explicit
+        # outbound targets.
+        reaches_any_interface = (
+            action_name == SEND_MESSAGE_ACTION
+            and current_interface in interface_names
+            and not outbound_target_interfaces
+        )
+        if (current_interface or outbound_target_interfaces) and not (
+            reaches_any_interface
+        ):
             action_interfaces = _action_source_tokens(action_def) & interface_names
             accepted_interfaces = set(outbound_target_interfaces or ())
             if current_interface:
@@ -1178,6 +1194,11 @@ def _build_current_turn_anchor(context_section: dict[str, Any]) -> str:
 # route that consumes this table.
 _PLUGIN_CONTEXT_BLOCKS: tuple[tuple[str, str, str | None], ...] = (
     ("scene", "[Setting]", None),
+    # Core-sourced runtime state (``core.action_parser._add_runtime_state_injections``):
+    # the interfaces that are switched on right now, and the last few restarts /
+    # plugin toggles. Both follow a runtime enable/disable with no restart.
+    ("active_interfaces", "[Interfaces]", None),
+    ("system_events", "[Recent system events]", None),
     ("home", "[Home]", None),
     ("home_weather", "[Weather]", "weather"),
     ("home_location", "[House]", "location"),
@@ -1522,8 +1543,19 @@ def _build_context_summary(
                     if isinstance(feelings, list) and feelings
                     else ""
                 )
+                # The sender of THIS turn is always listed, bio or not, and marked:
+                # without it the only profiled person in the block is often the
+                # trainer, who then reads as the current interlocutor.
+                is_sender = p.get("is_sender") is True
+                role_str = ""
+                if p.get("is_bot") is True:
+                    role_str += " (automated account)"
+                if is_sender:
+                    role_str += " <- the person writing to you now"
                 if bio:
-                    lines.append(f"- {tag}{nick_str}: {bio}{feel_str}")
+                    lines.append(f"- {tag}{nick_str}{role_str}: {bio}{feel_str}")
+                elif is_sender:
+                    lines.append(f"- {tag}{role_str}")
             if lines:
                 parts.append("[People in this conversation]")
                 parts.extend(lines)
@@ -1537,6 +1569,7 @@ def _build_context_summary(
 def _history_to_turns(
     history_lines: list[Any],
     synth_names: set[str],
+    chat_kind: str | None = None,
 ) -> list[Any]:  # list[Turn] — import deferred to avoid circular dep at module load
     """Convert formatted history strings produced by HistoryEngine into Turn objects.
 
@@ -1546,6 +1579,13 @@ def _history_to_turns(
     Args:
         history_lines: Lines from ``context_section["history_current_chat"]``.
         synth_names:   Lower-cased set of Synth name + aliases for role detection.
+        chat_kind:     ``"group"`` / ``"dm"`` when known (see
+                       ``core.chat_context.resolve_chat_kind``). In a group, or
+                       whenever the window holds lines from more than one human
+                       sender, each human turn is prefixed ``[Name]: `` so the
+                       model can tell who said what instead of reading every
+                       ``user`` turn as the same person (the trainer). A DM with
+                       a single sender keeps the bare text.
 
     Returns:
         List of ``Turn`` objects; may be empty.
@@ -1574,6 +1614,9 @@ def _history_to_turns(
     # Entries are (Turn, is_peer) pairs. is_peer is only meaningful for
     # role == "user" turns; it is always False for "assistant" turns.
     entries: list[tuple[Turn, bool]] = []
+    # Parallel to ``entries``: the sender of a genuine human turn, None for the
+    # persona's own and for peer turns (those are already attributed).
+    human_senders: list[str | None] = []
     for line in history_lines:
         if not isinstance(line, str):
             continue
@@ -1606,11 +1649,14 @@ def _history_to_turns(
         # 2026-09-24: a decorated line came back role="user").
         sender_lower = re.sub(r"\s*\((?:you|the persona)\)$", "", sender_lower).strip()
         is_peer = False
+        human_sender: str | None = None
         if sender_lower in all_synth_names:
             role = "assistant"
         else:
             role = "user"
             peer_name = peer_names_lower.get(sender_lower)
+            if not peer_name:
+                human_sender = sender
             if peer_name:
                 # Tag so the model can tell this was a peer SyntH speaking,
                 # not the human -- role must still be "user" (no third
@@ -1621,9 +1667,22 @@ def _history_to_turns(
         if trailing_marker:
             content = f"{content} {trailing_marker}"
         entries.append((Turn(role=role, content=content), is_peer))
+        human_senders.append(human_sender)
 
     if not entries:
         return []
+
+    # Attribute human turns when more than one person can be speaking. Done
+    # before the leading-assistant trim below, which drops entries from the
+    # front and would desynchronise ``human_senders``.
+    distinct_humans = {s.casefold() for s in human_senders if s}
+    if distinct_humans and (chat_kind == "group" or len(distinct_humans) > 1):
+        entries = [
+            (Turn(role=turn.role, content=f"[{who}]: {turn.content}"), is_peer)
+            if who
+            else (turn, is_peer)
+            for (turn, is_peer), who in zip(entries, human_senders)
+        ]
 
     # If the visible history window starts mid-conversation, it can begin with
     # stale assistant-only turns (for example repeated outreach messages). When
@@ -2135,6 +2194,13 @@ def _assemble_prompt_request(  # noqa: PLR0913
     )
 
     # ── Conversation history ─────────────────────────────────────────────────
+    # Group or DM, from what the interface reported on the message (never from
+    # one platform's path convention); shared by the history turns, the runtime
+    # prefix and the source payload below.
+    from core.chat_context import resolve_chat_kind
+
+    _chat_kind: str | None = resolve_chat_kind(message, interface_path)
+
     # Grillo internal beats have no ongoing conversation history.
     addressee_note = ""
     if is_grillo_internal:
@@ -2155,7 +2221,9 @@ def _assemble_prompt_request(  # noqa: PLR0913
             synth_name = "SyntH"
 
         history_lines: list[Any] = context_section.get("history_current_chat") or []
-        conversation_history = _history_to_turns(history_lines, synth_names)
+        conversation_history = _history_to_turns(
+            history_lines, synth_names, chat_kind=_chat_kind
+        )
         # Final safety net: never let an empty-content turn reach the provider
         # payload, whatever the source (a stale module binding or a malformed
         # history line could otherwise inject blank user/assistant messages,
@@ -2227,14 +2295,7 @@ def _assemble_prompt_request(  # noqa: PLR0913
     # Effective scope: use context_section's recorded scope or default to "local"
     scope: str = str(context_section.get("history_scope") or "local")
 
-    chat_type: str | None = None
-    if interface_path:
-        try:
-            from core.history_engine import telegram_chat_kind
-
-            chat_type = telegram_chat_kind(interface_path)
-        except Exception:
-            chat_type = None
+    chat_type: str | None = _chat_kind
 
     runtime_ctx = RuntimeContext(
         interface_name=interface_name,
@@ -2353,7 +2414,20 @@ def _assemble_prompt_request(  # noqa: PLR0913
                 from core.vessel_focus import is_vessel_turn
 
                 vessel_focus = is_vessel_turn(message, None, interface_path)
-                if not vessel_focus:
+                # The DSP is the standing profile of the trainer's own human
+                # contact. When the sender is a bot, or a person the interface
+                # registry knows is NOT the trainer, presenting it as "the person
+                # you're talking to" makes the model address them as the trainer
+                # (live: Rekku complaining to "Jay" inside a DM with a game bot).
+                # ``sender_is_trainer`` is None when it cannot tell, which keeps
+                # the previous behaviour.
+                from core.bot_ward import is_bot_sender
+                from core.chat_context import sender_is_trainer
+
+                not_the_trainer = is_bot_sender(message, interface_path) or (
+                    sender_is_trainer(message, interface_name) is False
+                )
+                if not vessel_focus and not not_the_trainer:
                     _soul_dsp_prefix = _build_soul_user_profile_prefix(context_section)
         except Exception:
             _soul_dsp_prefix = ""
@@ -2781,6 +2855,7 @@ async def build_prompt_request(
     try:
         history_paths = context_section.pop("history_interface_paths", None)
         if history_paths:
+            from core.interface_aliases import to_display_path as _legend_path
             from core.interface_paths import build_pretty_name
 
             legend_lines: list[str] = []
@@ -2793,10 +2868,11 @@ async def build_prompt_request(
                         f"[json_prompt] pretty name for {hp} failed: {legend_err}"
                     )
                     display = None
+                shown_hp = await _legend_path(hp)
                 if display:
-                    legend_lines.append(f"{hp} = {display}")
+                    legend_lines.append(f"{shown_hp} = {display}")
                 else:
-                    legend_lines.append(str(hp))
+                    legend_lines.append(str(shown_hp))
             if legend_lines:
                 context_section["channel_legend"] = legend_lines
     except Exception as e:
@@ -2908,21 +2984,20 @@ async def build_prompt_request(
     except Exception as e:
         log_debug(f"[json_prompt] capability-drops injection skipped: {e}")
 
-    # === 3b. Peer SyntH awareness block (Telegram groups only) ===
+    # === 3b. Peer SyntH awareness block (group chats on an interface whose ids
+    # the configured peers are written in; see core.peer_policy.PEER_INTERFACES) ===
     try:
-        _chat_type = getattr(getattr(message, "chat", None), "type", None)
-        _is_tg_group = interface_name == "telegram_bot" and _chat_type in (
-            "group",
-            "supergroup",
-        )
-        if _is_tg_group:
-            from core.peer_policy import get_peer_context_block
+        from core.chat_context import GROUP, resolve_chat_kind
+        from core.peer_policy import get_peer_context_block, interface_has_peers
 
+        if interface_has_peers(interface_name) and (
+            resolve_chat_kind(message, interface_path) == GROUP
+        ):
             peer_block = get_peer_context_block()
             if peer_block:
                 recon_instructions.append(peer_block)
                 log_debug(
-                    "[json_prompt] Peer context block injected for Telegram group"
+                    f"[json_prompt] Peer context block injected for group chat ({interface_name})"
                 )
     except Exception as e:
         log_debug(f"[json_prompt] Peer context block skipped: {e}")
@@ -2985,13 +3060,44 @@ async def build_prompt_request(
         isinstance(context_memory, dict) and context_memory.get("is_voice_input")
     )
 
+    # The model is shown the readable alias form (``telegram/@jay``) when one is
+    # known; ``core.message_chain`` maps it back to the stored id path.
+    from core.interface_aliases import to_display_path
+
+    _shown_path = await to_display_path(interface_path)
+
     _source_dict: dict = {
-        "interface_path": interface_path,
+        "interface_path": _shown_path,
         "message_id": message.message_id,
         "username": get_user_display_name(getattr(message, "from_user", None)),
         "usertag": get_user_usertag(getattr(message, "from_user", None)),
         "interface": interface_name,
     }
+    # The sender is an automated account (a bot): say so, so the reply is short
+    # and the exchange ends instead of going on forever (core/bot_ward.py).
+    try:
+        from core.bot_ward import BOT_NOTE, is_bot_sender
+
+        if is_bot_sender(message, interface_path):
+            _source_dict["is_bot"] = True
+            _source_dict["note"] = BOT_NOTE
+    except Exception as _bot_exc:  # pragma: no cover - defensive
+        log_debug(f"[json_prompt] bot sender check skipped: {_bot_exc}")
+    # Who is writing, said structurally: the trainer is a person who is not always
+    # in the chat, so the model is told per turn whether THIS sender is them (the
+    # system prompt's trainer bio is unconditional). Omitted when no trainer is
+    # configured for the interface, so "unknown" never reads as "not the trainer".
+    try:
+        from core.chat_context import resolve_chat_kind, sender_is_trainer
+
+        _sender_is_trainer = sender_is_trainer(message, interface_name)
+        if _sender_is_trainer is not None:
+            _source_dict["is_trainer"] = _sender_is_trainer
+        _src_chat_kind = resolve_chat_kind(message, interface_path)
+        if _src_chat_kind:
+            _source_dict["chat_type"] = _src_chat_kind
+    except Exception as _who_exc:  # pragma: no cover - defensive
+        log_debug(f"[json_prompt] sender identity fields skipped: {_who_exc}")
     # If the sender is currently in a Discord voice channel, tell the model —
     # this is what allows it to decide to issue join_voice_discord.
     _voice_channel_id = isinstance(context_memory, dict) and context_memory.get(
@@ -2999,6 +3105,23 @@ async def build_prompt_request(
     )
     if _voice_channel_id:
         _source_dict["author_voice_channel_id"] = str(_voice_channel_id)
+    # A live audio/video call: tell the model, so it speaks instead of writing.
+    _call_ctx = isinstance(context_memory, dict) and context_memory.get("call")
+    if isinstance(_call_ctx, dict) and _call_ctx:
+        from core.call_manager import CALL_NOTE
+
+        _in_call: dict[str, Any] = {
+            "kind": _call_ctx.get("kind", "audio"),
+            "seconds": _call_ctx.get("seconds", 0),
+            "note": CALL_NOTE,
+        }
+        if _call_ctx.get("caller_sees_you"):
+            _in_call["video"] = "the caller sees your avatar live on their screen"
+        if _call_ctx.get("screen_share"):
+            _in_call["screen_share"] = (
+                "the caller shares their screen: the image attached is what it shows now"
+            )
+        _source_dict["in_call"] = _in_call
 
     input_payload = {
         "text": text,
@@ -3014,7 +3137,7 @@ async def build_prompt_request(
         # history blends multiple chats, so we state it structurally, not just
         # in prose instructions.
         "current_chat": {
-            "interface_path": interface_path,
+            "interface_path": _shown_path,
             "interface": interface_name,
             "thread_id": getattr(message, "thread_id", None)
             or getattr(message, "message_thread_id", None),
@@ -3026,6 +3149,31 @@ async def build_prompt_request(
             else "local"
         ),
     }
+
+    # Name the chat the way the interface reports it (a group's title, a DM's
+    # counterpart): the name resolver result the message queue stored on the
+    # context, else the title carried on the message itself. Both optional — a
+    # failed lookup must never block the prompt.
+    try:
+        from core.chat_context import resolve_chat_title
+
+        _chat_name = (
+            context_memory.get("chat_name")
+            if isinstance(context_memory, dict)
+            else None
+        ) or resolve_chat_title(message)
+        _thread_name = (
+            context_memory.get("thread_name")
+            if isinstance(context_memory, dict)
+            else None
+        )
+        _current_chat = input_payload["current_chat"]
+        if _chat_name:
+            _current_chat["chat_name"] = str(_chat_name)
+        if _thread_name:
+            _current_chat["thread_name"] = str(_thread_name)
+    except Exception as _name_exc:  # pragma: no cover - defensive
+        log_debug(f"[json_prompt] chat name fields skipped: {_name_exc}")
 
     # Expose chosen history_scope to downstream plugins/engines explicitly.
     if effective_history_scope:

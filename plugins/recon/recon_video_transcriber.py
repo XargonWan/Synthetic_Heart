@@ -186,6 +186,30 @@ class ReconVideoTranscriberPlugin:
                 return []
         return self._urls_from_data(parsed)
 
+    def _urls_from_message_text(
+        self, text: str | None, message: Any = None
+    ) -> list[str]:
+        """Deterministic fallback: structurally validate whitespace-split tokens.
+
+        The recon LLM can miss a link or be skipped entirely, which left the main
+        model looking at a bare URL with no transcript. Each candidate token is
+        validated by :func:`is_youtube_url` (host/path inspection only — no
+        keyword or regex intent matching), so a plain link is always picked up.
+        """
+        source = text
+        if not isinstance(source, str) or not source.strip():
+            source = getattr(message, "text", None)
+        if not isinstance(source, str) or not source.strip():
+            return []
+        urls: list[str] = []
+        for token in source.split():
+            candidate = token.strip("<>()[]{}\"'.,;!?")
+            if candidate and "://" not in candidate:
+                candidate = f"https://{candidate}"
+            if is_youtube_url(candidate):
+                urls.append(candidate)
+        return urls
+
     def _local_video_path(self, message: Any) -> str | None:
         """Resolve a local video file referenced on the incoming message."""
         if message is None:
@@ -357,6 +381,8 @@ class ReconVideoTranscriberPlugin:
         youtube_urls = self._urls_from_data(data)
         if not youtube_urls:
             youtube_urls = self._urls_from_raw_text(_raw_llm_text)
+        # Always merge links found structurally in the message itself.
+        youtube_urls = youtube_urls + self._urls_from_message_text(text, message)
         # De-duplicate while preserving order.
         seen: set[str] = set()
         youtube_urls = [u for u in youtube_urls if not (u in seen or seen.add(u))]
@@ -381,6 +407,15 @@ class ReconVideoTranscriberPlugin:
                 snippet = None
             if snippet:
                 snippets.append(self._truncate(snippet))
+            else:
+                # Tell the model the video could not be read, so it neither
+                # invents its content nor promises a follow-up that never comes.
+                snippets.append(
+                    f"[YouTube: {url}]\nThe video could not be read (no subtitles "
+                    "or audio could be obtained). You have NOT seen it: do not "
+                    "describe it and do not promise to watch it later; tell the "
+                    "user plainly that you could not access it."
+                )
 
         if local_path:
             try:

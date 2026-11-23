@@ -230,7 +230,7 @@ the internal threshold, no hint is supplied and the plugin continues as before.
 3. WAV/PCM file writing to ``VOX_OUTPUT_DIR``
 4. Optional lip-sync data extraction (``engine.get_lipsync_data()``)
 5. Audio dispatch to the originating interface (WebUI ``synth:tts-play``, Discord, Telegram)
-6. Text fallback when the engine fails
+6. Fallback engines, then text fallback when every engine fails
 
 No interface or other plugin should handle TTS audio files or dispatch lip-sync events directly.
 
@@ -269,10 +269,29 @@ Configuration (all WebUI-configurable):
    * - ``VOX_FALLBACK_TO_TEXT``
      - ``true``
      - When ``true``, sends a plain-text message if TTS generation fails.
+   * - ``VOX_FALLBACK_ENGINES``
+     - ``[]``
+     - Ordered JSON list of engine names tried in turn when the active engine
+       (or a language override) cannot be loaded or returns no audio
+       (see *Fallback engines* below).
 
 .. note::
 
    A fresh installation uses ``kitten`` as the default ``ACTIVE_VOX_ENGINE``.
+
+.. note::
+
+   **Engines install themselves on first use.** Local voice engines are not base
+   dependencies (see the ``local-voice`` / ``vosk`` extras in ``pyproject.toml``),
+   so the first time one is used its Python package is installed and its model
+   downloaded, with no manual step. The package installer
+   (``core/package_installer.py``) installs only an allowlisted requirement
+   (``vosk``, ``faster-whisper``), into ``<data root>/pylibs`` (``/config/pylibs``
+   in the container, which persists with the volume) appended to ``sys.path`` so
+   it never shadows the application environment; it never runs ``uv add`` and so
+   never edits ``pyproject.toml`` or ``uv.lock``. A failed install is retried at
+   most every 10 minutes. ``AUTO_INSTALL_ENGINE_PACKAGES`` (default on) turns it
+   off. The ``[package_installer]`` log lines say what was installed or why not.
 
 WebUI helper endpoints
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -329,6 +348,47 @@ ISO-639-1 list, then choose engine → model → voice exactly as for the defaul
 engine.  The selection is persisted to ``VOX_LANGUAGE_OVERRIDES`` via
 ``POST /api/config``.  A read-only ``GET /api/languages`` endpoint serves the
 language catalogue used to populate the combo box.
+
+Fallback engines
+~~~~~~~~~~~~~~~~
+
+A failing engine never fails the turn.  Every media route keeps an ordered
+JSON list of engine names that the backend tries, in order, when the active
+engine is unavailable:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Config key
+     - Behaviour when the active engine fails
+   * - ``VOX_FALLBACK_ENGINES``
+     - ``VoxPlugin.speak()`` tries each engine; a fallback speaks with its own
+       model / voice (the failed engine's per-call pins are not forwarded).
+   * - ``AURIS_FALLBACK_ENGINES``
+     - ``AurisPlugin.transcribe_audio()`` tries each engine until one
+       transcribes (an explicit ``engine_name`` argument is never replaced).
+   * - ``IRIS_FALLBACK_ENGINES``
+     - ``IrisPlugin.describe_media()`` tries each engine until one returns a
+       usable description; the active engine's model pin is not forwarded.
+   * - ``CORTEX_FALLBACK_ENGINES``
+     - ``core.cortex_fallback`` tries ``CORTEX_FALLBACK_ENGINE`` first and then
+       each listed engine, each under ``CORTEX_FALLBACK_TIMEOUT_SEC``, when the
+       primary returns nothing or times out.
+
+The **Engines** tab shows a *Fallback* row list under each route (``＋`` adds a
+row, the arrows reorder, ``✕`` removes); the Vue voice settings offer it for
+Vox and Auris.
+
+If every Vox engine fails, the reply is delivered as text only (when
+``VOX_FALLBACK_TO_TEXT`` is on, the default) and Vox is flagged unavailable
+for three minutes: ``send_as_voice`` is withheld from the action catalog (as
+for a disabled engine) and the Telegram / Discord / WebUI prompt tells the
+Synth that voice is unavailable so it can say so to the user.  The next
+successful synthesis clears the flag.  Callers that need audio only (the radio
+host, ``generate_only=True``) still receive an error result instead of text.
+If every Auris or Iris engine fails the caller falls back to its existing
+placeholder text, so the turn still reaches the Synth.
 
 Public API:
 

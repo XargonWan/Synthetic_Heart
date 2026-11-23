@@ -1,3 +1,4 @@
+from core import stats_registry
 import asyncio
 import json
 import threading
@@ -511,6 +512,7 @@ def get_registered_recon_keys() -> set[str]:
     return keys
 
 
+@stats_registry.with_purpose("recon")
 async def gather_recon_contributions(
     message=None,
     context_memory=None,
@@ -741,10 +743,15 @@ async def gather_recon_contributions(
     keys_set = set(keys)
     needs_language = "language_hint" in keys_set
     needs_tone = "tone_hint" in keys_set
+    # The lingua/hint-cache shortcuts below can only answer the two hint keys.
+    # When any other recon plugin asked for a key (e.g. ``video_media``), the
+    # shared LLM call is the only thing that can fill it, so it must not be
+    # skipped — otherwise those plugins silently receive ``None``.
+    hints_only = keys_set <= {"language_hint", "tone_hint"}
 
     llm_text = None
     parsed: dict[str, Any] | None = None
-    cached_hint = _get_cached_hint(cache_key)
+    cached_hint = _get_cached_hint(cache_key) if hints_only else None
     if cached_hint:
         has_lang = bool(cached_hint.get("language_code"))
         has_tone = bool(
@@ -764,7 +771,13 @@ async def gather_recon_contributions(
             log_debug("[recon] Hint cache hit — skipping Recon LLM call")
 
     # If only language is required and local precheck found a value, skip LLM.
-    if parsed is None and local_language and needs_language and not needs_tone:
+    if (
+        parsed is None
+        and hints_only
+        and local_language
+        and needs_language
+        and not needs_tone
+    ):
         parsed = {"language_hint": {"language_code": local_language}}
         log_debug(
             f"[recon] Local lingua precheck resolved language={local_language}; skipping Recon LLM call"
@@ -925,6 +938,7 @@ async def gather_recon_contributions(
     return dedup
 
 
+@stats_registry.with_purpose("recon")
 async def resolve_language(
     *,
     contributions: List[Dict[str, Any]],
@@ -1008,6 +1022,7 @@ async def resolve_language(
     return str(config_registry.get_value("PROJECT_DEFAULT_LANGUAGE", "en") or "en")
 
 
+@stats_registry.with_purpose("recon")
 async def resolve_tone(
     *,
     contributions: List[Dict[str, Any]],

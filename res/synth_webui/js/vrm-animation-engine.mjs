@@ -12,7 +12,7 @@
  */
 
 import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
-import { AnimationUtils } from '/js/AnimationUtils.js';
+import { AnimationUtils } from '/js/AnimationUtils.js?v=20261105-loop-rebase';
 
 
 // Module-scoped state
@@ -186,13 +186,25 @@ function playSection(section) {
     const baseClip = currentAction.getClip();
     if (!baseClip) return;
 
-    const sectionClip = AnimationUtils.subclip(
-        baseClip,
-        `${baseClip.name}_${section}`,
-        startFrame,
-        endFrame,
-        fps
-    );
+    // Descriptors use inclusive end_frame; the slicing helpers expect an
+    // exclusive end, so add 1. Loops can opt into a baked wrap cross-fade via
+    // `loop.crossfade_frames` so the last pose blends into the first (no jump).
+    const sectionClip = (section === 'loop')
+        ? AnimationUtils.loopSubclip(
+            baseClip,
+            `${baseClip.name}_${section}`,
+            startFrame,
+            endFrame + 1,
+            fps,
+            sectionData.crossfade_frames
+        )
+        : AnimationUtils.subclip(
+            baseClip,
+            `${baseClip.name}_${section}`,
+            startFrame,
+            endFrame + 1,
+            fps
+        );
 
     if (!sectionClip) return;
 

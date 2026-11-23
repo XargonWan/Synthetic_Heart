@@ -170,3 +170,27 @@ export async function fetchAurisModels(): Promise<ModelCatalogEntry[]> {
 export async function downloadAurisModel(modelId: string): Promise<void> {
   await postJson(`/api/models/${encodeURIComponent(modelId)}/download`, {})
 }
+
+// ── Ordered fallback engines (per route) ───────────────────────────────────
+// <ROUTE>_FALLBACK_ENGINES is a JSON list of engine names the backend tries in
+// order when the active engine is unavailable.
+
+export type FallbackRoute = 'VOX' | 'AURIS' | 'IRIS' | 'CORTEX'
+
+export async function getFallbackEngines(route: FallbackRoute): Promise<string[]> {
+  const key = `${route}_FALLBACK_ENGINES`
+  const raw = (await fetchConfigValues([key]))[key]
+  if (!raw)
+    return []
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.map(String) : []
+  }
+  catch {
+    return []
+  }
+}
+
+export async function setFallbackEngines(route: FallbackRoute, engines: string[]): Promise<void> {
+  await postJson('/api/config', { key: `${route}_FALLBACK_ENGINES`, value: JSON.stringify(engines) })
+}

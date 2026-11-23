@@ -8,6 +8,7 @@ to a built-in engine from the perspective of the SyntH core.
 
 from __future__ import annotations
 
+from core import stats_registry
 import asyncio
 import base64
 import contextlib
@@ -493,6 +494,18 @@ class ExternalCortexEngine(AIPluginBase):
     def _retry_on_timeout(self) -> bool:
         extra = self._endpoint.extra_config or {}
         return bool(extra.get("retry_on_timeout", False))
+
+    @property
+    def lean_agent_prompt(self) -> bool:
+        """True when agent turns to this endpoint use the lean prompt.
+
+        ``extra_config.lean_agent_prompt``: web-driven chat UIs balk at a prompt
+        that announces an "agentic mode" and lays down a JSON protocol. With
+        this flag the agent loop sends only the goal plus the earlier tool calls
+        and results as standard ``assistant``/``tool`` messages, and the tools
+        as native OpenAI ``tools``; the endpoint is expected to do the rest.
+        """
+        return (self._endpoint.extra_config or {}).get("lean_agent_prompt") is True
 
     def _retry_on_empty(self) -> bool:
         """True when an empty-content LLM response should be re-requested.
@@ -1311,6 +1324,7 @@ class ExternalCortexEngine(AIPluginBase):
             except Exception:
                 pass
 
+    @stats_registry.tracked_engine("cortex", lambda self: self._endpoint.name)
     async def generate_response(
         self,
         messages: list[dict[str, Any]] | Any,

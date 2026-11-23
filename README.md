@@ -11,6 +11,8 @@
 
 [![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/xargon)
 
+**Developed through Human-Directed Agentic Engineering.** Synthetic Heart is developed through a human-directed process that uses AI agents as active engineering collaborators, with human oversight and direction throughout development.
+
 ## Meet SyntH — your digital friend
 
 Synthetic Heart (SyntH) is a FOSS application and framework that helps you create and meet a persistent AI persona, a "Synth", that can follow you across platforms: Discord, Telegram, WebUI and more. Put simply: it's a digital friend that keeps its own memory, personality and state and can grow and eveolved by themselves.
@@ -180,10 +182,20 @@ With the radio plugin, SyntH becomes a **live AI radio DJ** for your [AzuraCast]
 </div>
 
 ### Rift Vessel
-Embodiment into external game/virtual worlds through pluggable connectors, while identity, memory and personality persist across worlds and chat interfaces. Minecraft ships today (with autonomous play — Synth wanders, sets its own goals and pursues them); Skyrim, VRChat and Hytale might be coming next.
+Embodiment into external game/virtual worlds through pluggable connectors, while identity, memory and personality persist across worlds and chat interfaces. Minecraft and [RetroXR](https://retroxr.app/) (both in VR and Desktop) ships today (with autonomous play. Synth wanders, sets its own goals and pursues them); Skyrim, VRChat and Hytale might be coming next.
 
 <div align="center">
-   <img src="docs/res/screenshots/minecraft.png" alt="SyntH embodied in Minecraft via the Rift Vessel" width="700" />
+   <figure>
+      <img src="docs/res/screenshots/minecraft.png" alt="SyntH embodied in Minecraft via the Rift Vessel" width="700" />
+      <figcaption>SyntH embodied in Minecraft via the Rift Vessel</figcaption>
+   </figure>
+</div>
+
+<div align="center">
+   <figure>
+      <img src="docs/res/screenshots/retroxr.png" alt="SyntH embodied in VR RetroXR via the Rift Vessel" width="700" />
+      <figcaption>SyntH embodied in VR, RetroXR, via the Rift Vessel</figcaption>
+   </figure>
 </div>
 
 For more information, see the [FAQ](https://synthetic-heart.readthedocs.io/en/latest/faq.html).
@@ -232,6 +244,11 @@ Both paths are documented in [docs/installation.rst](docs/installation.rst).
     > **For Developers:** If you want to view logs directly in your project folder, uncomment the bind-mount line in `docker-compose.yml` (`./logs:/app/logs`).
 
 4.  Connect to the WebUI via HTTPS (default port is **8000**): `https://localhost:8000`.
+
+    > **For Developers:** to build the images from your local checkouts (Synth from `.`, Zen from `../zen-llm-engine`) instead of pulling the published ones, add the dev override:
+    > ```bash
+    > docker compose -f docker-compose.yml -f docker-compose-dev.yml up -d --build
+    > ```
 
 #### Database runtime and automatic migration
 
@@ -354,8 +371,8 @@ Both servers are pre-configured for **Claude Code** (`.mcp.json`) and **VS Code 
 Here are the main improvements and integrations we plan to work on — contributions are welcome:
 
 - Multimodal persistence: allow SyntH to take video calls from the WebUI and stream their own video as a webcam, useful for those who wish to stream gameplays or just talk face to face, even on other applications
-- VR Support: meet your SyntH in a VR space
-- More games added: Now the Rift Vessels supports Minecraft, but other game plugins are planned to be added next
+- ~~VR Support: meet your SyntH in a VR space~~ [done](https://mod.io/g/retroxr/m/synthetic-heart-rift)
+- More games added: Now the Rift Vessels supports Minecraft and RetroXR, but other game plugins are planned to be added next
 - Extended goals support: the Synth will be able to use the goals system outside the gaming context for real life matters
 - Plugins store / repository: search and download new plugins and add community plugin repositories
 - Live2D models

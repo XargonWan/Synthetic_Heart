@@ -14,7 +14,7 @@ Design constraints (see ``docs/rift_vessel.rst`` and issue #60):
 
 * **Opt-in.** All actions are gated by whether the ``minecraft_vessel`` plugin
   is enabled (its WebUI card toggle, persisted as
-  ``PLUGIN_ENABLED__minecraft_vessel``); when the plugin is disabled the
+  ``PLUGIN_ENABLED__minecraft``); when the plugin is disabled the
   provisioner refuses to install or start.
 * **Non-root.** The subprocess inherits the current (non-root) user; we never
   escalate privileges.
@@ -154,17 +154,17 @@ class BridgeProvisioner:
         """Return whether the ``minecraft_vessel`` plugin is enabled.
 
         The bridge lifecycle is gated by the plugin's own WebUI card toggle
-        (``PLUGIN_ENABLED__minecraft_vessel``) rather than a dedicated key, so a
+        (``PLUGIN_ENABLED__minecraft``) rather than a dedicated key, so a
         single switch controls both the plugin and its bridge. Defaults to
         ``True`` (the plugin card toggle defaults to enabled).
         """
         try:
             return bool(
                 config_registry.get_value(
-                    "PLUGIN_ENABLED__minecraft_vessel",
+                    "PLUGIN_ENABLED__minecraft",
                     True,
                     value_type=bool,
-                    component="minecraft_vessel",
+                    component="minecraft",
                     group="plugins",
                     hidden=True,
                 )

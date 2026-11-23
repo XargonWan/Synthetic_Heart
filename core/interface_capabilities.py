@@ -50,6 +50,13 @@ _CAPABILITY_METHOD_TOKENS: tuple[tuple[str, str], ...] = (
     ("send_file", "send_file"),
     ("send_voice", "send_voice"),
     ("send_tts_audio", "send_audio"),
+    # Optional: the interface can set the synth avatar as its own account picture
+    # (see core/synth_avatar.py).
+    ("set_avatar", "set_avatar"),
+    # Optional: the interface can host audio/video calls. Interfaces register a
+    # ``core.call_manager.CallProvider``; a ``start_call`` method (or a ``call``
+    # token from ``get_capabilities()``) advertises it.
+    ("start_call", "call"),
 )
 
 

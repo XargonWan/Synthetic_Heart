@@ -37,6 +37,7 @@ constraint) and runs off the hot path.
 
 from __future__ import annotations
 
+from core import stats_registry
 import math
 from typing import Any
 
@@ -296,6 +297,7 @@ def _build_fold_prompt(
     }
 
 
+@stats_registry.with_purpose("vessel_diary")
 async def _generate_json(engine: Any, prompt: dict[str, Any], key: str) -> str | None:
     """Call the engine and extract ``key`` from its JSON response (fail-safe)."""
     try:

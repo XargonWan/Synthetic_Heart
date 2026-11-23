@@ -1104,8 +1104,30 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 });
                 try { console.debug('[SynthWindowManager] created winbox for', opts.id, 'instance=', winbox); } catch (e) { /* ignore */ }
                 entry.winbox = winbox;
+                // Persist a size the user picked by dragging a resize handle.
+                // onresize alone only updates the in-memory rect, so the size was
+                // lost on reload. It also fires for programmatic resizes (e.g. the
+                // chat window's auto-fit), which must NOT be saved as the user's
+                // choice — hence the hook on the handles, saved when the drag ends.
                 try {
-                    const nativeMaximize = typeof winbox.maximize === 'function' ? winbox.maximize.bind(winbox) : null;
+                    const resizeEl = winbox.window || winbox.dom || winbox.g || null;
+                    if (resizeEl) {
+                        resizeEl.querySelectorAll('.wb-n, .wb-s, .wb-w, .wb-e, .wb-nw, .wb-ne, .wb-sw, .wb-se').forEach((handle) => {
+                            handle.addEventListener('pointerdown', () => {
+                                const onResizeEnd = () => {
+                                    document.removeEventListener('pointerup', onResizeEnd, true);
+                                    document.removeEventListener('pointercancel', onResizeEnd, true);
+                                    try { captureNormalRect(entry); } catch (e) { /* ignore */ }
+                                    try { saveState(opts.id); } catch (e) { /* ignore */ }
+                                };
+                                document.addEventListener('pointerup', onResizeEnd, true);
+                                document.addEventListener('pointercancel', onResizeEnd, true);
+                            }, { passive: true });
+                        });
+                    }
+                } catch (e) { /* ignore */ }
+                try {
+                    const nativeMaximize =typeof winbox.maximize === 'function' ? winbox.maximize.bind(winbox) : null;
                     if (nativeMaximize) {
                         winbox.maximize = function(...args) {
                             // Capture pre-maximize rect before WinBox resizes to fullscreen.
@@ -1365,6 +1387,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                         const persistValue = async (val, controls = []) => {
                             const targets = Array.isArray(controls) ? controls.filter(Boolean) : [];
+                            let saved = false;
                             try {
                                 targets.forEach((el) => { try { if (typeof el.disabled !== 'undefined') el.disabled = true; } catch (e) {} });
                                 const payload = { key: item.key, value: val };
@@ -1373,6 +1396,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                     const txt = await res.text();
                                     try { window.showToast('Save failed: ' + txt, true); } catch (e) {}
                                 } else {
+                                    saved = true;
                                     try {
                                         const out = await res.json();
                                         window.showToast('Saved', false);
@@ -1389,12 +1413,18 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             } finally {
                                 targets.forEach((el) => { try { if (typeof el.disabled !== 'undefined') el.disabled = !isEditable; } catch (e) {} });
                             }
+                            return saved;
                         };
 
                         let inputEl = null;
                         let extraEl = null;
                         let skipAutoSave = false;
-                        if (item.ui_type === 'bool' || item.value_type === 'bool') {
+                        const registeredType = window.getUiType ? window.getUiType(item.ui_type) : null;
+                        if (registeredType) {
+                            // A widget registered for this ui_type (see ui-helpers.js).
+                            inputEl = registeredType.create(item);
+                            skipAutoSave = registeredType.selfSaving;
+                        } else if (item.ui_type === 'bool' || item.value_type === 'bool') {
                             const checkbox = document.createElement('input');
                             const key = item.key || item.label || `bool-${Math.random().toString(36).slice(2)}`;
                             checkbox.type = 'checkbox';
@@ -1447,6 +1477,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             inputFile.disabled = !isEditable;
 
                             const uploadBtn = document.createElement('button');
+                            uploadBtn.type = 'button';
+                            uploadBtn.className = 'btn-ghost';
                             uploadBtn.textContent = 'Upload';
                             uploadBtn.disabled = !isEditable;
                             uploadBtn.addEventListener('click', async () => {
@@ -1974,6 +2006,17 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                     .join(',');
                             };
 
+                            // Only complete rows (interface AND id) are stored, so a half-filled
+                            // row never changes what is saved. Saving it anyway would disable the
+                            // controls (the interface list would not open when clicked: the click
+                            // blurs the id field first) and re-render, dropping the new row.
+                            let lastSaved = serializeEntries();
+                            const saveIfChanged = async (controls) => {
+                                const next = serializeEntries();
+                                if (next === lastSaved) return;
+                                if (await persistValue(next, controls)) lastSaved = next;
+                            };
+
                             const renderRows = () => {
                                 list.innerHTML = '';
                                 if (!entries.length) {
@@ -1981,7 +2024,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 }
                                 entries.forEach((entry, idx) => {
                                     const rowEl = document.createElement('div');
-                                    rowEl.className = 'repeatable-row';
+                                    rowEl.className = 'repeatable-row repeatable-row--trainer';
 
                                     const select = document.createElement('select');
                                     if (!interfaceOptions.length) {
@@ -2016,18 +2059,18 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                                     select.addEventListener('change', () => {
                                         entries[idx] = { iface: select.value, id: idInput.value };
-                                        persistValue(serializeEntries(), [select, idInput, removeBtn, addBtn]);
+                                        saveIfChanged([select, idInput, removeBtn, addBtn]);
                                     });
 
                                     idInput.addEventListener('blur', () => {
                                         entries[idx] = { iface: select.value, id: idInput.value.trim() };
-                                        persistValue(serializeEntries(), [select, idInput, removeBtn, addBtn]);
+                                        saveIfChanged([select, idInput, removeBtn, addBtn]);
                                     });
 
                                     removeBtn.addEventListener('click', () => {
                                         entries.splice(idx, 1);
                                         renderRows();
-                                        persistValue(serializeEntries(), [select, idInput, removeBtn, addBtn]);
+                                        saveIfChanged([select, idInput, removeBtn, addBtn]);
                                     });
 
                                     rowEl.appendChild(select);
@@ -3487,7 +3530,11 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                         let inputEl = null;
 
-                        if (ci.ui_type === 'bool' || ci.value_type === 'bool') {
+                        const registeredType = window.getUiType ? window.getUiType(ci.ui_type) : null;
+                        if (registeredType) {
+                            // A widget registered for this ui_type (see ui-helpers.js).
+                            inputEl = registeredType.create(ci);
+                        } else if (ci.ui_type === 'bool' || ci.value_type === 'bool') {
                             const wrap = document.createElement('div');
                             wrap.style.cssText = 'display:flex; align-items:center; gap:8px;';
                             const cb = document.createElement('input');
@@ -3706,7 +3753,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             const inputFile = document.createElement('input');
                             inputFile.type = 'file';
                             inputFile.disabled = !editable;
-                            inputFile.style.cssText = 'font-size:0.82rem; color:var(--text); flex:1 1 auto; min-width:0;';
+                            inputFile.style.cssText = 'flex:1 1 auto; min-width:0;';
                             // Auto-upload as soon as a file is selected.
                             inputFile.addEventListener('change', async () => {
                                 const f = inputFile.files && inputFile.files[0];
@@ -3736,7 +3783,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             const clearBtn = document.createElement('button');
                             clearBtn.textContent = 'Clear';
                             clearBtn.disabled = !editable || !val;
-                            clearBtn.style.cssText = 'padding:5px 12px; background:var(--accent); color:var(--accent-contrast); border:none; border-radius:6px; font-size:0.82rem; cursor:pointer;';
+                            clearBtn.type = 'button';
+                            clearBtn.className = 'btn-ghost';
                             clearBtn.addEventListener('click', async () => {
                                 try {
                                     clearBtn.disabled = true;
@@ -4254,6 +4302,15 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             err.className = 'component-error';
                             err.textContent = item.error;
                             pane.appendChild(err);
+                        }
+
+                        // Extension point: interfaces/plugins may inject a custom card
+                        // (e.g. a login flow) via window.synthInterfaceDetailHooks[name].
+                        try {
+                            const detailHook = (window.synthInterfaceDetailHooks || {})[item.name];
+                            if (typeof detailHook === 'function') detailHook(item, pane);
+                        } catch (hookErr) {
+                            console.warn('Detail hook failed for', item.name, hookErr);
                         }
 
                         // Optional metadata-driven "Run Now" button.
@@ -6111,6 +6168,140 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     }
                     loadVoxLanguageOverrides();
 
+                    // ── Ordered fallback engines per route (Vox / Auris / Iris / Cortex) ──
+                    // Each route keeps an ordered JSON list of engine names under
+                    // <ROUTE>_FALLBACK_ENGINES; the backend tries them in turn when
+                    // the active engine is unavailable.
+                    function setupFallbackEngineList({ configKey, engineSelectId, listId, addBtnId }) {
+                        const listEl = document.getElementById(listId);
+                        const addBtn = document.getElementById(addBtnId);
+                        if (!listEl) return;
+                        let engines = [];
+
+                        const engineOptions = () => {
+                            const src = document.getElementById(engineSelectId);
+                            return src
+                                ? Array.from(src.options).filter(o => o.value && o.value !== 'disabled' && o.value !== 'inline')
+                                : [];
+                        };
+
+                        async function save() {
+                            try {
+                                const r = await fetch('/api/config', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ key: configKey, value: JSON.stringify(engines) })
+                                });
+                                if (!r.ok) throw new Error('HTTP ' + r.status);
+                            } catch (e) {
+                                console.error('[synth_webui] failed to save ' + configKey, e);
+                                window.showToast && window.showToast('Failed to save fallback engines', true);
+                            }
+                        }
+
+                        function render() {
+                            if (!engines.length) {
+                                listEl.innerHTML = '<div class="meta">No fallback engines configured.</div>';
+                                return;
+                            }
+                            listEl.innerHTML = '';
+                            const options = engineOptions();
+                            engines.forEach((name, idx) => {
+                                const row = document.createElement('div');
+                                row.style.cssText = 'display:flex; gap:8px; align-items:center; margin-bottom:6px;';
+                                const order = document.createElement('span');
+                                order.className = 'meta';
+                                order.textContent = (idx + 1) + '.';
+                                const sel = document.createElement('select');
+                                sel.style.minWidth = '220px';
+                                options.forEach(o => {
+                                    const opt = document.createElement('option');
+                                    opt.value = o.value;
+                                    opt.textContent = o.textContent;
+                                    sel.appendChild(opt);
+                                });
+                                if (name && !options.some(o => o.value === name)) {
+                                    const opt = document.createElement('option');
+                                    opt.value = name;
+                                    opt.textContent = name + ' (unavailable)';
+                                    sel.appendChild(opt);
+                                }
+                                sel.value = name;
+                                sel.addEventListener('change', async () => {
+                                    engines[idx] = sel.value;
+                                    await save();
+                                });
+                                const mkBtn = (label, title, onClick, disabled) => {
+                                    const b = document.createElement('button');
+                                    b.type = 'button';
+                                    b.className = 'pill secondary';
+                                    b.title = title;
+                                    b.textContent = label;
+                                    b.style.cssText = 'padding:4px 10px; font-weight:600;';
+                                    b.disabled = !!disabled;
+                                    b.addEventListener('click', onClick);
+                                    return b;
+                                };
+                                const move = async (delta) => {
+                                    const to = idx + delta;
+                                    [engines[idx], engines[to]] = [engines[to], engines[idx]];
+                                    render();
+                                    await save();
+                                };
+                                row.append(
+                                    order,
+                                    sel,
+                                    mkBtn('↑', 'Try earlier', () => move(-1), idx === 0),
+                                    mkBtn('↓', 'Try later', () => move(1), idx === engines.length - 1),
+                                    mkBtn('✕', 'Remove', async () => {
+                                        engines.splice(idx, 1);
+                                        render();
+                                        await save();
+                                    })
+                                );
+                                listEl.appendChild(row);
+                            });
+                        }
+
+                        async function load() {
+                            try {
+                                const r = await fetch('/api/config');
+                                const cfg = r.ok ? await r.json() : {};
+                                const items = Array.isArray(cfg.items) ? cfg.items : [];
+                                const item = items.find(i => i.key === configKey);
+                                const parsed = (item && item.value) ? JSON.parse(item.value) : [];
+                                engines = Array.isArray(parsed) ? parsed.map(String) : [];
+                            } catch (e) {
+                                console.error('[synth_webui] failed to load ' + configKey, e);
+                                engines = [];
+                            }
+                            render();
+                        }
+
+                        if (addBtn && !addBtn.dataset.bound) {
+                            addBtn.addEventListener('click', async () => {
+                                const used = new Set(engines);
+                                const active = (document.getElementById(engineSelectId) || {}).value;
+                                const next = engineOptions().find(o => !used.has(o.value) && o.value !== active);
+                                if (!next) {
+                                    window.showToast && window.showToast('No other engine available to add', true);
+                                    return;
+                                }
+                                engines.push(next.value);
+                                render();
+                                await save();
+                            });
+                            addBtn.dataset.bound = '1';
+                        }
+                        load();
+                    }
+                    [
+                        { configKey: 'VOX_FALLBACK_ENGINES', engineSelectId: 'vox-engine-select', listId: 'vox-fallback-list', addBtnId: 'vox-add-fallback-btn' },
+                        { configKey: 'AURIS_FALLBACK_ENGINES', engineSelectId: 'auris-engine-select', listId: 'auris-fallback-list', addBtnId: 'auris-add-fallback-btn' },
+                        { configKey: 'IRIS_FALLBACK_ENGINES', engineSelectId: 'iris-engine-select', listId: 'iris-fallback-list', addBtnId: 'iris-add-fallback-btn' },
+                        { configKey: 'CORTEX_FALLBACK_ENGINES', engineSelectId: 'cortex-engine-select', listId: 'cortex-fallback-list', addBtnId: 'cortex-add-fallback-btn' },
+                    ].forEach(setupFallbackEngineList);
+
                     // ── Vosk model selector (replaces the old language selector) ──
                     // The user now picks the MODEL directly via #auris-vosk-model-select
                     // (see the block above).  VOSK_MODEL wins over VOSK_LANGUAGE in the
@@ -7299,6 +7490,10 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 const logsReasonTrailOutput = document.getElementById('logs-reason-trail-output');
                 const logsReasonTrailRefreshBtn = document.getElementById('logs-reason-trail-refresh');
                 const logsReasonTrailSearch = document.getElementById('logs-reason-trail-search');
+                const logsStatsOutput = document.getElementById('logs-stats-output');
+                const logsStatsRefreshBtn = document.getElementById('logs-stats-refresh');
+                const logsStatsDays = document.getElementById('logs-stats-days');
+                const logsStatsAuto = document.getElementById('logs-stats-auto');
                 const logsState = window.__synth_logs_state || {
                     currentSubtab: 'live',
                     failurePage: 1,
@@ -7312,6 +7507,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     loadingDeadTargets: false,
                     reasonTrailSearch: '',
                     loadingReasonTrail: false,
+                    loadingStats: false,
+                    statsTimer: null,
                 };
                 window.__synth_logs_state = logsState;
 
@@ -7394,8 +7591,109 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         loadReasonTrail();
                         return;
                     }
+                    if (nextSubtab === 'stats') {
+                        loadStats();
+                        return;
+                    }
                     applyFilters();
                 }
+
+                // ── Stats: the stat server's report (GET /api/stats) ──
+                // The page knows no plugin: it draws the sections (title + typed blocks) the server sends, and the
+                // server already left out everything with no data in the chosen period.
+                function statsSeconds(value) {
+                    const n = Number(value);
+                    if (value === null || value === undefined || !Number.isFinite(n)) return '–';
+                    return n >= 100 ? `${Math.round(n)} s` : `${n.toFixed(1)} s`;
+                }
+
+                function statsCard(item) {
+                    const value = item.kind === 'seconds' ? statsSeconds(item.value) : String(item.value);
+                    const sub = item.sub ? `<div class="lsc-label">${safeEscapeHtml(item.sub)}</div>` : '';
+                    return `<div class="logs-stat-card ${safeEscapeHtml(item.tone || '')}"><div class="lsc-value">${safeEscapeHtml(value)}</div><div class="lsc-label">${safeEscapeHtml(item.label)}</div>${sub}</div>`;
+                }
+
+                function renderStatsTimingTable(block) {
+                    const rows = block.rows || [];
+                    const hasFailed = rows.some((row) => row.failed !== undefined);
+                    const head = `<tr><th>${safeEscapeHtml(block.first || 'what')}</th><th>n</th>${hasFailed ? '<th>failed</th>' : ''}<th>mean</th><th>p50</th><th>p95</th><th>max</th><th>last</th></tr>`;
+                    const body = rows.map((row) => {
+                        const label = `<td>${safeEscapeHtml(row.label)}</td>`;
+                        if (!row.n) {
+                            return `<tr title="${safeEscapeHtml(row.hint || '')}">${label}<td>0</td><td colspan="${hasFailed ? 6 : 5}">no samples yet</td></tr>`;
+                        }
+                        const failed = hasFailed ? `<td>${row.failed === undefined ? '' : row.failed}</td>` : '';
+                        return `<tr title="${safeEscapeHtml(row.hint || '')}">${label}<td>${row.n}</td>${failed}<td>${statsSeconds(row.mean)}</td><td>${statsSeconds(row.p50)}</td><td>${statsSeconds(row.p95)}</td><td>${statsSeconds(row.max)}</td><td>${statsSeconds(row.last)}</td></tr>`;
+                    }).join('');
+                    return `<h4>${safeEscapeHtml(block.title || '')}</h4><table class="logs-stats-table"><thead>${head}</thead><tbody>${body}</tbody></table>`;
+                }
+
+                function renderStatsBlock(block) {
+                    switch (block.type) {
+                        case 'cards':
+                            return `<div class="logs-stats-cards">${(block.items || []).map(statsCard).join('')}</div>`;
+                        case 'timing_table':
+                            return renderStatsTimingTable(block);
+                        case 'counters':
+                            return `<p class="logs-stats-note">${safeEscapeHtml(block.title || '')}: ${(block.items || []).map((i) => `${safeEscapeHtml(i.label)} ${i.value}`).join(' · ')}</p>`;
+                        case 'note':
+                            return `<p class="logs-stats-note">${safeEscapeHtml(block.text || '')}</p>`;
+                        case 'day_table': {
+                            const head = `<tr><th>day</th>${(block.columns || []).map((c) => `<th>${safeEscapeHtml(c)}</th>`).join('')}</tr>`;
+                            const body = (block.rows || []).map((row) => `<tr><td>${safeEscapeHtml(row.day)}</td>${(row.values || []).map((v) => `<td>${v}</td>`).join('')}</tr>`).join('');
+                            return `<h4>${safeEscapeHtml(block.title || '')}</h4><table class="logs-stats-table"><thead>${head}</thead><tbody>${body}</tbody></table>`;
+                        }
+                        default:
+                            return '';
+                    }
+                }
+
+                function renderStats(payload) {
+                    if (!logsStatsOutput) return;
+                    const sections = payload.sections || [];
+                    if (!sections.length) {
+                        const label = (payload.period && payload.period.label) || 'this period';
+                        logsStatsOutput.innerHTML = `<div class="logs-empty-state">Nothing was counted in the ${safeEscapeHtml(label)}.</div>`;
+                        return;
+                    }
+                    logsStatsOutput.innerHTML = sections.map((section) => `
+                        <div class="logs-stats-section" data-stats-source="${safeEscapeHtml(section.source)}">
+                            <h3>${safeEscapeHtml(section.title)}</h3>
+                            ${(section.blocks || []).map(renderStatsBlock).join('')}
+                        </div>`).join('');
+                }
+
+                async function loadStats(silent) {
+                    if (!logsStatsOutput || logsState.loadingStats) return;
+                    logsState.loadingStats = true;
+                    if (!silent && !logsStatsOutput.querySelector('.logs-stats-section')) {
+                        logsStatsOutput.innerHTML = '<div class="logs-empty-state">Loading statistics...</div>';
+                    }
+                    try {
+                        const period = logsStatsDays ? logsStatsDays.value : '7d';
+                        const response = await fetch(`/api/stats?period=${encodeURIComponent(period)}`);
+                        const payload = await response.json();
+                        if (!response.ok || !payload.success) {
+                            throw new Error((payload && payload.error) || `HTTP ${response.status}`);
+                        }
+                        renderStats(payload);
+                    } catch (error) {
+                        console.error('[logs] failed to load statistics', error);
+                        logsStatsOutput.innerHTML = '<div class="logs-empty-state">Failed to load statistics.</div>';
+                    } finally {
+                        logsState.loadingStats = false;
+                    }
+                }
+
+                // The page may be set up again (its sections are rebuilt): the timer must watch the NEW elements.
+                if (logsState.statsTimer) {
+                    window.clearInterval(logsState.statsTimer);
+                }
+                logsState.statsTimer = window.setInterval(() => {
+                    if (logsState.currentSubtab === 'stats' && logsStatsAuto && logsStatsAuto.checked && !document.hidden) {
+                        loadStats(true);
+                    }
+                }, 10000);
 
                 function formatFailureDate(value) {
                     if (!value) return 'Unknown time';
@@ -7750,6 +8048,16 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 if (logsReasonTrailRefreshBtn) {
                     logsReasonTrailRefreshBtn.addEventListener('click', () => {
                         loadReasonTrail();
+                    });
+                }
+                if (logsStatsRefreshBtn) {
+                    logsStatsRefreshBtn.addEventListener('click', () => {
+                        loadStats();
+                    });
+                }
+                if (logsStatsDays) {
+                    logsStatsDays.addEventListener('change', () => {
+                        loadStats();
                     });
                 }
                 if (logsReasonTrailSearch) {

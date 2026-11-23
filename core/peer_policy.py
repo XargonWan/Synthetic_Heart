@@ -100,6 +100,17 @@ def _read_config(key: str, default: Any) -> Any:
         return default
 
 
+#: Interfaces whose user ids the ``SYNTH_PEERS`` entries are written in. Peer ids
+#: are Telegram user ids, so a peer block is only meaningful on these; keeping the
+#: list here (not in the prompt builder) leaves the builder interface-agnostic.
+PEER_INTERFACES: frozenset[str] = frozenset({"telegram", "telegram_bot"})
+
+
+def interface_has_peers(interface_name: str | None) -> bool:
+    """True when the configured peer ids belong to ``interface_name``'s platform."""
+    return bool(interface_name) and str(interface_name) in PEER_INTERFACES
+
+
 def is_peer_mode_enabled() -> bool:
     """Return True if peer SyntH awareness mode is globally enabled."""
     return bool(_read_config("SYNTH_PEER_ENABLED", False))
@@ -395,13 +406,13 @@ async def _self_replied_recently(chat_id: int, cooldown_seconds: float) -> bool:
     try:
         from core.db import get_conn_ctx
 
-        path_prefix = f"telegram_bot/{chat_id}%"
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     "SELECT MAX(created_at) FROM chat_history_cache "
-                    "WHERE interface_path LIKE %s AND sender_id = 'self'",
-                    (path_prefix,),
+                    "WHERE (interface_path LIKE %s OR interface_path LIKE %s) "
+                    "AND sender_id = 'self'",
+                    (f"telegram_bot/{chat_id}%", f"telegram/{chat_id}%"),
                 )
                 row = await cur.fetchone()
                 if not row or not row[0]:

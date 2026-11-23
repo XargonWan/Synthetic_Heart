@@ -26,10 +26,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from core.logging_utils import log_debug, log_error, log_info, log_warning
+from core import stats_registry
 from core.config_manager import config_registry
 
 # Lane constants
@@ -208,6 +210,15 @@ def classify(actions: List[Any], *, context: Dict[str, Any] | None = None) -> st
             log_info("[agent_router] classify: grillo beat -> FAST lane")
             return FAST
 
+    # A web-search delivery turn only reports results that already exist, with
+    # the action catalog restricted to messages. Its text quotes the original
+    # request, so recon flags it as agentic again and the Agent Lane would run
+    # a second task for it (one user message -> two tasks). Structural signal
+    # only: the beat type set by the search orchestrator, never message text.
+    if isinstance(context, dict) and context.get("beat_type") == "web_search_result":
+        log_info("[agent_router] classify: web search delivery turn -> FAST lane")
+        return FAST
+
     # Authoritative, pre-LLM decision: the recon plugin evaluated the user's
     # request and flagged it as agentic work. It escalates even when the main
     # model only emitted conversational actions — the under-emission case where
@@ -367,6 +378,46 @@ def start_task_resume(
 
 
 async def _run_agent_turn_detached(
+    goal: str,
+    context: Dict[str, Any],
+    bot: Any,
+    message: Any,
+    *,
+    explicit_resume_id: int | None = None,
+    preplanned_calls: list[Dict[str, Any]] | None = None,
+    preplanned_then_loop: bool = False,
+) -> None:
+    """Run one agentic turn and count its time as a turn (``turn.seconds``, kind ``agent``).
+
+    The queue consumer's slot is freed as soon as the turn is scheduled, so the turn time the queue records never
+    includes an agent turn; without this the "average turn" of the Stats page would leave the longest ones out.
+    """
+    started = time.monotonic()
+    interface_path = (
+        str(context.get("interface_path") or "") if isinstance(context, dict) else ""
+    )
+    interface = interface_path.split("/", 1)[0] if interface_path else "agent"
+    with stats_registry.purpose("agent_round"), stats_registry.scope("agent"):
+        try:
+            await _run_agent_turn_detached_untimed(
+                goal,
+                context,
+                bot,
+                message,
+                explicit_resume_id=explicit_resume_id,
+                preplanned_calls=preplanned_calls,
+                preplanned_then_loop=preplanned_then_loop,
+            )
+        finally:
+            stats_registry.observe(
+                "turn.seconds",
+                time.monotonic() - started,
+                interface=stats_registry.clean_label(interface),
+                kind="agent",
+            )
+
+
+async def _run_agent_turn_detached_untimed(
     goal: str,
     context: Dict[str, Any],
     bot: Any,
@@ -766,6 +817,16 @@ async def _deliver_agent_reply(
             f"with 0 actions executed (final_text={final_text!r})"
         )
         return
+
+    # The ``Task complete:`` marker exists for persisted context only (so a later
+    # turn reads the task as finished). It must never reach the chat, and the
+    # persona voiceover must not be asked to restyle it either.
+    from core.agent_core import TASK_COMPLETE_PREFIX
+
+    if final_text.startswith(TASK_COMPLETE_PREFIX):
+        final_text = final_text[len(TASK_COMPLETE_PREFIX) :].lstrip()
+        if not final_text:
+            return
 
     # Persona voiceover: the agent loop runs persona-free by design (its raw
     # final text is operationally correct but tonally flat), so before the

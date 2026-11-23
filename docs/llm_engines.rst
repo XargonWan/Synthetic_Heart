@@ -20,6 +20,10 @@ tool selection and execution are handled centrally by the unified tool registry
 and the agent tool executor (see :doc:`agentic_tools`), not by per-engine
 methods.
 
+Web-driven engines such as ZEN speak the standard OpenAI tool-calling API, and
+an endpoint can opt into a lean agent prompt so the chat UI is not told it is in
+an "agentic mode"; see "Lean prompt" in :doc:`agentic_tools`.
+
 Zen Plugin Architecture
 -----------------------------
 

@@ -10,7 +10,7 @@ from typing import Any, cast
 import traceback
 from types import SimpleNamespace
 
-from core import plugin_instance, rate_limit
+from core import bot_ward, chat_activity, plugin_instance, rate_limit, stats_registry
 from core.beat_utils import is_outbound_beat
 from core.logging_utils import log_debug, log_error, log_warning, log_info
 from core.mention_utils import is_message_for_bot
@@ -25,10 +25,12 @@ from core.session_meta import (
 from plugins.blocklist import is_user_blocked
 from core.interface_paths import get_name_resolver
 from core.user_utils import ensure_message_user_fields
+from core.variables_engine import register_exposed_var
+from core.voice_reply import is_voice_reply
 
 # Use a priority queue so events can be processed before regular messages.
 #
-# Priority scale: a plain 0–11 numeric axis where HIGHER = MORE URGENT.
+# Priority scale: a plain 0–12 numeric axis where HIGHER = MORE URGENT.
 # The names are deliberately generic (broad-scope) — the *meaning* lives in the
 # comments, not in narrow feature-bound names. Producers pick the closest band.
 #
@@ -39,14 +41,18 @@ from core.user_utils import ensure_message_user_fields
 #
 # NOTE ON VALUES: producers reference these constants **by name**, never by the
 # raw integer, so the exact numbers are free to be re-spaced. REFLECTION was
-# inserted between HIGH and URGENT (bumping EMERGENCY→11, URGENT→10) so a Vessel
-# "stop and think about my goal" turn can jump ahead of ordinary in-world player
-# chat yet still yield to a real-world emergency/safety notification.
+# inserted between HIGH and URGENT so a Vessel "stop and think about my goal"
+# turn can jump ahead of ordinary in-world player chat yet still yield to a
+# real-world emergency/safety notification. CALL was later slotted between
+# REFLECTION and HIGH (bumping REFLECTION→10, URGENT→11, EMERGENCY→12): a live
+# audio/video call is a person waiting in real time, so its turns rank above all
+# chat but still yield to a rift/vessel reflection and to urgent notifications.
 # BACKGROUND(2) was split below LOW(3) so G.R.I.L.L.O. background beats sit at
 # the absolute bottom and never contend with anything else.
-PRIORITY_EMERGENCY = 11  # Reserved top band — a real emergency, above everything
-PRIORITY_URGENT = 10  # Calendar reminders, auto_response(priority=True), safety
-PRIORITY_REFLECTION = 9  # Vessel "pause & reflect on my goal" turn (above player chat)
+PRIORITY_EMERGENCY = 12  # Reserved top band — a real emergency, above everything
+PRIORITY_URGENT = 11  # Calendar reminders, auto_response(priority=True), safety
+PRIORITY_REFLECTION = 10  # Vessel "pause & reflect on my goal" turn (above calls)
+PRIORITY_CALL = 9  # A turn inside a live audio/video call (above all chat)
 PRIORITY_HIGH = 8  # Direct prioritised human input (e.g. in-world player chat)
 PRIORITY_TRAINER = 7  # The trainer — must always reach Synth promptly
 PRIORITY_RADIO = 6  # Radio-host DJ banter (on-the-fly LLM generation during playback)
@@ -78,6 +84,7 @@ _PRIORITY_LABELS: dict[int, str] = {
     PRIORITY_EMERGENCY: "Emergency",
     PRIORITY_URGENT: "Urgent",
     PRIORITY_REFLECTION: "Reflection",
+    PRIORITY_CALL: "Call",
     PRIORITY_HIGH: "High",
     PRIORITY_TRAINER: "Trainer",
     PRIORITY_RADIO: "Radio",
@@ -123,6 +130,15 @@ _CONSUMER_STALL_WARN_SECONDS = 300.0
 _in_flight_label: str | None = None
 _in_flight_started_at: float = 0.0
 _in_flight_reported: bool = False
+# What the statistics say of the item in flight: its interface and kind, and whether its turn failed.
+_in_flight_meta: dict[str, str] = {}
+_in_flight_failed: bool = False
+# The item being worked on and its priority band, kept so the queue view can keep
+# showing it until its turn is completed (it has already left the heap).
+_in_flight_item: dict[str, Any] | None = None
+_in_flight_priority: int | None = None
+# When the consumer last finished an item (monotonic); None until it has finished one.
+_last_item_finished_at: float | None = None
 
 
 def _item_label(item: dict[str, Any] | None) -> str:
@@ -137,19 +153,105 @@ def _item_label(item: dict[str, Any] | None) -> str:
     return label
 
 
-def _note_item_in_flight(item: dict[str, Any] | None) -> None:
+def _note_item_in_flight(
+    item: dict[str, Any] | None, priority: int | None = None
+) -> None:
     """Record the item the consumer is now working on."""
-    global _in_flight_label, _in_flight_started_at, _in_flight_reported
+    global \
+        _in_flight_label, \
+        _in_flight_started_at, \
+        _in_flight_reported, \
+        _in_flight_meta, \
+        _in_flight_failed, \
+        _in_flight_item, \
+        _in_flight_priority
+    _in_flight_item = item if isinstance(item, dict) else None
+    _in_flight_priority = priority
     _in_flight_label = _item_label(item)
     _in_flight_started_at = time.monotonic()
     _in_flight_reported = False
+    _in_flight_failed = False
+    try:
+        data = item if isinstance(item, dict) else {}
+        path = str(data.get("interface_path") or "")
+        if data.get("vessel_player_chat"):
+            kind = "vessel_chat"
+        elif data.get("vessel_reflection") or data.get("vessel_appraisal"):
+            kind = "vessel_reflection"
+        elif path.startswith("vessel"):
+            kind = "vessel"
+        else:
+            kind = "chat"
+        _in_flight_meta = {
+            "interface": str(data.get("interface") or "unknown"),
+            "kind": kind,
+        }
+        enqueued_at = data.get("timestamp")
+        if enqueued_at is not None:
+            stats_registry.observe(
+                "turn.wait_seconds",
+                max(0.0, time.time() - float(enqueued_at)),
+                **_in_flight_meta,
+            )
+        stats_registry.gauge("queue.depth", _get_queue().qsize())
+    except Exception:  # pragma: no cover - a statistic never blocks a turn
+        pass
+
+
+def _note_turn_failed() -> None:
+    """The item in flight did not get a turn through (an error or a timeout): the statistics count it as failed."""
+    global _in_flight_failed
+    _in_flight_failed = True
 
 
 def _clear_item_in_flight() -> None:
     """Clear the in-flight item once its handling block has finished."""
-    global _in_flight_label, _in_flight_reported
+    global \
+        _in_flight_label, \
+        _in_flight_reported, \
+        _last_item_finished_at, \
+        _in_flight_item, \
+        _in_flight_priority
+    try:
+        if _in_flight_label:
+            meta = dict(_in_flight_meta)
+            stats_registry.incr(
+                "turns.failed" if _in_flight_failed else "turns.ok", **meta
+            )
+            stats_registry.observe(
+                "turn.seconds", time.monotonic() - _in_flight_started_at, **meta
+            )
+    except Exception:  # pragma: no cover
+        pass
     _in_flight_label = None
     _in_flight_reported = False
+    _in_flight_item = None
+    _in_flight_priority = None
+    _last_item_finished_at = time.monotonic()
+
+
+def consumer_idle_seconds(*, ignore_queued: bool = False) -> float:
+    """How long the consumer has had nothing to do: 0.0 while an item is in flight or anything is queued,
+    ``inf`` if it has never finished one (nothing ran yet).
+
+    Lets a producer of OPTIONAL work (an autonomous beat) wait until the engine has really rested, so a human's
+    message never lands behind a turn nobody asked for: a heap orders what runs NEXT, it cannot pull a running
+    generation back (Zen cannot be cancelled at all).
+
+    ``ignore_queued=True`` disregards items waiting in the queue (only an in-flight turn counts as busy), for
+    callers whose work is queued FIFO behind chat anyway and must not be held back by that backlog.
+    """
+    if _in_flight_label:
+        return 0.0
+    queue = _queue
+    try:
+        if not ignore_queued and queue is not None and queue.qsize() > 0:
+            return 0.0
+    except Exception:  # pragma: no cover - defensive
+        return 0.0
+    if _last_item_finished_at is None:
+        return float("inf")
+    return max(0.0, time.monotonic() - _last_item_finished_at)
 
 
 def _stalled_item_report() -> tuple[str, float] | None:
@@ -297,6 +399,158 @@ def _get_queue() -> asyncio.PriorityQueue:
             heapq.heapify(_queue._queue)
 
     return _queue
+
+
+register_exposed_var(
+    "QUEUE_COALESCE_ENABLED",
+    label="Merge Queued Messages of the Same Chat",
+    default=True,
+    value_type=bool,
+    ui_type="bool",
+    description=(
+        "While a turn is slow, messages that pile up in the queue with the exact same "
+        "interface path are merged into one queue element, so a single turn answers "
+        "them all. The turn already being processed is never touched."
+    ),
+    scope="core",
+    component="message_queue",
+    advanced=True,
+)
+register_exposed_var(
+    "QUEUE_COALESCE_MAX_ITEMS",
+    label="Max Messages Merged Into One Queue Element",
+    default=20,
+    value_type=int,
+    ui_type="number",
+    description=(
+        "Upper bound on the messages merged into one queued element. Beyond it the "
+        "next message starts a new element, which then collects the following ones."
+    ),
+    scope="core",
+    component="message_queue",
+    advanced=True,
+)
+
+_COALESCE_MAX_DEFAULT = 20
+
+
+def _coalesce_settings() -> tuple[bool, int]:
+    """Return ``(enabled, max_items)`` for queue-time merging; defaults on any error."""
+    try:
+        from core.config_manager import config_registry
+
+        enabled = bool(
+            config_registry.get_value(
+                "QUEUE_COALESCE_ENABLED",
+                True,
+                value_type=bool,
+                component="message_queue",
+            )
+        )
+        max_items = int(
+            config_registry.get_value(
+                "QUEUE_COALESCE_MAX_ITEMS",
+                _COALESCE_MAX_DEFAULT,
+                value_type=int,
+                component="message_queue",
+            )
+        )
+    except Exception:  # pragma: no cover - defensive
+        return True, _COALESCE_MAX_DEFAULT
+    return enabled, max(0, max_items)
+
+
+def _coalescible(item: dict) -> bool:
+    """True when ``item`` may be merged into (or absorb) another pending element.
+
+    Purely structural, never keyword based. Excluded: turns that own their own
+    lifecycle (live calls, scheduled/urgent events, vessel reflection, appraisal and
+    idle beats), anything a caller waits on (``response_future``/``media_future``),
+    Synth's autonomous vessel perceptions (superseded by
+    :func:`_supersede_pending_vessel_beats` instead) and any other ``no_compact``
+    item. A vessel player chat is ``no_compact`` on purpose but may merge with other
+    player chats of the same path (never with perceptions, see the key check in
+    :func:`_try_coalesce_pending`).
+    """
+    if item.get("call") or item.get("call_id") or item.get("priority"):
+        return False
+    if (
+        item.get("vessel_reflection")
+        or item.get("vessel_appraisal")
+        or item.get("vessel_idle_beat")
+    ):
+        return False
+    if item.get("media_future") is not None or item.get("response_future") is not None:
+        return False
+    is_player_chat = bool(item.get("vessel_player_chat"))
+    if item.get("interface") == "vessel" and not is_player_chat:
+        return False
+    if item.get("no_compact") and not is_player_chat:
+        return False
+    path = item.get("interface_path")
+    return isinstance(path, str) and bool(path) and item.get("message") is not None
+
+
+def _try_coalesce_pending(item: dict, priority_val: int) -> bool:
+    """Merge ``item`` into a pending queue element of the very same chat.
+
+    A slow turn lets many messages of one chat pile up, each costing a whole LLM
+    turn. When a *pending* element exists with the **identical** ``interface_path``
+    (plus same interface, thread and priority band) ``item`` is appended to its
+    ``absorbed`` list instead of being queued: the queue shows one element and the
+    consumer answers all the messages in a single turn. The element in flight has
+    already left the heap, so it is never touched.
+
+    Synchronous on purpose (no ``await``): it is atomic with the ``put`` that follows
+    in :func:`enqueue`. Returns ``True`` when ``item`` was absorbed (or dropped as a
+    duplicate) and must not be put on the heap.
+    """
+    enabled, max_items = _coalesce_settings()
+    if not enabled or max_items <= 0 or not _coalescible(item):
+        return False
+
+    key = _heap_key(priority_val)
+    is_player_chat = bool(item.get("vessel_player_chat"))
+    target: dict | None = None
+    target_counter = -1
+    heap = getattr(_get_queue(), "_queue", None)
+    if not isinstance(heap, list):
+        return False
+    for entry in heap:
+        try:
+            entry_key, counter_val, cand = entry
+        except (TypeError, ValueError):
+            continue
+        if (
+            not isinstance(cand, dict)
+            or entry_key != key
+            or cand.get("interface_path") != item.get("interface_path")
+            or cand.get("interface") != item.get("interface")
+            or cand.get("thread_id") != item.get("thread_id")
+            or bool(cand.get("vessel_player_chat")) != is_player_chat
+            or not _coalescible(cand)
+            or len(cand.get("absorbed") or ()) >= max_items
+        ):
+            continue
+        if counter_val > target_counter:
+            target, target_counter = cand, counter_val
+    if target is None:
+        return False
+
+    mid = getattr(item.get("message"), "message_id", None)
+    if mid:
+        known = [target, *(target.get("absorbed") or [])]
+        if any(getattr(e.get("message"), "message_id", None) == mid for e in known):
+            log_debug(f"[QUEUE] Dropped duplicate message {mid} already queued")
+            return True
+
+    target.setdefault("absorbed", []).append(item)
+    target["last_timestamp"] = item["timestamp"]
+    log_debug(
+        f"[QUEUE] Merged message into pending element of '{item.get('interface_path')}' "
+        f"({1 + len(target['absorbed'])} messages)"
+    )
+    return True
 
 
 def _drop_stale_vessel_perceptions(world_chat_id: str) -> None:
@@ -498,51 +752,131 @@ def drop_vessel_queue_for_world(world_chat_id: str) -> int:
     return dropped
 
 
+def _snapshot_entry(
+    item: dict[str, Any], priority_val: int, position: int, now: float, status: str
+) -> dict[str, object]:
+    """One plain, JSON-safe description of a queue item (never the live ``item``)."""
+    # Text preview from the wrapped message object(s), truncated. Guarded — the
+    # message may be any interface's object; we only want its ``.text``.
+    # A merged element (see ``_try_coalesce_pending``) previews every message it holds.
+    absorbed = item.get("absorbed") or []
+    merged_count = max(int(item.get("merged_count") or 1), 1 + len(absorbed))
+    preview = ""
+    try:
+        texts = [
+            str(getattr(entry.get("message"), "text", "") or "").strip()
+            for entry in (item, *absorbed)
+        ]
+        sep = " ⏎ " if merged_count > 1 else " "
+        preview = sep.join(t.replace("\n", sep) for t in texts if t)
+        if len(preview) > 240:
+            preview = preview[:240] + "…"
+    except Exception:  # pragma: no cover - defensive
+        preview = ""
+
+    def _as_float(value: object) -> float | None:
+        try:
+            return float(value) if value is not None else None  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+
+    enqueued_at_f = _as_float(item.get("timestamp"))
+    last_enqueued_at_f = _as_float(item.get("last_timestamp")) or enqueued_at_f
+    age_seconds = (now - enqueued_at_f) if enqueued_at_f is not None else None
+
+    return {
+        "position": position,
+        "status": status,
+        "priority": priority_val,
+        "priority_label": priority_label(priority_val),
+        "interface": item.get("interface"),
+        "interface_path": item.get("interface_path"),
+        "chat_id": item.get("chat_id"),
+        "chat_name": item.get("chat_name"),
+        "thread_name": item.get("message_thread_name"),
+        "enqueued_at": enqueued_at_f,
+        "last_enqueued_at": last_enqueued_at_f,
+        "merged_count": merged_count,
+        "age_seconds": age_seconds,
+        "text_preview": preview,
+        "is_priority": bool(item.get("priority")),
+        "call": bool(item.get("call")),
+        "vessel_player_chat": bool(item.get("vessel_player_chat")),
+        "vessel_reflection": bool(item.get("vessel_reflection")),
+        "vessel_appraisal": bool(item.get("vessel_appraisal")),
+    }
+
+
 def snapshot_queue(limit: int = 500) -> list[dict[str, object]]:
-    """Return a read-only snapshot of the currently PENDING queue items.
+    """Return a read-only snapshot of the queue: the item being processed, then the backlog.
 
     Powers the WebUI Activity → Queue tab. Each entry is a plain, JSON-safe dict
     describing one queued message — never the live ``item`` (which holds the bot,
-    the raw message object and futures). Items are returned in the order they
-    would be popped by the consumer: most urgent first (highest semantic
-    priority), FIFO within a band (via the monotonic counter).
+    the raw message object and futures).
 
-    The item currently being processed by the consumer has already been
-    ``get``-ed off the heap and is therefore NOT included — this is only the
-    pending backlog.
+    The item the consumer is working on has already been ``get``-ed off the heap,
+    but it is still listed — first, with ``status == "processing"`` and
+    ``position == 0`` — until its turn is completed (it succeeded or failed), so
+    the view does not lose a message while its (slow) turn runs. The pending
+    backlog follows with ``status == "pending"``, in the order the consumer would
+    pop it: most urgent first (highest semantic priority), FIFO within a band (via
+    the monotonic counter), ``position`` 1-based.
 
     Best-effort and fully guarded (mirrors the prune helpers): reads a copy of
     the internal heap without a lock, so a rare concurrent mutation can only
-    yield a slightly stale snapshot, never an exception. Returns ``[]`` when the
-    queue has not been created yet or on any error.
+    yield a slightly stale snapshot, never an exception. Returns ``[]`` when there
+    is nothing in flight and the queue has not been created yet, or on any error.
 
     Args:
-        limit: Maximum number of items to return (defensive cap for huge
-            backlogs). Clamped to ``[1, 5000]``.
+        limit: Maximum number of PENDING items to return (defensive cap for huge
+            backlogs). Clamped to ``[1, 5000]``. The in-flight item is always listed.
 
     Returns:
-        A list of dicts, each with: ``position`` (1-based pop order),
-        ``priority`` (int), ``priority_label`` (str), ``interface``,
-        ``interface_path``, ``chat_id``, ``chat_name``, ``thread_name``,
-        ``enqueued_at`` (epoch seconds, float), ``age_seconds`` (float),
-        ``text_preview`` (str, truncated), ``is_priority`` (bool) and the
-        structural vessel flags ``vessel_player_chat`` / ``vessel_reflection`` /
-        ``vessel_appraisal``.
+        A list of dicts, each with: ``position``, ``status`` (``"processing"`` or
+        ``"pending"``), ``priority`` (int), ``priority_label`` (str),
+        ``interface``, ``interface_path``, ``chat_id``, ``chat_name``,
+        ``thread_name``, ``enqueued_at`` (epoch seconds, float), ``age_seconds``
+        (float), ``text_preview`` (str, truncated), ``is_priority`` (bool),
+        ``call`` (bool) and the structural vessel flags ``vessel_player_chat`` /
+        ``vessel_reflection`` / ``vessel_appraisal``. The processing entry also has
+        ``processing_seconds``.
     """
     try:
         cap = max(1, min(5000, int(limit)))
     except (TypeError, ValueError):
         cap = 500
 
+    now = time.time()
+    out: list[dict[str, object]] = []
+
+    # The item being processed stays visible until its turn is completed.
+    try:
+        in_flight = _in_flight_item
+        if isinstance(in_flight, dict):
+            band = _in_flight_priority
+            entry = _snapshot_entry(
+                in_flight,
+                int(band) if band is not None else PRIORITY_GENERAL,
+                0,
+                now,
+                "processing",
+            )
+            entry["processing_seconds"] = max(
+                0.0, time.monotonic() - _in_flight_started_at
+            )
+            out.append(entry)
+    except Exception:  # pragma: no cover - defensive
+        pass
+
     if _queue is None:
-        return []
+        return out
 
     try:
         # Copy the heap before iterating so a concurrent enqueue/prune cannot
         # mutate it mid-read. Each entry is ``(heap_key, counter, item)``.
         entries = list(_queue._queue)
     except Exception:  # pragma: no cover - defensive
-        return []
+        return out
 
     # Sort into the exact pop order: min-heap key first (most urgent), then the
     # monotonic counter (FIFO tie-break).
@@ -558,8 +892,6 @@ def snapshot_queue(limit: int = 500) -> list[dict[str, object]]:
     except Exception:  # pragma: no cover - defensive
         pass
 
-    now = time.time()
-    out: list[dict[str, object]] = []
     for position, entry in enumerate(entries[:cap], start=1):
         try:
             heap_key, _counter_val, item = entry
@@ -567,46 +899,7 @@ def snapshot_queue(limit: int = 500) -> list[dict[str, object]]:
             continue
         if not isinstance(item, dict):
             continue
-
-        priority_val = -int(heap_key)
-
-        # Text preview from the wrapped message object, truncated. Guarded — the
-        # message may be any interface's object; we only want its ``.text``.
-        preview = ""
-        try:
-            raw_text = getattr(item.get("message"), "text", "") or ""
-            preview = str(raw_text).strip().replace("\n", " ")
-            if len(preview) > 240:
-                preview = preview[:240] + "…"
-        except Exception:  # pragma: no cover - defensive
-            preview = ""
-
-        enqueued_at = item.get("timestamp")
-        try:
-            enqueued_at_f = float(enqueued_at) if enqueued_at is not None else None
-        except (TypeError, ValueError):
-            enqueued_at_f = None
-        age_seconds = (now - enqueued_at_f) if enqueued_at_f is not None else None
-
-        out.append(
-            {
-                "position": position,
-                "priority": priority_val,
-                "priority_label": priority_label(priority_val),
-                "interface": item.get("interface"),
-                "interface_path": item.get("interface_path"),
-                "chat_id": item.get("chat_id"),
-                "chat_name": item.get("chat_name"),
-                "thread_name": item.get("message_thread_name"),
-                "enqueued_at": enqueued_at_f,
-                "age_seconds": age_seconds,
-                "text_preview": preview,
-                "is_priority": bool(item.get("priority")),
-                "vessel_player_chat": bool(item.get("vessel_player_chat")),
-                "vessel_reflection": bool(item.get("vessel_reflection")),
-                "vessel_appraisal": bool(item.get("vessel_appraisal")),
-            }
-        )
+        out.append(_snapshot_entry(item, -int(heap_key), position, now, "pending"))
 
     return out
 
@@ -938,6 +1231,22 @@ async def enqueue(
         f"[QUEUE] DEBUG: User {user_id} is not blocked or is trainer, continuing processing"
     )
 
+    # Bot ward: a private chat with a bot account must not turn into an endless
+    # exchange. Messages from a bot rank below ordinary chat, and once the bot has
+    # sent too many in a short while the conversation is paused: its messages stay
+    # in the chat history (the interface stored them already) but start no turn.
+    ward_verdict = await bot_ward.check_inbound(
+        bot_ward.path_for(message, interface_id), message
+    )
+    if ward_verdict.action == bot_ward.HISTORY_ONLY:
+        log_info(
+            f"[QUEUE] Bot ward: message from {user_id} kept as history only "
+            f"({ward_verdict.reason})"
+        )
+        if response_future is not None and not response_future.done():
+            response_future.set_result(None)
+        return
+
     plugin = await ensure_active_plugin("incoming message")
     if not plugin:
         log_error(
@@ -1156,17 +1465,37 @@ async def enqueue(
         # survival reflex already reacted mechanically, this is the deliberate
         # combat/social appraisal on top. Prunes stale autonomous beats too.
         "vessel_appraisal": bool(getattr(message, "_vessel_appraisal", False)),
+        # Structural marker: the rift idle beat (set by the vessel interface for
+        # ``event_type == "idle_beat"``). Ranked at the same band as human chat
+        # (GENERAL) so it alternates with Telegram in FIFO order instead of
+        # starving behind it.
+        "vessel_idle_beat": bool(getattr(message, "_vessel_idle_beat", False)),
+        # Structural marker: this turn belongs to a live audio/video call (set by
+        # ``core.call_manager.CallManager.mark_turn``). Ranked at PRIORITY_CALL —
+        # above every chat band, below rift/vessel reflection and urgent items.
+        "call": bool(getattr(message, "_call", False)),
+        # The call this turn belongs to (set by ``CallManager.mark_turn``); lets the
+        # queue recognise a follow-up utterance of the same call (see
+        # ``_interrupt_young_call_turn``).
+        "call_id": (
+            getattr(message, "call_id", None)
+            if getattr(message, "_call", False)
+            else None
+        ),
     }
 
     global _counter
 
-    # === Priority assignment (numeric 0–10 scale, higher = more urgent) ===
+    # === Priority assignment (numeric 0–12 scale, higher = more urgent) ===
     # A pure, unconditional ranking based only on the message's structural
     # origin — never on message text (project rule: no keyword/trigger-word
     # logic) and never conditional on whether a Vessel session is active. There
     # is NO de-prioritisation: ordinary chat is never demoted because Synth
     # happens to be embodied in a world. The bands, from most to least urgent:
     #   * priority=True (scheduled events / urgent notifications) → URGENT.
+    #   * A live-call turn (structural ``call`` flag, set by the call manager)
+    #     → CALL: a person waiting in real time, above every chat band but below
+    #     a rift/vessel reflection and urgent items.
     #   * A real in-world player chat (structural ``vessel_player_chat`` flag,
     #     set by the vessel interface from event kind + actor) → HIGH: it is a
     #     human speaking directly, so it ranks above ordinary chat and above
@@ -1205,6 +1534,12 @@ async def enqueue(
             _supersede_pending_vessel_beats(chat_id)
         except Exception as _ref_exc:  # pragma: no cover - defensive
             log_debug(f"[QUEUE] Vessel reflection prune skipped: {_ref_exc}")
+    elif item.get("call"):
+        # A person is talking to Synth in a live call and is waiting in real
+        # time: rank above every chat band (and exempt from the bot-ward demotion
+        # below, which only touches the ordinary-chat branch). Structural flag,
+        # never message text.
+        priority_val = PRIORITY_CALL
     elif interface == "vessel" and item.get("vessel_player_chat"):
         # A human speaking in-world. Prune stale autonomous perceptions for the
         # same world so the player is answered promptly (structural, guarded).
@@ -1213,6 +1548,15 @@ async def enqueue(
             _drop_stale_vessel_perceptions(chat_id)
         except Exception as _prune_exc:  # pragma: no cover - defensive
             log_debug(f"[QUEUE] Vessel perception prune skipped: {_prune_exc}")
+    elif interface == "vessel" and item.get("vessel_idle_beat"):
+        # Rift idle beat (RetroXR "person in a room"). Same band as ordinary chat
+        # so the two alternate FIFO; a fresh beat still supersedes stale queued
+        # beats for this world so they cannot pile up.
+        priority_val = PRIORITY_GENERAL
+        try:
+            _supersede_pending_vessel_beats(chat_id)
+        except Exception as _idle_exc:  # pragma: no cover - defensive
+            log_debug(f"[QUEUE] Vessel idle-beat supersede skipped: {_idle_exc}")
     elif interface == "vessel":
         # Synth's own autonomous perception/will-beat: ranked BELOW any human
         # chat. A fresh beat supersedes older queued ones for the same world so
@@ -1235,6 +1579,17 @@ async def enqueue(
                 priority_val = PRIORITY_TRAINER
         except Exception as exc:  # pragma: no cover - defensive
             log_debug(f"[QUEUE] Trainer priority lookup skipped: {exc}")
+        if ward_verdict.priority_drop and priority_val == PRIORITY_GENERAL:
+            # A bot's message: processed after the people waiting (bot ward).
+            priority_val = PRIORITY_GENERAL - ward_verdict.priority_drop
+
+    if item.get("call_id"):
+        _interrupt_young_call_turn(item["call_id"])
+
+    # Same chat already waiting in the queue: fold this message into that element
+    # (one turn for all of them) instead of paying a whole turn per message.
+    if _try_coalesce_pending(item, priority_val):
+        return
 
     _counter += 1
     await _get_queue().put((_heap_key(priority_val), _counter, item))
@@ -1384,6 +1739,151 @@ async def enqueue_low_priority(
     )
 
 
+# -- young call turns ---------------------------------------------------------
+# On a call people speak in pieces: the first words often arrive before the thought is
+# finished and the rest follows seconds later. While a call turn is still *young* (its
+# generation just started, nothing has been said back yet) a further utterance of the SAME
+# call cancels it and puts it back in the queue, where the queue's normal coalescing joins
+# both utterances into the one turn that is answered. An older turn is left to finish: the
+# SyntH is already replying and the new utterance is simply the next turn.
+register_exposed_var(
+    "CALL_TURN_INTERRUPT_WINDOW_SEC",
+    label="Call Turn Interrupt Window (s)",
+    default=8.0,
+    value_type=float,
+    ui_type="number",
+    description=(
+        "A call turn younger than this many seconds is cancelled and merged with the "
+        "next thing the caller says in the same call. 0 disables the interruption."
+    ),
+    scope="core",
+    component="call_manager",
+    advanced=True,
+)
+
+
+@dataclass(slots=True)
+class _CallTurn:
+    call_id: str
+    task: asyncio.Task
+    item: dict
+    priority: int
+    started: float
+    cancellable: bool
+    interrupted: bool = False
+
+
+_active_call_turn: _CallTurn | None = None
+
+
+def _register_call_turn(
+    item: dict, task: asyncio.Task, priority: int, cancellable: bool
+) -> None:
+    """Remember the call turn being generated, so a follow-up can interrupt it."""
+    global _active_call_turn
+    call_id = item.get("call_id")
+    _active_call_turn = (
+        _CallTurn(str(call_id), task, item, priority, time.monotonic(), cancellable)
+        if call_id
+        else None
+    )
+
+
+def _clear_call_turn(task: asyncio.Task | None = None) -> None:
+    global _active_call_turn
+    if task is None or (_active_call_turn and _active_call_turn.task is task):
+        _active_call_turn = None
+
+
+def _call_turn_interrupted(task: asyncio.Task) -> bool:
+    """True when ``task`` was cancelled on purpose by :func:`_interrupt_young_call_turn`."""
+    return bool(
+        _active_call_turn
+        and _active_call_turn.task is task
+        and _active_call_turn.interrupted
+    )
+
+
+def _interrupt_young_call_turn(call_id: str | None) -> bool:
+    """Cancel the in-flight turn of ``call_id`` if it is still young. True if cancelled."""
+    entry = _active_call_turn
+    if not call_id or entry is None or entry.call_id != str(call_id):
+        return False
+    if entry.interrupted or entry.task.done() or not entry.cancellable:
+        return False
+    try:
+        from core.config_manager import config_registry
+
+        window = float(
+            config_registry.get_value(
+                "CALL_TURN_INTERRUPT_WINDOW_SEC",
+                8.0,
+                value_type=float,
+                component="call_manager",
+            )
+        )
+    except (TypeError, ValueError):
+        window = 8.0
+    age = time.monotonic() - entry.started
+    if window <= 0 or age > window:
+        return False
+    entry.interrupted = True
+    entry.task.cancel()
+    log_info(
+        f"[QUEUE] Call {call_id}: new utterance {age:.1f}s into the previous turn — "
+        "interrupting it so both are answered together"
+    )
+    return True
+
+
+async def _requeue_interrupted(item: dict, priority: int) -> None:
+    """Put an interrupted call turn back; coalescing joins it with the new utterance."""
+    global _counter
+    _counter += 1
+    await _get_queue().put((_heap_key(priority), _counter, item))
+
+
+#: Structural turn flags a coalesced message must keep. They are set by the
+#: originating interface (``core.call_manager.CallManager.mark_turn`` for a call turn) and
+#: read downstream: the queue ranks on ``_call``; the context carries ``request_tts`` /
+#: ``is_voice_input`` to the reply path, which is what makes a call turn answered by voice.
+_CARRIED_TURN_FLAGS: tuple[str, ...] = (
+    "_call",
+    "call_id",
+    "request_tts",
+    "is_voice_input",
+    "interface_path",
+    # A merged vessel player chat must stay a direct address to the SyntH.
+    "_vessel_player_chat",
+    "_no_compact",
+    "voice_channel_id",
+)
+
+
+def _carry_turn_flags(merged: Any, batch: list) -> Any:
+    """Copy the structural turn flags of the coalesced ``batch`` onto ``merged``.
+
+    A merged message is a new object built from text only. Without this a call turn that
+    was queued behind another one lost its call/voice flags when the two were coalesced,
+    so its reply came back as text and the avatar went to WRITE instead of staying in THINK.
+    A flag is kept when ANY message of the batch carries it; the latest screen-share
+    attachment wins.
+    """
+    for name in _CARRIED_TURN_FLAGS:
+        for entry in batch:
+            value = getattr(entry.get("message"), name, None)
+            if value:
+                setattr(merged, name, value)
+    attachments = None
+    for entry in batch:
+        found = getattr(entry.get("message"), "attachments", None)
+        if found:
+            attachments = found
+    if attachments:
+        merged.attachments = attachments
+    return merged
+
+
 async def compact_similar_messages(first: dict, limit: int = 5) -> list:
     """Collect already-queued messages from same chat/thread/interface."""
     batch = [first]
@@ -1457,6 +1957,62 @@ async def compact_similar_messages(first: dict, limit: int = 5) -> list:
     return batch
 
 
+def _flatten_absorbed(bases: list) -> list:
+    """Expand each base element with the messages merged into it, oldest first."""
+    flat: list = []
+    for base in bases:
+        flat.append(base)
+        flat.extend(base.pop("absorbed", None) or [])
+    flat.sort(key=lambda entry: entry["timestamp"])
+    return flat
+
+
+def _build_merged_message(batch: list, base: Any) -> Any:
+    """Build the single message a coalesced ``batch`` is answered with.
+
+    One line per message, prefixed with its sender when it has one. When no message
+    of the batch has a ``from_user`` (vessel chat already carries the speaker in its
+    text) the merged one has none either, so the prompt layer does not prepend a
+    second, bogus "group" speaker.
+    """
+    lines = []
+    has_user = False
+    for b in batch:
+        msg = b.get("message")
+        if not (msg and getattr(msg, "text", None)):
+            continue
+        user = getattr(msg, "from_user", None)
+        if user:
+            has_user = True
+            # Prefer @username if present, otherwise prefer full_name
+            from core.user_utils import get_user_display_name, get_user_usertag
+
+            if getattr(user, "username", None):
+                name = get_user_usertag(user)
+            elif getattr(user, "full_name", None):
+                name = get_user_display_name(user)
+            else:
+                name = f"user_{get_user_display_name(user)}"
+            lines.append(f"{name}: {msg.text}")
+        else:
+            lines.append(msg.text)
+    merged = SimpleNamespace(
+        chat_id=getattr(base, "chat_id", None),
+        message_id=getattr(base, "message_id", None),
+        text="\n".join(lines),
+        from_user=(
+            SimpleNamespace(id=0, username="group", full_name="group")
+            if has_user
+            else None
+        ),
+        date=getattr(base, "date", datetime.utcnow()),
+        thread_id=getattr(base, "thread_id", None),
+        chat=getattr(base, "chat", None),
+        reply_to_message=getattr(base, "reply_to_message", None),
+    )
+    return _carry_turn_flags(merged, batch)
+
+
 async def _consumer_loop() -> None:
     """Continuously process queued messages one at a time."""
     log_info("[QUEUE] Consumer loop started")
@@ -1496,46 +2052,18 @@ async def _consumer_loop() -> None:
                     continue
 
             async with _get_lock():
-                batch = await compact_similar_messages(item)
-                final = batch[0]
+                bases = await compact_similar_messages(item)
+                final = bases[0]
+                # Elements merged at enqueue time (see ``_try_coalesce_pending``)
+                # join the batch here, so one turn answers all of them.
+                batch = _flatten_absorbed(bases)
                 if len(batch) > 1 and final.get("message"):
-                    lines = []
-                    for b in batch:
-                        msg = b.get("message")
-                        if not (msg and getattr(msg, "text", None)):
-                            continue
-                        user = getattr(msg, "from_user", None)
-                        if user:
-                            # Prefer @username if present, otherwise prefer full_name
-                            from core.user_utils import (
-                                get_user_display_name,
-                                get_user_usertag,
-                            )
-
-                            if getattr(user, "username", None):
-                                name = get_user_usertag(user)
-                            elif getattr(user, "full_name", None):
-                                name = get_user_display_name(user)
-                            else:
-                                name = f"user_{get_user_display_name(user)}"
-                            lines.append(f"{name}: {msg.text}")
-                        else:
-                            lines.append(msg.text)
-                    base = final["message"]
-                    merged = SimpleNamespace(
-                        chat_id=getattr(base, "chat_id", None),
-                        message_id=getattr(base, "message_id", None),
-                        text="\n".join(lines),
-                        from_user=SimpleNamespace(
-                            id=0, username="group", full_name="group"
-                        ),
-                        date=getattr(base, "date", datetime.utcnow()),
-                        thread_id=getattr(base, "thread_id", None),
-                        chat=getattr(base, "chat", None),
-                        reply_to_message=getattr(base, "reply_to_message", None),
-                    )
-                    final["message"] = merged
-                    final["context"] = batch[-1].get("context", final.get("context"))
+                    final["message"] = _build_merged_message(batch, final["message"])
+                    final["merged_count"] = len(batch)
+                    for entry in reversed(batch):
+                        if entry.get("context") is not None:
+                            final["context"] = entry["context"]
+                            break
                 log_debug(
                     f"[QUEUE] Processing message from chat {final.get('chat_id')}"
                 )
@@ -1589,7 +2117,7 @@ async def _consumer_loop() -> None:
 
             # Tell the supervisor watchdog which item is in flight: a stalled
             # generation is otherwise invisible while it happens.
-            _note_item_in_flight(final)
+            _note_item_in_flight(final, priority)
 
             try:
                 # Get timeout configuration from message_chain module
@@ -1677,6 +2205,11 @@ async def _consumer_loop() -> None:
                         # Propagate trainer flag so plugin_instance can route
                         # to TRAINER_CORTEX when a scope override is configured.
                         context["is_trainer"] = is_trainer
+                        # Chat/thread names resolved at enqueue time, for the prompt
+                        # ("current_chat"). Written even when empty so a previous
+                        # chat's name never lingers on a reused context.
+                        context["chat_name"] = final.get("chat_name")
+                        context["thread_name"] = final.get("message_thread_name")
                         # Propagate voice input flag from interface (used by message_chain TTS auto-inject)
                         # We explicitly write *both* True and False so that stale values
                         # from a previous message do not linger.  Previously we only
@@ -1707,6 +2240,26 @@ async def _consumer_loop() -> None:
                             context["request_tts"] = True
                         else:
                             context.pop("request_tts", None)
+
+                        # A live call: say so in the context (the prompt tells the model
+                        # it is on a call) and keep the avatar in THINK while the reply is
+                        # spoken. Written or cleared every turn so a call never lingers.
+                        _call_info = None
+                        if getattr(_queued_msg, "_call", False):
+                            from core.call_manager import get_call_manager
+
+                            _call_info = get_call_manager().turn_context(
+                                getattr(_queued_msg, "call_id", None)
+                            )
+                        if _call_info:
+                            context["call"] = _call_info
+                            context["request_tts"] = True
+                            context["is_voice_input"] = True
+                            context.setdefault(
+                                "animation_state_on_generation_start", "think"
+                            )
+                        else:
+                            context.pop("call", None)
 
                         # Propagate voice channel presence so the prompt engine can
                         # inform the LLM that the sender is in a voice channel — this
@@ -1771,6 +2324,9 @@ async def _consumer_loop() -> None:
                         )
 
                     async def _call_bot_generation_start() -> None:
+                        # "typing…" in the chat while the model generates (interfaces
+                        # that can show it implement send_activity; core/chat_activity).
+                        await chat_activity.begin(interface_path)
                         try:
                             bot_obj = final.get("bot")
                             if bot_obj is None:
@@ -1822,6 +2378,10 @@ async def _consumer_loop() -> None:
 
                         context_obj = _final.get("context")
                         if isinstance(context_obj, dict):
+                            if event == "start" and is_voice_reply(context_obj):
+                                # Spoken reply: no writing phase, the avatar stays in THINK
+                                # until the audio starts (Karada fires TALK).
+                                return "think"
                             if event == "start":
                                 for k in (
                                     "generation_animation_state_start",
@@ -1927,6 +2487,7 @@ async def _consumer_loop() -> None:
                         _interface_path: str = interface_path,
                         _context: Any = context,
                     ) -> None:
+                        await chat_activity.end(_interface_path)
                         try:
                             bot_obj = _final.get("bot")
                             if bot_obj is None:
@@ -1938,7 +2499,7 @@ async def _consumer_loop() -> None:
                             try:
                                 exc = task.exception()
                                 success = exc is None
-                            except Exception:
+                            except (Exception, asyncio.CancelledError):
                                 success = False
                             if inspect.iscoroutinefunction(fn):
                                 await fn(
@@ -2049,6 +2610,9 @@ async def _consumer_loop() -> None:
                             )
                         )
                         response_future = final.get("response_future")
+                        _register_call_turn(
+                            final, processing_task, priority, task_is_cancellable
+                        )
                         log_debug(
                             f"[QUEUE] Dispatched handle_incoming_message task for interface_path={interface_path}, interface={final.get('interface')} cancellable={task_is_cancellable}"
                         )
@@ -2122,10 +2686,18 @@ async def _consumer_loop() -> None:
                             continue
 
                         timed_out = False
+                        interrupted = False
                         try:
                             await asyncio.wait_for(
                                 processing_task, timeout=timeout_seconds
                             )
+                        except asyncio.CancelledError:
+                            # Only a deliberate interruption of a young call turn is
+                            # absorbed here; any other cancellation still propagates.
+                            if not _call_turn_interrupted(processing_task):
+                                raise
+                            interrupted = True
+                            await _requeue_interrupted(final, priority)
                         except asyncio.TimeoutError:
                             timed_out = True
                             log_error(
@@ -2263,14 +2835,19 @@ async def _consumer_loop() -> None:
                                 response_future is not None
                                 and not response_future.done()
                             ):
-                                if processing_task.done():
+                                if interrupted:
+                                    # The re-queued turn resolves it when it is answered.
+                                    pass
+                                elif processing_task.done():
                                     try:
                                         response_future.set_result(
                                             processing_task.result()
                                         )
                                     except Exception as exc:
+                                        _note_turn_failed()
                                         response_future.set_exception(exc)
                                 elif timed_out:
+                                    _note_turn_failed()
                                     response_future.set_exception(
                                         asyncio.TimeoutError(
                                             f"Message processing timed out after {timeout_seconds}s"
@@ -2328,6 +2905,7 @@ async def _consumer_loop() -> None:
                                 f"[QUEUE] Error checking pending queue for chat {chat_id}: {pending_e}"
                             )
             except Exception as e:  # pragma: no cover - plugin may misbehave
+                _note_turn_failed()
                 log_error(
                     f"[ERROR] Failed to process message from chat {final['chat_id']}: {e}\n{traceback.format_exc()}",
                 )
@@ -2351,6 +2929,7 @@ async def _consumer_loop() -> None:
                     log_warning(f"[QUEUE] Failed to send fallback message: {send_err}")
             finally:
                 _clear_item_in_flight()
+                _clear_call_turn()
                 for _ in batch:
                     _get_queue().task_done()
         except asyncio.CancelledError:

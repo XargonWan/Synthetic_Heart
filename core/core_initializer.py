@@ -6,11 +6,21 @@ import inspect
 import asyncio
 import functools
 import json
+import sys
 import threading
 from pathlib import Path
 from typing import Any
 from core.logging_utils import log_info, log_error, log_warning, log_debug
 from core.config import list_available_cortex_engines
+
+# Imported for its side effect: registers the CALL_* config vars (and the call
+# manager singleton is created lazily) before the config registry is loaded.
+import core.call_manager  # noqa: F401,E402
+
+# Importing this makes packages installed on first use of an engine (e.g. Vosk)
+# importable (it appends their persistent directory to sys.path) before any
+# engine loads, and registers AUTO_INSTALL_ENGINE_PACKAGES.
+import core.package_installer  # noqa: F401,E402
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional
 from enum import Enum
@@ -78,6 +88,49 @@ VENDORED_RUNTIME_DIR_SEGMENTS: frozenset[str] = frozenset(
         ".venv",
     }
 )
+
+#: Directory and file names inside a plugin that are TEST code, never plugins.
+#: A plugin may ship its own ``tests/`` tree (``plugins/rift_vessel/retroxr/tests``
+#: arrived with upstream on 2026-11-17). Importing those files drags in the
+#: repository's ``tests`` package, whose ``__init__`` installs stand-ins for
+#: ``telegram``/``telegram.error``/``telegram.ext`` and pulls in pytest, so the
+#: live process then binds a stub ``ApplicationBuilder`` and the Telegram bot
+#: cannot start (``AttributeError: 'ApplicationBuilder' object has no attribute
+#: 'token'``, live 2026-11-17). Test files also have no business being started.
+NON_PLUGIN_DIR_SEGMENTS: frozenset[str] = frozenset({"tests", "test", "__pycache__"})
+
+
+def is_plugin_candidate(py_file: Path, root: Path | None = None) -> bool:
+    """Whether a ``.py`` found by the recursive plugin scan is a plugin.
+
+    Skips package markers and private modules, vendored third-party runtime
+    trees, and a plugin's own test code. The test tree matters: importing
+    ``plugins/<p>/tests/conftest.py`` (upstream's retroxr plugin ships one) runs
+    ``from tests.conftest import ...``, which imports the repository's ``tests``
+    package. That package installs stand-ins for ``telegram``, ``telegram.error``
+    and ``telegram.ext`` into ``sys.modules`` and imports pytest, so the live
+    process then binds the stub ``ApplicationBuilder`` and ``start_bot()`` fails
+    with ``AttributeError: 'ApplicationBuilder' object has no attribute 'token'``
+    (live 2026-11-17, 2D checkout).
+    """
+    if py_file.name == "__init__.py" or py_file.name.startswith("_"):
+        return False
+    # Judge only the part of the path below the scan root: the checkout itself
+    # may live under a directory called ``test`` or ``tests`` (``~/tests/synth``),
+    # which must not disqualify every plugin.
+    parts = py_file.parts
+    if root is not None:
+        try:
+            parts = py_file.relative_to(root).parts
+        except ValueError:
+            pass
+    if any(part in VENDORED_RUNTIME_DIR_SEGMENTS for part in parts):
+        return False
+    if any(part in NON_PLUGIN_DIR_SEGMENTS for part in parts):
+        return False
+    if py_file.name == "conftest.py" or py_file.name.startswith("test_"):
+        return False
+    return True
 
 
 def derive_plugin_category(
@@ -880,6 +933,16 @@ class CoreInitializer:
 
             # Start all registered interfaces
             await self._start_interfaces()
+            self._schedule_avatar_sync()
+
+            # Tell the persona the core is up (and roughly how long it was
+            # away); also starts the "last seen alive" heartbeat.
+            try:
+                from core.system_events import record_boot
+
+                await record_boot()
+            except Exception as exc:  # pragma: no cover - defensive
+                log_debug(f"[core_initializer] boot event not recorded: {exc}")
 
             # Display summary at the end of initialization
             self._display_startup_summary()
@@ -1221,15 +1284,7 @@ class CoreInitializer:
                 continue
 
             for py_file in base_path.rglob("*.py"):
-                if py_file.name == "__init__.py" or py_file.name.startswith("_"):
-                    continue
-
-                # Skip vendored third-party runtime trees (npm node_modules,
-                # the SearXNG vendored source, etc.). These are not SyntH
-                # plugins and must not be imported or tracked as components.
-                if isinstance(py_file, Path) and any(
-                    part in VENDORED_RUNTIME_DIR_SEGMENTS for part in py_file.parts
-                ):
+                if not is_plugin_candidate(py_file, base_path):
                     continue
 
                 if (
@@ -2221,6 +2276,7 @@ class CoreInitializer:
         log_info(
             f"[core_initializer] 🔻 Plugin '{plugin_short_name}' disabled (unloaded)"
         )
+        await self._record_toggle_event(plugin_short_name, "plugin", False)
         return {"ok": True, "name": plugin_short_name, "enabled": False}
 
     async def enable_plugin(self, plugin_short_name: str) -> Dict[str, Any]:
@@ -2269,7 +2325,48 @@ class CoreInitializer:
         self._invalidate_action_caches()
         await self._build_actions_block()
         log_info(f"[core_initializer] 🔺 Plugin '{plugin_short_name}' enabled (loaded)")
+        await self._record_toggle_event(plugin_short_name, "plugin", True)
         return {"ok": True, "name": plugin_short_name, "enabled": True}
+
+    @staticmethod
+    def _schedule_avatar_sync(interface_name: str | None = None) -> None:
+        """Bring the synth avatar up to date shortly after interfaces connect.
+
+        An interface that was off (or not yet connected) when the avatar changed
+        catches up here; the per-interface applied version keeps it cheap — only
+        interfaces whose picture is out of date are touched.
+        """
+
+        async def _run() -> None:
+            try:
+                await asyncio.sleep(20)  # let the gateways connect first
+                from core import synth_avatar
+
+                if interface_name:
+                    await synth_avatar.sync_interface(interface_name)
+                else:
+                    await synth_avatar.broadcast_avatar_changed(catch_up=True)
+            except Exception as exc:  # pragma: no cover - defensive
+                log_debug(f"[core_initializer] avatar sync skipped: {exc}")
+
+        try:
+            asyncio.get_running_loop().create_task(_run())
+        except RuntimeError:  # pragma: no cover - no loop (sync context)
+            pass
+
+    @staticmethod
+    async def _record_toggle_event(name: str, kind: str, enabled: bool) -> None:
+        """Note a successful runtime toggle in the system-event window.
+
+        Recorded here, in the manager, so no plugin has to report its own
+        switch. Never raises: the toggle has already succeeded.
+        """
+        try:
+            from core.system_events import record_component_toggle
+
+            await record_component_toggle(name, kind, enabled)
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(f"[core_initializer] toggle event not recorded: {exc}")
 
     # ------------------------------------------------------------------
     # Runtime interface enable/disable (WebUI plugins/interfaces grid)
@@ -2332,7 +2429,8 @@ class CoreInitializer:
 
         The instance is kept in ``INTERFACE_REGISTRY`` (so it can be re-enabled
         without a re-import) but stopped, its actions removed from the registry
-        and it is dropped from ``active_interfaces``. A grey ghost component
+        and it is dropped from ``active_interfaces``. The prompt only lists
+        ``active_interfaces``, so the interface disappears from it at once. A grey ghost component
         record is kept so the WebUI still lists it. State is persisted.
         """
         if self.is_core_interface(interface_name):
@@ -2363,9 +2461,8 @@ class CoreInitializer:
                 details="Disabled from WebUI",
             )
 
-        self._invalidate_action_caches()
-        await self._build_actions_block()
-
+        # Persist the flag before rebuilding, so everything the rebuild reads
+        # already sees the interface as off.
         try:
             from core.config_manager import config_registry
 
@@ -2378,9 +2475,13 @@ class CoreInitializer:
                 f"[core_initializer] Failed to persist disabled state for interface {interface_name}: {exc}"
             )
 
+        self._invalidate_action_caches()
+        await self._build_actions_block()
+
         log_info(
             f"[core_initializer] 🔻 Interface '{interface_name}' disabled (stopped)"
         )
+        await self._record_toggle_event(interface_name, "interface", False)
         return {"ok": True, "name": interface_name, "enabled": False}
 
     async def enable_interface(self, interface_name: str) -> Dict[str, Any]:
@@ -2440,9 +2541,11 @@ class CoreInitializer:
 
         self._invalidate_action_caches()
         await self._build_actions_block()
+        self._schedule_avatar_sync(interface_name)
         log_info(
             f"[core_initializer] 🔺 Interface '{interface_name}' enabled (started)"
         )
+        await self._record_toggle_event(interface_name, "interface", True)
         return {"ok": True, "name": interface_name, "enabled": True}
 
     async def _instantiate_and_register(
@@ -2454,8 +2557,23 @@ class CoreInitializer:
         Returns True on success. Used by :meth:`enable_plugin`.
         """
         try:
-            module = importlib.import_module(module_name)
-            importlib.reload(module)
+            # Prefer the module already loaded: a package shim (``__init__`` that
+            # rebinds ``sys.modules[__name__]`` to its submodule, used by most
+            # plugins) has no ``__path__``, so importing a child of it fails.
+            module = sys.modules.get(module_name) or importlib.import_module(
+                module_name
+            )
+            try:
+                module = importlib.reload(module)
+            except AttributeError as exc:
+                # reload() also walks the parent's ``__path__``; the shim has
+                # none, so keep the loaded module and take a fresh instance.
+                if "__path__" not in str(exc):
+                    raise
+                log_debug(
+                    f"[core_initializer] {module_name} sits under a package shim; "
+                    "skipping reload"
+                )
         except Exception as exc:
             log_error(
                 f"[core_initializer] Failed to import {module_name} on enable: {exc}"
@@ -2645,6 +2763,19 @@ class CoreInitializer:
             log_error(f"[core_initializer] Error starting GrilloPlugin: {repr(e)}")
             self.startup_errors.append(f"GrilloPlugin: {e}")
 
+    def _is_inactive_interface_action(self, action_type: str) -> bool:
+        """True for a legacy ``message_<interface>`` action of an inactive interface.
+
+        Plugins such as ``message_plugin`` claim the per-interface message
+        actions for every interface at once. Whether the interface behind one is
+        switched on is the core's call, not the plugin's: when that interface is
+        known to the registry but not active, the action is not offered.
+        """
+        if not isinstance(action_type, str) or not action_type.startswith("message_"):
+            return False
+        target = action_type[len("message_") :]
+        return target in INTERFACE_REGISTRY and target not in self.active_interfaces
+
     async def _build_actions_block(self):
         """Collect and validate action schemas from all plugins and interfaces."""
         # TEMPORARILY DISABLE FLAG FOR TESTING
@@ -2791,6 +2922,12 @@ class CoreInitializer:
                     f"[core_initializer] Plugin {name} declares actions: {list(supported.keys())}"
                 )
                 for act, schema in supported.items():
+                    if self._is_inactive_interface_action(act):
+                        log_debug(
+                            f"[core_initializer] Action {act} from plugin {name} "
+                            "belongs to an inactive interface; withheld"
+                        )
+                        continue
                     _register(
                         act,
                         name,
@@ -2803,6 +2940,16 @@ class CoreInitializer:
         # --- Load interface actions from registry ---
         log_debug("[core_initializer] Starting interface loop")
         for name, iface in INTERFACE_REGISTRY.items():
+            # Registered means present in the prompt. Only interfaces the loader
+            # activated contribute: one switched off at runtime, disabled by
+            # config or missing its required configuration is not in
+            # ``active_interfaces``, so it must not advertise any action.
+            if name not in self.active_interfaces:
+                log_debug(
+                    f"[core_initializer] Interface {name} is not active; "
+                    "its actions are withheld from the prompt"
+                )
+                continue
             log_debug(f"[core_initializer] Processing interface: {name}")
             if not hasattr(iface, "get_supported_actions"):
                 continue
@@ -2858,7 +3005,9 @@ class CoreInitializer:
                     log_warning(
                         f"[core_initializer] Static injection from {plugin.__class__.__name__} must be a dict, got {type(data)}"
                     )
-        for iface in INTERFACE_REGISTRY.values():
+        for iface_name, iface in INTERFACE_REGISTRY.items():
+            if iface_name not in self.active_interfaces:
+                continue
             if hasattr(iface, "get_static_injection"):
                 try:
                     data = iface.get_static_injection()

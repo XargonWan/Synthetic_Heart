@@ -13,11 +13,39 @@ is guarded to no-op when the bot is already alive.
 The connector never creates agentic tasks and never writes diary/memory — the
 interface buffers experiences and flushes a single entry at end-of-session.
 
+## Server prerequisites (non-Microsoft accounts and skins)
+
+The bot joins with an offline username (no Microsoft or Mojang account), so the
+server has to be set up for it before Synth can enter the world:
+
+- **`online-mode=false`** in `server.properties` (restart afterwards). With
+  `online-mode=true` the server rejects the bot. Behind a proxy (Velocity or
+  BungeeCord), set the same on the proxy: `online-mode` in `velocity.toml`,
+  `online_mode` in BungeeCord's `config.yml`.
+- **`enforce-secure-profile=false`** on 1.19.1 and newer, otherwise the server
+  may refuse an offline client.
+- **Whitelist** (only if `white-list=true`): `/whitelist add <bot name>`. The name
+  is `MC_BOT_USERNAME` / `SYNTH_NAME`, at most 16 letters, digits or underscores.
+- **No password-login plugins** (AuthMe, LimboAuth and similar) unless they
+  exempt the bot. The bridge never sends `/login` or `/register`.
+
+Recommended server-side plugins:
+
+- **SkinsRestorer** (Paper, Spigot, Purpur, Velocity, BungeeCord): the recommended
+  skin provider, works on offline-mode servers. Install it on the backend the bot
+  joins.
+- **SkinRestorer** by Lionarius (Fabric, Forge, NeoForge, Quilt): the mod
+  equivalent for modded servers.
+- **LuckPerms** (optional): if the `/skin` commands are ignored for the bot, grant
+  its name the SkinsRestorer permissions or op it.
+
+Without a skin plugin the bot keeps the default skin. See *Skin* below.
+
 ## Enabling
 
 1. **Enable the plugin** — flip the Minecraft Vessel plugin **on** from its card
    in the WebUI Plugins tab. The bridge provisioner is gated by this toggle
-   (`PLUGIN_ENABLED__minecraft_vessel`); there is no separate bridge master switch.
+   (`PLUGIN_ENABLED__minecraft`); there is no separate bridge master switch.
    Note: if this plugin is enabled but the **Rift Vessel** core plugin is
    disabled, the card shows an **orange** LED — Minecraft can't connect until the
    core Vessel plugin is also enabled.
@@ -80,7 +108,7 @@ These live on the Rift Vessel **core** and apply to every world, not just Minecr
 ### Minecraft connector settings (`minecraft_vessel`)
 
 The bridge itself is gated by the plugin's own enable toggle
-(`PLUGIN_ENABLED__minecraft_vessel`) — there is no separate `MINECRAFT_BRIDGE_ENABLED`
+(`PLUGIN_ENABLED__minecraft`) — there is no separate `MINECRAFT_BRIDGE_ENABLED`
 key. Enable/disable the whole thing from the plugin card.
 
 | Key | Default | Advanced | Purpose |
@@ -97,6 +125,29 @@ key. Enable/disable the whole thing from the plugin card.
 | `MINECRAFT_SKIN_PUBLIC_BASE_URL` | *(empty)* | ✓ | Public base URL the Minecraft server can reach to fetch the uploaded skin. Leave empty to auto-derive: SyntH uses the WebUI host, and if that is a loopback it substitutes the machine's primary LAN IP so a server on the same LAN can reach it. Set explicitly for a VPN/public/reverse-proxy address. |
 | `MINECRAFT_SKIN_COMMAND_TEMPLATES` | *(empty)* | ✓ | Newline-separated list of chat commands tried in order at spawn. `{url}` / `{model}` are substituted. Empty tries both built-in provider syntaxes. |
 | `MINECRAFT_SKIN_COMMAND_TEMPLATE` | *(empty)* | ✓ | Legacy single-command override, kept for backward compatibility. Empty by default. |
+
+## `explore` (2026-11-05)
+
+Offered next to `wander` (which stays: the motor tick and a model that wants one hop still use it). `explore` is the
+core's walk (`plugins/rift_vessel/guide.md` "Exploration"): a chain of `goto` legs of 14-36 blocks (`GoalNearXZ`, range 3),
+sized to last until the next prompt, that **goes on the way it was going** (a trek, not a circle: 82% of legs continue
+the heading, against 67% without the habit), keeps 7+ blocks from hostile mobs, ends with `threat` when one comes close
+(the survival reflex deals with it, not the walk), and says afterwards what it came across (entities, blocks of interest).
+It is *blind*: the pathfinder says whether a place is reachable only by trying, so a `goto` that fails marks the place and
+three in a row end the walk. While it runs `motor_step` stands back (`deliberate_action_in_flight`) and someone else's
+chat interrupts it (the bot's own echo does not). It reads the bridge's `status` directly, never `get_world_state`: that
+read consumes the "took damage" delta. **No Minecraft server was available: this is tested against a fake bridge only.**
+
+## Blocks that cannot be broken
+
+`mine` and `collect_block` do not keep trying a block that will not break. They refuse up front, with a clear
+reason, when the game mode forbids it (`adventure` / `spectator`) or the block is unbreakable by nature
+(bedrock, barrier, ... — not in `creative`, where those can be broken). After a dig they wait a moment
+(`DIG_SETTLE_MS`) and re-read the cell: a server that protects the area (spawn protection, a claim or region
+plugin) puts the block back, and mineflayer has by then already shown it as broken locally. A block restored
+this way is remembered as *protected* for 10 minutes and skipped, and the next nearest block of that kind is
+taken instead. When every nearby block of the requested kind is skipped, the action fails with `reason`
+(`game_mode`, `unbreakable` or `protected`) and tells Synth to pick another block or area.
 
 ## Skin — how it works (important)
 

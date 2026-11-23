@@ -30,6 +30,7 @@ getting started.
    cortex
    interfaces
    peer_synths
+   bot_ward
    plugins
    plugins/generated_index
    self_growth
@@ -40,6 +41,7 @@ getting started.
    vrm_animations
    animation_system
    webui_controls
+   call_service
    synth_stage_frontend
    gemini/synth-live-voice-integration
    faq
@@ -59,6 +61,7 @@ getting started.
    dev_components
    api_endpoints
    logging
+   statistics
    agent_integration
    agentic_tools
    component_pattern

@@ -90,6 +90,58 @@ renders as the `[Setting]` block, listed first in
 - It is deployment configuration: edit it in the WebUI config (the
   `prompt_engine` component) or with `POST /api/config`.
 
+Runtime state: interfaces and system events
+-------------------------------------------
+
+Two more core-sourced blocks tell the persona about its own running state. Both
+are merged by `core.action_parser._add_runtime_state_injections`, rendered from
+`core.prompt_engine._PLUGIN_CONTEXT_BLOCKS`, and recomputed on every turn, so
+they follow a plugin or interface being switched on or off with no restart.
+
+`[Interfaces]`
+   One line naming the interfaces that are active right now (for example
+   `telegram, telegram_bot, synth_webui`). Ids only, a few tokens. The internal
+   `vessel` pseudo-interface is left out. The list comes from
+   `core.interface_paths.describe_active_interfaces`.
+
+   The path formats are added **on demand**: the `recon_interface_reference`
+   Recon plugin asks the shared Recon call whether the message talks about a chat
+   platform ("scrivimi su telegram") and, only then, injects the matching active
+   interfaces with their `interface_path` format (each interface's optional
+   `get_interface_path_hint()`) and the paths already known for them.
+
+`[Recent system events]`
+   The last few restarts and plugin / interface toggles, from the
+   `system_events` table (`core/system_events.py`)::
+
+      - 14:02 synth restarted (offline ~7 min, unexpected stop (last seen 13:55))
+      - 14:10 plugin blocklist disabled
+
+   A setting the user changes in the WebUI (``POST /api/config``) is noted too
+   (``user changed setting TTS_VOICE: anna -> luca``). Hidden internal flags are
+   skipped, a sensitive value is logged as ``value hidden`` and never shown, long
+   values are trimmed, and edits to one key within a minute (a slider) collapse
+   into one line.
+
+   Toggles are recorded by the core manager (`CoreInitializer.disable_*` /
+   `enable_*`), never by the plugin itself; a refused toggle records nothing. The
+   block disappears once the events are older than the window.
+
+   *Offline time is a rough figure.* A background heartbeat updates one reserved
+   row (`id = 1`) every `SYSTEM_HEARTBEAT_SECONDS`; a graceful stop writes a
+   `shutdown` event and freezes the heartbeat. At boot the newest of the two is
+   "last seen": a `shutdown` at least as recent as the heartbeat is a clean stop,
+   anything else an unexpected one (the container can be killed at any moment, so
+   the error is up to one heartbeat interval). With no heartbeat yet, the newest
+   recorded activity (`chat_history_cache`, `turn_reason_trail`,
+   `grillo_activity_log`) is used and labelled as an estimate; with none of them
+   nothing is claimed. A gap under two minutes is just the restart and is not
+   mentioned.
+
+Config (WebUI, `diagnostics` component): `SYSTEM_EVENTS_MAX_SHOWN` (default 5),
+`SYSTEM_EVENTS_WINDOW_MINUTES` (360), `SYSTEM_EVENTS_MAX_ROWS` (200),
+`SYSTEM_HEARTBEAT_SECONDS` (60), and `RECON_INTERFACE_REFERENCE_RECON_ENABLED`.
+
 Persona handling
 ----------------
 
@@ -139,6 +191,44 @@ For chat interfaces, the builder may also add `instructions_verbose`:
   wrappers and Cortex bridges.
 - Chat interface detection is performed dynamically by inspecting available
   `message_*` action owners, not by hardcoded interface names.
+
+Who is writing, and where
+-------------------------
+
+The persona profile may name a trainer, and the system prompt carries that bio on
+every turn. The model must therefore be told per turn that the sender is not
+always the trainer. This is decided in the core from raw data the interface puts
+on the message; no interface-specific logic lives in the prompt builder:
+
+- ``message.chat.type`` (``private``, ``group``, ``supergroup``, ``channel``) is
+  normalised by ``core.chat_context.resolve_chat_kind`` to ``dm`` or ``group``.
+  Only when an interface does not provide it does the core fall back to the
+  Telegram path convention.
+- ``message.from_user`` gives the sender; ``from_user.is_bot`` marks an automated
+  account (see :doc:`bot_ward`); ``context["is_trainer"]``'s comparison is exposed
+  by ``core.chat_context.sender_is_trainer`` (``None`` when no trainer is
+  configured for the interface, which means "unknown", never "not the trainer").
+- ``message.chat.title`` and the resolver-provided chat and thread names are
+  optional.
+
+What the model sees as a result:
+
+- ``input.payload.source`` carries ``is_trainer`` (when known) and ``chat_type``;
+  ``input.payload.current_chat`` carries ``chat_name`` and ``thread_name`` when
+  they are known.
+- The ``INTERLOCUTOR`` rule (``RULE_INTERLOCUTOR_IDENTITY``) says the sender is a
+  trainer only when ``is_trainer`` is true, and that an automated account is not
+  someone to complain to. It renders on every route except internal Grillo beats.
+- In a group, or when the history window has more than one human sender,
+  ``_history_to_turns`` prefixes each human turn with ``[Name]: ``. A DM with one
+  sender keeps the bare text.
+- The ``[People in this conversation]`` block always lists the current sender,
+  marked as the person writing now (and as an automated account when it is a
+  bot), even without a stored bio.
+- The standing SOUL profile (``SOUL_DSP_INJECT_ENABLED``) is not injected when the
+  sender is a bot or is known not to be the trainer.
+- The peer SyntH block is injected in group chats of the interfaces the
+  configured peers belong to (``core.peer_policy.PEER_INTERFACES``).
 
 Actions block
 -------------

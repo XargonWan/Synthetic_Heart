@@ -52,6 +52,18 @@ from plugins.rift_vessel.vessel_combat_strategy import (
     apply_combat_strategy,
     register_combat_strategy,
 )
+from plugins.rift_vessel.exploration import (
+    ExplorerMixin,
+    Hazard,
+    LookResult,
+    Probe,
+    Tuning,
+    WalkResult,
+    as_vec,
+    bearing,
+    explore_schema,
+    flat_dist,
+)
 from plugins.rift_vessel.vessel_base import (
     PerceptionCallback,
     PerceptionEvent,
@@ -234,10 +246,20 @@ def _detect_lan_ip() -> str | None:
     return ip
 
 
-class MinecraftConnector(VesselConnectorBase):
+class MinecraftConnector(ExplorerMixin, VesselConnectorBase):
     """Rift Vessel connector for Minecraft via the local Mineflayer bridge."""
 
     display_name = "Minecraft"
+    EXPLORE_WORLD = ENVIRONMENT
+    # Blocks, not metres in a room: legs of tens of blocks, a long memory of where it has been, a wide berth round
+    # anything hostile, and a strong habit of going on the way it was going (a trek, not a circle).
+    EXPLORE_TUNING = Tuning(
+        unseen_bonus=2.0, cost_weight=0.04, persistence=0.9, revisit_radius=14.0, revisit_penalty=2.5,
+        temperature=0.8, wild_chance=0.1, min_leg=8.0, hazard_margin=2.0, pause_min=1.0, pause_max=3.0,
+        blind_count=10, blind_near=14.0, blind_far=36.0, blind_seen_radius=14.0,
+    )
+    #: How far from a hostile mob it keeps (and, inside this, a walk ends): blocks.
+    EXPLORE_HOSTILE_RADIUS = 7.0
 
     def __init__(self) -> None:
         self._on_event: PerceptionCallback | None = None
@@ -1260,6 +1282,12 @@ class MinecraftConnector(VesselConnectorBase):
     async def _dispatch_event(self, raw: Dict[str, Any]) -> None:
         if not isinstance(raw, dict):
             return
+        # Someone else talking ends a walk at its next safe point: they are the next prompt, and the walk's end would
+        # be a second one. The body's own words (the bridge echoes them) are not someone else's.
+        if str(raw.get("event_type")) == "chat" and raw.get("actor") and self.idle_busy():
+            me = (self.get_in_world_name() or "").strip().lower()
+            if str(raw.get("actor")).strip().lower() != me:
+                self.cancel_explore("a player spoke", silent=True)
         # A `kill` event advances the questline's kill objectives (e.g. the
         # Ender Dragon). Structural: the mob game id comes straight from the
         # bridge, never a keyword scan. Fail-safe — a quest-store error must
@@ -1333,6 +1361,9 @@ class MinecraftConnector(VesselConnectorBase):
     ) -> VesselActionResult:
         if not self._connected:
             return VesselActionResult(ok=False, detail="not connected to a world")
+        if action == "explore":
+            started = self.start_explore(payload or {})
+            return VesselActionResult(ok=bool(started["ok"]), detail=started["detail"], data=started["data"])
         if action == "lookup_knowledge":
             return await self._act_lookup_knowledge(payload or {})
         if action in self._GOAL_VERBS:
@@ -1928,6 +1959,70 @@ class MinecraftConnector(VesselConnectorBase):
             return dest
         return self._reproject_destination(position, dest)
 
+    # ------------------------------------------------------------------
+    # Exploration: what the core asks of this body (plugins/rift_vessel/exploration.py)
+    # ------------------------------------------------------------------
+    #
+    # The bridge cannot list what is reachable (a pathfinder answers "is there a way to HERE"), so the walk is blind:
+    # the core makes up places round the body and a ``goto`` that finds no way marks the place. What the core adds is
+    # what ``wander`` lacks: the memory of where it has been, a budget in seconds, a wide berth round hostile mobs and a
+    # result told afterwards. Reads use the bridge's ``status`` directly, NOT ``get_world_state``: that read consumes the
+    # "took damage" delta the damage appraisal waits for.
+
+    async def _explore_status(self) -> Dict[str, Any] | None:
+        res = await self._post("/cmd", {"action": "status", "payload": {}})
+        if not res.get("ok"):
+            return None
+        data = res.get("data")
+        return data if isinstance(data, dict) else None
+
+    async def explore_probe(self, viewpoints, max_candidates):  # type: ignore[override]
+        if not self._connected:
+            return None
+        data = await self._explore_status()
+        pos = as_vec((data or {}).get("position"))
+        if pos is None:
+            return None
+        hazards = []
+        for e in (data or {}).get("entities") or []:
+            if isinstance(e, dict) and e.get("hostile"):
+                p = as_vec(e.get("position"))
+                if p is not None:
+                    hazards.append(Hazard(pos=p, radius=self.EXPLORE_HOSTILE_RADIUS, kind="threat"))
+        return Probe(position=pos, heading=getattr(self, "_explore_heading_seen", None), candidates=None, hazards=hazards)
+
+    async def explore_walk(self, pos, timeout):  # type: ignore[override]
+        before_data = await self._explore_status()
+        before = as_vec((before_data or {}).get("position"))
+        res = await self.act(
+            "goto",
+            {"x": pos[0], "z": pos[2], "range": 3, "timeout_ms": int(max(5.0, float(timeout)) * 1000)},
+        )
+        after_data = await self._explore_status()
+        after = as_vec((after_data or {}).get("position"))
+        moved = flat_dist(before, after) if before is not None and after is not None else 0.0
+        if before is not None and after is not None and moved > 1.0:
+            self._explore_heading_seen = bearing(before, after)
+        return WalkResult(ok=bool(res.ok), detail=str(res.detail or ""), position=after, moved=moved)
+
+    async def explore_look(self, seconds):  # type: ignore[override]
+        await self.explore_sleep(min(max(float(seconds), 0.0), 4.0))
+        data = await self._explore_status()
+        saw: list[dict[str, Any]] = []
+        names: set[str] = set()
+        for e in (data or {}).get("entities") or []:
+            if isinstance(e, dict) and not e.get("hostile") and e.get("name") and float(e.get("distance") or 0) <= 24:
+                names.add(str(e["name"]))
+        for b in (data or {}).get("blocks") or []:
+            if isinstance(b, dict) and b.get("name"):
+                names.add(str(b["name"]))
+        for name in sorted(names)[:8]:
+            saw.append({"name": name, "area": None})
+        return LookResult(saw=saw)
+
+    async def explore_halt(self):  # type: ignore[override]
+        await self._post("/cmd", {"action": "unfollow", "payload": {}})
+
     async def get_world_state(self) -> WorldState | None:
         if not self._connected:
             return None
@@ -2011,6 +2106,7 @@ class MinecraftConnector(VesselConnectorBase):
                 "respawn",
                 # Minecraft-specific gameplay verbs (see get_world_actions).
                 "goto",
+                "explore",
                 "mine",
                 "collect_block",
                 "place",
@@ -5066,6 +5162,9 @@ class MinecraftConnector(VesselConnectorBase):
                 "optional_fields": [],
                 "security_level": "low",
             },
+            "explore": explore_schema(
+                "It keeps well away from anything hostile and ends the walk if one comes close."
+            ),
             "wander": {
                 "description": (
                     "Roam to a random reachable spot nearby to explore on your "

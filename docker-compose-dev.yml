@@ -1,0 +1,25 @@
+# Development override: build the images from local sources instead of pulling
+# the published ones.
+#
+# Use it on top of the main file (the order matters, the dev file goes last):
+#
+#   docker compose -f docker-compose.yml -f docker-compose-dev.yml up -d --build
+#
+#   synth                 -> built from this checkout (.)
+#   synth-zen-llm-engine  -> built from ../zen-llm-engine (sibling checkout)
+#
+# Everything else (ports, volumes, env, database) is inherited unchanged from
+# docker-compose.yml. The images get local tags so the build never overwrites
+# the published xargonwan/* images you may have pulled.
+services:
+  synth:
+    image: synthetic_heart:dev
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+  synth-zen-llm-engine:
+    image: zen-llm-engine:dev
+    build:
+      context: ../zen-llm-engine
+      dockerfile: Dockerfile

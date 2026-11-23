@@ -421,6 +421,35 @@ class TestPriorityPreemption:
         cleared_state = await handler.get_full_state()
         assert cleared_state["face_values"] == {}
 
+    @pytest.mark.asyncio
+    async def test_face_frames_carry_the_skins_own_blendshape_weights(self) -> None:
+        """An emotion is sent as the ACTIVE SKIN's weights, never as a bare name each client must interpret
+        (a raw ``happy 0.65`` was drawn as the model's whole joy face by a client that took it literally)."""
+        handler, transport = _make_handler()
+        handler._emotion_presets = lambda: {  # type: ignore[method-assign]
+            "happy": {"mouth_smile": 0.25, "eyes_smile": 0.2},
+            "relaxed": {"eyes_smile": 0.15, "mouth_smile": 0.1},
+            "neutral": {},
+        }
+        await handler.set_face_values({"happy": 0.5, "relaxed": 1.0, "neutral": 0.3, "mouth_open": 0.4})
+        sent = transport.face_payloads[-1]["values"]
+        assert sent["mouth_smile"] == pytest.approx(0.125)  # happy 0.25*0.5 beats relaxed 0.1*1.0
+        assert sent["eyes_smile"] == pytest.approx(0.15)  # relaxed 0.15*1.0 beats happy 0.2*0.5
+        assert sent["mouth_open"] == pytest.approx(0.4)  # not an emotion of this skin: unchanged
+        assert "happy" not in sent and "neutral" not in sent
+        # the authoritative EMOTION state is untouched
+        assert handler._current_face_values["happy"] == pytest.approx(0.5)
+        # the periodic refresh sends the same resolved frame
+        await handler._broadcast_current_face_state()
+        assert transport.face_payloads[-1]["values"] == sent
+
+    @pytest.mark.asyncio
+    async def test_a_skin_without_presets_is_sent_the_values_as_they_are(self) -> None:
+        handler, transport = _make_handler()
+        handler._emotion_presets = lambda: {}  # type: ignore[method-assign]
+        await handler.set_face_values({"happy": 0.6})
+        assert transport.face_payloads[-1]["values"] == {"happy": 0.6}
+
 
 # ---------------------------------------------------------------------------
 # Phase 4: State priority registration

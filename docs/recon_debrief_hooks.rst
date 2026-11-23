@@ -74,6 +74,13 @@ Debrief situational notes
 - The situational-notes Debrief plugin extracts short-lived circumstances of
   the human ("dentist tomorrow", "moving house this week") into the SOUL
   ``situational_notes`` store, and retires the ones a turn shows have ended.
+- The extractor is shown the filed notes, ranked by relevance to the exchange and
+  each tagged with a reference (``[n1]``, ``[n2]`` ...). A note the human denies,
+  corrects or jokes about is retired by naming either its subject or its
+  reference under ``ended``; a reference matches regardless of wording or
+  language. A circumstance declared over in a turn is not re-filed in that same
+  turn, and an ``ended`` item that matches no active note is logged as a
+  warning (``matched no active note``).
 - The plugin's pane in the WebUI (Components → Debrief Situational Notes)
   shows the notes standing right now as editable text, one per line::
 

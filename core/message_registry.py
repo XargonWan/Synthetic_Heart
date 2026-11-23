@@ -55,8 +55,10 @@ def get_send_message_schema(
     """
     description = (
         "Send a message through any connected chat interface. The destination "
-        "is `interface_path` (e.g. 'telegram_bot/<chat_id>[/<thread_id>]', "
-        "'discord_bot/<guild_id>/<channel_id>', 'matrix/<room_id>'); when "
+        "is `interface_path` (e.g. 'telegram_bot/@username', 'telegram/@username', "
+        "'telegram_bot/<chat_id>[/<thread_id>]', 'telegram/<chat_id>[/<thread_id>]', "
+        "'discord_bot/<guild_id>/<channel_id>', 'matrix/<room_id>'; prefer the "
+        "@username form when the person has one); when "
         "replying to an incoming message you may omit it and the reply "
         "auto-routes to the origin conversation. Provide `text` and/or "
         "`media` (list of sandbox file paths; auto-detected image/video/"

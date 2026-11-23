@@ -382,6 +382,58 @@ async def test_vessel_reflection_ranked_above_player_chat(
     assert mq.PRIORITY_EMERGENCY > mq.PRIORITY_URGENT
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trainer_path", ["", "telegram_bot/999"])
+async def test_call_turn_ranked_between_reflection_and_chat(
+    monkeypatch: pytest.MonkeyPatch, trainer_path: str
+) -> None:
+    """A turn flagged ``_call`` gets PRIORITY_CALL, even from the trainer.
+
+    The call tier sits between rift/vessel reflection and every chat band:
+    ``EMERGENCY > URGENT > REFLECTION > CALL > HIGH > TRAINER > ... > GENERAL``.
+    """
+    import core.message_queue as mq
+
+    put_items = _patch_enqueue_hot_path(
+        monkeypatch, session_active=False, trainer_path=trainer_path
+    )
+    message = _make_message("telegram_bot/999")
+    message._call = True
+
+    await mq.enqueue(
+        bot=None,
+        message=message,
+        interface_id="telegram_bot",
+        skip_mention_check=True,
+    )
+
+    assert _semantic_priority(put_items) == mq.PRIORITY_CALL
+    assert put_items[-1][2]["call"] is True
+    assert mq.PRIORITY_REFLECTION > mq.PRIORITY_CALL > mq.PRIORITY_HIGH
+    assert mq.PRIORITY_HIGH > mq.PRIORITY_TRAINER > mq.PRIORITY_GENERAL
+    assert mq.priority_label(mq.PRIORITY_CALL) == "Call"
+
+
+@pytest.mark.asyncio
+async def test_non_call_turn_is_not_call_priority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without the ``_call`` flag an ordinary chat stays at GENERAL."""
+    import core.message_queue as mq
+
+    put_items = _patch_enqueue_hot_path(monkeypatch, session_active=False)
+
+    await mq.enqueue(
+        bot=None,
+        message=_make_message("telegram_bot/999"),
+        interface_id="telegram_bot",
+        skip_mention_check=True,
+    )
+
+    assert _semantic_priority(put_items) == mq.PRIORITY_GENERAL
+    assert put_items[-1][2]["call"] is False
+
+
 # ---------------------------------------------------------------------------
 # En-route element collection (_collect_en_route_sightings)
 # ---------------------------------------------------------------------------
@@ -828,3 +880,37 @@ async def test_describe_sighting_shows_known_player_identity() -> None:
     )
     assert plain is not None
     assert plain == "sheep (~3 blocks E)"
+
+
+@pytest.mark.asyncio
+async def test_reconnect_reuses_the_server_the_session_was_entered_with(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dropped world is retried on the override it was entered with, not the
+    saved default host (the default host once swallowed every retry)."""
+    from core import core_initializer
+    from interface.vessel_interface import VesselInterface
+
+    calls: list[dict[str, Any]] = []
+
+    class _Plugin:
+        def connect_overrides_for(self, name: str) -> dict[str, Any] | None:
+            return {"host": "pvp.example.net", "port": 25565}
+
+        async def connect_world(
+            self,
+            connector_name: str | None = None,
+            overrides: dict[str, Any] | None = None,
+        ) -> None:
+            calls.append({"name": connector_name, "overrides": overrides})
+
+    monkeypatch.setitem(core_initializer.PLUGIN_REGISTRY, "vessel_plugin", _Plugin())
+    iface = VesselInterface.__new__(VesselInterface)
+    await iface._attempt_reconnect("minecraft")
+
+    assert calls == [
+        {
+            "name": "minecraft",
+            "overrides": {"host": "pvp.example.net", "port": 25565},
+        }
+    ]

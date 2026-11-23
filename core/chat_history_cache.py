@@ -68,6 +68,40 @@ async def init_chat_history_table() -> None:
         log_error(f"[chat_history_cache] Failed to create table: {e}")
 
 
+async def chat_message_exists(
+    interface_path: str, sender_id: str, timestamp: datetime
+) -> bool:
+    """True when a row from ``sender_id`` at exactly ``timestamp`` is stored.
+
+    Lets an interface that re-reads a chat from its own server (after downtime)
+    tell what it already handled. Interface timestamps are second-precise and
+    stored as given, so equality is the right test. A failed lookup answers
+    ``False``: a message handled twice is better than one never handled.
+    """
+    if not interface_path or timestamp is None:
+        return False
+    try:
+        from datetime import timezone
+
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        timestamp = timestamp.astimezone(timezone.utc)
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT 1 FROM chat_history_cache
+                    WHERE interface_path = %s AND sender_id = %s AND created_at = %s
+                    LIMIT 1
+                    """,
+                    (interface_path, str(sender_id), timestamp),
+                )
+                return await cur.fetchone() is not None
+    except Exception as e:
+        log_debug(f"[chat_history_cache] existence check failed: {e}")
+        return False
+
+
 async def save_chat_message(
     interface_path: str,
     message_text: str,
