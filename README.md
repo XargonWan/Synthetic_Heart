@@ -371,12 +371,13 @@ Both servers are pre-configured for **Claude Code** (`.mcp.json`). No additional
 ## What's next (Planned features & fixes)
 Here are the main improvements and integrations we plan to work on — contributions are welcome:
 
-- Multimodal persistence: allow SyntH to take video calls from the WebUI and stream their own video as a webcam, useful for those who wish to stream gameplays or just talk face to face, even on other applications
+- ~~Multimodal persistence: allow SyntH to take video calls from the WebUI and stream their own video as a webcam, useful for those who wish to stream gameplays or just talk face to face, even on other applications~~ [done](https://github.com/XargonWan/Synthetic_Heart/pull/418)
 - ~~VR Support: meet your SyntH in a VR space~~ [done](https://mod.io/g/retroxr/m/synthetic-heart-rift)
+- Plugins repository: search and download new plugins and add community plugin repositories [doing]
 - More games added: Now the Rift Vessels supports Minecraft and RetroXR, but other game plugins are planned to be added next
 - Extended goals support: the Synth will be able to use the goals system outside the gaming context for real life matters
-- Plugins store / repository: search and download new plugins and add community plugin repositories
-- Live2D models
+- Karada State server: Live2D/Inochi2D model adapter
 - More interfaces
+- Even further improvements to self consciousness and personal will
 
 If you're interested in helping implement these features or testing them, open an issue or a PR and tag it with the relevant area (e.g. `interface`, `cortex`, `plugin`, etc.).
