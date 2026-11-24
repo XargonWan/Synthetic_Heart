@@ -35,6 +35,7 @@ from typing import Any, Optional
 
 from core.config_manager import config_registry
 from core.core_initializer import register_plugin
+from core.time_zone_utils import get_local_timezone
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.variables_engine import register_exposed_var
 
@@ -346,7 +347,7 @@ class GrilloWeeklyReviewPlugin:
 
     @staticmethod
     def _seconds_until_next_run(day_name: str, hhmm: str) -> int:
-        """Seconds until the next occurrence of ``day_name`` at ``hhmm`` (UTC)."""
+        """Seconds until the next ``day_name`` at ``hhmm`` in the configured timezone."""
         try:
             parts = str(hhmm).split(":")
             hour = int(parts[0])
@@ -356,13 +357,17 @@ class GrilloWeeklyReviewPlugin:
 
         target_weekday = _WEEKDAY_INDEX.get(str(day_name).strip().lower(), 6)
 
-        now = datetime.now(timezone.utc)
+        # Day and time are read on the configured wall clock (``TZ``); the
+        # scheduler and the database keep working in UTC.
+        now = datetime.now(get_local_timezone())
         target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         days_ahead = (target_weekday - now.weekday()) % 7
         target = target + timedelta(days=days_ahead)
         if target <= now:
             target = target + timedelta(days=7)
-        delta = (target - now).total_seconds()
+        delta = (
+            target.astimezone(timezone.utc) - now.astimezone(timezone.utc)
+        ).total_seconds()
         return max(0, int(delta))
 
     # -------------------------------------------------------- context builders

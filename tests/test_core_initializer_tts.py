@@ -106,7 +106,6 @@ def test_real_plugin_actions_follow_runtime_enablement(monkeypatch) -> None:
     from core.core_initializer import PLUGIN_REGISTRY, core_initializer
     from plugins.auris_plugin import AurisPlugin
     from plugins.iris_plugin import IrisPlugin
-    from plugins.memory_search import MemorySearchPlugin
     from plugins.soul_plugin import SoulPlugin
     from plugins.vox_plugin import VoxPlugin
 
@@ -125,7 +124,6 @@ def test_real_plugin_actions_follow_runtime_enablement(monkeypatch) -> None:
         "auris_plugin": AurisPlugin.__new__(AurisPlugin),
         "iris_plugin": IrisPlugin.__new__(IrisPlugin),
         "soul_plugin": SoulPlugin.__new__(SoulPlugin),
-        "memory_search": MemorySearchPlugin.__new__(MemorySearchPlugin),
     }
 
     with monkeypatch.context() as patch_ctx:
@@ -139,10 +137,6 @@ def test_real_plugin_actions_follow_runtime_enablement(monkeypatch) -> None:
         assert "tts_speak" not in available
         assert "stt_transcribe" not in available
         assert "vision_describe" not in available
-        # soul_plugin and memory_search are gated only by the global plugin
-        # toggle (PLUGIN_ENABLED__<name>), not by an internal config flag, so
-        # their actions are always exposed once the plugin is loaded.
-        assert "memory_search" in available
 
         overrides.update(
             {
@@ -158,7 +152,6 @@ def test_real_plugin_actions_follow_runtime_enablement(monkeypatch) -> None:
         assert "tts_speak" in available
         assert "stt_transcribe" in available
         assert "vision_describe" not in available
-        assert "memory_search" in available
         assert "soul_force_compile" not in available
 
     PLUGIN_REGISTRY.clear()

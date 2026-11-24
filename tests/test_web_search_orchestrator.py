@@ -1227,3 +1227,86 @@ async def test_search_partial_link_failure_does_not_fail_task(
         "https://ok.test/a": "ok",
         "https://blocked.test/b": "blocked",
     }
+
+
+def _history(*rows: tuple[str, str]) -> Any:
+    from collections import deque
+
+    return deque({"sender_name": who, "text": text} for who, text in rows)
+
+
+@pytest.mark.asyncio
+async def test_own_replies_are_the_trailing_run_after_the_last_person(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only her lines after the last human message count, oldest first."""
+    from core import chat_history_cache
+
+    async def _load(*_a: Any, **_k: Any) -> Any:
+        return _history(
+            ("self", "old answer"),
+            ("Jay", "Do you remember X?"),
+            ("self", "first part"),
+            ("self", "second   part"),
+        )
+
+    monkeypatch.setattr(chat_history_cache, "load_chat_history", _load)
+    got = await search_orchestrator._own_replies_since_last_turn("telegram/1")
+    assert got == ["first part", "second part"]
+
+
+@pytest.mark.asyncio
+async def test_own_replies_empty_when_the_person_spoke_last_or_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core import chat_history_cache
+
+    async def _person_last(*_a: Any, **_k: Any) -> Any:
+        return _history(("self", "hi"), ("Jay", "hello"))
+
+    monkeypatch.setattr(chat_history_cache, "load_chat_history", _person_last)
+    assert await search_orchestrator._own_replies_since_last_turn("t/1") == []
+    assert await search_orchestrator._own_replies_since_last_turn(None) == []
+
+    async def _boom(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(chat_history_cache, "load_chat_history", _boom)
+    assert await search_orchestrator._own_replies_since_last_turn("t/1") == []
+
+
+@pytest.mark.asyncio
+async def test_delivery_prompt_carries_what_she_already_said(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The delivery turn must show her earlier reply so it continues from it."""
+    from core import chat_history_cache
+
+    async def _load(*_a: Any, **_k: Any) -> Any:
+        return _history(("Jay", "Do you remember X?"), ("self", "Of course I do!"))
+
+    monkeypatch.setattr(chat_history_cache, "load_chat_history", _load)
+
+    sent: dict[str, Any] = {}
+
+    class _FakeQueue:
+        @staticmethod
+        async def enqueue_low_priority(bot: Any, message: Any, **_k: Any) -> None:
+            sent["text"] = message.text
+
+    import core
+
+    monkeypatch.setattr(core, "message_queue", _FakeQueue, raising=False)
+
+    await SearchOrchestrator()._deliver(
+        interface_path="telegram/1",
+        result_text="FOUND SOMETHING",
+        search_context="Do you remember X?",
+        queries=["X"],
+        context_memory={},
+        task_id="t2",
+    )
+
+    assert "YOU HAVE ALREADY REPLIED" in sent["text"]
+    assert '- "Of course I do!"' in sent["text"]
+    assert sent["text"].index("ALREADY REPLIED") < sent["text"].index("FOUND SOMETHING")

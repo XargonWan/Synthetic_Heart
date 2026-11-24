@@ -748,6 +748,27 @@ async def handle_incoming_message(
                             "[plugin_instance] Appended Iris vision analysis to prompt text"
                         )
 
+                        # Keep what Iris saw under the id of the message that
+                        # carried the media, so a later reply to that message can
+                        # quote it (a photo without a caption leaves no history
+                        # text to quote). A promoted reply (Telegram hands the
+                        # replied photo to the replying message) names the id of
+                        # the message the photo really belongs to.
+                        if not getattr(iris_result, "is_placeholder", False):
+                            _media_ref = getattr(
+                                message, "media_source_message_id", None
+                            ) or getattr(message, "message_id", None)
+                            _media_path = getattr(message, "interface_path", None) or (
+                                context_memory_or_prompt.get("interface_path")
+                                if isinstance(context_memory_or_prompt, dict)
+                                else None
+                            )
+                            from core import media_descriptions
+
+                            await media_descriptions.remember(
+                                _media_path, _media_ref, iris_result.description
+                            )
+
                         # Persist the enriched text into the already-saved
                         # chat-history row so the description survives across
                         # turns (the raw caption was saved upstream by the
@@ -1725,6 +1746,17 @@ def _build_unviewable_media_placeholder(
             "see its content right now."
         )
     media_label = mime_type or "media file"
+    if reason == "timeout":
+        # Late is not down: the engine is configured and was asked, it did not
+        # answer in time. Saying "vision is not available" made the persona tell
+        # people (and write in her diary) that her eyes were broken.
+        return (
+            f"The user sent a {media_label} attachment. "
+            "The Iris vision subsystem did not answer in time, so the image content "
+            "could not be read this time. Acknowledge the attachment, say you could "
+            "not look at it properly right now and that they can send it again; do "
+            "not say that vision is switched off or broken for good."
+        )
     return (
         f"The user sent a {media_label} attachment. "
         f"The Iris vision subsystem is currently {reason}, so the image content "
@@ -1806,6 +1838,23 @@ def _get_active_auris_engine() -> str:
         return "disabled"
 
 
+_IRIS_ENGINE_DEADLINE_SECONDS = 120.0
+_IRIS_DEADLINE_MARGIN_SECONDS = 15.0
+
+
+async def _iris_total_deadline_seconds() -> float:
+    """Longest a photo may take: the active engine plus every fallback, each cut at its own deadline."""
+    try:
+        from core.config import get_iris_fallback_engines_async
+
+        fallbacks = len(await get_iris_fallback_engines_async())
+    except Exception:
+        fallbacks = 0
+    return (
+        _IRIS_ENGINE_DEADLINE_SECONDS * (1 + fallbacks) + _IRIS_DEADLINE_MARGIN_SECONDS
+    )
+
+
 async def _describe_attachment_images_with_iris(
     attachments: list[dict],
     prompt: str | None = None,
@@ -1854,6 +1903,7 @@ async def _describe_attachment_images_with_iris(
                     is_sticker=first_media_is_sticker,
                 ),
                 is_sticker=first_media_is_sticker,
+                is_placeholder=True,
             )
         # Refresh config before reading _active_engine_name so we get the
         # DB-loaded value rather than the hard-coded startup default ("disabled").
@@ -1873,6 +1923,7 @@ async def _describe_attachment_images_with_iris(
                     is_sticker=first_media_is_sticker,
                 ),
                 is_sticker=first_media_is_sticker,
+                is_placeholder=True,
             )
         log_info(
             f"[plugin_instance] Iris active engine: '{active_engine}', processing {len(attachments)} attachment(s)"
@@ -1886,8 +1937,10 @@ async def _describe_attachment_images_with_iris(
                 is_sticker=first_media_is_sticker,
             ),
             is_sticker=first_media_is_sticker,
+            is_placeholder=True,
         )
 
+    failure_reason = "error"
     for attachment in attachments:
         mime_type = str(
             attachment.get("mime_type")
@@ -2002,15 +2055,22 @@ async def _describe_attachment_images_with_iris(
                 base_prompt = prompt or getattr(iris, "_default_prompt", "") or ""
                 effective_prompt = base_prompt + "\n\n" + effective_prompt
             try:
+                # The active engine is cut at its own deadline (the bridge's 120 s)
+                # and the configured fallback engines then get theirs, so this outer
+                # limit must cover all of them: it used to be 120 s too, so it fired
+                # at the same instant as the first engine's and no fallback ever ran.
+                iris_deadline = await _iris_total_deadline_seconds()
                 result = await asyncio.wait_for(
                     iris.describe_media(analysis_path, mime_type, effective_prompt),
-                    timeout=120.0,
+                    timeout=iris_deadline,
                 )
             except asyncio.TimeoutError:
                 log_warning(
-                    f"[plugin_instance] Iris: describe_media timed out after 120s for {mime_type}"
+                    f"[plugin_instance] Iris: describe_media timed out after "
+                    f"{iris_deadline:.0f}s for {mime_type}"
                 )
                 result = None
+                failure_reason = "timeout"
             if result and result.description:
                 # Record the durable cache location on the result so callers can
                 # persist it into chat-history metadata for re-inspection.
@@ -2040,9 +2100,12 @@ async def _describe_attachment_images_with_iris(
 
     return IrisResult(
         description=_build_unviewable_media_placeholder(
-            first_media_mime_type, reason="error", is_sticker=first_media_is_sticker
+            first_media_mime_type,
+            reason=failure_reason,
+            is_sticker=first_media_is_sticker,
         ),
         is_sticker=first_media_is_sticker,
+        is_placeholder=True,
     )
 
 

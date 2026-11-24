@@ -146,13 +146,23 @@ _EXTRACT_INSTRUCTIONS = (
     "subject under 'lifted'.\n"
     "A note must rest on the HUMAN's words. Never write a note from something only "
     "the persona asserted, and never a note about a known false claim.\n"
+    "ALSO judge PRIVACY, in the 'privacy' object. Set confidential to true when "
+    "the human shared something in confidence or something clearly sensitive and "
+    "personal that the persona must not repeat to other people: a secret, "
+    "something they asked you to keep to yourself, or private matters of health, "
+    "family, relationships, money, the law, or sensitive details about a third "
+    "party. Judge from the whole exchange and its tone, never from single words. "
+    "Ordinary chat, public facts and things the human is plainly happy to have "
+    "repeated are NOT confidential. 'reason' is one short sentence.\n"
     'Return ONLY a JSON object: {"notes": [{"note_type": ..., "subject": ..., '
     '"summary": ..., "priority": 0, "confidence": 0.5, '
     '"valid_from": "2026-05-05T00:00:00+00:00", '
     '"valid_until": "2026-05-12T00:00:00+00:00"}], "ended": ["<subject or [nN] reference '
     'of a note that is now over>"], "retracted": [{"subject": ..., "claim": ..., '
-    '"reason": ...}], "lifted": ["<subject>"]} — return empty lists for whatever was '
-    "not said; when nothing at all was said, all four are empty."
+    '"reason": ...}], "lifted": ["<subject>"], "privacy": {"confidential": false, '
+    '"reason": ""}} — return empty lists for whatever was '
+    "not said; when nothing at all was said, all four lists are empty and "
+    "confidential is false."
 )
 
 
@@ -299,6 +309,51 @@ class DebriefSituationalNotesPlugin:
             parse_retractions(corrected),
             parse_lifted(corrected),
         )
+
+    @staticmethod
+    def _extract_confidential(llm_text: str) -> bool:
+        """Whether the model judged the exchange to be shared in confidence.
+
+        Read from its own parse of the answer so the note parsing contract does not
+        change. Anything unreadable counts as "not confidential": the flag only ever
+        tightens who can be reminded of a memory, and a broken answer must not.
+        """
+        try:
+            parsed = extract_json_from_text(llm_text, return_metadata=False)
+        except Exception:
+            return False
+        if not isinstance(parsed, dict):
+            return False
+        privacy = parsed.get("privacy")
+        value = privacy.get("confidential") if isinstance(privacy, dict) else privacy
+        if isinstance(value, str):
+            return value.strip().lower() in ("true", "yes", "1")
+        return value is True
+
+    @staticmethod
+    def _get_soul_plugin() -> Any | None:
+        try:
+            from core.core_initializer import PLUGIN_REGISTRY
+
+            return PLUGIN_REGISTRY.get("soul_plugin")
+        except Exception:
+            return None
+
+    def _mark_private(self, interface_path: str | None) -> str | None:
+        """Tell SOUL this chat's current window is confidential.
+
+        Returns the session id private notes must carry (so only that chat sees
+        them), or ``None`` when SOUL is absent or the chat is unknown.
+        """
+        soul = self._get_soul_plugin()
+        if soul is None or not interface_path:
+            return None
+        try:
+            soul.mark_conversation_private(str(interface_path))
+            return str(soul.session_id_for(str(interface_path)))
+        except Exception as exc:
+            log_warning(f"[debrief_situational_notes] could not mark private: {exc}")
+            return None
 
     @staticmethod
     def _get_soul_repository() -> Any | None:
@@ -514,7 +569,10 @@ class DebriefSituationalNotesPlugin:
             )
 
     async def _store_notes(
-        self, candidates: List[Dict[str, Any]], session_id: str | None
+        self,
+        candidates: List[Dict[str, Any]],
+        session_id: str | None,
+        visibility: str = "shared",
     ) -> int:
         """Validate and persist the extracted notes. Returns how many were stored."""
         repository = self._get_soul_repository()
@@ -543,6 +601,7 @@ class DebriefSituationalNotesPlugin:
                 expired_at=model.expired_at,
                 source="debrief",
                 session_id=session_id,
+                visibility=visibility,
             )
             try:
                 keep_id = await repository.upsert_situational_note(note)
@@ -811,6 +870,19 @@ class DebriefSituationalNotesPlugin:
             context=context,
             original_message=original_message,
         )
+        # The privacy verdict comes from the same call and is applied even when the
+        # turn files no note: it is what keeps the confidence out of other chats.
+        interface_path = getattr(
+            original_message, "interface_path", None
+        ) or context.get("interface_path")
+        private_session: str | None = None
+        if self._extract_confidential(llm_text):
+            private_session = self._mark_private(interface_path)
+            log_info(
+                "[debrief_situational_notes] exchange judged confidential: its "
+                "memories and notes stay in this chat"
+            )
+
         if not (candidates or ended_subjects or retracted or lifted):
             return None
 
@@ -856,7 +928,12 @@ class DebriefSituationalNotesPlugin:
                     continue
                 kept.append(candidate)
             candidates = kept
-        stored = await self._store_notes(candidates, session_id)
+        if private_session:
+            stored = await self._store_notes(
+                candidates, private_session, visibility="private"
+            )
+        else:
+            stored = await self._store_notes(candidates, session_id)
         if stored:
             log_info(f"[debrief_situational_notes] Stored {stored} situational note(s)")
         return None

@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 
 from core.config import get_active_cortex_engine
 from core.core_initializer import register_plugin
+from core.action_tiers import register_always_full_actions
 from core.cortex_registry import get_cortex_registry
 from core.db import get_conn_ctx, _get_db_type
 from core.logging_utils import log_error, log_info, log_debug, log_warning
@@ -783,6 +784,91 @@ def _is_user_message_overflow_error(exc: Exception) -> bool:
     return "data too long for column 'user_message'" in msg
 
 
+def _schedule_soul_sync(entry_id: int | None) -> None:
+    """File the diary row in SOUL in the background, without delaying the write.
+
+    SOUL is where long-term recall lives, so a row that is only in ``ai_diary``
+    cannot be found by meaning. Best effort by design: with SOUL off, or on any
+    failure, the diary write stands and the next write of the same day files the
+    whole row again (the cell key is the row id, so it updates in place).
+    """
+    if not entry_id:
+        return
+    try:
+        asyncio.get_running_loop().create_task(_sync_diary_entry_to_soul(int(entry_id)))
+    except RuntimeError:
+        pass
+
+
+def _schedule_soul_retire(entry_ids: list[int]) -> None:
+    """Drop the SOUL cells of rows the consolidator folded into another row.
+
+    Their text now lives in the consolidated row, which is refiled; leaving the
+    fragments would recall the same afternoon twice. The cells are archived by the
+    repository, not destroyed.
+    """
+    if not entry_ids:
+        return
+    try:
+        asyncio.get_running_loop().create_task(_retire_diary_entries_in_soul(entry_ids))
+    except RuntimeError:
+        pass
+
+
+async def _retire_diary_entries_in_soul(entry_ids: list[int]) -> None:
+    try:
+        from core.soul.service import SoulService
+
+        service = SoulService.from_registry()
+        if service is None:
+            return
+        for entry_id in entry_ids:
+            await service.retire_source(
+                kind="journal", source_key=f"ai_diary:{entry_id}"
+            )
+    except Exception as exc:
+        log_debug(f"[ai_diary] SOUL retire skipped for {entry_ids}: {exc}")
+
+
+async def _sync_diary_entry_to_soul(entry_id: int) -> None:
+    try:
+        from core.soul.legacy_ingest import diary_emotion, diary_text
+        from core.soul.service import SoulService
+
+        service = SoulService.from_registry()
+        if service is None:
+            return
+        columns = (
+            "id",
+            "content",
+            "personal_thought",
+            "emotions",
+            "interaction_summary",
+            "created_at",
+        )
+        async with get_db() as conn:
+            cursor = await conn.cursor()
+            await cursor.execute(
+                f"SELECT {', '.join(columns)} FROM ai_diary WHERE id = %s",
+                (entry_id,),
+            )
+            raw = await cursor.fetchone()
+        if not raw:
+            return
+        row = dict(zip(columns, raw))
+        emotion, intensity = diary_emotion(row)
+        await service.ingest_chunked(
+            kind="journal",
+            source_key=f"ai_diary:{entry_id}",
+            text=diary_text(row),
+            event_timestamp=row["created_at"],
+            emotion=emotion,
+            intensity=intensity,
+        )
+    except Exception as exc:
+        log_debug(f"[ai_diary] SOUL sync skipped for entry {entry_id}: {exc}")
+
+
 async def _upsert_diary_impl(
     content: str,
     personal_thought: str | None,
@@ -880,6 +966,7 @@ async def _upsert_diary_impl(
                 log_debug(
                     f"[ai_diary] Updated today's diary entry id={ex_id}: {content[:50]}..."
                 )
+                _schedule_soul_sync(ex_id)
                 return ex_id
             else:
                 insert_sql = """
@@ -914,6 +1001,7 @@ async def _upsert_diary_impl(
                 log_debug(
                     f"[ai_diary] Created new diary entry for today: {content[:50]}..."
                 )
+                _schedule_soul_sync(diary_entry_id)
                 return diary_entry_id
     except Exception as e:
         log_error(f"[ai_diary] _upsert_diary_impl failed: {e}")
@@ -2119,6 +2207,11 @@ class DiaryPlugin:
                             "[ai_diary] Consolidation archived row cleanup failed for "
                             f"entry {entry_id}: {archive_result.get('error')}"
                         )
+                    else:
+                        _schedule_soul_retire(stale_entry_ids)
+
+                # The row now holds the consolidated prose; refile it in SOUL.
+                _schedule_soul_sync(int(entry_id))
 
                 log_info(
                     f"[ai_diary] Diary entry {entry_id} consolidated to clean prose"
@@ -2188,6 +2281,42 @@ async def _day_combined_text(entry_id: int) -> str | None:
     return _DIARY_FRAGMENT_SEPARATOR.join((row.get("content") or "") for row in rows)
 
 
+_DIARY_COPY_COLUMNS = (
+    "id",
+    "content",
+    "personal_thought",
+    "emotions",
+    "interaction_summary",
+    "created_at",
+    "interface",
+    "chat_id",
+    "thread_id",
+    "user_message",
+    "context_tags",
+)
+
+
+def _copy_diary_row(target: str, entry: Dict[str, Any]) -> None:
+    """Copy one diary row into ``target`` (``ai_diary`` or ``ai_diary_archive``).
+
+    ``involved_users`` is copied too: the archive INSERT used to list only the other
+    columns, so every archived or restored row lost who it was about. Schemas that
+    predate the column (the MariaDB DDL of the archive) cannot take it, so the copy
+    falls back to the columns both have rather than failing the archive.
+    """
+    with_users = _DIARY_COPY_COLUMNS + ("involved_users",)
+    for columns in (with_users, _DIARY_COPY_COLUMNS):
+        names = ", ".join(columns)
+        marks = ", ".join(["%s"] * len(columns))
+        values = tuple(entry.get(column) for column in columns)
+        try:
+            _run(_execute(f"INSERT INTO {target} ({names}) VALUES ({marks})", values))
+            return
+        except Exception:
+            if columns is _DIARY_COPY_COLUMNS:
+                raise
+
+
 def archive_diary_entries(entry_ids: List[int]) -> Dict[str, Any]:
     """Move diary entries from ai_diary to ai_diary_archive by their IDs."""
     if not PLUGIN_ENABLED:
@@ -2210,29 +2339,7 @@ def archive_diary_entries(entry_ids: List[int]) -> Dict[str, Any]:
 
         # Insert into archive table
         for entry in entries:
-            _run(
-                _execute(
-                    """
-                INSERT INTO ai_diary_archive 
-                (id, content, personal_thought, emotions, interaction_summary, created_at, 
-                 interface, chat_id, thread_id, user_message, context_tags)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                    (
-                        entry["id"],
-                        entry["content"],
-                        entry["personal_thought"],
-                        entry["emotions"],
-                        entry["interaction_summary"],
-                        entry["created_at"],
-                        entry["interface"],
-                        entry["chat_id"],
-                        entry["thread_id"],
-                        entry["user_message"],
-                        entry["context_tags"],
-                    ),
-                )
-            )
+            _copy_diary_row("ai_diary_archive", entry)
 
         # Delete from main table
         _run(
@@ -2275,29 +2382,7 @@ def unarchive_diary_entries(entry_ids: List[int]) -> Dict[str, Any]:
 
         # Insert back into main table
         for entry in entries:
-            _run(
-                _execute(
-                    """
-                INSERT INTO ai_diary 
-                (id, content, personal_thought, emotions, interaction_summary, created_at, 
-                 interface, chat_id, thread_id, user_message, context_tags)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                    (
-                        entry["id"],
-                        entry["content"],
-                        entry["personal_thought"],
-                        entry["emotions"],
-                        entry["interaction_summary"],
-                        entry["created_at"],
-                        entry["interface"],
-                        entry["chat_id"],
-                        entry["thread_id"],
-                        entry["user_message"],
-                        entry["context_tags"],
-                    ),
-                )
-            )
+            _copy_diary_row("ai_diary", entry)
 
         # Delete from archive table
         _run(
@@ -2394,5 +2479,8 @@ try:
     log_info("[ai_diary] Plugin instance created and registered with core")
 except Exception as e:
     log_error(f"[ai_diary] Failed to instantiate DiaryPlugin: {e}")
+
+# Every turn is expected to leave a diary entry, so its schema is always sent in full.
+register_always_full_actions("create_personal_diary_entry")
 
 PLUGIN_CLASS = DiaryPlugin

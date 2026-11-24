@@ -24,6 +24,31 @@ DEFAULT_SOURCE = "chat"
 REMEMBER_KEYWORDS = []
 
 
+#: Hits the raw chat tier may return when it is the only tier running.
+_CHAT_ONLY_LIMIT = 4
+
+
+def _legacy_tiers_enabled() -> bool:
+    """Whether the ``memories`` and ``ai_diary`` tiers of ``search_memories`` run.
+
+    On while the diary and the ``memories`` table are still searched by keyword.
+    Once ``scripts/ingest_legacy_into_soul.py`` has filed them in SOUL, SOUL's
+    recall already returns them (ranked by meaning), and leaving these tiers on
+    injects the same entries a second time under a different label. Turning the
+    flag off leaves only the raw chat tier, which SOUL does not search.
+    """
+    try:
+        from core.config_manager import config_registry
+
+        return bool(
+            config_registry.get_value(
+                "MEMORY_LEGACY_TIERS_ENABLED", True, value_type=bool
+            )
+        )
+    except Exception:
+        return True
+
+
 def _build_json_tag_conditions(column: str, tags: list[str]) -> tuple[str, list[str]]:
     if not tags:
         return "", []
@@ -253,6 +278,14 @@ async def search_memories(
         return []
 
     limit = max(1, int(limit or 5))
+    legacy_tiers = _legacy_tiers_enabled()
+    if not legacy_tiers:
+        # With the memories and diary tiers off, the raw chat tier is the only
+        # source left and used to take every slot: ten keyword-matched chat lines
+        # (many of them from other conversations) where the curated memories and
+        # diary entries had been. SOUL supplies those now, so the raw tier is
+        # capped to a few lines of fallback.
+        limit = min(limit, _CHAT_ONLY_LIMIT)
     pool_limit = max(limit * 3, limit)
 
     hits: list[dict] = []
@@ -348,14 +381,19 @@ async def search_memories(
         """Run the memories + ai_diary queries with the given join operator.
         Appends matches to ``hits`` and returns how many rows were added."""
         added = 0
+        if not legacy_tiers:
+            return added
 
         mem_where, mem_params = _mem_where(join_op)
         if mem_where:
             mem_query = (
                 "SELECT 'memories' AS source, id, created_at, content, tags "
-                "FROM memories WHERE "
+                # Observer rows are raw copies of chat lines, which the chat tier
+                # below already searches. Left in, they were 98% of the table and
+                # most of what a turn's memories held on a live store.
+                "FROM memories WHERE COALESCE(source, '') <> 'grillo_observer' AND ("
                 + mem_where
-                + " ORDER BY created_at DESC LIMIT %s"
+                + ") ORDER BY created_at DESC LIMIT %s"
             )
             mem_params.append(pool_limit)
             await cur.execute(mem_query, mem_params)

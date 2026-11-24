@@ -630,6 +630,9 @@ async def handle_message(update: Any, context: TgContext) -> None:
                 value = getattr(reply_msg, attr, None)
                 if value is not None:
                     setattr(message, attr, value)
+                    # The media belongs to the quoted message, not to this reply:
+                    # what Iris sees in it is filed under that message's id.
+                    message.media_source_message_id = reply_msg.message_id
 
     if message.voice or message.video_note or message.video:
         try:

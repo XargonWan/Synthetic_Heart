@@ -617,7 +617,8 @@ async def test_vision_test_empty_description_reports_failure() -> None:
     assert response.status_code == 200
     data = json.loads(bytes(response.body))
     assert data["ok"] is False
-    assert "no description returned" in data["error"].lower()
+    assert "no description" in data["error"].lower()
+    assert data["elapsed_ms"] >= 0
 
 
 # ---------------------------------------------------------------------------
@@ -748,3 +749,89 @@ async def test_set_probe_result_writes_models_when_probe_reports_them(
     assert "available_models" in query
     assert params[1] == '{"cortex": true}'
     assert params[2] == '["model-a"]'
+
+
+@pytest.mark.asyncio
+async def test_vision_test_sends_a_photo_sized_jpeg_and_reports_timing() -> None:
+    """The probe must stress what a chat photo stresses, and say how long it took."""
+    endpoint = _make_endpoint(default_model="model-a")
+    _webui, response, describe_image = await _vision_test_ok(endpoint)
+
+    data = json.loads(bytes(response.body))
+    assert data["ok"] is True
+    assert isinstance(data["elapsed_ms"], int)
+    assert data["slow"] is False
+    assert 80 * 1024 < data["image_bytes"] < 400 * 1024
+    call_args = describe_image.await_args
+    assert call_args is not None
+    sent = call_args.args[0]
+    assert sent[:2] == b"\xff\xd8", "the probe image is a JPEG"
+    assert len(sent) == data["image_bytes"]
+
+
+@pytest.mark.asyncio
+async def test_vision_test_picked_model_beats_the_endpoints_iris_model() -> None:
+    """Probing a model the person chose must not silently test ``iris_model``."""
+    from core.webui import SynthWebUIInterface
+
+    endpoint = _make_endpoint(default_model="model-a")
+    endpoint.extra_config = {"iris_model": "iris-m"}
+    webui = SynthWebUIInterface(autostart=False)
+    describe_image = AsyncMock(return_value="a clown")
+    adapter = SimpleNamespace(describe_image=describe_image)
+    registry = SimpleNamespace(get_endpoint=AsyncMock(return_value=endpoint))
+    with (
+        patch(
+            "core.external_endpoints.registry.get_external_endpoint_registry",
+            return_value=registry,
+        ),
+        patch("core.external_endpoints.crypto.decrypt_api_key", return_value="k"),
+        patch(
+            "core.external_endpoints.probe.get_adapter_for_endpoint",
+            return_value=adapter,
+        ),
+    ):
+        await webui.test_external_endpoint_vision(
+            endpoint.id, cast(Request, _DummyJsonRequest({"model": "picked"}))
+        )
+        await webui.test_external_endpoint_vision(
+            endpoint.id, cast(Request, _DummyJsonRequest({}))
+        )
+
+    first, second = describe_image.await_args_list
+    assert first.kwargs["model"] == "picked"
+    assert second.kwargs["model"] == "iris-m"
+
+
+@pytest.mark.asyncio
+async def test_set_probe_result_keeps_the_stored_image_probes(monkeypatch) -> None:
+    """Re-listing an endpoint's models must not erase which models passed the image probe."""
+    captured: dict = {}
+    registry = ExternalEndpointRegistry()
+    stored = _make_endpoint(default_model="model-a")
+    stored.models_metadata = [
+        {"id": "model-a", "capabilities": {}, "vision_probe": {"ok": True}}
+    ]
+
+    monkeypatch.setattr(
+        "core.external_endpoints.registry._ensure_table", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr("core.db.get_conn_ctx", lambda: _CapturingConnCtx(captured))
+    monkeypatch.setattr(registry, "get_endpoint", AsyncMock(return_value=stored))
+    monkeypatch.setattr(registry, "_sync_registries", AsyncMock(return_value=None))
+
+    await registry.set_probe_result(
+        endpoint_id=7,
+        status="success",
+        capabilities={"cortex": True},
+        models=["model-a", "model-b"],
+        models_metadata=[
+            {"id": "model-a", "capabilities": {}},
+            {"id": "model-b", "capabilities": {}},
+        ],
+    )
+
+    _query, params = _statement_matching(captured, "models_metadata = %s")
+    written = json.loads(params[3])
+    assert written[0]["vision_probe"] == {"ok": True}
+    assert "vision_probe" not in written[1]

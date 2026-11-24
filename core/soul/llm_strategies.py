@@ -910,7 +910,8 @@ class LlmMemCellExtractor:
                 transcript=transcript, current_date=current_date
             )
         cells = self._clean_cells(memories, transcript=text, current_date=current_date)
-        if not cells and memories:
+        forgettable = sum(1 for item in memories if self._is_forgettable(item))
+        if not cells and memories and forgettable < len(memories):
             # The model answered, but nothing it wrote was a distillation (it
             # quoted the transcript, or every entry was empty). That is as
             # unusable as a failed call: record the session deterministically
@@ -965,6 +966,18 @@ class LlmMemCellExtractor:
         log_debug("[soul_llm] no usable JSON in memcell extract response")
         return None
 
+    # Kinds the model can give an entry that is not worth a memory of its own. The
+    # model labels them (a classification, not a word list kept here).
+    FORGETTABLE_KINDS = frozenset({"small_talk", "one_off_command", "joke"})
+
+    @classmethod
+    def _is_forgettable(cls, item: Any) -> bool:
+        """Whether the model itself labelled the entry as not worth remembering."""
+        if not isinstance(item, dict):
+            return False
+        kind = str(item.get("kind") or "").strip().lower().replace("-", "_")
+        return kind in cls.FORGETTABLE_KINDS
+
     def _clean_cells(
         self,
         raw: list[Any],
@@ -990,6 +1003,11 @@ class LlmMemCellExtractor:
         for index, item in enumerate(raw):
             trace = self._clean_trace(item)
             if not trace:
+                continue
+            if not foresight and self._is_forgettable(item):
+                # A dated plan in the same session outranks the label: the signals
+                # ride on the first cell, so with one present nothing is skipped.
+                log_debug("[soul_llm] skipped an entry the model labelled forgettable")
                 continue
             trace_key = _normalise_for_compare(trace)
             if self._is_verbatim(trace_key, transcript_key):
@@ -1160,9 +1178,15 @@ class LlmMemCellExtractor:
             "attribute one to the other.\n"
             "Use the current_date in the payload to read relative time ('last "
             "night', 'tomorrow') and state absolute dates when a date matters.\n"
+            "NOT WORTH REMEMBERING: greetings, thanks and pleasantries; a one-off "
+            "command to the assistant that leaves nothing lasting behind; a joke or "
+            "figure of speech that is not meant literally. Either leave them out or "
+            "give the entry the matching kind below.\n"
+            "KIND of each entry, one of: fact, preference, plan, event, small_talk, "
+            "one_off_command, joke.\n"
             'Return ONLY a JSON object: {"memories": [{"trace": "...", "facts": '
-            '["..."]}]} with at most 4 entries, most durable first. Return '
-            '{"memories": []} only when the session holds nothing that a later '
-            "conversation could need.\n"
+            '["..."], "kind": "fact"}]} with at most 4 entries, most durable first. '
+            'Return {"memories": []} only when the session holds nothing that a '
+            "later conversation could need.\n"
             + _speaker_identity_block(self.speaker_identity)
         )

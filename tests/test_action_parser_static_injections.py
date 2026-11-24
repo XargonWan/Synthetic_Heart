@@ -178,3 +178,85 @@ async def test_a_fast_gather_says_nothing(
     await action_parser.gather_static_injections()
 
     assert not [line for line in info_lines if "static injections:" in line]
+
+
+class _ScopedInjectionPlugin:
+    """A plugin whose payload belongs to one chat, plus one key true in all chats."""
+
+    allow_static_injection_stale_fallback = True
+    static_injection_cache_ttl_seconds = 60.0
+    static_injection_global_keys = frozenset({"situational"})
+
+    def __init__(self) -> None:
+        self.fail = False
+
+    def get_supported_action_types(self) -> list[str]:
+        return ["static_inject"]
+
+    def static_injection_scope(self, message=None, context_memory=None) -> str:
+        return str(getattr(message, "chat_id", ""))
+
+    async def get_static_injection(self, message=None, context_memory=None):
+        if self.fail:
+            raise asyncio.TimeoutError()
+        return {
+            "recalled": f"memory of chat {message.chat_id}",
+            "situational": "travelling this week",
+        }
+
+
+@pytest.mark.asyncio
+async def test_stale_fallback_does_not_leak_one_chats_memories_into_another(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timeout in chat B must not serve chat A's recalled memories.
+
+    The cache used to be keyed by plugin class alone, so the last payload built
+    for ANY chat was served to whichever chat timed out next. Keys the plugin
+    declares global still ride across chats: the persona has to stay aware of
+    what is going on outside the conversation it is in.
+    """
+    from types import SimpleNamespace
+
+    from core import action_parser
+
+    plugin = _ScopedInjectionPlugin()
+    monkeypatch.setattr(action_parser, "_STATIC_INJECTION_CACHE", {})
+    monkeypatch.setattr(action_parser, "_load_action_plugins", lambda: [plugin])
+
+    chat_a = SimpleNamespace(chat_id="A")
+    chat_b = SimpleNamespace(chat_id="B")
+
+    fresh_a = await action_parser.gather_static_injections(chat_a)
+    assert fresh_a["recalled"] == "memory of chat A"
+
+    plugin.fail = True
+    fallback_b = await action_parser.gather_static_injections(chat_b)
+    assert "recalled" not in fallback_b
+    assert fallback_b.get("situational") == "travelling this week"
+
+    # Chat A's own fallback still works, and still carries its own memories.
+    fallback_a = await action_parser.gather_static_injections(chat_a)
+    assert fallback_a["recalled"] == "memory of chat A"
+    assert fallback_a["situational"] == "travelling this week"
+
+
+def test_the_scoped_cache_is_pruned_once_it_outgrows_its_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One entry per chat must not grow the cache without bound."""
+    import time
+
+    from core import action_parser
+
+    now = time.time()
+    cache = {
+        f"plugin|chat{i}": (now - 5000, {"k": "old"})
+        for i in range(action_parser._STATIC_INJECTION_CACHE_MAX + 5)
+    }
+    cache["plugin|fresh"] = (now, {"k": "new"})
+    monkeypatch.setattr(action_parser, "_STATIC_INJECTION_CACHE", cache)
+
+    action_parser._prune_static_injection_cache(now, 300.0)
+
+    assert list(cache) == ["plugin|fresh"]

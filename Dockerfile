@@ -45,6 +45,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3-venv python3-dev build-essential libxml2-dev libxslt1-dev \
       zlib1g-dev libffi-dev libssl-dev \
       libegl1 libegl-mesa0 libgl1 libgl1-mesa-dri \
+      libx11-dev libegl-dev libgl-dev \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -s /bin/bash abc
 
@@ -53,6 +54,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # The packages above give an EGL context without a GPU or a display. moderngl's glcontext
 # opens "libEGL.so" / "libGL.so" by their unversioned names, which Debian only ships in the
 # -dev packages: link them to the runtime libraries (works on amd64 and arm64).
+# The -dev packages in the list above (libx11-dev, libegl-dev, libgl-dev) are for arm64:
+# glcontext publishes no linux-aarch64 wheel, so uv compiles it from source and its
+# extensions include <X11/Xlib.h> and <EGL/egl.h>.
 RUN for lib in libEGL libGL; do \
       target="$(ldconfig -p | awk -v n="$lib.so.1" '$1 == n { print $NF; exit }')" && \
       test -n "$target" && ln -sf "$target" "/usr/local/lib/$lib.so" ; \

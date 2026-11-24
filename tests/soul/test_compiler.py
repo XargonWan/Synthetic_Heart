@@ -934,3 +934,87 @@ async def test_redistil_pass_only_touches_cells_older_than_the_cutoff() -> None:
     }
     assert repo.memcells["session-9:old"].episodic_trace.startswith("Scar confirmed")
     assert repo.memcells["session-9:fresh"].episodic_trace.startswith("Scar: okay")
+
+
+def _calm_cell(cell_id: str, *, age_days: int) -> MemCell:
+    return MemCell(
+        id=cell_id,
+        episodic_trace="User mentioned the weather briefly.",
+        atomic_facts=[],
+        emotional_tag=EmotionalTag(
+            state_snapshot={"joy": 0.0, "fear": 0.0, "sad": 0.0, "anger": 0.0},
+            dominant_emotion="neutral",
+            intensity=0.0,
+            valence=0.0,
+        ),
+        foresight_signals=[],
+        event_timestamp=datetime(2026, 5, 7, tzinfo=timezone.utc)
+        - timedelta(days=age_days),
+        session_id="s",
+        explicit_importance=0.0,
+        retrieval_count=0,
+    )
+
+
+def _curator_compiler(repo: InMemorySoulRepository) -> SoulCompiler:
+    return SoulCompiler(
+        repository=repo,
+        memcell_extractor=FakeMemCellExtractor(),
+        dsp_extractor=FakeDspExtractor(),
+        dsp_builder=RuleBasedDspBuilder(),
+        summary_builder=RuleBasedSummaryBuilder(),
+        embedder=NoopEmbedder(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_curator_over_cap_only_keeps_calm_cells_while_under_the_cap() -> None:
+    """Under the cap a calm cell is a survivor, not a deletion order."""
+    repo = InMemorySoulRepository()
+    for i in range(5):
+        cell = _calm_cell(f"calm-{i}", age_days=200 + i)
+        repo.memcells[cell.id] = cell
+
+    result = await _curator_compiler(repo).run_curator(
+        current_date=date(2026, 5, 7), max_memories=10, evict_only_over_cap=True
+    )
+
+    assert result.removed == 0
+    assert result.kept_calm == 5
+    assert len(repo.memcells) == 5
+
+
+@pytest.mark.asyncio
+async def test_curator_over_cap_evicts_the_calm_cells_and_archives_them() -> None:
+    repo = InMemorySoulRepository()
+    for i in range(5):
+        cell = _calm_cell(f"calm-{i}", age_days=200 + i)
+        repo.memcells[cell.id] = cell
+    # A cell with an explicit importance is KEEP_IMPORTANT, so it outranks calm ones.
+    important = _calm_cell("important", age_days=300)
+    important.explicit_importance = 1.0
+    repo.memcells[important.id] = important
+
+    result = await _curator_compiler(repo).run_curator(
+        current_date=date(2026, 5, 7), max_memories=3, evict_only_over_cap=True
+    )
+
+    assert result.removed == 3
+    assert "important" in repo.memcells
+    # Nothing is gone for good: every evicted cell is restorable from the archive.
+    assert len(repo.evicted_memcells) == 3
+    assert set(repo.evicted_memcells).isdisjoint(repo.memcells)
+
+
+@pytest.mark.asyncio
+async def test_curator_default_still_deletes_calm_cells_but_archives_them() -> None:
+    repo = InMemorySoulRepository()
+    cell = _calm_cell("old", age_days=400)
+    repo.memcells[cell.id] = cell
+
+    result = await _curator_compiler(repo).run_curator(
+        current_date=date(2026, 5, 7), max_memories=500
+    )
+
+    assert result.removed == 1
+    assert "old" in repo.evicted_memcells

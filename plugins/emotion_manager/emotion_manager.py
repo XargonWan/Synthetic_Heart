@@ -1043,6 +1043,14 @@ class EmotionManager(PluginBase):
                                             else:
                                                 continue
 
+                                            # The diary stores what the model wrote, and the prompt's
+                                            # own example is "joy": without normalising, a synonym
+                                            # ("joy", "happiness") was dropped here while the live
+                                            # diary-to-state sync accepted it, so a restart forgot it.
+                                            emotion_type = (
+                                                normalize_emotion_name(emotion_type)
+                                                or emotion_type
+                                            )
                                             if emotion_type in VALID_EMOTIONS:
                                                 # Apply decay to this historical value
                                                 # Create temp state to calc decay
@@ -1197,4 +1205,10 @@ __all__ = [
 ]
 
 # Export plugin class for auto-discovery by core_initializer
+# The model must declare its emotions every turn (RULE_EMOTION_UPDATES), so this
+# action's schema is always sent in full.
+from core.action_tiers import register_always_full_actions  # noqa: E402
+
+register_always_full_actions("update_emotion_state")
+
 PLUGIN_CLASS = EmotionManager

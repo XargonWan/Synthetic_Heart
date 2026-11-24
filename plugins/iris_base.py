@@ -53,6 +53,9 @@ class IrisResult:
     confidence: float | None = field(default=None)
     cached_path: str | None = field(default=None)
     is_sticker: bool = field(default=False)
+    # True when ``description`` is our own "could not be analysed" notice, not what an
+    # engine saw: such a text is never stored as the description of a photo.
+    is_placeholder: bool = field(default=False)
 
 
 class IrisEngineBase(ABC):

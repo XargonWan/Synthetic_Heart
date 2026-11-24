@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 import os
 import asyncio
 import inspect
+from collections.abc import Collection
 from typing import Any, cast
 
 # Lazily imported to avoid circular deps at module load time
@@ -141,6 +142,23 @@ USE_PERSONA_IN_SYSTEM_PROMPTS = config_registry.get_var(
     value_type=bool,
 )
 
+PROMPT_ACTIONS_TIERED = config_registry.get_var(
+    "PROMPT_ACTIONS_TIERED",
+    True,
+    label="Tier the action catalogue",
+    description=(
+        "Send the full schema only for the actions a turn can use (the core ones, "
+        "those the Recon call picks, and those the turn's state calls for) and a "
+        "compact form (brief and field names) for the rest. The catalogue was more "
+        "than half of a chat prompt (about 37,000 of 65,000 characters). Needs the "
+        "'Action needs' Recon plugin; without its verdict the whole catalogue is "
+        "sent in full, as before."
+    ),
+    group="core",
+    component="prompt_engine",
+    value_type=bool,
+)
+
 # Standing scene note — the physical setting of the household stated once and
 # carried into every prompt as the [Setting] block (see _PLUGIN_CONTEXT_BLOCKS).
 # It exists because the transcript alone cannot say where everyone is or how the
@@ -165,6 +183,7 @@ SCENE_NOTE = config_registry.get_var(
 def minify_actions_block(
     available_actions: dict,
     lite: bool = False,
+    full_schema_for: Collection[str] | None = None,
 ) -> dict:
     """Convert full action schemas to minimal versions for prompt.
 
@@ -183,6 +202,11 @@ def minify_actions_block(
         Full actions block with schemas in new normalized format.
     lite : bool
         When True, apply aggressive filtering and strip to brief-only.
+    full_schema_for : collection of str, optional
+        Standard mode only. When given, only these actions keep their full schema;
+        every other action is sent compact (brief + payload field names + required
+        fields, see ``core.action_tiers``). ``None`` keeps every schema (the
+        previous behaviour).
 
     Returns
     -------
@@ -257,6 +281,12 @@ def minify_actions_block(
                 if isinstance(required, list) and required:
                     lite_action["required_payload_keys"] = list(required)
             minified[action_name] = lite_action
+        elif full_schema_for is not None and action_name not in full_schema_for:
+            # Tiered: the model still sees that the action exists, what it is for
+            # and which fields it takes; the full definition validates the reply.
+            from core.action_tiers import compact_action
+
+            minified[action_name] = compact_action(normalized)
         else:
             # Standard: schema + brief
             minified[action_name] = extract_for_llm_prompt(action_name, normalized)
@@ -2360,8 +2390,9 @@ def _assemble_prompt_request(  # noqa: PLR0913
         _rq_sender = str((reply_to_dict.get("from") or {}).get("username") or "Unknown")
         _rq_text = str(reply_to_dict.get("text") or "").strip()
         if _rq_text and _rq_text != "[Non-text content]":
-            if len(_rq_text) > 400:
-                _rq_text = _rq_text[:400] + "\u2026"
+            from core.quoted_message import clip
+
+            _rq_text = clip(_rq_text)
             _rq_safe = _rq_text.replace('"', "'").replace("\n", " ")
             _reply_quote_prefix = (
                 f'[The user is replying to {_rq_sender}\'s message: "{_rq_safe}"]\n'
@@ -2665,6 +2696,9 @@ async def build_prompt_request(
     recon_instructions: list[str] = []
     recon_snippets: list[dict] = []
     recon_memories: list[dict] = []
+    # Actions the Recon call said this turn may need in full (None = Recon gave no
+    # verdict, so the catalogue is sent whole, as before).
+    recon_action_needs: set[str] | None = None
     resolved_language = None
     resolved_message_tone = None
     resolved_conversation_tone = None
@@ -2765,6 +2799,10 @@ async def build_prompt_request(
                             "tags": c.get("tags") or [],
                         }
                     )
+            elif ctype == "action_hint":
+                recon_action_needs = (recon_action_needs or set()) | {
+                    str(n) for n in (c.get("names") or []) if n
+                }
             elif ctype == "snippet":
                 recon_snippets.append(c)
             elif ctype == "instruction":
@@ -3268,9 +3306,11 @@ async def build_prompt_request(
 
     reply = getattr(message, "reply_to_message", None)
     if reply:
-        reply_text = getattr(reply, "text", None) or getattr(reply, "caption", None)
-        if not reply_text:
-            reply_text = "[Non-text content]"
+        # What the user quotes: its text, or for a photo/sticker/voice note what
+        # Iris saw in it (see core.quoted_message).
+        from core.quoted_message import quote_text
+
+        reply_text = await quote_text(reply, interface_path) or "[Non-text content]"
         reply_date = getattr(reply, "date", None)
         reply_timestamp = reply_date.isoformat() if reply_date else ""
         reply_from = getattr(reply, "from_user", None)
@@ -3601,8 +3641,18 @@ async def build_prompt_request(
             )
 
         # Minify to reduce token usage (lite=True also filters + strips to brief-only)
+        tier_full: set[str] | None = None
+        if not is_lite and recon_action_needs is not None:
+            from core.action_tiers import select_full_schema_actions, tiering_enabled
+
+            if tiering_enabled():
+                tier_full = select_full_schema_actions(
+                    full_actions,
+                    recon_action_needs,
+                    (prompt_with_instructions.get("context") or {}).keys(),
+                )
         prompt_with_instructions["actions"] = minify_actions_block(
-            full_actions, lite=is_lite
+            full_actions, lite=is_lite, full_schema_for=tier_full
         )
         log_debug(
             f"[json_prompt] Actions block minified: {len(json_dumps(full_actions))} -> {len(json_dumps(prompt_with_instructions['actions']))} chars (lite={is_lite})"

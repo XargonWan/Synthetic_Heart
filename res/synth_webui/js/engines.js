@@ -428,9 +428,13 @@
                 body: JSON.stringify({ model: model || null }),
             });
             if (echoEl) {
+                const took = result.elapsed_ms != null
+                    ? ` (${(result.elapsed_ms / 1000).toFixed(1)}s, ${Math.round((result.image_bytes || 0) / 1024)} KB photo)`
+                    : '';
                 if (result.ok && result.description) {
-                    echoEl.textContent = `✓ "${String(result.description).slice(0, 100)}"`;
-                    echoEl.style.color = 'var(--success,#27ae60)';
+                    const slowNote = result.slow ? ' — slow: a chat photo is cut at 120s' : '';
+                    echoEl.textContent = `${result.slow ? '⚠' : '✓'} "${String(result.description).slice(0, 100)}"${took}${slowNote}`;
+                    echoEl.style.color = result.slow ? 'var(--warning,#d68910)' : 'var(--success,#27ae60)';
                 } else {
                     echoEl.textContent = `✗ ${result.error || 'no description returned'}`;
                     echoEl.style.color = 'var(--danger,#c0392b)';
