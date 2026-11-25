@@ -37,7 +37,6 @@ PALETTE: dict[str, tuple[tuple[int, int, int], tuple[int, int, int]]] = {
     "telegram_bot": ((41, 128, 185), (255, 255, 255)),  # blue tile, white plane
     "discord_bot": ((88, 101, 242), (255, 255, 255)),  # indigo tile, white face
     "matrix_chat": ((30, 30, 30), (255, 255, 255)),  # dark tile, white brackets
-    "ollama_serve": ((60, 60, 66), (245, 245, 245)),  # slate tile, light llama
     "fluxer_bot": ((123, 44, 191), (255, 255, 255)),  # violet tile, white bolt
 }
 
@@ -111,29 +110,10 @@ def _draw_fluxer(draw: ImageDraw.ImageDraw, fg: tuple[int, int, int]) -> None:
     draw.line([(150, 44), (128, 140)], fill=(0, 0, 0, 40), width=3)
 
 
-def _draw_ollama(draw: ImageDraw.ImageDraw, fg: tuple[int, int, int]) -> None:
-    """A minimal llama silhouette (generic local-model glyph)."""
-    # body
-    draw.rounded_rectangle([96, 120, 168, 196], radius=20, fill=fg + (255,))
-    # neck
-    draw.rounded_rectangle([120, 70, 150, 140], radius=14, fill=fg + (255,))
-    # head
-    draw.rounded_rectangle([112, 56, 158, 92], radius=16, fill=fg + (255,))
-    # ears
-    draw.polygon([(116, 60), (110, 34), (128, 54)], fill=fg + (255,))
-    draw.polygon([(154, 60), (160, 34), (142, 54)], fill=fg + (255,))
-    # legs
-    for x in (104, 150):
-        draw.rounded_rectangle([x, 188, x + 14, 212], radius=6, fill=fg + (255,))
-    # eye (punch-out)
-    draw.ellipse([132, 66, 144, 78], fill=(60, 60, 66, 255))
-
-
 DRAWERS = {
     "telegram_bot": _draw_telegram,
     "discord_bot": _draw_discord,
     "matrix_chat": _draw_matrix,
-    "ollama_serve": _draw_ollama,
     "fluxer_bot": _draw_fluxer,
 }
 

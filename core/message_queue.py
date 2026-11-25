@@ -56,7 +56,7 @@ PRIORITY_CALL = 9  # A turn inside a live audio/video call (above all chat)
 PRIORITY_HIGH = 8  # Direct prioritised human input (e.g. in-world player chat)
 PRIORITY_TRAINER = 7  # The trainer — must always reach Synth promptly
 PRIORITY_RADIO = 6  # Radio-host DJ banter (on-the-fly LLM generation during playback)
-PRIORITY_GENERAL = 5  # Ordinary user chat (telegram/discord/matrix/webui/ollama…)
+PRIORITY_GENERAL = 5  # Ordinary user chat (discord/matrix/webui/HTTP API…)
 PRIORITY_AMBIENT = 4  # Autonomous vessel perceptions / will-beats (below humans)
 PRIORITY_LOW = 3  # Background-adjacent (web-search 2nd-pass, misc fallback)
 PRIORITY_BACKGROUND = 2  # G.R.I.L.L.O. beats — absolute bottom, never starves anything
@@ -1034,7 +1034,7 @@ async def enqueue(
         history_scope: Optional per-message history scope ("local"|"recent"|"unified"). If None, falls back to global `UNIFIED_HISTORY` behavior.
         priority: If True, message is added to front of queue (for events)
         interface_id: The interface identifier (e.g., 'webui', 'interface_name')
-        skip_mention_check: If True, skip is_message_for_bot check (for 1:1 interfaces like ollama, webui)
+        skip_mention_check: If True, skip is_message_for_bot check (for 1:1 interfaces like the HTTP API, webui)
         original_message: The original message object from the interface (for reactions)
         response_future: Optional Future that will be completed with the processing result or exception.
     """

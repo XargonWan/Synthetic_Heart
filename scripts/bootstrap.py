@@ -967,7 +967,6 @@ def build_env_values(
         "SYNTH_WEBUI_HOST": "127.0.0.1",
         "SYNTH_WEBUI_TLS": "0",
         "SYNTH_WEBUI_HTTP_PORT": str(webui_port),
-        "OLLAMA_HOST": "127.0.0.1",
         "OPENAI_API_SERVER_PORT": str(api_port),
         "SYNTH_IN_CONTAINER": "0",
         "SYNTH_HOST_OS": "windows" if platform.system() == "Windows" else "linux",

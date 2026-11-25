@@ -1,0 +1,60 @@
+schema = 1
+
+[extension]
+id = "official/openai_api"
+name = "OpenAI API"
+version = "0.1.0"
+description = "Talk to SyntH from any OpenAI-compatible client: models, chat completions and completions, with standard SSE streaming."
+author = "SyntH"
+
+[compat]
+core_api = ">=0.1,<1"
+
+[entry]
+module = "ext_main"
+function = "main"
+
+[[provides.interfaces]]
+id = "openai_api"
+# openai_api/<conversation>: one path per conversation a client names (or per request).
+paths = ["openai_api/{chat}"]
+# A turn can only be answered on the conversation the request came from.
+reply_only = true
+
+[permissions]
+capabilities = ["log", "config", "stats", "core.info", "interfaces.register", "interfaces.inbound"]
+network = ["0.0.0.0:11435"]  # it listens; the port is a setting
+
+[python]
+requirements = ["aiohttp>=3.9"]
+
+[config.OPENAI_API_PORT]
+type = "int"
+label = "Port"
+description = "TCP port the API listens on."
+default = 11435
+
+[config.OPENAI_API_HOST]
+type = "string"
+label = "Bind address"
+description = "Leave empty: 0.0.0.0 inside a container, 127.0.0.1 otherwise."
+default = ""
+
+[config.OPENAI_API_TOKEN]
+type = "string"
+label = "API key"
+description = "When set, clients must send it as 'Authorization: Bearer <key>'. Empty means no authentication: only do that on a trusted network."
+sensitive = true
+default = ""
+
+[config.OPENAI_API_MAX_HISTORY]
+type = "int"
+label = "Messages of history used"
+description = "How many earlier messages of a request are used to build the prompt."
+default = 20
+
+[config.OPENAI_API_TIMEOUT]
+type = "int"
+label = "Answer timeout (seconds)"
+description = "How long a request waits for the answer. 0 uses the longest the Core allows (15 minutes)."
+default = 0

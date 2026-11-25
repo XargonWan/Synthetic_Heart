@@ -2357,7 +2357,7 @@ class AgentLoopManager:
             # Under the explicit-completion contract, the ONLY structural
             # end-of-turn signal is ``attempt_completion`` (handled above) or
             # exhausting the iteration budget. A plain outbound message — even on
-            # a synchronous interface like Ollama — is NOT proof the goal is
+            # a synchronous interface like the HTTP API — is NOT proof the goal is
             # done: weak models routinely emit an intent statement ("I'll check
             # the codebase now...") as a message and would otherwise stop there.
             require_explicit_completion = bool(

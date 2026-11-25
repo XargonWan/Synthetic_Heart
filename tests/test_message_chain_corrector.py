@@ -876,11 +876,19 @@ async def test_corrector_handles_nonstring_response(monkeypatch, caplog):
 
 
 @pytest.mark.asyncio
-async def test_corrector_forces_message_to_ollama_serve(monkeypatch):
-    """When the originating interface is `ollama_serve`, corrected JSON must
-    route message actions back to `message_ollama_serve` and set
-    `payload.interface_path` accordingly."""
+async def test_corrector_answers_a_reply_only_interface_on_its_own_conversation(
+    monkeypatch,
+):
+    """When the originating interface is reply-only (an HTTP API), corrected JSON
+    must send message actions back to that conversation: the send verb, and
+    `payload.interface_path` on the originating interface."""
     import json
+
+    import core.interface_traits as traits
+
+    monkeypatch.setitem(
+        traits._declared, "http_api", traits.InterfaceTraits(reply_only=True)
+    )
 
     class FakeLLM:
         async def handle_incoming_message(self, bot, message, prompt):
@@ -910,17 +918,17 @@ async def test_corrector_forces_message_to_ollama_serve(monkeypatch):
         text="malformed json",
         bot=None,
         context={
-            "interface": "ollama_serve",
-            "interface_path": "ollama_serve/ollama:abc123",
+            "interface": "http_api",
+            "interface_path": "http_api/abc123",
         },
-        chat_id="ollama:abc123",
+        chat_id="abc123",
     )
 
     assert corrected is not None
     parsed, _ = extract_json_from_text(corrected, return_metadata=True)
     assert parsed is not None
     assert parsed["actions"][0]["type"] == "send_message"
-    assert parsed["actions"][0]["payload"]["interface_path"].startswith("ollama_serve/")
+    assert parsed["actions"][0]["payload"]["interface_path"] == "http_api/abc123"
 
 
 @pytest.mark.asyncio

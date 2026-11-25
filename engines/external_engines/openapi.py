@@ -1424,7 +1424,6 @@ class OpenAPIPlugin(AIPluginBase):
             "synth_webui": "message_synth_webui",
             "telegram_bot": "send_message",
             "discord_bot": "send_message",
-            "ollama_serve": "send_message",
         }
         message_action = interface_to_action.get(interface, "send_message")
 
@@ -1528,7 +1527,6 @@ class OpenAPIPlugin(AIPluginBase):
             "synth_webui": "message_synth_webui",
             "telegram_bot": "send_message",
             "discord_bot": "send_message",
-            "ollama_serve": "send_message",
         }
         message_action = interface_to_action.get(interface, "send_message")
 

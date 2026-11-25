@@ -45,7 +45,7 @@ AGENT = "agent"
 _AGENT_BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 
 # interface_paths that currently have a detached agent turn in flight. Streaming
-# HTTP interfaces (e.g. the OpenAI/Ollama-compatible server) return ``None`` from
+# HTTP interfaces (e.g. the OpenAI-compatible API) return ``None`` from
 # the message chain when the Agent Lane is taken (work is detached), which would
 # otherwise make them finalize the stream immediately with no text. They consult
 # this set to know they must WAIT for ``_deliver_agent_reply`` to stream the
@@ -350,7 +350,7 @@ def start_task_resume(
     :func:`_deliver_agent_reply`.
 
     The interface is registered as in-flight BEFORE the task is spawned so a
-    streaming interface (OpenAI/Ollama-compatible) waits for the async delivery
+    streaming interface (OpenAI-compatible) waits for the async delivery
     instead of finalizing its stream empty (same race guard as ``route``).
 
     Returns ``True`` if the resume task was scheduled, ``False`` on invalid input.

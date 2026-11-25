@@ -3078,7 +3078,7 @@ class SynthWebUIInterface:
 
         - ``text`` (str): the faked message body. Default "This is a test message".
         - ``interface_name`` (str): which interface delivered it. Default
-          "openai_compat" (the Ollama-compatible API surface).
+          "openai_compat" (the OpenAI-compatible API surface).
         - ``interface_path`` (str): the chat the message "arrived in". Default
           "openai_compat/test".
         - ``chat_id`` (str/int): the chat id. Default "test".
@@ -12261,7 +12261,7 @@ class SynthWebUIInterface:
         """Directory holding bundled per-component icons (``<name>.<ext>``).
 
         Used for legacy components that do not own a dedicated folder with an
-        ``icon.<ext>`` — e.g. single-file interfaces (Ollama) that live in the
+        ``icon.<ext>`` — e.g. single-file interfaces that live in the
         shared ``interface/`` directory. The
         icons shipped here are original, non-branded glyphs. A third-party
         brand/trademark logo may only be committed when its owner's licence or

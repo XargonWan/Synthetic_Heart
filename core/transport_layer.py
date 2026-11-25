@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from core.config_manager import config_registry
 from core.logging_utils import log_debug, log_warning, log_error, log_info
 
+from core.interface_traits import is_reply_only, message_action_for
 # Interface-specific utilities are loaded dynamically by interfaces.
 # The transport layer provides generic messaging functionality only.
 
@@ -3203,12 +3204,13 @@ async def run_corrector_middleware(
                         corrected, return_metadata=True
                     )
                     if parsed_json:
-                        # Special-case enforcement for ollama_serve: if the original
-                        # interface was `ollama_serve`, make sure any `send_message`
-                        # actions are routed back to the ollama_serve interface and
-                        # their payload.interface_path points to `ollama_serve/...`.
-                        if originating_interface == "ollama_serve" and isinstance(
-                            parsed_json, dict
+                        # A request/response interface can only be answered on the
+                        # conversation the request came from: any message action the
+                        # correction produced is sent back there.
+                        if (
+                            originating_interface
+                            and is_reply_only(originating_interface)
+                            and isinstance(parsed_json, dict)
                         ):
                             rewritten = False
                             actions = parsed_json.get("actions", [])
@@ -3224,53 +3226,33 @@ async def run_corrector_middleware(
                                     ):
                                         act["type"] = send_verb
                                         rewritten = True
-
-                                    # Ensure payload.interface_path is an ollama_serve path
                                     payload = act.get("payload") or {}
-                                    if isinstance(payload, dict) and act.get(
-                                        "type"
-                                    ) in ("send_message", "message_ollama_serve"):
-                                        iface_path = payload.get("interface_path", "")
-                                        if not iface_path.startswith("ollama_serve"):
+                                    if (
+                                        isinstance(payload, dict)
+                                        and act.get("type") == send_verb
+                                    ):
+                                        iface_path = str(
+                                            payload.get("interface_path", "")
+                                        )
+                                        if not iface_path.startswith(
+                                            originating_interface
+                                        ):
                                             id_for_iface = chat_id or (
                                                 context.get("chat_id")
                                                 if context
                                                 else None
                                             )
                                             payload["interface_path"] = (
-                                                f"ollama_serve/{id_for_iface or '<chat_id>'}"
-                                            )
-                                            rewritten = True
-
-                                        if act.get("type") == "send_message":
-                                            conversation_id = payload.get(
-                                                "conversation_id"
-                                            )
-                                            if conversation_id is None:
-                                                conversation_id = (
-                                                    context.get("conversation_id")
-                                                    if context
-                                                    else None
-                                                )
-                                            payload.setdefault(
-                                                "target",
-                                                chat_id
-                                                or conversation_id
-                                                or id_for_iface
-                                                or "<chat_id>",
-                                            )
-                                            payload.setdefault(
-                                                "conversation_id",
-                                                conversation_id,
+                                                f"{originating_interface}/{id_for_iface or '<chat_id>'}"
                                             )
                                             act["payload"] = payload
                                             rewritten = True
                             if rewritten:
                                 corrected = json.dumps(parsed_json, ensure_ascii=False)
                                 log_info(
-                                    "[corrector_middleware] Rewrote corrected actions to 'send_message' for originating interface 'ollama_serve'"
+                                    "[corrector_middleware] Rewrote corrected actions to the "
+                                    f"conversation of the originating interface {originating_interface!r}"
                                 )
-                                # Return rewritten JSON immediately for ollama_serve origin
                                 return corrected
 
                         corrected = json.dumps(parsed_json, ensure_ascii=False)

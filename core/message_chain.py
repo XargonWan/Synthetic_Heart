@@ -79,20 +79,6 @@ def get_failed_message_text() -> str:
     return str(fallback)
 
 
-# Map of interface prefixes to their correct message action types. With the
-# unified send_message action every chat interface shares one action; the map
-# remains for special interfaces whose outbound verb differs (WebUI, radio).
-_INTERFACE_TO_MESSAGE_ACTION: Dict[str, str] = {
-    "telegram_bot": "send_message",
-    "telegram": "send_message",
-    "discord_bot": "send_message",
-    "synth_webui": "message_synth_webui",
-    "matrix_chat": "send_message",
-    "ollama_serve": "send_message",
-    # radio_host: speaking on-air is the equivalent of "sending a message"
-    "radio_host": "radio_speak",
-}
-
 _ACTION_TYPE_ALIASES: Dict[str, str] = {
     "diary": "create_personal_diary_entry",
     "diary_entry": "create_personal_diary_entry",
@@ -635,7 +621,7 @@ def _drop_out_of_scope_leaked_actions(actions: list, ctx: Optional[dict]) -> lis
 
     The per-turn Fast-Lane prompt hides out-of-scope actions via the Hybrid-C
     scope gate (see ``core.prompt_engine._derive_default_prompt_action_types``):
-    on a plain chat turn (e.g. ``ollama_serve``) the ``vessel_*`` / ``agent_*``
+    on a plain chat turn (e.g. an HTTP API interface) the ``vessel_*`` / ``agent_*``
     actions are removed from the prompt, so a well-behaved model can only choose
     from the in-scope allowlist. A *state-retaining* external engine (e.g. the
     browser-driven zen endpoint, which cannot be reset from our side) keeps
@@ -1479,14 +1465,6 @@ async def handle_incoming_message(
         )
 
         # Determine interface flags early
-        user_facing_interfaces = [
-            "discord_bot",
-            "telegram_bot",
-            "telegram",
-            "synth_webui",
-            "matrix_chat",
-            "ollama_serve",
-        ]
         interface_path = ctx.get("interface_path") or ""
         chat_id = ctx.get("chat_id")
 
@@ -2730,14 +2708,6 @@ async def handle_incoming_message(
                         and isinstance(actions, list)
                     ):
                         # Check if this is for a user-facing interface
-                        user_facing_interfaces = [
-                            "discord_bot",
-                            "telegram_bot",
-                            "telegram",
-                            "synth_webui",
-                            "matrix_chat",
-                            "ollama_serve",
-                        ]
                         interface_path = ctx.get("interface_path") or ""
                         chat_id = ctx.get("chat_id")
 
@@ -2964,8 +2934,8 @@ async def handle_incoming_message(
                                 f"[message_chain] Error checking Vox/TTS config: {e}"
                             )
 
-                        # For Telegram/Discord, only auto-inject TTS for voice-originated
-                        # messages. WebUI, Matrix and Ollama always get TTS when VOX is active.
+                        # For Discord, only auto-inject TTS for voice-originated
+                        # messages. WebUI, Matrix and the like always get TTS when VOX is active.
                         # VOX_SPEAK_TEXT_REPLIES (opt-in toggle, Engines tab) lifts the
                         # voice-input requirement so typed text replies also get a clip.
                         _is_voice_input = bool(ctx.get("is_voice_input", False))

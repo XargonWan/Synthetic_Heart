@@ -3500,17 +3500,6 @@ async def corrector_orchestrator(
                 ]
 
                 if extra_keys:
-                    # Mapping from interface prefix to the correct message
-                    # action type — mirrors _INTERFACE_TO_MESSAGE_ACTION in
-                    # message_chain but kept inline to avoid circular imports.
-                    _iface_msg_map: dict[str, str] = {
-                        "telegram_bot": "message_telegram_bot",
-                        "telegram": "message_telegram",
-                        "discord_bot": "message_discord_bot",
-                        "synth_webui": "message_synth_webui",
-                        "matrix_chat": "message_matrix_chat",
-                        "ollama_serve": "message_ollama_serve",
-                    }
                     _message_like_keys = {"message", "text", "reply", "response"}
                     ctx_ipath = (context or {}).get("interface_path")
 

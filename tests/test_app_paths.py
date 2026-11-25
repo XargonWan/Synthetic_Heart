@@ -202,8 +202,8 @@ def test_bind_host_explicit_override_wins(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setenv("SYNTH_WEBUI_HOST", "192.168.1.10")
     assert app_paths.default_bind_host() == "192.168.1.10"
     monkeypatch.delenv("SYNTH_WEBUI_HOST")
-    monkeypatch.setenv("OLLAMA_HOST", "10.0.0.5")
-    assert app_paths.default_bind_host("OLLAMA_HOST") == "10.0.0.5"
+    monkeypatch.setenv("SOME_SERVICE_HOST", "10.0.0.5")
+    assert app_paths.default_bind_host("SOME_SERVICE_HOST") == "10.0.0.5"
 
 
 def test_check_dockerisms_guard_is_clean() -> None:

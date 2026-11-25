@@ -435,8 +435,8 @@ async def test_run_agentic_turn_intent_text_does_not_stop(monkeypatch):
 async def test_run_agentic_turn_message_intent_does_not_stop(monkeypatch):
     """A message action carrying intent text must NOT end the turn.
 
-    Regression for agent task 34: on a synchronous interface (Ollama) the model
-    emitted a ``message_ollama_serve`` action whose text was only an intent
+    Regression for agent task 34: on a synchronous interface (an HTTP API) the model
+    emitted a ``message_synth_webui`` action whose text was only an intent
     statement ("Inizio subito l'esplorazione...") and the loop wrongly stopped
     with model_done. A message is delivered but is NOT a completion signal — the
     loop must nudge and keep iterating until attempt_completion.
@@ -457,9 +457,9 @@ async def test_run_agentic_turn_message_intent_does_not_stop(monkeypatch):
                 {
                     "actions": [
                         {
-                            "type": "message_ollama_serve",
+                            "type": "message_synth_webui",
                             "payload": {
-                                "target": "ollama_serve/x",
+                                "target": "synth_webui/x",
                                 "text": "I'll start exploring the files now.",
                             },
                         }

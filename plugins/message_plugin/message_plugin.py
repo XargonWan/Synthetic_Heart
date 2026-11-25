@@ -60,7 +60,6 @@ class MessagePlugin:
             "message_discord_bot",
             "message_x",
             "message_synth_webui",
-            "message_ollama_serve",
             "message_matrix_chat",
         ]
 
@@ -80,7 +79,6 @@ class MessagePlugin:
             "message_reddit": {},
             "message_x": {},
             "message_matrix_chat": {},
-            "message_ollama_serve": {},
         }
 
     def get_prompt_instructions(self, action_name: str) -> dict:
@@ -375,7 +373,6 @@ class MessagePlugin:
             "message_discord_bot": "discord_bot",
             "message_x": "x",
             "message_synth_webui": "synth_webui",
-            "message_ollama_serve": "ollama_serve",
             "message_matrix_chat": "matrix_chat",
         }
 

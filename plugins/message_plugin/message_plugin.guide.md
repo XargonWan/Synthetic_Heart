@@ -12,4 +12,4 @@ This plugin is **message-chain critical** and cannot be disabled.
 
 Dynamically one `message_<interface>` per enabled interface, e.g.:
 `message_telegram_bot`, `message_discord_bot`, `message_synth_webui`,
-`message_matrix_chat`, `message_reddit`, `message_x`, `message_ollama_serve`.
+`message_matrix_chat`, `message_reddit`, `message_x`.

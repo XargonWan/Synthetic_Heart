@@ -16,7 +16,7 @@ import json
 import time
 import statistics
 
-OLLAMA_URL = "http://localhost:11435"
+API_URL = "http://localhost:11435"
 LONG_PROMPT = """
 Scrivi una storia dettagliata di almeno 8000 parole su un viaggio attraverso un mondo 
 fantasy. La storia deve includere:
@@ -73,7 +73,7 @@ async def send_prompt(engine: str, prompt: str, timeout: int = 300) -> dict:
         ).encode()
 
         req = urllib.request.Request(
-            f"{OLLAMA_URL}/api/chat",
+            f"{API_URL}/v1/chat/completions",
             data=data,
             headers={"Content-Type": "application/json"},
         )
@@ -157,7 +157,7 @@ async def main():
     print("=" * 70)
     print("SYNTH ENGINES STRESS TEST")
     print("=" * 70)
-    print(f"Target: {OLLAMA_URL}")
+    print(f"Target: {API_URL}")
     print(f"Started: {time.strftime('%Y-%m-%d %H:%M:%S')}")
 
     # Ramp-up delays: start high, decrease to 0 for last 3

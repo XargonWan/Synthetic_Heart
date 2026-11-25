@@ -1704,7 +1704,6 @@ def test_venice_native_tools_are_scoped_and_capped_for_vessel_turns():
         "message_reddit",
         "message_x",
         "message_matrix_chat",
-        "message_ollama_serve",
         "vessel_minecraft_say",
         "vessel_minecraft_move",
         "vessel_minecraft_look",

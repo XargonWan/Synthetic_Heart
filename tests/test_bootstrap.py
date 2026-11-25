@@ -226,7 +226,6 @@ def test_generated_env_carries_the_database_settings() -> None:
 def test_generated_env_binds_loopback_and_disables_tls() -> None:
     values = _env_values()
     assert values["SYNTH_WEBUI_HOST"] == "127.0.0.1"
-    assert values["OLLAMA_HOST"] == "127.0.0.1"
     assert values["SYNTH_WEBUI_TLS"] == "0"
     assert values["SYNTH_IN_CONTAINER"] == "0"
 

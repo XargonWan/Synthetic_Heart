@@ -38,7 +38,6 @@ async def test_message_action_types_can_be_overridden(monkeypatch):
             [
                 "message_telegram_bot",
                 "message_discord_bot",
-                "message_ollama_serve",
                 "message_synth_webui",
             ],
         )
@@ -51,7 +50,6 @@ async def test_message_action_types_can_be_overridden(monkeypatch):
         current_message_action_types = [
             "message_telegram_bot",
             "message_discord_bot",
-            "message_ollama_serve",
             "message_synth_webui",
         ]
 
