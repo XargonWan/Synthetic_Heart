@@ -6,7 +6,6 @@ const historyState = {
     _initialized: false,
     currentSubTab: 'diary',
     diary: { page: 1, per_page: 30, search: '', sort: 'desc' },
-    grillo: { page: 1, per_page: 20, search: '', beat_type: '', sort: 'desc' },
     dreams: { page: 1, per_page: 15, search: '', sort: 'desc' },
     chat: { page: 1, per_page: 50, search: '', interface_path: '', sort: 'desc' },
     vessel: { page: 1, per_page: 20, search: '', environment: '', sort: 'desc' },
@@ -98,9 +97,6 @@ function initializeHistoryTab() {
 
     document.getElementById('history-diary-sort')?.addEventListener('change', () => { historyState.diary.sort = document.getElementById('history-diary-sort').value; historyState.diary.page = 1; loadHistoryDiary(); });
 
-    document.getElementById('history-grillo-search')?.addEventListener('input', SynthUtils.debounce(() => { historyState.grillo.search = document.getElementById('history-grillo-search').value; historyState.grillo.page = 1; loadHistoryGrillo(); }, 500));
-    document.getElementById('history-grillo-beat-type')?.addEventListener('change', () => { historyState.grillo.beat_type = document.getElementById('history-grillo-beat-type').value; historyState.grillo.page = 1; loadHistoryGrillo(); });
-    document.getElementById('history-grillo-sort')?.addEventListener('change', () => { historyState.grillo.sort = document.getElementById('history-grillo-sort').value; historyState.grillo.page = 1; loadHistoryGrillo(); });
 
     document.getElementById('history-dreams-search')?.addEventListener('input', SynthUtils.debounce(() => { historyState.dreams.search = document.getElementById('history-dreams-search').value; historyState.dreams.page = 1; loadHistoryDreams(); }, 500));
     document.getElementById('history-dreams-sort')?.addEventListener('change', () => { historyState.dreams.sort = document.getElementById('history-dreams-sort').value; historyState.dreams.page = 1; loadHistoryDreams(); });
@@ -124,6 +120,10 @@ function initializeHistoryTab() {
     document.getElementById('history-queue-search')?.addEventListener('input', SynthUtils.debounce(() => { historyState.queue.search = document.getElementById('history-queue-search').value; loadHistoryQueue(); }, 400));
     document.getElementById('history-queue-priority')?.addEventListener('change', () => { historyState.queue.priority = document.getElementById('history-queue-priority').value; loadHistoryQueue(); });
     document.getElementById('history-queue-refresh')?.addEventListener('click', () => { loadHistoryQueue(); });
+
+    document.getElementById('history-turns-search')?.addEventListener('input', SynthUtils.debounce(() => { historyState.turns.search = document.getElementById('history-turns-search').value; loadHistoryTurns(); }, 400));
+    document.getElementById('history-turns-status')?.addEventListener('change', () => { historyState.turns.status = document.getElementById('history-turns-status').value; loadHistoryTurns(); });
+    document.getElementById('history-turns-refresh')?.addEventListener('click', () => { loadHistoryTurns(); });
 
     // Calendar controls
     document.getElementById('calendar-prev')?.addEventListener('click', () => shiftCalendarMonth(-1));
@@ -693,7 +693,7 @@ function loadHistoryData(subtab) {
     // the background while another sub-tab is shown.
     if (subtab !== 'queue') stopQueueAutoRefresh();
     if (subtab === 'diary') return loadHistoryDiary();
-    if (subtab === 'grillo') return loadHistoryGrillo();
+    if (subtab === 'turns') return loadHistoryTurns();
     if (subtab === 'calendar') return loadHistoryCalendar();
     if (subtab === 'dreams') return loadHistoryDreams();
     if (subtab === 'growth') return loadHistoryGrowth();
@@ -732,52 +732,6 @@ async function loadHistoryDiary() {
     } catch (error) {
         console.error('Failed to load diary:', error);
         content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load diary</p></div>';
-    }
-}
-
-async function loadHistoryGrillo() {
-    const content = document.getElementById('history-grillo-content'); if (!content) return;
-    console.log('[History] loadHistoryGrillo called with state:', historyState.grillo);
-    content.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><p>Loading grillo activity...</p></div>';
-    const params = new URLSearchParams({ page: historyState.grillo.page, per_page: historyState.grillo.per_page, search: historyState.grillo.search, beat_type: historyState.grillo.beat_type, sort: historyState.grillo.sort });
-    try {
-        const response = await fetch(`/api/history/grillo?${params}`);
-        const data = await response.json();
-        console.log('[History] grillo response:', data);
-        if (data && data.success) {
-            const beatSelect = document.getElementById('history-grillo-beat-type');
-            if (beatSelect && Array.isArray(data.beat_types)) {
-                // Replace existing options (preserve the default first option)
-                const defaultOption = beatSelect.options && beatSelect.options[0] ? beatSelect.options[0] : null;
-                beatSelect.innerHTML = '';
-                if (defaultOption) beatSelect.appendChild(defaultOption);
-                const existing = new Set();
-                data.beat_types.forEach(bt => {
-                    const trimmed = String(bt).trim();
-                    if (!trimmed || existing.has(trimmed)) return;
-                    const option = document.createElement('option');
-                    option.value = trimmed;
-                    option.textContent = trimmed.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-                    beatSelect.appendChild(option);
-                    existing.add(trimmed);
-                });
-            }
-            if (Array.isArray(data.entries) && data.entries.length > 0) {
-                content.innerHTML = data.entries.map(entry => renderGrilloEntry(entry)).join('');
-                content.classList.add('history-populated');
-                try { content.scrollTop = 0; content.tabIndex = -1; setTimeout(() => { try { content.focus(); } catch (e) {} }, 50); } catch (e) {}
-                renderPagination('grillo', data.page, data.total_pages, data.total_count);
-            } else {
-                content.classList.remove('history-populated');
-                content.innerHTML = '<div class="empty-state"><div class="icon">🦗</div><p>No grillo activity found</p></div>';
-            }
-        } else {
-            console.warn('[History] grillo response indicates failure or unexpected shape:', data);
-            content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load grillo activity</p></div>';
-        }
-    } catch (error) {
-        console.error('Failed to load grillo history:', error);
-        content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load grillo activity</p></div>';
     }
 }
 
@@ -1089,10 +1043,6 @@ function deleteDiaryDay(id) {
     deleteHistoryItem('/api/history/diary/' + id, loadHistoryDiary, 'Delete the entire diary entry for this day? This cannot be undone.');
 }
 
-function deleteGrilloEntry(id) {
-    deleteHistoryItem('/api/history/grillo/' + id, loadHistoryGrillo, 'Delete this grillo activity entry? This cannot be undone.');
-}
-
 function deleteDreamEntry(id) {
     deleteHistoryItem('/api/history/dreams/' + id, loadHistoryDreams, 'Delete this dream entry? This cannot be undone.');
 }
@@ -1170,90 +1120,6 @@ function renderDiaryDayEntry(entry) {
             </div>
             <div class="diary-day-content">${contentHtml || '<em>No entry for this day</em>'}</div>
             ${safeThought ? `<div class="diary-day-thought"><strong>💭</strong> ${safeThought}</div>` : ''}
-        </div>
-    `;
-}
-
-function renderGrilloEntry(entry) {
-    const timestamp = formatTimestamp(entry.executed_at);
-    const beatTypeLabel = entry.beat_type.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-    const rawResponse = (entry.response_text || '') || '';
-    const diaryContent = (entry.diary_content || '') || '';
-    let displayResponse = rawResponse || diaryContent || '';
-    let safePrompt = escapeHtml(entry.prompt_text || ''); safePrompt = safePrompt.replace(/^[\s\u00A0]+/, '').replace(/[\n\r]+$/, ''); const promptIsLong = safePrompt.split('\n').length > 6 || safePrompt.length > 600; const promptClass = promptIsLong ? ' grillo-prompt--limited' : '';
-    let safeResponse = escapeHtml(displayResponse || ''); safeResponse = safeResponse.replace(/^[\s\u00A0]+/, '').replace(/[\n\r]+$/, ''); const responseIsLong = safeResponse.split('\n').length > 6 || safeResponse.length > 600; const responseClass = responseIsLong ? ' grillo-response--limited' : '';
-    const actionsBlock = renderGrilloActions(entry.actions || []);
-
-    return `
-        <div class="history-entry">
-            <div class="history-entry-header">
-                <div class="history-entry-meta">
-                    <div class="history-entry-date">🦗 ${timestamp}</div>
-                    <span class="history-entry-type">${beatTypeLabel}</span>
-                </div>
-                ${entry.id ? `<button type="button" class="history-delete-btn" title="Delete this entry" onclick="window.SynthWebUI.deleteGrilloEntry(${entry.id})">🗑</button>` : ''}
-            </div>
-            <div class="grillo-prompt${promptClass}">${safePrompt}</div>
-            ${safeResponse ? `
-            <div style="margin-top: 0.75rem;">
-                <div style="font-size: 0.85rem; color: var(--text-soft); margin-bottom: 0.5rem; font-weight: 500;">Response:</div>
-                <div class="grillo-response${responseClass}">${safeResponse}</div>
-            </div>
-            ` : ''}
-            ${actionsBlock}
-            ${entry.has_diary ? `
-                <div class="history-entry-detail" style="margin-top: 1rem;">
-                    <strong>📝 Reflection created</strong>
-                    ${entry.diary_entry_id ? `<small> (ID: ${entry.diary_entry_id})</small>` : ''}
-                </div>
-            ` : '<div class="history-entry-detail" style="margin-top: 0.5rem; opacity: 0.6;"><em>No diary entry created yet</em></div>'}
-        </div>
-    `;
-}
-
-function renderGrilloActions(actions) {
-    if (!Array.isArray(actions) || actions.length === 0) {
-        return `
-            <div class="grillo-actions">
-                <div class="grillo-actions-header">
-                    <span>Grillo Actions</span>
-                </div>
-                <div class="history-entry-detail" style="margin: 0; opacity: 0.7;"><em>No actions proposed</em></div>
-            </div>
-        `;
-    }
-
-    const counts = actions.reduce((acc, action) => { const key = (action.status || 'pending').toLowerCase(); acc[key] = (acc[key] || 0) + 1; return acc; }, {});
-    const countChips = ['pending', 'processed', 'failed'].filter(key => counts[key]).map(key => `<span>${key}: ${counts[key]}</span>`).join('');
-
-    const items = actions.map(action => {
-        const status = (action.status || 'pending').toLowerCase();
-        const typeLabel = escapeHtml(action.action_type || 'unknown');
-        const payload = formatJsonBlock(action.payload);
-        const result = formatJsonBlock(action.result);
-        const errorText = action.error_text ? escapeHtml(action.error_text) : '';
-        const createdAt = action.created_at ? formatTimestamp(action.created_at) : '';
-        return `
-            <div class="grillo-action-item">
-                <div class="grillo-action-header">
-                    <span class="grillo-action-type">${typeLabel}</span>
-                    <span class="grillo-action-status ${status}">${status}</span>
-                    ${createdAt ? `<span style="font-size: 0.7rem; color: var(--text-soft);">${createdAt}</span>` : ''}
-                </div>
-                ${payload ? `<div class="grillo-action-detail"><strong>Payload:</strong>\n${payload}</div>` : ''}
-                ${result ? `<div class="grillo-action-detail"><strong>Result:</strong>\n${result}</div>` : ''}
-                ${errorText ? `<div class="grillo-action-detail"><strong>Error:</strong> ${errorText}</div>` : ''}
-            </div>
-        `;
-    }).join('');
-
-    return `
-        <div class="grillo-actions">
-            <div class="grillo-actions-header">
-                <span>Grillo Actions</span>
-                ${countChips ? `<div class="grillo-actions-counts">${countChips}</div>` : ''}
-            </div>
-            <div class="grillo-actions-list">${items}</div>
         </div>
     `;
 }
@@ -1368,6 +1234,17 @@ function _queueBuildHtml(data) {
 
 // Fetch + render one queue snapshot. `silent` skips the loading spinner (used
 // by the auto-refresh poll so live ticks don't flash a spinner every time).
+// Finished turns: expandable cards (res/synth_webui/js/turn_cards.js), newest first, each
+// labelled processed or failed.
+async function loadHistoryTurns() {
+    const content = document.getElementById('history-turns-content'); if (!content) return;
+    if (!window.SynthTurnCards) {
+        content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>The turn cards script did not load</p></div>';
+        return;
+    }
+    await window.SynthTurnCards.loadFinished(content, historyState.turns);
+}
+
 async function loadHistoryQueue(silent) {
     const content = document.getElementById('history-queue-content'); if (!content) return;
     if (historyState.queue.inFlight) return; // avoid overlapping polls
@@ -1391,6 +1268,10 @@ async function loadHistoryQueue(silent) {
         content.classList.remove('history-populated');
     } finally {
         historyState.queue.inFlight = false;
+    }
+    // The turns running now, as cards that fill in step by step.
+    if (window.SynthTurnCards) {
+        window.SynthTurnCards.loadLive(document.getElementById('history-queue-live'));
     }
     // (Re)arm the live auto-refresh loop; safe to call repeatedly.
     startQueueAutoRefresh();
@@ -1884,7 +1765,6 @@ window.SynthWebUI.saveGrowthCurrent = saveGrowthCurrent;
 window.SynthWebUI.runGrowthNow = runGrowthNow;
 window.SynthWebUI.revertGrowthState = revertGrowthState;
 window.SynthWebUI.deleteDiaryDay = deleteDiaryDay;
-window.SynthWebUI.deleteGrilloEntry = deleteGrilloEntry;
 window.SynthWebUI.deleteDreamEntry = deleteDreamEntry;
 window.SynthWebUI.deleteGrowthState = deleteGrowthState;
 window.SynthWebUI.deleteVesselEntry = deleteVesselEntry;

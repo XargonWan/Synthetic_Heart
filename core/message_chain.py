@@ -28,6 +28,7 @@ import asyncio
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, cast
 
+from core import turn_cards
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.config_manager import config_registry
 from core.beat_utils import is_outbound_beat
@@ -1273,26 +1274,14 @@ async def handle_incoming_message(
         except Exception:
             ctx["llm_response_text"] = ""
 
-        # Per-turn reason trail ("why did I say that"): the structural reason
-        # summary built in ``build_prompt_request`` rides the context dict
-        # (``plugin_instance`` stashes it under ``_reason_trail`` before the
-        # engine call). Record it here once per LLM turn, now that the reply
-        # text is known. Fail-open: any error must never affect the reply.
+        # "Why did I say that": the structural reason summary built in
+        # ``build_prompt_request`` rides the context dict (``plugin_instance`` stashes it
+        # under ``_reason_trail`` before the engine call). It goes to the turn's card, once
+        # per LLM turn, now that the reply is known. Fail-open: never affects the reply.
         try:
             _reason_trail = ctx.get("_reason_trail")
             if isinstance(_reason_trail, dict):
-                from core.turn_reason import record_reason
-
-                await record_reason(
-                    interface_path=ctx.get("interface_path") or _entry_interface_path,
-                    reply_preview=str(text or "")[:200],
-                    memories=_reason_trail.get("memories"),
-                    diary_sources=_reason_trail.get("diary_sources"),
-                    emotion=_reason_trail.get("emotion"),
-                    goal=_reason_trail.get("goal"),
-                    beat_type=_reason_trail.get("beat_type"),
-                    history_scope=_reason_trail.get("history_scope"),
-                )
+                turn_cards.note_reason(_reason_trail)
                 # Never leave the internal key on a context dict that could be
                 # reused by a later turn (a stale reason must not pair with a
                 # newer reply).
@@ -1519,6 +1508,11 @@ async def handle_incoming_message(
             import traceback
 
             log_error(f"[message_chain] Traceback: {traceback.format_exc()}")
+
+        # The card of this turn keeps the correct answer, or the last one that arrived.
+        turn_cards.attempt(
+            text, parsed is not None and not (metadata or {}).get("recovered")
+        )
 
         # Check if JSON was recovered from corruption - may still have valid actions
         if parsed is not None and metadata.get("recovered"):

@@ -259,12 +259,10 @@ async def initialize_database():
         await config_registry.persist_bootstrap_configs()
         log_debug("[main] Bootstrap configurations persisted")
 
-        # Ensure the bundled Zen LLM Engine companion endpoint is registered,
-        # and self-heal its base_url if it still points at the pre-rename
-        # "selenium-llm-engine" container hostname.
-        from core.external_endpoints.registry import ensure_default_zen_endpoint
+        # Finished turns (the cards of Activity > Turns) are kept in the database.
+        from core import turn_cards
 
-        await ensure_default_zen_endpoint()
+        turn_cards.set_store(turn_cards.DbStore())
 
         # NOTE: load_all_from_db() is called later in core_initializer.initialize_all()
         # after all variable registrations are complete. Do not call it here as it would

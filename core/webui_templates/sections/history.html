@@ -7,9 +7,9 @@
               <span class="icon">📔</span>
               <span>Diary</span>
             </button>
-            <button class="sub-nav-btn" data-subtab="grillo" role="tab" aria-selected="false">
-              <span class="icon">🦗</span>
-              <span>Grillo</span>
+            <button class="sub-nav-btn" data-subtab="turns" role="tab" aria-selected="false">
+              <span class="icon">🧾</span>
+              <span>Turns</span>
             </button>
             <button class="sub-nav-btn" data-subtab="calendar" role="tab" aria-selected="false">
               <span class="icon">📅</span>
@@ -66,30 +66,23 @@
         <div id="history-diary-pagination" class="pagination-controls"></div>
       </div>
 
-      <!-- Grillo Sub-Tab -->
-      <div class="sub-tab-panel" id="subtab-grillo" data-subtab="grillo">
+      <!-- Turns Sub-Tab -->
+      <div class="sub-tab-panel" id="subtab-turns" data-subtab="turns">
         <div class="section-controls">
-          <input type="text" id="history-grillo-search" placeholder="Search grillo activity..." class="search-input" />
-          <select id="history-grillo-beat-type" class="filter-select">
-            <option value="">All Beat Types</option>
-            <option value="tag_elaboration">Tag Elaboration</option>
-            <option value="memory_consolidation">Memory Consolidation</option>
-            <option value="self_reflection">Self Reflection</option>
-            <option value="curiosity">Curiosity</option>
-            <option value="relationship">Relationship</option>
+          <input type="text" id="history-turns-search" placeholder="Search turns..." class="search-input" />
+          <select id="history-turns-status" class="filter-select">
+            <option value="">All turns</option>
+            <option value="processed">Processed</option>
+            <option value="failed">Failed</option>
           </select>
-          <select id="history-grillo-sort" class="sort-select">
-            <option value="desc">Newest First</option>
-            <option value="asc">Oldest First</option>
-          </select>
+          <button type="button" id="history-turns-refresh" class="filter-refresh-btn" title="Reload turns">🔄</button>
         </div>
-        <div id="history-grillo-content" class="history-container">
+        <div id="history-turns-content" class="history-container">
           <div class="loading-state">
             <div class="loading-spinner"></div>
-            <p>Loading grillo activity...</p>
+            <p>Loading turns...</p>
           </div>
         </div>
-        <div id="history-grillo-pagination" class="pagination-controls"></div>
       </div>
       <div class="sub-tab-panel" id="subtab-calendar" data-subtab="calendar">
         <div class="section-controls calendar-controls">
@@ -254,6 +247,7 @@
           </select>
           <button type="button" id="history-queue-refresh" class="filter-refresh-btn" title="Reload queue">🔄</button>
         </div>
+        <div id="history-queue-live" class="history-queue-live" hidden></div>
         <div id="history-queue-content" class="history-container">
           <div class="loading-state">
             <div class="loading-spinner"></div>
@@ -1070,156 +1064,25 @@
         opacity: 0.6;
       }
 
-      .grillo-prompt {
-        background: rgba(12, 12, 20, 0.4);
-        /* use gradient border for accent-left */
-        border-left: 3px solid transparent;
-        border-image: linear-gradient(180deg, var(--accent), var(--accent-dark)) 1;
-        padding: 0.75rem;
-        margin-top: 0.5rem;
-        border-radius: 4px;
-        font-size: 0.85rem;
-        color: var(--text-soft);
-        white-space: pre-wrap;
-        word-break: break-word;
-      }
 
-      .grillo-prompt--limited {
-        max-height: calc(1.5em * 5);
-        overflow-y: auto;
-        scrollbar-width: thin;
-        scrollbar-color: rgba(255, 255, 255, 0.25) transparent;
-      }
 
-      .grillo-response {
-        background: rgba(76, 175, 80, 0.1);
-        border-left: 3px solid #4CAF50;
-        padding: 0.75rem;
-        border-radius: 4px;
-        font-size: 0.9rem;
-        line-height: 1.5;
-        color: var(--text);
-        white-space: pre-wrap;
-        word-break: break-word;
-      }
 
-      .grillo-response--limited {
-        max-height: calc(1.5em * 5);
-        overflow-y: auto;
-        scrollbar-width: thin;
-        scrollbar-color: rgba(255, 255, 255, 0.25) transparent;
-      }
 
-      .grillo-prompt--limited::-webkit-scrollbar,
-      .grillo-response--limited::-webkit-scrollbar {
-        width: 6px;
-      }
 
-      .grillo-prompt--limited::-webkit-scrollbar-track,
-      .grillo-response--limited::-webkit-scrollbar-track {
-        background: transparent;
-      }
 
-      .grillo-prompt--limited::-webkit-scrollbar-thumb,
-      .grillo-response--limited::-webkit-scrollbar-thumb {
-        background: rgba(255, 255, 255, 0.35);
-        border-radius: 999px;
-      }
 
-      .grillo-actions {
-        margin-top: 0.85rem;
-        padding: 0.75rem;
-        border-radius: 8px;
-        border: 1px solid var(--border);
-        background: rgba(12, 12, 20, 0.25);
-      }
 
-      .grillo-actions-header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 0.5rem;
-        font-size: 0.85rem;
-        color: var(--text-soft);
-        margin-bottom: 0.65rem;
-      }
 
-      .grillo-actions-counts {
-        display: flex;
-        gap: 0.4rem;
-        flex-wrap: wrap;
-      }
 
-      .grillo-actions-counts span {
-        padding: 0.15rem 0.5rem;
-        border-radius: 999px;
-        font-size: 0.75rem;
-        font-weight: 600;
-        background: rgba(255, 255, 255, 0.08);
-        color: var(--text-soft);
-      }
 
-      .grillo-actions-list {
-        display: flex;
-        flex-direction: column;
-        gap: 0.6rem;
-      }
 
-      .grillo-action-item {
-        border-radius: 6px;
-        padding: 0.6rem 0.75rem;
-        background: rgba(255, 255, 255, 0.03);
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        display: flex;
-        flex-direction: column;
-        gap: 0.35rem;
-      }
 
-      .grillo-action-header {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        flex-wrap: wrap;
-        font-size: 0.85rem;
-      }
 
-      .grillo-action-type {
-        font-weight: 600;
-        color: var(--text);
-      }
 
-      .grillo-action-status {
-        padding: 0.1rem 0.45rem;
-        border-radius: 999px;
-        font-size: 0.7rem;
-        font-weight: 700;
-        text-transform: uppercase;
-      }
 
-      .grillo-action-status.pending {
-        background: rgba(255, 193, 7, 0.2);
-        color: #ffc107;
-      }
 
-      .grillo-action-status.processed {
-        background: rgba(76, 175, 80, 0.2);
-        color: #4caf50;
-      }
 
-      .grillo-action-status.failed {
-        background: rgba(244, 67, 54, 0.2);
-        color: #f44336;
-      }
 
-      .grillo-action-detail {
-        font-size: 0.78rem;
-        color: var(--text-soft);
-        white-space: pre-wrap;
-        word-break: break-word;
-        background: rgba(12, 12, 20, 0.35);
-        border-radius: 6px;
-        padding: 0.45rem 0.6rem;
-      }
 
       .chat-message {
         display: flex;

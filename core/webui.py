@@ -952,7 +952,6 @@ class SynthWebUIInterface:
         self.app.get("/api/chat/session_meta")(self.get_session_meta)
         # History API endpoints (unified diary, grillo, chat history)
         self.app.get("/api/history/diary")(self.history_diary)
-        self.app.get("/api/history/grillo")(self.history_grillo)
         self.app.get("/api/history/calendar")(self.history_calendar)
         self.app.post("/api/history/calendar")(self.create_calendar_event)
         self.app.put("/api/history/calendar/{event_id}")(self.update_calendar_event)
@@ -969,6 +968,9 @@ class SynthWebUIInterface:
         self.app.get("/api/history/growth")(self.history_growth)
         self.app.get("/api/history/vessel")(self.history_vessel)
         self.app.get("/api/history/queue")(self.history_queue)
+        self.app.get("/api/turns/live")(self.turns_live)
+        self.app.get("/api/turns")(self.turns_list)
+        self.app.get("/api/turns/{card_id}")(self.turn_detail)
         self.app.get("/api/history/vessel/goals")(self.history_vessel_goals)
         self.app.delete("/api/history/vessel/goals/{world}/{goal_id}")(
             self.delete_vessel_goal
@@ -989,7 +991,6 @@ class SynthWebUIInterface:
         self.app.post("/api/growth/revert")(self.revert_growth_state)
         # Per-item delete for History sub-tabs
         self.app.delete("/api/history/diary/{entry_id}")(self.delete_diary_day)
-        self.app.delete("/api/history/grillo/{entry_id}")(self.delete_grillo_entry)
         self.app.delete("/api/history/dreams/{entry_id}")(self.delete_grillo_entry)
         self.app.delete("/api/history/growth/{entry_id}")(self.delete_growth_state)
         self.app.delete("/api/history/vessel/{entry_id}")(self.delete_vessel_entry)
@@ -1000,8 +1001,6 @@ class SynthWebUIInterface:
         self.app.get("/api/stats")(self.stats_overview)
         self.app.get("/api/dead-targets")(self.list_dead_targets)
         self.app.delete("/api/dead-targets/{target_id}")(self.delete_dead_target)
-        self.app.get("/api/reason-trail")(self.list_reason_trail)
-        self.app.delete("/api/reason-trail/{reason_id}")(self.delete_reason_trail)
         # Manual SOUL memory maintenance: the re-distil pass behind the button in
         # Settings. GET reports progress and how much is still unstamped, POST
         # starts the pass in the background.
@@ -8561,167 +8560,6 @@ class SynthWebUIInterface:
             log_error(f"{LOG_PREFIX} Failed to revert self-growth state: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
-    async def history_grillo(self, request: Request):
-        """Return grillo activity log for the History > Grillo sub-tab - optimized."""
-        params = request.query_params
-
-        def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
-            try:
-                parsed = int(value)
-            except (TypeError, ValueError):
-                return default
-            return max(minimum, min(maximum, parsed))
-
-        page = _bounded_int(params.get("page"), default=1, minimum=1, maximum=1000)
-        per_page = _bounded_int(
-            params.get("per_page"), default=15, minimum=1, maximum=50
-        )  # Ridotto
-        search = params.get("search", "").strip()
-        beat_type_filter = params.get("beat_type", "").strip()
-        sort = params.get("sort", "desc")
-
-        try:
-            from core.db import get_conn_ctx
-
-            offset = (page - 1) * per_page
-            order = "DESC" if sort == "desc" else "ASC"
-
-            # Build WHERE clause
-            where_conditions = []
-            where_params = []
-
-            if search:
-                where_conditions.append(
-                    "beat_type LIKE %s"
-                )  # Removed prompt_text search for speed
-                where_params.append(f"%{search}%")
-
-            if beat_type_filter:
-                where_conditions.append("beat_type = %s")
-                where_params.append(beat_type_filter)
-
-            where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
-
-            # Fetch entries WITHOUT expensive LEFT JOIN - load diary content on-demand if needed
-            entries = []
-            async with get_conn_ctx() as conn:
-                async with conn.cursor() as cur:
-                    # Include a lightweight join to ai_diary so the UI can show the actual
-                    # reflective text when response_text is missing/empty.
-                    query = f"""
-                        SELECT g.id,
-                               g.beat_type,
-                               g.prompt_text as prompt_text,
-                               g.response_text as response_text,
-                               g.diary_entry_id,
-                               g.executed_at,
-                               d.content as diary_content
-                        FROM grillo_activity_log g
-                        LEFT JOIN ai_diary d ON g.diary_entry_id = d.id
-                        WHERE {where_clause}
-                        ORDER BY g.executed_at {order}
-                        LIMIT %s OFFSET %s
-                    """
-
-                    await cur.execute(query, where_params + [per_page + 1, offset])
-                    rows = await cur.fetchall()
-
-                    has_more = len(rows) > per_page
-                    if has_more:
-                        rows = rows[:per_page]
-
-                    for row in rows:
-                        # Emit explicit UTC timestamps; naive datetimes are assumed local TZ.
-                        executed_at_str = self._dt_to_utc_iso(row[5])
-
-                        entries.append(
-                            {
-                                "id": row[0],
-                                "beat_type": row[1],
-                                "prompt_text": row[2],  # Truncated for speed
-                                "response_text": row[3],  # Truncated LLM response
-                                "diary_entry_id": row[4],
-                                "executed_at": executed_at_str,
-                                "has_diary": row[4]
-                                is not None,  # Flag instead of content
-                                "diary_content": row[6],
-                            }
-                        )
-
-            # Lazy-load list of available beat types (for populating the UI selector)
-            beat_types = []
-            if page == 1 and not beat_type_filter:
-                async with get_conn_ctx() as conn:
-                    async with conn.cursor() as cur:
-                        # Fetch a large set of distinct beat types for the UI filter
-                        await cur.execute(
-                            "SELECT DISTINCT beat_type FROM grillo_activity_log ORDER BY beat_type LIMIT 1000"
-                        )
-                        rows_bt = await cur.fetchall()
-                        # Normalize by trimming whitespace and ignore NULLs
-                        beat_types = [
-                            row[0].strip()
-                            for row in rows_bt
-                            if row[0] and str(row[0]).strip()
-                        ]
-
-            # Estimate total
-            total_count = offset + len(rows) + (per_page if has_more else 0)
-            total_pages = (total_count + per_page - 1) // per_page
-
-            # Attach per-action execs to entries
-            try:
-                from core.core_initializer import PLUGIN_REGISTRY
-
-                grillo_plugin = None
-                try:
-                    if isinstance(PLUGIN_REGISTRY, dict):
-                        grillo_plugin = PLUGIN_REGISTRY.get(
-                            "grillo_plugin"
-                        ) or PLUGIN_REGISTRY.get("grillo_impl")
-                except Exception:
-                    grillo_plugin = None
-
-                activity_ids = [e["id"] for e in entries]
-                action_map: dict[int, list] = {}
-                if grillo_plugin and hasattr(grillo_plugin, "fetch_action_execs"):
-                    action_map = (
-                        await grillo_plugin.fetch_action_execs(activity_ids)
-                        if activity_ids
-                        else {}
-                    )
-                else:
-                    try:
-                        from plugins.grillo.grillo_impl import GrilloPlugin
-
-                        action_map = (
-                            await GrilloPlugin.fetch_action_execs(activity_ids)
-                            if activity_ids
-                            else {}
-                        )
-                    except Exception as exc:
-                        log_debug(f"[webui] fetch_action_execs failed: {exc}")
-                for e in entries:
-                    e["actions"] = action_map.get(e["id"], [])
-            except Exception as e:
-                log_debug(f"[webui] fetch_action_execs failed: {e}")
-
-            return JSONResponse(
-                {
-                    "success": True,
-                    "entries": entries,
-                    "beat_types": beat_types,
-                    "page": page,
-                    "per_page": per_page,
-                    "total_count": total_count,
-                    "total_pages": total_pages,
-                }
-            )
-
-        except Exception as exc:
-            log_error(f"{LOG_PREFIX} Failed to fetch grillo history: {exc}")
-            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
-
     async def history_vessel(self, request: Request):
         """Return the Rift Vessel activity log for the History > Vessel sub-tab."""
         params = request.query_params
@@ -8892,6 +8730,93 @@ class SynthWebUIInterface:
         except Exception as exc:
             log_error(f"{LOG_PREFIX} Failed to fetch vessel history: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def delete_grillo_entry(self, request: Request):
+        """Delete a single grillo_activity_log row by id (Grillo & Dreams sub-tabs)."""
+        entry_id_raw = request.path_params.get("entry_id")
+        try:
+            entry_id = int(entry_id_raw)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"success": False, "error": "Invalid entry id"}, status_code=400
+            )
+
+        try:
+            from core.db import get_conn_ctx
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "DELETE FROM grillo_activity_log WHERE id = %s", (entry_id,)
+                    )
+                    deleted = getattr(cur, "rowcount", 0) or 0
+            return JSONResponse({"success": True, "deleted_count": deleted})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to delete grillo entry: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def turns_live(self, request: Request):
+        """The turns running now, as expandable cards (Activity > Queue).
+
+        Each card is filled in as its turn moves: the message, recon, the body, the
+        corrector turns, the actions, the debrief, emotions and the memories recalled,
+        with the time each piece took. Read-only.
+        """
+        del request
+        try:
+            from core import turn_cards
+
+            return JSONResponse(
+                {
+                    "success": True,
+                    "turns": turn_cards.live(),
+                    "generated_at": self._dt_to_utc_iso(datetime.now(timezone.utc)),
+                }
+            )
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to list live turns: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def turns_list(self, request: Request):
+        """The finished turns, newest first (Activity > Turns). Filters: ``status``
+        (``processed`` or ``failed``), ``search`` and ``limit`` (1-500)."""
+        params = request.query_params
+        status = params.get("status", "").strip().lower() or None
+        if status not in (None, "processed", "failed"):
+            return JSONResponse(
+                {"success": False, "error": "status must be processed or failed"},
+                status_code=400,
+            )
+        try:
+            limit = max(1, min(500, int(params.get("limit", "100"))))
+        except ValueError:
+            limit = 100
+        search = params.get("search", "").strip() or None
+        try:
+            from core import turn_cards
+
+            cards = await turn_cards.recent(limit, status=status, search=search)
+            return JSONResponse(
+                {"success": True, "turns": cards, "total_count": len(cards)}
+            )
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to list turns: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def turn_detail(self, card_id: str):
+        """One turn's card, running or finished."""
+        try:
+            from core import turn_cards
+
+            card = await turn_cards.get(card_id)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to read a turn: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+        if card is None:
+            return JSONResponse(
+                {"success": False, "error": "no such turn"}, status_code=404
+            )
+        return JSONResponse({"success": True, "turn": card})
 
     async def history_queue(self, request: Request):
         """Return a snapshot of the message queue: the item being processed, then the backlog.
@@ -9923,30 +9848,6 @@ class SynthWebUIInterface:
             log_error(f"{LOG_PREFIX} Failed to delete diary day: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
-    async def delete_grillo_entry(self, request: Request):
-        """Delete a single grillo_activity_log row by id (Grillo & Dreams sub-tabs)."""
-        entry_id_raw = request.path_params.get("entry_id")
-        try:
-            entry_id = int(entry_id_raw)
-        except (TypeError, ValueError):
-            return JSONResponse(
-                {"success": False, "error": "Invalid entry id"}, status_code=400
-            )
-
-        try:
-            from core.db import get_conn_ctx
-
-            async with get_conn_ctx() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        "DELETE FROM grillo_activity_log WHERE id = %s", (entry_id,)
-                    )
-                    deleted = getattr(cur, "rowcount", 0) or 0
-            return JSONResponse({"success": True, "deleted_count": deleted})
-        except Exception as exc:
-            log_error(f"{LOG_PREFIX} Failed to delete grillo entry: {exc}")
-            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
-
     async def delete_vessel_entry(self, request: Request):
         """Delete a single vessel_activity_log row by id (Vessel sub-tab)."""
         entry_id_raw = request.path_params.get("entry_id")
@@ -10553,57 +10454,6 @@ class SynthWebUIInterface:
         except Exception as exc:
             log_error(f"{LOG_PREFIX} Failed to fetch dead delivery targets: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
-
-    async def list_reason_trail(self, request: Request):
-        """Return the per-turn reason trail (Logs > Reason Trail)."""
-        params = request.query_params
-
-        def _bounded_int(value: Any, default: int | None, maximum: int) -> int | None:
-            if value is None:
-                return default
-            try:
-                parsed = int(value)
-            except (TypeError, ValueError):
-                return default
-            return max(1, min(maximum, parsed))
-
-        limit = _bounded_int(params.get("limit"), default=None, maximum=5000)
-        search = params.get("search", "").strip() or None
-
-        try:
-            from core.turn_reason import list_reasons
-
-            entries = await list_reasons(limit=limit, search=search)
-            normalized = []
-            for entry in entries:
-                item = dict(entry)
-                item["created_at"] = self._dt_to_utc_iso(entry.get("created_at"))
-                normalized.append(item)
-            return JSONResponse(
-                {"success": True, "entries": normalized, "total_count": len(normalized)}
-            )
-        except Exception as exc:
-            log_error(f"{LOG_PREFIX} Failed to fetch reason trail: {exc}")
-            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
-
-    async def delete_reason_trail(self, reason_id: int):
-        """Delete one reason-trail entry."""
-        try:
-            from core.turn_reason import delete_reason
-
-            deleted = await delete_reason(reason_id)
-            if not deleted:
-                raise HTTPException(
-                    status_code=404, detail="Reason trail entry not found"
-                )
-            return JSONResponse({"success": True, "deleted": True, "id": reason_id})
-        except HTTPException:
-            raise
-        except Exception as exc:
-            log_error(
-                f"{LOG_PREFIX} Failed to delete reason trail entry {reason_id}: {exc}"
-            )
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     async def delete_dead_target(self, target_id: int):
         """Revive a dead delivery target (removes the registry entry so the

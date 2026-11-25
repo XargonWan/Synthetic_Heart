@@ -2,7 +2,7 @@
 
 from core.prompt_engine import build_prompt_request
 from core.cortex_registry import get_cortex_registry
-from core import stats_registry
+from core import stats_registry, turn_cards
 import asyncio
 import contextvars
 import time as _time
@@ -977,25 +977,9 @@ async def handle_incoming_message(
             # reply_preview). The key is internal and never part of a prompt.
             context_memory_or_prompt["_reason_trail"] = _reason_trail_dict
         elif _reason_trail_dict is not None:
-            # Non-dict context: there is no ctx thread to message_chain, so
-            # record directly here (the reply preview is not known yet).
-            try:
-                from core.turn_reason import record_reason
-
-                await record_reason(
-                    interface_path=getattr(message, "interface_path", None),
-                    reply_preview=None,
-                    memories=_reason_trail_dict.get("memories"),
-                    diary_sources=_reason_trail_dict.get("diary_sources"),
-                    emotion=_reason_trail_dict.get("emotion"),
-                    goal=_reason_trail_dict.get("goal"),
-                    beat_type=_reason_trail_dict.get("beat_type"),
-                    history_scope=_reason_trail_dict.get("history_scope"),
-                )
-            except Exception as _reason_exc:
-                log_debug(
-                    f"[plugin_instance] Reason trail fallback record skipped: {_reason_exc}"
-                )
+            # Non-dict context: there is no ctx thread to message_chain, so it goes
+            # to the turn's card directly.
+            turn_cards.note_reason(_reason_trail_dict)
 
     prompt = sanitize_for_json(prompt)
     log_debug("🌐 JSON PROMPT built for the plugin:")
@@ -1158,6 +1142,15 @@ async def handle_incoming_message(
                 result = await effective_plugin.handle_incoming_message(
                     bot, message, prompt_for_engine
                 )
+        turn_cards.note(
+            "body",
+            {
+                "engine": _primary_engine_name,
+                "model": _scope_model,
+                "reply_chars": len(result) if isinstance(result, str) else None,
+            },
+            seconds=_time.monotonic() - _body_started,
+        )
         try:
             _log_llm_traffic(prompt, result, interface)
         except Exception as e:

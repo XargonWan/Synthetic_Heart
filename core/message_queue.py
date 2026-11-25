@@ -10,7 +10,14 @@ from typing import Any, cast
 import traceback
 from types import SimpleNamespace
 
-from core import bot_ward, chat_activity, plugin_instance, rate_limit, stats_registry
+from core import (
+    bot_ward,
+    chat_activity,
+    plugin_instance,
+    rate_limit,
+    stats_registry,
+    turn_cards,
+)
 from core.beat_utils import is_outbound_beat
 from core.logging_utils import log_debug, log_error, log_warning, log_info
 from core.mention_utils import is_message_for_bot
@@ -196,12 +203,45 @@ def _note_item_in_flight(
         stats_registry.gauge("queue.depth", _get_queue().qsize())
     except Exception:  # pragma: no cover - a statistic never blocks a turn
         pass
+    _begin_turn_card(item, priority)
+
+
+def _begin_turn_card(item: dict[str, Any] | None, priority: int | None) -> None:
+    """Start the turn's card (``core.turn_cards``). Fail-open: it never touches the turn."""
+    try:
+        if not isinstance(item, dict):
+            return
+        entry = _snapshot_entry(
+            item,
+            int(priority) if priority is not None else PRIORITY_GENERAL,
+            0,
+            time.time(),
+            "processing",
+        )
+        turn_cards.begin(
+            kind=_in_flight_meta.get("kind", "chat"),
+            interface=str(entry.get("interface") or "unknown"),
+            interface_path=entry.get("interface_path"),  # type: ignore[arg-type]
+            chat_name=entry.get("chat_name"),  # type: ignore[arg-type]
+            priority_label=entry.get("priority_label"),  # type: ignore[arg-type]
+            trigger={
+                "text": entry.get("text_preview"),
+                "chat_id": entry.get("chat_id"),
+                "thread_name": entry.get("thread_name"),
+                "call": entry.get("call"),
+            },
+            queued_at=entry.get("enqueued_at"),  # type: ignore[arg-type]
+            merged=int(entry.get("merged_count") or 1),  # type: ignore[call-overload]
+        )
+    except Exception:  # pragma: no cover - a card never blocks a turn
+        pass
 
 
 def _note_turn_failed() -> None:
     """The item in flight did not get a turn through (an error or a timeout): the statistics count it as failed."""
     global _in_flight_failed
     _in_flight_failed = True
+    turn_cards.mark_failed()
 
 
 def _clear_item_in_flight() -> None:
@@ -223,6 +263,7 @@ def _clear_item_in_flight() -> None:
             )
     except Exception:  # pragma: no cover
         pass
+    turn_cards.finish(failed=_in_flight_failed)
     _in_flight_label = None
     _in_flight_reported = False
     _in_flight_item = None

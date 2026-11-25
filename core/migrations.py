@@ -796,6 +796,134 @@ async def _flag_historic_test_failure_rows() -> None:
                 pass
 
 
+# Where an interface path is stored. ``("table", "column")``: the column holds
+# ``<interface>/<chat>[/<thread>]``.
+_INTERFACE_PATH_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("chat_history_cache", "interface_path"),
+    ("interface_paths", "interface_path"),
+    ("turn_reason_trail", "interface_path"),
+    ("web_search_tasks", "interface_path"),
+)
+
+
+async def _rename_interface(old: str, new: str) -> int:
+    """Rename an interface in every stored path (``old/...`` becomes ``new/...``) and
+    in the alias table. Idempotent: a second run finds nothing to rename.
+
+    Each statement is independent, so one table that is missing or already holds a
+    ``new/...`` row does not stop the others. Returns the number of statements that
+    ran without error."""
+    from core.db import _get_db_type, get_conn_ctx
+
+    db_type = _get_db_type()
+    head = len(old) + 1  # "old/"
+    done = 0
+    async with get_conn_ctx() as conn:
+        async with conn.cursor() as cur:
+            for table, column in _INTERFACE_PATH_COLUMNS:
+                try:
+                    if not await _table_exists(cur, table, db_type):
+                        continue
+                    quote = '"' if db_type == "postgres" else "`"
+                    t, c = f"{quote}{table}{quote}", f"{quote}{column}{quote}"
+                    await cur.execute(
+                        f"UPDATE {t} SET {c} = CONCAT(%s, SUBSTR({c}, %s)) "
+                        f"WHERE SUBSTR({c}, 1, %s) = %s",
+                        (f"{new}/", head + 1, head, f"{old}/"),
+                    )
+                    done += 1
+                except Exception as exc:
+                    log_warning(
+                        f"[migrations] Cannot rename interface {old}->{new} in {table}: {exc}"
+                    )
+            try:
+                if await _table_exists(cur, "interface_aliases", db_type):
+                    await cur.execute(
+                        "UPDATE interface_aliases SET interface = %s WHERE interface = %s",
+                        (new, old),
+                    )
+                    done += 1
+            except Exception as exc:
+                log_warning(
+                    f"[migrations] Cannot rename interface {old}->{new} in interface_aliases: {exc}"
+                )
+            try:
+                await conn.commit()
+            except Exception:
+                pass
+    return done
+
+
+async def _migrate_ollama_serve_to_openai_api() -> None:
+    """The OpenAI-compatible server interface was named ``ollama_serve`` while it
+    still spoke Ollama; it is the ``openai_api`` extension now. Its stored paths
+    follow the new name."""
+    done = await _rename_interface("ollama_serve", "openai_api")
+    if done:
+        log_info("[migrations] Renamed interface ollama_serve -> openai_api in stored paths")
+
+
+#: Config keys whose value is the name of an engine (a bare name; a scope value that
+#: carries a model is JSON and is left to the engine heal).
+_ENGINE_NAME_KEYS: tuple[str, ...] = (
+    "BASE_CORTEX",
+    "GRILLO_CORTEX",
+    "TRAINER_CORTEX",
+    "DSP_CORTEX",
+    "LIVE_CORTEX",
+    "AGENT_CORTEX",
+    "VESSEL_CORTEX",
+    "ACTIVE_IRIS_ENGINE",
+    "CORTEX_FALLBACK_ENGINE",
+)
+
+
+async def _rename_endpoint(old: str, new: str) -> bool:
+    """Rename an external endpoint, and the settings that name it as an engine.
+
+    Does nothing if ``old`` does not exist or ``new`` already does (two endpoints never
+    merge). Returns whether the endpoint was renamed."""
+    from core.db import _get_db_type, get_conn_ctx
+
+    db_type = _get_db_type()
+    async with get_conn_ctx() as conn:
+        async with conn.cursor() as cur:
+            if not await _table_exists(cur, "external_endpoints", db_type):
+                return False
+            await cur.execute(
+                "SELECT name FROM external_endpoints WHERE name IN (%s, %s)", (old, new)
+            )
+            names = {
+                (row["name"] if isinstance(row, dict) else row[0])
+                for row in await cur.fetchall()
+            }
+            if old not in names or new in names:
+                return False
+            await cur.execute(
+                "UPDATE external_endpoints SET name = %s WHERE name = %s", (new, old)
+            )
+            marks = ", ".join(["%s"] * len(_ENGINE_NAME_KEYS))
+            try:
+                await cur.execute(
+                    f"UPDATE config SET value = %s WHERE value = %s AND config_key IN ({marks})",
+                    (new, old, *_ENGINE_NAME_KEYS),
+                )
+            except Exception as exc:
+                log_warning(f"[migrations] Cannot rename engine {old}->{new} in config: {exc}")
+            try:
+                await conn.commit()
+            except Exception:
+                pass
+    return True
+
+
+async def _migrate_selenium_endpoint_name() -> None:
+    """The Zen endpoint was once named ``selenium-llm-engine``; the Zen extension looks
+    for ``zen-llm-engine``."""
+    if await _rename_endpoint("selenium-llm-engine", "zen-llm-engine"):
+        log_info("[migrations] Renamed endpoint selenium-llm-engine -> zen-llm-engine")
+
+
 # Registry of startup migrations, applied in order. Each entry is
 # (name, coroutine-callable). Add new one-shot migrations here.
 _STARTUP_MIGRATIONS: list[tuple[str, Any]] = [

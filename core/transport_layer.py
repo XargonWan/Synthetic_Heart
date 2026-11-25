@@ -7,6 +7,7 @@ import asyncio
 from inspect import isawaitable
 from typing import Any, Literal, Optional, TypeAlias, overload
 from types import SimpleNamespace
+from core import turn_cards
 from core.config_manager import config_registry
 from core.logging_utils import log_debug, log_warning, log_error, log_info
 
@@ -1348,8 +1349,8 @@ async def _grillo_fire_and_forget(
             # Filter out action types already present in the original LLM reply.
             # The checker's role is to ADD missing actions, not re-execute ones the LLM
             # already generated (those are handled by the main message_chain flow).
-            # Without this filter, a Grillo beat can double-send to Telegram:
-            # (1) checker auto-executes suggested message_telegram_bot, then
+            # Without this filter, a Grillo beat can double-send to a chat:
+            # (1) checker auto-executes suggested send_message, then
             # (2) the main correction loop also executes the same action.
             try:
                 original_json, _ = extract_json_from_text(
@@ -2452,6 +2453,7 @@ def _render_vessel_world_state_block(world_state: Any) -> str:
         return ""
 
 
+@turn_cards.timed("corrector", corrector=True)
 async def run_corrector_middleware(
     text: str,
     bot=None,

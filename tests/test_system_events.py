@@ -160,7 +160,7 @@ def test_without_a_heartbeat_the_last_action_is_used(
         monkeypatch,
         heartbeat_age=None,
         shutdown_age=None,
-        action_ages={"chat_history_cache": 3 * 3600, "turn_reason_trail": None},
+        action_ages={"chat_history_cache": 3 * 3600},
     )
     assert estimate is not None
     assert estimate["basis"] == "last_action"

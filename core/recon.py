@@ -1,4 +1,4 @@
-from core import stats_registry
+from core import stats_registry, turn_cards
 import asyncio
 import json
 import threading
@@ -512,6 +512,7 @@ def get_registered_recon_keys() -> set[str]:
     return keys
 
 
+@turn_cards.timed("recon")
 @stats_registry.with_purpose("recon")
 async def gather_recon_contributions(
     message=None,

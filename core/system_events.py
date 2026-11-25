@@ -28,7 +28,7 @@ The container can be killed at any moment, so the figure is a *rough* one:
 2. A graceful stop records a ``shutdown`` event; if it is at least as recent as
    the heartbeat the stop was *clean* and the moment is exact.
 3. With no heartbeat (first boot after this feature shipped) the last known
-   action — the newest ``chat_history_cache`` / ``turn_reason_trail`` /
+   action — the newest ``chat_history_cache`` /
    ``grillo_activity_log`` row — is used, and the figure is labelled as an
    estimate.
 4. With none of those nothing is claimed: the event just says "restarted".
@@ -479,7 +479,6 @@ async def estimate_offline() -> dict[str, Any] | None:
     action_ages: list[int] = []
     for table, column in (
         ("chat_history_cache", "created_at"),
-        ("turn_reason_trail", "created_at"),
         ("grillo_activity_log", "executed_at"),
     ):
         try:

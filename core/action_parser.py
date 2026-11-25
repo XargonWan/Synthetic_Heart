@@ -16,6 +16,7 @@ from core.config_manager import config_registry
 from core.action_safety import register_action_safety_config
 from core.image_processor import RESTRICT_ACTIONS
 import json
+from core import turn_cards
 from core.transport_layer import run_corrector_middleware
 from core.core_initializer import INTERFACE_REGISTRY
 
@@ -2527,6 +2528,20 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
             log_debug(
                 "[action_parser] Errors found but message is not from LLM; skipping correction to prevent loops"
             )
+
+    # What the turn did, for its card: the kinds of action that ran and how many failed
+    # (never each error: only the outcome counts).
+    turn_cards.note(
+        "actions",
+        {
+            "processed": [
+                str(a.get("type")) for a in processed_actions if isinstance(a, dict)
+            ],
+            "failed": [
+                str(a.get("type")) for a in failed_actions if isinstance(a, dict)
+            ],
+        },
+    )
 
     # Debrief hooks (postflight) before diary creation
     if not (context or {}).get("from_debrief"):

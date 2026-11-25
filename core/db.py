@@ -2022,27 +2022,6 @@ async def ensure_plugin_tables() -> None:
                     """
                 )
 
-                # turn_reason_trail (core/turn_reason.py) — per-turn structural
-                # summary of what drove a reply ("why did I say that").
-                await cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS turn_reason_trail (
-                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                        interface_path VARCHAR(255),
-                        reply_preview TEXT,
-                        memories JSON,
-                        diary_sources JSON,
-                        emotion VARCHAR(255),
-                        goal JSON,
-                        beat_type VARCHAR(100),
-                        history_scope VARCHAR(50),
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        INDEX idx_reason_trail_created_at (created_at),
-                        INDEX idx_reason_trail_interface_path (interface_path)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-                    """
-                )
-
                 # system_events (core/system_events.py) — restarts, plugin /
                 # interface toggles and the heartbeat row (kind = 'heartbeat')
                 # used to estimate offline time.

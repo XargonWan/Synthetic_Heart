@@ -107,7 +107,7 @@ def _extract_resume_task_id(actions: List[Any]) -> int | None:
     The model — not any keyword/text matching — decides to resume a specific
     task by emitting a ``resume_agent_task`` action carrying the numeric id it
     saw referenced in the conversation. This lets a user continue a task created
-    on a *different* interface (e.g. a Grillo task referenced from Telegram),
+    on a *different* interface (e.g. a Grillo task referenced from a chat),
     which interface-based auto-resume cannot bridge. Returns the first valid
     positive id found, or ``None``.
     """
