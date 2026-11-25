@@ -149,6 +149,17 @@ async def stop_interfaces() -> None:
         except Exception as e:
             log_warning(f"[main] Error stopping interface '{name}': {e}")
 
+    # Extension processes are stopped here too, so every shutdown and restart path
+    # that already calls this function also stops them. A no-op when disabled.
+    try:
+        from core.extensions.runtime import stop_extension_runtime
+
+        await asyncio.wait_for(stop_extension_runtime(), timeout=30)
+    except TimeoutError:
+        log_warning("[main] Extension runtime did not stop within 30s")
+    except Exception as e:
+        log_warning(f"[main] Error stopping extension runtime: {e}")
+
 
 async def stop_synth_mcp() -> None:
     """Close Synth-owned MCP sessions before the event loop is torn down."""
@@ -476,6 +487,16 @@ if __name__ == "__main__":
 
                 traceback.print_exc()
                 sys.exit(1)
+
+            # Extensions run in their own processes and are off unless
+            # EXTENSIONS_ENABLED is set. Whatever happens here must never stop the
+            # Core, so the call is isolated on its own.
+            try:
+                from core.extensions.runtime import start_extension_runtime
+
+                await start_extension_runtime()
+            except Exception as e:
+                log_warning(f"[main] Extension runtime could not start: {e}")
 
             log_info("[main] All components auto-discovered and initialized")
 

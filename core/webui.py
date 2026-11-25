@@ -793,6 +793,9 @@ class SynthWebUIInterface:
         # Register callback to broadcast state changes to all WebSocket clients
         self.action_state_manager.register_state_changed_callback(
             self._broadcast_action_state
+        #: Callables ``section -> tabs`` asked every time a section template is served,
+        #: for tabs that come and go at runtime (extension windows).
+        self._section_tab_providers: list[Callable[[str], list[dict[str, str]]]] = []
         )
         log_info(
             f"{LOG_PREFIX} Action state manager initialized with WebSocket broadcast",
@@ -1268,6 +1271,12 @@ class SynthWebUIInterface:
         ``webui_auth.websocket_authorized``).
         """
         self.app.include_router(router)
+    def register_section_tab_provider(
+        self, provider: Callable[[str], list[dict[str, str]]]
+    ) -> None:
+        """Add a source of sub-tabs that is asked on every render of a section."""
+        self._section_tab_providers.append(provider)
+
         log_info(
             f"{LOG_PREFIX} Plugin router mounted: {name or router}",
             log_file=WEBUI_LOG,
@@ -3451,7 +3460,12 @@ class SynthWebUIInterface:
                 template = template.replace(key, str(value))
 
             # Inject plugin-registered sub-tabs for this section
-            section_tabs = self._plugin_section_tabs.get(section, [])
+            section_tabs = list(self._plugin_section_tabs.get(section, []))
+            for provider in self._section_tab_providers:
+                try:
+                    section_tabs.extend(provider(section))
+                except Exception as exc:  # noqa: BLE001 - a bad provider loses its tabs only
+                    log_warning(f"{LOG_PREFIX} Section tab provider failed: {exc}")
             for tab in section_tabs:
                 # Append button inside <nav class="sub-nav">
                 template = template.replace(
