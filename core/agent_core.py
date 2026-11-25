@@ -43,7 +43,7 @@ try:
     # NOT counted — this caps only status updates sent while the loop keeps
     # working. Default 1: the user hears one interim update, then the final
     # answer — never a re-worded status message on every iteration (observed
-    # live: three near-identical Telegram updates from one turn).
+    # live: three near-identical chat updates from one turn).
     register_exposed_var(
         "AGENT_MAX_INTERIM_MESSAGES",
         label="Agent max interim messages",
@@ -929,7 +929,7 @@ class AgentLoopManager:
     ) -> Optional[Dict[str, Any]]:
         """Find a paused (``pending``) agentic task for the given interface.
 
-        A single interface (a Telegram chat, a Discord channel, a WebUI
+        A single interface (a Matrix room, a Discord channel, a WebUI
         session) must never own two parallel pending agentic tasks. When a
         turn exhausts its budget without an explicit completion it is parked as
         ``pending``; the very next message from that same ``interface_path``
@@ -1003,7 +1003,7 @@ class AgentLoopManager:
         Unlike :meth:`find_resumable_task_for_interface` this does NOT match on
         the originating interface: the user may refer to a task created on a
         different interface (e.g. a Grillo-originated task referenced from a
-        Telegram chat). The task id is chosen by the model — this method only
+        chat). The task id is chosen by the model — this method only
         loads and validates it, it never parses user text.
 
         Returns a dict ``{"task_id", "goal", "engine", "prior_observations"}``
@@ -1268,7 +1268,7 @@ class AgentLoopManager:
 
         This is the single, source-agnostic persistence point for
         :meth:`run_agentic_turn`. Every caller — the message-chain Agent Lane
-        (Telegram / Discord / API), the WebUI ``/api/agent/run`` route, or any
+        (Discord / API), the WebUI ``/api/agent/run`` route, or any
         future entry point — produces a row visible in the WebUI Agent panel,
         regardless of which interface originated the turn.
 
@@ -1627,7 +1627,7 @@ class AgentLoopManager:
 
         # Interim-message damper: even NON-identical re-worded status messages
         # must not spam the user on every iteration (observed live: one turn
-        # sent three near-identical Telegram updates because each iteration
+        # sent three near-identical chat updates because each iteration
         # re-narrated the same status slightly differently — exact-text dedup
         # can not catch that; also observed: four distinct rewordings of a
         # weather answer delivered to the SAME chat because each one landed on
@@ -2144,7 +2144,7 @@ class AgentLoopManager:
                 break
 
             # Synth actions vs tools. A plain outbound message action (e.g.
-            # ``message_telegram_bot``) is Synth talking to the user, NOT a tool
+            # ``send_message``) is Synth talking to the user, NOT a tool
             # the agent should feed back into its loop. Recognise those synth
             # actions and split them out: the message text becomes the turn's
             # reply, while the tool executor keeps handling real tools. This
@@ -2153,7 +2153,7 @@ class AgentLoopManager:
             # CRITICAL: a pure-message call must still be ACTUALLY DELIVERED to
             # the originating interface via the tool executor. Historically the
             # text was only captured into ``final_text`` and never executed, so
-            # on an asynchronous interface (Telegram/Discord) the message was
+            # on an asynchronous interface (Discord) the message was
             # silently never sent while the turn still claimed to have replied.
             # We now execute every pure-message through ``agent_tool_executor``
             # exactly like any other action, recording the delivery outcome.
@@ -2772,7 +2772,7 @@ class AgentLoopManager:
         # author the "I'm not done, shall I continue?" message itself, in the
         # conversation's own language/tone, instead of shipping a hardcoded
         # English string. Overwrite ``final_text`` with the composed message so
-        # every delivery path (Telegram/Discord/API) shows Synth's own words.
+        # every delivery path (Discord/API) shows Synth's own words.
         if stop_reason == "paused_max_iterations":
             actions_executed = 0
             for obs in observations:
@@ -2795,7 +2795,7 @@ class AgentLoopManager:
         # an empty ``final_text`` and NOTHING is delivered — the user sees
         # silence even though the agent diagnosed the situation mid-loop
         # (observed live: a stuck-queued download was analysed in every
-        # iteration's reasoning, yet Telegram never received a word because
+        # iteration's reasoning, yet the chat never received a word because
         # the turn died at the budget with no message). Compose the same
         # model-authored "here's where I am, shall I continue?" pause message
         # and re-classify the stop reason so the task parks as resumable
@@ -2860,7 +2860,7 @@ class AgentLoopManager:
         # Observability: a burst of delivery failures within one turn — even
         # when the turn otherwise ends normally because a DIFFERENT message
         # got through — previously left no trace outside raw logs. Live
-        # incident that surfaced this: ~186 failed ``message_telegram_bot``
+        # incident that surfaced this: ~186 failed ``send_message``
         # retries with an empty/malformed payload inside one turn, invisible
         # to ``list_llm_failures``. Best-effort and fire-and-forget: logging
         # here must never affect the turn's own outcome.
@@ -3571,7 +3571,7 @@ class AgentLoopManager:
         observation_block = "\n".join(history_lines)
 
         # Expose the originating conversation to the model. Message-delivery
-        # actions (e.g. message_telegram_bot / audio_telegram_bot) declare
+        # actions (e.g. send_message) declare
         # ``interface_path`` as a REQUIRED field, but the agentic prompt only
         # carried GOAL + TOOLS + OBSERVATIONS — the model never saw the source
         # interface_path and therefore either omitted it (payload validation
@@ -3599,7 +3599,7 @@ class AgentLoopManager:
                     "message or command to someone else or to a bot (e.g. "
                     "'send /embark to @some_bot'), do it with send_message using "
                     "that recipient's own interface_path (e.g. "
-                    "'telegram/@some_bot') and the exact text asked, then tell "
+                    "'example_chat/@some_bot') and the exact text asked, then tell "
                     "the user here that you sent it. Never answer with "
                     "instructions for the user to do it themselves."
                 )

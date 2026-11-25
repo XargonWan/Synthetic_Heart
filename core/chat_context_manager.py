@@ -142,7 +142,7 @@ def get_or_create_chat_context(interface_path: str) -> deque:
     """Get or create a context deque for an interface path.
 
     Args:
-        interface_path: The interface path (e.g., telegram_bot/123456/2)
+        interface_path: The interface path (e.g., example_chat/123456/2)
 
     Returns:
         A deque with maxlen=CHAT_HISTORY_LIMIT
@@ -195,7 +195,7 @@ async def add_message_to_context(
     3. Auto-cleans old messages beyond CHAT_HISTORY_LIMIT
 
     Args:
-        interface_path: Interface path (e.g., 'telegram_bot/123456/2')
+        interface_path: Interface path (e.g., 'example_chat/123456/2')
         message_text: The message text
         sender_name: Sender display name
         sender_id: Sender unique ID
@@ -333,7 +333,7 @@ async def load_chat_history(interface_path: str) -> None:
     from previous sessions.
 
     Args:
-        interface_path: Interface path to load history for (e.g., telegram_bot/123456/2)
+        interface_path: Interface path to load history for (e.g., example_chat/123456/2)
     """
     try:
         from core.chat_history_cache import load_chat_history as cache_load
@@ -390,7 +390,7 @@ def clear_chat_context(interface_path: str) -> None:
     """Clear context for a specific interface path.
 
     Args:
-        interface_path: Interface path (e.g., telegram_bot/123456/2)
+        interface_path: Interface path (e.g., example_chat/123456/2)
     """
     interface_path = _resolve_context_path(interface_path)
     if interface_path in _context_memory:
@@ -433,7 +433,7 @@ async def save_response_message(
     This should be called by the core whenever it sends a message to an interface.
 
     Args:
-        interface_path: Interface path (e.g., telegram_bot/123456/2)
+        interface_path: Interface path (e.g., example_chat/123456/2)
         message_text: The response message text
         metadata: Optional message metadata (e.g. {"tts_url": ...})
     """

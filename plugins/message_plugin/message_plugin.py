@@ -43,19 +43,18 @@ class MessagePlugin:
         if INTERFACE_REGISTRY:
             self.supported_interfaces = list(INTERFACE_REGISTRY.keys())
         else:
-            # Default to telegram_bot if no interfaces registered yet
-            self.supported_interfaces = ["telegram_bot"]
+            # Nothing registered yet: the WebUI is the one interface that always exists
+            self.supported_interfaces = ["synth_webui"]
         log_debug("[message_plugin] MessagePlugin initialized")
 
     @property
     def description(self):
         """Return a description of this plugin."""
-        return "Handles text message sending across different interfaces (Telegram, Discord, etc.)"
+        return "Handles text message sending across the registered interfaces"
 
     def get_supported_action_types(self):
         """Return the action types this plugin supports."""
         return [
-            "message_telegram_bot",
             "message_reddit",
             "message_discord",
             "message_discord_bot",
@@ -76,7 +75,6 @@ class MessagePlugin:
         and ensure context (like TTS audio) is passed to interface execution.
         """
         return {
-            "message_telegram_bot": {},
             "message_discord_bot": {},
             "message_synth_webui": {},
             "message_reddit": {},
@@ -196,8 +194,13 @@ class MessagePlugin:
 
         # Check if public chat logic
         is_public = False
-        # Simple heuristic: Telegram negative IDs, or Discord/Reddit/Matrix channels
-        if interface_name == "telegram_bot" and target:
+        # Simple heuristic: an interface whose negative chat ids are groups (it
+        # declares that in its manifest), or Discord/Reddit/Matrix channels
+        if (
+            interface_name
+            and target
+            and traits_for(interface_name).negative_chat_id_is_group
+        ):
             try:
                 if int(target) < 0:
                     is_public = True
@@ -367,7 +370,6 @@ class MessagePlugin:
         # Map action types to interface names
         action_type = action.get("type", "")
         interface_map = {
-            "message_telegram_bot": "telegram_bot",
             "message_reddit": "reddit",
             "message_discord": "discord",
             "message_discord_bot": "discord_bot",
@@ -414,7 +416,7 @@ class MessagePlugin:
             interface_name = (
                 self.supported_interfaces[0]
                 if self.supported_interfaces
-                else "telegram_bot"
+                else "synth_webui"
             )
 
         # openai_compat cortex routing safety: these small local models routinely

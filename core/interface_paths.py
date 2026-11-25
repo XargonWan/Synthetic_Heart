@@ -54,7 +54,7 @@ def set_name_resolver(interface: str, resolver: NameResolver) -> None:
     """Register a live chat/thread name resolver for an interface.
 
     The resolver is called by :func:`resolve_and_touch` to fetch the current
-    chat and thread names from the live interface (e.g. Telegram ``getChat``),
+    chat and thread names from the live interface (e.g. a platform's chat lookup),
     which are then stored as ``segment_labels`` on the interface path.
     """
     _NAME_RESOLVERS[interface] = resolver
@@ -174,7 +174,7 @@ async def resolve_and_touch(
 
     ``chat_name`` / ``thread_name`` may be passed by the caller to supply names
     that are only available on the incoming update and cannot be fetched via a
-    live API lookup (e.g. Telegram forum-topic names). Caller-supplied values
+    live API lookup (e.g. forum-topic names). Caller-supplied values
     take precedence over the resolver result.
     """
     if not interface_path or not isinstance(interface_path, str):
@@ -197,7 +197,7 @@ async def resolve_and_touch(
         except Exception as exc:
             log_debug(f"[interface_paths] resolver failed for {interface_path}: {exc}")
 
-    # Caller-supplied names win (e.g. Telegram topic name from the update).
+    # Caller-supplied names win (e.g. a topic name from the update).
     if override_chat_name:
         chat_name = override_chat_name
     if override_thread_name:
@@ -427,13 +427,13 @@ async def find_channel_groups(terms: list[str]) -> list[dict[str, Any]]:
     A term matches a path when it appears (case-insensitively) in any of the
     path's ``segment_labels``. Matches are grouped by root prefix
     (``interface_name/level1``); one term can match multiple groups across
-    interfaces (e.g. a "Dojo del Chaos" on both Telegram and Discord).
+    interfaces (e.g. a "Dojo del Chaos" on both Matrix and Discord).
 
     Returns a list of groups::
 
         {
-            "root_prefix": "telegram_bot/-1394756383",
-            "group_label": "Telegram Bot / Dojo del Chaos",
+            "root_prefix": "example_chat/-1394756383",
+            "group_label": "Example Chat / Dojo del Chaos",
             "thread_required": bool,   # True when only thread rows exist
             "children": [{"interface_path": ..., "display": ...}, ...],
         }

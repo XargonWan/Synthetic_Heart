@@ -447,11 +447,11 @@ class ConfigRegistry:
         be called automatically.
 
         Args:
-            component: Component name (e.g., "telegram_bot", "discord_bot")
+            component: Component name (e.g., "example_chat", "discord_bot")
             handler: Async callable that performs the reload (e.g., reload_interface)
 
         Example:
-            config_registry.register_reload_handler("telegram_bot", reload_interface)
+            config_registry.register_reload_handler("example_chat", reload_interface)
         """
         self._reload_handlers[component] = handler
         log_debug(f"[config] Registered reload handler for component '{component}'")

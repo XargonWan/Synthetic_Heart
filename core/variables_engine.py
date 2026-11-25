@@ -119,7 +119,7 @@ class ExposedVarDefinition:
         # For file-backed variables we accept a string path or dict metadata; skip casting
         if self.ui_type == "file":
             return
-        # Interface-path variables are opaque string paths (e.g. "telegram_bot/123");
+        # Interface-path variables are opaque string paths (e.g. "example_chat/123");
         # skip casting so they are stored verbatim.
         if self.ui_type == "interface-path":
             return
@@ -896,7 +896,7 @@ def register_all():
         ui_type="peer-list",
         description=(
             "The other SyntH instances that share groups with this one. Each row is "
-            "the peer's Telegram bot user ID (not @username) and the display name to "
+            "the peer's bot user ID (not @username) and the display name to "
             "use for them in the prompt instruction block. Messages from these bot IDs "
             "are handled according to SYNTH_PEER_POLICY to prevent infinite response "
             "cascades. NOTE: for a peer's messages to reach this instance at all, "
@@ -934,7 +934,7 @@ def register_all():
         value_type=float,
         ui_type="number",
         description=(
-            "Turn-coordination floor for shared Telegram groups. "
+            "Turn-coordination floor for shared group chats. "
             "Set to 0 on the primary instance (responds immediately). "
             "Set to a value greater than your typical LLM response time on every "
             "secondary instance — e.g. 20 for a 7-12s LLM. The secondary waits this "

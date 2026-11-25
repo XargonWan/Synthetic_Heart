@@ -265,7 +265,7 @@ async def _call_interface_send(interface_send_func, *args, **kwargs):
             if isawaitable(result):
                 return await result
             return result
-        # Retry 2: payload-style interfaces (e.g. Telegram/Discord/Matrix) expose
+        # Retry 2: payload-style interfaces (e.g. Discord/Matrix) expose
         # ``send_message(payload: dict, original_message=None)`` and do NOT accept a
         # ``text=`` keyword. universal_send/_send_text forward ``text=`` directly,
         # which the normal action path never does (it passes a payload dict
@@ -1059,7 +1059,7 @@ def _attempt_recover_actions_from_text(
 
     Current heuristic:
       - If the recovered JSON has an 'actions' list but some action types are
-        missing (commonly message_telegram_bot), try to find those action
+        missing (commonly send_message), try to find those action
         blocks in the raw original_text and reconstruct a safe action dict
         by extracting the 'text' value and escaping internal quotes.
 
@@ -1687,10 +1687,10 @@ async def universal_send(interface_send_func, *args, text: str | None = None, **
             "[transport] universal_send diagnostic logging failed to inspect interface_send_func"
         )
 
-    # Map thread_id to message_thread_id for Telegram API compatibility
+    # Map thread_id to message_thread_id (the name interfaces' send functions take)
     if "thread_id" in kwargs:
         thread_id = kwargs.pop("thread_id")
-        # Convert thread_id to int if it's a string (for Telegram API compatibility)
+        # Convert thread_id to int if it's a string
         if isinstance(thread_id, str) and thread_id.isdigit():
             thread_id = int(thread_id)
         kwargs["message_thread_id"] = thread_id
@@ -2789,7 +2789,7 @@ async def run_corrector_middleware(
                         correction_message_text += f"\nAllowed action types for this scope: {', '.join(sorted(allowed_action_types))}\n"
                     # If a message action already delivered on an earlier pass,
                     # the model must NOT re-send a reply — that is what caused
-                    # duplicate Telegram messages (CHANGELOG 2026-06-26). The
+                    # duplicate chat messages (CHANGELOG 2026-06-26). The
                     # "create ALL actions" requirement below is dropped so it
                     # cannot override this; structural type-prefix detection.
                     delivered_message_types = [
@@ -2866,12 +2866,12 @@ async def run_corrector_middleware(
             # the corrected response back to the correct interface instead of
             # falling back to synth_webui.
             #
-            # Prefer the authoritative interface_path prefix (e.g. "telegram_bot"
-            # from "telegram_bot/5208932647") over the raw context["interface"]
-            # value, which is a legacy display name ("telegram") that does not
-            # match the registered interface id ("telegram_bot"). Using the
+            # Prefer the authoritative interface_path prefix (e.g. "example_chat"
+            # from "example_chat/5208932647") over the raw context["interface"]
+            # value, which is a legacy display name ("example") that does not
+            # match the registered interface id ("example_chat"). Using the
             # legacy name made the required_format example teach
-            # "message_telegram" + "telegram/5208932647" — an unregistered
+            # "message_example" + "example_chat/5208932647" — an unregistered
             # action the model then copied verbatim, so the correction failed
             # again (langfuse 48282d7a-42fe-49a1-9d3a-4db1e1123a21).
             originating_interface: str | None = (
@@ -2986,7 +2986,7 @@ async def run_corrector_middleware(
             # model then copies into its correction, so the reply is never
             # delivered (live 2026-09-21, langfuse
             # feca9072-0abe-46ef-90da-f1409723088e: the sender passed
-            # ``interface="telegram"`` and no interface_path, so the path-prefix
+            # ``interface="example"`` and no interface_path, so the path-prefix
             # override above had nothing to resolve and the legacy label
             # survived).
             _legacy_iface_labels = {
@@ -3001,9 +3001,9 @@ async def run_corrector_middleware(
                 or "<interface>"
             )
             # Map the interface id to its registered message action type via the
-            # canonical table (telegram_bot -> message_telegram_bot, ...). Blind
+            # canonical table (each interface's declared sending action). Blind
             # ``message_{iface_label}`` taught the model unregistered types (e.g.
-            # ``message_telegram``) when the label was a legacy display name
+            # ``message_example``) when the label was a legacy display name
             # rather than the interface id, so the correction re-emitted the same
             # invalid action (langfuse 48282d7a-42fe-49a1-9d3a-4db1e1123a21).
             try:
@@ -3020,10 +3020,10 @@ async def run_corrector_middleware(
                 correction_action_type = "send_message"
             # Build the example interface_path WITHOUT a trailing slash. The old
             # unconditional ``.../{thread or ''}`` produced e.g.
-            # ``telegram_bot/5208932647/`` when ``thread_id`` was None, which the
+            # ``example_chat/5208932647/`` when ``thread_id`` was None, which the
             # model copied into its correction reply; if that reply ever reached
             # the interface it would be stored under a DIFFERENT history key than
-            # the canonical ``telegram_bot/5208932647`` and the model would never
+            # the canonical ``example_chat/5208932647`` and the model would never
             # see its own message again (a "forgot what itself said" gap).
             _correction_interface_path = f"{iface_label}/{chat_id or '<chat_id>'}"
             if payload_thread_id is not None:
@@ -3782,11 +3782,11 @@ async def notify_corrector_of_system_message(
     bot,
     chat_id: int | str | None = None,
     thread_id: int | None = None,
-    interface: str = "telegram_bot",
+    interface: str = "unknown",
 ):
     """Send a manually-generated system message into the corrector.
 
-    This is used by interfaces (currently only Telegram) when they need to
+    This is used by interfaces when they need to
     trigger the correction loop for error notifications or invalid user
     input.  Unlike normal LLM-origin messages, these are *not* coming from the
     AI stack, so we explicitly mark ``from_cortex=False`` to prevent the

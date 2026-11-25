@@ -92,6 +92,6 @@ def test_missing_reply_hint_non_vessel_unaffected_by_new_params() -> None:
         current_player_message="ignored for non-vessel",
         last_self_line="also ignored",
     )
-    assert "message_telegram_bot" in hint
+    assert "'send_message'" in hint and "'telegram_bot'" in hint
     assert "ignored for non-vessel" not in hint
     assert "also ignored" not in hint

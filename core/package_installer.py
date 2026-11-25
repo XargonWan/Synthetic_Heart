@@ -57,8 +57,6 @@ register_exposed_var(
 ALLOWED_REQUIREMENTS: dict[str, str] = {
     "vosk": "vosk>=0.3.45",
     "faster_whisper": "faster-whisper>=0.8.1",
-    # Telegram user-account calls (interface/telegram/telegram_call.py); pulls ntgcalls.
-    "pytgcalls": "py-tgcalls>=3.0.0",
 }
 
 _INSTALL_TIMEOUT_S = 900

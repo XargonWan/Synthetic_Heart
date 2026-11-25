@@ -1,13 +1,13 @@
 """
 Peer SyntH policy — prevents cascade loops when multiple SyntH instances
-share a Telegram group (or other multi-bot space).
+share a group chat (or other multi-bot space).
 
 When two bots are in the same group each bot's message can trigger alias
 matching in the other, causing an infinite response chain. This module
 intercepts those messages at the middleware layer — the LLM is never invoked.
 
 Config keys (set via WebUI or DB):
-  SYNTH_PEERS       JSON array of {"id": <telegram user id>, "name": <display
+  SYNTH_PEERS       JSON array of {"id": <platform user id>, "name": <display
                     name>} objects, one per other SyntH instance sharing spaces
                     with this one. Example:
                     [{"id": 1234567, "name": "Aria"}, {"id": 8901234, "name": "Sol"}]
@@ -15,7 +15,7 @@ Config keys (set via WebUI or DB):
   NOTE: for a peer bot's messages to reach this instance at all, "Bot-to-Bot
   Communication Mode" must be enabled for both bots in BotFather, AND this
   bot must have Group Privacy Mode disabled (or admin rights) in the shared
-  group -- otherwise Telegram never delivers the peer's messages here in the
+  group -- otherwise the platform never delivers the peer's messages here in the
   first place, and everything below is moot. See docs/peer_synths.rst.
 
   SYNTH_PEER_POLICY How to handle messages *from* those peer bots:
@@ -98,12 +98,6 @@ def _read_config(key: str, default: Any) -> Any:
     except Exception as e:
         log_debug(f"[peer_policy] config read failed for {key}: {e}")
         return default
-
-
-#: Interfaces whose user ids the ``SYNTH_PEERS`` entries are written in. Peer ids
-#: are Telegram user ids, so a peer block is only meaningful on these; keeping the
-#: list here (not in the prompt builder) leaves the builder interface-agnostic.
-PEER_INTERFACES: frozenset[str] = frozenset({"telegram", "telegram_bot"})
 
 
 def interface_has_peers(interface_name: str | None) -> bool:
@@ -418,9 +412,8 @@ async def _self_replied_recently(chat_id: int, cooldown_seconds: float) -> bool:
             async with conn.cursor() as cur:
                 await cur.execute(
                     "SELECT MAX(created_at) FROM chat_history_cache "
-                    "WHERE (interface_path LIKE %s OR interface_path LIKE %s) "
-                    "AND sender_id = 'self'",
-                    (f"telegram_bot/{chat_id}%", f"telegram/{chat_id}%"),
+                    f"WHERE ({like}) AND sender_id = 'self'",
+                    tuple(f"{name}/{chat_id}%" for name in peer_ifaces),
                 )
                 row = await cur.fetchone()
                 if not row or not row[0]:

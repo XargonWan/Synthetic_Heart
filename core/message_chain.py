@@ -366,7 +366,7 @@ def _auto_inject_interface_path(actions: list, interface_path: Optional[str]) ->
 
     Args:
         actions: List of action dicts to process
-        interface_path: The interface path from context (e.g., 'telegram_bot/5551234567')
+        interface_path: The interface path from context (e.g., 'example_chat/5551234567')
 
     Returns:
         The same list with interface_path injected in-place where missing
@@ -414,13 +414,13 @@ def _auto_inject_interface_path(actions: list, interface_path: Optional[str]) ->
 
 
 async def _canonicalize_alias_paths(actions: list) -> list:
-    """Map ``telegram/@jay`` style paths the model built to the stored id form.
+    """Map ``example_chat/@jay`` style paths the model built to the stored id form.
 
     The model is shown (and asked to build) readable alias paths; everything
     downstream — routing, origin comparison, beat target checks, history —
     keys on the canonical id path, so the conversion happens once, up front.
     An alias that is not known is left untouched (an interface may still be able
-    to resolve it, e.g. a public Telegram username).
+    to resolve it, e.g. a public username).
     """
     from core.interface_aliases import to_canonical_path
 
@@ -700,12 +700,12 @@ def _normalize_message_unknown(actions: list, interface_path: Optional[str]) -> 
     """Normalize 'message_unknown' action types to the correct interface-specific type.
 
     Some LLMs fabricate action types like 'message_unknown' instead of using the
-    correct interface-specific action (e.g., 'message_telegram_bot'). This function
+    correct interface-specific action (e.g., 'message_synth_webui'). This function
     detects and corrects such actions based on the interface_path.
 
     Args:
         actions: List of action dicts to normalize
-        interface_path: The interface path (e.g., 'telegram_bot/5551234567')
+        interface_path: The interface path (e.g., 'example_chat/5551234567')
 
     Returns:
         The same list with any 'message_unknown' types corrected in-place
@@ -713,7 +713,7 @@ def _normalize_message_unknown(actions: list, interface_path: Optional[str]) -> 
     if not actions or not interface_path:
         return actions
 
-    # Extract interface prefix from path (e.g., 'telegram_bot' from 'telegram_bot/5551234567')
+    # Extract interface prefix from path (e.g., 'example_chat' from 'example_chat/5551234567')
     interface_prefix = (
         interface_path.split("/")[0] if "/" in interface_path else interface_path
     )
@@ -807,8 +807,8 @@ def _build_missing_reply_hint(
         return hint
     return (
         "CHAT REPLY REQUIRED: The user is waiting for a reply in this active conversation turn. "
-        f"You MUST include a message action targeting the originating interface '{(interface_path or '').split('/')[0]}' "
-        "(e.g., 'message_telegram_bot') to reply to the user. Internal actions like diary entries "
+        f"You MUST include a message action targeting the originating interface '{prefix}' "
+        f"(e.g., '{action}') to reply to the user. Internal actions like diary entries "
         "and emotion updates do NOT substitute for replying."
     )
 
@@ -1157,7 +1157,7 @@ def _merge_correction_successes(
     ``message_*`` action already delivered on an earlier pass — so the retry
     filter (``successful_types``) stops stripping it and the model's re-emitted
     reply gets delivered a second time (CHANGELOG 2026-06-26 duplicate
-    Telegram messages). This merges the previous context's successful
+    chat messages). This merges the previous context's successful
     actions/types (deduplicated, order-stable) with the current pass's, so the
     "already delivered" knowledge accumulates across passes.
     """
@@ -1262,7 +1262,7 @@ async def handle_incoming_message(
     ctx = context or {}
     ctx["message"] = message
     ctx["original_text"] = (
-        text  # Track original text in context, not on message (for consistency with immutable Telegram Message objects)
+        text  # Track original text in context, not on message (for consistency with immutable platform Message objects)
     )
     if not ctx.get("goal") and isinstance(text, str) and text.strip():
         ctx["goal"] = text.strip()
@@ -1272,7 +1272,7 @@ async def handle_incoming_message(
         except Exception:
             ctx["original_user_message"] = ""
 
-    # Mark cortex-origin in context (not on message object, as Telegram
+    # Mark cortex-origin in context (not on message object, as platform
     # Message objects are immutable). We normalise on "from_cortex" internally.
     is_cortex_origin = True if source == "llm" else ctx.get("from_cortex", False)
     # also honor explicit cortex/ai flags in context (legacy support)
@@ -1320,7 +1320,7 @@ async def handle_incoming_message(
             # keep legacy attr for compatibility but core uses from_cortex
             message.from_cortex = is_cortex_origin
     except (AttributeError, TypeError):
-        pass  # Message object is immutable (Telegram Message); use ctx instead
+        pass  # Message object is immutable (platform Message); use ctx instead
 
     # Preserve chat_id and interface_path in context to avoid losing them during processing
     # Check message attributes, kwargs, and original context (in that priority order)
@@ -1620,7 +1620,7 @@ async def handle_incoming_message(
                 else:
                     # Recover a root-level type+payload action that the LLM placed
                     # outside the actions array, e.g.:
-                    #   {"actions": [...], "type": "message_telegram_bot", "payload": {...}}
+                    #   {"actions": [...], "type": "send_message", "payload": {...}}
                     # gemma-uncensored and similar models occasionally emit this
                     # malformed structure where the last action leaks to root.
                     # Folding it in here avoids the corrector firing for every
@@ -2012,7 +2012,7 @@ async def handle_incoming_message(
                 and not isinstance(parsed.get("action"), str)
             ):
                 # The LLM may have returned a dictionary mapping action types to payloads
-                # e.g., {"message_telegram_bot": {...}, "create_personal_diary_entry": {...}}
+                # e.g., {"send_message": {...}, "create_personal_diary_entry": {...}}
                 # Or it may have returned {"action": {"command": "...", ...}}
                 log_info("[message_chain] 🔄 Normalizing action-key dictionary format")
                 actions = []
@@ -2393,7 +2393,7 @@ async def handle_incoming_message(
             # Only execute actions if we have valid ones
             if parsed is not None:
                 # Note: LLM decides freely whether to respond to user or not
-                # If no message_telegram_bot action is included, user simply receives nothing
+                # If no send_message action is included, user simply receives nothing
                 # Log for debugging purposes
                 if source == "llm" or getattr(message, "from_cortex", False):
                     has_user_response = False
@@ -2742,7 +2742,7 @@ async def handle_incoming_message(
                         chat_id = ctx.get("chat_id")
 
                         # interface_path must have a chat_id suffix to be user-facing
-                        # e.g., "telegram_bot/5551234567" not just "telegram_bot".
+                        # e.g., "example_chat/5551234567" not just "example_chat".
                         # A reactive in-world player chat is user-facing too (see the
                         # earlier ``is_reactive_vessel_chat`` note); autonomous vessel
                         # perceptions leave the structural flag False and stay excluded.
@@ -2972,11 +2972,6 @@ async def handle_incoming_message(
                         _iface_tts_prefix = (ctx.get("interface_path") or "").split(
                             "/"
                         )[0]
-                        _voice_only_tts_ifaces = {
-                            "telegram_bot",
-                            "telegram",
-                            "discord_bot",
-                        }
                         tts_allowed = (
                             not is_voice_input_tts_only(_iface_tts_prefix)
                         ) or _is_voice_input
@@ -3080,7 +3075,7 @@ async def handle_incoming_message(
                                     #   • Remove the standalone message_* actions so text
                                     #     is NOT sent as a separate message.
                                     #   • Inject tts_speak with __merged_text so the text
-                                    #     becomes the audio caption (Telegram) or is sent
+                                    #     becomes the audio caption (where supported) or is sent
                                     #     immediately after the audio (other interfaces).
                                     #   • Do NOT set __auto_injected — if TTS fails the
                                     #     fallback will send text so the user is not left
@@ -3114,7 +3109,7 @@ async def handle_incoming_message(
                                         "type": "tts_speak",
                                         "payload": {
                                             "text": text_to_speak,
-                                            # __merged_text becomes the caption on Telegram
+                                            # __merged_text becomes the caption where supported
                                             # and the follow-up text on other interfaces.
                                             "__merged_text": text_to_speak,
                                             "emotion": payload.get("emotion")

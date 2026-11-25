@@ -452,7 +452,7 @@ def _relative_age_marker(ts: Any, now: datetime | None = None) -> str:
 _REPLY_QUOTE_MAX_CHARS = 200
 
 # The interfaces cache the persona's OWN messages under the canonical label
-# "self" (Telegram, Discord and the Vessel all do), and this block renders the
+# "self" (Discord and the Vessel all do), and this block renders the
 # stored label verbatim. In a block that also carries named people, a bare
 # "self" names nobody: measured live (2026-09-24, the 2D deployment) the model
 # read its own group-chat lines as the human's, asked him to explain a sentence
@@ -570,32 +570,13 @@ def strip_leading_age_marker(text: str) -> str:
     return split_leading_age_marker(text)[0]
 
 
-def telegram_chat_kind(path: str) -> str | None:
-    """Return ``"group"`` or ``"dm"`` for a telegram_bot / telegram interface_path.
-
-    Telegram chat IDs are negative for groups/supergroups and positive for
-    private chats -- a reliable signal that's already on every interface_path,
-    with no need to track chat titles (nothing in the codebase populates
-    those). Returns ``None`` for non-Telegram interfaces or an unparseable
-    chat id, where this convention doesn't apply.
-    """
-    parts = path.split("/")
-    if len(parts) >= 2 and parts[0] in ("telegram_bot", "telegram"):
-        try:
-            chat_id = int(parts[1])
-        except ValueError:
-            return None
-        return "group" if chat_id < 0 else "dm"
-    return None
-
-
 def _friendly_interface_label(path: str) -> str:
     """Best-effort human-readable label for a cross-chat source path.
 
-    Falls back to the raw path when :func:`telegram_chat_kind` can't
-    classify it (non-Telegram interfaces, unparseable chat id).
+    Falls back to the raw path when the interface does not say whether it is a
+    group (see ``core.interface_traits.chat_kind_for_path``).
     """
-    kind = telegram_chat_kind(path)
+    kind = chat_kind_for_path(path)
     if kind == "group":
         return "the group chat"
     if kind == "dm":
@@ -938,7 +919,7 @@ class HistoryEngine:
 
         # `context_memory` can be either:
         # - the centralized chat map: { interface_path: deque([...]) }
-        # - an interface/user context dict (e.g. Telegram user_data)
+        # - an interface/user context dict (e.g. a platform's user_data)
         # - a mixed dict (chat map + metadata like 'interface_path')
         # We normalize to a chat-map view where possible.
         chat_map: Optional[dict] = (

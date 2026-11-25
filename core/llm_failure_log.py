@@ -14,7 +14,7 @@ from core.variables_engine import register_exposed_var
 
 # Latched test-process marker. pytest sets ``PYTEST_CURRENT_TEST`` for the
 # duration of every test, and the test suite drives the real message chain, so
-# rows for its fixture chats (``telegram_bot/123``, ``synth_webui/42``) used to
+# rows for its fixture chats (``example_chat/123``, ``synth_webui/42``) used to
 # land in a live store as ordinary runtime failures: the recovery loop then found
 # them at boot and ran a full turn for a chat that does not exist, and the health
 # views counted them. Once a test is seen, the whole process is a test process -

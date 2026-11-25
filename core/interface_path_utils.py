@@ -5,9 +5,9 @@ Interface paths identify message routing through the system in a hierarchical fo
 interface_name/level1/level2/level3/...
 
 Examples:
-- telegram_bot/123456/2 - Telegram bot, channel 123456, thread 2
+- example_chat/123456/2 - example chat, channel 123456, thread 2
 - discord_bot/ab1234/cd423/4 - Discord bot, server ab1234, channel cd423, post 4
-- telegram_bot/6789 - Telegram bot, user 6789
+- example_chat/6789 - example chat, user 6789
 - discord_bot/Xargon - Discord bot, user Xargon
 """
 
@@ -19,15 +19,15 @@ def build_interface_path(interface_name: str, *levels: Any) -> str:
     """Build an interface path from components.
 
     Args:
-        interface_name: The interface name (e.g., 'telegram_bot', 'discord_bot')
+        interface_name: The interface name (e.g., 'example_chat', 'discord_bot')
         *levels: Variable number of hierarchical levels
 
     Returns:
         Complete interface path as a string
 
     Examples:
-        >>> build_interface_path('telegram_bot', '123456', '2')
-        'telegram_bot/123456/2'
+        >>> build_interface_path('example_chat', '123456', '2')
+        'example_chat/123456/2'
         >>> build_interface_path('discord_bot', 'ab1234')
         'discord_bot/ab1234'
     """
@@ -85,8 +85,8 @@ def parse_interface_path(interface_path: str) -> Tuple[str, List[str]]:
         Tuple of (interface_name, [levels])
 
     Examples:
-        >>> parse_interface_path('telegram_bot/123456/2')
-        ('telegram_bot', ['123456', '2'])
+        >>> parse_interface_path('example_chat/123456/2')
+        ('example_chat', ['123456', '2'])
         >>> parse_interface_path('discord_bot/Xargon')
         ('discord_bot', ['Xargon'])
     """
@@ -136,8 +136,8 @@ def get_interface_from_path(interface_path: str) -> str:
         The interface name (level 0)
 
     Examples:
-        >>> get_interface_from_path('telegram_bot/123456/2')
-        'telegram_bot'
+        >>> get_interface_from_path('example_chat/123456/2')
+        'example_chat'
     """
     interface_name, _ = parse_interface_path(interface_path)
     return interface_name
@@ -235,13 +235,13 @@ def get_level_from_path(interface_path: str, level: int) -> Optional[str]:
         The level value, or None if level doesn't exist
 
     Examples:
-        >>> get_level_from_path('telegram_bot/123456/2', 0)
-        'telegram_bot'
-        >>> get_level_from_path('telegram_bot/123456/2', 1)
+        >>> get_level_from_path('example_chat/123456/2', 0)
+        'example_chat'
+        >>> get_level_from_path('example_chat/123456/2', 1)
         '123456'
-        >>> get_level_from_path('telegram_bot/123456/2', 2)
+        >>> get_level_from_path('example_chat/123456/2', 2)
         '2'
-        >>> get_level_from_path('telegram_bot/123456/2', 3)
+        >>> get_level_from_path('example_chat/123456/2', 3)
         None
     """
     parts = interface_path.split("/")

@@ -162,7 +162,7 @@ def _prompt_key(
     would collide on the same key, and a "safe" cached response meant for one
     conversation could be replayed into a completely different one. See the
     incident this guards against: a Grillo diary-consolidation beat's cached
-    reply was served to a user's unrelated Telegram message, which then tried
+    reply was served to a user's unrelated chat message, which then tried
     to (and failed to) deliver itself back to the beat's internal pseudo
     interface instead of answering the user.
     """
@@ -230,7 +230,7 @@ async def run_cortex_with_fallback(
     indistinguishable from a direct call. Fail-open throughout: any failure in
     the fallback machinery degrades to the primary outcome (or empty).
 
-    ``interface_path`` (the calling turn's ``telegram_bot/<chat_id>``,
+    ``interface_path`` (the calling turn's ``example_chat/<chat_id>``,
     ``grillo/-1``, etc.) is folded into the Stage-2 cache key via
     ``_prompt_key`` so a cached response can only ever be replayed back to the
     same conversation/beat that produced it — never to an unrelated one.

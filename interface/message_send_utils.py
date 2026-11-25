@@ -1,14 +1,6 @@
 from typing import Optional
 import asyncio
 
-try:
-    from telegram.error import TimedOut
-except Exception:
-
-    class TimedOut(Exception):
-        pass
-
-
 from core.logging_utils import (
     log_debug,
     log_info,
@@ -19,9 +11,12 @@ from core.logging_utils import (
 import traceback
 import time
 
-try:
-    from telegram.error import RetryAfter, NetworkError
-except Exception:
+class TimedOut(Exception):
+    """A send timed out (the old Telegram client raised its own; nothing does now)."""
+
+
+class RetryAfter(Exception):
+    pass
 
 
 class NetworkError(Exception):

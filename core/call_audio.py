@@ -1,7 +1,7 @@
 """Speech in a call: audio frames in, normal turns out.
 
 This is the default way a call *hears* — for every interface that gives the core raw
-audio (Discord, Telegram, ...): the same path as a voice message, just continuous.
+audio (Discord, ...): the same path as a voice message, just continuous.
 
     PCM frames -> voice activity detection -> one utterance -> Auris (speech to text)
         -> "message received" signal -> a normal turn at ``PRIORITY_CALL``

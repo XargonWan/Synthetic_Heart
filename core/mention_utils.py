@@ -111,11 +111,11 @@ def get_current_aliases() -> list[str]:
 async def get_bot_username(bot):
     """Get the bot's username from the bot instance."""
     try:
-        # Handle different bot shapes (Telegram, Discord, etc.)
+        # Handle different bot shapes (Discord, etc.)
         # 1) direct attribute (some wrappers expose .username)
         if hasattr(bot, "username"):
             return bot.username
-        # 2) classic Telegram-like Bot with get_me()
+        # 2) classic Bot object with get_me()
         if hasattr(bot, "get_me"):
             me = await bot.get_me()
             return getattr(me, "username", None)

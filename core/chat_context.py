@@ -21,8 +21,8 @@ def resolve_chat_kind(message: Any, interface_path: str | None = None) -> str | 
 
     The interface-provided ``message.chat.type`` wins (``private`` is a DM;
     ``group``, ``supergroup`` and ``channel`` are groups). When the message does
-    not carry one, fall back to the Telegram path convention (negative chat id
-    means group), which is the only path-only signal the core knows about.
+    not carry one, fall back to what the interface declared about its paths
+    (``core.interface_traits``: some interfaces use a negative chat id for groups).
     """
     raw = getattr(getattr(message, "chat", None), "type", None)
     if isinstance(raw, str):
@@ -33,9 +33,9 @@ def resolve_chat_kind(message: Any, interface_path: str | None = None) -> str | 
             return GROUP
     if interface_path:
         try:
-            from core.history_engine import telegram_chat_kind
+            from core.interface_traits import chat_kind_for_path
 
-            return telegram_chat_kind(str(interface_path))
+            return chat_kind_for_path(str(interface_path))
         except Exception:
             return None
     return None

@@ -2,7 +2,7 @@
 
 Every messaging interface exposes itself to the LLM through this single
 action. The destination is resolved from ``interface_path`` (which encodes
-interface + chat + thread + room, e.g. ``telegram_bot/-3654654848/6578/2``),
+interface + chat + thread + room, e.g. ``example_chat/-3654654848/6578/2``),
 falling back to the origin conversation when the action replies to an incoming
 message (``original_message`` present).
 
@@ -55,8 +55,8 @@ def get_send_message_schema(
     """
     description = (
         "Send a message through any connected chat interface. The destination "
-        "is `interface_path` (e.g. 'telegram_bot/@username', 'telegram/@username', "
-        "'telegram_bot/<chat_id>[/<thread_id>]', 'telegram/<chat_id>[/<thread_id>]', "
+        "is `interface_path` (e.g. 'example_chat/@username', "
+        "'example_chat/<chat_id>[/<thread_id>]', "
         "'discord_bot/<guild_id>/<channel_id>', 'matrix/<room_id>'; prefer the "
         "@username form when the person has one); when "
         "replying to an incoming message you may omit it and the reply "

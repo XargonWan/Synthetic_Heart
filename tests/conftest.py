@@ -49,6 +49,30 @@ def _reset_llm_timeout_breakers():
 
 
 @pytest.fixture(autouse=True)
+def _declare_fixture_chat_interfaces():
+    """Declare the traits of the chat interface names the older tests use.
+
+    The Core no longer names interfaces: each interface declares what it is (see
+    ``core.interface_traits``). Many tests use ``telegram_bot`` and ``telegram`` as
+    stand-in names for "a chat on a platform with signed chat ids"; this declares
+    them the way the Telegram extension and the userbot do, and forgets them
+    afterwards.
+    """
+    from core import interface_traits as it
+
+    traits = it.InterfaceTraits(
+        voice_input_tts_only=True,
+        negative_chat_id_is_group=True,
+        bot_username_suffix="bot",
+        peer_ids=True,
+    )
+    it.register_traits("telegram_bot", traits)
+    it.register_traits("telegram", traits)
+    yield
+    it.clear_declared_traits()
+
+
+@pytest.fixture(autouse=True)
 def _reset_animation_handler_singleton():
     """Ensure tests don't leak KaradaStateServer singleton state across modules."""
     import core.animation_handler as ah

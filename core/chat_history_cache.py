@@ -113,7 +113,7 @@ async def save_chat_message(
     """Save a message to the chat history cache.
 
     Args:
-        interface_path: The interface path (e.g., telegram_bot/123456/2)
+        interface_path: The interface path (e.g., example_chat/123456/2)
         message_text: The message text
         sender_name: Optional sender name
         sender_id: Optional sender ID
@@ -355,16 +355,16 @@ async def load_chat_history(
     """Load chat history from cache for a specific interface path.
 
     Args:
-        interface_path: The interface path (e.g., telegram_bot/123456/2)
+        interface_path: The interface path (e.g., example_chat/123456/2)
         limit: Optional explicit row limit. When omitted, uses the configured
             history limit for the calling subsystem.
         match_chat_level: When False (default), matches ``interface_path``
             exactly -- byte-identical to the original query, so all existing
             callers are unaffected. When True, also includes rows whose
             ``interface_path`` is a thread-suffixed variant of the same chat
-            (e.g. ``telegram_bot/123/456`` when loading
-            ``telegram_bot/123``). Some messages in a conversation -- e.g. a
-            Telegram reply-in-thread -- get persisted with a thread-ID suffix
+            (e.g. ``example_chat/123/456`` when loading
+            ``example_chat/123``). Some messages in a conversation -- e.g. a
+            reply-in-thread -- get persisted with a thread-ID suffix
             appended to the bare chat path, so an exact match alone silently
             drops otherwise-legitimate turns from that conversation. Uses the
             same chat-level key convention as ``peer_policy._chat_key``
@@ -478,16 +478,16 @@ async def load_chat_history(
 
 
 def _normalize_interface_path(path: str) -> str:
-    """Collapse duplicate trailing segments produced by the old Telegram DM path format.
+    """Collapse duplicate trailing segments produced by an old private-chat path format.
 
-    Old code stored private Telegram chats as ``telegram_bot/<chat_id>/<user_id>``
+    Old code stored private chats as ``example_chat/<chat_id>/<user_id>``
     where for DMs ``chat_id == user_id``, giving a redundant final segment.  The
-    current format is ``telegram_bot/<chat_id>`` with no thread suffix.  When both
+    current format is ``example_chat/<chat_id>`` with no thread suffix.  When both
     formats coexist in the DB, normalising here ensures history_engine treats old
     entries as belonging to the same conversation as new entries.
 
     Only collapses when the last two path segments are identical, e.g.:
-        telegram_bot/5551234567/5551234567 → telegram_bot/5551234567
+        example_chat/5551234567/5551234567 → example_chat/5551234567
     Leaves all other paths untouched.
     """
     if not path:
@@ -698,7 +698,7 @@ async def clear_chat_history(interface_path: str) -> None:
     """Clear all messages for a specific interface path.
 
     Args:
-        interface_path: The interface path to clear (e.g., telegram_bot/123456/2)
+        interface_path: The interface path to clear (e.g., example_chat/123456/2)
     """
     if not interface_path:
         return

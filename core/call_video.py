@@ -2,7 +2,7 @@
 
 The "face" of the SyntH is the Karada render, drawn only in the browser (the WebUI
 canvas, the same one the pop-out webcam shows). The server keeps the avatar *state* but
-never produces images. A call that happens on another interface (Telegram's user
+never produces images. A call that happens on another interface (a user-account
 account, ...) and wants to show the SyntH's face therefore borrows an open WebUI tab as a
 camera:
 
@@ -89,7 +89,7 @@ register_exposed_var(
     ui_type="select",
     options=["square", "landscape", "portrait"],
     description=(
-        "Shape of the SyntH's call video. Telegram does not tell the SyntH how the caller "
+        "Shape of the SyntH's call video. The platform does not tell the SyntH how the caller "
         "holds the phone, and the size cannot change mid-call, so the default 'square' "
         "fits a phone held either way. 'landscape' uses CALL_VIDEO_WIDTH x CALL_VIDEO_HEIGHT, "
         "'portrait' the same turned on its side, 'square' a square as tall as the height."

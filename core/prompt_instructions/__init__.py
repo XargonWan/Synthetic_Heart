@@ -123,7 +123,7 @@ def build_instructions(
             before the rule set (e.g. a route banner). Values are stringified
             and appended in insertion order.
         reply_path: The *concrete* interface path of the current turn
-            (e.g. ``telegram_bot/-5293915984``), rendered into the reply-routing
+            (e.g. ``example_chat/-5293915984``), rendered into the reply-routing
             rule and the worked response example so the model is shown a real
             destination it can copy. When omitted or blank the routing text
             falls back to neutral wording that contains no path-shaped literal

@@ -18,7 +18,7 @@ Design rules (per AGENTS.md):
 * **Structural classification.** The dead-target signal is an exception type
   (``DeadTargetError``) plus well-known third-party error types. A narrow
   message-marker fallback exists only for interfaces that surface permanent
-  target loss as a plain string (e.g. Telegram/Matrix) — this is error
+  target loss as a plain string (e.g. Matrix) — this is error
   classification, not intent/routing logic.
 * **Transient failures never trip.** Timeouts and network errors must not
   mark a target dead; only *permanent* target loss does.

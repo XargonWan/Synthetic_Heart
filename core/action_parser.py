@@ -205,7 +205,7 @@ async def _maybe_record_grillo_outbound_message(
     """Best-effort: if a message_* action was produced by a Grillo beat, store its outbound text.
 
     Grillo beats carry an `activity_log_id` in the context dict (see GrilloPlugin._enqueue_with_low_priority).
-    When the LLM decides to send an outbound message (e.g. Telegram), we persist that text to
+    When the LLM decides to send an outbound message (e.g. a chat reply), we persist that text to
     `grillo_activity_log.response_text` so History > Grillo shows what was actually said.
     """
     try:
@@ -494,7 +494,7 @@ _INT_ID_FIELDS = {"chat_id", "user_id", "message_id"}
 # numbers (``"limit": "5"``) — valid JSON, but the string then breaks downstream
 # int math and SQL ``LIMIT`` clauses. Normalizing here fixes every such action at
 # once rather than per-plugin. Genuinely string-typed numeric fields (e.g. the
-# Telegram ``target`` id, free text) are intentionally absent so they stay strings.
+# chat ``target`` id, free text) are intentionally absent so they stay strings.
 _NUMERIC_PARAM_FIELDS = {
     "limit",
     "offset",
@@ -526,7 +526,7 @@ _NUMERIC_PARAM_FIELDS = {
 
 
 # Field names small/local models substitute for the required ``text`` field
-# on message_* actions (telegram, discord, matrix, reddit, x, ...). Order is
+# on message_* actions (discord, matrix, reddit, x, ...). Order is
 # priority — first match wins if a model somehow emits more than one.
 _TEXT_FIELD_ALIASES = ("message_text", "content", "message", "reply", "speech", "body")
 
@@ -630,7 +630,7 @@ def _normalize_emotion_payload_alias(payload: dict) -> None:
     the ``update_emotion_state`` payload (``payload['feelings']``) instead of at
     the response top level. The action schema requires ``payload['emotions']``,
     so without normalization the action fails validation and the whole turn's
-    output is rejected — the "output failure" seen on Telegram. Rename the
+    output is rejected — the "output failure" seen on chat interfaces. Rename the
     payload-level ``feelings`` dict to ``emotions`` when ``emotions`` is absent.
     The feelings values use a 0-1 scale while the schema/executor use 0-10, so
     they are scaled up only when every value is a 0-1 float.
@@ -681,7 +681,7 @@ def _normalize_payload(action_type: str, payload: dict) -> None:
       when integral, ``float`` otherwise.
 
     Non-numeric strings, already-numeric values, and string-typed fields such as
-    the Telegram ``target`` id are left untouched.
+    the chat ``target`` id are left untouched.
     """
 
     _normalize_text_field_alias(action_type, payload)
@@ -1420,7 +1420,7 @@ async def _dispatch_send_message(
             # A completely unregistered interface name (e.g. an internal
             # pseudo-interface like "grillo" that was never registered via
             # register_interface) can never start working by retrying the
-            # same action — unlike a real, registered interface (telegram_bot,
+            # same action — unlike a real, registered interface (example_chat,
             # discord_bot, matrix) failing on a bad chat_id/target, which
             # fails later inside interface.send_message() itself and stays
             # correctable. Marking this unfixable stops the selective
@@ -2821,7 +2821,7 @@ def _generate_context_tags(
         context_tags.append("technical")
     if "event" in action_types:
         context_tags.append("scheduling")
-    if "speech_zen_elevenlabs" in action_types or "audio_telegram_bot" in action_types:
+    if "speech_zen_elevenlabs" in action_types:
         context_tags.append("audio")
 
     # Content-based analysis for specific topics
@@ -3103,7 +3103,7 @@ async def _add_runtime_state_injections(injections: dict[str, Any]) -> dict[str,
     """Add what the persona should know about its own running state.
 
     * ``active_interfaces`` — the interfaces that are on right now, so it knows
-      it can reach (say) both ``telegram`` and ``telegram_bot``. Recomputed on
+      it can reach (say) both ``example_chat`` and ``discord_bot``. Recomputed on
       every turn, hence it follows a runtime enable/disable with no restart.
       Only the ids are listed (a few tokens); the path formats are added on
       demand by ``plugins/recon/recon_interface_reference``.

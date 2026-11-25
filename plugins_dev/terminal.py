@@ -12,13 +12,8 @@ try:
 except Exception:
     TELEGRAM_TRAINER_ID = None
 
-# Import telegram safely - may fail if not available
-try:
-    from telegram.constants import ParseMode
-except Exception:
-
-    class ParseMode:
-        MARKDOWN = "Markdown"
+class ParseMode:
+    MARKDOWN = "Markdown"
 
 
 # Import notifier safely

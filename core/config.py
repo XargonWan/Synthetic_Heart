@@ -577,7 +577,7 @@ LIVE_AUDIO_MIN_RMS = config_registry.get_var(
 
 # --- LogChat configuration (use config_registry so exposed-variable APIs are consistent)
 # The LogChat target is stored as a single canonical interface_path
-# (e.g. "telegram_bot/-28475648/6"), following the same "interface-path"
+# (e.g. "example_chat/-28475648/6"), following the same "interface-path"
 # standard used by other routing config vars. The interface name, chat id
 # and (optional) thread id are derived from this single value.
 _register_exposed_var(
@@ -588,7 +588,7 @@ _register_exposed_var(
     ui_type="interface-path",
     description=(
         "Interface path of the chat used for system/trainer notifications "
-        "(e.g. telegram_bot/-28475648/6)."
+        "(e.g. example_chat/-28475648/6)."
     ),
     scope="core",
     component="logchat",
@@ -1366,7 +1366,7 @@ async def switch_active_cortex_engine(name: str, use_hot_swap: bool = True):
 
 
 # The LogChat target is stored as a single canonical interface_path in the
-# `LOG_CHAT_ID` config key (e.g. "telegram_bot/-28475648/6"). The cache holds
+# `LOG_CHAT_ID` config key (e.g. "example_chat/-28475648/6"). The cache holds
 # that raw path; the interface name, chat id and thread id are derived from it.
 _log_chat_path: str | None = None  # cached log chat interface_path
 _log_chat_path_loaded: bool = False  # distinguishes loaded empty value from cache miss
@@ -1474,7 +1474,7 @@ async def set_log_chat_id_and_thread(
     """Compose and persist the LogChat target as a single interface_path.
 
     The interface, chat id and optional thread id are joined into one canonical
-    interface_path (e.g. "telegram_bot/-28475648/6") stored in `LOG_CHAT_ID`.
+    interface_path (e.g. "example_chat/-28475648/6") stored in `LOG_CHAT_ID`.
     """
     global _log_chat_path, _log_chat_path_loaded
 

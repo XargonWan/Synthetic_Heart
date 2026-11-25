@@ -398,7 +398,7 @@ async def _build_recon_history_texts_async(
             # match_chat_level=True: after a restart the in-memory context is
             # empty, so this DB read is the only source of local history. An
             # exact-path match silently drops thread-suffixed turns of the same
-            # chat (e.g. Telegram reply-in-thread), leaving local history empty
+            # chat (e.g. reply-in-thread), leaving local history empty
             # while global history (unfiltered) survives. Chat-level matching
             # keeps the two consistent across restarts.
             cached = await load_chat_history(

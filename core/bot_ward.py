@@ -24,9 +24,10 @@ lives in memory: a restart forgets it, and a loop that survives one is stopped
 again after another ``BOT_WARD_MAX_MESSAGES`` messages. Fail-open: any error
 means ``allow``.
 
-Who counts as a bot: the sender's ``is_bot`` flag, or — on Telegram, where the
-rule is enforced by the platform — a username ending in ``bot``. A private chat
-is a path with a single non-negative id (``telegram/123``, ``discord_bot/<user>``);
+Who counts as a bot: the sender's ``is_bot`` flag, or — on a platform that
+enforces a naming rule and declares it (``core.interface_traits``) — a username
+ending in that suffix. A private chat is a path with a single non-negative id
+(``<interface>/123``, ``discord_bot/<user>``);
 groups are out of scope (``peer_policy`` handles the known peers there).
 """
 
@@ -180,15 +181,11 @@ def is_bot_sender(message: Any, interface_path: Any = None) -> bool:
         return False
     if getattr(sender, "is_bot", False) is True:
         return True
-    # Telegram obliges every bot username to end in "bot" (Foo_bot, FooBot).
+    # Some platforms oblige bot account names to end in a fixed suffix; the
+    # interface declares it (``core.interface_traits``).
     path = interface_path or getattr(message, "interface_path", None)
     name = parse_interface_path(path)[0] if isinstance(path, str) else ""
-    username = getattr(sender, "username", None)
-    return (
-        name.startswith("telegram")
-        and isinstance(username, str)
-        and username.lower().endswith("bot")
-    )
+    return is_bot_username(name, getattr(sender, "username", None))
 
 
 def path_for(message: Any, interface_id: Any) -> str:

@@ -13,16 +13,6 @@ from core.config import get_trainer_id
 from core.ai_plugin_base import AIPluginBase
 import json
 
-try:
-    from telegram.constants import ParseMode
-except Exception:
-from types import SimpleNamespace
-
-ParseMode = SimpleNamespace(MARKDOWN="MARKDOWN")
-    # Provide a lightweight fallback for tests where python-telegram-bot is not available
-    from types import SimpleNamespace
-
-    ParseMode = SimpleNamespace(MARKDOWN="MARKDOWN")
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from interface.message_send_utils import safe_send
 import time
@@ -184,10 +174,7 @@ class ManualAIPlugin(AIPluginBase):
 
         prompt_json = json.dumps(prompt, ensure_ascii=False, separators=(",", ":"))
         try:
-            # Use telegram_bot.safe_send if tests monkeypatch it, otherwise use imported safe_send
-            from interface import telegram_bot as _telegram_bot_module
-
-            _safe_send = getattr(_telegram_bot_module, "safe_send", safe_send)
+            _safe_send = safe_send
 
             # Send heading and JSON chunks, capturing the last sent message for mapping
             sent_heading = await _safe_send(

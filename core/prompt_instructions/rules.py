@@ -33,7 +33,7 @@ so no trainer name is ever hardcoded here.
 NAMING_HINT_TOKEN = "{naming_hint}"
 
 #: Substituted with the *concrete* interface path of the current turn
-#: (e.g. ``telegram_bot/-5293915984``) so the routing rule and the worked
+#: (e.g. ``example_chat/-5293915984``) so the routing rule and the worked
 #: example show a real, copyable destination. A literal template token used to
 #: sit here, and a literal-minded model copied it verbatim into its
 #: ``interface_path`` — which then resolved to an unregistered interface and

@@ -8,10 +8,6 @@ from datetime import datetime, timezone
 from core.ai_plugin_base import AIPluginBase
 from core.db import insert_scheduled_event, get_due_events, mark_event_delivered
 from core.logging_utils import log_debug, log_info, log_error, log_warning
-from interface.message_send_utils import (
-    send_with_thread_fallback,
-    telegram_parse_mode_for,
-)
 from core.auto_response import request_llm_delivery
 import traceback
 import asyncio
@@ -108,7 +104,7 @@ class EventPlugin(AIPluginBase):
     def set_bot(self, bot):
         """Update the bot reference used for sending messages."""
         self.bot = bot
-        log_debug("[event_plugin] Telegram bot reference updated")
+        log_debug("[event_plugin] Bot reference updated")
 
     async def ensure_table_exists(self) -> None:
         """Ensure the scheduled_events table is present."""
@@ -803,28 +799,6 @@ class EventPlugin(AIPluginBase):
                 log_debug(
                     f"[event_plugin] ✅ Extracted interface_path from original_message: {interface_path}"
                 )
-            elif hasattr(original_message, "chat_id") or hasattr(
-                original_message, "chat"
-            ):
-                # Construct interface_path from Telegram message attributes
-                chat_id = getattr(original_message, "chat_id", None) or (
-                    original_message.chat.id
-                    if hasattr(original_message, "chat")
-                    else None
-                )
-                thread_id = getattr(original_message, "message_thread_id", None)
-
-                if chat_id:
-                    interface_path = f"telegram_bot/{chat_id}"
-                    if thread_id:
-                        interface_path += f"/{thread_id}"
-                    log_info(
-                        f"[event_plugin] ✅ Constructed interface_path from Telegram message: {interface_path}"
-                    )
-                else:
-                    log_warning(
-                        "[event_plugin] ⚠️ Could not extract chat_id from original_message"
-                    )
             else:
                 log_warning(
                     "[event_plugin] ⚠️ No interface_path found in original_message"
@@ -1493,7 +1467,7 @@ class EventPlugin(AIPluginBase):
         """Deliver a due event to Synth as an internal ``scheduled_reminder`` beat.
 
         Events are NOT tied to any single interface. Instead of hardcoding a
-        delivery target (the old behaviour, which forced ``telegram_bot`` and
+        delivery target (the old behaviour, which forced one interface and
         regex-scraped an ``interface_path`` from the description — silently
         dropping the reminder when none was found), the reminder is enqueued as
         an internal Grillo beat. Synth receives it as a thought and decides
@@ -1747,14 +1721,11 @@ class EventPlugin(AIPluginBase):
                 interface_path = interface_path_or_chat_id
                 await self._send_via_interface_path(interface_path, text, event_id)
             else:
-                # This is a chat_id (legacy path)
-                chat_id = (
-                    int(interface_path_or_chat_id)
-                    if isinstance(interface_path_or_chat_id, str)
-                    else interface_path_or_chat_id
-                )
-                await self._send_via_telegram_transport(
-                    chat_id, text, thread_id, event_id
+                # A bare chat id says nothing about which interface it belongs to, so
+                # there is nowhere to send it.
+                log_warning(
+                    f"[event_plugin] Scheduled message for event {event_id} names a bare "
+                    f"chat id ({interface_path_or_chat_id!r}) and no interface_path: not sent"
                 )
 
         except Exception as e:
@@ -1781,8 +1752,8 @@ class EventPlugin(AIPluginBase):
                 from_cortex=False,  # This is from the system, not the LLM
             )
 
-            # Route to the interface named in the path (telegram_bot/...,
-            # synth_webui/..., ...) instead of assuming Telegram.
+            # Route to the interface named in the path (synth_webui/..., any
+            # extension's interface) instead of assuming one.
             interface_name = interface_path.split("/")[0]
             action = {
                 "type": "send_message",
@@ -1823,90 +1794,6 @@ class EventPlugin(AIPluginBase):
 
         except Exception as e:
             log_error(f"[event_plugin] Error sending corrective message: {repr(e)}")
-
-    async def _send_via_telegram_transport(
-        self,
-        chat_id: int,
-        text: str,
-        thread_id: int = None,
-        event_id: int = None,
-    ):
-        """Send message directly via Telegram transport layer."""
-        try:
-            from core.core_initializer import INTERFACE_REGISTRY
-
-            bot = None
-            telegram_iface = INTERFACE_REGISTRY.get("telegram_bot")
-            if telegram_iface and getattr(telegram_iface, "bot", None):
-                bot = telegram_iface.bot
-                self.bot = bot
-            elif self.bot:
-                bot = self.bot
-            if not bot:
-                raise ImportError
-
-            await send_with_thread_fallback(
-                bot,
-                chat_id,
-                text,
-                thread_id=thread_id,  # fixed: correct param is thread_id
-                parse_mode=telegram_parse_mode_for(chat_id),
-            )
-
-            log_info(
-                f"[event_plugin] ✅ Scheduled message sent to {chat_id} (event {event_id})"
-            )
-
-        except ImportError:
-            log_error(
-                f"[event_plugin] Telegram transport layer not available for event {event_id}"
-            )
-            # Fallback: use the bot instance directly if available
-            await self._fallback_send_telegram(chat_id, text, thread_id, event_id)
-        except Exception as e:
-            log_error(
-                f"[event_plugin] Error in Telegram transport for event {event_id}: {repr(e)}"
-            )
-
-    async def _fallback_send_telegram(
-        self,
-        chat_id: int,
-        text: str,
-        thread_id: int = None,
-        event_id: int = None,
-    ):
-        """Fallback method to send via Telegram bot directly."""
-        try:
-            from core.core_initializer import INTERFACE_REGISTRY
-
-            bot = None
-            telegram_iface = INTERFACE_REGISTRY.get("telegram_bot")
-            if telegram_iface and getattr(telegram_iface, "bot", None):
-                bot = telegram_iface.bot
-                self.bot = bot
-            elif self.bot:
-                bot = self.bot
-
-            if bot:
-                await send_with_thread_fallback(
-                    bot,
-                    chat_id,
-                    text,
-                    thread_id=thread_id,  # fixed: correct param is thread_id
-                    parse_mode=telegram_parse_mode_for(chat_id),
-                )
-                log_info(
-                    f"[event_plugin] ✅ Fallback Telegram send successful for event {event_id}"
-                )
-            else:
-                log_error(
-                    f"[event_plugin] No Telegram bot available for fallback send (event {event_id})"
-                )
-
-        except Exception as e:
-            log_error(
-                f"[event_plugin] Fallback Telegram send failed for event {event_id}: {repr(e)}"
-            )
 
     async def _execute_other_action_silently(self, action: dict, event_id: int):
         """Execute non-message actions silently."""

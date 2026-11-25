@@ -197,10 +197,10 @@ def _repair_apostrophe_closed_escaped_tail(text: str) -> str:
     keys that were meant to be real JSON object keys, not string content.
 
     LLM produces (invalid JSON):
-        "text": "Some reply!', \\"interface_path\\": \\"telegram_bot/1\\"}
+        "text": "Some reply!', \\"interface_path\\": \\"example_chat/1\\"}
 
     After repair (valid JSON):
-        "text": "Some reply!", "interface_path": "telegram_bot/1"}
+        "text": "Some reply!", "interface_path": "example_chat/1"}
 
     The apostrophe becomes the real closing quote, and the escaped quotes in
     the trailing key/value run are unescaped back into real JSON structure.

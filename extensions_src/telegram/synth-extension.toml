@@ -1,0 +1,100 @@
+schema = 1
+
+[extension]
+id = "official/telegram"
+name = "Telegram (user account)"
+version = "0.1.0"
+description = "Chat and take voice calls through a Telegram user account (Telethon)."
+author = "SyntH"
+experimental = true
+
+[compat]
+core_api = ">=0.1,<1"
+
+[entry]
+module = "ext_main"
+function = "main"
+
+[[provides.interfaces]]
+id = "telegram"
+paths = ["telegram/{chat}[/{thread}]"]
+# What the Core may assume about this platform.
+voice_input_tts_only = true       # speech only for spoken messages
+negative_chat_id_is_group = true  # group ids are negative, private ids positive
+bot_username_suffix = "bot"       # Telegram bot usernames end in "bot"
+peer_ids = true                   # SYNTH_PEERS ids are Telegram user ids
+actions = ["answer_call_telegram"]
+
+[permissions]
+capabilities = [
+  "log", "config", "stats", "storage",
+  "interfaces.register", "interfaces.inbound", "avatar",
+  "calls", "ui.panel",
+]
+network = ["*.telegram.org:443", "*.t.me:443"]
+
+[python]
+requirements = ["telethon>=1.36", "py-tgcalls>=2.0"]
+
+[config.TELEGRAM_API_ID]
+type = "string"
+label = "API ID"
+description = "From my.telegram.org (API development tools)."
+sensitive = true
+required = true
+
+[config.TELEGRAM_API_HASH]
+type = "string"
+label = "API hash"
+sensitive = true
+required = true
+
+[config.TELEGRAM_PHONE]
+type = "string"
+label = "Phone number"
+description = "International format, used by the login panel."
+
+[config.TELEGRAM_USE_SYNTH_AVATAR]
+type = "bool"
+label = "Use the synth avatar"
+description = "Set the synth avatar as this account's profile picture (visible to all your contacts)."
+default = false
+
+[config.TELEGRAM_BACKLOG_MAX_AGE_SECONDS]
+type = "int"
+label = "Backlog age"
+description = "Messages older than this when they arrive are kept as history, not answered. 0 disables."
+default = 120
+
+[config.TELEGRAM_RECOVERY_WINDOW_SECONDS]
+type = "int"
+label = "Recovery window"
+description = "On start, read the chats active in the last N seconds and handle what was missed. 0 disables."
+default = 3600
+
+[config.TELEGRAM_CALLS_ENABLED]
+type = "bool"
+label = "Calls"
+description = "Let this account take voice calls (only the trainer and the allowed ids are answered)."
+default = true
+
+[config.TELEGRAM_CALL_ALLOWED_IDS]
+type = "string"
+label = "Call allowed ids"
+description = "Comma-separated Telegram user ids, besides the trainer, whose calls are answered."
+
+[config.TELEGRAM_CALL_RX_RATE]
+type = "int"
+label = "Incoming call sample rate"
+default = 48000
+
+[config.TELEGRAM_CALL_RX_CHANNELS]
+type = "int"
+label = "Incoming call channels"
+default = 1
+
+[config.TELEGRAM_CALL_VIDEO_ENABLED]
+type = "bool"
+label = "Call video"
+description = "Show the SyntH's face in answered calls."
+default = true

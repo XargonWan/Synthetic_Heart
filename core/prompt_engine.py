@@ -321,7 +321,6 @@ _NON_USER_FACING_ACTION_HINTS = (
 _SYSTEM_ONLY_ACTION_NAMES: frozenset[str] = frozenset(
     {
         "static_inject",
-        "audio_telegram_bot",
         "audio_discord_bot",
         "tts_speak",
     }
@@ -382,7 +381,7 @@ def _action_scopes(action_def: Any) -> set[str]:
        ``tool_registry.all_tools()``), not advertised in the Fast-Lane chat
        catalog. This is the action's own structural declaration, never a name or
        keyword match. It is what keeps whole integration suites out of every
-       chat prompt: on one ordinary Telegram turn the catalog carried 64 actions,
+       chat prompt: on one ordinary chat turn the catalog carried 64 actions,
        32 of them the agpeer and Home Assistant suites (60% of the catalog text),
        all of which declare ``external_effects``. A chat reply
        (``send_message``) deliberately declares none, so it is unaffected;
@@ -444,14 +443,14 @@ def _derive_outbound_beat_target_interfaces(
 
     Grillo observer beats run under the synthetic ``grillo`` interface, but
     their snippets and eligible-target list can point at real interfaces such
-    as ``telegram_bot`` or ``discord_bot``.  The prompt must expose message
+    as ``example_chat`` or ``discord_bot``.  The prompt must expose message
     actions for those offered interfaces so the model can use the target paths
     it was given.  This deliberately reads only routing metadata; it never
     infers an interface from message text.
 
     A ``web_search_result`` beat is delivered by the search orchestrator
     addressed to its real target via the **top-level** ``interface_path`` (e.g.
-    ``telegram_bot/-1003098886330/4297``) even though the beat itself runs under
+    ``example_chat/-1003098886330/4297``) even though the beat itself runs under
     a synthetic interface (``web_search`` / ``grillo``).  The originating
     snippet/target list may additionally be nested under ``prior_context`` (see
     ``plugins/web_search/search_orchestrator.py::_deliver``) — in the
@@ -460,7 +459,7 @@ def _derive_outbound_beat_target_interfaces(
     top-level ``interface_path`` plus snippet/target lists from both the
     top-level context and ``prior_context``.  Without this, the second turn sees
     no real interfaces and message actions for registered interfaces (e.g.
-    ``message_telegram_bot``) are dropped as out-of-scope, silently losing the
+    ``message_example_chat``) are dropped as out-of-scope, silently losing the
     search answer.
     """
     if not isinstance(context_memory, dict):
@@ -514,7 +513,7 @@ def _derive_outbound_beat_target_interfaces(
                     paths.add(path.strip())
 
     # Direct-chat shape: ``prior_context`` may itself be an interface-keyed
-    # history map (e.g. ``{"telegram_bot/-1003098886330/4297": deque([...])}``).
+    # history map (e.g. ``{"example_chat/-1003098886330/4297": deque([...])}``).
     # Treat keys that look like interface paths as additional offered targets —
     # purely structural (a slash-separated path), never content-based.
     if isinstance(prior, dict):
@@ -711,7 +710,7 @@ def _derive_default_prompt_action_types(
         # On a turn of a real interface that does not declare it itself (the
         # WebUI answers with ``message_synth_webui``), it would otherwise be
         # hidden, leaving the model no way to write to another interface such as
-        # the Telegram user account. Beats keep the strict rule: their
+        # a user account. Beats keep the strict rule: their
         # synthetic interface is not in the registry and they carry explicit
         # outbound targets.
         reaches_any_interface = (
@@ -773,7 +772,7 @@ _MEMORY_SOURCE_LABELS = {
 
 
 # The interfaces cache the persona's OWN messages under the canonical label
-# "self" (Telegram, Discord and the Vessel all do), so a recalled raw line that
+# "self" (Discord and the Vessel all do), so a recalled raw line that
 # carries one of these labels is the synth's own words and must never render as
 # a third party's.
 _SELF_SPEAKER_LABELS = frozenset({"self", "me", "assistant", "synt", "synth", "bot"})
@@ -2098,7 +2097,7 @@ def _scoped_actions_for_prompt(
     raw registry they were not: ``build_json_prompt`` scope-filtered the dict's
     ``actions`` key, and the *text* catalog was rendered from the unfiltered
     registry, so every Fast-Lane turn advertised the whole catalog. Measured on
-    one ordinary Telegram turn (trace ``eaf4fd28``): 64 actions, of which 18
+    one ordinary chat turn (trace ``eaf4fd28``): 64 actions, of which 18
     ``agpeer_*``, 14 ``hass_*`` and ``vessel_connect`` — an action the per-turn
     scope gate exists precisely to hide.
 
@@ -2674,7 +2673,7 @@ async def build_prompt_request(
         or (isinstance(context_memory, dict) and context_memory.get("grillo_beat"))
         or (interface_path and str(interface_path).startswith("grillo"))
     )
-    # Outbound beats (observer) target an external interface (e.g. telegram_bot)
+    # Outbound beats (observer) target an external interface (e.g. example_chat)
     # — they need recon (memory search) and should NOT be treated as internal.
     _beat_type = (
         (isinstance(context_memory, dict) and context_memory.get("beat_type"))
@@ -3060,7 +3059,7 @@ async def build_prompt_request(
         isinstance(context_memory, dict) and context_memory.get("is_voice_input")
     )
 
-    # The model is shown the readable alias form (``telegram/@jay``) when one is
+    # The model is shown the readable alias form (``example_chat/@jay``) when one is
     # known; ``core.message_chain`` maps it back to the stored id path.
     from core.interface_aliases import to_display_path
 
@@ -4156,7 +4155,7 @@ async def build_delivery_request(
         action_type:    Name of the action that produced these outputs
                         (used in the loop-prevention instruction).
         action_outputs: List of output dicts from the completed action.
-        interface_name: Name of the target interface (e.g. ``"telegram_bot"``).
+        interface_name: Name of the target interface (e.g. ``"example_chat"``).
         interface_path: Full interface path of the target user.
 
     Returns:
@@ -4889,7 +4888,7 @@ async def build_live_prompt_request(
 
     # --- Recent cross-interface chat history ---
     # This keeps the model aware of conversations on other interfaces
-    # (Telegram, Matrix, other Discord channels) so it stays consistent.
+    # (Matrix, other Discord channels) so it stays consistent.
     try:
         from core.chat_history_cache import load_global_chat_history
         from core.interface_path_utils import is_vessel_history_entry

@@ -61,7 +61,7 @@ async def handle_command_message(
     command_name = parts[0]
     if command_name.startswith("/"):
         command_name = command_name[1:]  # Remove leading slash
-    # Strip @botname suffix that Telegram appends in group chats (e.g. /cortex@synth_bot)
+    # Strip @botname suffix that platforms append in group chats (e.g. /cortex@synth_bot)
     if "@" in command_name:
         command_name = command_name.split("@", 1)[0]
 
@@ -277,8 +277,11 @@ def _chat_scope(
 
 async def wake_command(interface_context=None) -> str:
     """Set the chat to awake (normal routing)."""
-    interface_id, update, _context = await _resolve_interface_context(interface_context)
-    if interface_id != "telegram_bot" or not update:
+    interface_id, _update, _context = await _resolve_interface_context(
+        interface_context
+    )
+    scope = _chat_scope(interface_context, interface_id)
+    if scope is None:
         return "👀 Awake."
     chat_id = scope[0]
     try:
@@ -293,8 +296,11 @@ async def wake_command(interface_context=None) -> str:
 
 async def sleep_command(interface_context=None) -> str:
     """Set the chat to sleep (ignore non-command messages)."""
-    interface_id, update, _context = await _resolve_interface_context(interface_context)
-    if interface_id != "telegram_bot" or not update:
+    interface_id, _update, _context = await _resolve_interface_context(
+        interface_context
+    )
+    scope = _chat_scope(interface_context, interface_id)
+    if scope is None:
         return "💤 Asleep."
     chat_id = scope[0]
     try:
@@ -309,8 +315,11 @@ async def sleep_command(interface_context=None) -> str:
 
 async def status_command(interface_context=None) -> str:
     """Report wake/sleep state for the chat."""
-    interface_id, update, _context = await _resolve_interface_context(interface_context)
-    if interface_id != "telegram_bot" or not update:
+    interface_id, _update, _context = await _resolve_interface_context(
+        interface_context
+    )
+    scope = _chat_scope(interface_context, interface_id)
+    if scope is None:
         return "🤖 Status unavailable for this interface."
     chat_id = scope[0]
     try:
@@ -330,21 +339,13 @@ async def get_interface_path_command(interface_context=None) -> str:
     """Report the interface_path of the chat where the command was issued."""
     from core.interface_path_utils import build_interface_path
 
-    interface_id, update, _context = await _resolve_interface_context(interface_context)
+    interface_id, _update, _context = await _resolve_interface_context(
+        interface_context
+    )
 
-    if interface_id == "telegram_bot" and update:
-        chat = getattr(update, "effective_chat", None)
-        message = getattr(update, "effective_message", None)
-        chat_id = chat.id if chat else None
-        if chat_id is None:
-            return "⚠️ Unable to determine chat."
-        thread_id = getattr(message, "message_thread_id", None) if message else None
-        interface_path = build_interface_path(
-            "telegram_bot",
-            str(chat_id),
-            str(thread_id) if thread_id else None,
-        )
-        return f"📍 Interface path: `{interface_path}`"
+    scope = _chat_scope(interface_context, interface_id)
+    if scope is not None and scope[2]:
+        return f"📍 Interface path: `{scope[2]}`"
 
     if isinstance(interface_context, dict):
         interaction = interface_context.get("discord_interaction")
@@ -1274,20 +1275,6 @@ async def logchat_command(*args, interface_context=None) -> str:
 
     try:
         from core.config import set_log_chat_id_and_thread
-        from core.logging_utils import log_debug
-
-        chat_id = update.effective_chat.id
-
-        # Try to get thread_id - python-telegram-bot v20+ uses message_thread_id
-        thread_id = None
-        if update.effective_message:
-            # Try both attribute names for compatibility
-            thread_id = getattr(
-                update.effective_message, "message_thread_id", None
-            ) or getattr(update.effective_message, "thread_id", None)
-            log_debug(
-                f"[logchat_command] Extracted thread_id: {thread_id} from message"
-            )
 
         chat_id, thread_id = scope[0], scope[1]
 

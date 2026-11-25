@@ -1,15 +1,15 @@
 """Readable aliases for the numeric ids inside interface paths.
 
-``telegram/31321637`` says nothing to a person or to the model; ``telegram/@jay``
+``example_chat/31321637`` says nothing to a person or to the model; ``example_chat/@jay``
 does. The numeric id stays the *canonical* key everywhere it is stored (history,
 memories, ``interface_paths``, trainer checks), because an alias can change or
 be missing. This module keeps the id <-> alias pairs and converts a path in both
 directions:
 
 * :func:`to_display_path` — what the model is shown and asked to build
-  (``telegram/@jay/12``);
+  (``example_chat/@jay/12``);
 * :func:`to_canonical_path` — what the model sends back, mapped to the stored
-  form (``telegram/31321637/12``) before anything routes or compares it.
+  form (``example_chat/31321637/12``) before anything routes or compares it.
 
 Pairs are learnt from incoming traffic (:func:`remember_message_alias`): the
 sender's public username in a private chat, the chat's own username for a public
@@ -29,7 +29,7 @@ from typing import Any, Optional
 from core.interface_path_utils import parse_interface_path
 from core.logging_utils import log_debug
 
-#: Telegram-style public handle: 5-32 chars, letters/digits/underscore, letter first.
+#: Public handle style: 5-32 chars, letters/digits/underscore, letter first.
 _ALIAS_RE = re.compile(r"^@?([A-Za-z][A-Za-z0-9_]{4,31})$")
 
 _TABLE_SQL = """
@@ -199,7 +199,7 @@ def _join(interface: str, levels: list[str]) -> str:
 
 
 async def to_display_path(path: Any) -> Any:
-    """``telegram/31321637/12`` -> ``telegram/@jay/12`` when an alias is known.
+    """``example_chat/31321637/12`` -> ``example_chat/@jay/12`` when an alias is known.
 
     Anything that is not a string path, has no numeric first segment, or has no
     alias, comes back unchanged.
@@ -220,7 +220,7 @@ async def to_display_path(path: Any) -> Any:
 
 
 async def to_canonical_path(path: Any) -> Any:
-    """``telegram/@jay/12`` -> ``telegram/31321637/12`` when the alias is known."""
+    """``example_chat/@jay/12`` -> ``example_chat/31321637/12`` when the alias is known."""
     if not isinstance(path, str) or "/@" not in path:
         return path
     try:
@@ -237,7 +237,7 @@ async def to_canonical_path(path: Any) -> Any:
 
 
 async def remember_message_alias(interface: str, message: Any) -> None:
-    """Learn the alias a Telegram-style incoming ``message`` reveals. Never raises.
+    """Learn the alias an incoming ``message`` reveals. Never raises.
 
     In a private chat the chat id is the person's id, so the sender's username
     names the conversation. In a group or channel it is the chat's own username

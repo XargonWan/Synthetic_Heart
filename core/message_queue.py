@@ -1379,12 +1379,11 @@ async def enqueue(
     # ``core.interface_paths.touch_interface_path`` from the chat-context and
     # outbound message paths, so no explicit per-enqueue tracking is needed.
 
-    # Extract thread_id - unified field name, check both Telegram and generic names
-    # DEBUG: let's see what telegram message actually contains
+    # Extract thread_id - unified field name, check both the platform's and generic names
     thread_attrs = [attr for attr in dir(message) if "thread" in attr.lower()]
     log_debug(f"[QUEUE] Available thread attributes in message: {thread_attrs}")
 
-    # Check for thread_id, but also check message_thread_id (Telegram's native field)
+    # Check for thread_id, but also check message_thread_id (a platform's native field)
     # Note: DO NOT set message.thread_id - Message objects are immutable
     thread_id_val = getattr(message, "thread_id", None)
     if thread_id_val is None:
@@ -1467,7 +1466,7 @@ async def enqueue(
         "vessel_appraisal": bool(getattr(message, "_vessel_appraisal", False)),
         # Structural marker: the rift idle beat (set by the vessel interface for
         # ``event_type == "idle_beat"``). Ranked at the same band as human chat
-        # (GENERAL) so it alternates with Telegram in FIFO order instead of
+        # (GENERAL) so it alternates with other chats in FIFO order instead of
         # starving behind it.
         "vessel_idle_beat": bool(getattr(message, "_vessel_idle_beat", False)),
         # Structural marker: this turn belongs to a live audio/video call (set by
@@ -2457,7 +2456,7 @@ async def _consumer_loop() -> None:
                     ) -> None:
                         """Best-effort global animation state update (broadcast to all WebUI clients).
 
-                        Some interfaces (e.g. Telegram) pass a raw Bot object which does not
+                        Some interfaces (e.g. a user-account client) pass a raw Bot object which does not
                         implement generation hooks; this keeps the THINK → WRITE → IDLE flow
                         consistent with `plan-animationHandlerVrm.prompt.md`.
                         """
@@ -2916,7 +2915,7 @@ async def _consumer_loop() -> None:
                     if bot and chat_id:
                         kwargs = {"chat_id": chat_id, "text": "😵‍💫"}
                         if thread_id:
-                            # Convert thread_id to int if it's a string (for Telegram API compatibility)
+                            # Convert thread_id to int if it's a string
                             if isinstance(thread_id, str) and thread_id.isdigit():
                                 thread_id = int(thread_id)
                             kwargs["message_thread_id"] = thread_id

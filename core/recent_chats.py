@@ -11,7 +11,7 @@ from typing import Union, Optional, Callable
 
 MAX_ENTRIES = 100
 _metadata = {}
-# Keyed by str(chat_id): chat ids may be ints (Telegram) or strings
+# Keyed by str(chat_id): chat ids may be ints or strings
 # (webui sessions, UUIDs), and JSON persistence stringifies keys anyway.
 chat_path_map: dict[str, str] = {}
 

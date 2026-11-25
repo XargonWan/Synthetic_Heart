@@ -3141,7 +3141,7 @@ class SynthWebUIInterface:
             thread_id=thread_id,
             message_thread_id=thread_id,
         )
-        # chat attribute is read by some paths (e.g. telegram_chat_kind)
+        # chat attribute is read by some paths (e.g. chat-kind detection)
         fake_message.chat = SimpleNamespace(id=chat_id, type="group")
 
         try:

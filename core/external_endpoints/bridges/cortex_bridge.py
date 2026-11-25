@@ -578,7 +578,7 @@ class ExternalCortexEngine(AIPluginBase):
         model (``enable_tools_parallel``/``parallel_tool_calls``) sends the
         full scoped set so structurally important actions are never crowded out
         by alphabetical ordering — e.g. ``vessel_connect`` sits at "v" and was
-        silently dropped from Telegram turns, leaving the model unable to
+        silently dropped from chat turns, leaving the model unable to
         honour a "connect to the vessel" request.
         """
         extra = self._endpoint.extra_config or {}

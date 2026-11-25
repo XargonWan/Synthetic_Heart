@@ -1,6 +1,6 @@
 """Shared helpers for validating and classifying outbound file attachments.
 
-Interfaces (Telegram, Discord, Matrix, ...) use these helpers when Synth sends a
+Interfaces (Discord, Matrix, ...) use these helpers when Synth sends a
 file to a user or channel. Files must live inside the agent filesystem sandbox
 (the same roots used by ``plugins/agent_plugin.py``) so that a compromised or
 hallucinated action cannot exfiltrate arbitrary host files.

@@ -27,7 +27,6 @@ from core.abstract_context import AbstractContext, AbstractUser, AbstractMessage
 from core.mention_utils import is_message_for_bot
 from core.config_manager import config_registry
 from core.multimodal_attachment import (
-    extract_multimodal_from_telegram,
     extract_multimodal_from_discord,
     get_mime_type,
     is_supported_type,
@@ -1984,14 +1983,14 @@ async def _describe_attachment_images_with_iris(
                 else:
                     size_note = (
                         (
-                            " This is a small thumbnail/preview of a Telegram "
+                            " This is a small thumbnail/preview of a "
                             "sticker, so fine details may be unclear."
                         )
                         if is_thumb
                         else ""
                     )
                     effective_prompt = (
-                        "This is a Telegram sticker image. Stickers are often "
+                        "This is a sticker image. Stickers are often "
                         "small, simple, or stylized. Describe ONLY the most "
                         "prominent, clearly visible elements: main subject, "
                         "background color, and any obvious objects or text. "
@@ -2183,7 +2182,7 @@ async def _extract_multimodal_attachments(
     Args:
         bot: The bot instance (used for downloading files)
         message: The message object from the interface
-        interface_name: The interface identifier (e.g., 'telegram_bot', 'discord_bot')
+        interface_name: The interface identifier (e.g., 'discord_bot')
 
     Returns:
         List of attachment dicts with keys: {mime_type, data, filename}
@@ -2191,9 +2190,7 @@ async def _extract_multimodal_attachments(
     try:
         image_processor = get_image_processor()
 
-        if interface_name in ("telegram_bot", "telegram"):
-            return await extract_multimodal_from_telegram(bot, message, image_processor)
-        elif interface_name == "discord_bot":
+        if interface_name == "discord_bot":
             return await extract_multimodal_from_discord(message, image_processor)
         else:
             # Generic fallback for other interfaces

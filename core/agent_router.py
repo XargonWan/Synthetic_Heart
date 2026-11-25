@@ -784,7 +784,7 @@ async def _deliver_agent_reply(
     The Agent Lane runs detached from the Fast-Lane reply path, so the user
     otherwise sees nothing when the loop finishes. We deliver ``final_text`` as
     an ordinary outbound ``message`` on the originating interface — exactly like
-    a normal Telegram/Discord/WebUI reply — using the standard action dispatch
+    a normal Discord/WebUI reply — using the standard action dispatch
     so routing, TTS and history all behave as usual.
     """
     if not isinstance(result, dict):

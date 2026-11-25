@@ -19,7 +19,7 @@ resend, so skip any "already applied" shortcut of its own.
 
 ``def uses_synth_avatar(self) -> bool`` (optional)
     Opt-in switch; when absent the interface is treated as opted in. Accounts
-    whose avatar is visible to real people (a Telegram user account) default to
+    whose avatar is visible to real people (a user account) default to
     off.
 
 The picture is a presentation asset, not a secret; it is served unauthenticated
