@@ -486,6 +486,8 @@ if __name__ == "__main__":
                 import traceback
 
                 traceback.print_exc()
+            log_info("[main] All components auto-discovered and initialized")
+
                 sys.exit(1)
 
             # Extensions run in their own processes and are off unless
@@ -497,8 +499,6 @@ if __name__ == "__main__":
                 await start_extension_runtime()
             except Exception as e:
                 log_warning(f"[main] Extension runtime could not start: {e}")
-
-            log_info("[main] All components auto-discovered and initialized")
 
             # 🎯 Display startup summary after all components are ready (this should be the last message)
             log_info("[main] All components initialized, displaying startup summary...")

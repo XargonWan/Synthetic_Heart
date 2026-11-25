@@ -827,7 +827,7 @@ class EventPlugin(AIPluginBase):
                     )
             else:
                 log_warning(
-                    "[event_plugin] ⚠️ No interface_path or chat info found in original_message"
+                    "[event_plugin] ⚠️ No interface_path found in original_message"
                 )
 
         # Add interface_path to description for later retrieval
@@ -1733,7 +1733,7 @@ class EventPlugin(AIPluginBase):
         thread_id: int = None,
         event_id: int = None,
     ):
-        """Send message via transport layer using interface_path (preferred) or legacy chat_id."""
+        """Send a message to ``interface_path`` through the action path."""
         try:
             # Check if this is an interface_path (string starting with interface name)
             # or a chat_id (integer or numeric string)

@@ -32,6 +32,12 @@ from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.config_manager import config_registry
 from core.beat_utils import is_outbound_beat
 
+from core.interface_traits import (
+    is_user_facing as interface_is_user_facing,
+    is_voice_input_tts_only,
+    message_action_if_known,
+    message_actions,
+)
 # Result constants
 ACTIONS_EXECUTED = "ACTIONS_EXECUTED"
 BLOCKED = "BLOCKED"
@@ -118,7 +124,7 @@ _ACTION_SYSTEM_KEYS = frozenset(
 def _resolve_message_action_for_path(interface_path: Optional[str]) -> Optional[str]:
     """Resolve the outbound message action type for an interface path.
 
-    Standard interfaces map through ``_INTERFACE_TO_MESSAGE_ACTION``. A Vessel
+    Interfaces map through the action they declare (``core.interface_traits``). A Vessel
     embodiment path (``vessel/<world>``) has no chat ``message_*`` action — its
     outbound reply is a spoken action ``vessel_<world>_say``. The world is taken
     structurally from the second path segment (no keyword matching). Returns
@@ -132,7 +138,7 @@ def _resolve_message_action_for_path(interface_path: Optional[str]) -> Optional[
         if len(parts) >= 2 and parts[1].strip():
             return f"vessel_{parts[1].strip()}_say"
         return None
-    return _INTERFACE_TO_MESSAGE_ACTION.get(prefix)
+    return message_action_if_known(prefix)
 
 
 def _collect_message_texts(actions: list) -> list:
@@ -711,7 +717,7 @@ def _normalize_message_unknown(actions: list, interface_path: Optional[str]) -> 
     interface_prefix = (
         interface_path.split("/")[0] if "/" in interface_path else interface_path
     )
-    correct_action_type = _INTERFACE_TO_MESSAGE_ACTION.get(interface_prefix)
+    correct_action_type = message_action_if_known(interface_prefix)
 
     if not correct_action_type:
         return actions
@@ -741,7 +747,7 @@ def _normalize_message_unknown(actions: list, interface_path: Optional[str]) -> 
             action_type
             and isinstance(action_type, str)
             and action_type.startswith("message_")
-            and action_type not in _INTERFACE_TO_MESSAGE_ACTION.values()
+            and action_type not in message_actions()
         ):
             old_type = action_type
             # Update whichever key was used
@@ -784,6 +790,8 @@ def _build_missing_reply_hint(
             "CHAT REPLY REQUIRED: A player spoke to you in-world and is waiting for a reply. "
             f"You MUST include a speak action for this world (e.g., '{say_action}') so your words "
             "are voiced in the world. Internal actions like diary entries and emotion updates do "
+    prefix = (interface_path or "").split("/")[0]
+    action = message_action_if_known(prefix) or "send_message"
             "NOT substitute for speaking back to the player."
         )
         if current_player_message and current_player_message.strip():
@@ -1304,7 +1312,7 @@ async def handle_incoming_message(
                 # newer reply).
                 ctx.pop("_reason_trail", None)
         except Exception as _reason_exc:
-            log_debug(f"[message_chain] Reason trail record skipped: {_reason_exc}")
+            log_debug(f"[message_chain] Turn card context skipped: {_reason_exc}")
 
     # Also set on message object if possible (for corrector_orchestrator and action_parser detection)
     try:
@@ -1493,10 +1501,8 @@ async def handle_incoming_message(
         is_user_facing = bool(
             interface_path
             and (
-                any(
-                    interface_path.startswith(f"{iface}/")
-                    for iface in user_facing_interfaces
-                )
+                "/" in interface_path
+                and interface_is_user_facing(interface_path)
                 or is_reactive_vessel_chat
             )
         )
@@ -2753,10 +2759,8 @@ async def handle_incoming_message(
                             bool(
                                 interface_path
                                 and (
-                                    any(
-                                        interface_path.startswith(f"{iface}/")
-                                        for iface in user_facing_interfaces
-                                    )
+                                    "/" in interface_path
+                                    and interface_is_user_facing(interface_path)
                                     or is_reactive_vessel_chat
                                 )
                             )
@@ -2974,7 +2978,7 @@ async def handle_incoming_message(
                             "discord_bot",
                         }
                         tts_allowed = (
-                            _iface_tts_prefix not in _voice_only_tts_ifaces
+                            not is_voice_input_tts_only(_iface_tts_prefix)
                         ) or _is_voice_input
                         _speak_text_replies = False
                         try:
@@ -3191,7 +3195,7 @@ async def handle_incoming_message(
                     else:
                         # Check if the originating interface has a corresponding action
                         iface_prefix = (interface_path or "").split("/")[0]
-                        expected_action = _INTERFACE_TO_MESSAGE_ACTION.get(iface_prefix)
+                        expected_action = message_action_if_known(iface_prefix)
                         action_types_in_response = {
                             a.get("type") or a.get("action")
                             for a in (actions or [])
@@ -3206,7 +3210,7 @@ async def handle_incoming_message(
                         ):
                             log_warning(
                                 f"[message_chain] ⚠️ LLM replied but not to the originating interface '{iface_prefix}' "
-                                f"(expected '{expected_action}', got {action_types_in_response & set(_INTERFACE_TO_MESSAGE_ACTION.values())}) "
+                                f"(expected '{expected_action}', got {action_types_in_response & message_actions()}) "
                                 f"— user may not receive reply on {iface_prefix}"
                             )
                         else:

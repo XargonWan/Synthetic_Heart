@@ -87,7 +87,9 @@ async def send_prompt(engine: str, prompt: str, timeout: int = 300) -> dict:
 
         elapsed = time.time() - start
         result = json.loads(response)
-        response_text = result.get("message", {}).get("content", "")[:200]
+        response_text = ((result.get("choices") or [{}])[0].get("message") or {}).get(
+            "content", ""
+        )[:200]
         return {
             "engine": engine,
             "elapsed": elapsed,

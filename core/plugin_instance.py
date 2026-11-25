@@ -5,6 +5,7 @@ from core.cortex_registry import get_cortex_registry
 from core import stats_registry
 import asyncio
 import contextvars
+import time as _time
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from datetime import datetime
@@ -1105,6 +1106,7 @@ async def handle_incoming_message(
         # imported, or the wrapper raises, the primary outcome is preserved so
         # the direct call is indistinguishable from the pre-fallback behavior.
         async def _call_engine(engine_name: str) -> Any:
+        _body_started = _time.monotonic()
             instance = effective_plugin
             if engine_name != _primary_engine_name:
                 _fallback_reg = get_cortex_registry()

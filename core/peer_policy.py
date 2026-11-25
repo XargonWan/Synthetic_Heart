@@ -108,7 +108,9 @@ PEER_INTERFACES: frozenset[str] = frozenset({"telegram", "telegram_bot"})
 
 def interface_has_peers(interface_name: str | None) -> bool:
     """True when the configured peer ids belong to ``interface_name``'s platform."""
-    return bool(interface_name) and str(interface_name) in PEER_INTERFACES
+    from core.interface_traits import has_peer_ids
+
+    return bool(interface_name) and has_peer_ids(str(interface_name))
 
 
 def is_peer_mode_enabled() -> bool:
@@ -400,6 +402,12 @@ async def _self_replied_recently(chat_id: int, cooldown_seconds: float) -> bool:
     each independently mentions this bot's alias, causing two replies in
     quick succession. Fails open (False) so a DB error never permanently
     silences a SyntH.
+        from core.interface_traits import peer_interface_ids
+
+        peer_ifaces = peer_interface_ids()
+        if not peer_ifaces:
+            return False
+        like = " OR ".join("interface_path LIKE %s" for _ in peer_ifaces)
     """
     if cooldown_seconds <= 0:
         return False

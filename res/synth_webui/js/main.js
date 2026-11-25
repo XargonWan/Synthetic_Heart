@@ -4309,6 +4309,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         try {
                             const detailHook = (window.synthInterfaceDetailHooks || {})[item.name];
                             if (typeof detailHook === 'function') detailHook(item, pane);
+                            // Setup panels drawn for extensions (data, not code).
+                            if (typeof window.synthExtensionPanels === 'function') window.synthExtensionPanels(item, pane);
                         } catch (hookErr) {
                             console.warn('Detail hook failed for', item.name, hookErr);
                         }

@@ -16,6 +16,9 @@ import json
 try:
     from telegram.constants import ParseMode
 except Exception:
+from types import SimpleNamespace
+
+ParseMode = SimpleNamespace(MARKDOWN="MARKDOWN")
     # Provide a lightweight fallback for tests where python-telegram-bot is not available
     from types import SimpleNamespace
 

@@ -3007,10 +3007,10 @@ async def run_corrector_middleware(
             # rather than the interface id, so the correction re-emitted the same
             # invalid action (langfuse 48282d7a-42fe-49a1-9d3a-4db1e1123a21).
             try:
-                from core.message_chain import _INTERFACE_TO_MESSAGE_ACTION
+                from core.interface_traits import message_action_if_known
 
                 correction_action_type = (
-                    _INTERFACE_TO_MESSAGE_ACTION.get(iface_label) or "send_message"
+                    message_action_if_known(iface_label) or "send_message"
                 )
             except Exception:
                 # Never invent a per-interface name: the unified action is
@@ -3215,15 +3215,15 @@ async def run_corrector_middleware(
                             actions = parsed_json.get("actions", [])
                             if isinstance(actions, list):
                                 for act in actions:
+                            send_verb = message_action_for(originating_interface)
                                     if not isinstance(act, dict):
                                         continue
-                                    a_type = act.get("type", "")
-                                    # Rewrite any message_* target to send_message
+                                    a_type = str(act.get("type", ""))
                                     if (
                                         a_type.startswith("message_")
-                                        and a_type != "send_message"
+                                        and a_type != send_verb
                                     ):
-                                        act["type"] = "send_message"
+                                        act["type"] = send_verb
                                         rewritten = True
 
                                     # Ensure payload.interface_path is an ollama_serve path
@@ -3267,7 +3267,6 @@ async def run_corrector_middleware(
                                             act["payload"] = payload
                                             rewritten = True
                             if rewritten:
-                                # Serialize back to JSON string before returning
                                 corrected = json.dumps(parsed_json, ensure_ascii=False)
                                 log_info(
                                     "[corrector_middleware] Rewrote corrected actions to 'send_message' for originating interface 'ollama_serve'"

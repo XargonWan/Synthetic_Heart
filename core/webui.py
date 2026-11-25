@@ -23,6 +23,7 @@ import base64
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Callable
 from typing import Deque, Dict, Optional, List, Any
 from urllib.parse import quote, unquote, urlparse
 
@@ -1265,6 +1266,11 @@ class SynthWebUIInterface:
     def register_plugin_router(self, router: Any, name: str = "") -> None:
         """Mount a FastAPI ``APIRouter`` a plugin owns (an HTTP or WebSocket endpoint).
 
+        log_info(
+            f"{LOG_PREFIX} Plugin router mounted: {name or router}",
+            log_file=WEBUI_LOG,
+        )
+
         ``register_plugin_api_route`` only serves JSON on GET; a plugin that needs more, such as a
         WebSocket a game connects to, brings its own router and mounts it here, so the core knows
         nothing about the plugin. The router must do its own authorisation for a WebSocket (see
@@ -1276,11 +1282,6 @@ class SynthWebUIInterface:
     ) -> None:
         """Add a source of sub-tabs that is asked on every render of a section."""
         self._section_tab_providers.append(provider)
-
-        log_info(
-            f"{LOG_PREFIX} Plugin router mounted: {name or router}",
-            log_file=WEBUI_LOG,
-        )
 
     def register_plugin_section_tab(
         self,
@@ -3467,16 +3468,21 @@ class SynthWebUIInterface:
                 except Exception as exc:  # noqa: BLE001 - a bad provider loses its tabs only
                     log_warning(f"{LOG_PREFIX} Section tab provider failed: {exc}")
             for tab in section_tabs:
-                # Append button inside <nav class="sub-nav">
+                # Append button inside the section's sub-navigation
                 template = template.replace(
                     "</nav>", tab["button_html"] + "\n</nav>", 1
                 )
-                # Append panel inside .sub-tabs-container (anchored by closing comment)
-                template = template.replace(
+                # Append panel inside the container of the section's panels (anchored
+                # by its closing comment)
+                for anchor in (
                     "</div><!-- .sub-tabs-container -->",
-                    tab["panel_html"] + "\n      </div><!-- .sub-tabs-container -->",
-                    1,
-                )
+                    "</div><!-- .logs-subpanels -->",
+                ):
+                    if anchor in template:
+                        template = template.replace(
+                            anchor, tab["panel_html"] + "\n      " + anchor, 1
+                        )
+                        break
 
             return HTMLResponse(content=template)
 

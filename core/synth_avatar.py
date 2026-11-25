@@ -320,6 +320,30 @@ async def _apply_one(
         return f"failed: {type(exc).__name__}"
 
 
+#: Callables told ``(version_or_None)`` when the avatar really changed (an upload, a
+#: removal, a resend), so anything that mirrors it, extensions included, can stay in
+#: sync. Not called for a start-up or switch-on catch-up: nothing changed then.
+_change_listeners: list[Callable[[Optional[str]], None]] = []
+
+
+def add_change_listener(listener: Callable[[Optional[str]], None]) -> None:
+    if listener not in _change_listeners:
+        _change_listeners.append(listener)
+
+
+def remove_change_listener(listener: Callable[[Optional[str]], None]) -> None:
+    if listener in _change_listeners:
+        _change_listeners.remove(listener)
+
+
+def _notify_listeners(version: Optional[str]) -> None:
+    for listener in list(_change_listeners):
+        try:
+            listener(version)
+        except Exception as exc:  # a listener must never break the save
+            log_warning(f"[synth_avatar] change listener failed: {type(exc).__name__}")
+
+
 async def broadcast_avatar_changed(
     *, force: bool = False, only: Optional[str] = None, catch_up: bool = False
 ) -> dict[str, str]:
@@ -334,6 +358,8 @@ async def broadcast_avatar_changed(
     """
     loaded = load_avatar()
     data, version = loaded if loaded else (None, None)
+    if only is None and not catch_up:
+        _notify_listeners(version)
     targets = _avatar_interfaces()
     if only is not None:
         targets = {k: v for k, v in targets.items() if k == only}

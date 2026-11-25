@@ -125,6 +125,35 @@ def get_attention(scope_id: Union[str, int], default: bool = True) -> bool:
     return CHAT_ATTENTION_STATE.get(scope_id, default)
 
 
+def apply_text_triggers(
+    scope_id: Union[str, int, None],
+    text: str,
+    bot_username: str | None = None,
+) -> str | None:
+    """Put the chat to sleep or wake it when ``text`` carries a configured trigger.
+
+    Returns ``"sleep"`` or ``"wake"`` when the state changed, else ``None``. A
+    sleep trigger wins over a wake trigger. An ``@bot_username`` mention also
+    wakes a sleeping chat. The message that carries the trigger is still
+    processed by the caller (so the bot can answer the goodbye).
+    """
+    if scope_id is None or not text:
+        return None
+    lowered = str(text).lower().strip()
+    should_sleep, is_wake_word, _ = evaluate_triggers(lowered)
+    mentioned = bool(bot_username) and f"@{str(bot_username).lower()}" in lowered
+    awake = get_attention(scope_id, True)
+    if should_sleep:
+        if awake:
+            set_attention(scope_id, False)
+            return "sleep"
+        return None
+    if (is_wake_word or mentioned) and not awake:
+        set_attention(scope_id, True)
+        return "wake"
+    return None
+
+
 def get_attention_window_seconds() -> float:
     """Return the configured attention window length in seconds (0 = disabled)."""
     try:

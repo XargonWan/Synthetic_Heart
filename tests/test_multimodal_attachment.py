@@ -2,7 +2,6 @@
 """Tests for multimodal attachment extraction."""
 
 import base64
-from types import SimpleNamespace
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 

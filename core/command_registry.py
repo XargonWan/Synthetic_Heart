@@ -231,15 +231,56 @@ async def _resolve_interface_context(
     )
     return interface_id, update, context
 
+def _chat_scope(
+    interface_context: Any, interface_id: str | None
+) -> tuple[Any, Any, str | None] | None:
+    """``(chat_id, thread_id, interface_path)`` of the chat a command came from.
+
+    A message handed over by an interface (``wrapped``) is the same object the
+    message queue uses, so its ``chat_id`` is the key the chat's wake/sleep state
+    is stored under. Some interfaces instead pass the platform's own ``update``
+    object; its ``effective_chat``/``effective_message`` are read the same way.
+    ``None`` when neither says which chat it is.
+    """
+    from core.interface_path_utils import build_interface_path
+
+    if not isinstance(interface_context, dict):
+        return None
+    wrapped = interface_context.get("wrapped")
+    chat_id = getattr(wrapped, "chat_id", None)
+    if wrapped is not None and chat_id is not None:
+        thread_id = getattr(wrapped, "thread_id", None)
+        path = getattr(wrapped, "interface_path", None)
+        if not path and interface_id:
+            path = build_interface_path(
+                interface_id, str(chat_id), str(thread_id) if thread_id else None
+            )
+        return chat_id, thread_id, path
+    update = interface_context.get("update")
+    chat = getattr(update, "effective_chat", None)
+    if chat is None:
+        return None
+    message = getattr(update, "effective_message", None)
+    thread_id = getattr(message, "message_thread_id", None) or getattr(
+        message, "thread_id", None
+    )
+    path = (
+        build_interface_path(
+            interface_id, str(chat.id), str(thread_id) if thread_id else None
+        )
+        if interface_id
+        else None
+    )
+    return chat.id, thread_id, path
+
+
 
 async def wake_command(interface_context=None) -> str:
     """Set the chat to awake (normal routing)."""
     interface_id, update, _context = await _resolve_interface_context(interface_context)
     if interface_id != "telegram_bot" or not update:
         return "👀 Awake."
-    chat_id = update.effective_chat.id if update.effective_chat else None
-    if chat_id is None:
-        return "⚠️ Unable to determine chat."
+    chat_id = scope[0]
     try:
         from core.chat_attention import set_attention
 
@@ -255,9 +296,7 @@ async def sleep_command(interface_context=None) -> str:
     interface_id, update, _context = await _resolve_interface_context(interface_context)
     if interface_id != "telegram_bot" or not update:
         return "💤 Asleep."
-    chat_id = update.effective_chat.id if update.effective_chat else None
-    if chat_id is None:
-        return "⚠️ Unable to determine chat."
+    chat_id = scope[0]
     try:
         from core.chat_attention import set_attention
 
@@ -273,9 +312,7 @@ async def status_command(interface_context=None) -> str:
     interface_id, update, _context = await _resolve_interface_context(interface_context)
     if interface_id != "telegram_bot" or not update:
         return "🤖 Status unavailable for this interface."
-    chat_id = update.effective_chat.id if update.effective_chat else None
-    if chat_id is None:
-        return "⚠️ Unable to determine chat."
+    chat_id = scope[0]
     try:
         from core.chat_attention import get_attention
 
@@ -1230,10 +1267,9 @@ async def logchat_command(*args, interface_context=None) -> str:
     if not interface_context:
         return "❌ This command requires interface context"
 
-    update = interface_context.get("update")
-    context = interface_context.get("context")
-
-    if not all([update, context]):
+    interface_name = interface_context.get("interface_id", "unknown")
+    scope = _chat_scope(interface_context, interface_name)
+    if scope is None:
         return "❌ Missing interface context for `/logchat` command"
 
     try:
@@ -1253,8 +1289,7 @@ async def logchat_command(*args, interface_context=None) -> str:
                 f"[logchat_command] Extracted thread_id: {thread_id} from message"
             )
 
-        # Get interface_id from interface_context
-        interface_name = interface_context.get("interface_id", "unknown")
+        chat_id, thread_id = scope[0], scope[1]
 
         await set_log_chat_id_and_thread(chat_id, thread_id, interface_name)
         # Escape square brackets to avoid Markdown parsing issues

@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from core.config_manager import config_registry
 from core.interface_path_utils import is_vessel_history_entry, is_vessel_interface_path
+from core.interface_traits import chat_kind_for_path
 from core.logging_utils import log_debug, log_warning
 from core.variables_engine import register_exposed_var
 

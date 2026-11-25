@@ -8,6 +8,7 @@ from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.core_initializer import INTERFACE_REGISTRY
 from core.config_manager import config_registry
 from core.beat_utils import is_outbound_beat
+from core.interface_traits import traits_for
 
 
 # Names that mark a cached chat row as the synth's own output. The structural
@@ -376,6 +377,11 @@ class MessagePlugin:
             "message_matrix_chat": "matrix_chat",
         }
 
+        if interface_name is None and action_type.startswith("message_"):
+            # ``message_<interface>`` for any registered interface
+            candidate = action_type[len("message_") :]
+            if candidate in INTERFACE_REGISTRY:
+                interface_name = candidate
         interface_name = interface_map.get(action_type)
 
         # interface_path is validated upstream against real routable targets

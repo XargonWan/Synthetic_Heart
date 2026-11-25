@@ -8,6 +8,7 @@ import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Dict, List, Tuple
 
+from core.interface_traits import message_action_if_known
 from core.json_utils import dumps as json_dumps, redact_multimodal_for_logging
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.validation_registry import get_validation_registry
@@ -3543,7 +3544,7 @@ async def corrector_orchestrator(
                             synthetic_type = key
                             if ctx_ipath:
                                 iface_prefix = str(ctx_ipath).split("/")[0]
-                                resolved = _iface_msg_map.get(iface_prefix)
+                                resolved = message_action_if_known(iface_prefix)
                                 if resolved:
                                     synthetic_type = resolved
                                 payload["interface_path"] = str(ctx_ipath)

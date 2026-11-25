@@ -1,7 +1,6 @@
 from fastapi.testclient import TestClient
 
 from core.webui import SynthWebUIInterface
-from core.cortex_registry import get_cortex_registry
 
 
 def test_components_includes_cortex_login_fields():

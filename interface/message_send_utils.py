@@ -23,11 +23,9 @@ try:
     from telegram.error import RetryAfter, NetworkError
 except Exception:
 
-    class RetryAfter(Exception):
-        pass
 
-    class NetworkError(Exception):
-        pass
+class NetworkError(Exception):
+    pass
 
 
 # Track whether we've already warned about None bot to avoid log spam
