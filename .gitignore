@@ -93,6 +93,9 @@ installer/vendor/*.msi
 frontend/node_modules/
 frontend/dist/
 frontend/.pnpm-store
+# Built Stage client and the packages baked into the image (see scripts/build_bundled_extensions.py)
+extensions_src/synth_stage/web/
+extensions_bundled/
 
 # Minecraft Vessel bridge — the ``mineflayer/`` package folder is committed
 # source (its package.json ships with the plugin), but the installed Node
@@ -124,3 +127,6 @@ res/synth_webui/static/audio/tts/
 # pgvector binaries vendored into the Windows installer by CI, not by hand;
 # installer/vendor/README.md explains where they come from.
 installer/vendor/pgvector/
+
+# Per-extension vendored libraries (built by the package step)
+extensions_src/*/lib/

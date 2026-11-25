@@ -71,8 +71,6 @@ Components
 - **POST** `/api/components/dev/toggle` – enable/disable development components at
   runtime (flag resets on restart).  Payload: ``{"enabled": true/false}``.
 - **POST** `/api/components/cortex` – switch the active Cortex engine. Payload: ``{"name": "<engine>"}``.
-- **POST** `/api/components/cortex/login` – begin/login flow for Zen–based
-  Cortex engines. Payload: ``{"name": "<engine>"}``.
 - **POST** `/api/components/run` – execute a component by name (used by the "Run
   now" button in the WebUI).
 
@@ -101,7 +99,8 @@ persistent conversation cache used by the WebUI and interfaces.
 Historic data endpoints (used by the WebUI for timeline/history views):
 
 - **GET** `/api/history/diary` – diary history.
-- **GET** `/api/history/grillo` – Grillo activity log entries.
+- **GET** `/api/turns/live` – the turns running now, as cards (Activity > Queue).
+- **GET** `/api/turns` – finished turns, newest first (``status`` processed|failed, ``search``, ``limit``); **GET** `/api/turns/{id}` – one turn, running or finished (see :doc:`turn_cards`).
 - **GET** `/api/history/chat` – raw chat history records.
 
 Agent‑related APIs
@@ -217,22 +216,22 @@ Config & Miscellaneous
 OpenAI-Compatible Server
 ------------------------
 
-When the ``openai_api_server`` interface is enabled, SyntH exposes an
-OpenAI-compatible HTTP surface (and, for backward compatibility, the legacy
-Ollama REST protocol).  The following endpoints are implemented
-(usually on port ``11435`` by default):
+When the ``official/openai_api`` extension is installed and on, SyntH exposes an
+OpenAI-compatible HTTP surface (port ``11435`` by default, a setting of the
+extension):
 
-- **GET** `/api/tags` – list available models (returns `models` array).
-- **POST** `/api/chat` – standard chat endpoint accepting OpenAI‑style
-  ``messages`` payloads and streaming NDJSON responses.
-- **POST** `/api/generate` – simplified prompt‑only endpoint.  Equivalent to a
-  single-user message to `/api/chat`.
-- **GET** `/v1/models` – OpenAI‑style model list (returns ``object=list``).
-- **GET** `/api/models/{name}` – retrieve a single model descriptor by name or ID.
+- **GET** `/v1/models` – the SyntH as one model named after it (``object=list``).
+- **GET** `/v1/models/{id}` – that model's descriptor.
+- **POST** `/v1/chat/completions` – a chat turn from ``messages``; JSON, or standard
+  server-sent events with ``"stream": true`` (``data: {...}`` chunks and a final
+  ``data: [DONE]``).
+- **POST** `/v1/completions` – a single ``prompt``; same two response shapes.
+- **GET** `/` – health check, never needs the key.
 
-Clients familiar with the OpenAI API (or the legacy Ollama ecosystem) can point
-to the compat server and immediately begin issuing requests without any code
-changes.
+When the extension's *API key* setting is not empty every route except ``/`` needs
+``Authorization: Bearer <key>``. Errors use the OpenAI shape
+(``{"error": {"message", "type", "code"}}``). There are no ``/api/*`` (Ollama) routes.
+See :doc:`plugin_platform/extension_developer_guide` for how an extension is built.
 
 Further Reading
 ---------------

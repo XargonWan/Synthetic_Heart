@@ -37,13 +37,15 @@ System Components
 ``interface``
     Chat platform integrations (Telegram, Discord, Reddit, etc.). Each interface:
     
-    - Inherits from ``AIPluginBase`` or implements compatible interfaces
+    - Is a plain duck-typed class (there is no interface base class) that provides
+      ``display_name``, ``get_interface_id()``, ``send_message()`` and
+      ``get_supported_actions()`` and is created by a module-level ``initialize_interface()``
     - Registers supported actions (e.g., sending messages, media)
     - Handles platform-specific message formatting and rate limiting
     - Provides trainer ID validation for security
 
-``cortex/``
-    Runtime engine implementations (OpenAI, Google Gemini, manual input, etc.). Each engine:
+``engines/``
+    Runtime engine implementations (Anthropic, Google Gemini, OpenRouter, xAI, OpenAI-compatible endpoints, manual input, etc.; see :doc:`llm_engines`). Each engine:
     
     - Extends ``AIPluginBase`` for consistent interface
     - Handles prompt construction and response generation

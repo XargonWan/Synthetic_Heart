@@ -192,10 +192,12 @@ stop()
 Implementation Details
 ----------------------
 
-History > Grillo Output
-^^^^^^^^^^^^^^^^^^^^^^^
+Grillo Activity Log
+^^^^^^^^^^^^^^^^^^^
 
-The History > Grillo view is backed by the ``grillo_activity_log`` table.
+The Activity > Grillo tab is gone: a beat is a turn like any other and shows up as a card
+(:doc:`turn_cards`). The ``grillo_activity_log`` table is still written, and the Dreams tab
+reads it.
 
 - ``prompt_text`` stores the beat prompt used to trigger reflection.
 - ``diary_entry_id`` links to the resulting ``ai_diary`` entry (when one is created).

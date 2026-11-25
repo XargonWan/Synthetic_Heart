@@ -24,16 +24,23 @@ Interface paths follow a hierarchical structure separated by forward slashes:
 
 **Components:**
 
-- ``interface_name``: The interface type (e.g., ``telegram_bot``, ``discord_bot``, ``matrix``)
+- ``interface_name``: The interface registry key (e.g., ``telegram_bot``, ``discord_bot``, ``matrix_chat``)
 - ``target_identifier``: Primary conversation identifier (chat_id, channel_id, room_id, etc.)
 - ``thread_identifier`` (optional): Thread or sub-conversation identifier
+
+The path is split on ``/`` with **no escaping**: a level that itself contains
+``/`` is split into two levels. The number of levels and what they mean belong to
+each interface; the Core only treats the first segment as the interface name. The
+Discord channel path, for example, has the guild as its first level and the channel
+as its second.
 
 **Examples:**
 
 - ``telegram_bot/-1001234567890`` - Telegram channel/group chat
 - ``telegram_bot/123456789/987`` - Telegram chat with thread
 - ``discord_bot/987654321/123456`` - Discord channel with thread
-- ``matrix/!room:matrix.org/$event`` - Matrix room with thread event
+- ``matrix_chat/!room:matrix.org/$event`` - Matrix room with thread event (see the
+  note under "Matrix Interface" about the ``matrix`` prefix)
 
 Core Utilities
 --------------
@@ -73,13 +80,22 @@ Parsing Paths
 
    from core.interface_path_utils import parse_interface_path
 
-   # Parse path into components
-   components = parse_interface_path('telegram_bot/123456789/987')
-   # Result: {'interface': 'telegram_bot', 'target': '123456789', 'thread': '987'}
+   # Parse path into (interface name, [levels]); a tuple, not a dict
+   name, levels = parse_interface_path('telegram_bot/123456789/987')
+   # Result: ('telegram_bot', ['123456789', '987'])
 
    # Parse without thread
-   components = parse_interface_path('telegram_bot/123456789')
-   # Result: {'interface': 'telegram_bot', 'target': '123456789', 'thread': None}
+   name, levels = parse_interface_path('telegram_bot/123456789')
+   # Result: ('telegram_bot', ['123456789'])
+
+   # Legacy chat/thread view of the first two levels
+   from core.interface_path_utils import extract_legacy_ids
+   extract_legacy_ids('telegram_bot/123456789/987')
+   # Result: {'interface': 'telegram_bot', 'chat_id': '123456789', 'thread_id': '987'}
+
+``parse_interface_path`` does not validate: ``'a//b'`` parses to
+``('a', ['', 'b'])``. Use ``is_valid_interface_path`` to check a path. These
+behaviours are pinned by ``tests/test_extension_baseline_contracts.py``.
 
 Validation
 ~~~~~~~~~~
@@ -90,18 +106,29 @@ Validation
 
    # Validate path format
    valid = is_valid_interface_path('telegram_bot/123456789/987')  # True
-   valid = is_valid_interface_path('invalid_path')  # False
+   valid = is_valid_interface_path('synth_webui')  # True (a bare name is valid)
+   valid = is_valid_interface_path('telegram_bot//987')  # False (empty segment)
+   valid = is_valid_interface_path('')  # False
+
+A path is valid when it is a non-empty string and every ``/``-separated segment is
+non-empty and not just whitespace.
 
 Database Integration
 --------------------
 
-The chat history cache has been updated to use interface paths as the primary key:
+The chat history cache identifies a conversation by its interface path:
 
-**Schema Changes:**
+**Schema:**
 
-- Removed separate ``chat_id``, ``interface``, ``thread_id`` columns
-- Added single ``interface_path VARCHAR(512)`` column
-- Updated all indexes and constraints
+- A single ``interface_path VARCHAR(512)`` column replaces the older separate
+  ``chat_id``, ``interface`` and ``thread_id`` columns.
+- The table's primary key is ``id``; ``(interface_path, created_at)`` is unique.
+- ``load_chat_history(path, match_chat_level=True)`` also matches the thread
+  variants of a chat: it matches ``chat_key/%`` where the chat key is the first
+  two segments.
+- Two further tables are keyed by path: ``interface_paths`` (primary key
+  ``interface_path``, with ``last_used`` and ``segment_labels``) and
+  ``interface_aliases`` (``@username`` to numeric id).
 
 **Migration Impact:**
 
@@ -168,9 +195,8 @@ Telegram User Account
 
 - **Path Format**: ``telegram/chat_id[/thread_id]`` or ``telegram/@username[/thread_id]``
 - **Writing first**: a user account can only message a bare user id it has seen.
-  ``TelethonBot.ensure_peer`` (``interface/telegram/_compat.py``) looks for the
-  person once in the groups the account shares with them, then tries the public
-  username that the ``telegram_bot`` interface knows for that id, and otherwise
+  the ``official/telegram`` extension (``extensions_src/telegram/tl.py``, ``Account.ensure_peer``) looks for the
+  person once in the groups the account shares with them, and otherwise
   fails with a "Chat not found" error that says what to do (they message the
   account first, or the sender uses their ``@username``). A miss is remembered
   for ten minutes. A destination written as ``@username`` is resolved by
@@ -202,17 +228,23 @@ build a path**:
 Matrix Interface
 ~~~~~~~~~~~~~~~~
 
-- **Path Format**: ``matrix/room_identifier[/thread_event_id]``
-- **Generation**: ``build_interface_path('matrix', room_identifier, thread_event_id)``
+- **Path Format**: ``matrix_chat/room_identifier[/thread_event_id]`` (the registry key is ``matrix_chat``)
+- **Generation**: ``build_interface_path('matrix_chat', room_identifier, thread_event_id)``
 - **Thread Support**: Uses Matrix thread events
+- **Known inconsistency**: the queue and ``resolve_and_touch`` use the
+  ``matrix_chat/...`` prefix, but the inbound history write and the history of
+  sent messages use the literal prefix ``matrix``, so one room can be stored under
+  two prefixes. Whether this is intended is not established by the code; see
+  :doc:`plugin_platform/open_questions`.
 
 OpenAI-Compatible Server
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-- **Path Format**: ``ollama_serve/conversation_id`` (the ``ollama_serve``
-  identifier is retained for backward compatibility)
-- **Generation**: ``build_interface_path('ollama_serve', chat_id)``
+- **Path Format**: ``openai_api/<conversation>`` (declared as ``openai_api/{chat}`` in
+  the ``official/openai_api`` extension's manifest)
 - **Thread Support**: Single-level conversations
+- Formerly ``ollama_serve``: the startup migration ``migrate_ollama_serve_to_openai_api``
+  renames the stored paths and aliases.
 
 Best Practices
 --------------

@@ -120,27 +120,46 @@ Example: Dev Interface
 
     # interface_dev/my_experimental_interface.py
     
-    from core.interface_adapters import BaseInterface, register_interface
-    from core.logging_utils import log_info, log_error
-    
+    from core.core_initializer import register_interface
+    from core.logging_utils import log_info
+
     INTERFACE_NAME = "my_experimental_interface"
-    
-    class MyExperimentalInterface(BaseInterface):
-        """Experimental interface for testing new features."""
-        
-        def __init__(self):
-            super().__init__(INTERFACE_NAME)
-            log_info("[my_experimental_interface] Initializing dev interface")
-        
+
+    class MyExperimentalInterface:
+        """Experimental interface for testing new features.
+
+        There is no interface base class: an interface is a plain class that
+        provides these members (see interfaces.rst).
+        """
+
+        display_name = "My Experimental Interface"   # required, non-empty
+
+        def get_interface_id(self) -> str:
+            return INTERFACE_NAME
+
+        def get_supported_actions(self) -> dict:
+            return {}
+
+        async def send_message(self, payload: dict, original_message=None) -> bool:
+            return True
+
         async def start(self):
             log_info("[my_experimental_interface] Starting dev interface")
             # Your experimental code here
-        
+
         async def stop(self):
             log_info("[my_experimental_interface] Stopping dev interface")
-    
-    # Auto-register when module is imported
-    register_interface(INTERFACE_NAME, MyExperimentalInterface())
+
+    def initialize_interface() -> None:
+        """Called by the core after the configuration is loaded."""
+        register_interface(INTERFACE_NAME, MyExperimentalInterface())
+
+.. note::
+
+   ``interface_dev/example_dev_interface.py`` in the repository still imports
+   ``BaseInterface`` and ``register_interface`` from ``core.interface_adapters``;
+   neither name exists there, so that example does not import. Use the pattern
+   above.
 
 WebUI Indicators
 ----------------
@@ -154,7 +173,7 @@ When dev components are enabled and loaded, they appear in the Components tab wi
 .. code-block:: text
 
     🔧 Development Components
-    ☑ Enable development components (interface_dev, plugins_dev, cortex dev folders)
+    ☑ Enable development components (interface_dev, plugins_dev, engines/<kind>/dev)
     
     ⚠️ Warning: This setting is not persistent and will reset to OFF when 
     the container restarts. A restart is required after toggling.
@@ -246,7 +265,7 @@ Dev Components Not Loading
 
    .. code-block:: bash
 
-       ls -la interface_dev/ plugins_dev/ llm_engines_dev/
+       ls -la interface_dev/ plugins_dev/ engines/external_engines/dev/
 
 2. Check logs for import errors:
 

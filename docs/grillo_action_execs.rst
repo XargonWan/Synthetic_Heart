@@ -21,8 +21,8 @@ Table: grillo_action_execs
 WebUI
 -----
 
-The `History -> Grillo` endpoint now includes an `actions` array inside each
-entry returned by `/api/history/grillo`. Each `actions` item contains:
+The Dreams tab's endpoint includes an `actions` array inside each
+entry (the Grillo tab it came from is gone; beats are turn cards, see :doc:`turn_cards`). Each `actions` item contains:
 
 - id
 - activity_log_id

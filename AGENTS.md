@@ -235,7 +235,7 @@ Iris handles file-based image and video analysis.
 - **Bridge**: `core/external_endpoints/bridges/iris_bridge.py` — wraps any external endpoint adapter.
 - **Adapter method**: `BaseProtocolAdapter.describe_image(image_bytes, mime_type, prompt, model)` — implemented in `openai_compat`, `gemini_adapter`, `anthropic_adapter`.
 - **Media dispatcher**: `core/media_dispatcher.py` — Iris is called for `image/*` and `video/*` MIME types (step 2 in the escalation chain, between Auris and Live).
-- **Default engine**: `zen-llm-engine` (pre-set in `init-db.sql`). No local model is bundled.
+- **Default engine**: none is pre-set. Choose an endpoint that supports vision in the Engines tab (the `official/zen` extension registers one on a fresh install). No local model is bundled.
 - **WebUI**: Engine selector appears in the Engines tab (`core/webui_templates/sections/engines.html`), populated from `/api/components` → `iris` key.
 
 Engine authors subclass `IrisEngineBase` and set `ENGINE_CLASS = MyEngine` at module level. Register at import time:
@@ -433,6 +433,35 @@ Operate under these rules:
 
 ---
 
+## 5d. Extensions (plugin platform)
+
+Anything installable that is not the Core is an **extension**: its own process
+(`python -S -I`, clean environment, a data directory of its own) that talks to the Core
+only through the JSON-RPC gateway in `core/extensions/`. The hard rules (details in
+`docs/plugin_platform/`):
+
+- **No `core.*` import from an extension.** `rg "from core|import core" extensions_src/`
+  must find nothing. A capability that is missing is a new gateway API (proposed to the
+  maintainers), never a shortcut. Official extensions use the same API as anyone else.
+- **Every call is checked**: the capability is declared in the manifest **and** granted by
+  the operator, parameters are validated, calls are rate limited and time boxed.
+  Installing grants nothing. A capability is one of `log`, `config`, `stats`, `storage`,
+  `interfaces.*`, `avatar`, `calls`, `core.info`, `endpoints.manage`, `web.static`,
+  `web.routes`, `web.ws`, `web.origin`.
+- **Nothing bypasses the message chain.** An interface extension delivers with
+  `interfaces.inbound` and sends in `interface.send_message`; the Core owns history,
+  aliases, commands and the queue. The Core learns what an interface is from its manifest
+  (`[[provides.interfaces]]`, traits in `core/interface_traits.py`), never from a name.
+- **No legacy or compatibility layer.** In-tree plugins are rewritten as extensions; the
+  Core keeps only data migrations (`core/migrations.py`).
+- **UI**: an extension may put a window in exactly three WebUI slots, `activity`, `logs`
+  and `more` (`[[provides.ui]]`); the Core draws them. Its static pages are sandboxed
+  unless it holds `web.origin`, the one capability that lets a page act as the person.
+- **Where**: sources in `extensions_src/<name>/` (`synth-extension.toml`, `ext_main.py`),
+  SDK in `synth_sdk/`, Core side in `core/extensions/`, image bundling in
+  `scripts/build_bundled_extensions.py`, tests in `tests/test_extension*_*.py`.
+- The platform is **on by default** (`EXTENSIONS_ENABLED`). The defaults baked into the image (`default_install` in `extensions_bundled/`) are installed on, granted what they declare, at the first start; anything else is granted only by the operator.
+
 ## 6. Interfaces
 
 - Manage I/O with external systems.
@@ -446,7 +475,7 @@ Interfaces have **no base class** (they are duck-typed) and register themselves
 at import time by calling the module-level `register_interface(name, self)`.
 
 **Multi-file interfaces live in a sub-folder**, mirroring the multi-file plugin
-convention from §4. The four bot interfaces (Telegram, Discord, Matrix, Fluxer)
+convention from §4. The in-tree bot interfaces (Discord, Matrix)
 each own a self-contained folder that ships their WebUI assets alongside the
 code:
 
@@ -459,11 +488,9 @@ interface/<module>/
 ```
 
 The folder is named after the **module** (not the component), so the historical
-`interface.<module>` import path keeps working: `interface/telegram_bot/telegram_bot.py`
-(component `telegram_bot`), `interface/discord_interface/discord_interface.py`
+`interface.<module>` import path keeps working: `interface/discord_interface/discord_interface.py`
 (component `discord_bot`), `interface/matrix_interface/matrix_interface.py`
-(component `matrix_chat`), `interface/fluxer_interface/fluxer_interface.py`
-(component `fluxer_bot`).
+(component `matrix_chat`). Telegram and Fluxer are extensions (`extensions_src/`).
 
 The `__init__.py` shim imports the submodule as a **module** (never `from pkg
 import <mod>`, which would resolve a same-named module-level global — e.g.
@@ -487,10 +514,8 @@ directory: `register_interface` derives `dir_path` from the instance's
 `__module__` file's parent, which now points at the sub-folder. The
 plugin/interface manager (`core/webui.py`) discovers the icon by scanning that
 directory for `icon.<ext>` (png/svg/webp/jpg/jpeg/gif, in that priority order)
-and derives the MIME type automatically — Fluxer, for instance, ships an
-`icon.svg`. The OpenAI API Server (component `ollama_serve`) follows the same
-sub-folder layout: `interface/openai_api_server/openai_api_server.py` +
-`icon.png` + `guide.md`. Any remaining legacy single-file interface resolves to
+and derives the MIME type automatically — an interface can ship an
+`icon.svg`. Any remaining legacy single-file interface resolves to
 `interface/` and falls back to a bundled
 `res/synth_webui/static/component_icons/<name>.png` and a sibling
 `<name>.guide.md`.
@@ -1067,3 +1092,48 @@ Final responses should state:
 3. files affected;
 4. validation performed;
 5. remaining risks, limitations, or unrun checks.
+
+<!-- gitnexus:start -->
+# GitNexus — Code Intelligence
+
+This project is indexed by GitNexus as **synthetic_heart** (33402 symbols, 80300 relationships, 1421 execution flows).
+
+> Index stale? Run `node .gitnexus/run.cjs analyze --index-only` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? Bootstrap with `npx`, `bunx`, or `pnpm dlx` — e.g. `bunx gitnexus@latest analyze` (npm 11 npx crash; #1939).
+
+## Always Do
+
+- **MUST run impact before editing.** Use `impact({target: "symbolName", direction: "upstream"})` or `node .gitnexus/run.cjs impact "symbolName" --direction upstream --repo .`; report callers, processes, and risk. Never substitute grep for graph analysis.
+- **MUST analyze graph changes before committing.** Use `detect_changes({scope: "all"})` (MCP) or `node .gitnexus/run.cjs detect-changes --scope all --repo .` (CLI fallback). `partial: true` or `truncated: true` is not a clean check — a zero means unseen, not unaffected; re-run it. For regression review: `detect_changes({scope: "compare", base_ref: "main"})` or `node .gitnexus/run.cjs detect-changes --scope compare --base-ref "main" --repo .`.
+- MUST warn on HIGH/CRITICAL `risk` pre-edit; never use `riskSharedAxes` to waive a HIGH/CRITICAL `risk` warning. Compare File/symbol: MCP File omits axes; Graph-RAG expands File.
+- **MUST treat `risk: UNKNOWN` as unresolved, not as low.** An empty caller set is not evidence the symbol is unused — it can also mean the callers are not resolvable by the index (plain-object property access, dynamic dispatch, cross-language calls). `impact` pairs `UNKNOWN` with a `riskNote` saying so. Confirm with a text search before treating the symbol as safe to change or delete; do not proceed on the strength of a zero.
+- **MUST use `query({search_query: "concept"})` for concepts/flows, `context({name: "symbolName"})` for a named symbol, or `impact` for blast radius, on read-only callers, dependencies, imports, or execution flow.** Graph first; text search only for empty/`UNKNOWN`/literals.
+- For security review, `explain({target: "fileOrSymbol"})` lists taint findings (source→sink flows; needs `analyze --pdg`).
+
+## Never Do
+
+- NEVER edit a function, class, or method before MCP/CLI impact analysis.
+- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis, and never read `UNKNOWN` as an all-clear — it means the walk could not answer, which is the one verdict that requires confirming by other means.
+- NEVER rename symbols with find-and-replace — use `rename` which understands the call graph.
+- NEVER commit before MCP/CLI graph change analysis.
+
+## Resources
+
+| Resource | Use for |
+| --- | --- |
+| `gitnexus://repo/synthetic_heart/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/synthetic_heart/clusters` | All functional areas |
+| `gitnexus://repo/synthetic_heart/processes` | All execution flows |
+| `gitnexus://repo/synthetic_heart/process/{name}` | Step-by-step execution trace |
+
+## CLI
+
+| Task | Read this skill file |
+| --- | --- |
+| Understand architecture / "How does X work?" | `.claude/skills/gitnexus-exploring/SKILL.md` |
+| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus-impact-analysis/SKILL.md` |
+| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus-debugging/SKILL.md` |
+| Rename / extract / split / refactor | `.claude/skills/gitnexus-refactoring/SKILL.md` |
+| Tools, resources, schema reference | `.claude/skills/gitnexus-guide/SKILL.md` |
+| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus-cli/SKILL.md` |
+
+<!-- gitnexus:end -->

@@ -132,8 +132,8 @@ Notes and caveats
   whether to delete them as well, and keeps them unless you say otherwise: a
   silent uninstall (``/SILENT``, ``/VERYSILENT``) keeps them, because there is
   nobody to ask and keeping is the direction you can undo afterwards.
-- Selenium-based engines are being replaced by other engines; if you still use
-  them, install Chrome and ``undetected-chromedriver``.
+- Browser-driven engines run in their own container (see the Zen LLM Engine
+  extension); nothing in SyntH itself drives a browser.
 - Some tests assume a database or other services; point them at local ones with
   environment variables or let them skip.
 

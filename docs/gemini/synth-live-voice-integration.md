@@ -56,9 +56,9 @@ the conversation across all context subsystems (see
 | File | Purpose |
 |------|---------|
 | `core/live_session_manager.py` | Session lifecycle, audio I/O, receive loop, transcript accumulation, tool call dispatch, reconnect logic, voice config |
-| `llm_engines/gemini_api.py` | `get_live_session_manager()` factory, `start_live_voice_session()` / `stop_live_voice_session()` wrappers |
+| `engines/external_engines/gemini_api.py` | `get_live_session_manager()` factory, `start_live_voice_session()` / `stop_live_voice_session()` wrappers |
 | `core/prompt_engine.py` | `build_live_system_instruction()` — condensed persona for live sessions |
-| `interface/discord_interface.py` | Discord actions, audio pipeline classes, tool-calling bridge, `on_turn_complete` callback, voice state cleanup |
+| `interface/discord_interface/discord_interface.py` | Discord actions, audio pipeline classes, tool-calling bridge, `on_turn_complete` callback, voice state cleanup |
 | `core/chat_history_cache.py` | Per-interface and global chat history persistence |
 | `plugins/ai_diary.py` | Diary entry persistence |
 | `core/synth_core_memory.py` | Semantic memory persistence (`memories` table) |
@@ -214,7 +214,7 @@ than the placeholder `[voice_user]`.
 ## Context Ingestion
 
 After each model turn completes, `on_turn_complete` in
-`interface/discord_interface.py` persists the conversation to all four context
+`interface/discord_interface/discord_interface.py` persists the conversation to all four context
 subsystems.  The `interface_path` key used for voice conversations is
 `discord_live_{guild_id}`.
 

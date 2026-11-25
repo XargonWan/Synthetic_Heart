@@ -33,8 +33,20 @@ The Solution: Two-Phase Pattern
 
 - Core loads all registered variables from database
 - Core notifies all listeners with updated values
-- Core calls ``initialize_interface()`` / ``initialize_plugin()`` to create instances
+- Core calls ``initialize_interface()`` to create **interface** instances
 - Instances now see correct values from DB
+
+.. note::
+
+   The two phases are strict only for **interfaces**. There is no
+   ``initialize_plugin()`` hook and no separate plugin-instantiation phase:
+   ``CoreInitializer._load_plugins()`` imports a plugin module **and**
+   instantiates its ``PLUGIN_CLASS`` in the same step, before the database
+   values are loaded, and a synchronous ``start()`` runs there too. Only an
+   ``async`` ``start()`` is deferred, by ``start_pending_async_plugins()``, until
+   after the configuration is loaded. A plugin must therefore not read a
+   configuration value in ``__init__`` and expect the database value; read it
+   lazily (or in ``start()``).
 
 Implementation Pattern
 ----------------------
@@ -157,26 +169,22 @@ The core follows this sequence in ``core_initializer.py``:
 
 .. code-block:: python
 
-   async def initialize_all(self):
-       # 1. Initialize base systems (DB, registries)
-       await self._initialize_registries()
-       
-       # 2. PHASE 1: Import all components (registers variables)
-       self._load_plugins()
+   # Simplified from CoreInitializer.initialize_all (core/core_initializer.py)
+   async def initialize_all(self, notify_fn=None):
+       # 1. Registries: engine kinds and modules (register_default_engines)
+       # 2. Cortex engine, then plugins
+       self._load_plugins()   # imports AND instantiates plugins; sync start() runs here
+       #    ensure_plugin_tables(), validation rules, ...
+       await config_registry.load_all_from_db()      # first DB load
+       await self.start_pending_async_plugins()      # async plugin start()
+       # 3. PHASE 1 for interfaces: import, register variables, no instances yet
        self._discover_interfaces()
-       # At this point: variables registered, but NO instances created
-       
-       # 3. Load variables from database
+       # 4. Second DB load: interface variables get their stored values
        await config_registry.load_all_from_db()
-       config_registry.notify_all_listeners()
-       # At this point: all variables have correct values from DB
-       
-       # 4. PHASE 2: Initialize component instances
+       #    _build_actions_block()  (merge plugin and interface actions)
+       # 5. PHASE 2 for interfaces: create instances with correct configuration
        self._initialize_interface_instances()
-       self._initialize_plugin_instances()
-       # At this point: instances created with correct configuration
-       
-       # 5. Start components
+       # 6. Start interfaces
        await self._start_interfaces()
 
 Hot Reload Support
@@ -283,7 +291,7 @@ Components can be tested in isolation:
 See Also
 --------
 
-- ``interface/telegram_bot.py`` - Reference implementation
+- ``extensions_src/telegram_bot/`` - Reference implementation (an extension; see :doc:`plugin_platform/extension_developer_guide`)
 - ``interface/discord_interface.py`` - Another example
 - ``core/core_initializer.py`` - Core initialization logic
 - ``core/config_manager.py`` - Configuration system

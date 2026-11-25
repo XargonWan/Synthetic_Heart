@@ -251,7 +251,7 @@ What an interface can do is set by the platform, not by this project. Checked on
      - yes, **untested**
      - yes, **untested**: the face is drawn by the server (no browser); audio-only where the
        server cannot draw it
-     - ``interface/telegram/telegram_call.py`` on py-tgcalls (installed on first use). Written
+     - the ``official/telegram`` extension (``extensions_src/telegram/calls.py``) on py-tgcalls, through the extension call API (``core/extensions/calls.py``). Written
        from the library's published examples and API without an account to run it on: see
        *Debugging Telegram calls* below. For the video see *The SyntH's face in other
        interfaces' calls*.
@@ -260,7 +260,7 @@ What an interface can do is set by the platform, not by this project. Checked on
      - no
      - The Bot API has no call methods: a bot can neither place nor receive calls. It only
        exchanges voice messages and video notes.
-   * - ``matrix_chat``, ``fluxer_bot``, ``openai_api_server``, ``vessel``
+   * - ``matrix_chat``, ``fluxer_bot``, ``openai_api``, ``vessel``
      - no
      - no
      - No call transport in the library or protocol the interface uses.

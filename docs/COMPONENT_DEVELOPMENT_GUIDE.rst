@@ -317,7 +317,7 @@ That's it! Remove the listener function and ``add_listener`` call.
 Need Help?
 ----------
 
-- Check existing interfaces: ``interface/telegram_bot.py``, ``interface/discord_interface.py``
+- Check existing interfaces: the extensions in ``extensions_src/`` (``telegram_bot``, ``fluxer``) and ``interface/discord_interface.py``
 - Check core modules: ``core/persona_manager.py``
 - Ask in the development channel
 

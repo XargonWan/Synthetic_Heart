@@ -41,6 +41,7 @@ getting started.
    vrm_animations
    animation_system
    webui_controls
+   turn_cards
    call_service
    synth_stage_frontend
    gemini/synth-live-voice-integration
@@ -65,6 +66,7 @@ getting started.
    agent_integration
    agentic_tools
    component_pattern
+   plugin_platform/index
    two_phase_init_implementation
    config_management
    prompt_engine_json_prompt

@@ -113,39 +113,6 @@ Event Plugin
 
 **Purpose**: Routes scheduled events and autonomous event notifications through the LLM for better formatting, context-aware delivery, and intelligent response generation.
 
-Telethon Userbot
-~~~~~~~~~~~~~~~~
-
-**File**: ``interface/telethon_userbot.py``
-
-**Changes Made**:
-
-1. **Import Addition**:
-   
-   .. code-block:: python
-
-       from core.auto_response import request_llm_delivery
-
-2. **Updated Message Handler**:
-   
-   .. code-block:: python
-
-       # Pass to plugin via auto-response system for autonomous userbot interactions
-       try:
-           await request_llm_delivery(
-               message=message,
-               interface=client,
-               context=context_memory,
-               reason="telethon_userbot_autonomous"
-           )
-       except Exception as e:
-           log_error(
-               f"auto-response delivery failed for telethon userbot: {e}",
-               e,
-           )
-
-**Purpose**: Routes Telegram userbot interactions through the LLM for intelligent autonomous responses, maintaining consistency with the main Telegram bot interface.
-
 Benefits of Extension
 ---------------------
 

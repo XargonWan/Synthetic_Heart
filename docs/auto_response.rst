@@ -200,8 +200,9 @@ The auto-response system currently supports the following autonomous interfaces:
 **Event Plugin** (``plugins/event_plugin.py``)
     Scheduled event notifications and autonomous event-triggered actions delivered through LLM.
 
-**Telethon Userbot** (``interface/telethon_userbot.py``)
-    Autonomous Telegram userbot interactions routed through LLM for intelligent responses.
+**Extensions**
+    An interface that is an extension (Telegram, Fluxer, the OpenAI API) delivers through
+    ``interfaces.inbound``, so its turns go through the same queue and the same LLM path.
 
 Implementation for New Interfaces
 ----------------------------------

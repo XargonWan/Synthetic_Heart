@@ -173,14 +173,18 @@ Added Interface Instance Initialization
 Updated Initialization Sequence
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+This is a simplified sketch. The exact order, including that plugins are
+instantiated in ``_load_plugins()`` before the first configuration load, is in
+:doc:`component_pattern`.
+
 .. code-block:: python
 
    async def initialize_all(self):
        # 1. Initialize base systems
        await self._initialize_registries()
-       self._load_llm_engines()
+       await self._load_cortex_engine(notify_fn)   # was _load_llm_engines(), which no longer exists
        self._load_plugins()
-       
+
        # 2. PHASE 1: Import interfaces (registers variables)
        self._discover_interfaces()
        
@@ -267,7 +271,6 @@ The following interfaces should be migrated to the two-phase pattern:
 
 - [ ] ``discord_interface.py``
 - [ ] ``matrix_interface.py``
-- [ ] ``openai_api_server.py``
 
 Migration checklist for each:
 

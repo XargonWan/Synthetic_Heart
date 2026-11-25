@@ -133,7 +133,7 @@ they follow a plugin or interface being switched on or off with no restart.
    "last seen": a `shutdown` at least as recent as the heartbeat is a clean stop,
    anything else an unexpected one (the container can be killed at any moment, so
    the error is up to one heartbeat interval). With no heartbeat yet, the newest
-   recorded activity (`chat_history_cache`, `turn_reason_trail`,
+   recorded activity (`chat_history_cache`,
    `grillo_activity_log`) is used and labelled as an estimate; with none of them
    nothing is claimed. A gap under two minutes is just the restart and is not
    mentioned.

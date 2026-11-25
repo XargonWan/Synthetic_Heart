@@ -317,7 +317,6 @@ When the fallback helper is used, it:
           "synth_webui":   "message_synth_webui",
           "telegram_bot":  "message_telegram_bot",
           "discord_bot":   "message_discord_bot",
-          "ollama_serve":  "message_ollama_serve",
       }
 
    Falls back to ``message_{interface}`` for unknown interfaces.

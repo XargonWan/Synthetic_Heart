@@ -106,6 +106,6 @@ except the Telegram user account, whose picture is visible to all contacts.
    * - ``synth_webui``
      - Reads ``GET /api/synth_avatar`` directly.
      - Not applicable.
-   * - ``openai_api_server``, ``vessel_interface``, ``interface_dev/*``
+   * - ``openai_api``, ``vessel_interface``, ``interface_dev/*``
      - No account/profile concept.
      - Not applicable.

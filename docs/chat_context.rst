@@ -36,11 +36,17 @@ The system maintains persistent chat history using the ``core/chat_history_cache
        sender_name VARCHAR(255),
        sender_id VARCHAR(255),
        message_text LONGTEXT NOT NULL,
-       timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+       metadata JSON DEFAULT NULL,
+       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
        INDEX idx_interface_path (interface_path),
-       INDEX idx_timestamp (timestamp),
-       UNIQUE KEY uniq_message (interface_path, timestamp)
+       INDEX idx_created_at (created_at),
+       UNIQUE KEY uniq_message (interface_path, created_at)
    );
+
+The timestamp column is ``created_at`` (this block mirrors
+``core/chat_history_cache.py::init_chat_history_table``). ``metadata`` is added to
+older tables by an ``ALTER TABLE`` on startup. The dialect shown is MariaDB; the
+runtime also supports PostgreSQL.
 
 **API Usage:**
 
