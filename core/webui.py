@@ -925,8 +925,6 @@ class SynthWebUIInterface:
         self.app.post("/api/config")(self.update_config_entry)
         # Cortex-aware endpoints
         self.app.post("/api/components/cortex")(self.set_cortex_engine)
-        # Login control for Zen-based engines
-        self.app.post("/api/components/cortex/login")(self.cortex_login)
         # Model selection for cortex engines
         self.app.post("/api/components/cortex/model")(self.set_cortex_model)
         # Model selection for external Vox / Auris engines (persist the chosen
@@ -13797,20 +13795,6 @@ class SynthWebUIInterface:
 
         return await self._set_external_media_model(
             request, lambda: AURIS_REGISTRY, "stt_model", "Auris"
-        )
-
-    async def cortex_login(self, request: Request):
-        """Zen-based login is no longer supported.
-
-        The embedded Zen engine has been removed. Use the external
-        zen-llm-engine service and configure it as an external endpoint.
-        """
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Zen-based login is no longer supported. "
-                "Use the external zen-llm-engine endpoint."
-            ),
         )
 
     # Cortex endpoints

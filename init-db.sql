@@ -334,23 +334,6 @@ CREATE TABLE IF NOT EXISTS external_endpoints (
     INDEX idx_protocol (protocol)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Default external endpoint: Zen LLM Engine
-INSERT IGNORE INTO external_endpoints
-    (name, display_label, protocol, base_url, enabled, capabilities, subsystem_map, default_model, probe_status, extra_config)
-VALUES
-    (
-        'zen-llm-engine',
-        'Zen LLM Engine',
-        'openai',
-        'http://synth-zen-llm-engine:8000',
-        1,
-        '{"llm": true, "tts": false, "stt": false}',
-        '{"cortex": true, "vox": false, "auris": false, "live": false}',
-        'gemini',
-        'never',
-        '{"timeout": 300}'
-    );
-
 -- Core config table (authoritative for config_registry)
 CREATE TABLE IF NOT EXISTS config (
     `config_key` VARCHAR(255) PRIMARY KEY,
@@ -359,14 +342,12 @@ CREATE TABLE IF NOT EXISTS config (
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('BASE_CORTEX', 'zen-llm-engine');
 INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('GRILLO_CORTEX', 'Default');
 INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('TRAINER_CORTEX', 'Default');
 INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('DSP_CORTEX', 'Default');
-INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('ACTIVE_IRIS_ENGINE', 'zen-llm-engine');
--- Enable vision support for zen-llm-engine which supports image uploads
+-- Vision support of the OpenAI-compatible engine (images are uploaded to the endpoint)
 INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('OPENAPI_SUPPORTS_VISION', 'true');
--- Allow enough time for zen-llm-engine queue processing
+-- Allow enough time for slow, queued engines to answer
 INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('RESPONSE_TIMEOUT', '600');
 INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('SOUL_COMPILE_IDLE_SECONDS', '300');
 INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('SOUL_SCHEDULER_INTERVAL_SECONDS', '60');

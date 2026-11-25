@@ -32,32 +32,20 @@ if TYPE_CHECKING:
 _LOCAL_MAX_TOKENS_DEFAULT = 4096
 
 # Hard downstream character budget for the fully assembled OpenAI-style messages
-# sent to an endpoint, enforced by ``_clamp_messages_to_char_budget``. Kept
-# safely below the ``zen-llm-engine`` 32000-char chunking threshold so the
-# chunking path — and its "reply only OK" protocol contamination / empty-actions
-# garbling — is never triggered, regardless of how large the injected action
-# catalog is.
+# sent to an endpoint, enforced by ``_clamp_messages_to_char_budget``. Off by default:
+# an endpoint that cannot take a long prompt (one that splits anything over a limit
+# into several parts, say) declares ``extra_config["downstream_char_budget"]``, and the
+# extension or the operator that knows the limit sets it.
 #
-# IMPORTANT — serialization headroom: the clamp measures the *content* length of
-# each message (``_message_content_len``), but the payload the endpoint actually
-# receives is the role-separated serialization of those messages, which is
-# meaningfully larger (role labels, JSON framing/escaping, chat-template glue).
-# Measured LIVE (2026-07-28) on the zen-llm-engine: a content-sum clamped to
-# exactly 27000 chars produced a real zen prompt of 32232 chars — i.e.
-# ~5200 chars of serialization/template overhead — which STILL exceeded the
-# 32000 limit and triggered 2-part chunking (garbled request → empty
-# ``{"actions": []}`` → corrector loop → "😵" fallback). The overhead is far
-# larger than the ~2600 originally assumed. The budget is therefore set to 24000
-# (32000 − ~5200 measured overhead − ~2800 safety margin) so the final serialized
-# payload stays comfortably under 32000 even on the heaviest turns. Applies to
-# every openai-protocol endpoint; harmless for endpoints that accept larger
-# prompts (their payloads are already below this) unless overridden via
-# ``extra_config["downstream_char_budget"]`` (a non-positive value disables the
-# clamp entirely). Unlike the up-front ``max_chars`` reducer, this clamp only
-# trims the *user* body and never the system message (instructions + action
-# catalog), so protected content is never lost even when it alone exceeds the
-# budget.
-_DEFAULT_DOWNSTREAM_CHAR_BUDGET = 24000
+# Mind the serialization headroom when choosing a value: the clamp measures the
+# *content* length of each message (``_message_content_len``), but the payload the
+# endpoint receives is the role-separated serialization of those messages, which is
+# larger (role labels, JSON framing/escaping, chat-template glue; thousands of
+# characters on a heavy turn). A non-positive value disables the clamp. Unlike the
+# up-front ``max_chars`` reducer, this clamp only trims the *user* body and never the
+# system message (instructions + action catalog), so protected content is never lost
+# even when it alone exceeds the budget.
+_DEFAULT_DOWNSTREAM_CHAR_BUDGET = 0
 
 # Native tools remain off by default for compatibility with endpoints/models
 # that do not support function calling. Individual endpoints may opt in with

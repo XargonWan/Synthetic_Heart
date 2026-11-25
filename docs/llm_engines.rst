@@ -1,832 +1,109 @@
+LLM Engines
+===========
 
+An LLM *engine* is what the Cortex calls to turn a prompt into a response. This
+page describes how engines are found, registered and written **today**. It
+replaces an older version that described a ``llm_engines/`` directory and a
+``ZenLLMBase`` class; neither exists any more (``AGENTS.md`` lists ``llm_engines/``
+as an obsolete path).
 
-Engine Architecture
--------------------
+.. note::
 
-All LLM engines follow a consistent architecture:
+   Engines are one of the first things the planned extension platform moves out
+   of the Core: no native engines will remain in the main repository. See
+   :doc:`plugin_platform/index`.
 
-- **Auto-Discovery**: Engines are automatically found in the ``llm_engines/`` directory
-- **Standard Interface**: All engines extend ``AIPluginBase`` for consistent integration
-- **Capability Reporting**: Engines declare their supported models and features
-- **Dynamic Switching**: Active engine can be changed without restarting the system
-- **Unified Limits**: Engines report their constraints (token limits, modalities, etc.)
+Two ways to reach a model
+-------------------------
 
-Agentic Runtime integration
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#. **Engine modules** in ``engines/external_engines/``: Python modules written
+   for a specific provider SDK or API (``anthropic``, ``gemini_api``,
+   ``openapi``, ``openrouter``, ``xai_grok``). Development-only engines
+   (``manual``, ``openai_chatgpt``, ``gemini_cli``) live in
+   ``engines/external_engines/dev/`` and load only when development components
+   are enabled.
+#. **External endpoints**: database rows describing any HTTP endpoint, created
+   from the WebUI wizard with the JSON presets in ``providers/``. They are
+   wrapped by bridges in ``core/external_endpoints/bridges`` and registered with
+   the Cortex like an engine. See :doc:`external_endpoints`.
 
-Engines require no special hooks to participate in the Agentic Runtime. The
-runtime drives every engine through the standard ``AIPluginBase`` interface;
-tool selection and execution are handled centrally by the unified tool registry
-and the agent tool executor (see :doc:`agentic_tools`), not by per-engine
-methods.
+Zen
+~~~
 
-Web-driven engines such as ZEN speak the standard OpenAI tool-calling API, and
+Zen is **not** an engine module. The Zen LLM Engine is a separate container
+(``synth-zen-llm-engine`` in ``docker-compose.yml``) that exposes a browser-driven
+chat UI as an OpenAI-style API. SyntH reaches it as an ordinary external endpoint
+(protocol ``openai``) that the ``official/zen`` extension registers
+(``endpoints.ensure``, see :doc:`plugin_platform/extension_runtime`): on a fresh install
+it creates ``zen-llm-engine`` with the settings Zen needs (a 300 s timeout and a
+``downstream_char_budget`` of 24000, because Zen splits larger prompts), never behind an
+operator who configured other endpoints, and only filling in what an existing endpoint
+lacks. The Core seeds, names and tunes nothing for Zen, and the SyntH repository contains
+no driver code for it. An older page,
+``zen_driver_recovery``, described browser-driver recovery inside a
+``zen_llm_base`` module that no longer exists; that logic lives in the Zen
+container.
+
+Discovery and registration
+--------------------------
+
+#. ``core/cortex_registry.py::register_default_engines`` scans ``engines/``. For
+   each kind directory it imports every ``*_base.py`` module and calls its
+   ``discover_and_register()``.
+#. ``engines/external_engines/external_engines_base.py::discover_and_register``
+   registers the cortex kind ``llm_provider`` and iterates the modules of the
+   directory with ``pkgutil``. It skips packages, names starting with ``_`` and
+   names ending with ``_base``. A module that fails to import is logged as a
+   warning and skipped.
+#. Each module declares what it provides with module-level names:
+
+   .. code-block:: python
+
+      PLUGIN_CLASS = MyLLMPlugin          # LLM engine (cortex registration)
+      ENGINE_CLASS = MySTTAdapter         # STT adapter (auris registration)
+      VOX_ENGINE_CLASS = MyTTSAdapter     # TTS adapter (vox registration)
+
+      ENGINE_CAPABILITIES = {"llm": True, "stt": False, "tts": False}
+      ENGINE_LABEL = "Short human-readable description"
+
+   ``ENGINE_CAPABILITIES`` defaults to ``{"llm": True}``. The other registries
+   also accept ``AURIS_CAPABILITIES``, ``AURIS_ENGINE_LABEL``,
+   ``VOX_CAPABILITIES`` and ``VOX_ENGINE_LABEL``. The kind string
+   ``llm_provider`` is kept for compatibility with existing database rows such as
+   ``BASE_CORTEX``.
+#. ``CortexRegistry.load_engine`` also has a fallback import of
+   ``engines.external_engines.<name>`` and ``engines.live.<name>``.
+
+Labels for the WebUI
+~~~~~~~~~~~~~~~~~~~~
+
+The Components page shows a short label per engine, taken in this order from
+``ENGINE_LABEL`` in the module, ``engine_label`` on ``PLUGIN_CLASS``, or the
+``label=`` argument of ``CortexRegistry.register_engine_module``.
+
+Writing an engine module
+------------------------
+
+All shipped engines subclass ``AIPluginBase`` (``core/ai_plugin_base.py``) and
+export ``PLUGIN_CLASS``. Use an existing module as the reference, for example
+``engines/external_engines/anthropic.py`` (smallest) or ``openrouter.py``, and the
+docstring of ``external_engines_base.py`` for the module contract. The method
+signatures belong to ``AIPluginBase``; read them there rather than copying an
+example, because they are the source of truth.
+
+Engines take part in the Agentic Runtime without special hooks. The runtime
+drives every engine through the standard ``AIPluginBase`` interface; tool
+selection and execution are handled centrally by the unified tool registry and
+the agent tool executor (see :doc:`agentic_tools`), not by per-engine methods.
+Web-driven endpoints such as Zen speak the standard OpenAI tool-calling API, and
 an endpoint can opt into a lean agent prompt so the chat UI is not told it is in
 an "agentic mode"; see "Lean prompt" in :doc:`agentic_tools`.
 
-Zen Plugin Architecture
------------------------------
-
-The Zen-based LLM engines follow a standardized architecture to minimize code duplication and ensure consistent behavior across different browser-based services like ChatGPT, Grok, and Gemini.
-
-**Core Design**
-
-The architecture is built around a shared base class ``ZenLLMBase`` that handles common functionality:
-
-- **Driver Management**: Centralized browser driver lifecycle and configuration
-- **Workflow Standardization**: Consistent prompt sending and response waiting logic
-- **Response Extraction**: Standardized text extraction with multiple fallback selectors
-- **Error Handling**: Robust error recovery and logging
-
-**Standardized Methods**
-
-All Zen engines inherit these core methods from ``ZenLLMBase``:
-
-+------------------+------------------------------------------------+-----------------+
-| Method           | Purpose                                        | Override?       |
-+==================+================================================+=================+
-| ``_locate_prompt_area()`` | Find input textarea/contenteditable area   | ❌ No (subclass) |
-+------------------+------------------------------------------------+-----------------+
-| ``_get_response_selectors()`` | Return CSS selectors for responses       | ✅ **Yes**      |
-+------------------+------------------------------------------------+-----------------+
-| ``_extract_response_text()`` | Extract response using selectors          | ⚠️ Optional*    |
-+------------------+------------------------------------------------+-----------------+
-| ``_send_prompt_with_confirmation()`` | Send prompt and wait for confirmation | ❌ No (subclass) |
-+------------------+------------------------------------------------+-----------------+
-| ``_ensure_logged_in()`` | Check if user is logged in               | ❌ No (subclass) |
-+------------------+------------------------------------------------+-----------------+
-
-*Optional: Only override if service has special dialog handling
-
-**Response Extraction Flow**
-
-The base class implements a robust response extraction system:
-
-1. **Selector Priority**: Try each selector from ``_get_response_selectors()`` in order
-2. **Latest Response**: Return the last matching element (most recent response)
-3. **Text Extraction**: Try ``.text`` first, fallback to ``textContent`` attribute
-4. **Stabilization**: Wait for response text to stop changing before returning
-
-**Adding New Zen Engines**
-
-To add support for a new browser-based LLM service:
-
-1. **Create Plugin File**: Extend ``ZenLLMBase`` in ``llm_engines/``
-2. **Implement Required Methods**: Provide service-specific selectors and logic
-3. **Define Response Selectors**: Return CSS selectors for response extraction
-4. **Test Integration**: Verify with real service and adjust selectors as needed
-
-**Response Choice Handling**
-
-Some LLM services (like ChatGPT) offer users multiple response versions. The Zen architecture automatically handles this:
-
-- **Automatic Detection**: Checks for choice buttons using service-specific selectors
-- **First Choice Selection**: Automatically selects the first available option
-- **Fallback Behavior**: Continues normally if no choices are available
-- **Service-Specific**: Each engine provides its own ``_get_response_choice_selectors()`` method
-
-**Example Implementation**
-
-.. code-block:: python
-
-   from core.zen_llm_base import ZenLLMBase
-   
-   class ZenGrokPlugin(ZenLLMBase):
-       display_name = "Zen Grok"
-       
-       def __init__(self, notify_fn=None):
-           grok_config = {
-               "service_url": "https://grok.com",
-               "model": "grok",
-               "interface_name": "grok"
-           }
-           super().__init__(config=grok_config, notify_fn=notify_fn)
-       
-       def _get_response_selectors(self) -> list:
-           """Get CSS selectors for Grok responses."""
-           return [
-               "div.grok-response",  # Primary selector
-               "[data-testid='grok-message']",  # Fallback
-               ".response-text",  # Generic fallback
-           ]
-
-Authentication and Guest Mode
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Zen-based LLM plugins can function in guest mode (without user authentication), but this comes with limitations:
-
-- **Character Limits**: Guest mode typically has significantly reduced character limits compared to authenticated sessions, making SyntH appear less intelligent due to truncated prompts and responses
-- **Recommended Setup**: Use a logged-in account through the webui (``http://<host>:5006``) for full functionality and higher character limits
-- **Account Separation**: Create a dedicated account for SyntH separate from your personal account, as SyntH tends to flood chat history with frequent interactions
-
-Available Engines
------------------
-
-**API Engines:**
-
-* ``gemini_api`` – Direct REST API integration with Google Gemini. Supports multimodal input (images, audio, video, documents), correction/retry loops, and agentic hooks. See :doc:`gemini_api_engine` for full documentation.
-
-**Stable Engines:**
-
-* ``zen_chatgpt_legacy`` – Legacy version of the ChatGPT Zen engine. For backward compatibility only; consider migrating to the standardized ``zen_chatgpt`` engine.
-
-**Standardized Zen Engines:**
-
-All Zen-based LLM engines now follow a consistent architecture for reliability and maintainability:
-
-* ``zen_chatgpt`` – Drive a browser-based ChatGPT session. Supports GPT-4, GPT-3.5-Turbo, and other OpenAI models with automatic response choice handling and large prompt support (up to 100k characters).
-* ``zen_grok`` – Browser-controlled xAI Grok with 128k token context window. Supports Grok and Grok Vision models for advanced reasoning and vision capabilities.
-* ``zen_gemini`` – Browser-controlled Google Gemini with multiple model support (Gemini 2.5 Flash, 1.5 Pro). Supports up to 500k characters for Pro models with multimodal capabilities.
-
-**Other Engines:**
-
-* ``manual`` – Forward prompts to a human trainer for manual responses (useful for debugging and development).
-
-Manual Engine
--------------
-
-The ``manual`` engine forwards all prompts to a human trainer instead of an AI model:
-
-- **Debugging Tool**: Useful for testing interfaces and workflows without API costs
-- **Development Aid**: Allows manual inspection of prompts and responses
-- **No Configuration**: Works immediately without API keys or external dependencies
-- **Trainer Feedback**: Responses are sent back through the normal message flow
-
-Zen ChatGPT Engine
------------------------
-
-The ``zen_chatgpt`` engine controls a real ChatGPT browser session using the standardized Zen architecture:
-
-- **Standardized Architecture**: Built on ``ZenLLMBase`` for consistent behavior across all Zen engines
-- **Full Browser Control**: Uses Zen to interact with ChatGPT web interface
-- **Response Choice Handling**: Automatically selects first response when ChatGPT offers multiple options
-- **Enhanced Prompt Limits**: Supports prompts up to 128,000 characters
-- **Captcha Handling**: Manual intervention required for initial setup and captchas
-- **Visual Desktop**: Optional web interface at ``http://<host>:5006`` for monitoring
-- **Model Selection**: Supports different ChatGPT models via ``CHATGPT_MODEL`` environment variable
-    - Preview models like ``gpt-5.1-codex-max`` are available (add to ``MODEL_LIMITS_MAP``).
-        To enable the preview model for all clients, set the environment variable or component configuration to that model name, e.g.:
-        ``CHATGPT_MODEL=gpt-5.1-codex-max``
-
-**Key Features:**
-
-- **Robust Response Extraction**: Multiple CSS selectors with fallback logic
-- **Automatic Choice Selection**: Handles ChatGPT's multiple response options
-- **Large Prompt Support**: Large renderer-built prompts and compatibility fallback payloads up to 128,000 characters
-- **Error Recovery**: Graceful handling of network issues and browser problems
-
-Setup Steps:
-
-1. Start the system with ``docker compose up``
-2. Access ``http://<host>:5006`` in your browser
-3. Complete ChatGPT login and captcha verification
-4. synth can then interact with ChatGPT in real-time
-
-**Configuration:**
-
-.. code-block:: bash
-
-   CHATGPT_MODEL=gpt-4o  # Optional, defaults to gpt-4o
-    # To enable GPT-5.1-Codex-Max (Preview) for all clients, you can set:
-    # CHATGPT_MODEL=gpt-5.1-codex-max
-
-**Response Selectors:**
-
-The engine uses these CSS selectors for response extraction (tried in order):
-
-- ``div.markdown.prose`` (primary)
-- ``[data-message-author-role='assistant']`` (fallback)
-- ``div.markdown`` (generic fallback)
-
-**Troubleshooting:**
-
-- **Prompt Truncation**: If prompts appear truncated, check the character limits for your model
-- **Response Selection**: Verify CSS selectors are current if responses aren't extracted properly
-- **Choice Handling**: Check logs for "Checking for response choice buttons" messages
-- **Login Issues**: Ensure the browser window at ``http://<host>:5006`` has completed login
-
-Zen Gemini Engine
-----------------------
-
-The ``zen_gemini`` engine controls a Google Gemini browser session using the standardized Zen architecture:
-
-- **Standardized Architecture**: Built on ``ZenLLMBase`` for consistent behavior
-- **Model Support**: Gemini 2.5 Flash, 2.0 Flash, 1.5 Flash, 1.5 Pro with automatic limit detection
-- **Multimodal**: Supports image inputs and analysis
-- **Character Limits**: Up to 500k characters for Pro models
-- **Browser Control**: Uses Zen for web interface interaction
-- **Response Extraction**: Robust selector-based text extraction
-
-**Configuration:**
-
-.. code-block:: bash
-
-   GEMINI_MODEL=2.5-flash  # Optional, defaults to 2.5-flash
-
-**Setup:**
-
-1. Access ``http://<host>:5006`` to sign in to your Google account
-2. Complete any authentication challenges
-3. Switch to this engine with ``/cortex zen_gemini`` (deprecated alias: ``/llm zen_gemini``)
-
-Zen Grok Engine
---------------------
-
-The ``zen_grok`` engine controls an xAI Grok browser session using the standardized Zen architecture:
-
-- **Standardized Architecture**: Built on ``ZenLLMBase`` for consistent behavior
-- **Advanced Reasoning**: Access to Grok's reasoning capabilities
-- **Vision Support**: Grok Vision Beta for image analysis
-- **Large Context**: Up to 128k tokens context window
-- **Browser-Based**: Zen-driven interaction with web interface
-- **Response Extraction**: Robust selector-based text extraction
-
-**Configuration:**
-
-.. code-block:: bash
-
-   GROK_MODEL=grok-beta  # Optional, defaults to grok-beta
-
-**Setup:**
-
-1. Access ``http://<host>:5006`` to log in to X/Grok
-2. Complete login and any authentication challenges
-3. Switch to this engine with ``/cortex zen_grok`` (deprecated alias: ``/llm zen_grok``)
-
-Engine Registration and Discovery
----------------------------------
-
-LLM engines are automatically discovered through the core initializer:
-
-1. **Directory Scanning**: Core scans ``llm_engines/`` for Python files
-2. **Class Inspection**: Files are checked for ``PLUGIN_CLASS`` attribute
-3. **Registry Registration**: Engines register with the LLM registry
-4. **Capability Indexing**: Engine capabilities are indexed for runtime selection
-5. **Dynamic Loading**: Engines can be loaded/unloaded without system restart
-
-Labeling engines for the WebUI
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Engines may provide a short, human-readable label used by the WebUI to help operators
-choose the right engine for a task. Provide a label by either:
-
-- exporting ``ENGINE_LABEL = "short description"`` in the engine module, or
-- defining ``engine_label = "short description"`` on ``PLUGIN_CLASS``
-- or passing ``label="short description"`` to ``CortexRegistry.register_engine_module``
-
-These labels are surfaced in the Components page under "Cortex Engines" and are intended
-to be brief and informative (one sentence).
-
-Developing LLM Engines
-----------------------
-
-Creating a new LLM engine requires extending ``AIPluginBase`` and implementing the core methods:
-
-.. code-block:: python
-
-   from core.ai_plugin_base import AIPluginBase
-   from core.transport_layer import llm_to_interface
-
-   class MyEngine(AIPluginBase):
-       def __init__(self, notify_fn=None):
-           self.notify_fn = notify_fn
-
-       async def handle_incoming_message(self, bot, message, prompt):
-           """Process a message and generate response.
-
-           **IMPORTANT:** this method **must** return a plain string.  The core
-           transport and corrector layers assume a text response and will crash
-           if they receive an integer, dict, or other non-str value.  Engines
-           that send structured data should serialize it to JSON first.
-           """
-           # Generate response using your LLM
-           reply = await self.generate_response(prompt)
-           
-           # Send response back through the interface
-           await llm_to_interface(bot.send_message, chat_id=message.chat_id, text=reply)
-           return reply
-
-       async def generate_response(self, messages):
-           """Core LLM interaction method."""
-           # Implement your model API calls here
-           # messages is a list of message objects with role/content
-           response = await call_my_llm_api(messages)
-           return response
-
-       def get_supported_models(self) -> list[str]:
-           """Return available model names."""
-           return ["my-model-v1", "my-model-v2"]
-
-       def get_rate_limit(self):
-           """Return (requests_per_hour, time_window_seconds, burst_limit)."""
-           return (100, 3600, 10)  # 100 requests/hour with 10 burst
-
-   # Required: Export the engine class
-   PLUGIN_CLASS = MyEngine
-
-Developing Zen Engines
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-For browser-based LLM services, extend ``ZenLLMBase`` instead of ``AIPluginBase``:
-
-.. code-block:: python
-
-   from core.zen_llm_base import ZenLLMBase
-   
-   class ZenMyService(ZenLLMBase):
-       display_name = "Zen MyService"
-       
-       def __init__(self, notify_fn=None):
-           config = {
-               "service_url": "https://my-service.com",
-               "model": "my-model",
-               "interface_name": "my-service"
-           }
-           super().__init__(config=config, notify_fn=notify_fn)
-       
-       def _get_response_selectors(self) -> list:
-           """Return CSS selectors for response extraction."""
-           return [
-               "div.response-container",  # Primary selector
-               ".message-content",        # Fallback
-               "article p",               # Generic fallback
-           ]
-       
-       def _locate_prompt_area(self, driver, timeout: int = 10):
-           """Find the input area for your service."""
-           # Implement service-specific logic to locate input field
-           pass
-       
-       def _ensure_logged_in(self, driver) -> bool:
-           """Check if user is logged in to your service."""
-           # Implement login detection logic
-           pass
-
-**Key Methods to Implement:**
-
-- ``_get_response_selectors()``: Return prioritized list of CSS selectors for response text
-- ``_locate_prompt_area()``: Find and return the input textarea/contenteditable element
-- ``_ensure_logged_in()``: Verify user authentication status
-- ``_send_prompt_with_confirmation()``: Send prompt (usually inherited, override only if needed)
-
-**Response Choice Handling:**
-
-If your service offers multiple response options, override ``_get_response_choice_selectors()``:
-
-.. code-block:: python
-
-   def _get_response_choice_selectors(self) -> list:
-       """Return selectors for response choice buttons."""
-       return [
-           "button.response-choice",  # Primary
-           "div.options button:first-child",  # Fallback
-       ]
-
-**Testing Zen Engines:**
-
-1. **Manual Testing**: Run container in non-headless mode to observe browser interaction
-2. **Selector Testing**: Check logs for "Trying response selector" messages
-3. **Integration Testing**: Send test messages and verify response extraction
-4. **Choice Testing**: Test with services that offer multiple response options
-
-Engine Integration (Cortex)
-----------------------------
-
-Engines are now organized under the new **Cortex** abstraction. A cortex has a *kind* (e.g., ``llm``, ``live``, ``agent``) and one or more registered engines. Engines should register themselves with the Cortex registry.
-
-.. code-block:: python
-
-   from core.cortex_registry import get_cortex_registry
-   cortex = get_cortex_registry()
-   # Register an LLM engine (cortex='llm') or a live engine (cortex='live')
-   cortex.register_engine_module("my_engine", "cortex.llm_engine.my_engine", cortex='llm')
-
-Switch to a cortex engine at runtime using the Components tab in the WebUI
-or via the CLI/commands (the UI now asks for the *cortex kind* first, then an engine):
-
-.. code-block:: text
-
-   # Select cortex kind (e.g., llm)
-   /components set_active_cortex llm
-
-   # Select specific engine for the cortex
-   /components set_active_cortex_engine my_engine
-
-Notes
------
-- Use the Cortex registry helpers to discover engines and their capabilities: ``get_cortex_registry().get_available_engines(cortex)``.
-- Engines may optionally declare capability flags (vision, audio, actions, bidi, low_latency) when registered; these are used to choose the best engine for a given task.
-Engine Capabilities
--------------------
-
-Engines report their capabilities to the system:
-
-- **Model List**: Available models and their identifiers
-- **Token Limits**: Maximum prompt and response lengths
-- **Modalities**: Support for text, images, audio, etc.
-- **Rate Limits**: API constraints and throttling requirements
-- **Features**: Function calling, streaming, fine-tuning support
-
-These capabilities are used by the prompt engine to construct appropriate prompts and by the interface layer to handle different content types.
-
-Best Practices
---------------
-
-**Error Handling**
-    Implement robust error handling with user-friendly messages.
-
-**Rate Limiting**
-    Respect API limits and implement backoff strategies.
-
-**Token Management**
-    Track token usage and handle context window limitations.
-
-**Async Operations**
-    Use async methods for all I/O operations to maintain responsiveness.
-
-**Security**
-    Never log API keys or sensitive authentication data.
-
-**Zen-Specific Best Practices:**
-
-**Selector Robustness**
-    Provide multiple CSS selectors with fallbacks for response extraction.
-
-**DOM Stability**
-    Wait for elements to stabilize before interaction to handle dynamic content.
-
-**Browser Resource Management**
-    Monitor browser memory usage and implement cleanup for long-running sessions.
-
-**Network Resilience**
-    Handle network timeouts and implement retry logic for browser operations.
-
-**Login State Management**
-    Regularly verify authentication status and handle re-authentication gracefully.
-
-For complete examples, examine ``llm_engines/zen_chatgpt.py`` (standardized architecture), ``llm_engines/zen_gemini.py``, or ``llm_engines/zen_grok.py`` in the repository.
-
-Tutorial: Creating a New Zen LLM Plugin
-==============================================
-
-This tutorial walks through creating a new Zen-based LLM plugin from scratch, using the standardized ``ZenLLMBase`` architecture. We'll create a plugin for a hypothetical service called "MyLLM".
-
-Step 1: Create the Plugin File
--------------------------------
-
-Create a new file ``llm_engines/zen_myllm.py``:
-
-.. code-block:: python
-
-   from core.zen_llm_base import ZenLLMBase
-   
-   # Configuration constants
-   SERVICE_URL = "https://myllm.example.com"
-   MODEL_CONFIG_VAR = "MYLLM_MODEL"
-   DEFAULT_MODEL = "myllm-standard"
-   
-   # Model limits mapping (character limits)
-   MODEL_LIMITS_MAP = {
-       "myllm-standard": 50000,
-       "myllm-premium": 200000,
-       "myllm-enterprise": 1000000,
-       "default": 50000
-   }
-   
-   class ZenMyLLMPlugin(ZenLLMBase):
-       display_name = "Zen MyLLM"
-       
-       def __init__(self, notify_fn=None):
-           """Initialize the MyLLM plugin."""
-           super().__init__(
-               config={
-                   "service_url": SERVICE_URL,
-                   "interface_name": "myllm"
-               },
-               notify_fn=notify_fn
-           )
-           
-           # Model configuration
-           self.model_limits_map = MODEL_LIMITS_MAP
-           self.model_config_var = MODEL_CONFIG_VAR
-           self.default_model = DEFAULT_MODEL
-           
-           # Update limits
-           self._update_interface_limits()
-           
-           # Define selectors for MyLLM service
-           self.selectors["prompt_area"] = [
-               "textarea#message-input",
-               "div[contenteditable='true'].input-area",
-               "textarea[placeholder*='Type your message']",
-               "div.input-field[role='textbox']",
-           ]
-           
-           self.selectors["send_button"] = [
-               "button#send-message",
-               "button[data-action='send']",
-               "button[type='submit']",
-               "button[aria-label*='Send']",
-           ]
-           
-           self.selectors["response_text"] = [
-               "div.message-response",
-               ".chat-message.assistant",
-               "[data-role='assistant-message']",
-               ".response-content",
-           ]
-           
-           # Optional: Modal dismissal selectors
-           self.selectors["modal_dismissal"] = [
-               "button.modal-close",
-               ".modal button.close",
-               "[data-dismiss='modal']",
-           ]
-           
-           # Login detection selectors
-           self.login_detection_selectors = [
-               (By.CSS_SELECTOR, "button#login-btn"),
-               (By.CSS_SELECTOR, "a[href*='login']"),
-               (By.XPATH, "//button[contains(text(), 'Sign In')]"),
-           ]
-   
-       def _ensure_logged_in(self, driver) -> bool:
-           """Check if user is logged in to MyLLM."""
-           try:
-               current_url = driver.current_url
-           except Exception:
-               current_url = ""
-           
-           # Navigate to service if not there
-           if not current_url.startswith("https://myllm.example.com"):
-               driver.get(SERVICE_URL)
-               time.sleep(2)
-               current_url = driver.current_url
-           
-           # Check for login indicators
-           if "login" in current_url or "auth" in current_url:
-               if self._notify_fn:
-                   self._notify_fn("🔐 Login required for MyLLM. Open UI to log in.")
-               return False
-           
-           return True
-   
-       def get_supported_models(self) -> list:
-           """Return list of supported models."""
-           return list(MODEL_LIMITS_MAP.keys())
-   
-       def get_current_model(self) -> str:
-           """Get current model, considering login status."""
-           if not self.is_user_logged_in():
-               return "default"
-           return self._get_current_model_name()
-   
-       def get_interface_limits(self) -> dict:
-           """Get interface limits."""
-           self._update_interface_limits()
-           return self.interface_limits
-   
-       # Optional: Override if service has response choices
-       def _get_response_choice_selectors(self) -> list:
-           """Selectors for response choice buttons."""
-           return [
-               "button.response-option",
-               ".choice-buttons button:first-child",
-           ]
-   
-   # Required: Export the plugin class
-   PLUGIN_CLASS = ZenMyLLMPlugin
-
-Step 2: Implement Service-Specific Logic
------------------------------------------
-
-Override methods as needed for your service:
-
-**Login Detection (_ensure_logged_in):**
-
-.. code-block:: python
-
-   def _ensure_logged_in(self, driver) -> bool:
-       """Service-specific login checking logic."""
-       # Check current URL
-       current_url = driver.current_url
-       
-       # Navigate if not on service
-       if not current_url.startswith(self.service_url):
-           driver.get(self.service_url)
-           time.sleep(2)
-       
-       # Check for login page indicators
-       login_indicators = driver.find_elements(By.CSS_SELECTOR, ".login-form, .auth-required")
-       if login_indicators:
-           self._notify_fn("🔐 Please log in to MyLLM service")
-           return False
-       
-       return True
-
-**Response Choice Handling (if applicable):**
-
-.. code-block:: python
-
-   def _get_response_choice_selectors(self) -> list:
-       """Return selectors for multiple response choice buttons."""
-       return [
-           "button.choice-option",  # Primary
-           ".response-choices button",  # Fallback
-       ]
-
-Web UI: Login flow endpoint
----------------------------
-
-The Web UI provides an API to initiate an interactive login flow for Zen-based
-LLM engines. This is intended to start a browser session (Selkies/Chromium) so a
-user can authenticate via the service's web interface.
-
-Endpoint:
-
-``POST /api/components/cortex/login``
-
-Request JSON:
-
-``{ "name": "zen_chatgpt" }``
-
-Typical success response (acknowledgement, non-blocking):
-
-``{ "status": "ok", "name": "zen_chatgpt", "action": "started", "logged_in": false }``
-
-Notes:
-
-- The login flow is started asynchronously and the endpoint returns immediately.
-- Selkies availability is checked as a best-effort; absence does not prevent
-    the flow from proceeding where possible, but a helpful error will be returned
-    if the engine is not Zen-based or not loaded.
-- The client (Web UI) may poll ``GET /api/components`` to detect updates to
-    the engine's ``login_state`` and ``logged_in`` fields.
-
-Step 3: Define Robust Selectors
----------------------------------
-
-**Prompt Area Selectors:**
-
-Test multiple selectors in order of preference:
-
-.. code-block:: python
-
-   self.selectors["prompt_area"] = [
-       "textarea#specific-id",           # Most specific
-       "div[contenteditable='true']",    # Contenteditable divs
-       "textarea[placeholder*='message']", # Placeholder matching
-       "div.input-area",                 # Generic class
-       "textarea",                       # Generic fallback
-   ]
-
-**Response Text Selectors:**
-
-Provide multiple fallbacks for response extraction:
-
-.. code-block:: python
-
-   self.selectors["response_text"] = [
-       "div.assistant-message",          # Service-specific
-       "[data-author='assistant']",      # Data attributes
-       ".chat-message.ai",               # Class-based
-       ".response-content",              # Generic content
-       "article p",                      # Generic article text
-   ]
-
-Step 4: Test the Plugin
------------------------
-
-1. **Start the system:**
-
-   .. code-block:: bash
-
-      docker compose -f docker-compose-dev.yml up -d
-
-2. **Switch to your engine:**
-
-   .. code-block:: text
-
-      /llm zen_myllm
-
-3. **Monitor logs for selector attempts:**
-
-   .. code-block:: bash
-
-      docker compose -f docker-compose-dev.yml logs -f synth
-
-4. **Test with a simple prompt:**
-
-   Send a test message and check if the plugin:
-
-   - Navigates to the correct URL
-   - Finds the input area
-   - Sends the prompt
-   - Extracts the response
-
-Step 5: Debug and Refine
--------------------------
-
-**Common Issues:**
-
-- **Selector not found**: Add more fallback selectors
-- **Response not extracted**: Check response selectors in browser dev tools
-- **Login not detected**: Verify login detection selectors
-- **Modal blocking**: Add modal dismissal selectors
-
-**Debug Logging:**
-
-The base class logs selector attempts. Check logs for:
-
-.. code-block:: text
-
-   [zen_base] Trying prompt selector: textarea#specific-id
-   [zen_base] Found prompt area with selector: textarea#specific-id
-   [zen_base] Trying response selector: div.assistant-message
-
-**Browser Inspection:**
-
-Run in non-headless mode to inspect elements:
-
-.. code-block:: bash
-
-   # In docker-compose-dev.yml, set headless: false temporarily
-   environment:
-      - ZEN_HEADLESS=false
-
-Step 6: Add Configuration Variables
-------------------------------------
-
-Add configuration variables in ``core/config.py`` or use the web UI:
-
-.. code-block:: python
-
-   # In core/config.py
-   MYLLM_MODEL = config_registry.get_var(
-       "MYLLM_MODEL",
-       "myllm-standard",
-       label="MyLLM Model",
-       description="Default model for MyLLM service",
-       group="llm",
-       component="zen_myllm"
-   )
-
-Step 7: Document the Plugin
-----------------------------
-
-Update this documentation file to include your new plugin in the "Available Engines" section.
-
-**Example Documentation Addition:**
-
-.. code-block:: rst
-
-   Zen MyLLM Engine
-   ---------------------
-
-   The ``zen_myllm`` engine controls a MyLLM browser session:
-
-   - **Standardized Architecture**: Built on ``ZenLLMBase``
-   - **Model Support**: Standard, Premium, and Enterprise models
-   - **Character Limits**: Up to 1M characters for Enterprise
-   - **Browser Control**: Zen-driven web interface interaction
-
-   Configuration:
-
-   .. code-block:: bash
-
-      MYLLM_MODEL=myllm-premium  # Optional, defaults to myllm-standard
-
-Best Practices for New Plugins
--------------------------------
-
-**Selector Strategy:**
-
-1. **Specific first**: Use IDs, data attributes, unique classes
-2. **Semantic second**: Use ARIA roles, content patterns
-3. **Generic last**: Use tag names, common classes as fallbacks
-
-**Error Handling:**
-
-- Always provide fallbacks for critical selectors
-- Log failures with context for debugging
-- Use timeouts appropriate for your service
-
-**Testing:**
-
-- Test with different models/configurations
-- Verify login detection works
-- Check response extraction with various response types
-- Test modal dismissal if applicable
-
-**Maintenance:**
-
-- Monitor service UI changes that might break selectors
-- Update selectors when the service updates its interface
-- Keep model limits current with service changes
-
-**Performance:**
-
-- Minimize selector complexity for faster element finding
-- Use appropriate wait times for your service's responsiveness
-- Consider caching frequently used elements when possible
-
-By following this architecture, new LLM plugins can be created quickly and maintain consistency with existing engines while being easy to maintain and extend.
+Choosing the active engine
+--------------------------
+
+The active Cortex engine is stored in the ``BASE_CORTEX`` configuration key and
+can be changed from the Components page of the WebUI. The registry helper
+``get_cortex_registry().get_available_engines(cortex)`` lists what is registered.
+Engines and endpoints may declare capability flags (for example vision, audio,
+actions) used to pick the best engine for a task; see :doc:`cortex`.

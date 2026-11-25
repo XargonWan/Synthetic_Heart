@@ -821,3 +821,5 @@ async def run_startup_migrations() -> None:
 
 
 __all__ = ["run_startup_migrations"]
+    ("migrate_ollama_serve_to_openai_api", _migrate_ollama_serve_to_openai_api),
+    ("migrate_selenium_endpoint_name", _migrate_selenium_endpoint_name),

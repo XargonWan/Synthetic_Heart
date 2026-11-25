@@ -1,0 +1,34 @@
+schema = 1
+
+[extension]
+id = "official/zen"
+name = "Zen LLM Engine"
+version = "0.1.0"
+description = "Connect SyntH to the Zen LLM Engine, a free browser-driven engine that talks to AI chat sites, so you can use SyntH without any API key."
+author = "SyntH"
+
+[compat]
+core_api = ">=0.1,<1"
+
+[entry]
+module = "ext_main"
+function = "main"
+
+[provides]
+# The only endpoint this extension may create or touch.
+endpoints = ["zen-llm-engine"]
+
+[requires]
+# The container the endpoint points at: docker-compose.yml runs it
+# (synth-zen-llm-engine). The extension only registers the endpoint.
+services = ["zen-llm-engine"]
+
+[permissions]
+capabilities = ["log", "config", "endpoints.manage"]
+network = ["synth-zen-llm-engine:8000"]
+
+[config.ZEN_BASE_URL]
+type = "string"
+label = "Engine URL"
+description = "Where the Zen LLM Engine container answers. The default fits the docker-compose.yml service."
+default = "http://synth-zen-llm-engine:8000"

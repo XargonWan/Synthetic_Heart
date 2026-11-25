@@ -327,7 +327,7 @@ CORTEX_FALLBACK_ENGINES = config_registry.get_var(
 
 CORTEX_LOCAL_ENGINES = config_registry.get_var(
     "CORTEX_LOCAL_ENGINES",
-    "zen-llm-engine",
+    "",
     label="Cortex Local Engines",
     description=(
         "Comma-separated registry names of engines considered local (no network)."
