@@ -1,0 +1,58 @@
+schema = 1
+
+[extension]
+id = "official/fluxer"
+name = "Fluxer Bot"
+version = "0.1.0"
+description = "Chat with SyntH on a Fluxer instance (a Discord-compatible, self-hostable chat platform)."
+author = "SyntH"
+experimental = true
+
+[compat]
+core_api = ">=0.1,<1"
+
+[entry]
+module = "ext_main"
+function = "main"
+
+[[provides.interfaces]]
+id = "fluxer_bot"
+# fluxer_bot/<guild>/<channel> in a server, fluxer_bot/<channel> in a direct message.
+paths = ["fluxer_bot/{guild}/{channel}", "fluxer_bot/{channel}"]
+
+[permissions]
+capabilities = ["log", "config", "stats", "interfaces.register", "interfaces.inbound", "avatar"]
+network = ["*.fluxer.app:443"]  # a self-hosted instance is the operator's to add
+
+[python]
+requirements = ["aiohttp>=3.9"]
+
+[config.FLUXER_TOKEN]
+type = "string"
+label = "Bot token"
+description = "The bot token from your Fluxer instance."
+sensitive = true
+required = true
+
+[config.FLUXER_API_BASE_URL]
+type = "string"
+label = "API base URL"
+description = "REST API of your instance; {v} is replaced by the API version."
+default = "https://api.fluxer.app/v{v}"
+
+[config.FLUXER_GATEWAY_URL]
+type = "string"
+label = "Gateway URL"
+description = "WebSocket gateway of your instance."
+default = "wss://gateway.fluxer.app/?v=1&encoding=json"
+
+[config.FLUXER_API_VERSION]
+type = "int"
+label = "API version"
+default = 1
+
+[config.FLUXER_USE_SYNTH_AVATAR]
+type = "bool"
+label = "Use the synth avatar"
+description = "Set the synth avatar as the bot account's picture."
+default = true

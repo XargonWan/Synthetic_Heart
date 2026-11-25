@@ -1438,7 +1438,7 @@ class VoxPlugin(AIPluginBase):
                 #
                 # The payload goes as the SINGLE positional argument because
                 # that is the only convention all interfaces share: telegram is
-                # ``(payload, original_message)`` while discord/matrix/fluxer are
+                # ``(payload, original_message)`` while discord/matrix are
                 # ``(channel_id=None, text=None)`` and detect a dict first
                 # argument themselves — passing original_message positionally
                 # would land in their ``text`` parameter.

@@ -2451,7 +2451,7 @@ async def handle_incoming_message(
                             current_message_action_types = []
 
                     # The unified ``send_message`` action (AGENTS.md §6) is the
-                    # outbound reply action for telegram/discord/matrix/fluxer,
+                    # outbound reply action for chat interfaces,
                     # but its name does not start with ``message_`` — so neither
                     # the MESSAGE_ACTION_TYPES registry (which carries only
                     # legacy ``message_*`` names) nor the inference above ever

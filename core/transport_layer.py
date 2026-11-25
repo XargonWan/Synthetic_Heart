@@ -2992,7 +2992,6 @@ async def run_corrector_middleware(
             _legacy_iface_labels = {
                 "discord": "discord_bot",
                 "matrix": "matrix_chat",
-                "fluxer": "fluxer_bot",
                 "webui": "synth_webui",
             }
             iface_label = (

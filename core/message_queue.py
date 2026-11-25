@@ -346,8 +346,8 @@ def _reply_context_from_message(message: object) -> dict[str, str] | None:
     """Extract the quoted-reply context from a queued inbound message.
 
     When the user REPLIES to an earlier message, the interfaces attach the
-    platform reply payload on ``message.reply_to_message`` (Telegram wrapper,
-    Discord SimpleNamespace, Matrix fallback-parse namespace, Fluxer extraction).
+    platform reply payload on ``message.reply_to_message`` (platform wrapper,
+    Discord SimpleNamespace, Matrix fallback-parse namespace).
     The Agent Lane never sees that attribute — its prompt is built only from
     goal + observations + context — so without this the model answers a quote
     it cannot read. Returns ``{"sender_name", "text"}`` or None. Purely
