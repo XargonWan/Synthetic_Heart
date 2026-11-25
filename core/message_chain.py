@@ -32,13 +32,13 @@ from core import turn_cards
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.config_manager import config_registry
 from core.beat_utils import is_outbound_beat
-
 from core.interface_traits import (
     is_user_facing as interface_is_user_facing,
     is_voice_input_tts_only,
     message_action_if_known,
     message_actions,
 )
+
 # Result constants
 ACTIONS_EXECUTED = "ACTIONS_EXECUTED"
 BLOCKED = "BLOCKED"
@@ -777,8 +777,6 @@ def _build_missing_reply_hint(
             "CHAT REPLY REQUIRED: A player spoke to you in-world and is waiting for a reply. "
             f"You MUST include a speak action for this world (e.g., '{say_action}') so your words "
             "are voiced in the world. Internal actions like diary entries and emotion updates do "
-    prefix = (interface_path or "").split("/")[0]
-    action = message_action_if_known(prefix) or "send_message"
             "NOT substitute for speaking back to the player."
         )
         if current_player_message and current_player_message.strip():
@@ -792,6 +790,8 @@ def _build_missing_reply_hint(
                 f'("{last_self_line.strip()}") — write a new, relevant reply.'
             )
         return hint
+    prefix = (interface_path or "").split("/")[0]
+    action = message_action_if_known(prefix) or "send_message"
     return (
         "CHAT REPLY REQUIRED: The user is waiting for a reply in this active conversation turn. "
         f"You MUST include a message action targeting the originating interface '{prefix}' "

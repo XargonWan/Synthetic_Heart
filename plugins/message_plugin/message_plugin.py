@@ -376,12 +376,12 @@ class MessagePlugin:
             "message_matrix_chat": "matrix_chat",
         }
 
+        interface_name = interface_map.get(action_type)
         if interface_name is None and action_type.startswith("message_"):
             # ``message_<interface>`` for any registered interface
             candidate = action_type[len("message_") :]
             if candidate in INTERFACE_REGISTRY:
                 interface_name = candidate
-        interface_name = interface_map.get(action_type)
 
         # interface_path is validated upstream against real routable targets
         # (e.g. Grillo's ELIGIBLE TARGETS list); the action `type` is free-form

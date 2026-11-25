@@ -396,18 +396,18 @@ async def _self_replied_recently(chat_id: int, cooldown_seconds: float) -> bool:
     each independently mentions this bot's alias, causing two replies in
     quick succession. Fails open (False) so a DB error never permanently
     silences a SyntH.
-        from core.interface_traits import peer_interface_ids
-
-        peer_ifaces = peer_interface_ids()
-        if not peer_ifaces:
-            return False
-        like = " OR ".join("interface_path LIKE %s" for _ in peer_ifaces)
     """
     if cooldown_seconds <= 0:
         return False
     try:
         from core.db import get_conn_ctx
 
+        from core.interface_traits import peer_interface_ids
+
+        peer_ifaces = peer_interface_ids()
+        if not peer_ifaces:
+            return False
+        like = " OR ".join("interface_path LIKE %s" for _ in peer_ifaces)
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(

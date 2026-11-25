@@ -9,8 +9,8 @@ const historyState = {
     dreams: { page: 1, per_page: 15, search: '', sort: 'desc' },
     chat: { page: 1, per_page: 50, search: '', interface_path: '', sort: 'desc' },
     vessel: { page: 1, per_page: 20, search: '', environment: '', sort: 'desc' },
-    turns: { status: '', search: '', limit: 100 },
     queue: { search: '', priority: '', loaded: false, pollTimer: null, pollMs: 3000, inFlight: false },
+    turns: { status: '', search: '', limit: 100 },
     goals: { loaded: false },
     calendar: { year: null, month: null, events: [], loaded: false },
     growth: { current: null, entries: [], currentLikes: [], currentDislikes: [], pendingProposal: null }

@@ -16,6 +16,9 @@ import json
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from interface.message_send_utils import safe_send
 import time
+from types import SimpleNamespace
+
+ParseMode = SimpleNamespace(MARKDOWN="MARKDOWN")
 
 # Manual AI-specific configuration
 # Note: max_prompt_chars will be read from the active LLM engine at runtime

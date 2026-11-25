@@ -10,8 +10,8 @@ from types import SimpleNamespace
 from core import turn_cards
 from core.config_manager import config_registry
 from core.logging_utils import log_debug, log_warning, log_error, log_info
-
 from core.interface_traits import is_reply_only, message_action_for
+
 # Interface-specific utilities are loaded dynamically by interfaces.
 # The transport layer provides generic messaging functionality only.
 
@@ -3215,10 +3215,10 @@ async def run_corrector_middleware(
                             and isinstance(parsed_json, dict)
                         ):
                             rewritten = False
+                            send_verb = message_action_for(originating_interface)
                             actions = parsed_json.get("actions", [])
                             if isinstance(actions, list):
                                 for act in actions:
-                            send_verb = message_action_for(originating_interface)
                                     if not isinstance(act, dict):
                                         continue
                                     a_type = str(act.get("type", ""))

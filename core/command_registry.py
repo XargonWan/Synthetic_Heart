@@ -230,6 +230,7 @@ async def _resolve_interface_context(
     )
     return interface_id, update, context
 
+
 def _chat_scope(
     interface_context: Any, interface_id: str | None
 ) -> tuple[Any, Any, str | None] | None:
@@ -271,7 +272,6 @@ def _chat_scope(
         else None
     )
     return chat.id, thread_id, path
-
 
 
 async def wake_command(interface_context=None) -> str:

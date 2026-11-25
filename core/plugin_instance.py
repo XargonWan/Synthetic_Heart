@@ -1089,7 +1089,6 @@ async def handle_incoming_message(
         # imported, or the wrapper raises, the primary outcome is preserved so
         # the direct call is indistinguishable from the pre-fallback behavior.
         async def _call_engine(engine_name: str) -> Any:
-        _body_started = _time.monotonic()
             instance = effective_plugin
             if engine_name != _primary_engine_name:
                 _fallback_reg = get_cortex_registry()
@@ -1107,6 +1106,7 @@ async def handle_incoming_message(
                 )
 
         _prompt_signature = _compute_prompt_signature(prompt_for_engine)
+        _body_started = _time.monotonic()
 
         try:
             from core import cortex_fallback

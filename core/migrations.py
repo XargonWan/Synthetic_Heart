@@ -936,6 +936,8 @@ _STARTUP_MIGRATIONS: list[tuple[str, Any]] = [
     ("widen_memories_text_columns", _widen_memories_text_columns),
     ("flag_historic_test_failure_rows", _flag_historic_test_failure_rows),
     ("migrate_memories_dedupe_index", _migrate_memories_dedupe_index),
+    ("migrate_ollama_serve_to_openai_api", _migrate_ollama_serve_to_openai_api),
+    ("migrate_selenium_endpoint_name", _migrate_selenium_endpoint_name),
 ]
 
 
@@ -949,5 +951,3 @@ async def run_startup_migrations() -> None:
 
 
 __all__ = ["run_startup_migrations"]
-    ("migrate_ollama_serve_to_openai_api", _migrate_ollama_serve_to_openai_api),
-    ("migrate_selenium_endpoint_name", _migrate_selenium_endpoint_name),

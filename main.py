@@ -484,9 +484,9 @@ if __name__ == "__main__":
                 import traceback
 
                 traceback.print_exc()
-            log_info("[main] All components auto-discovered and initialized")
-
                 sys.exit(1)
+
+            log_info("[main] All components auto-discovered and initialized")
 
             # Extensions run in their own processes and are off unless
             # EXTENSIONS_ENABLED is set. Whatever happens here must never stop the

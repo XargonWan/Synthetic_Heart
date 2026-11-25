@@ -776,9 +776,6 @@ class SynthWebUIInterface:
         # Register callback to broadcast state changes to all WebSocket clients
         self.action_state_manager.register_state_changed_callback(
             self._broadcast_action_state
-        #: Callables ``section -> tabs`` asked every time a section template is served,
-        #: for tabs that come and go at runtime (extension windows).
-        self._section_tab_providers: list[Callable[[str], list[dict[str, str]]]] = []
         )
         log_info(
             f"{LOG_PREFIX} Action state manager initialized with WebSocket broadcast",
@@ -796,6 +793,9 @@ class SynthWebUIInterface:
         # Plugin section tabs: keyed by section name, each entry is a list of
         # {"tab_id": str, "button_html": str, "panel_html": str} dicts.
         self._plugin_section_tabs: dict[str, list[dict[str, str]]] = {}
+        #: Callables ``section -> tabs`` asked every time a section template is served,
+        #: for tabs that come and go at runtime (extension windows).
+        self._section_tab_providers: list[Callable[[str], list[dict[str, str]]]] = []
 
         if self.autostart:
             log_info(
@@ -1239,6 +1239,9 @@ class SynthWebUIInterface:
         self._plugin_api_routes[path] = handler
         log_info(
             f"{LOG_PREFIX} Plugin API route registered: {path}",
+            log_file=WEBUI_LOG,
+        )
+
     @staticmethod
     def _stage_available() -> bool:
         """Whether a running extension serves ``/stage/`` (the Stage client)."""
@@ -1254,16 +1257,8 @@ class SynthWebUIInterface:
         except Exception:  # noqa: BLE001 - a link in the settings, never an error
             return False
 
-            log_file=WEBUI_LOG,
-        )
-
     def register_plugin_router(self, router: Any, name: str = "") -> None:
         """Mount a FastAPI ``APIRouter`` a plugin owns (an HTTP or WebSocket endpoint).
-
-        log_info(
-            f"{LOG_PREFIX} Plugin router mounted: {name or router}",
-            log_file=WEBUI_LOG,
-        )
 
         ``register_plugin_api_route`` only serves JSON on GET; a plugin that needs more, such as a
         WebSocket a game connects to, brings its own router and mounts it here, so the core knows
@@ -1271,6 +1266,11 @@ class SynthWebUIInterface:
         ``webui_auth.websocket_authorized``).
         """
         self.app.include_router(router)
+        log_info(
+            f"{LOG_PREFIX} Plugin router mounted: {name or router}",
+            log_file=WEBUI_LOG,
+        )
+
     def register_section_tab_provider(
         self, provider: Callable[[str], list[dict[str, str]]]
     ) -> None:

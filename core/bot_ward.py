@@ -40,8 +40,8 @@ from typing import Any
 
 from core.config_manager import config_registry
 from core.interface_path_utils import parse_interface_path
-from core.logging_utils import log_debug, log_warning
 from core.interface_traits import is_bot_username
+from core.logging_utils import log_debug, log_warning
 from core.variables_engine import register_exposed_var
 
 ALLOW = "allow"
