@@ -23,6 +23,7 @@ slow step overran.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -66,124 +67,146 @@ class ProbeResult:
     ping_echo: str = ""
 
 
+#: Builds the adapter for one endpoint: ``(endpoint, api_key) -> BaseProtocolAdapter``.
+AdapterFactory = Callable[[ExternalEndpoint, str], "BaseProtocolAdapter"]  # type: ignore[name-defined]  # noqa: F821
+
+#: Protocol -> how to build its adapter. Each protocol registers itself; nothing in
+#: ``get_adapter_for_endpoint`` names a protocol.
+_ADAPTER_FACTORIES: dict[EndpointProtocol, AdapterFactory] = {}
+
+
+def register_protocol(protocol: EndpointProtocol, factory: AdapterFactory) -> None:
+    """Make ``protocol`` usable: ``factory`` builds the adapter for an endpoint of it.
+
+    Registering a protocol again replaces the earlier factory."""
+    _ADAPTER_FACTORIES[protocol] = factory
+
+
+def unregister_protocol(protocol: EndpointProtocol) -> None:
+    _ADAPTER_FACTORIES.pop(protocol, None)
+
+
+def registered_protocols() -> list[EndpointProtocol]:
+    return list(_ADAPTER_FACTORIES)
+
+
+def _need_base_url(endpoint: ExternalEndpoint) -> str:
+    if not endpoint.base_url:
+        raise ValueError(
+            f"[probe] Endpoint '{endpoint.name}' ({endpoint.protocol.value}) requires a base_url."
+        )
+    return endpoint.base_url
+
+
+def _need_api_key(endpoint: ExternalEndpoint, api_key: str) -> str:
+    if not api_key:
+        raise ValueError(
+            f"[probe] Endpoint '{endpoint.name}' ({endpoint.protocol.value}) requires an API key."
+        )
+    return api_key
+
+
+def _timeout(endpoint: ExternalEndpoint, default: float = 300.0) -> float:
+    return float((endpoint.extra_config or {}).get("timeout", default))
+
+
+def _openai_adapter(endpoint: ExternalEndpoint, api_key: str) -> Any:
+    from core.external_endpoints.adapters.openai_compat import OpenAICompatAdapter
+
+    return OpenAICompatAdapter(
+        base_url=_need_base_url(endpoint),
+        api_key=api_key,
+        timeout=_timeout(endpoint),
+    )
+
+
+def _gemini_adapter(endpoint: ExternalEndpoint, api_key: str) -> Any:
+    from core.external_endpoints.adapters.gemini_adapter import GeminiAdapter
+
+    return GeminiAdapter(api_key=_need_api_key(endpoint, api_key))
+
+
+def _anthropic_adapter(endpoint: ExternalEndpoint, api_key: str) -> Any:
+    from core.external_endpoints.adapters.anthropic_adapter import AnthropicAdapter
+
+    return AnthropicAdapter(
+        api_key=_need_api_key(endpoint, api_key),
+        base_url=endpoint.base_url or "https://api.anthropic.com",
+    )
+
+
+def _harmony_adapter(endpoint: ExternalEndpoint, api_key: str) -> Any:
+    from core.external_endpoints.adapters.harmony_ai_adapter import HarmonyAIAdapter
+
+    return HarmonyAIAdapter(
+        base_url=_need_base_url(endpoint),
+        api_key=api_key,
+        timeout=_timeout(endpoint),
+    )
+
+
+def _fish_adapter(endpoint: ExternalEndpoint, api_key: str) -> Any:
+    from core.external_endpoints.adapters.fish_audio_adapter import (
+        DEFAULT_BASE_URL,
+        FishAudioAdapter,
+    )
+
+    return FishAudioAdapter(
+        base_url=endpoint.base_url or DEFAULT_BASE_URL,
+        api_key=_need_api_key(endpoint, api_key),
+        extra_config=endpoint.extra_config,
+    )
+
+
+def _custom_adapter(endpoint: ExternalEndpoint, api_key: str) -> Any:
+    if endpoint.extra_config.get("legacy_http_tts"):
+        from core.external_endpoints.adapters.custom_tts_adapter import (
+            LegacyHttpTTSAdapter,
+        )
+
+        return LegacyHttpTTSAdapter(
+            base_url=_need_base_url(endpoint),
+            extra_config=endpoint.extra_config,
+        )
+    # Without a special mode a custom endpoint speaks the OpenAI-compatible dialect.
+    from core.external_endpoints.adapters.openai_compat import OpenAICompatAdapter
+
+    return OpenAICompatAdapter(
+        base_url=_need_base_url(endpoint),
+        api_key=api_key,
+        timeout=_timeout(endpoint, 60.0),
+    )
+
+
+for _protocol, _factory in (
+    (EndpointProtocol.OPENAI, _openai_adapter),
+    (EndpointProtocol.GEMINI, _gemini_adapter),
+    (EndpointProtocol.ANTHROPIC, _anthropic_adapter),
+    (EndpointProtocol.HARMONY, _harmony_adapter),
+    (EndpointProtocol.FISH, _fish_adapter),
+    (EndpointProtocol.CUSTOM, _custom_adapter),
+):
+    register_protocol(_protocol, _factory)
+
+
 def get_adapter_for_endpoint(
     endpoint: ExternalEndpoint,
     api_key: str = "",
 ) -> "BaseProtocolAdapter":  # type: ignore[name-defined]  # noqa: F821
-    """Return the appropriate protocol adapter for the given endpoint.
+    """Return the adapter registered for the endpoint's protocol.
 
     Args:
         endpoint: The :class:`ExternalEndpoint` descriptor.
         api_key:  The decrypted API key (or empty string).
 
-    Returns:
-        A :class:`BaseProtocolAdapter` instance ready to use.
-
     Raises:
-        ValueError: If the protocol is unsupported or ``base_url`` is missing
-                    when required.
+        ValueError: If no adapter is registered for the protocol, or the endpoint
+                    lacks what its adapter requires (``base_url``, API key).
     """
-    from core.external_endpoints.adapters.base import BaseProtocolAdapter  # noqa: F401
-
-    proto = endpoint.protocol
-
-    if proto == EndpointProtocol.OPENAI:
-        from core.external_endpoints.adapters.openai_compat import OpenAICompatAdapter
-
-        if not endpoint.base_url:
-            raise ValueError(
-                f"[probe] Endpoint '{endpoint.name}' (openai) requires a base_url."
-            )
-        timeout = float((endpoint.extra_config or {}).get("timeout", 300.0))
-        return OpenAICompatAdapter(
-            base_url=endpoint.base_url,
-            api_key=api_key,
-            timeout=timeout,
-        )
-
-    if proto == EndpointProtocol.GEMINI:
-        from core.external_endpoints.adapters.gemini_adapter import GeminiAdapter
-
-        if not api_key:
-            raise ValueError(
-                f"[probe] Endpoint '{endpoint.name}' (gemini) requires an API key."
-            )
-        return GeminiAdapter(api_key=api_key)
-
-    if proto == EndpointProtocol.ANTHROPIC:
-        from core.external_endpoints.adapters.anthropic_adapter import AnthropicAdapter
-
-        if not api_key:
-            raise ValueError(
-                f"[probe] Endpoint '{endpoint.name}' (anthropic) requires an API key."
-            )
-        base_url = endpoint.base_url or "https://api.anthropic.com"
-        return AnthropicAdapter(api_key=api_key, base_url=base_url)
-
-    if proto == EndpointProtocol.HARMONY:
-        from core.external_endpoints.adapters.harmony_ai_adapter import (
-            HarmonyAIAdapter,
-        )
-
-        if not endpoint.base_url:
-            raise ValueError(
-                f"[probe] Endpoint '{endpoint.name}' (harmony) requires a base_url."
-            )
-        timeout = float((endpoint.extra_config or {}).get("timeout", 300.0))
-        return HarmonyAIAdapter(
-            base_url=endpoint.base_url,
-            api_key=api_key,
-            timeout=timeout,
-        )
-
-    if proto == EndpointProtocol.FISH:
-        from core.external_endpoints.adapters.fish_audio_adapter import (
-            DEFAULT_BASE_URL,
-            FishAudioAdapter,
-        )
-
-        if not api_key:
-            raise ValueError(
-                f"[probe] Endpoint '{endpoint.name}' (fish) requires an API key."
-            )
-        return FishAudioAdapter(
-            base_url=endpoint.base_url or DEFAULT_BASE_URL,
-            api_key=api_key,
-            extra_config=endpoint.extra_config,
-        )
-
-    if proto == EndpointProtocol.CUSTOM:
-        if endpoint.extra_config.get("legacy_http_tts"):
-            from core.external_endpoints.adapters.custom_tts_adapter import (
-                LegacyHttpTTSAdapter,
-            )
-
-            if not endpoint.base_url:
-                raise ValueError(
-                    f"[probe] Endpoint '{endpoint.name}' (custom) requires a base_url."
-                )
-            return LegacyHttpTTSAdapter(
-                base_url=endpoint.base_url,
-                extra_config=endpoint.extra_config,
-            )
-
-        # Fall back to OpenAI-compatible if a base_url is provided
-        if endpoint.base_url:
-            from core.external_endpoints.adapters.openai_compat import (
-                OpenAICompatAdapter,
-            )
-
-            timeout = float((endpoint.extra_config or {}).get("timeout", 60.0))
-            return OpenAICompatAdapter(
-                base_url=endpoint.base_url,
-                api_key=api_key,
-                timeout=timeout,
-            )
-        raise ValueError(
-            f"[probe] Endpoint '{endpoint.name}' (custom) requires a base_url."
-        )
-
-    raise ValueError(f"[probe] Unsupported protocol: {proto!r}")
+    factory = _ADAPTER_FACTORIES.get(endpoint.protocol)
+    if factory is None:
+        raise ValueError(f"[probe] Unsupported protocol: {endpoint.protocol!r}")
+    return factory(endpoint, api_key)
 
 
 async def probe_endpoint(endpoint: ExternalEndpoint, api_key: str = "") -> ProbeResult:
