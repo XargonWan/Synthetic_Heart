@@ -26,9 +26,10 @@ accepted by the proxy, so the browser never sees it). Override with
 
 ## Production
 
-`pnpm build` produces `frontend/dist/`; the backend mounts it at `/stage`
-(same origin — no CORS involved) when the directory exists. The backend runs
-fine without it.
+`pnpm build` produces `frontend/dist/`. It is served by the `official/synth_stage`
+extension at `/stage/` (same origin, so no CORS): `scripts/build_stage_extension.sh`
+builds it and copies it into `extensions_src/synth_stage/web/`, which the extension
+serves once it is on and granted `web.static`. The backend runs fine without it.
 
 ## URL flags
 

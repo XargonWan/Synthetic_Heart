@@ -15,26 +15,26 @@ single source of truth (:pyfile:`core/animation_handler.py`).
 
 .. note::
 
-   Stage must be built before it can be served: if ``frontend/dist/`` has not
-   been built, the ``/stage`` route is not mounted and only the official
-   (classic) WebUI remains available. The backend still starts either way.
+   Stage is an **extension** (``official/synth_stage``, :doc:`plugin_platform/extension_runtime`):
+   the Core no longer mounts it. The extension serves the built client at ``/stage/``
+   and lists it in the WebUI's **More...** menu. It is on only when the extension is
+   installed, switched on and granted ``web.static`` and ``web.origin`` (Stage keeps the
+   WebUI token in its own storage and calls ``/api`` and ``/ws`` as the person, so it
+   needs the Core's origin).
 
-   - **In Docker** (the default deployment): the image builds Stage
-     automatically (see `Production deployment`_), so ``/stage`` is available
-     out of the box — no manual step required.
-   - **Outside Docker** (running SyntH directly on the host): you must build
-     Stage yourself before it appears at ``/stage``. Once (and again whenever
-     the frontend changes) run:
+   - **In Docker**: the image builds Stage and packs the extension with the other
+     defaults (see `Production deployment`_). Extensions are on by default
+     (``EXTENSIONS_ENABLED``) and the baked-in defaults, Stage included, are installed
+     granted on the first start, so it is available out of the box.
+   - **Outside Docker**: build the client into the extension package, then install the
+     extension from the repository or run it from ``extensions_src/``:
 
      .. code-block:: bash
 
-        cd frontend
-        pnpm install        # first time only
-        pnpm build          # emits frontend/dist/
+        scripts/build_stage_extension.sh   # pnpm install + build, copied to
+                                           # extensions_src/synth_stage/web/
 
-     Restart the backend afterwards; on startup look for ``Mounted /stage to
-     .../frontend/dist`` in the logs to confirm it was picked up. See
-     `Toolchain`_ for the Node ≥ 22 / pnpm requirements.
+     See `Toolchain`_ for the Node >= 22 / pnpm requirements.
 
 Architecture
 ------------
@@ -82,10 +82,12 @@ Override the target with:
 Production deployment
 ---------------------
 
-``pnpm build`` produces ``frontend/dist/``. The backend
-(:pyfile:`core/webui.py`) mounts it at ``/stage`` on the same origin — no CORS
-involved — whenever the directory exists. Visit ``https://<host>:<port>/stage``
-to load it.
+``pnpm build`` produces ``frontend/dist/``. ``scripts/build_stage_extension.sh`` copies
+it into ``extensions_src/synth_stage/web/``, which the ``official/synth_stage`` extension
+serves at ``/stage/`` on the Core's origin (no CORS involved) through the extension web
+provision (:pyfile:`core/extensions/webui_web.py`). Visit
+``https://<host>:<port>/stage/`` to load it. The WebUI's token gate covers it like every
+other route.
 
 Docker build
 ~~~~~~~~~~~~~
@@ -94,10 +96,12 @@ The Dockerfile builds Stage automatically as part of the image build, so no
 manual ``pnpm build`` step is needed for containerized deployments. A dedicated
 ``node:22-slim`` build stage (``stage_builder``) runs ``pnpm install
 --frozen-lockfile`` and ``pnpm build``, then the resulting ``dist/`` is copied
-into the runtime image at ``/app/frontend/dist``. The Node/pnpm toolchain stays
-in the build stage and never bloats the final Python image. After
-``docker compose up -d --build``, look for ``Mounted /stage to
-/app/frontend/dist`` in the startup logs.
+into the runtime image at ``/app/extensions_src/synth_stage/web``, and
+``scripts/build_bundled_extensions.py`` packs the default extensions (Stage
+included) into ``/app/extensions_bundled``, the repository the first start installs
+them from. The Node/pnpm toolchain stays in the build stage and never bloats the final
+Python image. After ``docker compose up -d --build`` and granting the extension, look
+for ``serving the Stage client at /stage/`` in the extension's log lines.
 
 URL flags
 ~~~~~~~~~
@@ -113,10 +117,11 @@ URL:
 
 - **Classic WebUI → Stage**: the *Settings* tab shows a "SyntH Stage" card with
   an *Open SyntH Stage* button linking to ``/stage/``. The card is only
-  rendered when Stage is actually mounted — the backend exposes a
-  ``STAGE_AVAILABLE`` flag on ``window.__SYNTH_CONFIG`` (set from
-  ``self._stage_mounted`` in :pyfile:`core/webui.py`), and the settings JS hides
-  the card when the flag is false, so the link never 404s.
+  rendered when a running extension serves ``/stage/`` — the backend exposes a
+  ``STAGE_AVAILABLE`` flag on ``window.__SYNTH_CONFIG`` (from
+  ``SynthWebUIInterface._stage_available`` in :pyfile:`core/webui.py`), and the
+  settings JS hides the card when the flag is false, so the link never 404s. Stage is
+  also in the **More...** menu.
 - **Stage → Classic WebUI**: the settings drawer has an *Interface* section with
   an *Open classic WebUI* button linking to ``/``. No flag is needed — the
   classic WebUI is always served at the root path.

@@ -157,10 +157,17 @@ COPY . /app
 # the WebUI on "summoning". The s6 run script copies this into the volume.
 COPY skins/Rei /app/.skins-seed/Rei
 
-# Copy the pre-built SyntH Stage bundle from the Node build stage. Placed AFTER
-# `COPY . /app` so it is never clobbered; the host has no frontend/dist, this is
-# the sole source of it. With this present, core/webui.py mounts /stage.
-COPY --from=stage_builder /build/dist /app/frontend/dist
+# Copy the pre-built SyntH Stage client from the Node build stage into the Stage
+# extension package (official/synth_stage serves it at /stage/). Placed AFTER
+# `COPY . /app` so it is never clobbered; the host has no build output, this is the
+# sole source of it.
+COPY --from=stage_builder /build/dist /app/extensions_src/synth_stage/web
+
+# Pack the default extensions into /app/extensions_bundled: the read-only repository
+# the first start installs them from (offline). The signing key is made for this build
+# and discarded; only its public half is kept next to the index. Needs the network
+# here, to build each extension's libraries into its package.
+RUN /app/venv/bin/python /app/scripts/build_bundled_extensions.py
 
 # vendored packages are installed by `uv sync` earlier via path sources.
 # Historically we pip-installed them here, but that invoked the system pip

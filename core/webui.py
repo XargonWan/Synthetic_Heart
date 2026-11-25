@@ -661,26 +661,8 @@ class SynthWebUIInterface:
                 f"{LOG_PREFIX} VRM directory does not exist, /avatars endpoint NOT mounted"
             )
 
-        # Mount the SyntH Stage frontend (frontend/dist) at /stage when built.
-        # The Stage app is an optional standalone Vue client (see frontend/README.md);
-        # the backend runs fine without it, so this mount is best-effort.
-        stage_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
-        self._stage_mounted = False
-        if stage_dist.exists():
-            try:
-                self.app.mount(
-                    "/stage",
-                    StaticFiles(directory=str(stage_dist), html=True),
-                    name="synth-stage",
-                )
-                self._stage_mounted = True
-                log_info(f"{LOG_PREFIX} Mounted /stage to {stage_dist}")
-            except Exception as exc:
-                log_warning(f"{LOG_PREFIX} Failed to mount /stage: {exc}")
-        else:
-            log_info(
-                f"{LOG_PREFIX} Stage frontend not built, /stage NOT mounted ({stage_dist})"
-            )
+        # SyntH Stage is an extension (official/synth_stage) that serves its own files at
+        # /stage/ through the extension web provision (core/extensions/webui_web.py).
 
         # Optional CORS for cross-origin Stage clients (e.g. Capacitor apps).
         # Gated on SYNTH_WEBUI_CORS_ORIGINS (comma-separated origins); default
@@ -1260,6 +1242,21 @@ class SynthWebUIInterface:
         self._plugin_api_routes[path] = handler
         log_info(
             f"{LOG_PREFIX} Plugin API route registered: {path}",
+    @staticmethod
+    def _stage_available() -> bool:
+        """Whether a running extension serves ``/stage/`` (the Stage client)."""
+        try:
+            from core.extensions import web
+            from core.extensions.runtime import get_extension_runtime
+
+            runtime = get_extension_runtime()
+            return (
+                runtime is not None
+                and web.alias_owner(runtime.gateway, "stage") is not None
+            )
+        except Exception:  # noqa: BLE001 - a link in the settings, never an error
+            return False
+
             log_file=WEBUI_LOG,
         )
 
@@ -2351,9 +2348,7 @@ class SynthWebUIInterface:
                 else "false",
                 # Whether the SyntH Stage frontend (/stage) is mounted. Used by
                 # the settings section to show/hide the "Open SyntH Stage" link.
-                "%%STAGE_AVAILABLE%%": "true"
-                if getattr(self, "_stage_mounted", False)
-                else "false",
+                "%%STAGE_AVAILABLE%%": "true" if self._stage_available() else "false",
             }
 
             # Vox (TTS) flag exposed to the WebUI client is derived from

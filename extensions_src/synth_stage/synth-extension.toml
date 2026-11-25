@@ -1,0 +1,31 @@
+schema = 1
+
+[extension]
+id = "official/synth_stage"
+name = "SyntH Stage"
+version = "0.1.0"
+description = "A standalone browser client for the SyntH avatar: the 3D stage, chat and voice, served at /stage/."
+author = "SyntH"
+
+[compat]
+core_api = ">=0.1,<1"
+
+[entry]
+module = "ext_main"
+function = "main"
+
+[provides.web]
+static = "web"       # the built client (see scripts/build_stage_extension.sh)
+alias = "stage"      # also reachable at /stage/
+# Stage keeps the WebUI token in its own storage and calls /api and /ws as the person,
+# so it needs the Core's origin. Without web.origin its pages are sandboxed.
+same_origin = true
+
+[[provides.ui]]
+slot = "more"
+id = "stage"
+title = "SyntH Stage"
+icon = "🎭"
+
+[permissions]
+capabilities = ["log", "web.static", "web.origin"]
