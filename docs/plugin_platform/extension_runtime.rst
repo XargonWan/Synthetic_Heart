@@ -474,9 +474,10 @@ the extension ships could read the WebUI session (token in storage) and act as t
 person. Therefore every static file carries ``Content-Security-Policy: sandbox
 allow-scripts allow-forms allow-popups allow-downloads``: the page gets an opaque origin,
 with no cookies, no storage and no way to use the session. An extension that must act as
-the person (Stage) declares ``same_origin = true`` and needs the capability
+the person (Stage, the Dashboard) declares ``same_origin = true`` and needs the capability
 ``web.origin``, which is the dangerous one: it is shown for what it is and granted
-explicitly. A sandboxed page can still run scripts, but it cannot use the WebUI session:
+explicitly. A sandboxed page can still run scripts, but it cannot use the WebUI session (the
+frames the Core draws also allow ``allow-modals``, so ``alert``/``confirm``/``prompt`` work):
 it cannot call ``/x/<id>/api/`` or any ``/api``. **Known limit**: when the WebUI token gate
 is on, the session cookie is ``SameSite=Strict``, so the sandboxed page's own sub-requests
 (scripts, styles, images) do not carry it and are refused: a sandboxed window then works
