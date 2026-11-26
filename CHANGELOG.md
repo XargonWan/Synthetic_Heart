@@ -1,3 +1,17 @@
+### feat(radio-host): the AzuraCast Radio DJ is an extension, on four new generic extension APIs
+
+**Before.** The radio host was an in-tree plugin (`plugins/radio_host`, about 3,300 lines) that imported the Core's message queue, Vox, persona manager, WebUI and database directly. The Core knew its name in four places (`radio_host` in the interface traits, `radio_speak` in the agent router, `PRIORITY_RADIO` in the message queue, a plugin-specific table).
+
+**Now.** `official/radio_host` (`extensions_src/radio_host/`) is a sandboxed extension. It watches the station through the AzuraCast API (httpx, `websockets`), and reaches the Core only through the public API: `turns.request` starts a background turn on its own `radio_host` interface (scoped to `radio_speak`, never in the chat history, priority `elevated`, below people), `voice.synthesize` and `voice.play` use the synth's voice and show the same clip on the stage, `[[provides.recon]]` adds the live radio status to the prompt when the conversation is about the radio, and `[[provides.ui]]` puts a Radio window in Activity (served from its own routes). The last 40 remarks live in the extension's storage, with a replay clip each. The scheduling rules (when to speak, a stale de-announce, the clean gap after a bumper) and their tests are carried over. The settings keep their old names, so an installation that had the radio switched on gets the extension fetched from the official repository with them (`core/extensions/legacy.py`); one that never switched it on is left alone.
+
+**Removed.** `plugins/radio_host/`, its tests, the table `radio_activity_log` (old rows are not carried over), `PRIORITY_RADIO` (the generic `PRIORITY_ELEVATED` replaces it), and the Core's knowledge of `radio_host`/`radio_speak` (an interface now declares the action it speaks with as `message_action`).
+
+**New API.** `turns.request`, `voice.synthesize`, `voice.play`, `recon.contribute` (capabilities of the same names), `[[provides.recon]]`, `message_action`, and the turn's `context` handed to `ctx.interfaces.on_action` handlers (whose handler now takes it as a fourth argument). Rate limited, scoped and checked like every gateway call.
+
+**Not verified here.** A real extension process is tested end to end against a fake AzuraCast (REST and WebDJ socket), a fake voice and a fake model answer. It was not run against a real station, a real model or a real voice engine, and the Radio window was not looked at in a browser. It needs `ffmpeg` on the machine, as the plugin did.
+
+**Location.** `extensions_src/radio_host/`, `core/extensions/{turns,voice,recon}.py`, `core/extensions/{core_interfaces,interfaces,manifest,runtime,legacy}.py`, `synth_sdk/runtime.py`, `core/message_queue.py`, `core/agent_router.py`, `core/interface_traits.py`, `docs/radio_azuracast.rst`, `docs/plugin_platform/extension_runtime.rst`.
+
 ### feat(extensions): interfaces and services are installable extensions, each in its own process
 
 **Before.** Telegram (bot and userbot), Fluxer, the OpenAI/Ollama API server and the Stage client were Core code: they imported `core.*`, were found by scanning `interface/` and `plugins/`, and the Core named them (message actions, chat kinds, Telegram ids, Ollama routes, the `/stage` mount, a seeded Zen endpoint).

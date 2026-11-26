@@ -1,0 +1,143 @@
+schema = 1
+
+[extension]
+id = "official/radio_host"
+name = "AzuraCast Radio DJ"
+version = "0.1.0"
+description = "Turns the synth into the live DJ of an AzuraCast station: it comments between songs on air and answers questions about what is playing."
+author = "SyntH"
+
+[compat]
+core_api = ">=0.1,<1"
+
+[entry]
+module = "ext_main"
+function = "main"
+
+# Where the model's remarks run. It is not a chat: nobody is on the other end, and the
+# way it speaks is its own action.
+[[provides.interfaces]]
+id = "radio_host"
+paths = ["radio_host/{chat}"]
+user_facing = false
+actions = ["radio_speak", "radio_update_metadata"]
+message_action = "radio_speak"
+
+# Asked of the model with every message: is this about the live radio? If so the radio
+# adds what is on air to the prompt.
+[[provides.recon]]
+key = "radio_status"
+instruction = "Determine whether the user's message is about the live radio broadcast (for example: the song currently playing, what is on air, the station, the DJ set, what plays next, or the listeners). If YES, return: {\"radio_status\": true}. If it is NOT about the live radio, return: {\"radio_status\": false}. Do not base this on any single word; judge the overall intent of the message."
+priority = 5
+
+[provides.web]
+static = "web"
+routes = true
+# The Radio window reads its data from this extension's routes as the person using the
+# WebUI, which needs the Core's origin.
+same_origin = true
+
+[[provides.ui]]
+slot = "activity"
+id = "radio"
+title = "Radio"
+icon = "📻"
+page = "index.html"
+
+[permissions]
+capabilities = [
+  "log", "config", "storage", "core.info",
+  "interfaces.register", "turns.request", "voice.synthesize", "voice.play",
+  "recon.contribute", "web.static", "web.routes", "web.origin",
+]
+# No fixed destination: the station is wherever the operator points it (its web API
+# and its WebDJ socket); that address is the operator's to add.
+
+[python]
+requirements = ["httpx>=0.27", "websockets>=12"]
+
+[config.AZURACAST_BASE_URL]
+type = "string"
+label = "AzuraCast Base URL"
+description = "AzuraCast instance URL (e.g. https://radio.example.com)."
+required = true
+
+[config.AZURACAST_API_KEY]
+type = "string"
+label = "AzuraCast API Key"
+description = "AzuraCast API key with station management permissions."
+sensitive = true
+required = true
+
+[config.AZURACAST_STATION_ID]
+type = "string"
+label = "AzuraCast Station ID"
+description = "Station shortcode from AzuraCast (e.g. 'main')."
+required = true
+
+[config.RADIO_HOST_LANGUAGE]
+type = "string"
+label = "Radio Language"
+description = "Language for radio DJ comments (e.g. English, Italian, Spanish)."
+default = "English"
+
+[config.RADIO_HOST_ANNOUNCE_IF_NO_LISTENERS]
+type = "bool"
+label = "Announce Only With Listeners"
+description = "When enabled, Synth only speaks on air if there is at least one listener. When disabled, announcements always play regardless of listener count."
+default = true
+
+[config.RADIO_HOST_POLL_INTERVAL_S]
+type = "int"
+label = "Track Poll Interval (s)"
+description = "How often to poll AzuraCast for track changes (default 15s)."
+default = 15
+
+[config.RADIO_HOST_INTERMISSION]
+type = "int"
+label = "Songs Between Comments"
+description = "Number of songs to play before Synth speaks (1 = every song)."
+default = 1
+
+[config.RADIO_HOST_LISTENER_HISTORY]
+type = "int"
+label = "Listener History Count"
+description = "How many recent listener messages to include for prompt context."
+default = 5
+
+[config.RADIO_HOST_VOX_ENGINE]
+type = "string"
+label = "Radio TTS Engine Override"
+description = "Override the default TTS engine for the radio host (leave blank to use the default)."
+default = ""
+
+[config.AZURACAST_STREAMER_USERNAME]
+type = "string"
+label = "WebDJ Streamer Username"
+description = "AzuraCast streamer (WebDJ) account username used to broadcast banter."
+default = "SyntH"
+
+[config.AZURACAST_STREAMER_PASSWORD]
+type = "string"
+label = "WebDJ Streamer Password"
+description = "AzuraCast streamer (WebDJ) account password."
+sensitive = true
+default = "synthradio"
+
+[config.RADIO_HOST_GAIN_DB]
+type = "float"
+label = "Audio Gain (dB)"
+description = "Volume boost for banter audio in dB (e.g. 4.0 for +4dB)."
+default = 4.0
+
+[config.RADIO_HOST_NEXT_SONG_ANNOUNCEMENT]
+type = "bool"
+label = "Next Song Announcement (EXPERIMENTAL)"
+description = "When enabled, Synth announces the next song. When disabled, Synth only de-announces the song that just finished without mentioning what is coming next."
+default = false
+
+[config.RADIO_HOST_ON_THE_FLY_TIMEOUT_S]
+type = "float"
+label = "On-the-fly Banter Timeout (s)"
+description = "How long (seconds) to wait for an on-the-fly LLM banter generation before giving up. Run in a background task, never blocks the track monitor; stale banter is safely skipped."
+default = 120.0

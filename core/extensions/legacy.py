@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 FALSE_WORDS = frozenset({"false", "0", "no", "off", "disabled"})
+TRUE_WORDS = frozenset({"true", "1", "yes", "on", "enabled"})
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,9 @@ class Component:
     required: tuple[str, ...] = ()
     #: Old flags; any of them false means the operator switched it off.
     enabled_keys: tuple[str, ...] = ()
+    #: Old flags that were **off unless set**: the component only ran if every one of them
+    #: holds a true value (a plugin whose switch defaulted to off and was never turned on).
+    must_be_on: tuple[str, ...] = ()
     #: ``(old config key, extension storage key)`` of a login session to move.
     session: tuple[str, str] | None = None
     #: Shipped in the image (installed by the first-start defaults). Others are fetched
@@ -88,6 +92,29 @@ COMPONENTS: tuple[Component, ...] = (
         enabled_keys=("INTERFACE_ENABLED__fluxer_bot",),
     ),
     Component(
+        "official/radio_host",
+        {
+            "AZURACAST_BASE_URL": "AZURACAST_BASE_URL",
+            "AZURACAST_API_KEY": "AZURACAST_API_KEY",
+            "AZURACAST_STATION_ID": "AZURACAST_STATION_ID",
+            "AZURACAST_STREAMER_USERNAME": "AZURACAST_STREAMER_USERNAME",
+            "AZURACAST_STREAMER_PASSWORD": "AZURACAST_STREAMER_PASSWORD",
+            "RADIO_HOST_LANGUAGE": "RADIO_HOST_LANGUAGE",
+            "RADIO_HOST_ANNOUNCE_IF_NO_LISTENERS": "RADIO_HOST_ANNOUNCE_IF_NO_LISTENERS",
+            "RADIO_HOST_POLL_INTERVAL_S": "RADIO_HOST_POLL_INTERVAL_S",
+            "RADIO_HOST_INTERMISSION": "RADIO_HOST_INTERMISSION",
+            "RADIO_HOST_LISTENER_HISTORY": "RADIO_HOST_LISTENER_HISTORY",
+            "RADIO_HOST_VOX_ENGINE": "RADIO_HOST_VOX_ENGINE",
+            "RADIO_HOST_GAIN_DB": "RADIO_HOST_GAIN_DB",
+            "RADIO_HOST_NEXT_SONG_ANNOUNCEMENT": "RADIO_HOST_NEXT_SONG_ANNOUNCEMENT",
+            "RADIO_HOST_ON_THE_FLY_TIMEOUT_S": "RADIO_HOST_ON_THE_FLY_TIMEOUT_S",
+        },
+        required=("AZURACAST_BASE_URL", "AZURACAST_API_KEY", "AZURACAST_STATION_ID"),
+        # The radio host's own switch defaulted to off: it ran only if it was turned on.
+        must_be_on=("RADIO_HOST_ENABLED",),
+        default_package=False,
+    ),
+    Component(
         "official/openai_api",
         {
             "OLLAMA_HOST": "OPENAI_API_HOST",
@@ -107,6 +134,7 @@ def old_keys() -> list[str]:
         keys.update(component.settings)
         keys.update(component.required)
         keys.update(component.enabled_keys)
+        keys.update(component.must_be_on)
         if component.session:
             keys.add(component.session[0])
     return sorted(keys)
@@ -136,6 +164,9 @@ def decide(component: Component, rows: Mapping[str, str]) -> Decision:
     off = any(
         (rows.get(key) or "").strip().lower() in FALSE_WORDS
         for key in component.enabled_keys
+    ) or any(
+        (rows.get(key) or "").strip().lower() not in TRUE_WORDS
+        for key in component.must_be_on
     )
     configured = all(_has(rows.get(key)) for key in component.required)
     if not configured:

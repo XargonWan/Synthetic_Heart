@@ -206,12 +206,23 @@ Milestones
        its template became ``index.html``, and ``theme.js`` copies the WebUI's theme
        variables from the framing page. The core Dashboard tab, its template, its JS and
        the whitelists are gone; frames now allow ``allow-modals`` because the Dashboard
-       uses ``prompt``/``confirm``. **Not started**: AzuraCast.
-       AzuraCast is ``plugins/radio_host``
-       (3,750 lines: AzuraCast client, jingle injector with Vox, track monitor, Recon
-       hooks, its own tables, message-queue priority and a ``radio_host`` interface), a
-       full plugin migration that needs the storage, Vox/media, queue and hook APIs
-       first (see M9).
+       uses ``prompt``/``confirm``.
+       **AzuraCast moved (2026-11-26)** to ``official/radio_host`` (``activity`` slot,
+       a Radio window served from its own routes with ``web.origin`` granted). The
+       scheduling logic and its tests came across unchanged (when to speak, a stale
+       de-announce, the clean gap after a bumper); what is new is the way it reaches the
+       Core, which needed four generic APIs (see :doc:`extension_runtime`, "Turns of its
+       own, the synth's voice, and a Recon question"): ``turns.request`` (a scoped
+       background turn, priority below people), ``voice.synthesize`` and ``voice.play``
+       (the Core's voice and the stage), ``[[provides.recon]]`` and ``message_action``.
+       The in-tree plugin, its table ``radio_activity_log`` (the last 40 remarks now live
+       in the extension's storage; the old rows are not carried over) and
+       ``PRIORITY_RADIO`` (now the generic ``PRIORITY_ELEVATED``) are gone, and so is the
+       Core's knowledge of ``radio_host`` and ``radio_speak``. A real extension process
+       is tested against a fake AzuraCast (REST and WebDJ) end to end; it was **not run
+       against a real station, a real model or a real voice engine**. Old
+       installations that had it switched on get it fetched from the official repository
+       with their settings (``legacy.py``).
        **Requirement added (2026-11-24)**: the extension system must let an extension
        **add routes** (HTTP and WebSocket, permission-checked by the gateway), because
        Live is to become an extension while Vox, Auris, Iris and Cortex stay in the

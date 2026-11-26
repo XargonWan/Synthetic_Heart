@@ -21,8 +21,8 @@ permits their inclusion.
 
 ## AzuraCast
 
-- **Asset(s):** AzuraCast logo, used as the icon for the `radio_host` plugin's
-  AzuraCast integration.
+- **Asset(s):** AzuraCast logo, used as the icon for the `radio_host` extension's
+  AzuraCast integration (`extensions_src/radio_host/icon.png`).
 - **Owner:** AzuraCast (Buster "Silver Eagle" Neece and contributors).
 - **Software licence:** AGPL-3.0 —
   <https://github.com/AzuraCast/AzuraCast/blob/main/LICENSE.md>

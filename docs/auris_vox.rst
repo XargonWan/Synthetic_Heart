@@ -261,8 +261,8 @@ Configuration (all WebUI-configurable):
      - Directory where generated audio files are written. In the container the
        default sits on the ``/config`` volume so voice messages survive a
        container recreate; an explicit value (or the environment variable) wins.
-       The radio host keeps its banter clips under ``/config/media/radio_host``
-       (``SYNTH_RADIO_AUDIO_DIR`` overrides).
+       The radio host extension asks Vox for its banter through ``voice.synthesize``
+       and keeps its replay clips in its own data directory.
    * - ``VOX_TIMEOUT_SECONDS``
      - ``10``
      - Maximum seconds to wait for a TTS engine response.

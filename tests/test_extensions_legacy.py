@@ -93,6 +93,43 @@ class TestDecisions:
         d = decide(component("official/telegram"), rows)
         assert not d.migrate and not d.install
 
+    RADIO = {
+        "AZURACAST_BASE_URL": "https://radio.example.com",
+        "AZURACAST_API_KEY": "key",
+        "AZURACAST_STATION_ID": "main",
+        "RADIO_HOST_LANGUAGE": "Italian",
+        "RADIO_HOST_GAIN_DB": "6.5",
+    }
+
+    def test_a_radio_host_that_was_switched_on_is_fetched_with_its_settings(
+        self,
+    ) -> None:
+        d = decide(
+            component("official/radio_host"),
+            {**self.RADIO, "RADIO_HOST_ENABLED": "true"},
+        )
+        assert d.migrate and d.install and not d.switch_off
+        assert d.settings["AZURACAST_BASE_URL"] == "https://radio.example.com"
+        assert d.settings["RADIO_HOST_LANGUAGE"] == "Italian"
+        assert d.settings["RADIO_HOST_GAIN_DB"] == "6.5"
+
+    @pytest.mark.parametrize("flag", [None, "", "false", "0"])
+    def test_a_radio_host_that_was_never_switched_on_stays_where_it_is(
+        self, flag: str | None
+    ) -> None:
+        # Its switch defaulted to off: filling the station in was not enough to go on air.
+        rows = dict(self.RADIO)
+        if flag is not None:
+            rows["RADIO_HOST_ENABLED"] = flag
+        d = decide(component("official/radio_host"), rows)
+        assert not d.migrate and not d.install
+
+    def test_a_radio_host_without_a_station_never_worked(self) -> None:
+        rows = {**self.RADIO, "RADIO_HOST_ENABLED": "true"}
+        del rows["AZURACAST_STATION_ID"]
+        d = decide(component("official/radio_host"), rows)
+        assert not d.migrate and "never worked" in d.reason
+
     def test_the_api_server_ran_on_its_defaults_so_it_stays_on(self) -> None:
         d = decide(component("official/openai_api"), {})
         assert d.migrate and not d.switch_off and d.settings == {}
@@ -123,6 +160,7 @@ class TestDecisions:
     def test_every_old_key_the_migration_reads_is_listed(self) -> None:
         keys = old_keys()
         assert "TELEGRAM_SESSION" in keys and "OLLAMA_SERVER_ENABLED" in keys
+        assert "RADIO_HOST_ENABLED" in keys and "AZURACAST_API_KEY" in keys
         assert keys == sorted(set(keys))
 
 

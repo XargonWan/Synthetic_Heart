@@ -27,7 +27,7 @@ Available Action Plugins
 
 * ``ai_diary`` – Personal memory system for synth. Records conversations, thoughts, and emotions. See :doc:`ai_diary_personal_memory` for details.
 * ``bio_manager`` – Manage persistent user biographies. Uses database settings ``DB_HOST``, ``DB_USER``, ``DB_PASS`` and ``DB_NAME``.
-* ``radio_host`` – AI radio DJ plugin. Monitors an AzuraCast station, generates spoken transitions between songs using Synth's full context pipeline (persona, emotions, diary, SOUL), and injects them into the stream. See its plugin guide under :doc:`plugins/generated_index` for details.
+* ``radio_host`` – AI radio DJ, now an extension (``official/radio_host``). Monitors an AzuraCast station, generates spoken transitions between songs using Synth's full context pipeline (persona, emotions, diary, SOUL), and injects them into the stream. See :doc:`radio_azuracast`.
 
 Bio Manager Plugin
 ------------------

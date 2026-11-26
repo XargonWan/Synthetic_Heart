@@ -118,7 +118,7 @@ Rules:
 - Critical message-chain plugins must declare that runtime disabling is not allowed.
 - Third-party logos require explicit permission and attribution in `LICENSE_EXTERNAL.md`; otherwise use an original glyph or the SyntH fallback.
 
-Use `plugins/radio_host/` and the relevant wiki pages as reference implementations.
+Use `extensions_src/radio_host/` (an extension that speaks) and the relevant wiki pages as reference implementations.
 
 ### Interfaces
 
@@ -446,12 +446,18 @@ only through the JSON-RPC gateway in `core/extensions/`. The hard rules (details
 - **Every call is checked**: the capability is declared in the manifest **and** granted by
   the operator, parameters are validated, calls are rate limited and time boxed.
   Installing grants nothing. A capability is one of `log`, `config`, `stats`, `storage`,
-  `interfaces.*`, `avatar`, `calls`, `core.info`, `endpoints.manage`, `web.static`,
-  `web.routes`, `web.ws`, `web.origin`.
+  `interfaces.*`, `avatar`, `calls`, `core.info`, `endpoints.manage`, `turns.request`,
+  `voice.synthesize`, `voice.play`, `recon.contribute`, `web.static`, `web.routes`, `web.ws`,
+  `web.origin`.
 - **Nothing bypasses the message chain.** An interface extension delivers with
   `interfaces.inbound` and sends in `interface.send_message`; the Core owns history,
   aliases, commands and the queue. The Core learns what an interface is from its manifest
   (`[[provides.interfaces]]`, traits in `core/interface_traits.py`), never from a name.
+- **An extension that speaks or starts turns** (a radio, a companion) uses `turns.request`
+  (a background turn on its own interface: scoped to that interface's actions, never in
+  the chat history, priority below people), `voice.synthesize` / `voice.play` (the Core's
+  voice and the stage) and, to add facts to the prompt, `[[provides.recon]]`. It names the
+  action it speaks with as `message_action`. Reference: `extensions_src/radio_host/`.
 - **No legacy or compatibility layer.** In-tree plugins are rewritten as extensions; the
   Core keeps only data migrations (`core/migrations.py`).
 - **UI**: an extension may put a window in exactly three WebUI slots, `activity`, `logs`
@@ -980,7 +986,6 @@ Before finishing a code task, verify:
 | `ACTIVE_VOX_ENGINE` | Active TTS engine |
 | `ACTIVE_AURIS_ENGINE` | Active STT engine |
 | `ACTIVE_IRIS_ENGINE` | Active vision/image engine |
-| `RADIO_HOST_ANNOUNCE_IF_NO_LISTENERS` | When enabled (default True), Synth only speaks on air if listeners are present. Set to False for always-on announcements. |
 | `SYNTH_NAME` | Synth's display name |
 | `SYNTH_PROFILE` | Synth's persona profile text (injected into every prompt) |
 | `SYNTH_ALIASES` | Comma-separated name aliases Synth responds to |
