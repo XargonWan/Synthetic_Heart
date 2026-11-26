@@ -98,6 +98,8 @@ Contents
    extension_runtime
    telegram_extension
    repository_implementation
+   remaining_work
+   manual_checklist
    open_questions
    testing_strategy
    extension_developer_guide
