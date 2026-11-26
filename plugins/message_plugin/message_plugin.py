@@ -60,7 +60,6 @@ class MessagePlugin:
             "message_discord_bot",
             "message_x",
             "message_synth_webui",
-            "message_matrix_chat",
         ]
 
     @staticmethod
@@ -78,7 +77,6 @@ class MessagePlugin:
             "message_synth_webui": {},
             "message_reddit": {},
             "message_x": {},
-            "message_matrix_chat": {},
         }
 
     def get_prompt_instructions(self, action_name: str) -> dict:
@@ -205,9 +203,7 @@ class MessagePlugin:
             except Exception:
                 pass
         elif (
-            interface_name
-            in ["discord", "discord_bot", "reddit", "matrix", "matrix_chat"]
-            and target
+            interface_name in ["discord", "discord_bot", "reddit", "matrix"] and target
         ):
             is_public = True
 
@@ -373,7 +369,6 @@ class MessagePlugin:
             "message_discord_bot": "discord_bot",
             "message_x": "x",
             "message_synth_webui": "synth_webui",
-            "message_matrix_chat": "matrix_chat",
         }
 
         interface_name = interface_map.get(action_type)

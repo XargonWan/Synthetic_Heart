@@ -51,7 +51,6 @@ DEFAULT = InterfaceTraits()
 CORE_INTERFACES: dict[str, InterfaceTraits] = {
     "discord_bot": InterfaceTraits(voice_input_tts_only=True),
     "synth_webui": InterfaceTraits(message_action="message_synth_webui"),
-    "matrix_chat": InterfaceTraits(),
 }
 
 _declared: dict[str, InterfaceTraits] = {}
