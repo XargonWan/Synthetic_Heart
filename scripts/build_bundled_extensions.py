@@ -32,6 +32,8 @@ DEFAULTS = (
     "official/fluxer",
     "official/telegram_bot",
     "official/zen",
+    "official/protocol_harmony",
+    "official/protocol_fish",
 )
 
 

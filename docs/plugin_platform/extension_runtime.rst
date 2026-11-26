@@ -488,6 +488,42 @@ and ``ctx.recon.on_contribute(handler)``. Tests: ``tests/test_extensions_turns_v
 ``tests/test_extension_radio_host_process.py`` (a real extension process, a fake station
 and the whole path of one remark).
 
+Wire protocols for external endpoints
+-------------------------------------
+
+An *external endpoint* (an LLM, speech or vision service the operator configured) names a
+``protocol``, and the Core keeps one adapter per protocol for the operations on it (list
+models, chat, speech, transcription, vision, probing). An extension can provide a protocol
+(``core/extensions/protocols.py``): it declares ``[[provides.protocols]]`` (``name``, an
+optional ``base`` protocol, and the ``ops`` it implements) and holds ``endpoints.protocol``.
+While it runs, the adapter of that protocol is a proxy that sends each operation to the
+extension (``protocol.request``).
+
+* **Layering.** Operations that are not listed fall back to the ``base`` protocol's adapter
+  in the Core. Harmony (``official/protocol_harmony``) is OpenAI-compatible for chat and
+  vision, and implements only ``models``, ``tts`` and ``stt``; Fish Audio
+  (``official/protocol_fish``) is a TTS-only provider and implements everything it has,
+  plus the voice-picker extras (``list_speakers``, ``fetch_model_detail``,
+  ``parse_model_id_from_url``).
+* **What it is given.** The endpoint's name, base URL, default model and extra settings and
+  its **decrypted API key**, because it needs the key to speak the protocol. It is given the
+  keys of the endpoints that use *its* protocol and of no others, which is what the
+  capability's grant means. It cannot take over a protocol the Core has built in (OpenAI,
+  Gemini, Anthropic and ``custom``: the prompt and tool rendering is built around those
+  dialects).
+* **Files, not blobs.** Audio and images do not travel in a message: the Core stages a file
+  in the extension's data directory for what it sends (transcription, vision), and the
+  extension returns a file path for what it makes (speech), which the Core reads
+  (``MediaBridge.take_inbound``: inside the data directory, a regular file, size limited) and
+  deletes. A request that would not fit in a message is refused before it is sent.
+* **Lifecycle.** An endpoint saved with a protocol keeps it while the extension is off (any
+  lowercase identifier is a valid protocol); its engines appear when the extension starts and
+  go away when it stops (``ExternalEndpointRegistry.sync_protocol``).
+
+SDK: ``ctx.protocols.on_request(handler)``, ``handler(protocol, op, endpoint, api_key, args)``.
+Tests: ``tests/test_extension_protocols.py`` (the Core side, both extensions' logic against a
+fake service, and a real Harmony extension process against a fake Harmony service).
+
 Web content
 -----------
 

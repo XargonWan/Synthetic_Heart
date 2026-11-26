@@ -743,6 +743,51 @@ class Recon(_Namespace):
         self._ctx.handle("recon.contribute", adapter)
 
 
+class Protocols(_Namespace):
+    """Wire protocols you provide for external endpoints (``[[provides.protocols]]``)."""
+
+    def on_request(
+        self,
+        handler: Callable[
+            [str, str, dict[str, Any], str, dict[str, Any]], Awaitable[Any] | Any
+        ],
+    ) -> None:
+        """Answer the Core's operations on an endpoint that uses one of your protocols.
+
+        ``handler(protocol, op, endpoint, api_key, args)`` returns the result as JSON:
+
+        * ``chat`` (``messages``, ``model``, ``kwargs``): ``{"content", "model",
+          "finish_reason", "usage"}``;
+        * ``models``: a list of ``{"id", "name", "owned_by", "capabilities",
+          "model_type", "input_modalities", "output_modalities", "languages"}``;
+        * ``capabilities`` (``models``): ``{"cortex": bool, "vox": bool, ...}``;
+        * ``health``: ``true``/``false``; ``ping`` (``model``, ``timeout``, ``models``):
+          ``{"ok", "text"}``;
+        * ``tts`` (``text``, ``voice``, ``kwargs``): ``{"path": <file in your data
+          directory>}`` (the Core reads and deletes it); ``stt`` (``path``, ``mime_type``)
+          and ``vision`` (``path``, ``mime_type``, ``prompt``): ``{"text"}`` (the path is
+          a file the Core staged for you);
+        * ``list_speakers``, ``fetch_model_detail`` (``model_id``),
+          ``parse_model_id_from_url`` (``url``): extras a voice picker uses.
+
+        ``endpoint`` is ``{"name", "base_url", "default_model", "extra_config"}`` and
+        ``api_key`` the endpoint's decrypted key. Raise to report a failure."""
+
+        async def adapter(params: dict[str, Any]) -> Any:
+            result = handler(
+                str(params.get("protocol", "")),
+                str(params.get("op", "")),
+                dict(params.get("endpoint") or {}),
+                str(params.get("api_key", "")),
+                dict(params.get("args") or {}),
+            )
+            if asyncio.iscoroutine(result):
+                result = await result
+            return result
+
+        self._ctx.handle("protocol.request", adapter)
+
+
 class Endpoints(_Namespace):
     """External endpoints you front (capability ``endpoints.manage``). Only names your
     manifest declares in ``provides.endpoints``, and never an endpoint that holds an
@@ -946,6 +991,7 @@ class Context:
         self.turns = Turns(self)
         self.voice = Voice(self)
         self.recon = Recon(self)
+        self.protocols = Protocols(self)
         self._handlers: dict[str, Callable[[dict[str, Any]], Awaitable[Any] | Any]] = {}
 
     def inbox_path(self, name: str = "file") -> Path:

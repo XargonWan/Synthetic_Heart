@@ -135,29 +135,6 @@ def _anthropic_adapter(endpoint: ExternalEndpoint, api_key: str) -> Any:
     )
 
 
-def _harmony_adapter(endpoint: ExternalEndpoint, api_key: str) -> Any:
-    from core.external_endpoints.adapters.harmony_ai_adapter import HarmonyAIAdapter
-
-    return HarmonyAIAdapter(
-        base_url=_need_base_url(endpoint),
-        api_key=api_key,
-        timeout=_timeout(endpoint),
-    )
-
-
-def _fish_adapter(endpoint: ExternalEndpoint, api_key: str) -> Any:
-    from core.external_endpoints.adapters.fish_audio_adapter import (
-        DEFAULT_BASE_URL,
-        FishAudioAdapter,
-    )
-
-    return FishAudioAdapter(
-        base_url=endpoint.base_url or DEFAULT_BASE_URL,
-        api_key=_need_api_key(endpoint, api_key),
-        extra_config=endpoint.extra_config,
-    )
-
-
 def _custom_adapter(endpoint: ExternalEndpoint, api_key: str) -> Any:
     if endpoint.extra_config.get("legacy_http_tts"):
         from core.external_endpoints.adapters.custom_tts_adapter import (
@@ -182,8 +159,6 @@ for _protocol, _factory in (
     (EndpointProtocol.OPENAI, _openai_adapter),
     (EndpointProtocol.GEMINI, _gemini_adapter),
     (EndpointProtocol.ANTHROPIC, _anthropic_adapter),
-    (EndpointProtocol.HARMONY, _harmony_adapter),
-    (EndpointProtocol.FISH, _fish_adapter),
     (EndpointProtocol.CUSTOM, _custom_adapter),
 ):
     register_protocol(_protocol, _factory)

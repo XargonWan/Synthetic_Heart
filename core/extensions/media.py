@@ -294,6 +294,39 @@ class MediaBridge:
         """
         return await asyncio.to_thread(self._import_all, extension_id, list(items))
 
+    def _take(self, extension_id: str, raw: str) -> bytes:
+        data_dir = self._data_dir(extension_id)
+        fd, size = open_inside(data_dir, raw, owner_uid=self._uid(extension_id))
+        try:
+            if size > self.limits.max_file_bytes:
+                raise MediaError(
+                    f"the file is larger than {self.limits.max_file_bytes} bytes"
+                )
+            with os.fdopen(fd, "rb", closefd=False) as source:
+                data = source.read(self.limits.max_file_bytes + 1)
+            if len(data) > self.limits.max_file_bytes:
+                raise MediaError("the file grew while it was read")
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            os.unlink(os.path.realpath(raw))
+        except OSError:
+            pass
+        return data
+
+    async def take_inbound(self, extension_id: str, raw_path: str) -> bytes:
+        """Read a file the extension made in its own data directory, then delete it.
+
+        For a result that is **consumed** (a synthesised voice handed back to the Core),
+        so no copy is kept and no inbound quota is used. The same checks as an
+        attachment: inside the data directory, a regular file, the right owner, a size
+        limit. Raises :class:`MediaError`.
+        """
+        return await asyncio.to_thread(self._take, extension_id, raw_path)
+
     # ------------------------------------------------------------ outbound
 
     def _stage(

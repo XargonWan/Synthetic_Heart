@@ -1,0 +1,30 @@
+schema = 1
+
+[extension]
+id = "official/protocol_harmony"
+name = "Harmony AI protocol"
+version = "0.1.0"
+description = "Lets SyntH talk to Harmony AI Cloud (project-harmony.ai): its model listing and its text-to-speech and speech-to-text endpoints."
+author = "SyntH"
+
+[compat]
+core_api = ">=0.1,<1"
+
+[entry]
+module = "ext_main"
+function = "main"
+
+# Chat, embeddings and vision are OpenAI-shaped: the Core's OpenAI adapter answers them.
+[[provides.protocols]]
+name = "harmony"
+base = "openai"
+ops = ["models", "tts", "stt"]
+
+[permissions]
+# endpoints.protocol hands this extension the API key of every endpoint that uses the
+# "harmony" protocol (and of no other endpoint): it needs it to speak to Harmony.
+capabilities = ["log", "endpoints.protocol"]
+network = ["*.project-harmony.ai:443"]  # a self-hosted Harmony is the operator's to add
+
+[python]
+requirements = ["httpx>=0.27"]

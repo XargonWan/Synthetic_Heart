@@ -1,0 +1,29 @@
+schema = 1
+
+[extension]
+id = "official/protocol_fish"
+name = "Fish Audio protocol"
+version = "0.1.0"
+description = "Lets SyntH use Fish Audio's cloud text-to-speech, with its voice catalogue."
+author = "SyntH"
+
+[compat]
+core_api = ">=0.1,<1"
+
+[entry]
+module = "ext_main"
+function = "main"
+
+# A TTS-only provider: no base protocol, no chat.
+[[provides.protocols]]
+name = "fish"
+ops = ["models", "capabilities", "health", "ping", "tts", "list_speakers", "fetch_model_detail", "parse_model_id_from_url"]
+
+[permissions]
+# endpoints.protocol hands this extension the API key of every endpoint that uses the
+# "fish" protocol (and of no other endpoint): it needs it to call Fish Audio.
+capabilities = ["log", "endpoints.protocol"]
+network = ["api.fish.audio:443"]
+
+[python]
+requirements = ["httpx>=0.27"]

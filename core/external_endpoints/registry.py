@@ -584,6 +584,34 @@ class ExternalEndpointRegistry:
     # Registry synchronisation
     # ------------------------------------------------------------------
 
+    async def sync_protocol(self, protocol: str) -> None:
+        """A protocol became available or went away: register or drop its endpoints.
+
+        An extension can provide a protocol (see ``core.extensions.protocols``), and it may
+        start after the endpoints were registered at boot, or stop while they exist.
+        """
+        from core.external_endpoints import probe
+
+        try:
+            endpoints = await self.list_endpoints(enabled_only=True)
+        except Exception as exc:
+            log_warning(f"[ext_endpoints] Could not load endpoints from DB: {exc}")
+            return
+        available = EndpointProtocol(protocol) in probe._ADAPTER_FACTORIES  # noqa: SLF001
+        for ep in endpoints:
+            if ep.protocol.value != protocol:
+                continue
+            try:
+                if available:
+                    await self._sync_registries(ep)
+                else:
+                    self._unregister_from_all(ep.engine_name())
+            except Exception as exc:
+                log_warning(
+                    f"[ext_endpoints] Could not sync '{ep.name}' after protocol "
+                    f"{protocol!r} changed: {exc}"
+                )
+
     async def register_all_enabled(self) -> None:
         """Load all enabled endpoints and register them in SyntH subsystems.
 

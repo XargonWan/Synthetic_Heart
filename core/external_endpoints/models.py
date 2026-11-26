@@ -9,14 +9,32 @@ from typing import Any
 
 
 class EndpointProtocol(str, Enum):
-    """Wire protocol used to communicate with the endpoint."""
+    """Wire protocol used to communicate with the endpoint.
+
+    The members are the dialects the Core implements itself. A protocol an extension
+    provides (``[[provides.protocols]]``) is any other lowercase identifier: it is made on
+    demand, so an endpoint saved with such a protocol keeps it even while the extension
+    is not running (its adapter is then simply unavailable).
+    """
 
     OPENAI = "openai"
     GEMINI = "gemini"
     ANTHROPIC = "anthropic"
-    HARMONY = "harmony"
-    FISH = "fish"
     CUSTOM = "custom"
+
+    @classmethod
+    def _missing_(cls, value: object) -> "EndpointProtocol | None":
+        import re
+
+        if not isinstance(value, str) or not re.fullmatch(
+            r"[a-z][a-z0-9_]{1,31}", value
+        ):
+            return None
+        member = str.__new__(cls, value)
+        member._name_ = value.upper()
+        member._value_ = value
+        cls._value2member_map_[value] = member
+        return member
 
 
 class SubsystemType(str, Enum):

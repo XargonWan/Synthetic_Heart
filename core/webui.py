@@ -12,6 +12,7 @@ integral and inseparable part of the SyntH system.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import re
@@ -4202,7 +4203,7 @@ class SynthWebUIInterface:
 
         api_key = decrypt_api_key(endpoint.api_key_enc or "")
         adapter = get_adapter_for_endpoint(endpoint, api_key)
-        parse = getattr(type(adapter), "parse_model_id_from_url", None)
+        parse = getattr(adapter, "parse_model_id_from_url", None)
         fetch_detail = getattr(adapter, "fetch_model_detail", None)
         if parse is None or not callable(fetch_detail):
             raise HTTPException(
@@ -4211,6 +4212,8 @@ class SynthWebUIInterface:
             )
 
         model_id = parse(url)
+        if inspect.isawaitable(model_id):  # an adapter in an extension answers over RPC
+            model_id = await model_id
         if not model_id:
             raise HTTPException(status_code=400, detail="Could not parse a voice id")
 

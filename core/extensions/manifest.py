@@ -143,6 +143,46 @@ class ReconProvision:
     priority: int = 0
 
 
+@dataclass(frozen=True)
+class ProtocolProvision:
+    """A wire protocol for external endpoints that the extension speaks.
+
+    An external endpoint (an LLM, speech or vision service) names a ``protocol``; the Core
+    asks the adapter of that protocol to list models, synthesise speech, transcribe, and so
+    on. When the extension declares one here and holds ``endpoints.protocol``, the Core
+    asks **the extension** for the operations in ``ops``. Operations not listed fall back to
+    the ``base`` protocol's adapter when one is named (a dialect that differs from the base
+    only in a few places, as Harmony differs from OpenAI), and are unsupported otherwise.
+    The extension is given the API key of the endpoints that use its protocol, and of no
+    others.
+    """
+
+    name: str
+    #: Protocol whose adapter answers the operations this one does not.
+    base: str = ""
+    ops: tuple[str, ...] = ()
+
+
+#: Operations an extension may implement for a protocol.
+PROTOCOL_OPS = frozenset(
+    {
+        "chat",
+        "models",
+        "capabilities",
+        "health",
+        "ping",
+        "tts",
+        "stt",
+        "vision",
+        "list_speakers",
+        "fetch_model_detail",
+        "parse_model_id_from_url",
+    }
+)
+MAX_PROTOCOLS = 4
+PROTOCOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
+
+
 #: Recon questions one extension may add.
 MAX_RECON = 4
 RECON_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{1,39}$")
@@ -163,6 +203,8 @@ class Provides:
     endpoints: tuple[str, ...] = ()
     #: Questions added to the Recon step (see :class:`ReconProvision`).
     recon: tuple[ReconProvision, ...] = ()
+    #: Wire protocols for external endpoints (see :class:`ProtocolProvision`).
+    protocols: tuple[ProtocolProvision, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -441,6 +483,7 @@ def _parse_provides(data: Mapping[str, Any], c: _Collector) -> Provides:
                 "web",
                 "endpoints",
                 "recon",
+                "protocols",
             }
         ),
         "provides",
@@ -534,6 +577,7 @@ def _parse_provides(data: Mapping[str, Any], c: _Collector) -> Provides:
                 f"unknown engine kind {kind!r} (allowed: {', '.join(sorted(ENGINE_KINDS))})",
             )
     recon = _parse_recon(table, c)
+    protocols = _parse_protocols(table, c)
     web = _parse_web(table, c)
     if ui and (web is None or not web.static):
         c.add(
@@ -549,6 +593,7 @@ def _parse_provides(data: Mapping[str, Any], c: _Collector) -> Provides:
         web=web,
         endpoints=endpoints,
         recon=recon,
+        protocols=protocols,
     )
 
 
@@ -650,6 +695,46 @@ def _parse_recon(
     keys = [r.key for r in found]
     for dup in sorted({k for k in keys if keys.count(k) > 1}):
         c.add("provides.recon", f"question {dup!r} is declared twice")
+    return tuple(found)
+
+
+def _parse_protocols(
+    provides: Mapping[str, Any], c: _Collector
+) -> tuple[ProtocolProvision, ...]:
+    raw = provides.get("protocols", [])
+    if not isinstance(raw, list):
+        c.add("provides.protocols", "must be a list of tables ([[provides.protocols]])")
+        return ()
+    if len(raw) > MAX_PROTOCOLS:
+        c.add("provides.protocols", f"at most {MAX_PROTOCOLS} protocols")
+    found: list[ProtocolProvision] = []
+    for index, item in enumerate(raw[:MAX_PROTOCOLS]):
+        path = f"provides.protocols[{index}]"
+        table = c.table(item, path)
+        if table is None or not isinstance(item, Mapping):
+            continue
+        c.unknown_keys(item, frozenset({"name", "base", "ops"}), path)
+        name = c.string(item, "name", path, required=True)
+        base = c.string(item, "base", path)
+        ops = c.string_list(item, "ops", path)
+        if name and not PROTOCOL_NAME_RE.match(name):
+            c.add(f"{path}.name", f"must be a lowercase identifier, got {name!r}")
+        if base and not PROTOCOL_NAME_RE.match(base):
+            c.add(f"{path}.base", f"must be a lowercase identifier, got {base!r}")
+        if base and base == name:
+            c.add(f"{path}.base", "a protocol cannot be its own base")
+        unknown = sorted(set(ops) - PROTOCOL_OPS)
+        if unknown:
+            c.add(
+                f"{path}.ops",
+                f"unknown operations {unknown} (allowed: {', '.join(sorted(PROTOCOL_OPS))})",
+            )
+        if not ops:
+            c.add(f"{path}.ops", "list at least one operation")
+        found.append(ProtocolProvision(name, base, ops))
+    names = [p.name for p in found]
+    for dup in sorted({n for n in names if names.count(n) > 1}):
+        c.add("provides.protocols", f"protocol {dup!r} is declared twice")
     return tuple(found)
 
 
