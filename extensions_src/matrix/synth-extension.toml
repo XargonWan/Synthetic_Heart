@@ -1,0 +1,101 @@
+schema = 1
+
+[extension]
+id = "official/matrix"
+name = "Matrix"
+version = "0.1.0"
+description = "Talk to SyntH in Matrix rooms (matrix.org or your own homeserver), with threads, replies, files and typing."
+author = "SyntH"
+
+[compat]
+core_api = ">=0.1,<1"
+
+[entry]
+module = "ext_main"
+function = "main"
+
+[[provides.interfaces]]
+id = "matrix"
+# matrix/<room> in a room, matrix/<room>/<thread event> inside a thread.
+paths = ["matrix/{chat}", "matrix/{chat}/{thread}"]
+
+[permissions]
+capabilities = ["log", "config", "stats", "interfaces.register", "interfaces.inbound"]
+network = ["*.matrix.org:443"]  # a self-hosted homeserver is the operator's to add
+
+[python]
+requirements = ["matrix-nio>=0.24"]
+
+[config.MATRIX_HOMESERVER]
+type = "string"
+label = "Homeserver"
+description = "Base URL of the Matrix homeserver (e.g. https://matrix.org)."
+default = "https://matrix.org"
+
+[config.MATRIX_USER]
+type = "string"
+label = "Matrix user id"
+description = "The bot's MXID (e.g. @yoursynth:matrix.org)."
+required = true
+
+[config.MATRIX_PASSWORD]
+type = "string"
+label = "Password"
+description = "Used to log in when no access token is given."
+sensitive = true
+default = ""
+
+[config.MATRIX_ACCESS_TOKEN]
+type = "string"
+label = "Access token"
+description = "A long-lived access token, used instead of the password (preferred for a bot)."
+sensitive = true
+default = ""
+
+[config.MATRIX_DEVICE_ID]
+type = "string"
+label = "Device id"
+description = "Device identifier to reuse when establishing a session."
+default = ""
+
+[config.MATRIX_DEVICE_NAME]
+type = "string"
+label = "Device name"
+description = "Human readable name for the device registered on the homeserver."
+default = "SyntH"
+
+[config.MATRIX_ALLOWED_ROOMS]
+type = "string"
+label = "Allowed rooms"
+description = "Comma separated room ids or aliases the bot may answer in. Empty: every room."
+default = ""
+
+[config.MATRIX_AUTO_JOIN]
+type = "bool"
+label = "Auto-join invites"
+description = "Join the rooms the bot is invited to (subject to the invite policy)."
+default = true
+
+[config.MATRIX_INVITE_POLICY]
+type = "string"
+label = "Invite policy"
+description = "trainer_only joins only invitations from the trainer and trusted users; allow_all joins every invitation."
+default = "trainer_only"
+
+[config.MATRIX_PRIVATE_MESSAGES]
+type = "string"
+label = "Private messages"
+description = "trainer_only answers private rooms only for the trainer and trusted users; allow_all answers everyone."
+default = "trainer_only"
+
+[config.MATRIX_TRUSTED_USERS]
+type = "string"
+label = "Trusted users"
+description = "Comma separated MXIDs (e.g. @alice:matrix.org) always allowed for private messages and invites when the policy is trainer_only."
+default = ""
+
+[config.MATRIX_USE_SYNTH_AVATAR]
+type = "bool"
+label = "Use the synth avatar"
+description = "Set the synth avatar as the account's profile picture."
+default = true

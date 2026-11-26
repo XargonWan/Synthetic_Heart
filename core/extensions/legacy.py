@@ -92,6 +92,25 @@ COMPONENTS: tuple[Component, ...] = (
         enabled_keys=("INTERFACE_ENABLED__fluxer_bot",),
     ),
     Component(
+        "official/matrix",
+        {
+            "MATRIX_HOMESERVER": "MATRIX_HOMESERVER",
+            "MATRIX_USER": "MATRIX_USER",
+            "MATRIX_PASSWORD": "MATRIX_PASSWORD",
+            "MATRIX_ACCESS_TOKEN": "MATRIX_ACCESS_TOKEN",
+            "MATRIX_DEVICE_ID": "MATRIX_DEVICE_ID",
+            "MATRIX_DEVICE_NAME": "MATRIX_DEVICE_NAME",
+            "MATRIX_ALLOWED_ROOMS": "MATRIX_ALLOWED_ROOMS",
+            "MATRIX_AUTO_JOIN": "MATRIX_AUTO_JOIN",
+            "MATRIX_INVITE_POLICY": "MATRIX_INVITE_POLICY",
+            "MATRIX_PRIVATE_MESSAGES": "MATRIX_PRIVATE_MESSAGES",
+            "MATRIX_TRUSTED_USERS": "MATRIX_TRUSTED_USERS",
+        },
+        required=("MATRIX_USER",),
+        enabled_keys=("INTERFACE_ENABLED__matrix_chat",),
+        default_package=False,
+    ),
+    Component(
         "official/radio_host",
         {
             "AZURACAST_BASE_URL": "AZURACAST_BASE_URL",

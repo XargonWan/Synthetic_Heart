@@ -124,6 +124,26 @@ class TestDecisions:
         d = decide(component("official/radio_host"), rows)
         assert not d.migrate and not d.install
 
+    def test_a_configured_matrix_account_is_fetched_with_its_settings(self) -> None:
+        rows = {
+            "MATRIX_USER": "@synth:hs",
+            "MATRIX_ACCESS_TOKEN": "tok",
+            "MATRIX_TRUSTED_USERS": "@a:hs",
+        }
+        d = decide(component("official/matrix"), rows)
+        assert d.migrate and d.install and not d.switch_off
+        assert d.settings == {
+            "MATRIX_USER": "@synth:hs",
+            "MATRIX_ACCESS_TOKEN": "tok",
+            "MATRIX_TRUSTED_USERS": "@a:hs",
+        }
+        off = decide(
+            component("official/matrix"),
+            {**rows, "INTERFACE_ENABLED__matrix_chat": "false"},
+        )
+        assert not off.migrate and not off.install
+        assert not decide(component("official/matrix"), {}).migrate
+
     def test_a_radio_host_without_a_station_never_worked(self) -> None:
         rows = {**self.RADIO, "RADIO_HOST_ENABLED": "true"}
         del rows["AZURACAST_STATION_ID"]

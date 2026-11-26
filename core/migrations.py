@@ -863,6 +863,50 @@ async def _migrate_ollama_serve_to_openai_api() -> None:
         log_info("[migrations] Renamed interface ollama_serve -> openai_api in stored paths")
 
 
+async def _migrate_matrix_chat_to_matrix() -> None:
+    """The Matrix interface was registered as ``matrix_chat`` while its history was stored
+    under ``matrix/...``. It is the ``matrix`` extension now, one id for both: a trainer
+    set for ``matrix_chat`` follows (``TRAINER_IDS``), and any path stored under the old
+    name does."""
+    await _rename_interface("matrix_chat", "matrix")
+    from core.db import _get_db_type, get_conn_ctx
+
+    db_type = _get_db_type()
+    async with get_conn_ctx() as conn:
+        async with conn.cursor() as cur:
+            if not await _table_exists(cur, "config", db_type):
+                return
+            await cur.execute(
+                "SELECT value FROM config WHERE config_key = %s", ("TRAINER_IDS",)
+            )
+            row = await cur.fetchone()
+            raw = (row["value"] if isinstance(row, dict) else row[0]) if row else None
+            if not raw:
+                return
+            entries = str(raw).split(",")
+            have_new = any(e.strip().startswith("matrix:") for e in entries)
+            changed = False
+            kept: list[str] = []
+            for entry in entries:
+                if entry.strip().startswith("matrix_chat:"):
+                    changed = True
+                    if have_new:
+                        continue  # the new name already has its trainer: it wins
+                    entry = entry.replace("matrix_chat:", "matrix:", 1)
+                kept.append(entry)
+            if not changed:
+                return
+            await cur.execute(
+                "UPDATE config SET value = %s WHERE config_key = %s",
+                (",".join(kept), "TRAINER_IDS"),
+            )
+            try:
+                await conn.commit()
+            except Exception:
+                pass
+    log_info("[migrations] Renamed the Matrix trainer entry matrix_chat -> matrix")
+
+
 #: Config keys whose value is the name of an engine (a bare name; a scope value that
 #: carries a model is JSON and is left to the engine heal).
 _ENGINE_NAME_KEYS: tuple[str, ...] = (
@@ -938,6 +982,7 @@ _STARTUP_MIGRATIONS: list[tuple[str, Any]] = [
     ("migrate_memories_dedupe_index", _migrate_memories_dedupe_index),
     ("migrate_ollama_serve_to_openai_api", _migrate_ollama_serve_to_openai_api),
     ("migrate_selenium_endpoint_name", _migrate_selenium_endpoint_name),
+    ("migrate_matrix_chat_to_matrix", _migrate_matrix_chat_to_matrix),
 ]
 
 
