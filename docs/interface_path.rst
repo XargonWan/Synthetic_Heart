@@ -24,7 +24,7 @@ Interface paths follow a hierarchical structure separated by forward slashes:
 
 **Components:**
 
-- ``interface_name``: The interface registry key (e.g., ``telegram_bot``, ``discord_bot``, ``matrix_chat``)
+- ``interface_name``: The interface registry key (e.g., ``telegram_bot``, ``discord_bot``, ``matrix``)
 - ``target_identifier``: Primary conversation identifier (chat_id, channel_id, room_id, etc.)
 - ``thread_identifier`` (optional): Thread or sub-conversation identifier
 
@@ -39,8 +39,7 @@ as its second.
 - ``telegram_bot/-1001234567890`` - Telegram channel/group chat
 - ``telegram_bot/123456789/987`` - Telegram chat with thread
 - ``discord_bot/987654321/123456`` - Discord channel with thread
-- ``matrix_chat/!room:matrix.org/$event`` - Matrix room with thread event (see the
-  note under "Matrix Interface" about the ``matrix`` prefix)
+- ``matrix/!room:matrix.org/$event`` - Matrix room with thread event
 
 Core Utilities
 --------------
@@ -228,14 +227,13 @@ build a path**:
 Matrix Interface
 ~~~~~~~~~~~~~~~~
 
-- **Path Format**: ``matrix_chat/room_identifier[/thread_event_id]`` (the registry key is ``matrix_chat``)
-- **Generation**: ``build_interface_path('matrix_chat', room_identifier, thread_event_id)``
+- **Path Format**: ``matrix/room_identifier[/thread_event_id]`` (declared as
+  ``matrix/{chat}`` and ``matrix/{chat}/{thread}`` in the ``official/matrix`` manifest)
 - **Thread Support**: Uses Matrix thread events
-- **Known inconsistency**: the queue and ``resolve_and_touch`` use the
-  ``matrix_chat/...`` prefix, but the inbound history write and the history of
-  sent messages use the literal prefix ``matrix``, so one room can be stored under
-  two prefixes. Whether this is intended is not established by the code; see
-  :doc:`plugin_platform/open_questions`.
+- **History**: the interface used to register as ``matrix_chat`` while the history was
+  written under ``matrix``, so one room could be stored under two prefixes. The extension
+  uses ``matrix`` everywhere and ``core/migrations.py`` (``_migrate_matrix_chat_to_matrix``)
+  renames the stored ``matrix_chat/...`` paths, ``MATRIX_CHAT_*`` keys and trainer ids.
 
 OpenAI-Compatible Server
 ~~~~~~~~~~~~~~~~~~~~~~~~~~

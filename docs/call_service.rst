@@ -260,7 +260,7 @@ What an interface can do is set by the platform, not by this project. Checked on
      - no
      - The Bot API has no call methods: a bot can neither place nor receive calls. It only
        exchanges voice messages and video notes.
-   * - ``matrix_chat``, ``fluxer_bot``, ``openai_api``, ``vessel``
+   * - ``matrix``, ``fluxer_bot``, ``openai_api``, ``vessel``
      - no
      - no
      - No call transport in the library or protocol the interface uses.

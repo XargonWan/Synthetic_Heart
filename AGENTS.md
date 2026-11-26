@@ -495,8 +495,7 @@ interface/<module>/
 
 The folder is named after the **module** (not the component), so the historical
 `interface.<module>` import path keeps working: `interface/discord_interface/discord_interface.py`
-(component `discord_bot`), `interface/matrix_interface/matrix_interface.py`
-(component `matrix_chat`). Telegram and Fluxer are extensions (`extensions_src/`).
+(component `discord_bot`). Telegram, Fluxer and Matrix are extensions (`extensions_src/`).
 
 The `__init__.py` shim imports the submodule as a **module** (never `from pkg
 import <mod>`, which would resolve a same-named module-level global — e.g.

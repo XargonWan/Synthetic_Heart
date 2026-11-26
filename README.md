@@ -113,7 +113,7 @@ SyntH can consume remote MCP servers as tools, and can expose every one of its o
 ### Multiple chat interfaces
 <img src="extensions_src/telegram_bot/icon.svg" alt="Telegram" width="56" align="left" hspace="12" vspace="8" />
 <img src="interface/discord_interface/icon.svg" alt="Discord" width="75" align="left" hspace="12" vspace="8" />
-<img src="interface/matrix_interface/icon.svg" alt="Matrix" width="56" align="left" hspace="12" vspace="8" style="background-color:#000000; padding:6px; border-radius:6px;" />
+<img src="extensions_src/matrix/icon.svg" alt="Matrix" width="56" align="left" hspace="12" vspace="8" style="background-color:#000000; padding:6px; border-radius:6px;" />
 
 Reach your Synth where you already are: the built-in WebUI, Telegram, Discord and Matrix. Every message flows through a single message chain, so the persona stays coherent no matter which interface you use.
 More interfaces can be simply added over time thanks due to the plugins system.

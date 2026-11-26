@@ -270,7 +270,6 @@ Apply Pattern to Other Interfaces
 The following interfaces should be migrated to the two-phase pattern:
 
 - [ ] ``discord_interface.py``
-- [ ] ``matrix_interface.py``
 
 Migration checklist for each:
 

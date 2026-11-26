@@ -25,14 +25,14 @@ Available Interfaces
 
 * ``discord_interface`` – Discord bot integration. Requires ``DISCORD_BOT_TOKEN``.
 * ``fluxer_bot`` – the ``official/fluxer`` extension: Fluxer bot integration (self-hostable, Discord-compatible chat) via a native aiohttp REST + WebSocket gateway client. Requires ``FLUXER_TOKEN``. See :doc:`fluxer_interface`.
-* ``matrix_interface`` – Matrix chat bridge powered by ``matrix-nio``. Requires homeserver credentials and tokenizer (password or access token).
+* ``matrix`` – the ``official/matrix`` extension: Matrix chat bridge (``matrix-nio``, which the extension carries itself). Requires homeserver credentials and a trainer (password or access token). See :doc:`matrix_interface`.
 * ``openai_api`` – the ``official/openai_api`` extension: an OpenAI-compatible REST bridge that lets external clients talk to SyntH as if it were an OpenAI endpoint (``/v1/models``, ``/v1/chat/completions``, ``/v1/completions``, SSE streaming).
 * ``telegram_bot`` – the ``official/telegram_bot`` extension: Telegram bot interface with media support. Requires ``BOTFATHER_TOKEN`` and trainer ID. (The userbot is ``official/telegram``, see :doc:`telegram_user_interface`.)
 * ``telegram`` – the ``official/telegram`` extension: Telegram **user-account** interface (real phone number, MTProto via Telethon, which the extension carries itself) with a WebUI login. Requires ``TELEGRAM_API_ID`` and ``TELEGRAM_API_HASH``. See :doc:`telegram_user_interface`.
 
 Interfaces that can host audio/video calls register a call provider with the central call service; see :doc:`call_service`.
 
-Interfaces that can set their own account picture (``discord_bot``, ``telegram_bot``, ``matrix_chat``, ``fluxer_bot`` and, opt-in, ``telegram``) use the core synth avatar; see :doc:`synth_avatar` for the support matrix.
+Interfaces that can set their own account picture (``discord_bot``, ``telegram_bot``, ``matrix``, ``fluxer_bot`` and, opt-in, ``telegram``) use the core synth avatar; see :doc:`synth_avatar` for the support matrix.
 
 **Development Interfaces** (in ``interface_dev/`` directory):
 
@@ -437,7 +437,7 @@ never leak schemas into the prompt.
      - ``["DISCORD_BOT_TOKEN"]``
    * - Fluxer (extension ``official/fluxer``, ``[config.FLUXER_TOKEN]`` ``required = true``)
      - ``["FLUXER_TOKEN"]``
-   * - Matrix (``interface/matrix_interface.py``)
+   * - Matrix (extension ``official/matrix``, ``[config.MATRIX_USER]`` ``required = true``)
      - ``["MATRIX_USER", ("MATRIX_PASSWORD", "MATRIX_ACCESS_TOKEN")]``
 
 Matrix shows the mixed AND + OR case: it needs its MXID (``MATRIX_USER``) **and**
@@ -571,4 +571,4 @@ failures or four minutes.
 
 Implemented by ``telegram`` (Telethon ``SetTypingRequest``, including forum
 topics), ``telegram_bot`` (``sendChatAction``), ``discord_bot`` (typing only) and
-``matrix_chat`` (typing only). Turn it off with ``CHAT_ACTIVITY_ENABLED``.
+``matrix`` (typing only). Turn it off with ``CHAT_ACTIVITY_ENABLED``.

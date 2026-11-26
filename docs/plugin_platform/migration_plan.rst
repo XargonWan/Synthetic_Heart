@@ -276,6 +276,21 @@ Milestones
      - No ``plugins``/``interface``/``engines`` extension code in the Core; the
        Core boots with zero extensions.
 
+       **Status (2026-11-26), partly done.** Moved out: Matrix (``official/matrix``, with
+       the ``matrix_chat`` to ``matrix`` data migration), the Harmony and Fish Audio
+       endpoint adapters (``official/protocol_harmony``, ``official/protocol_fish``, through
+       the new ``provides.protocols`` API), the Dashboard (``official/synth_dashboard``),
+       the AzuraCast radio host (``official/radio_host``) and the KittenTTS voice (source
+       in ``extensions_src/vox_kitten``, not yet released), plus the removal of the manual
+       engine and ``interface/message_send_utils.py``. **Not done**: Discord (4,400 lines,
+       voice and Live inside), Live as an extension (needs a duplex audio streaming API
+       and a provider-neutral session config), the Vessel adapters (M8b: needs a
+       state-mirror connector API), the VRM renderer (M8c), native Kitten and Vosk (need a
+       models API for the Manage Models panel), and the legacy ``engines/external_engines``
+       modules, which overlap the endpoint presets. The OpenAI-compatible, Gemini,
+       Anthropic and ``custom`` endpoint protocols deliberately stay in the Core: the
+       prompt and tool renderers and the cortex bridge are built around them.
+
 Critical risk: Telegram
 -----------------------
 

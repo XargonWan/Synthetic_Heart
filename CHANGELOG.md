@@ -1,3 +1,15 @@
+### feat(extensions): Matrix, Harmony, Fish Audio and the KittenTTS voice are extensions; the manual engine is gone
+
+**Before.** The Matrix interface (`interface/matrix_interface/`), the Harmony and Fish Audio endpoint adapters (`core/external_endpoints/adapters/`) and the `EndpointProtocol.HARMONY`/`FISH_AUDIO` branches were Core code. The Core also carried a dev "manual" engine and `interface/message_send_utils.py`, a Telegram-era sender no production code used any more.
+
+**Now.** `official/matrix` (`extensions_src/matrix/`) serves the Matrix interface through the public API; its stored `matrix_chat/...` paths, `MATRIX_CHAT_*` keys and trainer ids are renamed to `matrix` by `core/migrations.py`, which also closes the old split between the `matrix_chat` and `matrix` history prefixes. `official/protocol_harmony` and `official/protocol_fish` are the first **endpoint protocol** extensions: `[[provides.protocols]]` (name, `base`, ops) plus the `endpoints.protocol` capability make the Core call the extension for chat/models/capabilities/health/tts/stt and the extra operations it declares (voice lists, model detail); files travel through the media bridge, and the proxy works from the worker-thread loops Vox and Auris use. Both are installed by default. `extensions_src/vox_kitten/` is the KittenTTS voice as an extension (source only: it is not in the release list yet because it needs torch and espeak, which are unverified). `official/synth_dashboard` is the Dashboard tab as an extension.
+
+**Removed.** `interface/matrix_interface/` and its test; the Harmony and Fish adapters and their enum branches (the registry accepts dynamic protocol names); `engines/external_engines/dev/manual.py` and the fallbacks to `manual` in the Grillo and diary plugins; `interface/message_send_utils.py` and its four tests; the Core's Matrix and Harmony names in the interface traits, the corrector and the message plugin. Recover any of it with `git log --diff-filter=D -- <path>`; the surviving code names the commits.
+
+**Not verified here.** Matrix was exercised against a fake homeserver, never a real one. Harmony and Fish Audio were exercised against fake HTTP servers and real extension processes, not the live services. The legacy-settings migration for Matrix and the new defaults were not run against a real database or a rebuilt Docker image.
+
+**Location.** `extensions_src/{matrix,protocol_harmony,protocol_fish,vox_kitten,synth_dashboard}/`, `core/extensions/protocols.py`, `core/extensions/{manifest,runtime,endpoints,media,legacy}.py`, `core/external_endpoints/`, `core/migrations.py`, `docs/plugin_platform/extension_runtime.rst`, `docs/matrix_interface.rst`.
+
 ### feat(radio-host): the AzuraCast Radio DJ is an extension, on four new generic extension APIs
 
 **Before.** The radio host was an in-tree plugin (`plugins/radio_host`, about 3,300 lines) that imported the Core's message queue, Vox, persona manager, WebUI and database directly. The Core knew its name in four places (`radio_host` in the interface traits, `radio_speak` in the agent router, `PRIORITY_RADIO` in the message queue, a plugin-specific table).

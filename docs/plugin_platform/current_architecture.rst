@@ -1,7 +1,11 @@
 A. Current Architecture
 =======================
 
-This chapter describes how SyntH works **today**. Nothing here is a proposal.
+This chapter describes how SyntH worked **on 2026-11-23, before the extraction began**.
+Nothing here is a proposal. It is kept as the baseline the milestones were measured
+against, so it still names components that have since moved (Telegram, Fluxer, Matrix, the
+OpenAI server, Harmony, Fish Audio, the radio host); see :doc:`migration_plan` for where
+each one stands now.
 
 Startup and initialization
 --------------------------

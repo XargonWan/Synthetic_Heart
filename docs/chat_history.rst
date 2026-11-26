@@ -233,7 +233,7 @@ Interface Integration
 
 .. code-block:: python
 
-   # In matrix_interface.py
+   # In the official/matrix extension (extensions_src/matrix)
    await add_message_to_context(
        interface_path=interface_path,
        message_text=text,

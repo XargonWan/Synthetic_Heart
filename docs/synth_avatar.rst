@@ -89,7 +89,7 @@ except the Telegram user account, whose picture is visible to all contacts.
      - ``ClientUser.edit(avatar=bytes)``; a refused change (rate limit) is
        logged and retried on the next change or resend.
      - **Implemented**, ``DISCORD_BOT_USE_SYNTH_AVATAR``.
-   * - ``matrix_chat`` (matrix-nio 0.24)
+   * - ``matrix`` (matrix-nio 0.24)
      - ``AsyncClient.upload`` then ``set_avatar(mxc://...)``. Removal is not
        applied (Matrix has no portable "no avatar").
      - **Implemented**, ``MATRIX_CHAT_USE_SYNTH_AVATAR``.
