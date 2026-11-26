@@ -1600,9 +1600,9 @@ class GrilloCompactorPlugin:
                     # archived. Previously the decline only skipped the size gate below, so a cluster
                     # explicitly marked should_compact=false was still persisted and its sources still
                     # deleted (one declined day became a ~180 char summary standing for a whole day).
-                    if not should_compact and _setting(
-                        "GRILLO_COMPACT_SKIP_DECLINED", True, bool
-                    ):
+                    # fmt: off
+                    if not should_compact and _setting("GRILLO_COMPACT_SKIP_DECLINED", True, bool):
+                    # fmt: on
                         log_info(
                             f"[grillo_compactor] Cluster {cid} declined by the model "
                             f"({justification[:100]!r}) -> nothing written, sources left in place"
