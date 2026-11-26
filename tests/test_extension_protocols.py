@@ -458,6 +458,20 @@ class TestOperations:
         )
 
     @pytest.mark.asyncio
+    async def test_a_worker_thread_with_its_own_loop_can_use_the_adapter(
+        self, rig: Rig
+    ) -> None:
+        # Vox and Auris run their adapters through asyncio.run() in a worker thread.
+        client = await rig.connect(manifest(HARMONY))
+        answering(client, {"protocol.request": [{"id": "from-thread", "name": "T"}]})
+        adapter = rig.adapter("harmony")
+
+        def in_thread() -> list[str]:
+            return [m.id for m in asyncio.run(adapter.list_models())]
+
+        assert await asyncio.to_thread(in_thread) == ["from-thread"]
+
+    @pytest.mark.asyncio
     async def test_an_adapter_of_a_gone_extension_says_so(self, rig: Rig) -> None:
         await rig.connect(manifest(HARMONY))
         factory = rig.host.factories["harmony"]

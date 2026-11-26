@@ -27,6 +27,7 @@ Operations (``ProtocolProvision.ops``): ``chat``, ``models``, ``capabilities``, 
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import tempfile
@@ -164,8 +165,10 @@ def adapter_class() -> type:
             api_key: str,
             media: MediaBridge | None,
             base_factory: Callable[[Any, str], Any] | None,
+            core_loop: asyncio.AbstractEventLoop | None = None,
         ) -> None:
             self._session, self._spec = session, spec
+            self._core_loop = core_loop
             self._endpoint, self._api_key = endpoint, api_key
             self._files = _Files(session, media)
             self._base_factory = base_factory
@@ -198,8 +201,17 @@ def adapter_class() -> type:
                     ErrorCode.INTERNAL_ERROR,
                     "the request is too large to send in a message",
                 )
-            return await self._session.call(
+            call = self._session.call(
                 "protocol.request", params, timeout=TIMEOUTS.get(op, 100.0)
+            )
+            core_loop = self._core_loop
+            if core_loop is None or asyncio.get_running_loop() is core_loop:
+                return await call
+            # Called from another loop: the Core's voice and hearing engines run their
+            # adapters in a worker thread with a loop of its own. The connection belongs to
+            # the Core's loop, so the call is made there and awaited from here.
+            return await asyncio.wrap_future(
+                asyncio.run_coroutine_threadsafe(call, core_loop)
             )
 
         # ---------------------------------------------------------------- chat
@@ -387,6 +399,10 @@ def attach_protocols(
         if not specs or not session.allowed(CAP_PROTOCOL):
             return
         cls = adapter_class()
+        try:
+            core_loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+        except RuntimeError:
+            core_loop = None
         added: list[str] = []
         for spec in specs:
             if host.builtin(spec.name):
@@ -415,7 +431,9 @@ def attach_protocols(
                     raise ValueError(
                         f"the extension providing protocol {spec.name!r} is not running"
                     )
-                return cls(session, spec, endpoint, api_key, media, base_factory)
+                return cls(
+                    session, spec, endpoint, api_key, media, base_factory, core_loop
+                )
 
             host.register(spec.name, factory)
             added.append(spec.name)
