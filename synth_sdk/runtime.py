@@ -803,6 +803,7 @@ class Endpoints(_Namespace):
         base_url: str,
         *,
         display_label: str = "",
+        protocol: str = "openai",
         extra_config: dict[str, Any] | None = None,
         subsystem_map: dict[str, bool] | None = None,
         only_if_registry_empty: bool = False,
@@ -812,13 +813,15 @@ class Endpoints(_Namespace):
         keys the operator already set are left alone. ``only_if_registry_empty`` does
         not add an endpoint behind a configured operator; ``update_base_url`` also
         repoints an existing one (use it to heal a known-stale URL, not to override the
-        operator)."""
+        operator). ``protocol`` is ``openai`` or a protocol this extension provides
+        (``[[provides.protocols]]``); an engine that runs locally passes ``base_url=""``."""
         return dict(
             await self._ctx.call(
                 "endpoints.ensure",
                 name=name,
                 base_url=base_url,
                 display_label=display_label,
+                protocol=protocol,
                 extra_config=extra_config or {},
                 subsystem_map=subsystem_map or {},
                 only_if_registry_empty=only_if_registry_empty,

@@ -1,0 +1,52 @@
+schema = 1
+
+[extension]
+id = "official/vox_kitten"
+name = "KittenTTS voice"
+version = "0.1.0"
+description = "Local, offline text-to-speech with the KittenTTS models: multi-voice, runs on the CPU."
+author = "SyntH"
+
+[compat]
+core_api = ">=0.1,<1"
+
+[entry]
+module = "ext_main"
+function = "main"
+
+[provides]
+endpoints = ["kitten"]
+
+[[provides.protocols]]
+name = "kitten"
+ops = ["models", "capabilities", "health", "ping", "tts", "list_speakers"]
+
+[permissions]
+# endpoints.protocol is what lets it answer for the "kitten" engine; it holds no key (the
+# engine is local and has none). network: the models are fetched from HuggingFace on first use.
+capabilities = ["log", "config", "endpoints.manage", "endpoints.protocol"]
+network = ["huggingface.co:443", "cdn-lfs.huggingface.co:443"]
+
+[python]
+# kittentts is not on PyPI under this name at the version SyntH used: the release asset is
+# https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl.
+# It pulls onnxruntime and a CPU torch; espeak-ng must be installed on the machine.
+requirements = ["kittentts", "numpy", "phonemizer", "soundfile"]
+
+[config.KITTEN_MODEL]
+type = "string"
+label = "Model"
+description = "Which KittenTTS model to use: kitten-tts-mini-0.8 (default, ~80 MB), kitten-tts-nano-0.8 (~25 MB) or kitten-tts-micro-0.8 (~15 MB). Downloaded on first use."
+default = "kitten-tts-mini-0.8"
+
+[config.KITTEN_SPEED]
+type = "float"
+label = "Speech speed"
+description = "Speaking rate multiplier. 1.0 = normal, above 1 faster, below 1 slower (0.5 to 2.0)."
+default = 1.3
+
+[config.KITTEN_LANGUAGE_MODELS]
+type = "string"
+label = "Language to model map (JSON)"
+description = "Use another model for a language, e.g. {\"it\": \"kitten-tts-nano-it-0.1\"}. Empty: the model above is used for every language."
+default = "{}"

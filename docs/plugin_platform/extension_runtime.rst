@@ -520,6 +520,20 @@ extension (``protocol.request``).
   lowercase identifier is a valid protocol); its engines appear when the extension starts and
   go away when it stops (``ExternalEndpointRegistry.sync_protocol``).
 
+**A local engine is a protocol too.** An engine that runs inside the extension (the
+KittenTTS voice, ``official/vox_kitten``) provides a protocol and creates one endpoint of it
+with ``endpoints.ensure(name, "", protocol="kitten", subsystem_map={"vox": True})``: an empty
+address is allowed for a protocol the extension provides. The Core's voice, hearing and vision
+bridges then treat it as any endpoint, with its voice picker, active-engine setting and
+per-voice key (``<NAME>_VOICE``). The Core's voice pipeline runs adapters in a worker thread
+with a loop of its own; the proxy makes its call on the Core's loop, so that works.
+
+**Not moved yet.** The Vosk speech engine and the native KittenTTS engine are still in the
+Core. Both register their models with the Core's model manager (the "Manage Models" panel:
+catalogue, downloads, progress), which an extension cannot reach. A models API on the gateway
+is the prerequisite for moving them, and until then ``official/vox_kitten`` replaces the native
+engine of the same name only while it runs.
+
 SDK: ``ctx.protocols.on_request(handler)``, ``handler(protocol, op, endpoint, api_key, args)``.
 Tests: ``tests/test_extension_protocols.py`` (the Core side, both extensions' logic against a
 fake service, and a real Harmony extension process against a fake Harmony service).

@@ -75,6 +75,8 @@ def _declared(ctx: CallContext, name: str) -> None:
 
 
 def _url(value: str) -> str:
+    if value == "":  # a local engine (a protocol that needs no address)
+        return value
     parsed = urlparse(value)
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         raise RpcError(ErrorCode.INVALID_PARAMS, "base_url must be an http(s) URL")
@@ -124,6 +126,14 @@ def register_endpoint_api(gateway: Gateway, port: EndpointPort) -> None:
     async def ensure(ctx: CallContext, args: dict[str, Any]) -> dict[str, Any]:
         name = args["name"]
         _declared(ctx, name)
+        protocol = args["protocol"]
+        own = {p.name for p in ctx.manifest.provides.protocols}
+        if protocol not in PROTOCOLS and protocol not in own:
+            raise RpcError(
+                ErrorCode.INVALID_PARAMS,
+                f"protocol {protocol!r} is neither {', '.join(PROTOCOLS)} nor one this "
+                "extension provides (provides.protocols)",
+            )
         base_url = _url(args["base_url"])
         extra = _extra(args["extra_config"])
         subsystems = _subsystems(args["subsystem_map"])
@@ -135,7 +145,7 @@ def register_endpoint_api(gateway: Gateway, port: EndpointPort) -> None:
                 name,
                 args["display_label"] or name,
                 base_url,
-                args["protocol"],
+                protocol,
                 extra,
                 subsystems,
             )
@@ -186,7 +196,7 @@ def register_endpoint_api(gateway: Gateway, port: EndpointPort) -> None:
                     "str",
                     required=False,
                     default="openai",
-                    choices=PROTOCOLS,
+                    max_length=32,
                 ),
                 Param("extra_config", "object", required=False, default={}),
                 Param("subsystem_map", "object", required=False, default={}),

@@ -12,7 +12,12 @@ from synth_sdk.rpc import ErrorCode
 from core.extensions.endpoints import CAP_ENDPOINTS, EndpointInfo, register_endpoint_api
 from core.extensions.gateway import Gateway
 from core.extensions.grants import MemoryGrantStore
-from core.extensions.manifest import Manifest, Permissions, Provides
+from core.extensions.manifest import (
+    Manifest,
+    Permissions,
+    ProtocolProvision,
+    Provides,
+)
 from core.extensions.memory_ports import memory_ports
 from tests.test_extensions_gateway import Client, Env
 
@@ -252,3 +257,49 @@ async def test_bad_parameters_are_refused(
     params: dict[str, Any] = {"name": "my-engine", "base_url": URL, **bad}
     await client.expect(ErrorCode.INVALID_PARAMS, "endpoints.ensure", **params)
     assert port.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_local_engine_endpoint_has_no_address_and_its_own_protocol(
+    rig: tuple[Env, FakePort],
+) -> None:
+    """An engine that runs inside the extension (a local voice) has nothing to connect to."""
+    env, port = rig
+    m = manifest("local-voice")
+    m = Manifest(
+        id=m.id,
+        name=m.name,
+        version=m.version,
+        core_api=m.core_api,
+        permissions=m.permissions,
+        provides=Provides(
+            endpoints=("local-voice",),
+            protocols=(ProtocolProvision("localvoice", "", ("tts",)),),
+        ),
+    )
+    client = await env.connect(m, grant=(CAP_ENDPOINTS,))
+    got = await client.call(
+        "endpoints.ensure",
+        name="local-voice",
+        base_url="",
+        protocol="localvoice",
+        subsystem_map={"vox": True},
+    )
+    assert got["created"] is True
+    assert port.calls[0][1][2:4] == ("", "localvoice")
+    # a protocol the extension does not provide (nor the OpenAI one) is refused
+    await client.expect(
+        ErrorCode.INVALID_PARAMS,
+        "endpoints.ensure",
+        name="local-voice",
+        base_url="",
+        protocol="harmony",
+    )
+    # an address, when given, must still be http(s)
+    await client.expect(
+        ErrorCode.INVALID_PARAMS,
+        "endpoints.ensure",
+        name="local-voice",
+        base_url="ftp://x",
+        protocol="localvoice",
+    )
