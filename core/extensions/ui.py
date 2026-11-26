@@ -56,7 +56,9 @@ def frame_html(entry: dict[str, Any]) -> str:
     return (
         f'<iframe class="ext-frame" title="{escape(entry["title"])}" '
         f'src="{escape(entry["url"])}" sandbox="{sandbox}" loading="lazy" '
-        'referrerpolicy="no-referrer"></iframe>'
+        'referrerpolicy="no-referrer" '
+        'style="display:block;width:100%;height:calc(100vh - 260px);min-height:420px;'
+        'border:0;background:transparent"></iframe>'
     )
 
 
