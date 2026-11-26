@@ -12,6 +12,9 @@ Relevant ``extra_config`` keys (set by the provider preset or the add-endpoint w
 * ``tts_reference_id``  — cloned/library voice id used as ``reference_id``
 * ``tts_extra_payload`` — optional dict merged into the request payload
 * ``manual_voices``     — voices the operator added by URL
+
+It replaces ``core/external_endpoints/adapters/fish_audio_adapter.py``, removed in commit
+16154870 (``git log --diff-filter=D -- core/external_endpoints/adapters/fish_audio_adapter.py``).
 """
 
 from __future__ import annotations

@@ -15,6 +15,9 @@ and its **audio endpoints** are its own:
   ``input_embedding`` instead.
 * ``POST /v1/audio/transcriptions`` (STT) also takes **JSON**, with the audio base64 in
   ``input_audio``, and returns the transcript in ``text``.
+
+It replaces ``core/external_endpoints/adapters/harmony_ai_adapter.py``, removed in commit
+16154870 (``git log --diff-filter=D -- core/external_endpoints/adapters/harmony_ai_adapter.py``).
 """
 
 from __future__ import annotations
