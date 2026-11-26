@@ -6,6 +6,9 @@ short spoken remark around each song change, has the synth's voice say it
 land in the gap between songs. The same clip is played on the avatar's stage so anyone
 watching sees the synth speak. Everything the Core owns (the model, the voice, the
 avatar, the chat history) is reached only through those calls.
+
+It replaces the in-tree plugin ``plugins/radio_host``, removed in commit 713590cd; the old
+code is found with ``git log --diff-filter=D -- plugins/radio_host/radio_host_plugin.py``.
 """
 
 from __future__ import annotations
