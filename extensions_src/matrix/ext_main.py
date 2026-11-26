@@ -4,6 +4,9 @@ Talks to a Matrix homeserver with ``matrix-nio`` (bundled in ``lib/``). Talks to
 through ``ctx``; imports nothing from the Core. A Matrix path is ``matrix/<room>`` or
 ``matrix/<room>/<thread event>``: the *room* is the chat and a thread is a thread, so
 the default ``chat[/thread]`` shape of an interface fits.
+
+It replaces the in-tree ``interface/matrix_interface``, removed in commit 02b10a6e; the old code
+is found with ``git log --diff-filter=D -- interface/matrix_interface/matrix_interface.py``.
 """
 
 from __future__ import annotations
