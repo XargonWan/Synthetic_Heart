@@ -752,11 +752,7 @@ class GrilloGrowthPlugin:
                 log_error(
                     f"[grillo_growth] Could not load Cortex engine '{active_cortex}': {e}"
                 )
-                try:
-                    engine = registry.load_engine("manual")
-                except Exception as e2:
-                    log_error(f"[grillo_growth] Manual fallback failed: {e2}")
-                    return None
+                return None
 
         parsed = await self._generate_and_parse(engine, prompt)
 
@@ -1390,11 +1386,7 @@ class GrilloGrowthPlugin:
                 log_error(
                     f"[grillo_growth] Could not load Cortex engine '{active_cortex}': {e}"
                 )
-                try:
-                    engine = registry.load_engine("manual")
-                except Exception as e2:
-                    log_error(f"[grillo_growth] Manual fallback failed: {e2}")
-                    return None
+                return None
 
         parsed = await self._generate_and_parse(engine, prompt)
         if parsed is None:

@@ -96,27 +96,20 @@ def normalize_interface_name(interface: str) -> str:
     if not interface or interface.lower() == "unknown":
         return "unknown"
 
-    # Normalize telegram interfaces
-    if "telegram" in interface.lower() or "telethon" in interface.lower():
-        return "telegram"
+    name = interface.lower()
 
-    # Normalize discord interfaces
-    if "discord" in interface.lower():
-        return "discord"
-
-    # Other specific interfaces
+    # Platform bots are named ``<platform>_bot``: the platform is the label.
+    # ``telegram_bot`` and the user-account ``telegram`` both land on ``telegram``.
     interface_mapping = {
         "webui": "webui",
         "web": "webui",
         "x_interface": "x",
         "twitter": "x",
         "reddit_interface": "reddit",
-        "cli": "manual",
-        "manual": "manual",
     }
-
-    normalized = interface_mapping.get(interface.lower(), interface.lower())
-    return normalized
+    if name in interface_mapping:
+        return interface_mapping[name]
+    return name.removesuffix("_bot")
 
 
 def get_max_diary_chars(
@@ -148,7 +141,7 @@ def get_max_diary_chars(
                     "[ai_diary] Already in async context, using sync fallback for get_active_cortex_engine"
                 )
                 # Use a simple fallback since we can't await here
-                active_cortex = "manual"  # Safe fallback
+                active_cortex = None  # unknown: the safe default limit below applies
             else:
                 active_cortex = loop.run_until_complete(get_active_cortex_engine())
         except RuntimeError:
@@ -157,13 +150,13 @@ def get_max_diary_chars(
                 active_cortex = asyncio.run(get_active_cortex_engine())
             except Exception as e:
                 log_debug(f"[ai_diary] Could not get active Cortex engine: {e}")
-                active_cortex = "manual"  # Safe fallback
+                active_cortex = None  # unknown: the safe default limit below applies
         except Exception as e:
             log_debug(f"[ai_diary] Error in async handling: {e}")
-            active_cortex = "manual"  # Safe fallback
+            active_cortex = None  # unknown: the safe default limit below applies
 
-        if not active_cortex or active_cortex == "manual":
-            log_debug("[ai_diary] Using manual fallback limits")
+        if not active_cortex:
+            log_debug("[ai_diary] No active engine known: using the default limits")
             return 128001  # Safe fallback
 
         registry = get_cortex_registry()

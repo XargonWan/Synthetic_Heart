@@ -26,7 +26,7 @@ class TestCortexRegistryAutoDiscover(unittest.TestCase):
 
         register_default_engines(dev_enabled=True)
         engines = reg.get_available_engines()
-        # Dev engines (e.g. manual) should be discoverable when dev is enabled
+        # Dev engines should be discoverable when dev is enabled
         self.assertTrue(
             len(engines) > 0,
             "Expected at least one engine after dev discovery",

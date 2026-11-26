@@ -53,7 +53,9 @@ def _coerce_text(value: object) -> str:
         parts = [_coerce_text(v) for v in value]
         return "\n".join(p for p in parts if p).strip()
     if isinstance(value, dict):
-        return "\n".join(f"{k}: {_coerce_text(v)}" for k, v in value.items() if _coerce_text(v)).strip()
+        return "\n".join(
+            f"{k}: {_coerce_text(v)}" for k, v in value.items() if _coerce_text(v)
+        ).strip()
     return str(value).strip()
 
 
@@ -62,17 +64,77 @@ def _coerce_text(value: object) -> str:
 # as weather flagged 14 of 17 days of the first day-unit replay for nothing. A word that does two jobs
 # may only be required in the job it is unambiguous in.
 _WEATHER_STRICT = (
-    "rain", "rains", "rained", "raining", "rainy", "storm", "stormy", "thunder", "lightning",
-    "snow", "snowy", "sleet", "hail", "fog", "foggy", "mist", "misty", "sunny", "sunshine",
-    "overcast", "drizzle", "cloud", "cloudy", "wind", "windy", "humid", "frost", "pouring",
+    "rain",
+    "rains",
+    "rained",
+    "raining",
+    "rainy",
+    "storm",
+    "stormy",
+    "thunder",
+    "lightning",
+    "snow",
+    "snowy",
+    "sleet",
+    "hail",
+    "fog",
+    "foggy",
+    "mist",
+    "misty",
+    "sunny",
+    "sunshine",
+    "overcast",
+    "drizzle",
+    "cloud",
+    "cloudy",
+    "wind",
+    "windy",
+    "humid",
+    "frost",
+    "pouring",
 )
 _PLACE_TERMS = (
-    "bed", "roof", "kitchen", "garden", "forest", "couch", "sofa", "balcony", "shower", "bath",
-    "window", "floor", "blanket", "house", "home", "room", "stairs", "yard", "door", "car",
+    "bed",
+    "roof",
+    "kitchen",
+    "garden",
+    "forest",
+    "couch",
+    "sofa",
+    "balcony",
+    "shower",
+    "bath",
+    "window",
+    "floor",
+    "blanket",
+    "house",
+    "home",
+    "room",
+    "stairs",
+    "yard",
+    "door",
+    "car",
 )
 _OBJECT_TERMS = (
-    "minecraft", "vessel", "coffee", "tea", "soup", "bread", "book", "phone", "quest", "block",
-    "server", "radio", "music", "glasses", "outfit", "dress", "lingerie", "bikini", "shower",
+    "minecraft",
+    "vessel",
+    "coffee",
+    "tea",
+    "soup",
+    "bread",
+    "book",
+    "phone",
+    "quest",
+    "block",
+    "server",
+    "radio",
+    "music",
+    "glasses",
+    "outfit",
+    "dress",
+    "lingerie",
+    "bikini",
+    "shower",
 )
 # One person may carry more than one name in her entries, so a name is satisfied by its own group:
 # Mama/Mommy are one person, Daddy/Papa another. The check must never fail a summary for picking the
@@ -177,14 +239,22 @@ def _verify_anchors(source_text: str, summary: str, anchors: dict) -> dict:
     import re
 
     src = (source_text or "").lower()
-    out = ((summary or "") + " " + json.dumps(anchors or {}, ensure_ascii=False, default=str)).lower()
+    out = (
+        (summary or "")
+        + " "
+        + json.dumps(anchors or {}, ensure_ascii=False, default=str)
+    ).lower()
 
     def _has(text: str, word: str) -> bool:
         return re.search(rf"\b{re.escape(word)}\b", text) is not None
 
     missing: dict = {}
     required = kept = 0
-    for label, vocab in (("weather", _WEATHER_STRICT), ("place", _PLACE_TERMS), ("object", _OBJECT_TERMS)):
+    for label, vocab in (
+        ("weather", _WEATHER_STRICT),
+        ("place", _PLACE_TERMS),
+        ("object", _OBJECT_TERMS),
+    ):
         want = sorted({w for w in vocab if _has(src, w)})
         if not want:
             continue
@@ -948,9 +1018,15 @@ class GrilloCompactorPlugin:
         day_label = str(day_ts)[:10] if day_ts else f"row {day_id}"
         content = row.get("content") or ""
         thoughts_cap = max(0, _setting("GRILLO_COMPACT_DAY_THOUGHTS_CHARS", 6000, int))
-        thoughts = ((row.get("personal_thought") or "")[:thoughts_cap]) if thoughts_cap else ""
-        max_chars = max(300, _setting("GRILLO_COMPACT_DAY_MAX_SUMMARY_CHARS", 2000, int))
-        min_confidence = float(_setting("GRILLO_COMPACT_REPLACE_MIN_CONFIDENCE", 0.9, float))
+        thoughts = (
+            ((row.get("personal_thought") or "")[:thoughts_cap]) if thoughts_cap else ""
+        )
+        max_chars = max(
+            300, _setting("GRILLO_COMPACT_DAY_MAX_SUMMARY_CHARS", 2000, int)
+        )
+        min_confidence = float(
+            _setting("GRILLO_COMPACT_REPLACE_MIN_CONFIDENCE", 0.9, float)
+        )
         anchor_check = bool(_setting("GRILLO_COMPACT_ANCHOR_CHECK", True, bool))
         source_text = f"{content}\n{thoughts}"
         known_false = await get_known_false_claims_block()
@@ -996,7 +1072,13 @@ class GrilloCompactorPlugin:
         anchors: dict = {}
         confidence = 0.5
         feeling = None
-        verify: dict = {"passed": True, "coverage": None, "missing": {}, "required": 0, "kept": 0}
+        verify: dict = {
+            "passed": True,
+            "coverage": None,
+            "missing": {},
+            "required": 0,
+            "kept": 0,
+        }
         instruction = ""
 
         for attempt in (1, 2):
@@ -1008,7 +1090,9 @@ class GrilloCompactorPlugin:
                 status = "declined"
                 break
             summary = _coerce_text(data.get("summary"))
-            anchors = data.get("anchors") if isinstance(data.get("anchors"), dict) else {}
+            anchors = (
+                data.get("anchors") if isinstance(data.get("anchors"), dict) else {}
+            )
             confidence = _parse_confidence(data.get("confidence"))
             feeling = _coerce_text(data.get("feeling")) or None
             if not summary:
@@ -1025,7 +1109,9 @@ class GrilloCompactorPlugin:
                 status = "ok"
                 break
             if attempt == 1:
-                missing_json = json.dumps(verify.get("missing") or {}, ensure_ascii=False)
+                missing_json = json.dumps(
+                    verify.get("missing") or {}, ensure_ascii=False
+                )
                 log_info(
                     f"[grillo_compactor] day {day_label}: anchors missing {missing_json} -> one retry"
                 )
@@ -1048,7 +1134,9 @@ class GrilloCompactorPlugin:
         if status != "ok":
             base.update({"status": status, "summary": summary[:400]})
             if status == "declined":
-                base["justification"] = _coerce_text((data or {}).get("justification"))[:200]
+                base["justification"] = _coerce_text((data or {}).get("justification"))[
+                    :200
+                ]
             return base
 
         would_replace = confidence >= min_confidence
@@ -1058,13 +1146,17 @@ class GrilloCompactorPlugin:
                     "status": "ok",
                     "summary": summary,
                     "anchors": anchors,
-                    "memory_content": summary if not anchors else f"{summary}\n\n{_format_anchors(anchors)}",
+                    "memory_content": summary
+                    if not anchors
+                    else f"{summary}\n\n{_format_anchors(anchors)}",
                     "would_replace_source": would_replace,
                 }
             )
             return base
 
-        memory_content = summary if not anchors else f"{summary}\n\n{_format_anchors(anchors)}"
+        memory_content = (
+            summary if not anchors else f"{summary}\n\n{_format_anchors(anchors)}"
+        )
         tags_raw = row.get("tags")
         if not isinstance(tags_raw, str):
             tags_raw = json.dumps(tags_raw or [])
@@ -1447,17 +1539,7 @@ class GrilloCompactorPlugin:
                     log_error(
                         f"[grillo_compactor] Could not load active Cortex engine '{active_cortex}': {e}"
                     )
-                    # Try a safe fallback to the bundled 'manual' engine
-                    try:
-                        engine = registry.load_engine("manual")
-                        log_info(
-                            "[grillo_compactor] Fallback to 'manual' Cortex engine succeeded"
-                        )
-                    except Exception as e2:
-                        log_error(
-                            f"[grillo_compactor] Fallback to manual engine failed: {e2}"
-                        )
-                        return False
+                    return False
 
             # Generate response
             try:
@@ -1518,7 +1600,9 @@ class GrilloCompactorPlugin:
                     # archived. Previously the decline only skipped the size gate below, so a cluster
                     # explicitly marked should_compact=false was still persisted and its sources still
                     # deleted (one declined day became a ~180 char summary standing for a whole day).
-                    if not should_compact and _setting("GRILLO_COMPACT_SKIP_DECLINED", True, bool):
+                    if not should_compact and _setting(
+                        "GRILLO_COMPACT_SKIP_DECLINED", True, bool
+                    ):
                         log_info(
                             f"[grillo_compactor] Cluster {cid} declined by the model "
                             f"({justification[:100]!r}) -> nothing written, sources left in place"
@@ -1649,7 +1733,11 @@ class GrilloCompactorPlugin:
                             f"[grillo_compactor] Cluster {cid} produced no memory content -> nothing written"
                         )
                         proposed_results.append(
-                            {"cluster_id": cid, "status": "no_content", "source_ids": source_ids}
+                            {
+                                "cluster_id": cid,
+                                "status": "no_content",
+                                "source_ids": source_ids,
+                            }
                         )
                         continue
 
