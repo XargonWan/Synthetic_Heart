@@ -18,7 +18,6 @@ ENV_READS_ALLOWED: dict[str, int] = {
     "live_engines/gemini.py": 1,
     "soul_plugin/soul_plugin.py": 1,
     "event_plugin/event_plugin.py": 5,
-    "radio_host/radio_host_plugin.py": 1,
     "mate_engine/mate_engine.py": 1,
     "agent_plugin/agent_plugin.py": 1,
     "rift_vessel/minecraft/minecraft.py": 1,

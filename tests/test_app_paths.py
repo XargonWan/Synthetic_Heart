@@ -9,7 +9,6 @@ container-only default fails locally instead of on a user's machine.
 
 from __future__ import annotations
 
-import importlib
 import os
 import subprocess
 import sys
@@ -216,16 +215,6 @@ def test_check_dockerisms_guard_is_clean() -> None:
         cwd=str(app_paths.app_root()),
     )
     assert result.returncode == 0, result.stdout + result.stderr
-
-
-def test_radio_audio_dir_is_not_container_only() -> None:
-    """The radio plugin resolves its audio dir instead of hardcoding /app."""
-    module = importlib.import_module("plugins.radio_host.radio_host_plugin")
-    audio_dir = Path(module.AUDIO_STORAGE_DIR)
-    if app_paths.usable_container_dir(Path("/app")):
-        assert audio_dir == Path("/app/tmp_tts/radio_host")
-    else:
-        assert app_paths.app_root() in audio_dir.parents
 
 
 # --------------------------------------------------- generated-audio location
