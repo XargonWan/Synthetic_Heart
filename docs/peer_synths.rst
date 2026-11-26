@@ -69,7 +69,7 @@ When a message arrives in a Telegram group:
    used to be stripped from every peer's copy of a line while the sender's own
    store kept them: each instance remembered the other's actions as plain
    speech. Group and supergroup ids are negative, so
-   ``telegram_parse_mode_for`` (``interface/message_send_utils.py``) sends
+   ``parse_mode_for`` in the Telegram bot extension (``extensions_src/telegram_bot/convert.py``) sends
    those chats with no parse mode and keeps ``Markdown`` for private chats. In
    a group the markers are therefore visible exactly as typed, which is also
    what both instances store.

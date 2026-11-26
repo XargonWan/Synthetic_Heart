@@ -33,16 +33,6 @@ except Exception as e:
     traceback.print_exc()
 
 try:
-    print("3. Testing interface.message_send_utils...")
-
-    print("   ✅ interface.message_send_utils imported successfully")
-except Exception as e:
-    print(f"   ❌ interface.telegram_utils failed: {e}")
-    import traceback
-
-    traceback.print_exc()
-
-try:
     print("4. Testing cortex.llm_provider.dev.manual...")
 
     print("   ✅ cortex.llm_provider.dev.manual imported successfully")
