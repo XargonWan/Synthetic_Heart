@@ -52,8 +52,6 @@ CORE_INTERFACES: dict[str, InterfaceTraits] = {
     "discord_bot": InterfaceTraits(voice_input_tts_only=True),
     "synth_webui": InterfaceTraits(message_action="message_synth_webui"),
     "matrix_chat": InterfaceTraits(),
-    # Speaking on air is the equivalent of sending a message; nobody is chatting.
-    "radio_host": InterfaceTraits(user_facing=False, message_action="radio_speak"),
 }
 
 _declared: dict[str, InterfaceTraits] = {}

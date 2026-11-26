@@ -60,7 +60,7 @@ from synth_sdk.rpc import ErrorCode, RpcError
 
 from core.extensions.gateway import ApiMethod, CallContext, Gateway, Param, Session
 from core.extensions.media import MediaBridge, MediaError
-from core.interface_traits import InterfaceTraits
+from core.interface_traits import SEND_MESSAGE, InterfaceTraits
 
 CAP_REGISTER = "interfaces.register"
 CAP_INBOUND = "interfaces.inbound"
@@ -100,6 +100,19 @@ NameResolver = Callable[..., Awaitable[dict[str, str | None]]]
 
 
 # ------------------------------------------------------------------ ports
+
+
+#: Key under which a turn the extension started (``turns.request``) keeps its context.
+CONTEXT_KEY = "extension_turn"
+
+
+def turn_context_for(context_memory: Any, extension_id: str) -> dict[str, Any]:
+    """What the extension passed in ``turns.request``, if this turn is its own."""
+    turn = context_memory.get(CONTEXT_KEY) if isinstance(context_memory, dict) else None
+    if isinstance(turn, dict) and turn.get("extension_id") == extension_id:
+        value = turn.get("context")
+        return dict(value) if isinstance(value, dict) else {}
+    return {}
 
 
 class InterfaceHost(Protocol):
@@ -341,6 +354,9 @@ class RemoteInterface:
                     "interface_id": self.spec.id,
                     "name": name,
                     "payload": dict(payload) if isinstance(payload, Mapping) else {},
+                    # What the extension itself put in ``turns.request``, when this
+                    # action answers one of its turns; nothing otherwise.
+                    "context": turn_context_for(context, self._session.extension_id),
                 },
                 timeout=SEND_TIMEOUT,
             )
@@ -608,6 +624,7 @@ def _traits_for(ctx: CallContext, interface_id: str) -> InterfaceTraits:
                 bot_username_suffix=provided.bot_username_suffix or None,
                 peer_ids=provided.peer_ids,
                 reply_only=provided.reply_only,
+                message_action=provided.message_action or SEND_MESSAGE,
             )
     return InterfaceTraits()
 

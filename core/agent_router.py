@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core import stats_registry
 from core.config_manager import config_registry
+from core.interface_traits import message_actions
 
 # Lane constants
 FAST = "fast"
@@ -135,9 +136,9 @@ def _is_pure_message(action_type: str) -> bool:
     action; special outbound verbs (radio, TTS) are listed explicitly.
     """
     return (
-        action_type in ("send_message", "message")
+        action_type in ("send_message", "message", "tts_speak")
         or action_type.startswith("message_")
-        or action_type in ("radio_speak", "tts_speak")
+        or action_type in message_actions()
     )
 
 

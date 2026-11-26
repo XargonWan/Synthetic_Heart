@@ -431,6 +431,63 @@ SDK: ``ctx.endpoints.get(name)`` and ``ctx.endpoints.ensure(name, base_url, ...)
 Zen LLM Engine extension (``extensions_src/zen``) is the first user: the Core no longer
 seeds, names or tunes anything for Zen.
 
+Turns of its own, the synth's voice, and a Recon question
+----------------------------------------------------------
+
+An extension that is not a chat but still *speaks*, such as a radio DJ (the AzuraCast
+Radio DJ, ``extensions_src/radio_host``, is the first), needs four more things from the
+Core. Each is a small, scoped API; none gives access to the model, the voice engine or the
+avatar directly.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 24 22 54
+
+   * - Method
+     - Capability
+     - Behaviour
+   * - ``turns.request``
+     - ``turns.request``
+     - Runs one **background turn** on one of the extension's own interfaces
+       (``core/extensions/turns.py``). ``text`` is what the model is asked; the turn is
+       not written to the chat history, is scoped to ``allowed_actions`` (at least one,
+       all actions of that interface, so the model cannot reach anything else) and is
+       queued at a named ``priority``: ``background``, ``low``, ``ambient``, ``general``
+       or ``elevated`` (one step above ordinary chat, below the trainer and below every
+       call). ``context`` (at most 4 KB of JSON) comes back, untouched, in the extension's
+       ``interface.action`` call when the model answers with one of its actions, so a
+       request and its answer meet again without a table of pending turns. At most 20
+       requests a minute, because each costs a model call.
+   * - ``voice.synthesize``
+     - ``voice.synthesize``
+     - Speaks ``text`` with the synth's voice (or a named engine) and returns the audio as
+       **a file in the extension's own data directory** (a copy made by the Core, readable
+       by that extension only, removed within an hour). No engine: ``{"available": false}``.
+   * - ``voice.play``
+     - ``voice.play``
+     - Makes the avatar speak a clip of the extension's, with lip-sync, for everyone
+       watching the stage. The path must be inside the extension's data directory; the
+       Core copies it with the same checks as an attachment and opens no other path.
+   * - ``recon.contribute`` (Core to extension)
+     - ``recon.contribute``
+     - The extension declares ``[[provides.recon]]`` (``key``, ``instruction``,
+       ``priority``): a question added to Recon, the step before every turn in which the
+       model answers a few structured questions about the message. With the model's answer
+       the Core calls the extension and puts what it returns into the prompt as snippets
+       (at most three, 2,000 characters each, five seconds to answer). A key the Core's
+       own recon plugins use cannot be taken, and nothing else can be contributed.
+
+Two small manifest and SDK pieces go with them. ``message_action`` in
+``[[provides.interfaces]]`` names the interface's own action that is how it *speaks* (a
+radio's "say on air"), so the Core treats it as a message without knowing its name.
+``ctx.interfaces.on_action`` hands the handler the turn's ``context`` as its fourth argument.
+
+SDK: ``ctx.turns.request(...)``, ``ctx.voice.synthesize(text)`` / ``ctx.voice.play(path)``
+and ``ctx.recon.on_contribute(handler)``. Tests: ``tests/test_extensions_turns_voice_recon.py``
+(the API against fakes), ``tests/test_extensions_core_turns_voice.py`` (the Core services),
+``tests/test_extension_radio_host_process.py`` (a real extension process, a fake station
+and the whole path of one remark).
+
 Web content
 -----------
 

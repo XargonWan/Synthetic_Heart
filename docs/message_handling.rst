@@ -90,13 +90,13 @@ Enqueue a low-priority background message from a plugin:
         priority=message_queue.PRIORITY_BACKGROUND,
     )
 
-    # Radio banter (above normal chat, may briefly block)
+    # Time-bound commentary an extension asked for (above normal chat, below people)
     await message_queue.enqueue_low_priority(
         bot=None,
-        message=banter_message,
-        context_memory={'radio_host': True},
-        interface_id='radio',
-        priority=message_queue.PRIORITY_RADIO,
+        message=commentary_message,
+        context_memory={'skip_history': True},
+        interface_id='radio_host',
+        priority=message_queue.PRIORITY_ELEVATED,
     )
 
 The full priority scale: ``EMERGENCY`` (12) > ``URGENT`` (11) > ``REFLECTION`` (10)

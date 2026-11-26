@@ -80,6 +80,9 @@ class InterfaceProvision:
     reply_only: bool = False
     #: Names of the extra actions the interface may offer besides ``send_message``.
     actions: tuple[str, ...] = ()
+    #: The one of those actions that is how the interface *speaks* (a radio's "say on
+    #: air"), when it is not ``send_message``. Empty: ``send_message``.
+    message_action: str = ""
 
 
 #: The fixed places in the WebUI an extension may put a window in. ``activity`` and
@@ -124,6 +127,28 @@ class WebProvision:
 
 
 @dataclass(frozen=True)
+class ReconProvision:
+    """A question the extension adds to the Recon step of every turn.
+
+    Recon asks the model, once per turn and for all the plugins at once, a few small
+    structured questions about the message. This is one of them: ``key`` names the
+    answer, ``instruction`` is the question (written for the model, language-neutral),
+    ``priority`` orders what the extension's answer adds to the prompt. When the model
+    answers, the Core calls ``recon.contribute`` on the extension with that answer and
+    puts what it returns into the prompt.
+    """
+
+    key: str
+    instruction: str
+    priority: int = 0
+
+
+#: Recon questions one extension may add.
+MAX_RECON = 4
+RECON_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{1,39}$")
+
+
+@dataclass(frozen=True)
 class Provides:
     """What the extension contributes to the system."""
 
@@ -136,6 +161,8 @@ class Provides:
     #: Names of the external endpoints (``external_endpoints``) the extension may create
     #: and keep up to date. Any other endpoint is out of its reach.
     endpoints: tuple[str, ...] = ()
+    #: Questions added to the Recon step (see :class:`ReconProvision`).
+    recon: tuple[ReconProvision, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -405,7 +432,16 @@ def _parse_provides(data: Mapping[str, Any], c: _Collector) -> Provides:
     c.unknown_keys(
         table,
         frozenset(
-            {"interfaces", "actions", "engines", "hooks", "ui", "web", "endpoints"}
+            {
+                "interfaces",
+                "actions",
+                "engines",
+                "hooks",
+                "ui",
+                "web",
+                "endpoints",
+                "recon",
+            }
         ),
         "provides",
     )
@@ -432,6 +468,7 @@ def _parse_provides(data: Mapping[str, Any], c: _Collector) -> Provides:
                     "peer_ids",
                     "reply_only",
                     "actions",
+                    "message_action",
                 }
             ),
             path,
@@ -456,6 +493,12 @@ def _parse_provides(data: Mapping[str, Any], c: _Collector) -> Provides:
         suffix = c.string(entry, "bot_username_suffix", path)
         iface_actions = c.string_list(entry, "actions", path)
         c.matching(iface_actions, IDENT_RE, f"{path}.actions", "action name")
+        speaking = c.string(entry, "message_action", path)
+        if speaking and speaking not in iface_actions:
+            c.add(
+                f"{path}.message_action",
+                f"must be one of the interface's own actions, got {speaking!r}",
+            )
         interfaces.append(
             InterfaceProvision(
                 id=iface_id,
@@ -469,6 +512,7 @@ def _parse_provides(data: Mapping[str, Any], c: _Collector) -> Provides:
                 peer_ids=c.boolean(entry, "peer_ids", path),
                 reply_only=c.boolean(entry, "reply_only", path),
                 actions=iface_actions,
+                message_action=speaking,
             )
         )
     ids = [item.id for item in interfaces]
@@ -489,6 +533,7 @@ def _parse_provides(data: Mapping[str, Any], c: _Collector) -> Provides:
                 "provides.engines",
                 f"unknown engine kind {kind!r} (allowed: {', '.join(sorted(ENGINE_KINDS))})",
             )
+    recon = _parse_recon(table, c)
     web = _parse_web(table, c)
     if ui and (web is None or not web.static):
         c.add(
@@ -503,6 +548,7 @@ def _parse_provides(data: Mapping[str, Any], c: _Collector) -> Provides:
         ui=ui,
         web=web,
         endpoints=endpoints,
+        recon=recon,
     )
 
 
@@ -568,6 +614,43 @@ def _parse_ui(provides: Mapping[str, Any], c: _Collector) -> tuple[UiEntry, ...]
     for dup in sorted({k for k in keys if keys.count(k) > 1}):
         c.add("provides.ui", f"window {dup[1]!r} is declared twice in slot {dup[0]!r}")
     return tuple(entries)
+
+
+def _parse_recon(
+    provides: Mapping[str, Any], c: _Collector
+) -> tuple[ReconProvision, ...]:
+    raw = provides.get("recon", [])
+    if not isinstance(raw, list):
+        c.add("provides.recon", "must be a list of tables ([[provides.recon]])")
+        return ()
+    if len(raw) > MAX_RECON:
+        c.add("provides.recon", f"at most {MAX_RECON} questions")
+    found: list[ReconProvision] = []
+    for index, item in enumerate(raw[:MAX_RECON]):
+        path = f"provides.recon[{index}]"
+        table = c.table(item, path)
+        if table is None or not isinstance(item, Mapping):
+            continue
+        c.unknown_keys(item, frozenset({"key", "instruction", "priority"}), path)
+        key = c.string(item, "key", path, required=True)
+        instruction = c.string(item, "instruction", path, required=True)
+        priority = item.get("priority", 0)
+        if key and not RECON_KEY_RE.match(key):
+            c.add(f"{path}.key", f"must be a lowercase identifier, got {key!r}")
+        if not len(instruction) <= 1500:
+            c.add(f"{path}.instruction", "must be at most 1500 characters")
+        if (
+            isinstance(priority, bool)
+            or not isinstance(priority, int)
+            or not 0 <= priority <= 10
+        ):
+            c.add(f"{path}.priority", "must be an integer from 0 to 10")
+            priority = 0
+        found.append(ReconProvision(key, instruction, priority))
+    keys = [r.key for r in found]
+    for dup in sorted({k for k in keys if keys.count(k) > 1}):
+        c.add("provides.recon", f"question {dup!r} is declared twice")
+    return tuple(found)
 
 
 def _parse_web(provides: Mapping[str, Any], c: _Collector) -> WebProvision | None:

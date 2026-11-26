@@ -386,3 +386,145 @@ class CoreEndpointPort:
 
 def core_endpoint_port() -> CoreEndpointPort:
     return CoreEndpointPort()
+
+
+class CoreTurns:
+    """``TurnPort`` backed by the Core's message queue.
+
+    The turn is queued like any other low-priority work (a Grillo beat, a reminder):
+    its own ``context_memory`` (never the shared one), no chat history, and the
+    extension's context under :data:`core.extensions.turns.CONTEXT_KEY`.
+    """
+
+    async def request(
+        self,
+        *,
+        extension_id: str,
+        interface_id: str,
+        path: str,
+        text: str,
+        sender_name: str,
+        priority: str,
+        context: dict[str, Any],
+        allowed_actions: list[str],
+        history_recent_max: int,
+    ) -> None:
+        import asyncio
+        from datetime import datetime, timezone
+        from types import SimpleNamespace
+
+        from core import message_queue
+        from core.extensions.interfaces import CONTEXT_KEY
+
+        bands = {
+            "background": message_queue.PRIORITY_BACKGROUND,
+            "low": message_queue.PRIORITY_LOW,
+            "ambient": message_queue.PRIORITY_AMBIENT,
+            "general": message_queue.PRIORITY_GENERAL,
+            "elevated": message_queue.PRIORITY_ELEVATED,
+        }
+        chat_part = path.split("/")[1] if "/" in path else path
+        try:
+            chat_id: Any = int(chat_part)
+        except ValueError:
+            chat_id = chat_part
+        message = SimpleNamespace()
+        message.chat_id = chat_id
+        message.message_id = (
+            f"ext_turn_{interface_id}_{asyncio.get_running_loop().time()}"
+        )
+        message.text = text
+        message.from_user = SimpleNamespace(
+            id=chat_id,
+            username=interface_id,
+            full_name=sender_name,
+            first_name=sender_name,
+        )
+        message.chat = SimpleNamespace(id=chat_id, type="internal")
+        message.date = datetime.now(timezone.utc)
+        context_memory: dict[str, Any] = {
+            "skip_history": True,
+            "history_recent_max": history_recent_max,
+            "beat_type": "extension_turn",
+            "allowed_action_types": list(allowed_actions),
+            CONTEXT_KEY: {
+                "extension_id": extension_id,
+                "interface_id": interface_id,
+                "context": context,
+            },
+        }
+        await message_queue.enqueue_low_priority(
+            None,
+            message,
+            context_memory=context_memory,
+            interface_id=interface_id,
+            original_message=None,
+            priority=bands[priority],
+        )
+
+
+class CoreVoice:
+    """``VoicePort`` backed by the Core's Vox plugin."""
+
+    @staticmethod
+    def _vox() -> Any | None:
+        from core.core_initializer import PLUGIN_REGISTRY
+
+        return PLUGIN_REGISTRY.get("vox_plugin") or PLUGIN_REGISTRY.get("vox")
+
+    async def synthesize(self, text: str, engine: str) -> str | None:
+        import os
+        import re
+
+        from core.logging_utils import log_warning
+
+        vox = self._vox()
+        if vox is None:
+            log_warning("[extensions] voice.synthesize: no Vox plugin")
+            return None
+        chosen = engine or getattr(vox, "_active_engine_name", "") or ""
+        spoken = text.strip()
+        if "kitten" in chosen.lower():
+            # That engine mispronounces or rejects characters outside Latin scripts.
+            spoken = re.sub(
+                r"[^\x20-\x7E\xA0-\xFFĀ-ſ‐-‘“-”]+",
+                "",
+                spoken,
+            ).strip()
+        if not spoken:
+            spoken = "A track transition."
+        result = await vox.speak(
+            text=spoken, engine_name=engine or None, generate_only=True
+        )
+        path = result.get("audio_path") if isinstance(result, dict) else None
+        return path if path and os.path.isfile(path) else None
+
+    async def play(self, audio_path: str, text: str, engine: str) -> bool:
+        vox = self._vox()
+        if vox is None or not hasattr(vox, "broadcast_audio_to_webui"):
+            return False
+        return bool(
+            await vox.broadcast_audio_to_webui(
+                audio_path=audio_path, text=text or None, engine_name=engine or None
+            )
+        )
+
+
+class CoreReconHost:
+    """``ReconHost`` backed by the Core's plugin registry, where Recon looks."""
+
+    def add(self, name: str, plugin: object) -> None:
+        from core.core_initializer import PLUGIN_REGISTRY
+
+        PLUGIN_REGISTRY[name] = plugin
+
+    def remove(self, name: str, plugin: object) -> None:
+        from core.core_initializer import PLUGIN_REGISTRY
+
+        if PLUGIN_REGISTRY.get(name) is plugin:
+            PLUGIN_REGISTRY.pop(name, None)
+
+    def taken_keys(self) -> set[str]:
+        from core.recon import get_registered_recon_keys
+
+        return set(get_registered_recon_keys())

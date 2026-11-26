@@ -29,8 +29,6 @@ class TestDefaults:
             "discord_bot"
         )
         assert it.message_action_for("synth_webui/x") == "message_synth_webui"
-        assert it.message_action_for("radio_host") == "radio_speak"
-        assert not it.is_user_facing("radio_host/1")
 
     def test_empty_values_are_safe(self) -> None:
         assert it.traits_for(None) == it.DEFAULT and it.traits_for("") == it.DEFAULT
@@ -60,8 +58,15 @@ class TestDeclared:
         assert not it.is_voice_input_tts_only("discord_bot")
 
     def test_user_facing_ids_excludes_non_chat_interfaces(self) -> None:
-        assert "radio_host" not in it.user_facing_ids()
+        it.register_traits(
+            "onair",
+            it.InterfaceTraits(user_facing=False, message_action="speak_on_air"),
+        )
+        assert "onair" not in it.user_facing_ids()
         assert "discord_bot" in it.user_facing_ids()
+        # a declared interface says how it speaks; the Core knows no name for it
+        assert it.message_action_for("onair/1") == "speak_on_air"
+        assert "speak_on_air" in it.message_actions()
 
 
 class TestChatKind:

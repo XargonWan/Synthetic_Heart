@@ -26,6 +26,9 @@ from core.extensions.api import register_core_api
 from core.extensions.avatar import AvatarLoader, register_avatar_api
 from core.extensions.endpoints import EndpointPort, register_endpoint_api
 from core.extensions.info import InfoLoader, register_info_api
+from core.extensions.recon import ReconHost, attach_recon
+from core.extensions.turns import TurnPort, register_turn_api
+from core.extensions.voice import VoicePort, register_voice_api
 from core.extensions.web import WebSocketHub, register_web_api
 from core.extensions.calls import CallPorts, register_call_api
 from core.extensions.gateway import AuditRecord, Gateway
@@ -71,6 +74,9 @@ class ExtensionRuntime:
         avatar_loader: AvatarLoader | None = None,
         info_loader: InfoLoader | None = None,
         endpoint_port: EndpointPort | None = None,
+        turn_port: TurnPort | None = None,
+        voice_port: VoicePort | None = None,
+        recon_host: ReconHost | None = None,
         media_root: Path | None = None,
         outbound_resolver: OutboundResolver | None = None,
         classifier: Classifier | None = None,
@@ -116,6 +122,10 @@ class ExtensionRuntime:
             register_info_api(self.gateway, info_loader)
         if endpoint_port is not None:
             register_endpoint_api(self.gateway, endpoint_port)
+        if turn_port is not None:
+            register_turn_api(self.gateway, turn_port)
+        if recon_host is not None:
+            attach_recon(self.gateway, recon_host, warn=self._warn)
         self.web_hub = WebSocketHub()
         register_web_api(self.gateway, self.web_hub)
         self.gateway.on_attach.append(
@@ -135,6 +145,8 @@ class ExtensionRuntime:
                 )
                 interface_ports.media = self.media
             register_interface_api(self.gateway, interface_ports)
+            if voice_port is not None and self.media is not None:
+                register_voice_api(self.gateway, voice_port, self.media)
             if call_ports is not None:
                 register_call_api(
                     self.gateway,
@@ -347,6 +359,9 @@ async def start_extension_runtime() -> StartReport | None:
             return None
         from core.app_paths import data_root
         from core.extensions.core_interfaces import (
+            CoreReconHost,
+            CoreTurns,
+            CoreVoice,
             core_avatar,
             core_call_ports,
             core_classifier,
@@ -368,6 +383,9 @@ async def start_extension_runtime() -> StartReport | None:
             avatar_loader=core_avatar,
             info_loader=core_info,
             endpoint_port=core_endpoint_port(),
+            turn_port=CoreTurns(),
+            voice_port=CoreVoice(),
+            recon_host=CoreReconHost(),
             media_root=data_root() / "media" / "extensions",
             outbound_resolver=core_outbound_resolver,
             classifier=core_classifier,

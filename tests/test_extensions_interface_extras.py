@@ -200,6 +200,7 @@ class TestOwnActions:
                     "interface_id": "chat",
                     "name": "answer_call",
                     "payload": {"user_id": "1", "answer": True},
+                    "context": {},
                 },
             )
         ]

@@ -636,7 +636,11 @@ class Runner:
                 await calls.stop()
 
     async def answer_call_action(
-        self, interface_id: str, name: str, payload: dict[str, Any]
+        self,
+        interface_id: str,
+        name: str,
+        payload: dict[str, Any],
+        context: dict[str, Any],
     ) -> dict[str, Any]:
         if name != ANSWER_CALL or self.calls is None:
             return {"status": "failed", "message": "Telegram calls are not available"}

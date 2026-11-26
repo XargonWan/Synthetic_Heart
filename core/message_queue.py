@@ -62,7 +62,7 @@ PRIORITY_REFLECTION = 10  # Vessel "pause & reflect on my goal" turn (above call
 PRIORITY_CALL = 9  # A turn inside a live audio/video call (above all chat)
 PRIORITY_HIGH = 8  # Direct prioritised human input (e.g. in-world player chat)
 PRIORITY_TRAINER = 7  # The trainer — must always reach Synth promptly
-PRIORITY_RADIO = 6  # Radio-host DJ banter (on-the-fly LLM generation during playback)
+PRIORITY_ELEVATED = 6  # Time-bound background turns an extension starts (e.g. live commentary); never above people
 PRIORITY_GENERAL = 5  # Ordinary user chat (discord/matrix/webui/HTTP API…)
 PRIORITY_AMBIENT = 4  # Autonomous vessel perceptions / will-beats (below humans)
 PRIORITY_LOW = 3  # Background-adjacent (web-search 2nd-pass, misc fallback)
@@ -94,7 +94,7 @@ _PRIORITY_LABELS: dict[int, str] = {
     PRIORITY_CALL: "Call",
     PRIORITY_HIGH: "High",
     PRIORITY_TRAINER: "Trainer",
-    PRIORITY_RADIO: "Radio",
+    PRIORITY_ELEVATED: "Elevated",
     PRIORITY_GENERAL: "General",
     PRIORITY_AMBIENT: "Ambient",
     PRIORITY_LOW: "Low",
@@ -1694,8 +1694,8 @@ async def enqueue_low_priority(
 
     This is a convenience wrapper for plugins that want to submit background
     messages at a specific priority band. By default items are pushed at
-    PRIORITY_LOW; callers that need a different band (e.g. radio-host banter at
-    PRIORITY_RADIO, G.R.I.L.L.O. beats at PRIORITY_BACKGROUND, or calendar
+    PRIORITY_LOW; callers that need a different band (e.g. time-bound extension commentary at
+    PRIORITY_ELEVATED, G.R.I.L.L.O. beats at PRIORITY_BACKGROUND, or calendar
     reminders at PRIORITY_URGENT) pass an explicit ``priority``.
 
     Items at or below PRIORITY_BACKGROUND_THRESHOLD are treated as non-blocking

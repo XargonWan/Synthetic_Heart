@@ -321,16 +321,23 @@ class Interfaces(_Namespace):
         return None if value is None else str(value)
 
     def on_action(
-        self, handler: Callable[[str, str, dict[str, Any]], Awaitable[Any] | Any]
+        self,
+        handler: Callable[
+            [str, str, dict[str, Any], dict[str, Any]], Awaitable[Any] | Any
+        ],
     ) -> None:
         """Run one of the interface's own actions. ``handler(interface_id, name,
-        payload)`` returns ``{"status": "success"|"failed", "message": str}``."""
+        payload, context)`` returns ``{"status": "success"|"failed", "message": str}``.
+
+        ``context`` is what you passed to :meth:`Turns.request` when this action
+        answers one of the turns you started, and ``{}`` otherwise."""
 
         async def adapter(params: dict[str, Any]) -> Any:
             result = handler(
                 str(params.get("interface_id", "")),
                 str(params.get("name", "")),
                 dict(params.get("payload") or {}),
+                dict(params.get("context") or {}),
             )
             if asyncio.iscoroutine(result):
                 result = await result
@@ -650,6 +657,92 @@ class Panels(_Namespace):
         self._ctx.handle("panel.action", adapter)
 
 
+class Turns(_Namespace):
+    """Turns you start yourself (capability ``turns.request``)."""
+
+    async def request(
+        self,
+        interface_id: str,
+        path: str,
+        text: str,
+        *,
+        allowed_actions: list[str],
+        sender_name: str = "",
+        priority: str = "low",
+        context: dict[str, Any] | None = None,
+        history_recent_max: int = 0,
+    ) -> None:
+        """Ask the model to run one background turn on one of your interfaces.
+
+        ``text`` is what it is asked; ``allowed_actions`` the actions of this interface
+        it may answer with (at least one); ``priority`` is ``background``, ``low``,
+        ``ambient``, ``general`` or ``elevated``. ``context`` (small JSON) comes back
+        to your :meth:`Interfaces.on_action` handler when the model answers. The turn
+        is not written to the chat history."""
+        await self._ctx.call(
+            "turns.request",
+            interface_id=interface_id,
+            path=path,
+            text=text,
+            allowed_actions=allowed_actions,
+            sender_name=sender_name,
+            priority=priority,
+            context=context or {},
+            history_recent_max=history_recent_max,
+        )
+
+
+class Voice(_Namespace):
+    """The synth's voice (capabilities ``voice.synthesize`` and ``voice.play``)."""
+
+    async def synthesize(self, text: str, engine: str = "") -> Path | None:
+        """Speak ``text`` and get the audio as a file in your data directory, or
+        ``None`` when no engine could make it. The Core removes it within an hour."""
+        result = await self._ctx.call(
+            "voice.synthesize", _timeout=95.0, text=text, engine=engine
+        )
+        if not result.get("available"):
+            return None
+        return Path(str(result["path"]))
+
+    async def play(self, path: Path | str, text: str = "", engine: str = "") -> bool:
+        """Make the avatar speak a clip of yours (a file in your data directory) on the
+        stage, with lip-sync. Whether anyone received it."""
+        result = await self._ctx.call(
+            "voice.play", _timeout=35.0, path=str(path), text=text, engine=engine
+        )
+        return bool(result.get("delivered"))
+
+
+class Recon(_Namespace):
+    """Questions you added to the Recon step (``[[provides.recon]]``)."""
+
+    def on_contribute(
+        self,
+        handler: Callable[
+            [str, Any, str, str], Awaitable[list[dict[str, Any]]] | list[dict[str, Any]]
+        ],
+    ) -> None:
+        """Answer the Core when the model has answered one of your questions.
+
+        ``handler(key, answer, text, interface_path)`` returns a list of
+        ``{"content": str}`` snippets to put into the prompt (a few, short), or
+        ``[]``. It runs on the turn's critical path: answer within a few seconds."""
+
+        async def adapter(params: dict[str, Any]) -> Any:
+            result = handler(
+                str(params.get("key", "")),
+                params.get("answer"),
+                str(params.get("text", "")),
+                str(params.get("interface_path", "")),
+            )
+            if asyncio.iscoroutine(result):
+                result = await result
+            return result if isinstance(result, list) else []
+
+        self._ctx.handle("recon.contribute", adapter)
+
+
 class Endpoints(_Namespace):
     """External endpoints you front (capability ``endpoints.manage``). Only names your
     manifest declares in ``provides.endpoints``, and never an endpoint that holds an
@@ -850,6 +943,9 @@ class Context:
         self.core = CoreInfo(self)
         self.web = Web(self)
         self.endpoints = Endpoints(self)
+        self.turns = Turns(self)
+        self.voice = Voice(self)
+        self.recon = Recon(self)
         self._handlers: dict[str, Callable[[dict[str, Any]], Awaitable[Any] | Any]] = {}
 
     def inbox_path(self, name: str = "file") -> Path:
