@@ -20,7 +20,7 @@ from core.extensions.gateway import Gateway
 
 #: The template that holds each section's sub-tabs.
 SECTION_OF_SLOT = {"activity": "history", "logs": "logs"}
-SANDBOX = "allow-scripts allow-forms allow-popups allow-downloads"
+SANDBOX = "allow-scripts allow-forms allow-popups allow-downloads allow-modals"
 
 
 def entries(gateway: Gateway) -> list[dict[str, Any]]:

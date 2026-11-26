@@ -196,12 +196,18 @@ Milestones
        **WebUI slots (2026-11-25)**: three fixed points
        (``activity``, ``logs``, ``more``; your decision) take windows from extensions
        (``[[provides.ui]]``); Stage is the first, in ``more``. Static pages are sandboxed
-       unless the extension has ``web.origin``. The server side is tested; the "More..."
-       menu script and the injected sub-tabs are **not verified in a browser**.
-       **Not started**: Dashboard and AzuraCast. Dashboard (``dashboard.html`` plus a
-       1,054-line ``dashboard.js``) draws with the WebUI's theme variables and shell
-       helpers, which a framed page does not inherit: it needs a theme and token handoff
-       to framed windows first, and a browser to check it. AzuraCast is ``plugins/radio_host``
+       unless the extension has ``web.origin``. The server side is tested, and the
+       "More..." menu, the injected Activity and Logs sub-tabs, the WinBox windows, the
+       Queue and Turns cards and the Dashboard window were **checked in headless Chromium
+       against the real WebUI** (2026-11-26; the harness is not in the repository).
+       **Dashboard moved (2026-11-26)** to ``official/synth_dashboard`` (``more`` slot,
+       ``web.origin`` granted because it edits settings through ``/api`` as the person):
+       the page is the old ``dashboard.js`` unchanged except for the "am I active" check,
+       its template became ``index.html``, and ``theme.js`` copies the WebUI's theme
+       variables from the framing page. The core Dashboard tab, its template, its JS and
+       the whitelists are gone; frames now allow ``allow-modals`` because the Dashboard
+       uses ``prompt``/``confirm``. **Not started**: AzuraCast.
+       AzuraCast is ``plugins/radio_host``
        (3,750 lines: AzuraCast client, jingle injector with Vox, track monitor, Recon
        hooks, its own tables, message-queue priority and a ``radio_host`` interface), a
        full plugin migration that needs the storage, Vox/media, queue and hook APIs

@@ -1,0 +1,30 @@
+schema = 1
+
+[extension]
+id = "official/synth_dashboard"
+name = "Control Deck"
+version = "0.1.0"
+description = "The Dashboard: a knob, toggle and readout for every adjustable setting, with plugin switches and an agent prompt runner."
+author = "SyntH"
+
+[compat]
+core_api = ">=0.1,<1"
+
+[entry]
+module = "ext_main"
+function = "main"
+
+[provides.web]
+static = "web"
+# The Dashboard reads and writes the Core's settings through /api as the person, so it
+# needs the Core's origin. Without web.origin its pages are sandboxed and cannot.
+same_origin = true
+
+[[provides.ui]]
+slot = "more"
+id = "dashboard"
+title = "Dashboard"
+icon = "🎛️"
+
+[permissions]
+capabilities = ["log", "web.static", "web.origin"]

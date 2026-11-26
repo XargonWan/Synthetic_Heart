@@ -27,6 +27,7 @@ from core.extensions.repo.pack import build_index, pack_extension  # noqa: E402
 #: What a fresh image installs on its own.
 DEFAULTS = (
     "official/synth_stage",
+    "official/synth_dashboard",
     "official/openai_api",
     "official/fluxer",
     "official/telegram_bot",

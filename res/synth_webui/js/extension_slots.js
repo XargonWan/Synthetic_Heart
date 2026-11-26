@@ -22,7 +22,7 @@
     }
 
     function frameFor(entry) {
-        const sandbox = 'allow-scripts allow-forms allow-popups allow-downloads' +
+        const sandbox = 'allow-scripts allow-forms allow-popups allow-downloads allow-modals' +
             (entry.same_origin ? ' allow-same-origin' : '');
         const frame = el('iframe', { title: entry.title, referrerPolicy: 'no-referrer' });
         frame.setAttribute('sandbox', sandbox);

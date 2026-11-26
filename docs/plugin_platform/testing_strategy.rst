@@ -13,8 +13,9 @@ the live database.
 Existing tests that must change
 -------------------------------
 
-* ``tests/test_dashboard_section_presence.py``: string-asserts the Dashboard nav
-  and whitelists in the Core.
+* ``tests/test_dashboard_section_presence.py``: string-asserted the Dashboard nav
+  and whitelists in the Core; replaced (2026-11-26) by ``tests/test_extension_dashboard.py``,
+  which checks the extension's manifest and page and that the Core no longer has the tab.
 * The Zen tests: ``test_zen_endpoint_no_resurrect``, ``test_db_auto_heal``,
   ``test_setup_page``, ``test_stats_server`` use ``zen-llm-engine`` as a
   fixture or guard a shipped preset.

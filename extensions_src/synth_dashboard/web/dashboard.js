@@ -7,9 +7,9 @@
  * with a sidebar index, live readouts, plugin run/toggle commands and an
  * agent prompt runner.
  *
- * Registered as window.SynthWebUI.initDashboardTab so main.js loadSection()
- * invokes it automatically when the tab is shown. The shared DOM ids live in
- * core/webui_templates/sections/dashboard.html.
+ * Runs as the page of the official/synth_dashboard extension (served at
+ * /x/official/synth_dashboard/, same origin as the WebUI so it can call /api as the
+ * person). It started as the WebUI's own Dashboard tab; the DOM ids live in index.html.
  */
 (function () {
     'use strict';
@@ -106,11 +106,8 @@
     }
 
     function isDashboardActive() {
-        if (!document.body || !document.body.dataset) { return false; }
-        var ds = document.body.dataset;
-        return ds.activeTab === 'dashboard' ||
-            ds['active-tab'] === 'dashboard' ||
-            (typeof window !== 'undefined' && window.activeTab === 'dashboard');
+        // The page lives in a frame or a window of its own: it is "active" while visible.
+        return !document.hidden;
     }
 
     // -----------------------------------------------------------------------

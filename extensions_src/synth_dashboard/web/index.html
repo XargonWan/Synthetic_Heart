@@ -1,5 +1,14 @@
-<section class="tab-panel" id="tab-dashboard" data-tab="dashboard" role="tabpanel">
-    <style>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Control Deck</title>
+<style>
+html, body { margin: 0; min-height: 100%; background: var(--bg, #0d0d16); color: var(--text, #f5f5ff);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+body { padding: 12px; box-sizing: border-box; }
+
         /* ── Dashboard theme — follows the global WebUI theme via its CSS vars ── */
         #tab-dashboard{
             --dash-bg: var(--bg, #0d0d16);
@@ -332,8 +341,13 @@
             #tab-dashboard .dash-sidebar { flex: none; max-height: 160px; overflow-y: auto; }
             #tab-dashboard .dash-rack { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
         }
-    </style>
-    <div class="dash-root">
+    
+</style>
+<script src="theme.js"></script>
+</head>
+<body>
+<section class="tab-panel active" id="tab-dashboard" data-tab="dashboard">
+<div class="dash-root">
         <header class="dash-header">
             <div class="dash-title">
                 <h2>Control Deck</h2>
@@ -355,5 +369,7 @@
         </div>
         <div id="dash-toasts" class="dash-toasts" aria-live="polite"></div>
     </div>
-    <script src="/js/dashboard.js"></script>
 </section>
+<script src="dashboard.js"></script>
+</body>
+</html>
