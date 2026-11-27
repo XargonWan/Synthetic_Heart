@@ -324,11 +324,23 @@ async def _install_defaults(root: Path) -> str:
         installer = Installer(root, bundled=bundled_repository())
         await asyncio.to_thread(installer.ensure_official_repository)
         installed, failed = await asyncio.to_thread(installer.ensure_defaults)
+        updated, update_failed = await asyncio.to_thread(installer.update_bundled)
     except Exception as exc:  # noqa: BLE001 - defaults must never stop start-up
         return f"[extensions] default install skipped: {type(exc).__name__}: {exc}"
+    notes: list[str] = []
     if failed:
-        return f"[extensions] default install: {', '.join(installed) or 'none'} ok; failed: {'; '.join(failed)}"
-    return f"[extensions] default install: {', '.join(installed)}" if installed else ""
+        notes.append(
+            f"[extensions] default install: {', '.join(installed) or 'none'} ok; failed: {'; '.join(failed)}"
+        )
+    elif installed:
+        notes.append(f"[extensions] default install: {', '.join(installed)}")
+    if updated:
+        notes.append(f"[extensions] updated from the image: {', '.join(updated)}")
+    if update_failed:
+        notes.append(
+            f"[extensions] update from the image failed: {'; '.join(update_failed)}"
+        )
+    return "\n".join(notes)
 
 
 def get_extension_runtime() -> ExtensionRuntime | None:

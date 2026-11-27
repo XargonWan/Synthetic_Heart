@@ -761,5 +761,27 @@ class Installer:
             self.state.save(state)
         return installed, failed
 
+    def update_bundled(self) -> tuple[list[str], list[str]]:
+        """Bring what the image's own repository installed up to the versions it carries.
+
+        The image is how SyntH is updated: a new image has newer defaults than the ones in
+        an old ``/config`` volume. Only extensions installed *from the baked-in repository*
+        are touched (never one the operator took from another repository), they keep their
+        on/off state and grants, and a version that asks for more than was granted does not
+        get it: that stays for the operator to grant. Returns ``(updated, failed)``.
+        """
+        updated: list[str] = []
+        failed: list[str] = []
+        for ext_id, have, available in self.updates():
+            record = self.state.load().extensions.get(ext_id)
+            if record is None or record.repo != BUNDLED_NAME:
+                continue
+            try:
+                self.update(ext_id, allow_untrusted=True)
+                updated.append(f"{ext_id} {have} -> {available}")
+            except InstallError as exc:
+                failed.append(f"{ext_id}: {exc}")
+        return updated, failed
+
     def pinned_fingerprint(self, public_key: str) -> str:
         return key_fingerprint(public_key)

@@ -905,6 +905,57 @@ class TestDefaults:
         assert inst.state.load().defaults_done is True
         assert inst.ensure_defaults() == ([], [])
 
+    def test_a_new_image_updates_what_the_old_one_installed(
+        self, tmp_path: Path
+    ) -> None:
+        """A volume that outlives the container keeps old defaults: the image's own
+        repository brings them up to date, keeping their state and grants."""
+        old = Repo(tmp_path / "old", tmp_path)
+        old.sign_with_new_key()
+        old.add("dev/core_ui", "1.0.0")
+        old.publish(defaults=("dev/core_ui",))
+        (old.dir / "public.key").write_text(old.public)
+        inst = Installer(
+            tmp_path / "runtime", core_api_version="0.1.0", bundled=old.dir
+        )
+        inst.ensure_defaults()
+        inst.set_enabled("dev/core_ui", False)
+        granted = inst.grants.granted("dev/core_ui")
+        assert inst.update_bundled() == ([], [])  # nothing newer yet
+
+        new = Repo(tmp_path / "new", tmp_path)
+        new.sign_with_new_key()
+        new.add("dev/core_ui", "1.1.0")
+        new.publish(defaults=("dev/core_ui",))
+        (new.dir / "public.key").write_text(new.public)
+        fresh = Installer(
+            tmp_path / "runtime", core_api_version="0.1.0", bundled=new.dir
+        )
+        assert fresh.update_bundled() == (["dev/core_ui 1.0.0 -> 1.1.0"], [])
+        record = fresh.state.load().extensions["dev/core_ui"]
+        assert (record.version, record.enabled) == ("1.1.0", False)
+        assert fresh.grants.granted("dev/core_ui") == granted
+        assert fresh.update_bundled() == ([], [])
+
+    def test_only_what_the_image_installed_is_updated_by_the_image(
+        self, tmp_path: Path
+    ) -> None:
+        other = Repo(tmp_path / "other", tmp_path)
+        other.add("dev/mine", "1.0.0")
+        other.publish()
+        bundle = Repo(tmp_path / "bundled", tmp_path)
+        bundle.sign_with_new_key()
+        bundle.add("dev/mine", "2.0.0")
+        bundle.publish()
+        (bundle.dir / "public.key").write_text(bundle.public)
+        inst = Installer(
+            tmp_path / "runtime", core_api_version="0.1.0", bundled=bundle.dir
+        )
+        add_repo(inst, other)
+        inst.install("dev/mine", repo="test")
+        assert inst.update_bundled() == ([], [])
+        assert inst.state.load().extensions["dev/mine"].version == "1.0.0"
+
     def test_a_default_of_the_baked_in_repository_is_granted_what_it_declares(
         self, tmp_path: Path
     ) -> None:
