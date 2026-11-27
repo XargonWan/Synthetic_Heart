@@ -1,3 +1,15 @@
+### feat(voice): the local voice and hearing engines are default extensions, and speech to a chat is a voice note
+
+**Before.** KittenTTS and Vosk were built into the Core, behind a "local-voice" extra that pulled PyTorch, torchaudio and spaCy, a first-use package installer and a model manager with its own panel. A fresh image had neither working. A spoken reply that reached Telegram instead of a call arrived as a `vox_*.wav` file.
+
+**Now.** `official/vox_kitten` and `official/auris_vosk` are installed with the image and work from the first start: each carries its libraries (onnxruntime, espeak-ng; Vosk), downloads its model on first use into its data directory, and creates the `kitten` and `vosk` endpoints, so `ACTIVE_VOX_ENGINE`, `KITTEN_VOICE` and the old `KITTEN_*`/`VOSK_*` settings keep working (migrated by `core/extensions/legacy.py`). KittenTTS runs the upstream model code without PyTorch or spaCy. An interface declares `voice_format` (`ogg_opus`, `mp3`, `m4a`) and a spoken reply that goes to a chat instead of a call is converted with ffmpeg (`core/voice_delivery.py`) and sent with `send_as_voice`, so both Telegram interfaces send a voice note. `tts_lipsync` no longer names Discord or Telegram (`speech_as_media`). A Rift Vessel connector can be an extension (`provides.vessels`, capability `vessel.connector`, `ctx.vessels`, `synth_sdk.vessel`).
+
+**Removed.** `plugins/vox_engines/kitten.py`, `plugins/auris_engines/vosk_engine.py`, `vendor/kittentts`, `core/package_installer.py` (`AUTO_INSTALL_ENGINE_PACKAGES`), the `local-voice`, `vosk`, `whisper` and `tts-local` extras and the torch index, the Kitten and Vosk pickers of the WebUI, `/api/auris/vosk/download`, the `VOSK_*` settings of the Core, the Vosk language detection with Whisper, and the Core's Kitten text cleaning (the extension does it). The extension SDK now logs from worker threads (it raised before) and prints why a handler raised.
+
+**Not verified here.** The two engines were run for real (KittenTTS speaks a sentence and Vosk hears it, as separate extension processes with their real libraries and models); not through the WebUI, not against a real Telegram account (the voice note), and the Docker image was not rebuilt (it grows by about 235 MB for the two engines).
+
+**Location.** `core/voice_delivery.py`, `core/interface_traits.py`, `core/extensions/{manifest,legacy,vessels}.py`, `synth_sdk/`, `plugins/{vox_plugin,auris_plugin,tts_lipsync}/`, `pyproject.toml`, `uv.lock`; the engines in the plugins repository (`extensions/vox_kitten`, `extensions/auris_vosk`).
+
 ### chore(extensions): the official extensions' sources and tests move to the plugins repository
 
 **Before.** `extensions_src/` held the sources of every official extension and `tests/test_extension_*.py` their tests, so the Core repository carried code that is released and versioned on its own.

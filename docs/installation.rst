@@ -161,15 +161,10 @@ System dependencies
   in-world body. Not required for anything else; the Windows installer can
   provision it with ``-WithNode``.
 
-Local speech (``torch``, ``torchaudio``, ``kittentts``, ``vosk``) is **not**
-installed by default: it is several hundred megabytes and only useful for
-offline TTS/STT. Add it when you want it:
-
-.. code-block:: bash
-
-   uv sync --extra local-voice
-
-Cloud engines (any OpenAI-compatible endpoint) need none of it.
+Local speech needs nothing here: the KittenTTS voice and the Vosk recogniser are extensions
+(``official/vox_kitten``, ``official/auris_vosk``) installed by default, with their own
+libraries; their models are downloaded on first use. Cloud engines (any OpenAI-compatible
+endpoint) need none of it.
 
 
 Coming from MariaDB

@@ -691,11 +691,9 @@ a misleading "pytest is not available" result.
   it by command line (match `main.py`), then `Stop-Process -Id <pid> -Force`.
   Do not kill unrelated long-lived infra (the `mcp_servers/*.py` processes, the
   `tencentdb_knowledge_mcp.py` launcher) unless asked.
-- **`uv run main.py` may fail on a transient network error fetching the
-  `kittentts` GitHub wheel** (e.g. `http2 error ... refused stream`). The venv is
-  already synced — the failure is only `uv` re-resolving metadata. Use
-  `uv run --offline main.py` or `uv run --no-sync main.py` (or run
-  `.venv/Scripts/python.exe main.py` directly) instead of retrying the fetch.
+- **`uv run main.py` may fail on a transient network error** while `uv` re-resolves metadata.
+  The venv is already synced — use `uv run --offline main.py` or `uv run --no-sync main.py` (or
+  run `.venv/Scripts/python.exe main.py` directly) instead of retrying.
 
 ### Before editing
 
@@ -1076,7 +1074,6 @@ Before finishing a code task, verify:
 | `GEMINI_API_KEY` | Gemini API key (also settable via env) |
 | `RECON_MAX_RESULTS` | Max results for recon/search operations |
 | `RECON_TIMEOUT` | Timeout for recon operations |
-| `VOSK_MODEL_PATH` | Path to VOSK STT model |
 | `CHAT_SLEEP_COMMANDS` | Commands that put Synth into sleep/quiet mode |
 | `CHAT_WAKE_COMMANDS` | Commands that wake Synth from sleep mode |
 

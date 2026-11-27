@@ -119,17 +119,16 @@ async def test_the_voice_is_made_by_vox_without_sending_it_anywhere(
 
 
 @pytest.mark.asyncio
-async def test_text_an_engine_cannot_say_is_cleaned_for_it(
+async def test_the_core_does_not_clean_text_for_an_engine_by_name(
     monkeypatch, tmp_path: Path
 ) -> None:
+    """What an engine cannot say is the engine's to clean: the Core passes the text on."""
     clip = tmp_path / "a.wav"
     clip.write_bytes(b"RIFF")
-    vox = FakeVox(clip, engine="kitten_tts")
+    vox = FakeVox(clip, engine="kitten")
     with_vox(monkeypatch, vox)
     await CoreVoice().synthesize("Ciao ☺ 世界 amici", "")
-    assert vox.calls[-1]["text"] == "Ciao   amici"
-    await CoreVoice().synthesize("世界", "")  # nothing left: a neutral phrase
-    assert vox.calls[-1]["text"]
+    assert vox.calls[-1]["text"] == "Ciao ☺ 世界 amici"
 
 
 @pytest.mark.asyncio

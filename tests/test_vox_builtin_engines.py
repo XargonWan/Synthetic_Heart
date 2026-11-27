@@ -15,9 +15,10 @@ def test_builtin_vox_engines_registered() -> None:
             VOX_REGISTRY.unregister_engine(name)
         VoxPlugin()
         engines = set(VOX_REGISTRY.get_available_engines())
-        # Only kitten is a built-in engine; other TTS models come from
-        # external endpoints (e.g. Harmony).
-        assert engines == {"kitten"}
+        # No engine is built in beyond the HTTP one (registered only when legacy
+        # TTS_ENDPOINTS exist): local voices (KittenTTS) and cloud ones come from
+        # extensions and external endpoints.
+        assert "kitten" not in engines
     finally:
         VOX_REGISTRY._engine_modules.clear()
         VOX_REGISTRY._engine_modules.update(saved_modules)
@@ -51,22 +52,3 @@ def test_http_vox_engine_registered_when_legacy_endpoints_configured() -> None:
         VOX_REGISTRY._engine_meta.update(saved_meta)
         VOX_REGISTRY._instances.clear()
         VOX_REGISTRY._instances.update(saved_instances)
-
-
-def test_kittentts_stub_importable() -> None:
-    """The vendored ``kittentts`` package should import without blowing up.
-
-    If the optional audio dependencies (``gtts``/``pydub``) are missing the
-    module still has to load; generation will raise later.  Skip the test
-    entirely on machines that don't have those dependencies installed.
-    """
-    try:
-        import kittentts  # type: ignore
-    except ImportError:
-        pytest.skip("kittentts stub dependencies not available")
-
-    assert hasattr(kittentts, "KittenTTS")
-    # try at least constructing the class; actual generation is covered by
-    # ``test_vox_plugin`` which already exercises the engine sample.
-    tts = kittentts.KittenTTS()
-    assert tts is not None

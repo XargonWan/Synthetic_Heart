@@ -26,16 +26,15 @@ needs first. Status as of 2026-11-26. Nothing here is built.
    * - Rift Vessel adapters (M8b)
      - The adapter contract has about 25 methods, many synchronous; the Minecraft adapter
        alone is about 6,000 lines.
-     - A state-mirror connector API: the extension pushes the world state and receives
-       Vessel verbs, instead of the Core calling methods in-process.
+     - The connector API exists (``provides.vessels``: the extension pushes a state snapshot
+       and perception events, and answers ``vessel.call``). What is missing is a Karada API
+       for extensions (frames, presence, audio) for the bodies that draw the avatar, and the
+       moving itself: the Core's Minecraft and RetroXR code still imports the Core.
    * - VRM renderer, format-agnostic Karada (M8c)
      - The Karada payloads (``vrm_model``, ``vrm_animation_v2``, ``vrm_face``,
        ``vrm_expression_*``) are modelled on VRM.
      - Split the logical state (animation, expression, audio, presence) from renderer
        data, then rename the payload types once, with a data-free migration.
-   * - Vosk and native Kitten
-     - Both are installed and managed from the Manage Models panel.
-     - A models API (list, download, remove, report status) callable by an extension.
    * - ``engines/external_engines/*``
      - Anthropic, Gemini, OpenAI-style, OpenRouter and xAI engines overlap the endpoint
        presets and are used by Discord.
@@ -49,9 +48,9 @@ needs first. Status as of 2026-11-26. Nothing here is built.
 Order
 -----
 
-#. Models API (unblocks Vosk and Kitten).
 #. Duplex streaming API, then Live, then Discord (text, actions, calls, Live).
-#. Vessel connector API, then the adapters one at a time (retroxr, vrchat, skyrim,
-   minecraft).
+#. Vessel adapters, one at a time (retroxr, vrchat, skyrim, minecraft), on the connector API
+   that exists now (``provides.vessels``): they also need a Karada API for extensions (frames,
+   presence) and the storage API for goals and bases.
 #. Karada logical state, then the VRM renderer.
 #. Retire the legacy LLM engines and the old ``plugins/``/``interface/`` scans.

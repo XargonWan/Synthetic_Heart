@@ -1,9 +1,8 @@
 """The default install must work without the local voice stack installed.
 
-``torch``, ``torchaudio``, ``kittentts`` and ``vosk`` live in the optional
-``local-voice`` extra, because they are the largest thing in the dependency set
-and most deployments use a cloud engine or an external endpoint. That only works
-if nothing on the base import path needs them.
+``torch``, ``torchaudio``, ``kittentts`` and ``vosk`` are not Core dependencies: the local
+voice and hearing engines are extensions that carry their own libraries. Nothing on the
+base import path may need them.
 
 These tests run in a subprocess with the four packages made unimportable, which
 is the only faithful way to check "installed without them" while this checkout
@@ -38,12 +37,6 @@ _PROBE = textwrap.dedent(
 
     vad = importlib.import_module("core.vad_service")
     assert vad.VAD_SERVICE.initialize() is False, "VAD must degrade, not raise"
-
-    kitten = importlib.import_module("plugins.vox_engines.kitten")
-    assert kitten.KittenTTS is None, "kitten TTS must fall back when kittentts is absent"
-    assert kitten._USING_VENDOR_STUB is True
-
-    importlib.import_module("plugins.auris_engines.vosk_engine")
 
     leaked = sorted(BLOCKED & set(sys.modules))
     assert not leaked, "a blocked module was imported anyway: %s" % leaked

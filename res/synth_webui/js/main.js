@@ -5350,295 +5350,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         liveThinkingBudget.dataset.bound = '1';
                     }
 
-                    // ── Kitten TTS speaker selector ───────────────────────────
-                    const kittenSpeakerSelect = document.getElementById('kitten-speaker-select');
-                    const kittenModelSelect = document.getElementById('kitten-model-select');
-                    const kittenPlayBtn = document.getElementById('kitten-play-btn');
-                    let kittenSpeakerList = [];
-                    let kittenModelList = [];
-
-                    function populateKittenModels(currentValue) {
-                        if (!kittenModelSelect) return;
-                        kittenModelSelect.innerHTML = '';
-                        if (!kittenModelList.length) {
-                            const opt = document.createElement('option');
-                            opt.value = '';
-                            opt.textContent = 'No downloaded models';
-                            opt.disabled = true;
-                            opt.selected = true;
-                            kittenModelSelect.appendChild(opt);
-                            return;
-                        }
-                        let matched = false;
-                        kittenModelList.forEach(m => {
-                            const opt = document.createElement('option');
-                            opt.value = m.model_id;
-                            opt.textContent = m.display_name || m.model_id;
-                            if (String(currentValue) === m.model_id) {
-                                opt.selected = true;
-                                matched = true;
-                            }
-                            kittenModelSelect.appendChild(opt);
-                        });
-                        if (!matched && kittenModelSelect.options.length) {
-                            kittenModelSelect.selectedIndex = 0;
-                        }
-                    }
-
-                    async function loadKittenModels() {
-                        try {
-                            const r = await fetch('/api/models?plugin_id=vox_kitten');
-                            if (r.ok) {
-                                const data = await r.json();
-                                const models = Array.isArray(data.models) ? data.models : [];
-                                kittenModelList = models.filter(m => m.downloaded === true);
-                            } else {
-                                kittenModelList = [];
-                            }
-                        } catch (e) {
-                            console.error('[synth_webui] failed to load kitten models', e);
-                            kittenModelList = [];
-                        }
-                    }
-
-                    function populateKittenSpeakers(currentValue) {
-                        if (!kittenSpeakerSelect) return;
-                        kittenSpeakerSelect.innerHTML = '';
-                        kittenSpeakerList.forEach(s => {
-                            const opt = document.createElement('option');
-                            opt.value = s.code;
-                            opt.textContent = s.name || s.code;
-                            if (String(currentValue) === s.code) opt.selected = true;
-                            kittenSpeakerSelect.appendChild(opt);
-                        });
-                    }
-
-                    async function loadKittenSpeakers() {
-                        try {
-                            const r = await fetch('/api/vox/speakers?engine=kitten');
-                            if (r.ok) {
-                                kittenSpeakerList = await r.json();
-                            } else {
-                                kittenSpeakerList = [];
-                            }
-                        } catch (e) {
-                            console.error('[synth_webui] failed to load kitten speakers', e);
-                            kittenSpeakerList = [];
-                        }
-                    }
-                    async function updateKittenControlsVisibility() {
-                        if (!kittenSpeakerSelect) return;
-                        const voxSel = document.getElementById('vox-engine-select');
-                        if (voxSel && voxSel.value === 'kitten') {
-                            // ensure we have the speaker + model lists before populating
-                            await loadKittenSpeakers();
-                            await loadKittenModels();
-                            if (kittenModelSelect) kittenModelSelect.style.display = '';
-                            kittenSpeakerSelect.style.display = '';
-                            kittenPlayBtn.style.display = '';
-                            try {
-                                const r = await fetch('/api/config');
-                                if (r.ok) {
-                                    const cfg = await r.json();
-                                    const items = Array.isArray(cfg.items) ? cfg.items : [];
-                                    const voiceItem = items.find(i => i.key === 'KITTEN_VOICE');
-                                    populateKittenSpeakers(voiceItem && voiceItem.value ? voiceItem.value : 'en_1');
-                                    const modelItem = items.find(i => i.key === 'KITTEN_MODEL');
-                                    populateKittenModels(modelItem && modelItem.value ? modelItem.value : 'builtin');
-                                } else {
-                                    populateKittenSpeakers('en_1');
-                                    populateKittenModels('builtin');
-                                }
-                            } catch (e) {
-                                populateKittenSpeakers('en_1');
-                                populateKittenModels('builtin');
-                            }
-                        } else {
-                            if (kittenModelSelect) kittenModelSelect.style.display = 'none';
-                            kittenSpeakerSelect.style.display = 'none';
-                            if (kittenPlayBtn) kittenPlayBtn.style.display = 'none';
-                        }
-                    }
-                    if (kittenSpeakerSelect && !kittenSpeakerSelect.dataset.bound) {
-                        kittenSpeakerSelect.addEventListener('change', async () => {
-                            const speaker = kittenSpeakerSelect.value;
-                            try {
-                                await fetch('/api/config', {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ key: 'KITTEN_VOICE', value: speaker })
-                                });
-                                window.showToast && window.showToast('Kitten speaker set to ' + speaker);
-                            } catch (e) {
-                                console.error('[synth_webui] Failed to set KITTEN_VOICE', e);
-                                window.showToast && window.showToast('Failed to save speaker', true);
-                            }
-                        });
-                        kittenSpeakerSelect.dataset.bound = '1';
-                    }
-                    if (kittenModelSelect && !kittenModelSelect.dataset.bound) {
-                        kittenModelSelect.addEventListener('change', async () => {
-                            const model = kittenModelSelect.value;
-                            if (!model) return;
-                            try {
-                                await fetch('/api/config', {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ key: 'KITTEN_MODEL', value: model })
-                                });
-                                window.showToast && window.showToast('Kitten model set to ' + model);
-                            } catch (e) {
-                                console.error('[synth_webui] Failed to set KITTEN_MODEL', e);
-                                window.showToast && window.showToast('Failed to save model', true);
-                            }
-                        });
-                        kittenModelSelect.dataset.bound = '1';
-                    }
-                    if (kittenPlayBtn && !kittenPlayBtn.dataset.bound) {
-                        kittenPlayBtn.addEventListener('click', () => {
-                            const code = kittenSpeakerSelect.value;
-                            const audio = new Audio(`/api/vox/sample?engine=kitten&speaker=${code}`);
-                            audio.play();
-                        });
-                        kittenPlayBtn.dataset.bound = '1';
-                    }
-                    // Expose a refresh hook so the Manage-Models modal can rebuild the
-                    // downloaded-model combo after a download/delete without a page reload.
-                    window.refreshKittenModelSelect = updateKittenControlsVisibility;
-                    // show kitten controls now + wire engine change event
-                    updateKittenControlsVisibility();
-                    const voxEngineSel = document.getElementById('vox-engine-select');
-                    if (voxEngineSel) {
-                        voxEngineSel.addEventListener('change', updateKittenControlsVisibility);
-                    }
-
-                    // ── Vosk active-model selector (local Auris engine) ──
-                    // Mirrors the Kitten model picker: lists only downloaded Vosk
-                    // models and persists the choice into the VOSK_MODEL config key.
-                    const aurisVoskModelSelect = document.getElementById('auris-vosk-model-select');
-                    let aurisVoskModelList = [];
-
-                    function populateAurisModels(currentValue) {
-                        if (!aurisVoskModelSelect) return;
-                        aurisVoskModelSelect.innerHTML = '';
-                        if (!aurisVoskModelList.length) {
-                            const opt = document.createElement('option');
-                            opt.value = '';
-                            opt.textContent = 'No models available';
-                            opt.disabled = true;
-                            opt.selected = true;
-                            aurisVoskModelSelect.appendChild(opt);
-                            return;
-                        }
-                        let matched = false;
-                        aurisVoskModelList.forEach(m => {
-                            const opt = document.createElement('option');
-                            opt.value = m.model_id;
-                            let label = m.display_name || m.model_id;
-                            if (m.downloaded === true) {
-                                // nothing extra — ready to use
-                            } else if (m.downloading) {
-                                label += ' (downloading…)';
-                            } else {
-                                label += ' (not downloaded — select to download)';
-                            }
-                            opt.textContent = label;
-                            opt.dataset.downloaded = m.downloaded === true ? '1' : '0';
-                            if (String(currentValue) === m.model_id) {
-                                opt.selected = true;
-                                matched = true;
-                            }
-                            aurisVoskModelSelect.appendChild(opt);
-                        });
-                        if (!matched && aurisVoskModelSelect.options.length) {
-                            aurisVoskModelSelect.selectedIndex = 0;
-                        }
-                    }
-
-                    async function loadAurisModels() {
-                        try {
-                            const r = await fetch('/api/models?plugin_id=auris_vosk');
-                            if (r.ok) {
-                                const data = await r.json();
-                                // List ALL catalog models (downloaded or not) so the user
-                                // picks the MODEL directly — not a language.  Non-downloaded
-                                // models are selectable and trigger a download on change.
-                                const models = Array.isArray(data.models) ? data.models : [];
-                                aurisVoskModelList = models;
-                            } else {
-                                aurisVoskModelList = [];
-                            }
-                        } catch (e) {
-                            console.error('[synth_webui] failed to load auris vosk models', e);
-                            aurisVoskModelList = [];
-                        }
-                    }
-
-                    async function updateAurisModelVisibility() {
-                        if (!aurisVoskModelSelect) return;
-                        const aurisSel = document.getElementById('auris-engine-select');
-                        if (aurisSel && aurisSel.value === 'vosk') {
-                            await loadAurisModels();
-                            aurisVoskModelSelect.style.display = '';
-                            try {
-                                const r = await fetch('/api/config');
-                                if (r.ok) {
-                                    const cfg = await r.json();
-                                    const items = Array.isArray(cfg.items) ? cfg.items : [];
-                                    const modelItem = items.find(i => i.key === 'VOSK_MODEL');
-                                    populateAurisModels(modelItem && modelItem.value ? modelItem.value : '');
-                                } else {
-                                    populateAurisModels('');
-                                }
-                            } catch (e) {
-                                populateAurisModels('');
-                            }
-                        } else {
-                            aurisVoskModelSelect.style.display = 'none';
-                        }
-                    }
-                    if (aurisVoskModelSelect && !aurisVoskModelSelect.dataset.bound) {
-                        aurisVoskModelSelect.addEventListener('change', async () => {
-                            const model = aurisVoskModelSelect.value;
-                            const opt = aurisVoskModelSelect.options[aurisVoskModelSelect.selectedIndex];
-                            const alreadyDownloaded = opt && opt.dataset.downloaded === '1';
-                            try {
-                                await fetch('/api/config', {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ key: 'VOSK_MODEL', value: model })
-                                });
-                                if (alreadyDownloaded) {
-                                    window.showToast && window.showToast('Vosk model set to ' + (model || '(default)'));
-                                } else {
-                                    window.showToast && window.showToast('Vosk model set to ' + (model || '(default)') + ' — starting download…');
-                                    await fetch('/api/models/' + encodeURIComponent(model) + '/download', { method: 'POST' });
-                                    // Refresh the combo so the option flips to "downloaded"
-                                    // once the download finishes (poll via the Manage-Models hook).
-                                    if (typeof window.refreshAurisModelSelect === 'function') {
-                                        window.refreshAurisModelSelect();
-                                    }
-                                }
-                            } catch (e) {
-                                console.error('[synth_webui] Failed to set VOSK_MODEL', e);
-                                window.showToast && window.showToast('Failed to save model', true);
-                            }
-                        });
-                        aurisVoskModelSelect.dataset.bound = '1';
-                    }
-                    // Expose a refresh hook so the Manage-Models modal can rebuild the
-                    // downloaded-model combo after a download/delete without a page reload.
-                    window.refreshAurisModelSelect = updateAurisModelVisibility;
-                    // show auris controls now + wire engine change event
-                    updateAurisModelVisibility();
-                    const aurisEngineSel = document.getElementById('auris-engine-select');
-                    if (aurisEngineSel) {
-                        aurisEngineSel.addEventListener('change', updateAurisModelVisibility);
-                    }
-
                     // ── Generic Vox voice selector (any engine exposing speakers) ──
-                    // Engines other than Kitten (which has its own dedicated picker
-                    // above) get a generic voice dropdown + preview here whenever
+                    // Every engine gets a generic voice dropdown + preview here whenever
                     // /api/vox/speakers returns entries for the active engine. The
                     // choice is persisted into the <ENGINE>_VOICE config key when the
                     // key exists (registered dynamically for external endpoints that
@@ -5699,14 +5412,13 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     async function updateVoxVoiceVisibility() {
                         if (!voxVoiceSelect) return;
                         const engine = voxEngineSel ? voxEngineSel.value : '';
-                        // Kitten has its own dedicated speaker picker; hide the generic
-                        // one for it and when no engine / a disabled engine is active.
-                        if (!engine || engine === 'kitten' || engine === 'disabled') {
+                        // Hide the picker when no engine / a disabled engine is active.
+                        if (!engine || engine === 'disabled') {
                             voxVoiceSelect.style.display = 'none';
                             if (voxVoicePlayBtn) voxVoicePlayBtn.style.display = 'none';
                             // Drop any voices loaded for a previous (external) engine so
-                            // they can never leak into the hidden selector when Kitten or
-                            // a disabled engine is active again.
+                            // they can never leak into the hidden selector when a
+                            // disabled engine is active again.
                             voxVoiceList = [];
                             return;
                         }
@@ -5845,7 +5557,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     async function updateVoxManageVoicesVisibility() {
                         if (!voxManageVoicesBtn) return;
                         const engine = voxEngineSel ? voxEngineSel.value : '';
-                        if (!engine || engine === 'kitten' || engine === 'disabled') {
+                        if (!engine || engine === 'disabled') {
                             voxManageVoicesBtn.style.display = 'none';
                             return;
                         }
@@ -6048,7 +5760,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     async function populateVoxLangOverrideVoices(engine) {
                         if (!voxLangOverrideVoice) return;
                         voxLangOverrideVoice.innerHTML = '<option value="">(default)</option>';
-                        if (!engine || engine === 'disabled' || engine === 'kitten') return;
+                        if (!engine || engine === 'disabled') return;
                         try {
                             const r = await fetch(`/api/vox/speakers?engine=${encodeURIComponent(engine)}`);
                             const list = r.ok ? await r.json() : [];
@@ -6303,11 +6015,6 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         { configKey: 'IRIS_FALLBACK_ENGINES', engineSelectId: 'iris-engine-select', listId: 'iris-fallback-list', addBtnId: 'iris-add-fallback-btn' },
                         { configKey: 'CORTEX_FALLBACK_ENGINES', engineSelectId: 'cortex-engine-select', listId: 'cortex-fallback-list', addBtnId: 'cortex-add-fallback-btn' },
                     ].forEach(setupFallbackEngineList);
-
-                    // ── Vosk model selector (replaces the old language selector) ──
-                    // The user now picks the MODEL directly via #auris-vosk-model-select
-                    // (see the block above).  VOSK_MODEL wins over VOSK_LANGUAGE in the
-                    // engine, so the language selector is intentionally removed.
 
                     if (componentsVoxListEl)   renderDetailsList(data.vox   || [], componentsVoxListEl);
                     if (componentsAurisListEl) renderDetailsList(data.auris || [], componentsAurisListEl);

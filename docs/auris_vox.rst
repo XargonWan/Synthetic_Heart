@@ -100,24 +100,14 @@ Auris — STT Subsystem
 Plugin: ``auris_plugin``
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-**Vosk-specific configuration**
+**Vosk**
 
-When the ``auris_vosk`` engine is selected, two additional variables control
-language handling:
-
-* ``VOSK_LANGUAGE`` – language code for the Vosk model (``"en-us"``,
-  ``"it"``, ``"fr"`` etc).  Starting in version 2.?, this defaults to
-  ``"auto"`` instead of English; in ``auto`` mode the first few seconds of
-  audio are probed by a Whisper‑tiny model (via the optional ``faster-whisper``
-  package) to identify the spoken language.  If detection fails or the
-  dependency is missing, the first downloaded Vosk model is used as a fallback.
-  Explicitly setting ``VOSK_LANGUAGE`` overrides auto‑detection.
-
-* ``VOSK_LID_CONFIDENCE`` – when Whisper LID is used, the minimum probability
-  (0–1) required to accept the detected language.  Defaults to ``0.5``.  If
-  the confidence is below this threshold the fallback path is taken.
-
-
+The local speech recogniser is the ``official/auris_vosk`` extension, installed by default (see
+:doc:`plugin_platform/extension_runtime`). It creates a hearing engine called ``vosk``; its
+settings are ``VOSK_LANGUAGE`` (``en``, ``it``, ``fr``, ``es``, ``de``, ``pt``, ``zh``, ``ja``,
+``ko``; ``auto`` means English, the automatic detection with Whisper is gone) and ``VOSK_MODEL``
+(a specific model id such as ``vosk-en-us-large``). The model of the language is downloaded on
+first use, into the extension's own data directory.
 
 The ``AurisPlugin`` is the single authoritative entry-point for all transcription.  Other plugins, interfaces, and cortex engines **must not** call STT backends directly — they should always call ``AurisPlugin.transcribe_audio()``.
 
@@ -197,7 +187,7 @@ The only built-in Auris engine currently shipped by default is:
      - File
      - Notes
    * - ``vosk``
-     - ``plugins/auris_engines/vosk_engine.py``
+     - ``official/auris_vosk`` (extension)
      - Local speech recognition engine. File-based, offline, and suitable for self-hosted deployments.
 
 .. note::
@@ -281,17 +271,10 @@ Configuration (all WebUI-configurable):
 
 .. note::
 
-   **Engines install themselves on first use.** Local voice engines are not base
-   dependencies (see the ``local-voice`` / ``vosk`` extras in ``pyproject.toml``),
-   so the first time one is used its Python package is installed and its model
-   downloaded, with no manual step. The package installer
-   (``core/package_installer.py``) installs only an allowlisted requirement
-   (``vosk``, ``faster-whisper``), into ``<data root>/pylibs`` (``/config/pylibs``
-   in the container, which persists with the volume) appended to ``sys.path`` so
-   it never shadows the application environment; it never runs ``uv add`` and so
-   never edits ``pyproject.toml`` or ``uv.lock``. A failed install is retried at
-   most every 10 minutes. ``AUTO_INSTALL_ENGINE_PACKAGES`` (default on) turns it
-   off. The ``[package_installer]`` log lines say what was installed or why not.
+   **Local engines are extensions.** The local voice (``kitten``, ``official/vox_kitten``) and
+   hearing (``vosk``, ``official/auris_vosk``) engines are installed by default and carry their
+   own libraries (onnxruntime, espeak-ng, Vosk), so the Core depends on none of them. Each
+   downloads its model on first use into its own data directory.
 
 WebUI helper endpoints
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -313,7 +296,7 @@ wish to supply short example clips.
   A missing ``speaker`` parameter produces a ``400`` error.
 
 These helpers are used internally by ``res/synth_webui/js/main.js`` to
-populate the Kitten voice selector and play sample audio.
+populate the voice selector and play sample audio.
 
 Per-language engine overrides
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -478,14 +461,10 @@ Available Vox engines
        ``TTS_ENDPOINTS`` / ``TTS_TIMEOUT_SECONDS`` keys are still honoured
        as fallbacks.
    * - ``kitten``
-     - ``vox_engines/kitten.py``
-     - Neural KittenTTS engine; requires the ``kittentts`` package or uses
-       the vendored shim (`vendor/kittentts`).  The shim is lightweight and
-       lazily imports ``gtts``/``pydub`` – those two libraries are declared as
-       normal project dependencies and **must be installed** (``uv add gtts
-       pydub``) for audio output to work.  Without them the engine will fall
-       back to text and log an informative error.  Produces higher-quality
-       audio than the legacy system-voice implementation.
+     - ``official/vox_kitten`` (extension)
+     - Local neural KittenTTS engine (ONNX on the CPU, eight voices). Installed by default; it
+       creates the ``kitten`` endpoint and speaks through it. It cleans text it cannot say
+       (non-Latin scripts) itself.
 
 HTTP engine configuration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~

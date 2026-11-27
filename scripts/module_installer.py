@@ -89,35 +89,7 @@ def _is_module_installed(spec: ModuleSpec) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def download_kitten_model() -> None:
-    _print("  Triggering KittenTTS model download on first use...")
-    try:
-        import asyncio
-
-        sys.path.insert(0, str(REPO_ROOT))
-        from core.model_manager import MODEL_MANAGER
-
-        models = [
-            m for m in MODEL_MANAGER.catalog() if m.get("plugin_id") == "vox_kitten"
-        ]
-        if models:
-            asyncio.run(MODEL_MANAGER.download(models[0]["model_id"]))
-            _ok("KittenTTS model downloaded")
-        else:
-            _print("  KittenTTS model will be downloaded on first use via the WebUI.")
-    except Exception as exc:
-        _print(f"  Model download skipped (will happen on first use): {exc}")
-
-
-def download_vosk_model() -> None:
-    _print("  VOSK model will be downloaded automatically on first use.")
-    _ok("No manual download needed for VOSK")
-
-
-_POST_INSTALL_HOOKS: dict[str, object] = {
-    "download_kitten_model": download_kitten_model,
-    "download_vosk_model": download_vosk_model,
-}
+_POST_INSTALL_HOOKS: dict[str, object] = {}
 
 
 # ---------------------------------------------------------------------------

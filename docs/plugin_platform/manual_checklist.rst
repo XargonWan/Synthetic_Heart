@@ -42,7 +42,10 @@ Extensions that were Core code
 #. Harmony and Fish Audio endpoints: add one from the wizard, list models and voices, add a
    Fish voice by its URL, synthesise a sentence, check the Vox and Auris engines that use
    them (they run from worker threads).
-#. KittenTTS extension: not in the release yet; build it locally, install it, synthesise.
+#. KittenTTS and Vosk extensions (installed by default): the first sentence downloads the
+   model, a voice reply is heard, the voice picker lists Bella..Leo, a voice note you send is
+   transcribed. A spoken reply that reaches Telegram (no call open) arrives as a **voice note**,
+   not as a ``vox_*.wav`` file (the userbot too; with ffmpeg present).
 #. Stage still loads from its extension.
 
 Publication

@@ -53,10 +53,6 @@
                 <div id="vox-controls" style="display:flex; gap:12px; align-items:flex-start; margin-bottom:12px; flex-wrap:wrap;">
                     <select id="vox-engine-select" style="padding:8px 12px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; font-size:1rem; min-width:220px;">
                     </select>
-                    <!-- speaker selector shown when a Kitten model is active -->
-                    <select id="kitten-speaker-select" title="Kitten TTS — Speaker voice" style="padding:8px 12px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; font-size:1rem; min-width:160px; display:none;">
-                    </select>
-                    <button id="kitten-play-btn" title="Play sample" style="display:none; padding:8px 12px; font-weight:600;">▶</button>
                     <button id="vox-manage-models-btn" class="pill secondary" title="Download, update or remove TTS models" style="padding:8px 14px; font-weight:600;">🗂 Manage Models</button>
                     <div id="vox-engine-info" class="meta" style="min-width:260px; display:none;">
                         <div style="font-weight:600;" id="vox-engine-label">—</div>
@@ -72,9 +68,6 @@
                 <div class="meta" style="margin-bottom:10px;">File-based STT engines. Select the active engine using the dropdown below.</div>
                 <div id="auris-controls" style="display:flex; gap:12px; align-items:flex-start; margin-bottom:12px; flex-wrap:wrap;">
                     <select id="auris-engine-select" style="padding:8px 12px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; font-size:1rem; min-width:220px;">
-                    </select>
-                    <!-- Vosk active-model selector: lists ALL catalog models (downloaded or not) -->
-                    <select id="auris-vosk-model-select" style="padding:8px 12px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; font-size:1rem; min-width:240px; display:none;" title="Select the active Vosk model (downloads on select if missing)">
                     </select>
                     <button id="auris-manage-models-btn" class="pill secondary" title="Download, update or remove STT models" style="padding:8px 14px; font-weight:600;">🗂 Manage Models</button>
                     <div id="auris-engine-info" class="meta" style="min-width:260px; display:none;">
@@ -214,32 +207,5 @@ import { createModelManagerModal } from '/js/model-manager.mjs';
     } else {
         _wire();
     }
-})();
-
-// ── Vosk language dropdown — populate from MODEL_MANAGER catalog ────────────
-(async function populateVoskModelDropdown() {
-    const select = document.getElementById('auris-vosk-language');
-    if (!select) return;
-    try {
-        const resp = await fetch('/api/models?plugin_id=auris_vosk');
-        if (!resp.ok) return;
-        const { models } = await resp.json();
-        if (!models || !models.length) return;
-        // Remove existing placeholder options (keep any already added by components.js)
-        const existingValues = new Set(Array.from(select.options).map(o => o.value));
-        for (const m of models) {
-            const tag = m.language || m.model_id;
-            if (existingValues.has(tag)) {
-                // Update label to reflect download status
-                const opt = select.querySelector(`option[value="${tag}"]`);
-                if (opt) {
-                    const prefix = m.downloaded ? '✓ ' : m.downloading ? '⬇ ' : '';
-                    if (!opt.textContent.startsWith(prefix) && prefix) {
-                        opt.textContent = prefix + opt.textContent.replace(/^[✓⬇] /, '');
-                    }
-                }
-            }
-        }
-    } catch (e) { /* non-fatal */ }
 })();
 </script>

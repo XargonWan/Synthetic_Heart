@@ -155,17 +155,10 @@
                     <!-- model picker shown when the active engine/endpoint exposes multiple models -->
                     <select id="vox-model-select" style="min-width:200px; display:none;" title="Select the model used by the active Vox engine">
                     </select>
-                    <!-- generic voice selector shown for any (non-Kitten) engine that exposes speakers -->
+                    <!-- generic voice selector shown for any engine that exposes speakers -->
                     <select id="vox-voice-select" style="min-width:200px; display:none;" title="Select the voice used by the active Vox engine">
                     </select>
                     <button id="vox-voice-play-btn" title="Preview voice" style="display:none; padding:8px 12px; font-weight:600;">▶</button>
-                    <!-- downloaded-model selector shown when the Kitten engine is active -->
-                    <select id="kitten-model-select" title="Kitten TTS — Model" style="min-width:200px; display:none;">
-                    </select>
-                    <!-- speaker selector shown when a Kitten model is active -->
-                    <select id="kitten-speaker-select" title="Kitten TTS — Speaker voice" style="min-width:160px; display:none;">
-                    </select>
-                    <button id="kitten-play-btn" title="Play sample" style="display:none; padding:8px 12px; font-weight:600;">▶</button>
                     <!-- voice manager shown for engines that support adding voices by URL (e.g. Fish Audio) -->
                     <button id="vox-manage-voices-btn" class="pill secondary" title="Add voices by URL and manage the voice list" style="display:none; padding:8px 14px; font-weight:600;">🎙 Manage Voices</button>
                     <button id="vox-manage-models-btn" class="pill secondary" title="Download, update or remove TTS models" style="padding:8px 14px; font-weight:600;">🗂 Manage Models</button>
@@ -233,9 +226,6 @@
                     </select>
                     <!-- model picker shown when the active engine/endpoint exposes multiple models -->
                     <select id="auris-model-select" style="min-width:200px; display:none;" title="Select the model used by the active Auris engine">
-                    </select>
-                    <!-- Vosk active-model selector: lists ALL catalog models (downloaded or not) -->
-                    <select id="auris-vosk-model-select" style="min-width:240px; display:none;" title="Select the active Vosk model (downloads on select if missing)">
                     </select>
                     <button id="auris-manage-models-btn" class="pill secondary" title="Download, update or remove STT models" style="padding:8px 14px; font-weight:600;">🗂 Manage Models</button>
                     <div id="auris-engine-info" class="meta" style="min-width:260px; display:none;">

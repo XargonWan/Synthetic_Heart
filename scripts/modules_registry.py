@@ -35,13 +35,6 @@ MODULES: dict[str, ModuleSpec] = {
         uv_packages=["edge-tts>=6.1.9"],
         env_vars={"ACTIVE_VOX_ENGINE": "edge_tts"},
     ),
-    "tts-kitten": ModuleSpec(
-        name="KittenTTS",
-        description="Local neural TTS (~150 MB model, 8 English voices, CPU-ready).",
-        uv_packages=[],  # the vendored kittentts shim + gtts/pydub (core deps) are enough
-        env_vars={"ACTIVE_VOX_ENGINE": "kitten"},
-        post_install="download_kitten_model",
-    ),
     "tts-gtts": ModuleSpec(
         name="Google TTS (gTTS)",
         description="Google Translate TTS — free, cloud, multilingual.",
@@ -49,16 +42,9 @@ MODULES: dict[str, ModuleSpec] = {
         env_vars={"ACTIVE_VOX_ENGINE": "gtts"},
     ),
     # ── STT engines ────────────────────────────────────────────────────────
-    "stt-vosk": ModuleSpec(
-        name="VOSK (local STT)",
-        description="Offline speech-to-text (~50 MB model).  CPU-only, works without internet.",
-        uv_packages=["vosk>=0.3.45"],  # not a base dependency (see pyproject extras)
-        env_vars={"ACTIVE_AURIS_ENGINE": "vosk"},
-        post_install="download_vosk_model",
-    ),
     "stt-whisper": ModuleSpec(
         name="Faster Whisper (local STT)",
-        description="OpenAI Whisper via faster-whisper (CTranslate2).  Better accuracy than VOSK.",
+        description="OpenAI Whisper via faster-whisper (CTranslate2).  Local speech-to-text.",
         uv_packages=["faster-whisper>=0.8.1"],
         env_vars={"ACTIVE_AURIS_ENGINE": "whisper"},
     ),

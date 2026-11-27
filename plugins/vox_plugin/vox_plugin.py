@@ -1518,7 +1518,6 @@ class VoxPlugin(AIPluginBase):
         # endpoint has been configured.
         builtins = [
             "plugins.vox_engines.http",
-            "plugins.vox_engines.kitten",
         ]
 
         for mod in builtins:

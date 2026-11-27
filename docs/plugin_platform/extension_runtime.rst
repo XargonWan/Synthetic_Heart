@@ -562,11 +562,21 @@ bridges then treat it as any endpoint, with its voice picker, active-engine sett
 per-voice key (``<NAME>_VOICE``). The Core's voice pipeline runs adapters in a worker thread
 with a loop of its own; the proxy makes its call on the Core's loop, so that works.
 
-**Not moved yet.** The Vosk speech engine and the native KittenTTS engine are still in the
-Core. Both register their models with the Core's model manager (the "Manage Models" panel:
-catalogue, downloads, progress), which an extension cannot reach. A models API on the gateway
-is the prerequisite for moving them, and until then ``official/vox_kitten`` replaces the native
-engine of the same name only while it runs.
+**The local voice and hearing engines are extensions.** ``official/vox_kitten`` (KittenTTS) and
+``official/auris_vosk`` (Vosk) are installed by default and work from the first start: each
+carries its libraries (onnxruntime and espeak-ng; Vosk), downloads its own model on first use
+into its data directory, and creates its endpoint (``kitten``, ``vosk``) under the names the
+built-in engines had, so ``ACTIVE_VOX_ENGINE``, ``KITTEN_VOICE`` and the old settings keep
+working (``core/extensions/legacy.py`` copies ``KITTEN_*`` and ``VOSK_*``). KittenTTS runs the
+upstream model code without PyTorch or spaCy, which the upstream package pulls in but the
+inference never uses. They replaced the Core's built-in engines, the model manager's
+registrations and the first-use package installer.
+
+**Spoken replies to a chat.** An interface declares ``voice_format`` (``ogg_opus``, ``mp3`` or
+``m4a``) for the audio its chats take as a voice message; a reply that is spoken while no call
+is open is converted with ffmpeg (``core/voice_delivery.py``) and sent with ``send_as_voice``, so
+Telegram receives a voice note instead of a ``.wav`` file. Without ffmpeg, or on a clip it cannot
+read, the original is sent.
 
 SDK: ``ctx.protocols.on_request(handler)``, ``handler(protocol, op, endpoint, api_key, args)``.
 Tests: ``tests/test_extension_protocols.py`` (the Core side, both extensions' logic against a

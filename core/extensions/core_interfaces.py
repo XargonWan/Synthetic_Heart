@@ -474,7 +474,6 @@ class CoreVoice:
 
     async def synthesize(self, text: str, engine: str) -> str | None:
         import os
-        import re
 
         from core.logging_utils import log_warning
 
@@ -482,15 +481,7 @@ class CoreVoice:
         if vox is None:
             log_warning("[extensions] voice.synthesize: no Vox plugin")
             return None
-        chosen = engine or getattr(vox, "_active_engine_name", "") or ""
         spoken = text.strip()
-        if "kitten" in chosen.lower():
-            # That engine mispronounces or rejects characters outside Latin scripts.
-            spoken = re.sub(
-                r"[^\x20-\x7E\xA0-\xFFĀ-ſ‐-‘“-”]+",
-                "",
-                spoken,
-            ).strip()
         if not spoken:
             spoken = "A track transition."
         result = await vox.speak(

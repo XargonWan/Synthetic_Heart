@@ -17,10 +17,6 @@ from core.config import list_available_cortex_engines
 # manager singleton is created lazily) before the config registry is loaded.
 import core.call_manager  # noqa: F401,E402
 
-# Importing this makes packages installed on first use of an engine (e.g. Vosk)
-# importable (it appends their persistent directory to sys.path) before any
-# engine loads, and registers AUTO_INSTALL_ENGINE_PACKAGES.
-import core.package_installer  # noqa: F401,E402
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional
 from enum import Enum

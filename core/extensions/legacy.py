@@ -133,6 +133,20 @@ COMPONENTS: tuple[Component, ...] = (
         must_be_on=("RADIO_HOST_ENABLED",),
         default_package=False,
     ),
+    # The local voice and hearing engines were built in. They need nothing filled in to work,
+    # and both packages are in the image, so only the settings an operator changed move.
+    Component(
+        "official/vox_kitten",
+        {
+            "KITTEN_MODEL": "KITTEN_MODEL",
+            "KITTEN_SPEED": "KITTEN_SPEED",
+            "KITTEN_LANGUAGE_MODELS": "KITTEN_LANGUAGE_MODELS",
+        },
+    ),
+    Component(
+        "official/auris_vosk",
+        {"VOSK_LANGUAGE": "VOSK_LANGUAGE", "VOSK_MODEL": "VOSK_MODEL"},
+    ),
     Component(
         "official/openai_api",
         {

@@ -852,8 +852,6 @@ class SynthWebUIInterface:
             self.audio_upload_endpoint
         )
         self.app.post("/api/chat/attachments")(self.chat_attachment_upload_endpoint)
-        # helper endpoint for Vosk language selection (legacy compat, delegates to MODEL_MANAGER)
-        self.app.post("/api/auris/vosk/download")(self.vosk_model_download)
         # Model management endpoints (SSOT: MODEL_MANAGER)
         self.app.get("/api/models")(self.list_models)
         self.app.get("/api/models/{model_id}")(self.get_model_detail)
@@ -4285,54 +4283,6 @@ class SynthWebUIInterface:
     # ------------------------------------------------------------------
     # Model management endpoints  (SSOT: core.model_manager.MODEL_MANAGER)
     # ------------------------------------------------------------------
-
-    async def vosk_model_download(self, language: str = Form(...)):
-        """POST /api/auris/vosk/download  — legacy compat shim.
-
-        Looks up the Vosk model_id for *language* and delegates to
-        ``MODEL_MANAGER.download()``.  Also updates ``VOSK_LANGUAGE`` so the
-        engine picks up the new model on next load.
-        """
-        try:
-            from core.config_manager import config_registry
-            from core.model_manager import MODEL_MANAGER
-
-            # lang → model_id mapping (mirrors vosk_engine._LANG_TO_MODEL_ID)
-            _LANG_MAP: dict[str, str] = {
-                "en": "vosk-en-us",
-                "en-us": "vosk-en-us",
-                "en-gb": "vosk-en-us",
-                "it": "vosk-it-it",
-                "it-it": "vosk-it-it",
-                "fr": "vosk-fr-fr",
-                "fr-fr": "vosk-fr-fr",
-                "es": "vosk-es-es",
-                "es-es": "vosk-es-es",
-                "de": "vosk-de-de",
-                "de-de": "vosk-de-de",
-                "pt": "vosk-pt-pt",
-                "pt-pt": "vosk-pt-pt",
-                "zh": "vosk-zh-cn",
-                "zh-cn": "vosk-zh-cn",
-                "ja": "vosk-ja-jp",
-                "ja-jp": "vosk-ja-jp",
-                "ko": "vosk-ko-kr",
-                "ko-kr": "vosk-ko-kr",
-            }
-            model_id = _LANG_MAP.get(language.lower(), f"vosk-{language.lower()}")
-            config_registry.set_value("VOSK_LANGUAGE", language)
-            # Fire-and-forget in background so the endpoint always returns immediately;
-            # clients can poll /api/models/{id}/progress to track completion.
-            import asyncio as _asyncio
-
-            _asyncio.create_task(MODEL_MANAGER.download(model_id))
-            log_info(f"{LOG_PREFIX} vosk_model_download: started {model_id}")
-            return JSONResponse(
-                {"success": True, "language": language, "model_id": model_id}
-            )
-        except Exception as exc:
-            log_error(f"{LOG_PREFIX} vosk_model_download error: {exc}")
-            return JSONResponse({"error": str(exc)}, status_code=500)
 
     async def list_models(self, request: Request) -> JSONResponse:
         """GET /api/models[?plugin_id=<id>]  — return all registered models with status."""
@@ -13406,12 +13356,7 @@ class SynthWebUIInterface:
             "vox_current_model": (
                 config_registry.get_value("VOX_DEFAULT_MODEL", "") or ""
             ),
-            "auris_current_model": (
-                config_registry.get_value(
-                    "VOSK_MODEL", "", group="plugins", component="auris_plugin"
-                )
-                or ""
-            ),
+            "auris_current_model": "",
             "live": live_data,
             "interfaces": interfaces_data,
             "plugins": plugins_data,

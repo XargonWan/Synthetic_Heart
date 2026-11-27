@@ -284,7 +284,19 @@ class TestMigrate:
     ) -> None:
         port = FakePort({c.extension_id for c in COMPONENTS})
         report = await migrate(
-            {}, port, [c for c in COMPONENTS if c.extension_id != "official/openai_api"]
+            {},
+            port,
+            # These have nothing mandatory to fill in: they run on their defaults.
+            [
+                c
+                for c in COMPONENTS
+                if c.extension_id
+                not in {
+                    "official/openai_api",
+                    "official/vox_kitten",
+                    "official/auris_vosk",
+                }
+            ],
         )
         assert port.calls == [] and port.settings == {} and port.sessions == {}
         assert all("nothing to carry over" in line for line in report.lines)

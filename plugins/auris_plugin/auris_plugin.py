@@ -63,30 +63,6 @@ config_registry.get_value(
     hidden=True,
 )
 config_registry.get_value(
-    "VOSK_MODEL_PATH",
-    "",
-    value_type=str,
-    group="plugins",
-    component="auris_plugin",
-    hidden=True,
-)
-config_registry.get_value(
-    "VOSK_LANGUAGE",
-    "en-us",
-    value_type=str,
-    group="plugins",
-    component="auris_plugin",
-    hidden=True,
-)
-config_registry.get_value(
-    "VOSK_MODEL",
-    "",
-    value_type=str,
-    group="plugins",
-    component="auris_plugin",
-    hidden=True,
-)
-config_registry.get_value(
     "MODEL_AUTO_DOWNLOAD",
     True,
     value_type=bool,
@@ -353,11 +329,10 @@ class AurisPlugin(AIPluginBase):
         Only file-based engines belong here.  Real-time/streaming engines live
         in ``plugins/live_engines/`` and are loaded by the Live registry.
         """
-        builtins = [
-            # Note: cloud-based engines (e.g. Gemini) are not auto-loaded here;
-            # they are registered only when the user explicitly adds them as an
-            # external endpoint via the External Engines UI.
-            "plugins.auris_engines.vosk_engine",
+        builtins: list[str] = [
+            # No engine ships in the Core: the local one (Vosk) is the ``official/auris_vosk``
+            # extension, and cloud engines are registered when the user adds them as an
+            # external endpoint via the Engines UI.
         ]
         for mod in builtins:
             try:
