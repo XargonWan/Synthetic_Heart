@@ -204,20 +204,46 @@ class TestTransport:
     def test_the_default_tag_is_latest(self) -> None:
         assert GithubReleaseTransport(REPO, "").tag == "latest"
 
-    def test_a_token_is_not_sent_to_the_host_a_redirect_leads_to(
-        self, tmp_path: Path
+    @staticmethod
+    def _serve(
+        handler: type,
+    ) -> tuple[http.server.ThreadingHTTPServer, threading.Thread]:
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        return server, thread
+
+    def test_a_token_reads_a_private_release_through_the_api_and_stays_home(
+        self,
     ) -> None:
-        seen: dict[str, str | None] = {}
+        seen: dict[str, tuple[str | None, str | None]] = {}
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802
-                seen[self.path] = self.headers.get("Authorization")
-                if self.path.startswith("/o/r/releases"):
+                seen[self.path] = (
+                    self.headers.get("Authorization"),
+                    self.headers.get("Accept"),
+                )
+                port = self.server.server_port
+                if self.path == "/repos/o/r/releases/tags/t":
+                    body = json.dumps(
+                        {
+                            "assets": [
+                                {
+                                    "name": "a",
+                                    "url": f"http://127.0.0.1:{port}/assets/9",
+                                }
+                            ]
+                        }
+                    ).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                elif self.path == "/assets/9":
                     self.send_response(302)
                     # 127.0.0.1 and localhost are different hosts to the client
-                    self.send_header(
-                        "Location", f"http://localhost:{self.server.server_port}/cdn/a"
-                    )
+                    self.send_header("Location", f"http://localhost:{port}/cdn/a")
                     self.end_headers()
                 else:
                     self.send_response(200)
@@ -228,14 +254,44 @@ class TestTransport:
             def log_message(self, *args: Any) -> None:
                 return None
 
-        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
+        server, thread = self._serve(Handler)
         try:
+            root = f"http://127.0.0.1:{server.server_port}"
             t = GithubReleaseTransport(
                 "o/r",
                 "t",
                 token="secret",
+                base=root,
+                api_base=root,
+                allow_loopback_http=True,
+            )
+            assert t.read("a", 100) == b"ok"
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+        assert seen["/repos/o/r/releases/tags/t"][0] == "Bearer secret"
+        assert seen["/assets/9"] == ("Bearer secret", "application/octet-stream")
+        assert seen["/cdn/a"][0] is None
+
+    def test_without_a_token_nothing_credential_is_sent(self) -> None:
+        seen: list[str | None] = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                seen.append(self.headers.get("Authorization"))
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *args: Any) -> None:
+                return None
+
+        server, thread = self._serve(Handler)
+        try:
+            t = GithubReleaseTransport(
+                "o/r",
+                "t",
                 base=f"http://127.0.0.1:{server.server_port}",
                 allow_loopback_http=True,
             )
@@ -243,8 +299,83 @@ class TestTransport:
         finally:
             server.shutdown()
             thread.join(timeout=5)
-        assert seen["/o/r/releases/download/t/a"] == "Bearer secret"
-        assert seen["/cdn/a"] is None
+        assert seen == [None]
+
+    @pytest.mark.parametrize("status", [403, 429])
+    def test_a_refused_download_says_where_to_enter_a_token(self, status: int) -> None:
+        t = GithubReleaseTransport("o/r", "t")
+
+        def refuse(relpath: str, limit: int):
+            raise TransportError(f"download failed: HTTP {status}")
+
+        t._stream = refuse  # type: ignore[method-assign]
+        with pytest.raises(TransportError) as info:
+            t.read("a", 10)
+        message = str(info.value)
+        assert "Settings > Extensions > GitHub access token" in message
+        assert "Enter a GitHub access token" in message
+
+    def test_a_refusal_with_a_token_asks_to_check_it_instead(self) -> None:
+        t = GithubReleaseTransport("o/r", "t", token="x")
+
+        def refuse(relpath: str, limit: int):
+            raise TransportError("download failed: HTTP 403")
+
+        t._stream = refuse  # type: ignore[method-assign]
+        with pytest.raises(TransportError, match="Check the token"):
+            t.read("a", 10)
+
+    def test_a_404_without_a_token_mentions_private_repositories(self) -> None:
+        t = GithubReleaseTransport("o/r", "t")
+
+        def missing(relpath: str, limit: int):
+            raise TransportError("download failed: HTTP 404")
+
+        t._stream = missing  # type: ignore[method-assign]
+        with pytest.raises(TransportError, match="private"):
+            t.read("a", 10)
+
+
+class TestGithubTokenSetting:
+    def test_the_configured_token_reaches_a_github_repository_only(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from core.extensions.repo import installer as installer_module
+        from core.extensions.repo.config import Repository
+
+        monkeypatch.setattr(installer_module, "github_token", lambda: "global-token")
+        inst = Installer(tmp_path / "runtime", core_api_version="0.1.0")
+        github = inst._default_transport(
+            Repository(name="g", location="github:o/r", kind="github", branch="t")
+        )
+        assert github._token == "global-token"  # type: ignore[attr-defined]
+        http_repo = inst._default_transport(
+            Repository(name="h", location="https://example.org/r", kind="http")
+        )
+        assert http_repo._token is None  # type: ignore[attr-defined]
+
+    def test_a_repository_own_token_wins(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from core.extensions.repo import installer as installer_module
+        from core.extensions.repo.config import Repository
+
+        monkeypatch.setattr(installer_module, "github_token", lambda: "global-token")
+        inst = Installer(tmp_path / "runtime", core_api_version="0.1.0")
+        transport_ = inst._default_transport(
+            Repository(
+                name="g", location="github:o/r", kind="github", token="own-token"
+            )
+        )
+        assert transport_._token == "own-token"  # type: ignore[attr-defined]
+
+    def test_the_setting_is_a_sensitive_core_key(self) -> None:
+        from core.config_manager import config_registry
+        from core.extensions.repo.github_access import TOKEN_KEY, github_token
+
+        github_token()
+        definition = config_registry._definitions[TOKEN_KEY]  # noqa: SLF001
+        assert definition.sensitive is True
 
 
 class TestEndToEnd:

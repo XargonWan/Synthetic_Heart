@@ -39,6 +39,10 @@ Trust
   A local path is not exempt from any of this.
 * **Permissions**: installing grants nothing. The manifest's capabilities are shown and
   the operator grants them (``grant``, or the Store's prompt), never more than declared.
+* **GitHub access token.** One setting, *Settings > Extensions > GitHub access token*
+  (``GITHUB_TOKEN``, masked), is used for every GitHub repository: it reads private releases
+  through the GitHub API and raises the anonymous download limit. A repository's own token wins.
+  When GitHub answers 401/403/429 the error tells the user to enter it and where.
 * **Credentials** of a private repository (a token) are stored with the repository
   (mode 0600), used only by the transport and never sent to an extension or to the page.
 

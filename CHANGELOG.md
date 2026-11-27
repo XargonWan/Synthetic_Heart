@@ -1,3 +1,11 @@
+### fix(webui): frames put floating windows away; Uninstall button in Installed
+
+While Synth Stage or Dashboard (a frame) is open, the chat window and the minimized-windows stack are hidden instead of floating over it, and the frame's close button moved to the bottom-left so it no longer covers the page's own top-right controls. The detail pane of every extension-backed plugin in Installed has a red **Uninstall** button (confirms, removes the extension and its data, refreshes the list).
+
+### feat(extensions): a GitHub access token for private repositories and the download limit
+
+Settings > Extensions has **GitHub access token** (`GITHUB_TOKEN`, stored masked). With it the GitHub release transport reads private releases through the GitHub API and gets the authenticated rate limit; a repository's own token still wins, and the token is only ever sent to github.com / api.github.com. When GitHub refuses a download (HTTP 401/403/429) the error now says to enter a token and where (or, with a token set, to check it), and a 404 without a token mentions that a private repository needs one.
+
 ### feat(webui): one button for the OpenAI-compatible and Claude APIs
 
 In Add External Endpoint, the providers that are only an OpenAI-compatible API (OpenAI, xAI Grok, OpenRouter, GitHub Models, Ollama, Venice AI, Custom) or the Claude API (Anthropic) are one **OpenAI / Claude API** button; a dropdown in the next step picks the provider and fills the protocol, address, name and key hint from its preset. Gemini and Harmony, which have their own protocol and extras, keep their own buttons. The presets themselves are unchanged.

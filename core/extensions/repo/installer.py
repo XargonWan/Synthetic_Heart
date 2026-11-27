@@ -57,6 +57,7 @@ from core.extensions.repo.transports import (
     TransportError,
     fetch_url,
 )
+from core.extensions.repo.github_access import github_token
 from core.extensions.resolver import CORE_API_VERSION, check_install
 
 #: Extraction limits: a hostile archive must not fill the disk or the inode table.
@@ -166,7 +167,7 @@ class Installer:
             return GithubReleaseTransport(
                 repo.location.removeprefix("github:"),
                 repo.branch or "latest",
-                token=repo.token or None,
+                token=repo.token or github_token() or None,
             )
         return LocalTransport(Path(repo.location))
 

@@ -401,6 +401,9 @@ async def start_extension_runtime() -> StartReport | None:
         from core.extensions.core_ports import core_api_ports
 
         root = data_root() / "extensions"
+        from core.extensions.repo.github_access import register as register_github_token
+
+        register_github_token()
         defaults_note = await _install_defaults(root)
         legacy_note = await _migrate_legacy(root)
         runtime = ExtensionRuntime(

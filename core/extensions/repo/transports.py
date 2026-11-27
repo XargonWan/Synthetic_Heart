@@ -283,6 +283,7 @@ def fetch_url(
 
 
 _GITHUB_REPO = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
+_RELEASE_JSON_LIMIT = 4 * 1024 * 1024
 _GITHUB_TAG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 
 
@@ -304,6 +305,7 @@ class GithubReleaseTransport:
         *,
         token: str | None = None,
         base: str = "https://github.com",
+        api_base: str = "https://api.github.com",
         timeout: float = 60.0,
         allow_loopback_http: bool = False,
     ) -> None:
@@ -313,6 +315,7 @@ class GithubReleaseTransport:
             raise TransportError(f"{tag!r} is not a usable release tag")
         self.repo, self.tag = repo, tag or "latest"
         self._base = base.rstrip("/")
+        self._api = api_base.rstrip("/")
         self._token = token
         self._timeout = timeout
         self._loopback = allow_loopback_http
@@ -326,29 +329,79 @@ class GithubReleaseTransport:
             raise TransportError(f"a release asset has a plain name, not {relpath!r}")
         return f"{self._base}/{self.repo}/releases/download/{self.tag}/{pure.name}"
 
+    def _api_headers(self, accept: str) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self._token}",
+            "Accept": accept,
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+
+    def _asset_api_url(self, name: str) -> str:
+        """The API URL of one asset: a private release is only readable through it."""
+        import json
+
+        try:
+            release = json.loads(
+                b"".join(
+                    _https_stream(
+                        f"{self._api}/repos/{self.repo}/releases/tags/{self.tag}",
+                        _RELEASE_JSON_LIMIT,
+                        headers=self._api_headers("application/vnd.github+json"),
+                        timeout=self._timeout,
+                        allow_loopback_http=self._loopback,
+                    )
+                )
+            )
+        except ValueError as exc:
+            raise TransportError("GitHub answered with something unreadable") from exc
+        for asset in release.get("assets", []):
+            if asset.get("name") == name and isinstance(asset.get("url"), str):
+                return asset["url"]
+        raise TransportError(f"download failed: HTTP 404 (no asset {name!r})")
+
     def _stream(self, relpath: str, limit: int) -> Iterator[bytes]:
-        headers = {"Authorization": f"Bearer {self._token}"} if self._token else None
+        if not self._token:
+            return _https_stream(
+                self._url(relpath),
+                limit,
+                timeout=self._timeout,
+                allow_loopback_http=self._loopback,
+            )
+        pure = _safe_relative(relpath)
+        if len(pure.parts) != 1:
+            raise TransportError(f"a release asset has a plain name, not {relpath!r}")
         return _https_stream(
-            self._url(relpath),
+            self._asset_api_url(pure.name),
             limit,
-            headers=headers,
+            headers=self._api_headers("application/octet-stream"),
             timeout=self._timeout,
             allow_loopback_http=self._loopback,
         )
 
-    def _nothing_published(self, exc: TransportError) -> TransportError | None:
-        if "HTTP 404" not in str(exc):
-            return None
-        return TransportError(
-            f"nothing is published yet: the release {self.tag!r} of {self.repo} has no "
-            "catalog (the publishing pipeline has not run for it; HTTP 404)"
-        )
+    def _friendly(self, exc: TransportError) -> TransportError | None:
+        from core.extensions.repo.github_access import HINT, HINT_WITH_TOKEN
+
+        text = str(exc)
+        if any(f"HTTP {code}" in text for code in (401, 403, 429)):
+            return TransportError(HINT_WITH_TOKEN if self._token else HINT)
+        if "HTTP 404" in text:
+            return TransportError(
+                f"nothing is published yet: the release {self.tag!r} of {self.repo} has "
+                "no catalog (the publishing pipeline has not run for it; HTTP 404)"
+                + (
+                    ""
+                    if self._token
+                    else ". If the repository is private, enter a GitHub access token "
+                    "in Settings > Extensions > GitHub access token"
+                )
+            )
+        return None
 
     def read(self, relpath: str, limit: int) -> bytes:
         try:
             return b"".join(self._stream(relpath, limit))
         except TransportError as exc:
-            friendly = self._nothing_published(exc)
+            friendly = self._friendly(exc)
             if friendly is None:
                 raise
             raise friendly from exc
@@ -357,7 +410,7 @@ class GithubReleaseTransport:
         try:
             _write_stream(self._stream(relpath, limit), dest)
         except TransportError as exc:
-            friendly = self._nothing_published(exc)
+            friendly = self._friendly(exc)
             if friendly is None:
                 raise
             raise friendly from exc
