@@ -82,6 +82,24 @@ async def test_every_path_column_and_the_alias_table_are_renamed(monkeypatch) ->
 
 
 @pytest.mark.asyncio
+async def test_the_prefix_is_typed_for_postgres_but_not_for_mariadb(
+    monkeypatch,
+) -> None:
+    """PostgreSQL cannot tell the type of a bare parameter inside CONCAT: the migration
+    failed on a real database with "could not determine data type of parameter $1"."""
+    import core.db as core_db
+
+    log, _ = _patch(monkeypatch)
+    await _rename_interface("ollama_serve", "openai_api")
+    assert all("CONCAT(%s::text," in sql for sql, _ in log if "CONCAT" in sql)
+    log.clear()
+    monkeypatch.setattr(core_db, "_get_db_type", lambda: "mysql")
+    await _rename_interface("ollama_serve", "openai_api")
+    sqls = [sql for sql, _ in log if "CONCAT" in sql]
+    assert sqls and all("CONCAT(%s," in sql and "::text" not in sql for sql in sqls)
+
+
+@pytest.mark.asyncio
 async def test_a_missing_table_does_not_stop_the_others(monkeypatch) -> None:
     log, _ = _patch(monkeypatch, missing={"turn_reason_trail", "web_search_tasks"})
     assert await _rename_interface("ollama_serve", "openai_api") == 3

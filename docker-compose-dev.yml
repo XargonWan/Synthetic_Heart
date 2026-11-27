@@ -5,7 +5,8 @@
 #
 #   docker compose -f docker-compose.yml -f docker-compose-dev.yml up -d --build
 #
-#   synth                 -> built from this checkout (.)
+#   synth                 -> built from this checkout (.), with the official extensions
+#                            from ../synthetic-heart-official-plugins
 #   synth-zen-llm-engine  -> built from ../zen-llm-engine (sibling checkout)
 #
 # Everything else (ports, volumes, env, database) is inherited unchanged from
@@ -17,6 +18,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # The official extensions come from the sibling checkout, pushed or not.
+      additional_contexts:
+        plugins: ../synthetic-heart-official-plugins
 
   synth-zen-llm-engine:
     image: zen-llm-engine:dev

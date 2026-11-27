@@ -16,6 +16,16 @@ RUN pnpm install --frozen-lockfile
 COPY frontend/ ./
 RUN pnpm build
 
+# The official extensions' sources (the plugins repository), cloned at PLUGINS_REF. A local
+# checkout replaces this stage: `docker build --build-context plugins=../synthetic-heart-official-plugins`
+# (docker-compose-dev.yml does it), so a build can use extensions that are not pushed yet.
+FROM alpine/git AS plugins_clone
+ARG PLUGINS_REPO=https://github.com/XargonWan/synthetic-heart-official-plugins.git
+ARG PLUGINS_REF=develop
+RUN git clone --depth 1 --branch "$PLUGINS_REF" "$PLUGINS_REPO" /plugins
+FROM scratch AS plugins
+COPY --from=plugins_clone /plugins/extensions /extensions
+
 # 2. Start your actual Base Image (Debian slim)
 # PyTorch official wheels require a glibc-based Python environment.
 FROM python:3.12-slim
@@ -169,10 +179,8 @@ COPY --from=stage_builder /build/dist /tmp/stage-dist
 # above is put into its package. The signing key is made for this build and discarded; only
 # its public half is kept next to the index. Needs the network here, to fetch the sources
 # and to build each extension's libraries into its package.
-ARG PLUGINS_REPO=https://github.com/XargonWan/synthetic-heart-official-plugins.git
-ARG PLUGINS_REF=develop
-RUN git clone --depth 1 --branch "$PLUGINS_REF" "$PLUGINS_REPO" /tmp/official-plugins && \
-    cp -r /tmp/stage-dist /tmp/official-plugins/extensions/synth_stage/web && \
+COPY --from=plugins /extensions /tmp/official-plugins/extensions
+RUN cp -r /tmp/stage-dist /tmp/official-plugins/extensions/synth_stage/web && \
     /app/venv/bin/python /app/scripts/build_bundled_extensions.py --sources /tmp/official-plugins/extensions && \
     rm -rf /tmp/official-plugins /tmp/stage-dist
 

@@ -365,7 +365,7 @@ async def _recent_paths_from_history(limit: int) -> list[dict[str, Any]]:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
                     """
-                    SELECT interface_path, MAX(timestamp) AS last_ts
+                    SELECT interface_path, MAX(created_at) AS last_ts
                     FROM chat_history_cache
                     WHERE interface_path IS NOT NULL
                     GROUP BY interface_path
@@ -640,9 +640,9 @@ async def backfill_interface_paths_from_history() -> int:
 
     is_postgres = _get_db_type() == "postgres"
     epoch_expr = (
-        "EXTRACT(EPOCH FROM MAX(timestamp))"
+        "EXTRACT(EPOCH FROM MAX(created_at))"
         if is_postgres
-        else "UNIX_TIMESTAMP(MAX(timestamp))"
+        else "UNIX_TIMESTAMP(MAX(created_at))"
     )
     insert_sql = f"""
         INSERT INTO interface_paths (interface_path, last_used)

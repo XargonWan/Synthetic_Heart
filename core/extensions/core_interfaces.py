@@ -371,7 +371,23 @@ class CoreEndpointPort:
             extra_config=extra_config,
             subsystem_map=subsystem_map,
         )
+        await self._register(int(created.id))
         return int(created.id)
+
+    async def _register(self, endpoint_id: int) -> None:
+        """Put the endpoint into the voice, hearing and model subsystems now.
+
+        Boot registers every stored endpoint once; an extension creates its endpoints
+        later (the first start), and without this they would only work after a restart.
+        """
+        from core.logging_utils import log_warning
+
+        try:
+            await self._registry().reload_endpoint(endpoint_id)
+        except Exception as exc:  # the row is saved; the next boot registers it
+            log_warning(
+                f"[extensions] could not register endpoint {endpoint_id}: {exc}"
+            )
 
     async def update(
         self,
@@ -385,7 +401,7 @@ class CoreEndpointPort:
             fields["base_url"] = base_url
         if extra_config is not None:
             fields["extra_config"] = extra_config
-        await self._registry().update_endpoint(endpoint_id, **fields)
+        await self._registry().update_endpoint(endpoint_id, **fields)  # re-registers it
 
 
 def core_endpoint_port() -> CoreEndpointPort:

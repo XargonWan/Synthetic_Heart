@@ -291,3 +291,45 @@ class TestCoreMessaging:
         ports = core_interface_ports()
         assert isinstance(ports.host, CoreInterfaceHost)
         assert isinstance(ports.messaging, CoreMessaging)
+
+
+class _FakeEndpointRegistry:
+    def __init__(self, fail: bool = False) -> None:
+        self.reloaded: list[int] = []
+        self.fail = fail
+
+    async def add_endpoint(self, **kwargs: Any) -> Any:
+        from types import SimpleNamespace
+
+        return SimpleNamespace(id=7)
+
+    async def reload_endpoint(self, endpoint_id: int) -> None:
+        if self.fail:
+            raise RuntimeError("probe failed")
+        self.reloaded.append(endpoint_id)
+
+
+@pytest.mark.asyncio
+async def test_an_endpoint_an_extension_creates_is_registered_at_once(
+    monkeypatch,
+) -> None:
+    """Boot registers the stored endpoints once. An extension creates its own on the first
+    start, and without this its voice or hearing engine only worked after a restart."""
+    from core.extensions.core_interfaces import CoreEndpointPort
+
+    registry = _FakeEndpointRegistry()
+    port = CoreEndpointPort()
+    monkeypatch.setattr(port, "_registry", lambda: registry)
+    assert await port.add("kitten", "KittenTTS", "", "kitten", {}, {"vox": True}) == 7
+    assert registry.reloaded == [7]
+
+
+@pytest.mark.asyncio
+async def test_a_registration_that_fails_does_not_lose_the_endpoint(
+    monkeypatch,
+) -> None:
+    from core.extensions.core_interfaces import CoreEndpointPort
+
+    port = CoreEndpointPort()
+    monkeypatch.setattr(port, "_registry", lambda: _FakeEndpointRegistry(fail=True))
+    assert await port.add("kitten", "KittenTTS", "", "kitten", {}, {}) == 7

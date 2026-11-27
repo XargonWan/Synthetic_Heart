@@ -826,8 +826,11 @@ async def _rename_interface(old: str, new: str) -> int:
                         continue
                     quote = '"' if db_type == "postgres" else "`"
                     t, c = f"{quote}{table}{quote}", f"{quote}{column}{quote}"
+                    # PostgreSQL cannot tell the type of a bare parameter inside CONCAT
+                    # (``could not determine data type of parameter $1``).
+                    prefix = "%s::text" if db_type == "postgres" else "%s"
                     await cur.execute(
-                        f"UPDATE {t} SET {c} = CONCAT(%s, SUBSTR({c}, %s)) "
+                        f"UPDATE {t} SET {c} = CONCAT({prefix}, SUBSTR({c}, %s)) "
                         f"WHERE SUBSTR({c}, 1, %s) = %s",
                         (f"{new}/", head + 1, head, f"{old}/"),
                     )
