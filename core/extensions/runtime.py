@@ -29,6 +29,7 @@ from core.extensions.info import InfoLoader, register_info_api
 from core.extensions.protocols import ProtocolHost, attach_protocols
 from core.extensions.recon import ReconHost, attach_recon
 from core.extensions.turns import TurnPort, register_turn_api
+from core.extensions.karada import KaradaHost, register_karada_api
 from core.extensions.vessels import VesselHost, attach_vessels, register_vessel_api
 from core.extensions.voice import VoicePort, register_voice_api
 from core.extensions.web import WebSocketHub, register_web_api
@@ -81,6 +82,7 @@ class ExtensionRuntime:
         recon_host: ReconHost | None = None,
         protocol_host: ProtocolHost | None = None,
         vessel_host: VesselHost | None = None,
+        karada_host: KaradaHost | None = None,
         media_root: Path | None = None,
         outbound_resolver: OutboundResolver | None = None,
         classifier: Classifier | None = None,
@@ -161,6 +163,8 @@ class ExtensionRuntime:
             register_panel_api(self.gateway, self.panels)
         if protocol_host is not None:
             attach_protocols(self.gateway, protocol_host, self.media, warn=self._warn)
+        if karada_host is not None:
+            register_karada_api(self.gateway, karada_host)
         if vessel_host is not None:
             register_vessel_api(self.gateway)
             attach_vessels(self.gateway, vessel_host, warn=self._warn)
@@ -368,6 +372,7 @@ async def start_extension_runtime() -> StartReport | None:
             return None
         from core.app_paths import data_root
         from core.extensions.protocols import CoreProtocolHost
+        from core.extensions.karada import CoreKaradaHost
         from core.extensions.vessels import CoreVesselHost
         from core.extensions.core_interfaces import (
             CoreReconHost,
@@ -399,6 +404,7 @@ async def start_extension_runtime() -> StartReport | None:
             recon_host=CoreReconHost(),
             protocol_host=CoreProtocolHost(),
             vessel_host=CoreVesselHost(),
+            karada_host=CoreKaradaHost(),
             media_root=data_root() / "media" / "extensions",
             outbound_resolver=core_outbound_resolver,
             classifier=core_classifier,

@@ -522,6 +522,21 @@ while connected (``changed()`` pushes at once); ``ctx.vessels.serve(name, connec
 it. Tests: ``tests/test_extensions_vessels.py`` (the API against fakes and one real process,
 ``tests/support/world_extension``).
 
+Karada for extensions
+---------------------
+
+An extension that draws or carries the avatar somewhere else (a game room, a headset, a
+renderer) becomes a **transport** of the Karada state server (``core/extensions/karada.py``).
+``karada.subscribe`` registers it; from then on each broadcast reaches it as a ``karada.frame``
+notification ``{kind, payload}`` (``animation``, ``audio``, ``face``, ``model``, ``expression``,
+``presence``, ``direct``), the payload exactly Karada's own and audio as the URL Karada already
+serves, never as bytes. It also returns the state to catch up with (``{animation, presence}``,
+also ``karada.state``). ``karada.presence`` announces she is arriving in (``summon``) or leaving
+a world; an extension may only clear a presence it set, and one that ends releases its own. Each
+extension has a bounded queue (64 frames: the oldest are dropped, the server never waits).
+SDK: ``ctx.karada.on_frame(handler)`` (one frame at a time, in order), ``subscribe()``,
+``state()``, ``set_presence()``. Tests: ``tests/test_extensions_karada.py``.
+
 Wire protocols for external endpoints
 -------------------------------------
 

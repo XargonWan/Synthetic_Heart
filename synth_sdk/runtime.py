@@ -789,6 +789,62 @@ class Protocols(_Namespace):
         self._ctx.handle("protocol.request", adapter)
 
 
+class Karada(_Namespace):
+    """What the avatar is doing (capabilities ``karada.subscribe`` and ``karada.presence``):
+    for an extension that draws or carries her somewhere else."""
+
+    def __init__(self, ctx: Context) -> None:
+        super().__init__(ctx)
+        self._worker: asyncio.Future[None] | None = None
+
+    def on_frame(
+        self, handler: Callable[[str, dict[str, Any]], Awaitable[None] | None]
+    ) -> None:
+        """``handler(kind, payload)`` for each frame Karada broadcasts once you subscribed.
+        ``kind`` is ``animation``, ``audio``, ``face``, ``model``, ``expression``, ``presence``
+        or ``direct``; ``payload`` is Karada's own, unchanged (audio carries a URL, never bytes).
+        Frames are handed to you one at a time, in the order Karada sent them."""
+        frames: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()
+
+        async def worker() -> None:
+            while True:
+                kind, payload = await frames.get()
+                try:
+                    result = handler(kind, payload)
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception:  # noqa: BLE001 - one bad frame must not end the stream
+                    traceback.print_exc(file=sys.stderr)
+
+        async def adapter(params: dict[str, Any]) -> None:
+            if self._worker is None or self._worker.done():
+                self._worker = asyncio.ensure_future(worker())
+            frames.put_nowait(
+                (str(params.get("kind", "")), dict(params.get("payload") or {}))
+            )
+
+        self._ctx.handle("karada.frame", adapter)
+
+    async def subscribe(self) -> dict[str, Any]:
+        """Start receiving frames. Returns what to catch up with:
+        ``{"animation": {...}, "presence": "summon" | None}``."""
+        return dict(await self._ctx.call("karada.subscribe"))
+
+    async def unsubscribe(self) -> bool:
+        """Stop receiving frames. Whether you were subscribed."""
+        return bool((await self._ctx.call("karada.unsubscribe")).get("unsubscribed"))
+
+    async def state(self) -> dict[str, Any]:
+        """What the avatar does now (the same as :meth:`subscribe` returns)."""
+        return dict(await self._ctx.call("karada.state"))
+
+    async def set_presence(self, state: str | None) -> str | None:
+        """Say she is arriving in a world (``"summon"``) or leaving it (``None``: only a
+        presence you set yourself). Returns the presence now."""
+        result = await self._ctx.call("karada.presence", state=state)
+        return result.get("presence")
+
+
 class Vessels(_Namespace):
     """Rift Vessel connectors you provide (``[[provides.vessels]]``, capability
     ``vessel.connector``). See :mod:`synth_sdk.vessel`."""
@@ -1114,6 +1170,7 @@ class Context:
         self.recon = Recon(self)
         self.protocols = Protocols(self)
         self.vessels = Vessels(self)
+        self.karada = Karada(self)
         self._handlers: dict[str, Callable[[dict[str, Any]], Awaitable[Any] | Any]] = {}
 
     def inbox_path(self, name: str = "file") -> Path:
