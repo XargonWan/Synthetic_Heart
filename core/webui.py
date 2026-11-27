@@ -2727,66 +2727,15 @@ class SynthWebUIInterface:
         # Trigger facial expression timeline when tags are present
         if em_events:
             try:
-                from plugins.facial_expression_plugin import FacialExpressionPlugin
                 from core.animation_handler import get_karada_state_server
-                from core.core_initializer import PLUGIN_REGISTRY
 
-                kss = get_karada_state_server()
-                has_clients = kss.has_connected_clients() if kss else False
-                log_debug(
-                    f"{LOG_PREFIX} expression dispatch: kss={kss is not None}, "
-                    f"has_clients={has_clients}, em_events={len(em_events)}"
+                scheduled = get_karada_state_server().schedule_expressions(
+                    em_events, len(clean_text)
                 )
-                if has_clients:
-                    expr_plugin: Optional[FacialExpressionPlugin] = None
-                    if isinstance(PLUGIN_REGISTRY, dict):
-                        for p in PLUGIN_REGISTRY.values():
-                            if isinstance(p, FacialExpressionPlugin):
-                                expr_plugin = p
-                                break
-                    log_debug(
-                        f"{LOG_PREFIX} expression dispatch: expr_plugin={'found' if expr_plugin else 'NOT FOUND'}"
-                    )
-                    if expr_plugin:
-                        from core.persona_manager import get_persona_manager
-
-                        persona_json: Optional[Dict[str, Any]] = None
-                        pm = get_persona_manager()
-                        if pm and getattr(pm, "_current_persona", None):
-                            try:
-                                persona_json = pm._load_persona_json(
-                                    pm._current_persona.name
-                                )
-                            except Exception:
-                                persona_json = None
-                        chars_per_sec = (
-                            persona_json.get("facial_expression_chars_per_sec", 12)
-                            if persona_json
-                            else 12
-                        )
-                        expr_section = (
-                            persona_json.get("facial_expressions", {})
-                            if persona_json
-                            else {}
-                        )
-                        log_debug(
-                            f"{LOG_PREFIX} expression dispatch: scheduling timeline, "
-                            f"events={len(em_events)}, "
-                            f"cps={chars_per_sec}, expr_keys={list(expr_section.keys())}"
-                        )
-                        asyncio.create_task(
-                            expr_plugin._play_expression_timeline(
-                                em_events,
-                                len(clean_text),
-                                "",
-                                chars_per_sec,
-                                expr_section=expr_section,
-                            )
-                        )
-                else:
-                    log_debug(
-                        f"{LOG_PREFIX} expression dispatch: SKIPPED (no connected clients)"
-                    )
+                log_debug(
+                    f"{LOG_PREFIX} expression dispatch: events={len(em_events)}, "
+                    f"scheduled={scheduled}"
+                )
             except Exception as exc:
                 log_debug(
                     f"{LOG_PREFIX} debug_inject_message expression timeline error: {exc}"

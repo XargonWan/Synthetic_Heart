@@ -502,6 +502,56 @@ class KaradaStateServer:
                     f"[KaradaStateServer] failed to push expression via {type(transport).__name__}: {exc}"
                 )
 
+    # ------------------------------------------------------------------
+    # Facial expressions: the [em_NAME:INTENSITY] tags of a reply (core/karada_expressions.py)
+    # ------------------------------------------------------------------
+
+    def expression_guidance(self) -> str:
+        """The prompt block that teaches the model the expression tag protocol."""
+        from core.karada_expressions import expression_guidance
+
+        return expression_guidance()
+
+    async def play_expression_timeline(
+        self,
+        events: list[Any],
+        total_chars: int,
+        chars_per_sec: float,
+        expr_section: Optional[Dict[str, Any]] = None,
+        audio_duration_s: Optional[float] = None,
+    ) -> None:
+        """Drive the face through the tags of one reply, then back to the base emotion."""
+        from core.karada_expressions import play_expression_timeline
+
+        await play_expression_timeline(
+            self,
+            events,
+            total_chars,
+            chars_per_sec,
+            expr_section=expr_section,
+            audio_duration_s=audio_duration_s,
+        )
+
+    def schedule_expressions(
+        self,
+        events: list[Any],
+        total_chars: int,
+        audio_duration_s: Optional[float] = None,
+    ) -> bool:
+        """Play ``events`` in the background (the persona sets the pace) when somebody is
+        watching. Whether it was scheduled."""
+        from core.karada_expressions import schedule_expressions
+
+        return schedule_expressions(self, events, total_chars, audio_duration_s)
+
+    def apply_expression_tags(
+        self, text: str, audio_duration_s: Optional[float] = None
+    ) -> str:
+        """``text`` without its ``[em_...]`` tags, which are played on the face."""
+        from core.karada_expressions import apply_expression_tags
+
+        return apply_expression_tags(self, text, audio_duration_s)
+
     def has_connected_clients(self) -> bool:
         """Return True if any clients are connected via any transport."""
         for transport in self._transports:

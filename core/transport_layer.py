@@ -2058,47 +2058,27 @@ async def universal_send(interface_send_func, *args, text: str | None = None, **
                 )
 
             # Facial-expression tags must be parsed from message payload text,
-            # not from the raw LLM response envelope.
+            # not from the raw LLM response envelope: Karada strips them and plays them.
             try:
-                from core.core_initializer import PLUGIN_REGISTRY
+                from core.animation_handler import get_karada_state_server
 
-                facial_plugin = next(
-                    (
-                        p
-                        for p in PLUGIN_REGISTRY.values()
-                        if hasattr(p, "process_message_text")
-                    ),
-                    None,
-                )
-                if facial_plugin:
-                    session_id = str(
-                        interface_path
-                        or kwargs.get("chat_id")
-                        or context.get("original_chat_id")
-                        or "default"
-                    )
-                    for action in current_interface_actions:
-                        action_type = str(action.get("type") or "")
-                        payload = action.get("payload")
-                        if not _is_message_action_name(action_type) or not isinstance(
-                            payload, dict
-                        ):
-                            continue
-                        payload_text = payload.get("text")
-                        if (
-                            not isinstance(payload_text, str)
-                            or "[em" not in payload_text
-                        ):
-                            continue
-                        cleaned = await facial_plugin.process_message_text(
-                            payload_text,
-                            session_id=session_id,
+                karada = get_karada_state_server()
+                for action in current_interface_actions:
+                    action_type = str(action.get("type") or "")
+                    payload = action.get("payload")
+                    if not _is_message_action_name(action_type) or not isinstance(
+                        payload, dict
+                    ):
+                        continue
+                    payload_text = payload.get("text")
+                    if not isinstance(payload_text, str) or "[em" not in payload_text:
+                        continue
+                    cleaned = karada.apply_expression_tags(payload_text)
+                    if isinstance(cleaned, str) and cleaned != payload_text:
+                        payload["text"] = cleaned
+                        log_debug(
+                            f"[transport] Applied facial expression cleanup for {action_type}"
                         )
-                        if isinstance(cleaned, str) and cleaned != payload_text:
-                            payload["text"] = cleaned
-                            log_debug(
-                                f"[transport] Applied facial expression cleanup for {action_type}"
-                            )
             except Exception as facial_exc:
                 log_debug(
                     f"[transport] Facial payload processing skipped due to error: {facial_exc}"

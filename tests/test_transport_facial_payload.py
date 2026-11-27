@@ -4,7 +4,6 @@ import pytest
 @pytest.mark.asyncio
 async def test_universal_send_cleans_facial_tags_in_message_payload(monkeypatch):
     import core.transport_layer as transport
-    import core.core_initializer as ci
     import core.action_parser as action_parser
 
     captured = {}
@@ -15,12 +14,17 @@ async def test_universal_send_cleans_facial_tags_in_message_payload(monkeypatch)
 
     monkeypatch.setattr(action_parser, "run_actions", fake_run_actions)
 
-    class DummyFacialPlugin:
-        async def process_message_text(
-            self, text: str, session_id: str, audio_duration_s=None
-        ):
-            assert session_id == "telegram_bot/123"
+    from core.animation_handler import get_karada_state_server
+
+    class DummyKarada:
+        def apply_expression_tags(self, text: str, audio_duration_s=None):
+            assert "[em_grin:0.8]" in text
             return "Ciao come va?"
+
+    monkeypatch.setattr(
+        "core.animation_handler.get_karada_state_server", lambda: DummyKarada()
+    )
+    assert get_karada_state_server is not None
 
     class DummyBot:
         def get_interface_id(self):
@@ -29,9 +33,6 @@ async def test_universal_send_cleans_facial_tags_in_message_payload(monkeypatch)
         async def send_message(self, *args, text=None, **kwargs):
             captured["sent_text"] = text
             return None
-
-    plugin_backup = dict(ci.PLUGIN_REGISTRY)
-    ci.PLUGIN_REGISTRY["facial_plugin_test"] = DummyFacialPlugin()
 
     try:
         payload = (
@@ -47,8 +48,7 @@ async def test_universal_send_cleans_facial_tags_in_message_payload(monkeypatch)
             interface_path="telegram_bot/123",
         )
     finally:
-        ci.PLUGIN_REGISTRY.clear()
-        ci.PLUGIN_REGISTRY.update(plugin_backup)
+        pass
 
     assert "actions" in captured
     assert captured["actions"][0]["payload"]["text"] == "Ciao come va?"

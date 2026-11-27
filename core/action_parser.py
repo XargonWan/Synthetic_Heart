@@ -1683,7 +1683,6 @@ async def _handle_plugin_action(
                 # === facial expression tag handling ===
                 try:
                     from core.facial_expression_parser import parse_facial_expressions
-                    from plugins.facial_expression_plugin import FacialExpressionPlugin
                     from core.animation_handler import get_karada_state_server
 
                     original_text = payload.get("text", "") or ""
@@ -1698,57 +1697,10 @@ async def _handle_plugin_action(
                     # second, char-estimate-based timeline here would race the
                     # audio-driven one and make the avatar's face differ between
                     # Vox engines for the same emotion tag.
-                    is_voice_reply = bool(payload.get("send_as_voice"))
-                    if (
-                        events
-                        and not is_voice_reply
-                        and get_karada_state_server().has_connected_clients()
-                    ):
-                        # find our plugin instance (if loaded)
-                        expr_plugin = None
-                        from core.core_initializer import PLUGIN_REGISTRY
-
-                        if isinstance(PLUGIN_REGISTRY, dict):
-                            for p in PLUGIN_REGISTRY.values():
-                                if isinstance(p, FacialExpressionPlugin):
-                                    expr_plugin = p
-                                    break
-                        if expr_plugin:
-                            total_chars = len(clean_text)
-                            # read settings via persona manager as plugin does
-                            from core.persona_manager import get_persona_manager
-
-                            persona_json = None
-                            pm = get_persona_manager()
-                            current_persona = (
-                                getattr(pm, "_current_persona", None) if pm else None
-                            )
-                            if pm and current_persona is not None:
-                                try:
-                                    persona_json = pm._load_persona_json(
-                                        current_persona.name
-                                    )
-                                except Exception:
-                                    persona_json = None
-                            chars_per_sec = (
-                                persona_json.get("facial_expression_chars_per_sec", 12)
-                                if persona_json
-                                else 12
-                            )
-                            expr_section = (
-                                persona_json.get("facial_expressions", {})
-                                if persona_json
-                                else {}
-                            )
-                            asyncio.create_task(
-                                expr_plugin._play_expression_timeline(
-                                    events,
-                                    total_chars,
-                                    getattr(original_message, "session_id", ""),
-                                    chars_per_sec,
-                                    expr_section=expr_section,
-                                )
-                            )
+                    if events and not bool(payload.get("send_as_voice")):
+                        get_karada_state_server().schedule_expressions(
+                            events, len(clean_text)
+                        )
                 except Exception:
                     pass
 
@@ -3111,6 +3063,15 @@ def _add_core_injections(injections: dict[str, Any]) -> dict[str, Any]:
             injections["scene"] = scene
     except Exception as exc:  # pragma: no cover - config safety net
         log_debug(f"[action_parser] core static injection skipped: {exc}")
+    try:
+        # The face is Karada's: it teaches the model the [em_NAME:INTENSITY] tags.
+        from core.animation_handler import get_karada_state_server
+
+        injections["facial_expression_guidance"] = (
+            get_karada_state_server().expression_guidance()
+        )
+    except Exception as exc:  # pragma: no cover - guidance is optional
+        log_debug(f"[action_parser] facial expression guidance skipped: {exc}")
     return injections
 
 

@@ -1114,57 +1114,8 @@ class VoxPlugin(AIPluginBase):
         try:
             from core.animation_handler import get_karada_state_server
 
-            karada = get_karada_state_server()
-            if not karada or not karada.has_connected_clients():
-                return
-
-            from core.core_initializer import PLUGIN_REGISTRY
-            from plugins.facial_expression_plugin import FacialExpressionPlugin
-
-            expr_plugin: FacialExpressionPlugin | None = None
-            if isinstance(PLUGIN_REGISTRY, dict):
-                for p in PLUGIN_REGISTRY.values():
-                    if isinstance(p, FacialExpressionPlugin):
-                        expr_plugin = p
-                        break
-            if not expr_plugin:
-                return
-
-            from core.persona_manager import get_persona_manager
-
-            persona_json: dict[str, Any] | None = None
-            pm = get_persona_manager()
-            current_persona = getattr(pm, "_current_persona", None) if pm else None
-            if pm and current_persona:
-                try:
-                    persona_json = pm._load_persona_json(current_persona.name)
-                except Exception:
-                    persona_json = None
-
-            chars_per_sec = (
-                persona_json.get("facial_expression_chars_per_sec", 12)
-                if persona_json
-                else 12
-            )
-            expr_section = (
-                persona_json.get("facial_expressions", {}) if persona_json else {}
-            )
-
-            session_id = ""
-            if interface_path:
-                parts = str(interface_path).split("/")
-                if len(parts) >= 2:
-                    session_id = parts[1]
-
-            asyncio.create_task(
-                expr_plugin._play_expression_timeline(
-                    events,
-                    len(clean_text),
-                    session_id,
-                    chars_per_sec,
-                    expr_section=expr_section,
-                    audio_duration_s=audio_duration_s,
-                )
+            get_karada_state_server().schedule_expressions(
+                events, len(clean_text), audio_duration_s
             )
         except Exception as exc:
             log_warning(f"[vox_plugin] Failed to schedule expression timeline: {exc}")

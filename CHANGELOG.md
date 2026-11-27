@@ -1,3 +1,17 @@
+### refactor(karada): facial expressions are part of Karada, no longer a plugin
+
+**Before.** The `[em_NAME:INTENSITY]` tags of a reply were parsed and played by `plugins/facial_expression_plugin`; four places (the transport layer, the action parser, Vox, the debug inject route) each looked the plugin up in the plugin registry and repeated the persona lookup before calling a private method.
+
+**Now.** The Karada state server owns them: `expression_guidance()` (the prompt block, now a core injection of every turn), `schedule_expressions()`, `apply_expression_tags()` and `play_expression_timeline()` (`core/karada_expressions.py`). The persona lookup happens once, inside, and nothing is scheduled when nobody is watching. The plugin, its tests and its registry lookups are gone; the face can no longer be switched off by disabling a plugin.
+
+**Not verified here.** The face was not looked at in a browser: the timeline is tested against a recording Karada.
+
+**Location.** `core/karada_expressions.py`, `core/animation_handler.py`, `core/action_parser.py`, `core/transport_layer.py`, `plugins/vox_plugin/vox_plugin.py`, `core/webui.py`, `tests/test_karada_expressions.py`.
+
+### feat(webui): Plugins is Installed, Catalog, Repositories; the More menu; authors; why no answer arrived
+
+The Plugins page has **Installed**, **Catalog** (what the repositories offer: nothing is bought) and **Repositories** (list, add, remove: a development folder is one too); the "Development Components" warning and its route are gone. The extension menu is called **More** and sits before **About**. An extension of the More menu can be a **frame** under the top bar (the Stage is one) instead of a resizable window. A plugin or an extension names its author or authors (`author = "XargonWan"` or a list; `core/authorship.py`, shown in the plugin detail). A turn card that got no answer says why: the engine and the reason of the failed model call, or that the turn ended with an error.
+
 ### feat(extensions): Karada and hearing for extensions, and a fresh install keeps its Zen endpoint
 
 **Before.** An extension could not follow what the avatar does or have a recording read by the hearing engine, so a body that draws her in a game room (RetroXR) could not leave the Core. `endpoints.ensure(only_if_registry_empty=true)` counted any endpoint: once the local voice and hearing engines became default extensions and created theirs first, a fresh install no longer got its Zen endpoint, and had no model at all.

@@ -247,7 +247,10 @@ def test_core_injections_keep_the_other_keys_and_never_raise(monkeypatch):
         raise RuntimeError("config unavailable")
 
     monkeypatch.setattr("core.config_manager.config_registry.get_value", _boom)
-    assert _add_core_injections({"home": "kitchen on"}) == {"home": "kitchen on"}
+    result = _add_core_injections({"home": "kitchen on"})
+    assert result["home"] == "kitchen on" and "scene" not in result
+    # Karada's own block does not depend on the config store.
+    assert "facial_expression_guidance" in result
 
 
 def test_retraction_blocks_render_and_are_considered_rendered():

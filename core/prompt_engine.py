@@ -1205,7 +1205,7 @@ _PLUGIN_CONTEXT_BLOCKS: tuple[tuple[str, str, str | None], ...] = (
     # written, gathered, merged and dropped on every turn.
     # ``todays_dream`` is grillo_dream's dream for today (present from the 05:00
     # beat until GRILLO_DREAM_INJECT_UNTIL), and ``facial_expression_guidance``
-    # is the facial_expression_plugin teaching the ``[em_NAME:intensity]`` tag
+    # is Karada teaching the model the ``[em_NAME:intensity]`` tag
     # protocol that drives the avatar's face through the Karada state server.
     ("todays_dream", "[Today's dream]", None),
     ("facial_expression_guidance", "[Facial expressions]", None),
