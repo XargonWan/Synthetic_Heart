@@ -42,6 +42,7 @@ def entries(gateway: Gateway) -> list[dict[str, Any]]:
                     "id": window.id,
                     "title": window.title,
                     "icon": window.icon,
+                    "presentation": window.presentation,
                     "url": f"/x/{extension_id}/{window.page}",
                     "same_origin": same_origin,
                 }

@@ -321,3 +321,75 @@ def test_the_more_menu_is_called_more_and_sits_before_about() -> None:
     ).read_text(encoding="utf-8")
     assert "textContent: 'More'" in script and "More…" not in script
     assert "nav.insertBefore(button, about)" in script
+
+
+class TestPresentation:
+    """A ``more`` entry is a window, or a frame: a whole view under the top bar."""
+
+    BASE = (
+        'schema = 1\n[extension]\nid = "dev/x"\nname = "x"\nversion = "1.0.0"\n'
+        '[compat]\ncore_api = ">=0.1"\n[provides.web]\nstatic = "web"\n'
+        '[[provides.ui]]\nslot = "{slot}"\nid = "w"\ntitle = "W"\n{extra}'
+    )
+
+    def parse(self, extra: str = "", slot: str = "more"):
+        from core.extensions.manifest import parse_manifest_text
+
+        return parse_manifest_text(self.BASE.format(slot=slot, extra=extra))
+
+    def test_a_window_is_the_default(self) -> None:
+        assert self.parse().provides.ui[0].presentation == "window"
+
+    def test_a_frame_can_be_asked_for_in_the_more_menu(self) -> None:
+        assert (
+            self.parse('presentation = "frame"\n').provides.ui[0].presentation
+            == "frame"
+        )
+
+    def test_only_the_more_slot_has_frames(self) -> None:
+        import pytest
+
+        from core.extensions.manifest import ManifestError
+
+        with pytest.raises(ManifestError, match="only for the 'more' slot"):
+            self.parse('presentation = "frame"\n', slot="activity")
+
+    def test_an_unknown_presentation_is_refused(self) -> None:
+        import pytest
+
+        from core.extensions.manifest import ManifestError
+
+        with pytest.raises(ManifestError, match="must be one of window, frame"):
+            self.parse('presentation = "popup"\n')
+
+    @pytest.mark.asyncio
+    async def test_the_menu_is_told_how_to_show_each_entry(self) -> None:
+        ports, grants = memory_ports(), MemoryGrantStore()
+        gateway = Gateway(grants=grants)
+        register_core_api(gateway, ports)
+        env = Env(gateway, grants, ports)
+        try:
+            await env.connect(
+                manifest(
+                    UiEntry("more", "stage", "Stage", "🎭", "index.html", "frame"),
+                    UiEntry("more", "tool", "Tool"),
+                ),
+                grant=(web.CAP_STATIC,),
+            )
+            shown = {e["id"]: e["presentation"] for e in ui.entries(gateway)}
+            assert shown == {"stage": "frame", "tool": "window"}
+        finally:
+            await env.close()
+
+    def test_the_menu_script_opens_a_frame_without_window_chrome(self) -> None:
+        from pathlib import Path
+
+        script = (
+            Path(__file__).resolve().parent.parent
+            / "res/synth_webui/js/extension_slots.js"
+        ).read_text(encoding="utf-8")
+        assert (
+            "entry.presentation === 'frame'" in script
+            and "function openFrame" in script
+        )
+        assert "closeFrame" in script

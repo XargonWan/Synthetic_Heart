@@ -671,15 +671,20 @@ The WebUI takes windows from extensions at three fixed points and nowhere else
    * - ``logs``
      - A sub-tab of the Logs section.
    * - ``more``
-     - A line in a new **More** menu in the top bar; choosing it opens the window.
+     - A line in the **More** menu of the top bar (before About); choosing it opens the window, or a frame (see below).
 
 An extension declares a window with ``[[provides.ui]]`` (``slot``, ``id``, ``title``,
-``icon``, ``page``) and needs ``provides.web.static``: the window is that page of its own
+``icon``, ``page``, ``presentation``) and needs ``provides.web.static``: the window is that page of its own
 files, shown in a frame the Core draws (sandboxed unless ``web.origin``). Titles and ids
 are escaped, never markup, and no extension script runs in the WebUI page itself. Only a
 running extension with ``web.static`` granted appears; ``GET /api/extensions/ui`` (WebUI
 token) lists what is available. The Plugins section is the extension manager's own and
 takes no contribution. Not verified in a browser here.
+
+``presentation`` is ``window`` (the default: a resizable WinBox window, for a panel or a
+tool) or ``frame`` (only in ``more``): a whole view that fills the main area under the top
+bar, like the avatar's 3D page, with no window chrome. It cannot be moved or resized, and
+choosing a tab of the bar, the close button or Escape puts it away. The Stage is a frame.
 
 The process
 -----------

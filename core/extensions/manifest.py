@@ -111,6 +111,14 @@ class UiEntry:
     title: str
     icon: str = ""
     page: str = "index.html"
+    #: ``window``: a resizable window on the desktop (a panel, a tool). ``frame``: a whole
+    #: view that fills the main area under the top bar, like the avatar's 3D page, with no
+    #: window chrome (an app: the Stage). Only the ``more`` slot has a choice.
+    presentation: str = "window"
+
+
+#: How an entry of the ``more`` menu is shown.
+UI_PRESENTATIONS = ("window", "frame")
 
 
 @dataclass(frozen=True)
@@ -707,12 +715,24 @@ def _parse_ui(provides: Mapping[str, Any], c: _Collector) -> tuple[UiEntry, ...]
         table = c.table(item, path)
         if table is None or not isinstance(item, Mapping):
             continue
-        c.unknown_keys(item, frozenset({"slot", "id", "title", "icon", "page"}), path)
+        c.unknown_keys(
+            item,
+            frozenset({"slot", "id", "title", "icon", "page", "presentation"}),
+            path,
+        )
         slot = c.string(item, "slot", path, required=True) or ""
         ident = c.string(item, "id", path, required=True) or ""
         title = c.string(item, "title", path, required=True) or ""
         icon = c.string(item, "icon", path) or ""
         page = c.string(item, "page", path) or "index.html"
+        presentation = c.string(item, "presentation", path) or "window"
+        if presentation not in UI_PRESENTATIONS:
+            c.add(
+                f"{path}.presentation",
+                f"must be one of {', '.join(UI_PRESENTATIONS)}, got {presentation!r}",
+            )
+        elif presentation == "frame" and slot != "more":
+            c.add(f"{path}.presentation", "a frame is only for the 'more' slot")
         if slot and slot not in UI_SLOTS:
             c.add(f"{path}.slot", f"must be one of {', '.join(UI_SLOTS)}, got {slot!r}")
         if ident and not IDENT_RE.match(ident):
@@ -723,7 +743,7 @@ def _parse_ui(provides: Mapping[str, Any], c: _Collector) -> tuple[UiEntry, ...]
             c.add(f"{path}.icon", "must be at most 8 characters (an emoji)")
         if not UI_PAGE_RE.match(page) or ".." in page.split("/"):
             c.add(f"{path}.page", f"must be a plain relative file path, got {page!r}")
-        entries.append(UiEntry(slot, ident, title, icon, page))
+        entries.append(UiEntry(slot, ident, title, icon, page, presentation))
     keys = [(e.slot, e.id) for e in entries]
     for dup in sorted({k for k in keys if keys.count(k) > 1}):
         c.add("provides.ui", f"window {dup[1]!r} is declared twice in slot {dup[0]!r}")

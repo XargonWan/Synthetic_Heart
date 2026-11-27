@@ -31,7 +31,36 @@
         return frame;
     }
 
+    // A frame is a whole view under the top bar (like the avatar's 3D page), not a window:
+    // it cannot be moved or resized, and choosing any tab of the bar puts it away.
+    let frameHost = null;
+
+    function closeFrame() {
+        if (frameHost) { frameHost.remove(); frameHost = null; }
+    }
+
+    function openFrame(entry) {
+        closeFrame();
+        const topbar = document.querySelector('header.top-bar');
+        const top = topbar ? Math.round(topbar.getBoundingClientRect().bottom) : 0;
+        frameHost = el('section', { className: 'ext-frame-view' });
+        frameHost.setAttribute('aria-label', entry.title);
+        frameHost.style.cssText = 'position:fixed;left:0;right:0;bottom:0;top:' + top + 'px;' +
+            'z-index:900;background:var(--background)';
+        const close = el('button', { type: 'button', className: 'ext-frame-close', textContent: '✕' });
+        close.title = 'Close ' + entry.title;
+        close.setAttribute('aria-label', 'Close ' + entry.title);
+        close.style.cssText = 'position:absolute;top:8px;right:12px;z-index:2;width:34px;height:34px;' +
+            'border-radius:50%;border:1px solid var(--accent);background:var(--surface-alt);' +
+            'color:var(--text-soft);font-size:1rem;cursor:pointer;opacity:.85';
+        close.addEventListener('click', closeFrame);
+        frameHost.appendChild(frameFor(entry));
+        frameHost.appendChild(close);
+        document.body.appendChild(frameHost);
+    }
+
     function openWindow(entry) {
+        if (entry.presentation === 'frame') { openFrame(entry); return; }
         const id = 'ext-window-' + entry.extension_id.replace('/', '-') + '-' + entry.id;
         const existing = open.get(id);
         if (existing) {
@@ -91,7 +120,12 @@
             button.setAttribute('aria-expanded', 'true');
         });
         document.addEventListener('click', closeMenu);
-        document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeMenu(); });
+        // Choosing a tab of the bar leaves the frame (the More button itself does not).
+        nav.addEventListener('click', (event) => {
+            const tab = event.target && event.target.closest ? event.target.closest('.nav-btn') : null;
+            if (tab && tab !== button) closeFrame();
+        });
+        document.addEventListener('keydown', (event) => { if (event.key === 'Escape') { closeMenu(); closeFrame(); } });
         // Before About, the last entry of the bar.
         const about = nav.querySelector('[data-tab="about"]');
         nav.insertBefore(button, about);
@@ -101,6 +135,7 @@
     function render() {
         const more = entries.filter((entry) => entry.slot === 'more');
         if (!more.length) {
+            closeFrame();
             if (button) { button.remove(); button = null; }
             if (menu) { menu.remove(); menu = null; }
             return;
