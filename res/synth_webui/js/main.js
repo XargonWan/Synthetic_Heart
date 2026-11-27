@@ -5350,6 +5350,8 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         liveThinkingBudget.dataset.bound = '1';
                     }
 
+                    const voxEngineSel = document.getElementById('vox-engine-select');
+
                     // ── Generic Vox voice selector (any engine exposing speakers) ──
                     // Every engine gets a generic voice dropdown + preview here whenever
                     // /api/vox/speakers returns entries for the active engine. The
