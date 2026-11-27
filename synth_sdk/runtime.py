@@ -17,6 +17,7 @@ import importlib
 import json
 import os
 import secrets
+import sys
 import traceback
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field, is_dataclass
@@ -1092,6 +1093,10 @@ class Context:
         self.stopping = asyncio.Event()
         self._subscriptions: dict[str, list[EventCallback]] = {}
         self._background: set[asyncio.Task[None]] = set()
+        try:
+            self._loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = None
         self.log = Log(self)
         self.config = Config(self)
         self.storage = Storage(self)
@@ -1137,7 +1142,18 @@ class Context:
             raise _raise_typed(exc) from None
 
     def fire(self, method: str, params: dict[str, Any]) -> None:
-        """Send a notification without waiting (logs and statistics)."""
+        """Send a notification without waiting (logs and statistics). Safe to call from a
+        worker thread (``asyncio.to_thread``): it hands the send over to the extension's loop."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            loop = self._loop
+            if loop is not None and not loop.is_closed():
+                loop.call_soon_threadsafe(self._schedule, method, params)
+            return
+        self._schedule(method, params)
+
+    def _schedule(self, method: str, params: dict[str, Any]) -> None:
         task = asyncio.ensure_future(self._notify(method, params))
         self._background.add(task)
         task.add_done_callback(self._background.discard)
@@ -1227,7 +1243,13 @@ async def run_extension(
         if main_task is not None and not main_task.done():
             main_task.cancel()
 
-    peer = RpcPeer(reader, writer, handler, name=f"ext:{extension_id}")
+    def report(method: str, exc: BaseException) -> None:
+        """A handler that raised: the Core only sees "internal error", so say why on stderr
+        (the Core logs an extension's stderr)."""
+        print(f"[{extension_id}] {method} raised:", file=sys.stderr)
+        traceback.print_exception(exc, file=sys.stderr)
+
+    peer = RpcPeer(reader, writer, handler, name=f"ext:{extension_id}", on_error=report)
     serve = asyncio.ensure_future(peer.serve())
     exit_code = 0
     try:

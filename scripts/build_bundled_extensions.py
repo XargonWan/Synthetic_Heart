@@ -39,6 +39,8 @@ DEFAULTS = (
     "official/zen",
     "official/protocol_harmony",
     "official/protocol_fish",
+    "official/vox_kitten",
+    "official/auris_vosk",
 )
 
 
