@@ -684,7 +684,7 @@ takes no contribution. Not verified in a browser here.
 ``presentation`` is ``window`` (the default: a resizable WinBox window, for a panel or a
 tool) or ``frame`` (only in ``more``): a whole view that fills the main area under the top
 bar, like the avatar's 3D page, with no window chrome. It cannot be moved or resized, and
-choosing a tab of the bar, the close button or Escape puts it away. The Stage is a frame.
+choosing a tab of the bar, the close button or Escape puts it away. The Stage and the Dashboard are frames.
 
 The process
 -----------

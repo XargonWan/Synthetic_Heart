@@ -10,7 +10,7 @@
 
 ### feat(webui): Plugins is Installed, Catalog, Repositories; the More menu; authors; why no answer arrived
 
-The Plugins page has **Installed**, **Catalog** (what the repositories offer: nothing is bought) and **Repositories** (list, add, remove: a development folder is one too); the "Development Components" warning and its route are gone. The extension menu is called **More** and sits before **About**. An extension of the More menu can be a **frame** under the top bar (the Stage is one) instead of a resizable window. A plugin or an extension names its author or authors (`author = "XargonWan"` or a list; `core/authorship.py`, shown in the plugin detail). A turn card that got no answer says why: the engine and the reason of the failed model call, or that the turn ended with an error.
+The Plugins page has **Installed**, **Catalog** (what the repositories offer: nothing is bought) and **Repositories** (list, add, remove: a development folder is one too); the "Development Components" warning and its route are gone. The extension menu is called **More** and sits before **About**. An extension of the More menu can be a **frame** under the top bar (the Stage and the Dashboard are) instead of a resizable window. A plugin or an extension names its author or authors (`author = "XargonWan"` or a list; `core/authorship.py`, shown in the plugin detail). A turn card that got no answer says why: the engine and the reason of the failed model call, or that the turn ended with an error.
 
 ### feat(extensions): Karada and hearing for extensions, and a fresh install keeps its Zen endpoint
 
