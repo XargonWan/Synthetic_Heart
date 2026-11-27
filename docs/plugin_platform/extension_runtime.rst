@@ -671,7 +671,7 @@ The WebUI takes windows from extensions at three fixed points and nowhere else
    * - ``logs``
      - A sub-tab of the Logs section.
    * - ``more``
-     - A line in a new **More...** menu in the top bar; choosing it opens the window.
+     - A line in a new **More** menu in the top bar; choosing it opens the window.
 
 An extension declares a window with ``[[provides.ui]]`` (``slot``, ``id``, ``title``,
 ``icon``, ``page``) and needs ``provides.web.static``: the window is that page of its own

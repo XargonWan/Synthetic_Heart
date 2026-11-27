@@ -17,7 +17,7 @@ single source of truth (:pyfile:`core/animation_handler.py`).
 
    Stage is an **extension** (``official/synth_stage``, :doc:`plugin_platform/extension_runtime`):
    the Core no longer mounts it. The extension serves the built client at ``/stage/``
-   and lists it in the WebUI's **More...** menu. It is on only when the extension is
+   and lists it in the WebUI's **More** menu. It is on only when the extension is
    installed, switched on and granted ``web.static`` and ``web.origin`` (Stage keeps the
    WebUI token in its own storage and calls ``/api`` and ``/ws`` as the person, so it
    needs the Core's origin).
@@ -121,7 +121,7 @@ URL:
   ``STAGE_AVAILABLE`` flag on ``window.__SYNTH_CONFIG`` (from
   ``SynthWebUIInterface._stage_available`` in :pyfile:`core/webui.py`), and the
   settings JS hides the card when the flag is false, so the link never 404s. Stage is
-  also in the **More...** menu.
+  also in the **More** menu.
 - **Stage → Classic WebUI**: the settings drawer has an *Interface* section with
   an *Open classic WebUI* button linking to ``/``. No flag is needed — the
   classic WebUI is always served at the root path.

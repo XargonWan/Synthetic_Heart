@@ -197,7 +197,7 @@ Milestones
        (``activity``, ``logs``, ``more``; your decision) take windows from extensions
        (``[[provides.ui]]``); Stage is the first, in ``more``. Static pages are sandboxed
        unless the extension has ``web.origin``. The server side is tested, and the
-       "More..." menu, the injected Activity and Logs sub-tabs, the WinBox windows, the
+       "More" menu, the injected Activity and Logs sub-tabs, the WinBox windows, the
        Queue and Turns cards and the Dashboard window were **checked in headless Chromium
        against the real WebUI** (2026-11-26; the harness is not in the repository).
        **Dashboard moved (2026-11-26)** to ``official/synth_dashboard`` (``more`` slot,

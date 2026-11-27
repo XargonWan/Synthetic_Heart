@@ -1,4 +1,4 @@
-/* The "More..." menu: windows extensions put in the WebUI (core/extensions/ui.py).
+/* The "More" menu: windows extensions put in the WebUI (core/extensions/ui.py).
  * An extension declares a window (title, icon, a page of its own files); this script,
  * which is the Core's, draws the menu and the window. Every node is built with DOM calls
  * and textContent, so nothing an extension sends is read as HTML or script. The page
@@ -74,7 +74,7 @@
         button.setAttribute('aria-haspopup', 'true');
         button.setAttribute('aria-expanded', 'false');
         button.appendChild(el('span', { className: 'icon', textContent: '⋯' }));
-        button.appendChild(el('span', { textContent: 'More…' }));
+        button.appendChild(el('span', { textContent: 'More' }));
         menu = el('div', { className: 'ext-more-menu' });
         menu.hidden = true;
         menu.setAttribute('role', 'menu');
@@ -92,7 +92,9 @@
         });
         document.addEventListener('click', closeMenu);
         document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeMenu(); });
-        nav.appendChild(button);
+        // Before About, the last entry of the bar.
+        const about = nav.querySelector('[data-tab="about"]');
+        nav.insertBefore(button, about);
         document.body.appendChild(menu);
     }
 

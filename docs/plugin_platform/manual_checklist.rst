@@ -42,7 +42,7 @@ Extensions that were Core code
 #. Radio host against a real AzuraCast station with a model and a voice engine: it speaks
    between tracks, the Radio window in Activity shows the last remarks with replay, the
    radio status reaches the prompt when you ask about the radio, ``ffmpeg`` is present.
-#. Dashboard window in the "More..." menu.
+#. Dashboard window in the "More" menu.
 #. Harmony and Fish Audio endpoints: add one from the wizard, list models and voices, add a
    Fish voice by its URL, synthesise a sentence, check the Vox and Auris engines that use
    them (they run from worker threads).

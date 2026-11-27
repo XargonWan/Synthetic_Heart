@@ -311,3 +311,13 @@ class TestWebUiIntegration:
         )
         assert "ext-dev-win" not in skins
         assert "ext-dev-win-trace" not in history  # a logs window is not in Activity
+
+
+def test_the_more_menu_is_called_more_and_sits_before_about() -> None:
+    from pathlib import Path
+
+    script = (
+        Path(__file__).resolve().parent.parent / "res/synth_webui/js/extension_slots.js"
+    ).read_text(encoding="utf-8")
+    assert "textContent: 'More'" in script and "More…" not in script
+    assert "nav.insertBefore(button, about)" in script

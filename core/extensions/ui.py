@@ -1,7 +1,7 @@
 """Windows extensions put in the fixed slots of the WebUI.
 
 Three slots exist (``manifest.UI_SLOTS``): ``activity`` and ``logs`` add a sub-tab to
-those sections, ``more`` adds a line to the "More..." menu, which opens the window.
+those sections, ``more`` adds a line to the "More" menu, which opens the window.
 A window is a page of the extension's static files shown in a frame; the Core draws the
 tab, the menu and the frame, so no extension script runs in the WebUI page itself.
 

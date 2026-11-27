@@ -93,7 +93,7 @@ class InterfaceProvision:
 
 
 #: The fixed places in the WebUI an extension may put a window in. ``activity`` and
-#: ``logs`` are sub-tabs of those two sections; ``more`` is the "More..." menu, which
+#: ``logs`` are sub-tabs of those two sections; ``more`` is the "More" menu, which
 #: opens each registered window. Nothing else in the WebUI takes a contribution.
 UI_SLOTS = ("activity", "logs", "more")
 
