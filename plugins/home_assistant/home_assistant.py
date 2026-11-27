@@ -924,6 +924,9 @@ class _HAClient:
 class HomeAssistantPlugin(PluginBase):
     """Home Assistant bridge plugin (state awareness plus house actions)."""
 
+    #: Who wrote it (see core/authorship.py).
+    author = "Scarlet-Raine"
+
     display_name = "Home Assistant"
     description = (
         "Lets Synth see the house and act on it through Home Assistant, and "

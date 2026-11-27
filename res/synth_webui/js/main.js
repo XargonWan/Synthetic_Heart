@@ -4263,6 +4263,12 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             desc.textContent = descText;
                             pane.appendChild(desc);
                         }
+                        if (Array.isArray(item.authors) && item.authors.length) {
+                            const by = document.createElement('div');
+                            by.className = 'plugin-detail-author meta';
+                            by.textContent = 'By ' + item.authors.join(' and ');
+                            pane.appendChild(by);
+                        }
                         const detailsText = item.details || '';
                         if (detailsText && detailsText !== descText) {
                             const meta = document.createElement('div');

@@ -91,6 +91,9 @@ class LiveEngineBase(ABC):
     the sides they actually support (``supports_input`` / ``supports_output``).
     """
 
+    #: Who wrote it (see core/authorship.py).
+    author = "Scarlet-Raine"
+
     display_name: str = "Unnamed Live Engine"
 
     # ------------------------------------------------------------------

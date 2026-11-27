@@ -325,3 +325,41 @@ class TestInterfaceTraits:
         data = _data()
         data["provides"] = {"interfaces": [{"id": "chat", "peer_ids": "yes"}]}
         assert any("peer_ids" in e for e in _errors(data))
+
+
+class TestAuthors:
+    BASE = (
+        'schema = 1\n[extension]\nid = "dev/x"\nname = "x"\nversion = "1.0.0"\n'
+        '{author}[compat]\ncore_api = ">=0.1"\n'
+    )
+
+    def parse(self, author_line: str):
+        from core.extensions.manifest import parse_manifest_text
+
+        return parse_manifest_text(self.BASE.format(author=author_line))
+
+    def test_one_author_is_a_name(self) -> None:
+        m = self.parse('author = "XargonWan"\n')
+        assert m.authors == ("XargonWan",) and m.author == "XargonWan"
+
+    def test_several_authors_are_a_list(self) -> None:
+        m = self.parse('author = ["XargonWan", "Scarlet-Raine"]\n')
+        assert m.authors == ("XargonWan", "Scarlet-Raine")
+        assert m.author == "XargonWan, Scarlet-Raine"
+
+    def test_no_author_is_none(self) -> None:
+        assert self.parse("").authors == ()
+
+    @pytest.mark.parametrize(
+        "line, expect",
+        [
+            ("author = 3\n", "must be a name or a list of names"),
+            ('author = ["a", 4]\n', "must be a name or a list of names"),
+            ('author = ["a", ""]\n', "must be a name or a list of names"),
+            ('author = ["a", "a"]\n', "listed twice"),
+        ],
+    )
+    def test_a_bad_author_is_refused(self, line: str, expect: str) -> None:
+        with pytest.raises(ManifestError) as info:
+            self.parse(line)
+        assert expect in str(info.value)

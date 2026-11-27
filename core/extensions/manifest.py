@@ -301,7 +301,8 @@ class Manifest:
     name: str
     version: str
     description: str = ""
-    author: str = ""
+    #: Who wrote it: ``author = "Name"`` or ``author = ["Name", "Other Name"]`` in the manifest.
+    authors: tuple[str, ...] = ()
     license: str = ""
     experimental: bool = False
     #: PEP 440 specifier of the Core API versions this extension works with. The
@@ -314,6 +315,11 @@ class Manifest:
     permissions: Permissions = field(default_factory=Permissions)
     python_requirements: tuple[str, ...] = ()
     config: tuple[ConfigField, ...] = ()
+
+    @property
+    def author(self) -> str:
+        """The authors as one line (``"A, B"``)."""
+        return ", ".join(self.authors)
 
     @property
     def interface_ids(self) -> tuple[str, ...]:
@@ -470,10 +476,24 @@ def _parse_extension(data: Mapping[str, Any], c: _Collector) -> dict[str, Any]:
         "name": c.string(table, "name", "extension", required=True),
         "version": version,
         "description": c.string(table, "description", "extension"),
-        "author": c.string(table, "author", "extension"),
+        "authors": _parse_authors(table, c),
         "license": c.string(table, "license", "extension"),
         "experimental": c.boolean(table, "experimental", "extension"),
     }
+
+
+def _parse_authors(table: Mapping[str, Any], c: _Collector) -> tuple[str, ...]:
+    """``author`` is a name or a list of names (an extension can have several authors)."""
+    raw = table.get("author", "")
+    if isinstance(raw, str):
+        return (raw.strip(),) if raw.strip() else ()
+    if isinstance(raw, list) and all(isinstance(i, str) and i.strip() for i in raw):
+        names = tuple(i.strip() for i in raw)
+        if len(set(names)) != len(names):
+            c.add("extension.author", "the same author is listed twice")
+        return names
+    c.add("extension.author", "must be a name or a list of names")
+    return ()
 
 
 def _parse_compat(data: Mapping[str, Any], c: _Collector) -> str:
@@ -1033,7 +1053,7 @@ def parse_manifest(data: Mapping[str, Any], *, source: str = "<manifest>") -> Ma
         name=ext["name"],
         version=ext["version"],
         description=ext["description"],
-        author=ext["author"],
+        authors=ext["authors"],
         license=ext["license"],
         experimental=ext["experimental"],
         core_api=core_api,

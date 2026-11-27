@@ -54,7 +54,9 @@ class PluginBase:
           when the "Run Now" button is pressed. Defaults to ``"run_now"``.
         - ``run_label``: caption shown on the "Run Now" button.
         - ``run_title``: tooltip/description shown next to the button.
-        - ``version`` / ``author`` / ``type``: informational only.
+        - ``author``: a name or a list of names (see :mod:`core.authorship`); the
+          ``author`` class attribute does the same.
+        - ``version`` / ``type``: informational only.
         """
         return {
             "name": self.get_display_name(),

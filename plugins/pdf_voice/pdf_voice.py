@@ -312,6 +312,9 @@ def split_into_chapters(
 class PDFVoicePlugin(PluginBase):
     """Drive Vox to read a PDF aloud, one chapter per TTS clip."""
 
+    #: Who wrote it (see core/authorship.py).
+    author = "Scarlet-Raine"
+
     display_name = "PDF Voice"
 
     def __init__(self) -> None:

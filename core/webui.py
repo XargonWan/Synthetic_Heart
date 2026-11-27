@@ -56,6 +56,7 @@ from core import app_paths as _app_paths
 # environment change made before the server is constructed still applies.
 _default_bind_host = _app_paths.default_bind_host
 _in_container = _app_paths.in_container
+from core.authorship import authors_of
 from core.logging_utils import _LOG_FILE, log_debug, log_error, log_info, log_warning
 from core.config_manager import config_registry
 from core.variables_engine import register_exposed_var
@@ -12644,6 +12645,7 @@ class SynthWebUIInterface:
                     "name": name,
                     "display_name": self._get_display_name(name, plugin),
                     "description": description,
+                    "authors": authors_of(plugin),
                     "actions": actions,
                     "status": meta["status"],
                     "details": led_details,

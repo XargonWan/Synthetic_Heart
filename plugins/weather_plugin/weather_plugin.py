@@ -113,6 +113,9 @@ register_exposed_var(
 class WeatherPlugin:
     """Plugin to provide weather information using wttr.in."""
 
+    #: Who wrote it (see core/authorship.py).
+    author = ("XargonWan", "Scarlet-Raine")
+
     display_name = "Weather"
 
     def __init__(self):

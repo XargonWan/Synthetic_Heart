@@ -326,6 +326,9 @@ class AgpeerPlugin(PluginBase):
     degrade to clean per-action errors.
     """
 
+    #: Who wrote it (see core/authorship.py).
+    author = "Scarlet-Raine"
+
     display_name = "agpeer"
 
     def __init__(self) -> None:

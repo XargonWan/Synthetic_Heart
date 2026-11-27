@@ -462,6 +462,9 @@ class SoulPlugin(PluginBase):
     injecting context through existing static injection plumbing.
     """
 
+    #: Who wrote it (see core/authorship.py).
+    author = ("XargonWan", "Scarlet-Raine")
+
     display_name = "SOUL Plugin"
     allow_static_injection_stale_fallback = True
     static_injection_cache_ttl_seconds = 300.0
