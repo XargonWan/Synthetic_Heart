@@ -8,6 +8,10 @@ on a real installation.
 First start and migration
 -------------------------
 
+#. Fresh install (empty database): the Engines tab lists the voice engine ``kitten``, the
+   hearing engine ``vosk`` and the cortex endpoint ``zen-llm-engine`` without anyone adding them;
+   the first spoken reply downloads the KittenTTS model (about 25 to 80 MB) and is heard.
+
 #. Update an installation that used the old plugins; start it. The defaults
    (``synth_stage``, ``synth_dashboard``, ``openai_api``, ``fluxer``, ``telegram_bot``,
    ``zen``, ``protocol_harmony``, ``protocol_fish``) appear in Plugins > Installed, switched

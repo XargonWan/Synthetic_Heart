@@ -1,3 +1,15 @@
+### feat(extensions): Karada and hearing for extensions, and a fresh install keeps its Zen endpoint
+
+**Before.** An extension could not follow what the avatar does or have a recording read by the hearing engine, so a body that draws her in a game room (RetroXR) could not leave the Core. `endpoints.ensure(only_if_registry_empty=true)` counted any endpoint: once the local voice and hearing engines became default extensions and created theirs first, a fresh install no longer got its Zen endpoint, and had no model at all.
+
+**Now.** `karada.subscribe` / `karada.unsubscribe` / `karada.state` / `karada.presence` (SDK `ctx.karada`) make an extension a Karada transport: it receives the frames the WebUI receives, in order, with a bounded queue, and announces or clears its own presence (released when it ends). `voice.transcribe` (`ctx.voice.transcribe`) has a recording of the extension's read by the hearing engine the person chose. `only_if_registry_empty` is now `only_if_no_cortex`: only an enabled endpoint that serves the cortex counts. A remote Vessel connector also declares `uses_idle_beat`, `core_verbs` and `core_verb_descriptions`.
+
+**Verified.** The ten default extensions were packed into a bundle with `scripts/build_bundled_extensions.py` and started from it as a first start would (real libraries, real processes): all ten run and `kitten`, `vosk` and `zen-llm-engine` are created.
+
+**Not verified here.** The same start against the real endpoint registry and database, the Docker build (the Dockerfile clones the plugins repository's `develop`, which has none of these commits until it is pushed), and the WebUI in a browser. No Rift Vessel connector has been moved to an extension yet.
+
+**Location.** `core/extensions/{karada,voice,endpoints,vessels,core_interfaces}.py`, `synth_sdk/`, `tests/test_extensions_karada.py`.
+
 ### feat(voice): the local voice and hearing engines are default extensions, and speech to a chat is a voice note
 
 **Before.** KittenTTS and Vosk were built into the Core, behind a "local-voice" extra that pulled PyTorch, torchaudio and spaCy, a first-use package installer and a model manager with its own panel. A fresh image had neither working. A spoken reply that reached Telegram instead of a call arrived as a `vox_*.wav` file.
