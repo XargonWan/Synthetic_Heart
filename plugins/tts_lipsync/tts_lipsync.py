@@ -440,12 +440,14 @@ class TTSLipSyncPlugin(AIPluginBase):
                         text_caption = payload.get("__merged_text") or payload.get(
                             "text"
                         )
-                        await target_iface.send_message(
-                            {
-                                "interface_path": interface_path,
-                                "media": [str(local_path)],
-                                "text": text_caption,
-                            }
+                        from core.voice_delivery import send_speech
+
+                        await send_speech(
+                            target_iface,
+                            iface_name,
+                            interface_path,
+                            local_path,
+                            text_caption,
                         )
             except Exception as e:
                 log_error(f"[tts_lipsync] Auto-dispatch failed callback: {e}")

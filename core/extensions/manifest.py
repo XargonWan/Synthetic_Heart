@@ -47,6 +47,8 @@ NETWORK_RE = re.compile(r"^(\*\.)?[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?:[0-9]{
 #: Module path that the extension process will import.
 MODULE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
 
+#: Audio formats an interface may ask spoken messages in.
+VOICE_FORMATS = frozenset({"ogg_opus", "mp3", "m4a"})
 ENGINE_KINDS = frozenset({"llm", "vox", "auris", "iris", "live"})
 CONFIG_TYPES = frozenset({"string", "int", "float", "bool"})
 
@@ -80,6 +82,9 @@ class InterfaceProvision:
     reply_only: bool = False
     #: A synthesised reply is delivered as a media file through ``send_message``.
     speech_as_media: bool = False
+    #: The audio format the interface's chats accept for a spoken message (see
+    #: ``core.interface_traits.InterfaceTraits.voice_format``); empty: as the engine made it.
+    voice_format: str = ""
     #: Names of the extra actions the interface may offer besides ``send_message``.
     actions: tuple[str, ...] = ()
     #: The one of those actions that is how the interface *speaks* (a radio's "say on
@@ -543,6 +548,7 @@ def _parse_provides(data: Mapping[str, Any], c: _Collector) -> Provides:
                     "peer_ids",
                     "reply_only",
                     "speech_as_media",
+                    "voice_format",
                     "actions",
                     "message_action",
                 }
@@ -567,6 +573,12 @@ def _parse_provides(data: Mapping[str, Any], c: _Collector) -> Provides:
             except ValueError as exc:
                 c.add(f"{path}.paths", f"invalid path pattern {pattern!r}: {exc}")
         suffix = c.string(entry, "bot_username_suffix", path)
+        voice_format = c.string(entry, "voice_format", path) or ""
+        if voice_format and voice_format not in VOICE_FORMATS:
+            c.add(
+                f"{path}.voice_format",
+                f"must be one of {', '.join(sorted(VOICE_FORMATS))}, got {voice_format!r}",
+            )
         iface_actions = c.string_list(entry, "actions", path)
         c.matching(iface_actions, IDENT_RE, f"{path}.actions", "action name")
         speaking = c.string(entry, "message_action", path)
@@ -588,6 +600,7 @@ def _parse_provides(data: Mapping[str, Any], c: _Collector) -> Provides:
                 peer_ids=c.boolean(entry, "peer_ids", path),
                 reply_only=c.boolean(entry, "reply_only", path),
                 speech_as_media=c.boolean(entry, "speech_as_media", path),
+                voice_format=voice_format,
                 actions=iface_actions,
                 message_action=speaking,
             )

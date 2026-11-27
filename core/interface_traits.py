@@ -47,6 +47,10 @@ class InterfaceTraits:
     #: ``send_message`` (a voice note, an audio attachment). Lip-sync does not depend on
     #: it: the Karada state server plays the speech on every connected avatar client.
     speech_as_media: bool = False
+    #: The audio format this interface's chats accept for a spoken message (a voice note):
+    #: ``ogg_opus``, ``mp3`` or ``m4a``. Empty: the clip is sent as the engine made it.
+    #: Applies whenever speech goes to a chat rather than into a live call.
+    voice_format: str = ""
 
 
 DEFAULT = InterfaceTraits()

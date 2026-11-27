@@ -1442,12 +1442,11 @@ class VoxPlugin(AIPluginBase):
                 # ``(channel_id=None, text=None)`` and detect a dict first
                 # argument themselves — passing original_message positionally
                 # would land in their ``text`` parameter.
-                await target_iface.send_message(
-                    {
-                        "interface_path": interface_path,
-                        "media": [str(audio_path)],
-                        "text": caption,
-                    }
+                # Spoken, not a file: converted to the voice format the chat takes.
+                from core.voice_delivery import send_speech
+
+                await send_speech(
+                    target_iface, iface_name, interface_path, audio_path, caption
                 )
 
             else:
