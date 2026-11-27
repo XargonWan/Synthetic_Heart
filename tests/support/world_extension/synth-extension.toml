@@ -1,0 +1,22 @@
+schema = 1
+
+[extension]
+id = "dev/tinyworld"
+name = "Tiny world"
+version = "0.1.0"
+description = "A test world: one room, one player, a chat."
+
+[compat]
+core_api = ">=0.1,<1"
+
+[entry]
+module = "ext_main"
+function = "main"
+
+[[provides.vessels]]
+name = "tinyworld"
+label = "Tiny world"
+capabilities = ["chat", "movement"]
+
+[permissions]
+capabilities = ["log", "vessel.connector"]

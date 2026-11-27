@@ -185,6 +185,33 @@ MAX_PROTOCOLS = 4
 PROTOCOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
 
 
+@dataclass(frozen=True)
+class VesselProvision:
+    """A Rift Vessel connector: the body this extension gives the synth in one world.
+
+    The Vessel (in the Core) owns the session, the salience filter, the beats and the diary.
+    The connector only embodies: it connects to the world, turns what happens into
+    perception events, and carries out the actions the Vessel asks for. An extension that
+    declares one here and holds ``vessel.connector`` is offered to the Vessel under ``name``
+    next to the built-in connectors.
+    """
+
+    name: str
+    #: Shown where the Vessel lists its connectors.
+    label: str = ""
+    #: The world's chat is still there on the next visit (a person in a room), so ending
+    #: a session does not clear it.
+    remembers_chat: bool = False
+    #: Capability flags: ``movement``, ``chat``, ``perception``, ``interaction``, ``local``.
+    capabilities: tuple[str, ...] = ()
+
+
+VESSEL_CAPABILITIES = frozenset(
+    {"movement", "chat", "perception", "interaction", "local"}
+)
+MAX_VESSELS = 4
+VESSEL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
+
 #: Recon questions one extension may add.
 MAX_RECON = 4
 RECON_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{1,39}$")
@@ -207,6 +234,8 @@ class Provides:
     recon: tuple[ReconProvision, ...] = ()
     #: Wire protocols for external endpoints (see :class:`ProtocolProvision`).
     protocols: tuple[ProtocolProvision, ...] = ()
+    #: Rift Vessel connectors (see :class:`VesselProvision`).
+    vessels: tuple[VesselProvision, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -486,6 +515,7 @@ def _parse_provides(data: Mapping[str, Any], c: _Collector) -> Provides:
                 "endpoints",
                 "recon",
                 "protocols",
+                "vessels",
             }
         ),
         "provides",
@@ -582,6 +612,7 @@ def _parse_provides(data: Mapping[str, Any], c: _Collector) -> Provides:
             )
     recon = _parse_recon(table, c)
     protocols = _parse_protocols(table, c)
+    vessels = _parse_vessels(table, c)
     web = _parse_web(table, c)
     if ui and (web is None or not web.static):
         c.add(
@@ -598,6 +629,7 @@ def _parse_provides(data: Mapping[str, Any], c: _Collector) -> Provides:
         endpoints=endpoints,
         recon=recon,
         protocols=protocols,
+        vessels=vessels,
     )
 
 
@@ -739,6 +771,48 @@ def _parse_protocols(
     names = [p.name for p in found]
     for dup in sorted({n for n in names if names.count(n) > 1}):
         c.add("provides.protocols", f"protocol {dup!r} is declared twice")
+    return tuple(found)
+
+
+def _parse_vessels(
+    provides: Mapping[str, Any], c: _Collector
+) -> tuple[VesselProvision, ...]:
+    raw = provides.get("vessels", [])
+    if not isinstance(raw, list):
+        c.add("provides.vessels", "must be a list of tables ([[provides.vessels]])")
+        return ()
+    if len(raw) > MAX_VESSELS:
+        c.add("provides.vessels", f"at most {MAX_VESSELS} connectors")
+    found: list[VesselProvision] = []
+    for index, item in enumerate(raw[:MAX_VESSELS]):
+        path = f"provides.vessels[{index}]"
+        table = c.table(item, path)
+        if table is None or not isinstance(item, Mapping):
+            continue
+        c.unknown_keys(
+            item, frozenset({"name", "label", "remembers_chat", "capabilities"}), path
+        )
+        name = c.string(item, "name", path, required=True)
+        if name and not VESSEL_NAME_RE.match(name):
+            c.add(f"{path}.name", f"must be a lowercase identifier, got {name!r}")
+        flags = c.string_list(item, "capabilities", path)
+        unknown = sorted(set(flags) - VESSEL_CAPABILITIES)
+        if unknown:
+            c.add(
+                f"{path}.capabilities",
+                f"unknown flags {unknown} (allowed: {', '.join(sorted(VESSEL_CAPABILITIES))})",
+            )
+        found.append(
+            VesselProvision(
+                name=name or "",
+                label=c.string(item, "label", path) or "",
+                remembers_chat=c.boolean(item, "remembers_chat", path),
+                capabilities=flags,
+            )
+        )
+    names = [v.name for v in found]
+    for dup in sorted({n for n in names if names.count(n) > 1}):
+        c.add("provides.vessels", f"connector {dup!r} is declared twice")
     return tuple(found)
 
 

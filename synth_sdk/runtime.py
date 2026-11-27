@@ -19,7 +19,7 @@ import os
 import secrets
 import traceback
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -788,6 +788,119 @@ class Protocols(_Namespace):
         self._ctx.handle("protocol.request", adapter)
 
 
+class Vessels(_Namespace):
+    """Rift Vessel connectors you provide (``[[provides.vessels]]``, capability
+    ``vessel.connector``). See :mod:`synth_sdk.vessel`."""
+
+    #: How often the snapshot is compared with the last one pushed while connected.
+    POLL_SECONDS = 1.0
+
+    def __init__(self, ctx: Context) -> None:
+        super().__init__(ctx)
+        self._connectors: dict[str, Any] = {}
+        self._last: dict[str, dict[str, Any]] = {}
+        self._pollers: dict[str, asyncio.Task[None]] = {}
+
+    def serve(self, name: str, connector: Any) -> None:
+        """Give the Vessel the connector ``name`` (declared in the manifest)."""
+        self._connectors[name] = connector
+        connector._changed = lambda: self._push_soon(name)
+        self._ctx.handle("vessel.call", self._call)
+
+    async def perceive(self, name: str, event: dict[str, Any]) -> bool:
+        """Report something that happened in the world: ``{"event_type", "summary",
+        "actor", "salience", "data"}``. Whether the Vessel took it (it ignores events
+        while the connector is not connected)."""
+        result = await self._ctx.call("vessel.perceive", name=name, event=event)
+        return bool(result.get("accepted"))
+
+    async def push_state(self, name: str) -> None:
+        """Send the Core the answers it gives without asking, if they changed."""
+        connector = self._connectors.get(name)
+        if connector is None:
+            return
+        snapshot = json.loads(json.dumps(connector.snapshot(), default=str))
+        if snapshot == self._last.get(name):
+            return
+        self._last[name] = snapshot
+        await self._ctx.call("vessel.state", name=name, state=snapshot)
+
+    def _push_soon(self, name: str) -> None:
+        async def run() -> None:
+            try:
+                await self.push_state(name)
+            except RpcError:
+                pass
+
+        task = asyncio.ensure_future(run())
+        self._ctx._background.add(task)
+        task.add_done_callback(self._ctx._background.discard)
+
+    async def _poll(self, name: str) -> None:
+        while not self._ctx.stopping.is_set():
+            await asyncio.sleep(self.POLL_SECONDS)
+            try:
+                await self.push_state(name)
+            except RpcError:
+                continue
+
+    def _start_polling(self, name: str) -> None:
+        if name not in self._pollers or self._pollers[name].done():
+            self._pollers[name] = asyncio.ensure_future(self._poll(name))
+
+    def _stop_polling(self, name: str) -> None:
+        task = self._pollers.pop(name, None)
+        if task is not None:
+            task.cancel()
+
+    async def _call(self, params: dict[str, Any]) -> Any:
+        name = str(params.get("name", ""))
+        method = str(params.get("method", ""))
+        args = dict(params.get("args") or {})
+        connector = self._connectors.get(name)
+        if connector is None:
+            raise RpcError(ErrorCode.INVALID_PARAMS, f"no connector {name!r}")
+        if method == "connect":
+
+            async def emit(event: dict[str, Any]) -> bool:
+                return await self.perceive(name, event)
+
+            ok = bool(await connector.connect(dict(args.get("settings") or {}), emit))
+            if ok:
+                self._start_polling(name)
+            await self.push_state(name)
+            return {
+                "ok": ok,
+                "error": connector.last_error,
+                "state": self._last.get(name, {}),
+            }
+        if method == "disconnect":
+            self._stop_polling(name)
+            await connector.disconnect()
+            await self.push_state(name)
+            return None
+        fn = getattr(connector, method, None)
+        if fn is None or method.startswith("_"):
+            raise RpcError(ErrorCode.METHOD_NOT_FOUND, f"{method} is not supported")
+        if method in {
+            "evaluate_goal_completion",
+            "evaluate_goal_completion_from_history",
+            "complete_active_goal",
+        }:
+            result = fn(*list(args.get("args") or []), **dict(args.get("kwargs") or {}))
+        else:
+            result = fn(**args)
+        if asyncio.iscoroutine(result):
+            result = await result
+        try:
+            await self.push_state(name)
+        except RpcError:
+            pass
+        if is_dataclass(result) and not isinstance(result, type):
+            return asdict(result)
+        return result
+
+
 class Endpoints(_Namespace):
     """External endpoints you front (capability ``endpoints.manage``). Only names your
     manifest declares in ``provides.endpoints``, and never an endpoint that holds an
@@ -995,6 +1108,7 @@ class Context:
         self.voice = Voice(self)
         self.recon = Recon(self)
         self.protocols = Protocols(self)
+        self.vessels = Vessels(self)
         self._handlers: dict[str, Callable[[dict[str, Any]], Awaitable[Any] | Any]] = {}
 
     def inbox_path(self, name: str = "file") -> Path:

@@ -488,6 +488,40 @@ and ``ctx.recon.on_contribute(handler)``. Tests: ``tests/test_extensions_turns_v
 ``tests/test_extension_radio_host_process.py`` (a real extension process, a fake station
 and the whole path of one remark).
 
+Rift Vessel connectors
+----------------------
+
+The Vessel (session, salience filter, beats, diary, goals) stays in the Core. What a *world*
+adds is a **connector**: the body that connects to the game or room, reports what happens and
+does what it is asked. An extension provides one with ``[[provides.vessels]]`` (``name``,
+``label``, ``remembers_chat``, ``capabilities`` flags) and the ``vessel.connector`` capability
+(``core/extensions/vessels.py``); the Vessel then loads it from its registry like any other
+connector, and nothing else in the Vessel changes.
+
+The contract has two halves, because the Core's connector contract mixes coroutines with
+plain methods called from synchronous code:
+
+* **Awaited questions** (``connect``, ``disconnect``, ``act``, ``act_deliberate``,
+  ``motor_step``, ``get_world_state``, the goal, base and quest lookups,
+  ``lookup_knowledge``, ``get_embodiment_assets``, ``probe_external_liveness``) become one
+  ``vessel.call`` request each. A failed ``act`` comes back as ``ok=False``, never as an
+  exception; the others fall back to the contract's default.
+* **Immediate answers** (``is_connected``, ``idle_busy``, ``describe_surroundings``,
+  ``get_world_actions``, ``get_progression_*``, ``get_in_world_name``,
+  ``get_world_identity``, ``describe_capabilities``, ``get_knowledge_sources``...) cannot
+  wait for a message. The extension pushes a **state snapshot** (``vessel.state``, at most
+  64 kB, known keys only) whenever one changes and the Core answers from the last one; a key
+  never sent gets the contract's default. A connector whose extension has stopped is not
+  connected.
+
+From the extension to the Core: ``vessel.perceive`` (an event of the world; taken only while
+the Vessel has the connector connected, only for a connector the extension declared) and
+``vessel.state``. SDK: ``synth_sdk.vessel.VesselConnector`` carries the same method names as
+the Core's contract, collects the snapshot and pushes it after every call and every second
+while connected (``changed()`` pushes at once); ``ctx.vessels.serve(name, connector)`` serves
+it. Tests: ``tests/test_extensions_vessels.py`` (the API against fakes and one real process,
+``tests/support/world_extension``).
+
 Wire protocols for external endpoints
 -------------------------------------
 
