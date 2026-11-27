@@ -39,10 +39,10 @@ def _build_trainer_bio_section() -> str:
     try:
         from core import config as config_module
 
-        trainer_name = config_module.TRAINER_NAME
+        trainer_name = config_module.get_trainer_display_name()
         trainer_ids = config_module.get_trainer_ids()
 
-        if not trainer_name or trainer_name == "Trainer":
+        if not trainer_name:
             return ""
 
         # Format: Clear distinction that this is about the person who trains/supervises the SyntH
