@@ -49,6 +49,35 @@ class TestAttempts:
         assert len(card.reply["text"]) == tc.MAX_REPLY
 
 
+class TestFailures:
+    """The card says why no answer arrived."""
+
+    def test_a_failed_model_call_is_remembered_with_its_engine_and_reason(self) -> None:
+        card = begin()
+        tc.note_failure("llm", "ConnectError: Connection error.", "zen-llm-engine")
+        (failure,) = card.to_dict()["failures"]
+        assert failure == {
+            "stage": "llm",
+            "engine": "zen-llm-engine",
+            "reason": "ConnectError: Connection error.",
+        }
+
+    def test_a_turn_that_fails_carries_the_reason_in_its_error_too(self) -> None:
+        card = begin()
+        tc.mark_failed("TimeoutError: no reply")
+        assert card.error == "TimeoutError: no reply" and card.status == tc.FAILED
+
+    def test_failures_are_bounded_and_long_reasons_cut(self) -> None:
+        card = begin()
+        for n in range(tc.MAX_FAILURES + 5):
+            tc.note_failure("llm", "x" * 1000 + str(n))
+        assert len(card.failures) == tc.MAX_FAILURES
+        assert all(len(f["reason"]) <= 300 for f in card.failures)
+
+    def test_without_a_current_card_it_does_nothing(self) -> None:
+        tc.note_failure("llm", "boom")  # must not raise
+
+
 class TestStages:
     def test_a_stage_is_timed_and_added(self) -> None:
         card = begin()

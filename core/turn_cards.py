@@ -57,6 +57,8 @@ MAX_SECTION_BYTES = 24_000
 MAX_SECTIONS = 40
 #: How many finished cards stay in memory (the store keeps more).
 MEMORY_RING = 200
+#: How many failed model calls one card remembers.
+MAX_FAILURES = 8
 
 
 def clean(value: Any, depth: int = 0) -> Any:
@@ -120,6 +122,9 @@ class TurnCard:
     attempts: int = 0
     reply: dict[str, Any] | None = None  # {"text", "valid"}
     error: str | None = None
+    #: Why a model call did not give an answer (``{"stage", "engine", "reason"}``), oldest
+    #: first and bounded: what the card says when no answer arrived.
+    failures: list[dict[str, str]] = field(default_factory=list)
     #: A merged batch: how many queued items this one turn answered.
     merged: int = 1
     #: Stages running right now, outermost first (not part of the output).
@@ -165,6 +170,15 @@ class TurnCard:
         elif self.reply is None or not self.reply.get("valid"):
             self.reply = {"text": shown, "valid": False}
 
+    def failure(self, stage: str, reason: Any, engine: str | None = None) -> None:
+        """A model call failed: remember why (a connection error, a timeout, an empty answer)."""
+        if len(self.failures) >= MAX_FAILURES:
+            return
+        text = " ".join(str(reason).split())[:300] or "unknown error"
+        self.failures.append(
+            {"stage": str(stage)[:40], "engine": str(engine or "")[:80], "reason": text}
+        )
+
     def corrector_turn(self, converged: bool | None = None) -> None:
         self.corrector_turns += 1
         if converged is not None:
@@ -207,6 +221,7 @@ class TurnCard:
             "attempts": self.attempts,
             "reply": self.reply,
             "error": self.error,
+            "failures": self.failures,
             "sections": [s.to_dict() for s in self.sections.values()],
         }
 
@@ -515,6 +530,16 @@ def attempt(text: Any, valid: bool) -> None:
             card.attempt(text, valid)
         except Exception as exc:  # noqa: BLE001
             log_debug(f"[turn_cards] attempt skipped: {exc}")
+
+
+def note_failure(stage: str, reason: Any, engine: str | None = None) -> None:
+    """The current turn's model call failed for ``reason``: the card says why no answer came."""
+    card = _current.get()
+    if card is not None:
+        try:
+            card.failure(stage, reason, engine)
+        except Exception as exc:  # noqa: BLE001
+            log_debug(f"[turn_cards] failure skipped: {exc}")
 
 
 def note_reason(reason: dict[str, Any]) -> None:

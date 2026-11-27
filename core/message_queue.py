@@ -237,11 +237,15 @@ def _begin_turn_card(item: dict[str, Any] | None, priority: int | None) -> None:
         pass
 
 
-def _note_turn_failed() -> None:
-    """The item in flight did not get a turn through (an error or a timeout): the statistics count it as failed."""
+def _note_turn_failed(reason: str | None = None) -> None:
+    """The item in flight did not get a turn through (an error or a timeout): the statistics count it as failed.
+
+    ``reason`` is what its card says when no answer arrived."""
     global _in_flight_failed
     _in_flight_failed = True
-    turn_cards.mark_failed()
+    turn_cards.mark_failed(reason)
+    if reason:
+        turn_cards.note_failure("turn", reason)
 
 
 def _clear_item_in_flight() -> None:
@@ -2884,10 +2888,10 @@ async def _consumer_loop() -> None:
                                             processing_task.result()
                                         )
                                     except Exception as exc:
-                                        _note_turn_failed()
+                                        _note_turn_failed(f"{type(exc).__name__}: {exc}")
                                         response_future.set_exception(exc)
                                 elif timed_out:
-                                    _note_turn_failed()
+                                    _note_turn_failed("the turn took too long and was stopped")
                                     response_future.set_exception(
                                         asyncio.TimeoutError(
                                             f"Message processing timed out after {timeout_seconds}s"
@@ -2945,7 +2949,7 @@ async def _consumer_loop() -> None:
                                 f"[QUEUE] Error checking pending queue for chat {chat_id}: {pending_e}"
                             )
             except Exception as e:  # pragma: no cover - plugin may misbehave
-                _note_turn_failed()
+                _note_turn_failed(f"{type(e).__name__}: {e}")
                 log_error(
                     f"[ERROR] Failed to process message from chat {final['chat_id']}: {e}\n{traceback.format_exc()}",
                 )

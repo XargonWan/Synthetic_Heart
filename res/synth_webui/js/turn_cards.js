@@ -163,10 +163,26 @@
         return grid;
     }
 
+    // Why nothing came back: the model call that failed (engine and reason), the error that
+    // ended the turn, or - when neither was recorded - that the model was never asked.
+    function noAnswerNote(card) {
+        const failures = Array.isArray(card.failures) ? card.failures : [];
+        if (failures.length) {
+            const last = failures[failures.length - 1];
+            const who = last.engine ? ' (' + last.engine + ')' : '';
+            const more = failures.length > 1 ? ' [' + failures.length + ' failures]' : '';
+            return 'No answer arrived: the model call failed' + who + ': ' + last.reason + more;
+        }
+        if (card.error) return 'No answer arrived: ' + card.error;
+        if (card.status === 'processing' || card.status === 'queued') return 'No answer yet.';
+        if (!card.attempts) return 'No answer arrived: the model was not asked in this turn.';
+        return 'No answer arrived.';
+    }
+
     function replyNode(card) {
         const box = el('div');
         if (!card.reply) {
-            box.appendChild(el('div', 'tc-reply-note last', 'No answer arrived.'));
+            box.appendChild(el('div', 'tc-reply-note last', noAnswerNote(card)));
             return box;
         }
         box.appendChild(el(

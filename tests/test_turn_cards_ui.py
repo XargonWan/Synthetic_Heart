@@ -122,3 +122,13 @@ class TestCardsScript:
     def test_empty_and_failed_loads_say_so(self, drawn: dict) -> None:
         assert drawn["emptyText"].startswith("No turns yet")
         assert drawn["brokenText"] == "Failed to load the turns."
+
+
+class TestNoAnswerNote:
+    def test_the_card_says_why_no_answer_arrived(self) -> None:
+        script = (ROOT / "res" / "synth_webui" / "js" / "turn_cards.js").read_text(
+            encoding="utf-8"
+        )
+        assert "function noAnswerNote(card)" in script
+        assert "card.failures" in script and "card.error" in script
+        assert "the model call failed" in script

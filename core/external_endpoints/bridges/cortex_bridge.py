@@ -1531,6 +1531,14 @@ class ExternalCortexEngine(AIPluginBase):
                 log_warning(
                     f"[cortex_bridge:{self._endpoint.name}] generate_response failed: {exc}"
                 )
+                try:
+                    from core import turn_cards
+
+                    turn_cards.note_failure(
+                        "llm", f"{type(exc).__name__}: {exc}", self._endpoint.name
+                    )
+                except Exception:  # noqa: BLE001 - a card never touches the call
+                    pass
                 raise
 
     def _downstream_char_budget(self) -> int:
