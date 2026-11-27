@@ -691,6 +691,7 @@ function loadHistoryData(subtab) {
     // Leaving the Queue tab: stop its auto-refresh loop so it never polls in
     // the background while another sub-tab is shown.
     if (subtab !== 'queue') stopQueueAutoRefresh();
+    if (subtab !== 'agent') { try { if (window.SynthWebUI && typeof window.SynthWebUI.stopAgentTab === 'function') window.SynthWebUI.stopAgentTab(); } catch (e) { /* ignore */ } }
     if (subtab === 'diary') return loadHistoryDiary();
     if (subtab === 'grillo') return loadHistoryGrillo();
     if (subtab === 'calendar') return loadHistoryCalendar();
