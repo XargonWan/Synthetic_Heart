@@ -41,7 +41,6 @@ dependencies = [
     # libraries, so the Core pays for no torch, onnxruntime or vosk.
     # audio dependencies are intentionally pared back for a CPU-only container.
     "pydub>=0.25.1",
-    "huggingface-hub>=1.5.0",
     "gtts>=2.5.4",
     "lingua-language-detector>=2.0.2",
     "gemini-cli>=0.1.0",

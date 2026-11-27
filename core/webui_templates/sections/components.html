@@ -53,7 +53,6 @@
                 <div id="vox-controls" style="display:flex; gap:12px; align-items:flex-start; margin-bottom:12px; flex-wrap:wrap;">
                     <select id="vox-engine-select" style="padding:8px 12px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; font-size:1rem; min-width:220px;">
                     </select>
-                    <button id="vox-manage-models-btn" class="pill secondary" title="Download, update or remove TTS models" style="padding:8px 14px; font-weight:600;">🗂 Manage Models</button>
                     <div id="vox-engine-info" class="meta" style="min-width:260px; display:none;">
                         <div style="font-weight:600;" id="vox-engine-label">—</div>
                         <div style="font-size:0.9rem; color:var(--muted);" id="vox-engine-description">—</div>
@@ -69,7 +68,6 @@
                 <div id="auris-controls" style="display:flex; gap:12px; align-items:flex-start; margin-bottom:12px; flex-wrap:wrap;">
                     <select id="auris-engine-select" style="padding:8px 12px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; font-size:1rem; min-width:220px;">
                     </select>
-                    <button id="auris-manage-models-btn" class="pill secondary" title="Download, update or remove STT models" style="padding:8px 14px; font-weight:600;">🗂 Manage Models</button>
                     <div id="auris-engine-info" class="meta" style="min-width:260px; display:none;">
                         <div style="font-weight:600;" id="auris-engine-label">—</div>
                         <div style="font-size:0.9rem; color:var(--muted);" id="auris-engine-description">—</div>
@@ -190,22 +188,3 @@
     </div>
 </section>
 
-<script type="module">
-import { createModelManagerModal } from '/js/model-manager.mjs';
-
-// ── Vox "Manage Models" button ──────────────────────────────────────────────
-(function wireModelManagerButtons() {
-    function _wire() {
-        const voxBtn = document.getElementById('vox-manage-models-btn');
-        const aurisBtn = document.getElementById('auris-manage-models-btn');
-        if (voxBtn) voxBtn.addEventListener('click', () => createModelManagerModal());
-        if (aurisBtn) aurisBtn.addEventListener('click', () => createModelManagerModal());
-    }
-    // components.html may be injected dynamically; try immediately then via MutationObserver
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', _wire);
-    } else {
-        _wire();
-    }
-})();
-</script>

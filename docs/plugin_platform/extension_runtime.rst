@@ -569,8 +569,8 @@ into its data directory, and creates its endpoint (``kitten``, ``vosk``) under t
 built-in engines had, so ``ACTIVE_VOX_ENGINE``, ``KITTEN_VOICE`` and the old settings keep
 working (``core/extensions/legacy.py`` copies ``KITTEN_*`` and ``VOSK_*``). KittenTTS runs the
 upstream model code without PyTorch or spaCy, which the upstream package pulls in but the
-inference never uses. They replaced the Core's built-in engines, the model manager's
-registrations and the first-use package installer.
+inference never uses. They replaced the Core's built-in engines, the model manager (its "Manage Models" panel and
+``/api/models`` routes went with it: nothing registered a model any more) and the first-use package installer.
 
 **Spoken replies to a chat.** An interface declares ``voice_format`` (``ogg_opus``, ``mp3`` or
 ``m4a``) for the audio its chats take as a voice message; a reply that is spoken while no call
