@@ -372,7 +372,29 @@
         return node;
     }
 
-    window.SynthExtensionUpdates = { button: updateButton, refresh: loadUpdates };
+    // The red button of the Installed detail pane: removes the extension and its data.
+    function uninstallButton(extensionId, label) {
+        const node = el('button', { type: 'button', className: 'pill btn-danger', textContent: 'Uninstall' });
+        node.style.marginTop = '8px';
+        node.addEventListener('click', async () => {
+            const what = label || extensionId;
+            if (!window.confirm('Uninstall ' + what + '?\n\nIts files and its data are removed.')) return;
+            node.disabled = true;
+            try {
+                const result = await call('/remove', { id: extensionId });
+                if (result.ok) toast('Uninstalled ' + what);
+                else toast(result.error || 'Uninstall failed', true);
+            } catch (e) {
+                toast('Uninstall: ' + e.message, true);
+            }
+            node.disabled = false;
+            await loadUpdates(true);
+            reloadComponents();
+        });
+        return node;
+    }
+
+    window.SynthExtensionUpdates = { button: updateButton, refresh: loadUpdates, uninstallButton };
 
     // The Plugins section is drawn again on every visit: fill the bar whenever it appears.
     let barTimer = null;

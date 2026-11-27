@@ -37,6 +37,20 @@
 
     function closeFrame() {
         if (frameHost) { frameHost.remove(); frameHost = null; }
+        document.body.classList.remove('ext-frame-open');
+        const veil = document.getElementById('ext-frame-veil');
+        if (veil) veil.remove();
+    }
+
+    // While a frame is up, floating windows (chat, etc.) and the minimized-window stack would
+    // sit on top of it; they are put away for the duration and come back when it closes.
+    function ensureFrameVeil() {
+        if (document.getElementById('ext-frame-veil')) return;
+        const style = el('style');
+        style.id = 'ext-frame-veil';
+        style.textContent = 'body.ext-frame-open .winbox, body.ext-frame-open #synth-minimized-stack' +
+            '{display:none !important}';
+        document.head.appendChild(style);
     }
 
     function openFrame(entry) {
@@ -50,13 +64,15 @@
         const close = el('button', { type: 'button', className: 'ext-frame-close', textContent: '✕' });
         close.title = 'Close ' + entry.title;
         close.setAttribute('aria-label', 'Close ' + entry.title);
-        close.style.cssText = 'position:absolute;top:8px;right:12px;z-index:2;width:34px;height:34px;' +
+        close.style.cssText = 'position:absolute;bottom:12px;left:12px;z-index:2;width:34px;height:34px;' +
             'border-radius:50%;border:1px solid var(--accent);background:var(--surface-alt);' +
             'color:var(--text-soft);font-size:1rem;cursor:pointer;opacity:.85';
         close.addEventListener('click', closeFrame);
         frameHost.appendChild(frameFor(entry));
         frameHost.appendChild(close);
         document.body.appendChild(frameHost);
+        ensureFrameVeil();
+        document.body.classList.add('ext-frame-open');
     }
 
     function openWindow(entry) {

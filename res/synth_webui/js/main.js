@@ -4295,6 +4295,13 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             console.warn('Detail hook failed for', item.name, hookErr);
                         }
 
+                        // Extension-backed components can be removed from their own pane.
+                        if (item.extension_id && window.SynthExtensionUpdates
+                            && typeof window.SynthExtensionUpdates.uninstallButton === 'function') {
+                            pane.appendChild(window.SynthExtensionUpdates.uninstallButton(
+                                item.extension_id, item.display_name || item.name));
+                        }
+
                         // Optional metadata-driven "Run Now" button.
                         if (item.runnable && !item.is_mcp) {
                             const runBtn = document.createElement('button');

@@ -393,3 +393,24 @@ class TestPresentation:
             and "function openFrame" in script
         )
         assert "closeFrame" in script
+
+    def test_a_frame_puts_floating_windows_away_while_it_is_open(self) -> None:
+        from pathlib import Path
+
+        script = (
+            Path(__file__).resolve().parent.parent
+            / "res/synth_webui/js/extension_slots.js"
+        ).read_text(encoding="utf-8")
+        assert "ext-frame-open" in script and ".winbox" in script
+        # closing the frame brings the windows back
+        assert "classList.remove('ext-frame-open')" in script
+
+    def test_the_installed_pane_has_a_red_uninstall_button(self) -> None:
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent / "res/synth_webui/js"
+        store = (root / "extension_store.js").read_text(encoding="utf-8")
+        main = (root / "main.js").read_text(encoding="utf-8")
+        assert "uninstallButton" in store and "btn-danger" in store
+        assert "'/remove'" in store
+        assert "uninstallButton(" in main and "item.extension_id" in main
