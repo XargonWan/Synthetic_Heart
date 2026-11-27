@@ -12434,6 +12434,11 @@ class SynthWebUIInterface:
                     "has_icon": self._plugin_has_icon(info, name),
                     "icon_url": f"/api/plugins/{name}/icon",
                     "guide": self._read_plugin_guide(info, name),
+                    # The extension that provides this interface (None for a built-in
+                    # one): the page offers its update.
+                    "extension_id": getattr(
+                        getattr(interface, "_session", None), "extension_id", None
+                    ),
                 }
             )
 

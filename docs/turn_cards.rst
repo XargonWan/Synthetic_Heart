@@ -12,8 +12,10 @@ Where to see them
 * **Activity > Queue** shows what is waiting, and above it the turns **running now** as cards
   that fill in step by step (they refresh every few seconds).
 * **Activity > Turns** keeps the finished ones, newest first, each with a **coloured label**:
-  *processed* (green) or *failed* (red; it did not get through, definitively). Filter by
-  status or search the text.
+  **Done** (the highlight colour) or **Error** (red: it did not get through, or it sent no
+  reply: a card with no answer says why, with the engine and the reason of the failed model
+  call, or that the model was not asked). The stored status is still ``processed`` or
+  ``failed``. Filter by status or search the text.
 
 Collapsed, a card is one line like a queue entry: status, kind, where it came from, the
 message, and the numbers that matter (how long it ran, how long it waited, corrector turns).

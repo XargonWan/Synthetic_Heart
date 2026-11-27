@@ -179,6 +179,14 @@ class TurnCard:
             {"stage": str(stage)[:40], "engine": str(engine or "")[:80], "reason": text}
         )
 
+    def no_answer_reason(self) -> str:
+        """Why the turn ended without an answer, for the card and its error."""
+        if self.failures:
+            last = self.failures[-1]
+            engine = f" ({last['engine']})" if last["engine"] else ""
+            return f"no answer: the model call failed{engine}: {last['reason']}"
+        return "no answer: the model was not asked in this turn"
+
     def corrector_turn(self, converged: bool | None = None) -> None:
         self.corrector_turns += 1
         if converged is not None:
@@ -480,10 +488,17 @@ def finish(failed: bool = False, error: str | None = None) -> None:
         _current.set(None)
         _live.pop(card.id, None)
         card.finished_at = time.time()
+        # A turn that sent no reply did not get through, whatever else it did: it is an
+        # error, not "processed".
+        if not failed and card.status != FAILED and card.reply is None:
+            failed = True
+            error = error or card.no_answer_reason()
         failed = failed or card.status == FAILED
         card.status = FAILED if failed else PROCESSED
         if failed and error:
             card.error = str(error)[:300]
+        elif failed and not card.error and card.reply is None:
+            card.error = card.no_answer_reason()[:300]
         data = card.to_dict()
         try:
             loop = asyncio.get_running_loop()

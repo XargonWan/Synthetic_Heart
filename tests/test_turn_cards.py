@@ -78,6 +78,51 @@ class TestFailures:
         tc.note_failure("llm", "boom")  # must not raise
 
 
+class TestNoReplyIsAnError:
+    """A turn that sent no reply did not get through: "error", not "processed"."""
+
+    @pytest.mark.asyncio
+    async def test_no_reply_and_no_failure_is_an_error_that_says_the_model_was_not_asked(
+        self,
+    ) -> None:
+        begin()
+        tc.finish()
+        await tc.drain()
+        [saved] = await tc.recent()
+        assert saved["status"] == "failed"
+        assert saved["error"] == "no answer: the model was not asked in this turn"
+
+    @pytest.mark.asyncio
+    async def test_a_failed_model_call_is_named_in_the_error(self) -> None:
+        begin()
+        tc.note_failure("llm", "ConnectError: Connection error.", "zen-llm-engine")
+        tc.finish()
+        await tc.drain()
+        [saved] = await tc.recent()
+        assert saved["status"] == "failed"
+        assert (
+            "zen-llm-engine" in saved["error"] and "Connection error" in saved["error"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_answer_makes_it_done(self) -> None:
+        begin()
+        tc.attempt("the answer", valid=True)
+        tc.finish()
+        await tc.drain()
+        [saved] = await tc.recent()
+        assert saved["status"] == "processed" and saved["error"] is None
+
+    @pytest.mark.asyncio
+    async def test_an_answer_that_was_not_correct_is_still_a_reply(self) -> None:
+        begin()
+        tc.attempt("not valid", valid=False)
+        tc.finish()
+        await tc.drain()
+        [saved] = await tc.recent()
+        assert saved["status"] == "processed"
+
+
 class TestStages:
     def test_a_stage_is_timed_and_added(self) -> None:
         card = begin()
@@ -176,6 +221,7 @@ class TestLifecycle:
     async def test_a_finished_card_is_saved_and_no_longer_live(self) -> None:
         card = begin(trigger={"text": "hello"})
         tc.note("body", seconds=0.2)
+        tc.attempt("an answer", valid=True)
         tc.finish()
         await tc.drain()
         assert tc.live() == [] and tc.current() is None
@@ -204,6 +250,7 @@ class TestLifecycle:
     async def test_recent_filters_by_status_and_text_and_is_newest_first(self) -> None:
         for text, failed in (("alpha", False), ("beta", True), ("gamma", False)):
             tc.begin(kind="chat", interface="x", trigger={"text": text})
+            tc.attempt("an answer", valid=True)
             tc.finish(failed=failed)
             await tc.drain()
         assert [c["trigger"]["text"] for c in await tc.recent()] == [
@@ -319,6 +366,7 @@ class TestQueueHooks:
         assert live["trigger"]["text"] == "hello   there"
         assert 2.5 <= live["queue_seconds"] <= 6
         tc.note("body", seconds=0.1)
+        tc.attempt("an answer", valid=True)
         mq._clear_item_in_flight()  # noqa: SLF001
         await tc.drain()
         [saved] = await tc.recent()
@@ -445,6 +493,7 @@ class TestApi:
     def seed(self, text: str, failed: bool) -> str:
         card = tc.begin(kind="chat", interface="synth_webui", trigger={"text": text})
         tc.note("body", seconds=0.5)
+        tc.attempt("an answer", valid=True)
         tc.finish(failed=failed, error="boom" if failed else None)
         data = {"id": card.id, **card.to_dict()}
         asyncio.run(tc.get_store().save(data))

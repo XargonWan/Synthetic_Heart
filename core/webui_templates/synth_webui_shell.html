@@ -1175,6 +1175,32 @@
             align-items: center;
             gap: 0.5rem;
         }
+        .plugins-update-bar {
+            margin-left: auto;
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .plugins-update-count {
+            color: var(--accent);
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+        .plugin-banner-update {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 26px;
+            height: 26px;
+            padding: 0;
+            border-radius: 50%;
+            border: 1px solid var(--accent);
+            background: transparent;
+            color: var(--accent);
+            cursor: pointer;
+        }
+        .plugin-banner-update:hover { background: var(--accent); color: var(--background); }
+        .plugin-banner-update:disabled { opacity: .5; cursor: default; }
         .plugin-banner-run {
             flex: 0 0 auto;
             display: inline-flex;

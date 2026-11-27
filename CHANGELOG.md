@@ -1,3 +1,7 @@
+### feat(webui): update all, an update button per plugin, and Done/Error on the turn cards
+
+The Plugins page shows how many plugins have an update (in the highlight colour) with an **Update all** button next to it, and a plugin that is an extension with a newer version gets an update button beside its switch (`GET /api/extensions/store/updates`, `POST /api/extensions/store/update-all`; one that fails does not stop the others). On Activity, a turn card is **Done** in the highlight colour or **Error** in red, and a turn that sent no reply is an error ("no answer: ..." with the engine and reason, or that the model was not asked) instead of "processed".
+
 ### refactor(karada): facial expressions are part of Karada, no longer a plugin
 
 **Before.** The `[em_NAME:INTENSITY]` tags of a reply were parsed and played by `plugins/facial_expression_plugin`; four places (the transport layer, the action parser, Vox, the debug inject route) each looked the plugin up in the plugin registry and repeated the persona lookup before calling a private method.

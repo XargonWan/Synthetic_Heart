@@ -73,11 +73,11 @@ class TestCardsScript:
 
     def test_the_status_is_a_coloured_label(self, drawn: dict) -> None:
         assert (drawn["pillText"], drawn["rootClass"]) == (
-            "Processed",
+            "Done",
             "tc-card tc-processed",
         )
         assert (drawn["failedPill"], drawn["failedClass"]) == (
-            "Failed",
+            "Error",
             "tc-card tc-failed",
         )
         assert drawn["liveClass"] == "tc-card tc-processing"

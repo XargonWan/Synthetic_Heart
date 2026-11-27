@@ -171,6 +171,70 @@ def build_router(
             reply["runtime"] = await reload(holder["id"])
         return reply
 
+    @router.get(f"{ROUTE}/updates")
+    async def updates(request: Request, refresh: bool = False) -> Any:
+        """What has a newer version in a repository: ``[{id, installed, available}]``."""
+        if not webui_auth.request_authorized(request):
+            return denied()
+        try:
+            found = await asyncio.to_thread(installer.updates, refresh=refresh)
+            problem = ""
+        except Exception as exc:  # noqa: BLE001 - an unreachable repository is a message
+            found, problem = [], f"{type(exc).__name__}: {exc}"
+        return {
+            "updates": [
+                {"id": i, "installed": have, "available": new} for i, have, new in found
+            ],
+            "problem": problem,
+        }
+
+    @router.post(f"{ROUTE}/update-all")
+    async def update_all(request: Request) -> Any:
+        """Update every extension that has a newer version. One that fails (or comes from a
+        repository that needs a confirmation) does not stop the others."""
+        if not webui_auth.request_authorized(request):
+            return denied()
+
+        def work() -> list[dict[str, Any]]:
+            results: list[dict[str, Any]] = []
+            for ext_id, have, new in installer.updates():
+                try:
+                    done = installer.update(ext_id)
+                    results.append(
+                        {
+                            "id": ext_id,
+                            "ok": True,
+                            "from": have,
+                            "to": new,
+                            "installed": done.installed,
+                        }
+                    )
+                except UntrustedRepository as exc:
+                    results.append(
+                        {
+                            "id": ext_id,
+                            "ok": False,
+                            "needs_confirmation": True,
+                            "error": str(exc),
+                        }
+                    )
+                except (InstallError, ConfigError) as exc:
+                    results.append({"id": ext_id, "ok": False, "error": str(exc)})
+            return results
+
+        try:
+            results = await asyncio.to_thread(work)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "results": []}
+        for entry in results:
+            if entry["ok"]:
+                entry["runtime"] = await reload(entry["id"])
+        return {
+            "ok": all(r["ok"] for r in results),
+            "updated": sum(1 for r in results if r["ok"]),
+            "results": results,
+        }
+
     @router.post(f"{ROUTE}/rollback")
     async def rollback(request: Request) -> Any:
         holder: dict[str, str] = {}

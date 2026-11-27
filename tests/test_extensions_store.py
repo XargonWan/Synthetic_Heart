@@ -446,3 +446,99 @@ class TestRepositoriesAlwaysAvailable:
         # the failure branch of the Repositories view still draws the form
         failure = script[script.index("async function renderRepositories") :]
         assert failure.index("repoForm(root)") < failure.index("problems(data, root)")
+
+
+class TestUpdates:
+    """What can be updated, and updating all of it at once."""
+
+    def _two(self, store: dict[str, Any]) -> None:
+        repo = store["repo"]
+        store["inst"].install("dev/one")
+        store["inst"].install("dev/lib")
+        repo.add("dev/one", "1.1.0", extra_files={"marker.txt": b"v11"})
+        repo.add("dev/lib", "1.1.0")
+        repo.publish()
+
+    @pytest.mark.asyncio
+    async def test_the_updates_are_listed_with_both_versions(
+        self, store: dict[str, Any]
+    ) -> None:
+        self._two(store)
+        data = (
+            await store["web"].get("/api/extensions/store/updates", headers=OK)
+        ).json()
+        assert {(u["id"], u["installed"], u["available"]) for u in data["updates"]} == {
+            ("dev/one", "1.0.0", "1.1.0"),
+            ("dev/lib", "1.0.0", "1.1.0"),
+        }
+
+    @pytest.mark.asyncio
+    async def test_nothing_to_update_is_an_empty_list(
+        self, store: dict[str, Any]
+    ) -> None:
+        store["inst"].install("dev/one")
+        data = (
+            await store["web"].get("/api/extensions/store/updates", headers=OK)
+        ).json()
+        assert data["updates"] == [] and data["problem"] == ""
+
+    @pytest.mark.asyncio
+    async def test_update_all_updates_every_one_and_reports_each(
+        self, store: dict[str, Any]
+    ) -> None:
+        self._two(store)
+        reply = await post(store, "update-all", {})
+        assert reply["ok"] is True and reply["updated"] == 2
+        assert {r["id"] for r in reply["results"]} == {"dev/one", "dev/lib"}
+        assert all(r["ok"] for r in reply["results"])
+        records = store["inst"].state.load().extensions
+        assert (records["dev/one"].version, records["dev/lib"].version) == (
+            "1.1.0",
+            "1.1.0",
+        )
+        assert store["inst"].updates() == []
+
+    @pytest.mark.asyncio
+    async def test_one_that_fails_does_not_stop_the_others(
+        self, store: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._two(store)
+        real = store["inst"].update
+
+        def flaky(ext_id: str, **kw: Any) -> Any:
+            if ext_id == "dev/lib":
+                from core.extensions.repo.installer import InstallError
+
+                raise InstallError("the download was refused")
+            return real(ext_id, **kw)
+
+        monkeypatch.setattr(store["inst"], "update", flaky)
+        reply = await post(store, "update-all", {})
+        assert reply["ok"] is False and reply["updated"] == 1
+        by_id = {r["id"]: r for r in reply["results"]}
+        assert by_id["dev/one"]["ok"] is True
+        assert (
+            by_id["dev/lib"]["ok"] is False and "refused" in by_id["dev/lib"]["error"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_both_need_the_token(self, store: dict[str, Any]) -> None:
+        web = store["web"]
+        assert (await web.get("/api/extensions/store/updates")).status_code == 401
+        assert (
+            await web.post("/api/extensions/store/update-all", json={})
+        ).status_code == 401
+
+    def test_the_page_has_the_bar_the_count_and_a_button_per_plugin(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        html = (root / "core/webui_templates/sections/plugins.html").read_text(
+            encoding="utf-8"
+        )
+        assert 'id="plugins-update-bar"' in html
+        script = (root / "res/synth_webui/js/extension_store.js").read_text(
+            encoding="utf-8"
+        )
+        assert "updatable plugin" in script and "Update all" in script
+        assert "window.SynthExtensionUpdates" in script
+        main = (root / "res/synth_webui/js/main.js").read_text(encoding="utf-8")
+        assert "SynthExtensionUpdates.button(item.extension_id)" in main

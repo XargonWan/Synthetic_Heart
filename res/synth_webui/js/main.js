@@ -4744,6 +4744,12 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                     controls.appendChild(runBtn);
                                 }
 
+                                // Update: for a plugin that is an extension with a newer
+                                // version in a repository (hidden until there is one).
+                                if (item.extension_id && window.SynthExtensionUpdates) {
+                                    controls.appendChild(window.SynthExtensionUpdates.button(item.extension_id));
+                                }
+
                                 // Toggle: hidden for MCP servers and for plugins that
                                 // cannot be disabled (core). POSTs to /api/components/toggle.
                                 if (!item.is_mcp && item.disable_allowed !== false) {

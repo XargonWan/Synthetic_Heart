@@ -2,8 +2,8 @@
  *
  * A card is born when the message queue hands an item to the consumer, is filled in as the
  * turn moves (recon, body, corrector, actions, debrief, emotions, recalled memories, each
- * with the time it took) and, once over, stays in Activity > Turns labelled "processed" or
- * "failed". Collapsed, a card is one line like a queue entry; expanded it shows everything.
+ * with the time it took) and, once over, stays in Activity > Turns labelled "done" or
+ * "error" (a turn that sent no reply is an error). Collapsed, a card is one line like a queue entry; expanded it shows everything.
  *
  * Everything is built with DOM calls and textContent: nothing a turn contains is ever read
  * as HTML or script.
@@ -22,7 +22,8 @@
         memories: 'Recalled memories',
         agent: 'Agent',
     };
-    const STATUS_LABELS = { processing: 'Processing', processed: 'Processed', failed: 'Failed', queued: 'Queued' };
+    // A turn that got through is "done"; one that failed, or sent no reply, is an "error".
+    const STATUS_LABELS = { processing: 'Processing', processed: 'Done', failed: 'Error', queued: 'Queued' };
     const expanded = new Set();
 
     function el(tag, className, text) {
@@ -56,7 +57,7 @@
         .tc-card { --tc-accent: var(--accent, #6bfefe); border: 1px solid var(--border, rgba(255,255,255,.1)); border-left: 4px solid var(--tc-accent);
             border-radius: 14px; background: var(--surface, rgba(24,24,36,.9)); overflow: hidden; }
         .tc-card.tc-processing { --tc-accent: var(--warn, #f3c04d); }
-        .tc-card.tc-processed { --tc-accent: var(--success, #18c98c); }
+        .tc-card.tc-processed { --tc-accent: var(--accent, #6bfefe); }
         .tc-card.tc-failed { --tc-accent: var(--error, #ff7b93); }
         .tc-card.tc-queued { --tc-accent: var(--text-soft, #b9badc); }
         .tc-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding: 10px 14px; cursor: pointer; user-select: none; }
@@ -173,7 +174,10 @@
             const more = failures.length > 1 ? ' [' + failures.length + ' failures]' : '';
             return 'No answer arrived: the model call failed' + who + ': ' + last.reason + more;
         }
-        if (card.error) return 'No answer arrived: ' + card.error;
+        if (card.error) {
+            const text = String(card.error);
+            return /^no answer/i.test(text) ? text.charAt(0).toUpperCase() + text.slice(1) : 'No answer arrived: ' + text;
+        }
         if (card.status === 'processing' || card.status === 'queued') return 'No answer yet.';
         if (!card.attempts) return 'No answer arrived: the model was not asked in this turn.';
         return 'No answer arrived.';

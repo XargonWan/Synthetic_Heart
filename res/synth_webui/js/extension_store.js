@@ -191,6 +191,102 @@
     // Both views read the same overview; an action redraws whichever are on the page.
     function render() { start(true); }
 
+    // ---- Updates: "Update all" and the count on the Installed tab, a button per plugin ----
+
+    const available = new Map();      // extension id -> { installed, available }
+    const updateButtons = new Set();  // { id, node }
+
+    function refreshButtons() {
+        updateButtons.forEach((entry) => {
+            if (!entry.node.isConnected) { updateButtons.delete(entry); return; }
+            const found = available.get(entry.id);
+            entry.node.hidden = !found;
+            if (found) entry.node.title = 'Update ' + entry.id + ' to ' + found.available + ' (now ' + found.installed + ')';
+        });
+    }
+
+    function renderUpdateBar() {
+        const bar = document.getElementById('plugins-update-bar');
+        if (!bar) return;
+        bar.textContent = '';
+        const count = available.size;
+        if (!count) return;
+        bar.appendChild(el('span', {
+            className: 'plugins-update-count',
+            textContent: count + (count === 1 ? ' updatable plugin' : ' updatable plugins'),
+        }));
+        bar.appendChild(el('button', {
+            type: 'button', className: 'pill', textContent: 'Update all',
+            onclick: async (ev) => {
+                const button = ev.currentTarget;
+                button.disabled = true;
+                try {
+                    const result = await call('/update-all', {});
+                    const failed = (result.results || []).filter((r) => !r.ok);
+                    if (result.updated) toast('Updated ' + result.updated + (result.updated === 1 ? ' plugin' : ' plugins'));
+                    failed.forEach((r) => toast(r.id + ': ' + (r.error || 'failed'), true));
+                    if (!result.updated && !failed.length) toast(result.error || 'Nothing to update', !!result.error);
+                } catch (e) {
+                    toast('Update all: ' + e.message, true);
+                }
+                await loadUpdates(true);
+                reloadComponents();
+            },
+        }));
+    }
+
+    function reloadComponents() {
+        const hub = window.SynthWebUI;
+        if (hub && typeof hub.loadEnginesSummary === 'function') hub.loadEnginesSummary();
+        start(true);
+    }
+
+    async function loadUpdates(refresh) {
+        try {
+            const data = await call('/updates' + (refresh ? '?refresh=true' : ''));
+            available.clear();
+            (data.updates || []).forEach((u) => available.set(u.id, u));
+        } catch (e) { /* the page just shows no update */ }
+        renderUpdateBar();
+        refreshButtons();
+    }
+
+    // The button of one plugin: hidden until its extension has an update.
+    function updateButton(extensionId) {
+        const node = el('button', { type: 'button', className: 'plugin-banner-update', hidden: true });
+        node.setAttribute('aria-label', 'Update ' + extensionId);
+        node.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M12 4l7 8h-4.5v8h-5v-8H5z" fill="currentColor"/></svg>';
+        node.addEventListener('click', async (ev) => {
+            ev.stopPropagation();
+            node.disabled = true;
+            try {
+                const result = await call('/update', { id: extensionId });
+                if (result.ok) toast('Updated ' + extensionId);
+                else toast(result.error || 'Update failed', true);
+            } catch (e) {
+                toast('Update: ' + e.message, true);
+            }
+            node.disabled = false;
+            await loadUpdates(true);
+            reloadComponents();
+        });
+        updateButtons.add({ id: extensionId, node });
+        refreshButtons();
+        return node;
+    }
+
+    window.SynthExtensionUpdates = { button: updateButton, refresh: loadUpdates };
+
+    // The Plugins section is drawn again on every visit: fill the bar whenever it appears.
+    let barTimer = null;
+    new MutationObserver(() => {
+        clearTimeout(barTimer);
+        barTimer = setTimeout(() => {
+            const bar = document.getElementById('plugins-update-bar');
+            if (bar && !bar.dataset.ready) { bar.dataset.ready = '1'; renderUpdateBar(); loadUpdates(false); }
+        }, 150);
+    }).observe(document.documentElement, { childList: true, subtree: true });
+
     function start(refresh) {
         [['extension-catalog', renderCatalog], ['extension-repositories', renderRepositories]].forEach(([id, draw]) => {
             const host = document.getElementById(id);
