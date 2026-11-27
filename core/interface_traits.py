@@ -43,13 +43,17 @@ class InterfaceTraits:
     #: A request/response interface (an HTTP API): the only place a turn may answer is
     #: the conversation the request came from.
     reply_only: bool = False
+    #: A synthesised reply is delivered to this interface as a media file sent with
+    #: ``send_message`` (a voice note, an audio attachment). Lip-sync does not depend on
+    #: it: the Karada state server plays the speech on every connected avatar client.
+    speech_as_media: bool = False
 
 
 DEFAULT = InterfaceTraits()
 
 #: Interfaces that ship inside the Core. Extensions declare their own traits.
 CORE_INTERFACES: dict[str, InterfaceTraits] = {
-    "discord_bot": InterfaceTraits(voice_input_tts_only=True),
+    "discord_bot": InterfaceTraits(voice_input_tts_only=True, speech_as_media=True),
     "synth_webui": InterfaceTraits(message_action="message_synth_webui"),
 }
 

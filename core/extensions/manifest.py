@@ -78,6 +78,8 @@ class InterfaceProvision:
     bot_username_suffix: str = ""
     peer_ids: bool = False
     reply_only: bool = False
+    #: A synthesised reply is delivered as a media file through ``send_message``.
+    speech_as_media: bool = False
     #: Names of the extra actions the interface may offer besides ``send_message``.
     actions: tuple[str, ...] = ()
     #: The one of those actions that is how the interface *speaks* (a radio's "say on
@@ -510,6 +512,7 @@ def _parse_provides(data: Mapping[str, Any], c: _Collector) -> Provides:
                     "bot_username_suffix",
                     "peer_ids",
                     "reply_only",
+                    "speech_as_media",
                     "actions",
                     "message_action",
                 }
@@ -554,6 +557,7 @@ def _parse_provides(data: Mapping[str, Any], c: _Collector) -> Provides:
                 bot_username_suffix=suffix or "",
                 peer_ids=c.boolean(entry, "peer_ids", path),
                 reply_only=c.boolean(entry, "reply_only", path),
+                speech_as_media=c.boolean(entry, "speech_as_media", path),
                 actions=iface_actions,
                 message_action=speaking,
             )

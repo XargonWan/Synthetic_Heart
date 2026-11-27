@@ -23,6 +23,7 @@ voice_input_tts_only = true       # speech only for spoken messages
 negative_chat_id_is_group = true  # group ids are negative, private ids positive
 bot_username_suffix = "bot"       # Telegram bot usernames end in "bot"
 peer_ids = true                   # SYNTH_PEERS ids are Telegram user ids
+speech_as_media = true            # a spoken reply is sent as a voice note
 
 [permissions]
 capabilities = ["log", "config", "stats", "interfaces.register", "interfaces.inbound"]

@@ -91,3 +91,19 @@ class TestBotsAndPeers:
     def test_peer_ids_belong_to_the_declaring_interface(self) -> None:
         it.register_traits("signed", it.InterfaceTraits(peer_ids=True))
         assert it.has_peer_ids("signed/1") and not it.has_peer_ids("discord_bot")
+
+
+def test_speech_as_media_is_declared_by_the_interface_not_named_by_the_core():
+    from pathlib import Path
+
+    from core.extensions.manifest import load_manifest
+    from core.interface_traits import traits_for
+
+    assert traits_for("discord_bot").speech_as_media is True
+    assert traits_for("some_new_interface").speech_as_media is False
+    manifest = load_manifest(
+        Path(__file__).resolve().parent.parent
+        / "extensions_src/telegram_bot/synth-extension.toml"
+    )
+    provided = {i.id: i for i in manifest.provides.interfaces}
+    assert provided["telegram_bot"].speech_as_media is True

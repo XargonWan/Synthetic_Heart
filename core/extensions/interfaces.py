@@ -624,6 +624,7 @@ def _traits_for(ctx: CallContext, interface_id: str) -> InterfaceTraits:
                 bot_username_suffix=provided.bot_username_suffix or None,
                 peer_ids=provided.peer_ids,
                 reply_only=provided.reply_only,
+                speech_as_media=provided.speech_as_media,
                 message_action=provided.message_action or SEND_MESSAGE,
             )
     return InterfaceTraits()

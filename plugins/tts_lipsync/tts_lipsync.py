@@ -13,6 +13,7 @@ from core.config_manager import config_registry
 from core.variables_engine import register_exposed_var
 from core.logging_utils import log_info, log_warning, log_error, log_debug
 from core.beat_utils import is_outbound_beat
+from core.interface_traits import traits_for
 
 
 register_exposed_var(
@@ -401,25 +402,7 @@ class TTSLipSyncPlugin(AIPluginBase):
                             f"[tts_lipsync] Karada broadcast_audio failed: {exc}"
                         )
 
-                    if iface_name == "discord_bot" and hasattr(
-                        target_iface, "send_message"
-                    ):
-                        # Send audio with text (merged from message action if present)
-                        msg_payload = {
-                            "interface_path": interface_path,
-                            "audio": str(local_path),
-                        }
-
-                        # Use merged text if available, fallback to original text
-                        text_caption = payload.get("__merged_text") or payload.get(
-                            "text"
-                        )
-                        if text_caption:
-                            msg_payload["text"] = text_caption
-
-                        await target_iface.send_message(msg_payload)
-
-                    elif iface_name == "synth_webui" and hasattr(
+                    if iface_name == "synth_webui" and hasattr(
                         target_iface, "send_tts_audio"
                     ):
                         # WebUI: send text message + TTS audio for lip-sync playback
@@ -448,14 +431,12 @@ class TTSLipSyncPlugin(AIPluginBase):
                                 f"[tts_lipsync] Could not extract session_id from interface_path: {interface_path}"
                             )
 
-                    elif iface_name == "telegram_bot" and hasattr(
+                    elif traits_for(iface_name).speech_as_media and hasattr(
                         target_iface, "send_message"
                     ):
-                        # Unified delivery (AGENTS.md §6). The legacy
-                        # ``audio_telegram_bot`` action was deleted in the unified
-                        # send_message refactor, so dispatching it only produced
-                        # "[telegram_interface] execute_action called for unknown
-                        # action" and the voice note was dropped.
+                        # Unified delivery (AGENTS.md §6): the speech goes to the chat
+                        # as a media file, with the text as its caption. Which interfaces
+                        # want that is declared by each interface (``speech_as_media``).
                         text_caption = payload.get("__merged_text") or payload.get(
                             "text"
                         )
