@@ -234,6 +234,27 @@ class TestConnector:
         assert remote.get_progression_stage() is None
 
     @pytest.mark.asyncio
+    async def test_what_the_vessel_reads_off_a_connector_beside_the_contract(
+        self, rig: Rig
+    ) -> None:
+        client = await rig.connect(manifest(WORLD))
+        remote = rig.connector()
+        assert remote.uses_idle_beat is False and remote.core_verbs is None
+        assert remote.core_verb_descriptions == {}
+        await client.call(
+            "vessel.state",
+            name="tinyworld",
+            state={
+                "uses_idle_beat": True,
+                "core_verbs": ["say", "move"],
+                "core_verb_descriptions": {"follow": "Follow the player."},
+            },
+        )
+        assert remote.uses_idle_beat is True
+        assert remote.core_verbs == frozenset({"say", "move"})
+        assert remote.core_verb_descriptions == {"follow": "Follow the player."}
+
+    @pytest.mark.asyncio
     async def test_world_state_and_goals_are_converted(self, rig: Rig) -> None:
         client = await rig.connect(manifest(WORLD))
         rig.reply(

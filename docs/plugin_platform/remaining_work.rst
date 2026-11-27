@@ -24,12 +24,21 @@ needs first. Status as of 2026-11-26. Nothing here is built.
        tool calls) and a provider-neutral session configuration that the extension turns
        into its provider's own.
    * - Rift Vessel adapters (M8b)
-     - The adapter contract has about 25 methods, many synchronous; the Minecraft adapter
-       alone is about 6,000 lines.
-     - The connector API exists (``provides.vessels``: the extension pushes a state snapshot
-       and perception events, and answers ``vessel.call``). What is missing is a Karada API
-       for extensions (frames, presence, audio) for the bodies that draw the avatar, and the
-       moving itself: the Core's Minecraft and RetroXR code still imports the Core.
+     - The connector API and the Karada API for extensions exist (``provides.vessels``,
+       ``karada.subscribe``/``karada.presence``). Reading RetroXR for the move found what is
+       still missing: (1) the mod's socket (``/api/vessel/retroxr/ws``) has to become an
+       extension WebSocket route (``/x/<id>/ws/...``), so the mod (``retroxr-mod-synth``,
+       and its copy in the RetroXR checkout) changes its URL; (2) a hearing API
+       (``auris.transcribe``) for the player's recorded clips; (3) the connector keeps her goals
+       through the Core's Goals plugin (``plugins.goals.goals``): in an extension they go to its
+       own storage, and the goals already stored for RetroXR are not carried over; (4) the
+       series it records (``body.busy_seconds``, ``vessel.verb.*``) are read back by
+       ``core/vessel_stats.py`` under their bare names, but the gateway prefixes an extension's
+       series; (5) the session handling of ``VesselInterface`` (``paused``, ``session_token``,
+       the disconnect grace) lives half in the connector: it has to be written down as part of
+       the contract. Its 2,450 lines of tests move with it. Minecraft additionally needs the
+       goals, bases and quests tables through the storage API, the Node bridge as a subprocess
+       of the extension and its 6,000 lines.
    * - VRM renderer, format-agnostic Karada (M8c)
      - The Karada payloads (``vrm_model``, ``vrm_animation_v2``, ``vrm_face``,
        ``vrm_expression_*``) are modelled on VRM.

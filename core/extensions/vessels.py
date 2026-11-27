@@ -88,6 +88,9 @@ STATE_KEYS = frozenset(
         "capabilities",
         "world_actions",
         "knowledge_sources",
+        "uses_idle_beat",
+        "core_verbs",
+        "core_verb_descriptions",
     }
 )
 
@@ -389,6 +392,24 @@ def connector_class() -> type:
             if self._gone():
                 return False
             return bool(await self._answer("probe_external_liveness", None, False))
+
+        # What the Vessel reads off a connector besides the contract's methods.
+        @property
+        def uses_idle_beat(self) -> bool:
+            return bool(self._mirrored("uses_idle_beat", False))
+
+        @property
+        def core_verbs(self) -> frozenset[str] | None:
+            """The Core verbs this world offers; ``None``: it does not restrict itself."""
+            value = self._mirrored("core_verbs", None)
+            return frozenset(str(v) for v in value) if isinstance(value, list) else None
+
+        @property
+        def core_verb_descriptions(self) -> dict[str, str]:
+            return {
+                str(k): str(v)
+                for k, v in dict(self._mirrored("core_verb_descriptions", {})).items()
+            }
 
         def get_in_world_name(self) -> str | None:
             value = self._mirrored("in_world_name", None)

@@ -46,6 +46,13 @@ class VesselConnector:
     remembers_chat: bool = False
     #: Why the last ``connect`` failed (shown to the person who asked to enter the world).
     last_error: str | None = None
+    #: She is a person in a room, not a bot with goals: when nobody talks to her she is told
+    #: what is around her and asked what she wants to do (the Vessel's idle beat).
+    uses_idle_beat: bool = False
+    #: The Core verbs (``say``, ``move``, ``look``...) this world offers; ``None``: all of them.
+    core_verbs: frozenset[str] | set[str] | list[str] | None = None
+    #: The text to show for a Core verb in this world, in place of the generic one.
+    core_verb_descriptions: dict[str, str] = {}
 
     def __init__(self) -> None:
         self._changed: Callable[[], None] | None = None
@@ -190,6 +197,9 @@ class VesselConnector:
             "capabilities": self.describe_capabilities(),
             "world_actions": self.get_world_actions(),
             "knowledge_sources": self.get_knowledge_sources(),
+            "uses_idle_beat": bool(self.uses_idle_beat),
+            "core_verbs": None if self.core_verbs is None else sorted(self.core_verbs),
+            "core_verb_descriptions": dict(self.core_verb_descriptions),
         }
 
     def changed(self) -> None:
