@@ -347,8 +347,12 @@ class CoreEndpointPort:
             extra_config=dict(found.extra_config or {}),
         )
 
-    async def count(self) -> int:
-        return len(await self._registry().list_endpoints())
+    async def count_cortex(self) -> int:
+        return sum(
+            1
+            for endpoint in await self._registry().list_endpoints()
+            if endpoint.enabled and (endpoint.subsystem_map or {}).get("cortex")
+        )
 
     async def add(
         self,

@@ -989,12 +989,13 @@ class Endpoints(_Namespace):
         protocol: str = "openai",
         extra_config: dict[str, Any] | None = None,
         subsystem_map: dict[str, bool] | None = None,
-        only_if_registry_empty: bool = False,
+        only_if_no_cortex: bool = False,
         update_base_url: bool = False,
     ) -> dict[str, Any]:
         """Create the endpoint, or fill in what an existing one lacks: ``extra_config``
-        keys the operator already set are left alone. ``only_if_registry_empty`` does
-        not add an endpoint behind a configured operator; ``update_base_url`` also
+        keys the operator already set are left alone. ``only_if_no_cortex`` does not add
+        the endpoint when the operator already has an endpoint that serves the cortex (a
+        voice or hearing engine does not count); ``update_base_url`` also
         repoints an existing one (use it to heal a known-stale URL, not to override the
         operator). ``protocol`` is ``openai`` or a protocol this extension provides
         (``[[provides.protocols]]``); an engine that runs locally passes ``base_url=""``."""
@@ -1007,7 +1008,7 @@ class Endpoints(_Namespace):
                 protocol=protocol,
                 extra_config=extra_config or {},
                 subsystem_map=subsystem_map or {},
-                only_if_registry_empty=only_if_registry_empty,
+                only_if_no_cortex=only_if_no_cortex,
                 update_base_url=update_base_url,
             )
         )

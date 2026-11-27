@@ -31,8 +31,8 @@ class FakePort:
     async def get(self, name: str) -> EndpointInfo | None:
         return self.rows.get(name)
 
-    async def count(self) -> int:
-        return len(self.rows)
+    async def count_cortex(self) -> int:
+        return sum(1 for row in self.rows.values() if row.extra_config.get("_cortex"))
 
     async def add(
         self,
@@ -225,12 +225,27 @@ async def test_it_is_not_added_behind_a_configured_operator(
     rig: tuple[Env, FakePort],
 ) -> None:
     env, port = rig
-    port.rows["other"] = EndpointInfo(1, "other", "http://x", False)
+    port.rows["other"] = EndpointInfo(1, "other", "http://x", False, {"_cortex": True})
     client = await connect(env, "my-engine")
     got = await client.call(
-        "endpoints.ensure", name="my-engine", base_url=URL, only_if_registry_empty=True
+        "endpoints.ensure", name="my-engine", base_url=URL, only_if_no_cortex=True
     )
     assert got["created"] is False and "my-engine" not in port.rows
+
+
+@pytest.mark.asyncio
+async def test_a_voice_or_hearing_engine_is_not_a_configured_operator(
+    rig: tuple[Env, FakePort],
+) -> None:
+    """A fresh install already holds the local voice and hearing endpoints: they must not stop
+    the Zen endpoint from being created."""
+    env, port = rig
+    port.rows["kitten"] = EndpointInfo(1, "kitten", "", False)
+    client = await connect(env, "my-engine")
+    got = await client.call(
+        "endpoints.ensure", name="my-engine", base_url=URL, only_if_no_cortex=True
+    )
+    assert got["created"] is True
 
 
 @pytest.mark.asyncio

@@ -423,8 +423,9 @@ decides where the key goes:
   ``has_key``); the extension cannot set or read a key;
 * an existing endpoint only gains the ``extra_config`` keys it lacks, so what the
   operator set stays; its base URL changes only with ``update_base_url=true``;
-* ``only_if_registry_empty=true`` does not add an endpoint behind an operator who already
-  configured others; ``extra_config`` keys starting with ``_`` and credentials in the URL
+* ``only_if_no_cortex=true`` does not add an endpoint when the operator already has an
+  enabled endpoint that serves the cortex (voice and hearing engines, such as the default
+  KittenTTS and Vosk, do not count: a fresh install still gets its Zen endpoint); ``extra_config`` keys starting with ``_`` and credentials in the URL
   are refused.
 
 SDK: ``ctx.endpoints.get(name)`` and ``ctx.endpoints.ensure(name, base_url, ...)``. The

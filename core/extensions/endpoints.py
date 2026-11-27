@@ -45,7 +45,10 @@ class EndpointInfo:
 class EndpointPort(Protocol):
     async def get(self, name: str) -> EndpointInfo | None: ...
 
-    async def count(self) -> int: ...
+    async def count_cortex(self) -> int:
+        """How many enabled endpoints serve the cortex (an LLM): what "the operator has a
+        model configured" means. Voice and hearing engines do not count."""
+        ...
 
     async def add(
         self,
@@ -139,8 +142,11 @@ def register_endpoint_api(gateway: Gateway, port: EndpointPort) -> None:
         subsystems = _subsystems(args["subsystem_map"])
         found = await port.get(name)
         if found is None:
-            if args["only_if_registry_empty"] and await port.count() > 0:
-                return {"created": False, "skipped": "the registry is not empty"}
+            if args["only_if_no_cortex"] and await port.count_cortex() > 0:
+                return {
+                    "created": False,
+                    "skipped": "a cortex endpoint is already configured",
+                }
             created = await port.add(
                 name,
                 args["display_label"] or name,
@@ -200,7 +206,7 @@ def register_endpoint_api(gateway: Gateway, port: EndpointPort) -> None:
                 ),
                 Param("extra_config", "object", required=False, default={}),
                 Param("subsystem_map", "object", required=False, default={}),
-                Param("only_if_registry_empty", "bool", required=False, default=False),
+                Param("only_if_no_cortex", "bool", required=False, default=False),
                 Param("update_base_url", "bool", required=False, default=False),
             ),
             ensure,
