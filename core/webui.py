@@ -1252,6 +1252,13 @@ class SynthWebUIInterface:
         ``webui_auth.websocket_authorized``).
         """
         self.app.include_router(router)
+        # The extension web router ends with catch-all routes (``/{alias}/{path}``) that
+        # must lose to every other route. A router mounted after it would sit behind them
+        # and answer 404 for its own paths (the Store did), so they are kept last.
+        routes = self.app.router.routes
+        catch_all = [r for r in routes if getattr(r, "path", "").startswith("/{alias}")]
+        if catch_all:
+            routes[:] = [r for r in routes if r not in catch_all] + catch_all
         log_info(
             f"{LOG_PREFIX} Plugin router mounted: {name or router}",
             log_file=WEBUI_LOG,

@@ -542,3 +542,40 @@ class TestUpdates:
         assert "window.SynthExtensionUpdates" in script
         main = (root / "res/synth_webui/js/main.js").read_text(encoding="utf-8")
         assert "SynthExtensionUpdates.button(item.extension_id)" in main
+
+
+class TestMountOrder:
+    """The Store was mounted after the extension web router, whose catch-all ``/{alias}/...``
+    route answered 404 for ``/api/extensions/store``: the Plugins tabs said "unavailable"."""
+
+    def _app(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        from starlette.testclient import TestClient
+
+        import core.webui as cw
+        from core.extensions import webui_store, webui_web
+        from core.extensions.gateway import Gateway
+        from core.extensions.grants import MemoryGrantStore
+
+        monkeypatch.setattr(webui_auth, "request_authorized", lambda request: True)
+        iface = cw.SynthWebUIInterface(autostart=False)
+        monkeypatch.setattr(cw, "synth_webui_interface", iface)
+        gateway = Gateway(grants=MemoryGrantStore())
+        inst = installer(tmp_path)
+        # the order the runtime mounts them in: the web router first, the Store after it
+        assert webui_web.mount(gateway, lambda ext: tmp_path / ext)
+        assert webui_store.mount(inst, lambda: None)
+        return TestClient(iface.app)
+
+    def test_the_store_answers_after_the_web_router_was_mounted_first(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = self._app(tmp_path, monkeypatch)
+        response = client.get("/api/extensions/store")
+        assert response.status_code == 200 and "repositories" in response.json()
+        assert client.get("/api/extensions/store/updates").status_code == 200
+
+    def test_an_unknown_alias_is_still_a_plain_404(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = self._app(tmp_path, monkeypatch)
+        assert client.get("/no-such-alias/page.html").status_code == 404
