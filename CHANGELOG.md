@@ -1,3 +1,11 @@
+### feat(skins): skins are extensions of kind skins
+
+A skin can be an extension that only ships files (`[[provides.skins]]` with `name`, `type` and `path`, no `[entry]`: nothing runs). The index marks it `kind = "skins"`; the **Skins** tab has a *Get more skins* list from the repositories with Install / Update, and the Plugins Catalog no longer lists them. Installing copies the folder into `skins/<Name>` with a marker file naming the extension; turning it off or uninstalling removes exactly that folder (a folder without the marker, such as one the user made, is never touched), and the start-up sync restores them on a fresh image. `type` is `vrm` for now; `inochi2d` and `live2d` will be added with their renderers. **Rei** and **Zero** stay bundled and cannot be deleted; a skin from an extension shows an **Uninstall** button instead of Delete (the delete route answers 409 and names the extension). **Miku** and **Riko** moved to the official plugins repository (`official/skin_miku`, `official/skin_riko`, not installed by default).
+
+**Not verified here.** The Skins tab was not looked at in a browser; the install/remove cycle was run with the real Riko package against a local repository.
+
+**Location.** `core/extensions/skins.py`, `core/extensions/manifest.py`, `core/extensions/repo/`, `core/webui.py`, `res/synth_webui/js/skins-ui.js`, `tests/test_extension_skins.py`.
+
 ### fix(webui): frames put floating windows away; Uninstall button in Installed
 
 While Synth Stage or Dashboard (a frame) is open, the chat window and the minimized-windows stack are hidden instead of floating over it, and the frame's close button moved to the bottom-left so it no longer covers the page's own top-right controls. The detail pane of every extension-backed plugin in Installed has a red **Uninstall** button (confirms, removes the extension and its data, refreshes the list).

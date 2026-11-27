@@ -489,6 +489,22 @@ and ``ctx.recon.on_contribute(handler)``. Tests: ``tests/test_extensions_turns_v
 ``tests/test_extension_radio_host_process.py`` (a real extension process, a fake station
 and the whole path of one remark).
 
+Skins
+-----
+
+A skin is an extension that ships only files: ``[[provides.skins]]`` (``name`` = the folder
+name in ``skins/``, ``type`` = how the model is rendered, ``path`` = the folder in the
+package) and no ``[entry]``, so nothing is launched (``Manifest.kind == "skins"``). The index
+marks the package ``kind = "skins"``; the WebUI lists such packages in the **Skins** tab
+(*Get more skins*) and not in Plugins.
+
+While the extension is installed and on, ``core/extensions/skins.py`` copies the folder into the
+skins directory with a ``.synth-extension`` marker; turning it off, uninstalling and the
+start-up synchronisation keep the directory equal to what is installed. A folder without the
+marker (Rei, Zero, a skin the user made) is never overwritten or removed. ``type`` is only
+``vrm`` today; ``inochi2d`` and ``live2d`` are added when their renderers exist. Rei and Zero
+are bundled with SyntH, not extensions, and cannot be deleted.
+
 Rift Vessel connectors
 ----------------------
 
