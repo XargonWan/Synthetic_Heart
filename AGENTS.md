@@ -447,7 +447,7 @@ only through the JSON-RPC gateway in `core/extensions/`. The hard rules (details
   the operator, parameters are validated, calls are rate limited and time boxed.
   Installing grants nothing. A capability is one of `log`, `config`, `stats`, `storage`,
   `interfaces.*`, `avatar`, `calls`, `core.info`, `endpoints.manage`, `turns.request`,
-  `voice.synthesize`, `voice.play`, `recon.contribute`, `endpoints.protocol`, `vessel.connector`, `karada.subscribe`, `karada.presence`, `web.static`, `web.routes`, `web.ws`,
+  `voice.synthesize`, `voice.play`, `voice.transcribe`, `recon.contribute`, `endpoints.protocol`, `vessel.connector`, `karada.subscribe`, `karada.presence`, `web.static`, `web.routes`, `web.ws`,
   `web.origin`.
 - **Nothing bypasses the message chain.** An interface extension delivers with
   `interfaces.inbound` and sends in `interface.send_message`; the Core owns history,

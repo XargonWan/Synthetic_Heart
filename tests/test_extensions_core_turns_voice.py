@@ -166,3 +166,38 @@ def test_recon_proxies_live_where_the_core_looks_and_only_theirs_are_removed() -
     finally:
         PLUGIN_REGISTRY.pop("ext_recon_test", None)
     assert isinstance(host.taken_keys(), set)
+
+
+class FakeAuris:
+    def __init__(self, text: str = "ciao a tutti", language: str | None = "it") -> None:
+        self.calls: list[tuple[str, str | None]] = []
+        self._text, self._language = text, language
+
+    async def transcribe_audio(self, path: str, mime: str | None = None) -> Any:
+        from types import SimpleNamespace
+
+        self.calls.append((path, mime))
+        return SimpleNamespace(text=self._text, language=self._language)
+
+
+@pytest.mark.asyncio
+async def test_a_recording_is_read_by_the_hearing_engine_the_person_chose(
+    monkeypatch,
+) -> None:
+    from core.core_initializer import PLUGIN_REGISTRY
+
+    auris = FakeAuris()
+    monkeypatch.setitem(PLUGIN_REGISTRY, "auris_plugin", auris)
+    heard = await CoreVoice().transcribe("/media/clip.ogg", "audio/ogg")
+    assert heard == {"text": "ciao a tutti", "language": "it"}
+    assert auris.calls == [("/media/clip.ogg", "audio/ogg")]
+
+
+@pytest.mark.asyncio
+async def test_nothing_heard_or_no_hearing_plugin_is_none(monkeypatch) -> None:
+    from core.core_initializer import PLUGIN_REGISTRY
+
+    monkeypatch.setitem(PLUGIN_REGISTRY, "auris_plugin", FakeAuris(text="  "))
+    assert await CoreVoice().transcribe("/x.wav", "") is None
+    monkeypatch.delitem(PLUGIN_REGISTRY, "auris_plugin", raising=False)
+    assert await CoreVoice().transcribe("/x.wav", "audio/wav") is None

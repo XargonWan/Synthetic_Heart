@@ -36,7 +36,12 @@ from core.extensions.memory_ports import (
 )
 from core.extensions.recon import CAP_RECON, RemoteRecon, attach_recon
 from core.extensions.turns import CAP_TURNS, RATE_LIMIT, register_turn_api
-from core.extensions.voice import CAP_PLAY, CAP_SYNTHESIZE, register_voice_api
+from core.extensions.voice import (
+    CAP_PLAY,
+    CAP_SYNTHESIZE,
+    CAP_TRANSCRIBE,
+    register_voice_api,
+)
 from tests.test_extensions_gateway import Client, Env
 from tests.test_extensions_interface_extras import answering
 from tests.test_extensions_interfaces import PATTERNS, register
@@ -47,6 +52,7 @@ CAPS = (
     CAP_TURNS,
     CAP_SYNTHESIZE,
     CAP_PLAY,
+    CAP_TRANSCRIBE,
     CAP_RECON,
 )
 SPEAK = {
@@ -87,6 +93,7 @@ class FakeVoice:
         self.audio = audio
         self.spoken: list[tuple[str, str]] = []
         self.played: list[tuple[str, str, str]] = []
+        self.transcribed: list[tuple[str, str]] = []
 
     async def synthesize(self, text: str, engine: str) -> str | None:
         self.spoken.append((text, engine))
@@ -95,6 +102,14 @@ class FakeVoice:
     async def play(self, audio_path: str, text: str, engine: str) -> bool:
         self.played.append((audio_path, text, engine))
         return True
+
+    heard: dict[str, Any] | None = {"text": " hello there ", "language": "en"}
+
+    async def transcribe(
+        self, audio_path: str, mime_type: str
+    ) -> dict[str, Any] | None:
+        self.transcribed.append((audio_path, mime_type))
+        return self.heard
 
 
 class FakeReconHost:
@@ -342,10 +357,53 @@ class TestVoice:
         assert rig.voice.played == []
 
     @pytest.mark.asyncio
+    async def test_a_recording_of_the_extension_is_heard_from_a_copy(
+        self, rig: Rig
+    ) -> None:
+        client = await rig.connect()
+        clip = rig.tmp / "data" / "dev/radio" / "player.ogg"
+        clip.write_bytes(b"OggS" + b"\x01" * 40)
+        got = await client.call(
+            "voice.transcribe", path=str(clip), mime_type="audio/ogg"
+        )
+        assert got == {"available": True, "text": "hello there", "language": "en"}
+        (path, mime) = rig.voice.transcribed[0]
+        assert Path(path) != clip and Path(path).read_bytes() == clip.read_bytes()
+        assert mime == "audio/ogg"
+
+    @pytest.mark.asyncio
+    async def test_nothing_heard_is_a_plain_answer_not_an_error(self, rig: Rig) -> None:
+        rig.voice.heard = None
+        client = await rig.connect()
+        clip = rig.tmp / "data" / "dev/radio" / "silence.wav"
+        clip.write_bytes(b"RIFF" + b"\x00" * 40)
+        assert await client.call("voice.transcribe", path=str(clip)) == {
+            "available": False
+        }
+
+    @pytest.mark.asyncio
+    async def test_only_the_extensions_own_recordings_can_be_heard(
+        self, rig: Rig
+    ) -> None:
+        client = await rig.connect()
+        secret = rig.tmp / "secret.env"
+        secret.write_text("KEY=1")
+        for bad in (str(secret), "/etc/passwd"):
+            await client.expect(ErrorCode.INVALID_PARAMS, "voice.transcribe", path=bad)
+        await client.expect(
+            ErrorCode.INVALID_PARAMS,
+            "voice.transcribe",
+            path=str(secret),
+            mime_type="text/html",
+        )
+        assert rig.voice.transcribed == []
+
+    @pytest.mark.asyncio
     async def test_both_need_their_grant(self, rig: Rig) -> None:
         client = await rig.connect(grant=("interfaces.register",))
         await client.expect(ErrorCode.PERMISSION_DENIED, "voice.synthesize", text="x")
         await client.expect(ErrorCode.PERMISSION_DENIED, "voice.play", path="x")
+        await client.expect(ErrorCode.PERMISSION_DENIED, "voice.transcribe", path="x")
 
 
 RECON = (ReconProvision("radio_status", "Is the message about the radio?", 5),)

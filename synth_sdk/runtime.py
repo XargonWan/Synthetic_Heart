@@ -706,6 +706,19 @@ class Voice(_Namespace):
             return None
         return Path(str(result["path"]))
 
+    async def transcribe(
+        self, path: Path | str, mime_type: str = ""
+    ) -> dict[str, Any] | None:
+        """Read a recording of yours (a file in your data directory) with the hearing engine the
+        person chose. ``{"text", "language"}``, or ``None`` when nothing could hear it
+        (capability ``voice.transcribe``)."""
+        result = await self._ctx.call(
+            "voice.transcribe", _timeout=125.0, path=str(path), mime_type=mime_type
+        )
+        if not result.get("available"):
+            return None
+        return {"text": str(result["text"]), "language": result.get("language")}
+
     async def play(self, path: Path | str, text: str = "", engine: str = "") -> bool:
         """Make the avatar speak a clip of yours (a file in your data directory) on the
         stage, with lip-sync. Whether anyone received it."""

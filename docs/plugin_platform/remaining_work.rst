@@ -28,8 +28,8 @@ needs first. Status as of 2026-11-26. Nothing here is built.
        ``karada.subscribe``/``karada.presence``). Reading RetroXR for the move found what is
        still missing: (1) the mod's socket (``/api/vessel/retroxr/ws``) has to become an
        extension WebSocket route (``/x/<id>/ws/...``), so the mod (``retroxr-mod-synth``,
-       and its copy in the RetroXR checkout) changes its URL; (2) a hearing API
-       (``auris.transcribe``) for the player's recorded clips; (3) the connector keeps her goals
+       and its copy in the RetroXR checkout) changes its URL; (2) hearing for the player's recorded
+       clips (done: ``voice.transcribe``); (3) the connector keeps her goals
        through the Core's Goals plugin (``plugins.goals.goals``): in an extension they go to its
        own storage, and the goals already stored for RetroXR are not carried over; (4) the
        series it records (``body.busy_seconds``, ``vessel.verb.*``) are read back by

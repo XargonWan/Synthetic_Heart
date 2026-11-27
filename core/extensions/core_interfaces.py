@@ -500,6 +500,22 @@ class CoreVoice:
             )
         )
 
+    async def transcribe(
+        self, audio_path: str, mime_type: str
+    ) -> dict[str, Any] | None:
+        from core.core_initializer import PLUGIN_REGISTRY
+        from core.logging_utils import log_warning
+
+        auris = PLUGIN_REGISTRY.get("auris_plugin")
+        if auris is None or not hasattr(auris, "transcribe_audio"):
+            log_warning("[extensions] voice.transcribe: no Auris plugin")
+            return None
+        result = await auris.transcribe_audio(audio_path, mime_type or None)
+        text = str(getattr(result, "text", "") or "").strip()
+        if not text:
+            return None
+        return {"text": text, "language": getattr(result, "language", None)}
+
 
 class CoreReconHost:
     """``ReconHost`` backed by the Core's plugin registry, where Recon looks."""

@@ -15,7 +15,13 @@ the Core owns Vox, the engine settings and the avatar. Two calls cover it:
     watching the stage. You name a file in your data directory; the Core copies it
     (the same checks as an attachment) and never opens any other path.
 
-Both need the file bridge (``MediaBridge``) the interface API uses, so a Core without
+``voice.transcribe``
+    hear a recording **you** hold (a clip the player recorded in your world): you name a file
+    in your data directory and its MIME type, the Core copies it (the same checks as an
+    attachment) and reads it with the hearing engine the person chose (Auris), and answers
+    ``{"text", "language"}``. ``{"available": false}`` when nothing could hear it.
+
+Both ``synthesize`` and ``play`` need the file bridge (``MediaBridge``) the interface API uses, so a Core without
 attachments does not offer them.
 """
 
@@ -31,11 +37,14 @@ from core.extensions.media import MediaBridge, MediaError
 
 CAP_SYNTHESIZE = "voice.synthesize"
 CAP_PLAY = "voice.play"
+CAP_TRANSCRIBE = "voice.transcribe"
 MAX_TEXT = 2000
 ENGINE_RE = re.compile(r"^[A-Za-z0-9_.:-]{0,64}$")
 #: A voice takes a while; longer than the gateway's default.
 SYNTHESIZE_TIMEOUT = 90.0
 PLAY_TIMEOUT = 30.0
+TRANSCRIBE_TIMEOUT = 120.0
+MIME_RE = re.compile(r"^(audio/[A-Za-z0-9.+-]{1,40})?$")
 
 
 class VoicePort(Protocol):
@@ -88,6 +97,49 @@ def register_voice_api(gateway: Gateway, port: VoicePort, media: MediaBridge) ->
             raise RpcError(ErrorCode.INVALID_PARAMS, f"file refused: {exc.reason}")
         delivered = await port.play(imported[0]["path"], args["text"], args["engine"])
         return {"delivered": bool(delivered)}
+
+    async def transcribe(ctx: CallContext, args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            imported = await media.import_inbound(
+                ctx.extension_id, [{"path": args["path"]}]
+            )
+        except MediaError as exc:
+            gateway.record(
+                ctx.extension_id, "voice.transcribe", "invalid_params", exc.reason[:80]
+            )
+            raise RpcError(ErrorCode.INVALID_PARAMS, f"file refused: {exc.reason}")
+        heard = await port.transcribe(
+            imported[0]["path"], args["mime_type"] or imported[0].get("mime_type") or ""
+        )
+        if not heard or not str(heard.get("text") or "").strip():
+            return {"available": False}
+        return {
+            "available": True,
+            "text": str(heard["text"]).strip(),
+            "language": heard.get("language"),
+        }
+
+    if hasattr(port, "transcribe"):
+        gateway.register(
+            ApiMethod(
+                "voice.transcribe",
+                CAP_TRANSCRIBE,
+                (
+                    Param("path", "str", max_length=500),
+                    Param(
+                        "mime_type",
+                        "str",
+                        required=False,
+                        default="",
+                        max_length=60,
+                        pattern=MIME_RE,
+                    ),
+                ),
+                transcribe,
+                "Read a recording of yours with the hearing engine the person chose.",
+                timeout=TRANSCRIBE_TIMEOUT,
+            )
+        )
 
     gateway.register(
         ApiMethod(
