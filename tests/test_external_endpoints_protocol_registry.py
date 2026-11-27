@@ -124,3 +124,26 @@ def test_a_protocol_can_be_added_replaced_and_removed() -> None:
             get_adapter_for_endpoint(endpoint(exotic))
     finally:
         unregister_protocol(exotic)
+
+
+@pytest.mark.asyncio
+async def test_an_endpoint_of_an_extension_protocol_waits_quietly_at_boot(
+    monkeypatch,
+) -> None:
+    """Endpoints are registered once at boot, before the extensions start: one of a
+    protocol an extension provides is not an error, it is registered when the extension is up."""
+    from core.external_endpoints import registry as reg
+
+    logged: dict[str, list[str]] = {"error": [], "info": []}
+    monkeypatch.setattr(reg, "log_error", lambda m, *a, **k: logged["error"].append(m))
+    monkeypatch.setattr(reg, "log_info", lambda m, *a, **k: logged["info"].append(m))
+    registry = reg.ExternalEndpointRegistry.__new__(reg.ExternalEndpointRegistry)
+    waiting = endpoint(EndpointProtocol("ghost_engine"), name="ghost")
+    await registry._sync_registries(waiting)  # noqa: SLF001
+    assert logged["error"] == []
+    assert any("waits for the extension" in line for line in logged["info"])
+
+    # a built-in protocol that cannot be built is still an error
+    broken = endpoint(EndpointProtocol.OPENAI, name="broken", base_url="")
+    await registry._sync_registries(broken)  # noqa: SLF001
+    assert any("Cannot build adapter for 'broken'" in line for line in logged["error"])

@@ -660,6 +660,16 @@ class ExternalEndpointRegistry:
         try:
             adapter: BaseProtocolAdapter = get_adapter_for_endpoint(ep, api_key)
         except Exception as exc:
+            from core.extensions.protocols import CoreProtocolHost
+
+            if ep.protocol.value not in CoreProtocolHost.BUILTIN:
+                # A protocol an extension provides: the extension starts after boot and
+                # registers the endpoint itself when it is up (``sync_protocol``).
+                log_info(
+                    f"[ext_endpoints] '{ep.name}' waits for the extension that provides "
+                    f"the protocol {ep.protocol.value!r}"
+                )
+                return
             log_error(f"[ext_endpoints] Cannot build adapter for '{ep.name}': {exc}")
             return
 
