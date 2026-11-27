@@ -131,7 +131,7 @@ cluttered. A starting set to validate with the maintainers:
   grid, the stats page through ``stats`` sections);
 * configuration form generated from the manifest schema.
 
-The extension store lives in the existing **Plugins > Store** sub-tab
+The extension store lives in the existing **Plugins > Catalog** and **Plugins > Repositories** sub-tabs
 (``core/webui_templates/sections/plugins.html``, today "Coming soon"). Repository
 management is also available from a CLI.
 

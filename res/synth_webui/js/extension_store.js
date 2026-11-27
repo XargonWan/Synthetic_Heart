@@ -1,4 +1,4 @@
-/* Plugins > Store: repositories and extensions (core/extensions/webui_store.py).
+/* Plugins > Catalog and Repositories: extensions and where they come from (core/extensions/webui_store.py).
  * Everything that comes from a repository (names, descriptions, warnings) is shown with
  * textContent, never as HTML.
  */
@@ -43,46 +43,68 @@
             }
             toast('Done');
         } catch (e) {
-            toast('Store: ' + e.message, true);
+            toast('Extensions: ' + e.message, true);
         }
         render(root);
     }
 
+    function labelled(text, input) {
+        return el('label', { style: 'display:flex;flex-direction:column;gap:2px;margin:0 10px 8px 0;font-size:0.85rem' }, [text, input]);
+    }
+
     function repoForm(root) {
-        const field = (placeholder, width) => el('input', { type: 'text', placeholder, style: 'margin:0 6px 6px 0;width:' + width });
-        const name = field('name', '8em');
-        const location = field('folder, https:// URL or Git URL', '22em');
-        const key = field('publisher public key (base64)', '22em');
+        const field = (placeholder, width) => el('input', { type: 'text', placeholder, style: 'width:' + width });
+        const name = field('official', '9em');
+        const location = field('folder, https:// URL or Git URL', '24em');
+        const branch = field('branch (Git only)', '9em');
+        const key = field('base64, empty: unsigned', '24em');
         const trusted = el('input', { type: 'checkbox' });
         const add = el('button', {
-            className: 'pill', textContent: 'Add repository',
+            className: 'pill', textContent: 'Add repository', style: 'margin-bottom:8px',
             onclick: () => act('/repo/add', {
-                name: name.value, location: location.value, key: key.value, trusted: trusted.checked,
+                name: name.value, location: location.value, branch: branch.value,
+                key: key.value, trusted: trusted.checked,
             }, root),
         });
-        return el('div', { style: 'margin:8px 0' }, [
-            name, location, key,
-            el('label', { style: 'margin-right:8px' }, [trusted, ' trusted']), add,
+        return el('div', { style: 'margin-top:14px' }, [
+            el('h3', { textContent: 'Add a repository' }),
+            el('div', { style: 'display:flex;flex-wrap:wrap;align-items:flex-end' }, [
+                labelled('Name', name), labelled('Location', location), labelled('Branch', branch),
+                labelled('Publisher public key', key),
+                labelled('Trusted', trusted), add,
+            ]),
         ]);
     }
 
-    function repoList(data, root) {
-        const wrap = el('div');
+    function repoTable(data, root) {
         if (!data.repositories.length) {
-            wrap.appendChild(el('div', { className: 'meta', textContent: 'No repository yet: add one below.' }));
+            return el('div', { className: 'meta', textContent: 'No repository yet: add one below.' });
         }
+        const offered = {};
+        data.extensions.forEach((x) => { if (x.repo) offered[x.repo] = (offered[x.repo] || 0) + 1; });
+        const table = el('table', { style: 'width:100%' }, [
+            el('tr', {}, ['Name', 'Kind', 'Location', 'Key', 'Trusted', 'Extensions', ''].map(
+                (h) => el('th', { textContent: h, style: 'text-align:left' }))),
+        ]);
         data.repositories.forEach((r) => {
-            wrap.appendChild(el('div', { style: 'margin:3px 0' }, [
-                el('strong', { textContent: r.name }),
-                ' ' + r.kind + ', ' + (r.fingerprint ? 'key ' + r.fingerprint : 'no key') + ', '
-                    + (r.trusted ? 'trusted' : 'untrusted') + ', ' + r.location + ' ',
-                el('button', {
+            table.appendChild(el('tr', {}, [
+                el('td', {}, [el('strong', { textContent: r.name })]),
+                el('td', { textContent: r.kind }),
+                el('td', { textContent: r.location + (r.branch ? ' @ ' + r.branch : ''), style: 'word-break:break-all' }),
+                el('td', { textContent: r.fingerprint || 'none' }),
+                el('td', { textContent: r.trusted ? 'yes' : 'no' }),
+                el('td', { textContent: String(offered[r.name] || 0) }),
+                el('td', {}, [el('button', {
                     className: 'pill', textContent: 'Remove',
-                    onclick: () => act('/repo/remove', { name: r.name }, root),
-                }),
+                    onclick: () => {
+                        if (window.confirm('Remove the repository "' + r.name + '"? What it installed stays installed.')) {
+                            act('/repo/remove', { name: r.name }, root);
+                        }
+                    },
+                })]),
             ]));
         });
-        return wrap;
+        return table;
     }
 
     function row(x, root) {
@@ -112,39 +134,61 @@
         ]);
     }
 
-    async function render(root) {
-        let data;
+    async function overview(root, what) {
         try {
-            data = await call('');
+            return await call('');
         } catch (e) {
-            root.textContent = 'Store unavailable.';
-            return;
+            root.textContent = what + ' unavailable.';
+            return null;
         }
-        root.textContent = '';
-        root.appendChild(el('h3', { textContent: 'Repositories' }));
-        root.appendChild(repoList(data, root));
-        root.appendChild(repoForm(root));
+    }
+
+    function problems(data, root) {
         (data.problems || []).forEach((p) => root.appendChild(el('div', { className: 'component-error', textContent: p })));
-        root.appendChild(el('h3', { textContent: 'Extensions' }));
+    }
+
+    async function renderCatalog(root) {
+        const data = await overview(root, 'The catalog');
+        if (!data) return;
+        root.textContent = '';
+        problems(data, root);
         const table = el('table', { style: 'width:100%' }, [
             el('tr', {}, ['Extension', 'Installed', 'Available', '', ''].map((h) => el('th', { textContent: h, style: 'text-align:left' }))),
         ]);
         data.extensions.forEach((x) => table.appendChild(row(x, root)));
         root.appendChild(table);
         if (!data.extensions.length) {
-            root.appendChild(el('div', { className: 'meta', textContent: 'Nothing is offered yet.' }));
+            root.appendChild(el('div', { className: 'meta', textContent: data.repositories.length
+                ? 'Nothing is offered by your repositories.'
+                : 'Nothing is offered yet: add a repository in the Repositories tab.' }));
         }
     }
 
+    async function renderRepositories(root) {
+        const data = await overview(root, 'The repositories');
+        if (!data) return;
+        root.textContent = '';
+        problems(data, root);
+        root.appendChild(repoTable(data, root));
+        root.appendChild(repoForm(root));
+    }
+
+    // Both views read the same overview; an action redraws whichever are on the page.
+    function render() { start(true); }
+
     function start(refresh) {
-        const host = document.getElementById('extension-store');
-        if (host && (refresh || !host.dataset.ready)) { host.dataset.ready = '1'; render(host); }
+        [['extension-catalog', renderCatalog], ['extension-repositories', renderRepositories]].forEach(([id, draw]) => {
+            const host = document.getElementById(id);
+            if (host && (refresh || !host.dataset.ready)) { host.dataset.ready = '1'; draw(host); }
+        });
     }
     document.addEventListener('DOMContentLoaded', () => start(false));
-    // Opening the Store tab shows the current state, not what it was at page load.
+    // Opening either tab shows the current state, not what it was at page load.
     document.addEventListener('click', (ev) => {
         const t = ev.target;
-        if (t && t.matches && t.matches('.plugins-subnav-btn[data-plugins-subtab="store"]')) setTimeout(() => start(true), 0);
+        if (t && t.matches && t.matches('.plugins-subnav-btn[data-plugins-subtab="catalog"], .plugins-subnav-btn[data-plugins-subtab="repositories"]')) {
+            setTimeout(() => start(true), 0);
+        }
     });
     start(false);
 })();

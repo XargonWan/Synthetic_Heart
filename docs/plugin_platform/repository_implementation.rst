@@ -66,7 +66,7 @@ Behaviour
   merely flags is installed but not granted.
 * **From the Store** an install switches the extension on and then shows what it asks for
   and offers to grant it; nothing is granted without that confirmation.
-* **Live**: the Store (Plugins > Store) and the CLI use the same installer. From the
+* **Live**: the Catalog and Repositories tabs (Plugins) and the CLI use the same installer. From the
   Store the running extension is stopped, replaced and started again at once; from the
   CLI the change applies at the next start.
 

@@ -2,7 +2,8 @@
     <div class="settings-grid" style="flex-direction: column;">
         <nav class="plugins-subnav" role="tablist" aria-label="Plugins views">
             <button class="plugins-subnav-btn active" type="button" data-plugins-subtab="installed" aria-selected="true">Installed</button>
-            <button class="plugins-subnav-btn" type="button" data-plugins-subtab="store" aria-selected="false">Store</button>
+            <button class="plugins-subnav-btn" type="button" data-plugins-subtab="catalog" aria-selected="false">Catalog</button>
+            <button class="plugins-subnav-btn" type="button" data-plugins-subtab="repositories" aria-selected="false">Repositories</button>
         </nav>
 
         <div class="plugins-subpanel active" id="plugins-panel-installed" data-plugins-subtab="installed">
@@ -61,25 +62,25 @@
             </div>
         </article>
 
-        <article class="card" style="background: var(--background); border: 2px solid #ffc107; border-radius: 8px;">
-            <h2 style="color: #ffc107;">🔧 Development Components</h2>
-            <div style="display: flex; align-items: center; gap: 15px; margin-top: 10px;">
-                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                    <input type="checkbox" id="dev-components-toggle" style="width: 20px; height: 20px; cursor: pointer;">
-                    <span style="font-weight: 500;">Enable development components (interface_dev, plugins_dev, engines/&lt;kind&gt;/dev)</span>
-                </label>
-            </div>
-            <div class="meta" style="margin-top: 10px;">
-                ⚠️ <strong>Warning:</strong> This setting is not persistent and will reset to OFF when SyntH restarts. SyntH will restart automatically after toggling.
-            </div>
-        </article>
+        
         </div>
 
-        <div class="plugins-subpanel" id="plugins-panel-store" data-plugins-subtab="store">
+        <div class="plugins-subpanel" id="plugins-panel-catalog" data-plugins-subtab="catalog">
             <article class="card">
-                <h2>Store</h2>
-                <div id="extension-store">
-                    <div class="meta">Loading the Store...</div>
+                <h2>Catalog</h2>
+                <div class="meta">Extensions offered by your repositories: install, update, turn on or off, roll back, uninstall.</div>
+                <div id="extension-catalog">
+                    <div class="meta">Loading the catalog...</div>
+                </div>
+            </article>
+        </div>
+
+        <div class="plugins-subpanel" id="plugins-panel-repositories" data-plugins-subtab="repositories">
+            <article class="card">
+                <h2>Repositories</h2>
+                <div class="meta">Where extensions come from. A development folder is a repository too: add it here.</div>
+                <div id="extension-repositories">
+                    <div class="meta">Loading the repositories...</div>
                 </div>
             </article>
         </div>

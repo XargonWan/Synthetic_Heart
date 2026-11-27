@@ -3143,7 +3143,6 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     const engineLoginWarning = document.getElementById('cortex-login-warning');
                     const engineLoginWarningSelkies = document.getElementById('cortex-login-warning-selkies');
                     const engineLoginWarningUrl = document.getElementById('cortex-login-warning-url');
-                    const devToggle = document.getElementById('dev-components-toggle');
 
                     const getEngineByName = (name) => {
                         const engines = (data.cortex && Array.isArray(data.cortex.engines)) ? data.cortex.engines : [];
@@ -3454,31 +3453,6 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             });
                             engineLoginBtn.dataset.bound = '1';
                         }
-
-                    if (devToggle) {
-                        devToggle.checked = !!data.dev_components_enabled;
-                        if (!devToggle.dataset.bound) {
-                            devToggle.addEventListener('change', async () => {
-                                try {
-                                    const res = await fetch('/api/components/dev/toggle', {
-                                        method: 'POST',
-                                        headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({ enabled: devToggle.checked })
-                                    });
-                                    const resp = await res.json();
-                                    if (!res.ok) throw new Error(resp.detail || 'Request failed');
-                                    if (resp.message) {
-                                        alert(resp.message);
-                                    }
-                                } catch (e) {
-                                    console.error('[synth_webui] Failed to toggle dev components', e);
-                                    alert('Failed to toggle dev components.');
-                                    devToggle.checked = !devToggle.checked;
-                                }
-                            });
-                            devToggle.dataset.bound = '1';
-                        }
-                    }
 
                     // Shared config-row builder used by both the classic details list and
                     // the two-column plugins detail pane. `item` supplies optional context

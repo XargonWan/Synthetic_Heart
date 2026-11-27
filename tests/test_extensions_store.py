@@ -322,3 +322,49 @@ class TestRuntimeStartup:
         assert "Core API" in reason
         assert not runtime.supervisor.known("dev/future")
         await runtime.stop()
+
+
+class TestPluginsPage:
+    """Plugins > Installed | Catalog | Repositories: nothing is bought, and development
+    components are just a repository, so the old Store and the warning are gone."""
+
+    def _html(self) -> str:
+        from pathlib import Path
+
+        return (
+            Path(__file__).resolve().parent.parent
+            / "core/webui_templates/sections/plugins.html"
+        ).read_text(encoding="utf-8")
+
+    def test_the_tabs_are_installed_catalog_repositories(self) -> None:
+        html = self._html()
+        for name in ("installed", "catalog", "repositories"):
+            assert f'data-plugins-subtab="{name}"' in html
+        assert 'data-plugins-subtab="store"' not in html and ">Store<" not in html
+        assert (
+            'id="extension-catalog"' in html and 'id="extension-repositories"' in html
+        )
+
+    def test_the_development_components_warning_is_gone_everywhere(self) -> None:
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        for page in (
+            "core/webui_templates/sections/plugins.html",
+            "core/webui_templates/sections/components.html",
+            "core/webui_templates/synth_webui_index.html",
+            "res/synth_webui/js/main.js",
+        ):
+            text = (root / page).read_text(encoding="utf-8")
+            assert "dev-components-toggle" not in text, page
+            assert "Development Components" not in text, page
+
+    def test_the_script_draws_both_views_from_the_same_overview(self) -> None:
+        from pathlib import Path
+
+        script = (
+            Path(__file__).resolve().parent.parent
+            / "res/synth_webui/js/extension_store.js"
+        ).read_text(encoding="utf-8")
+        assert "renderCatalog" in script and "renderRepositories" in script
+        assert "'/repo/add'" in script and "'/repo/remove'" in script

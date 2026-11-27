@@ -7,7 +7,7 @@ that runs in its own process with the ``matrix-nio`` library bundled in it. Ever
 arrives in an allowed room goes through the standard message chain, so the persona, plugins and
 memory answer as they do on any other interface.
 
-It is not installed by default: get it from the official repository (Plugins > Store). An
+It is not installed by default: get it from the official repository (Plugins > Catalog). An
 installation that had the old built-in interface configured gets it fetched, with its
 settings, the first time it starts after the update.
 

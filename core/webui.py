@@ -891,7 +891,6 @@ class SynthWebUIInterface:
         self.app.delete("/api/skins/{skin_name}")(self.delete_skin)
         self.app.get("/api/components")(self.components_summary)
         self.app.post("/api/components/reload")(self.reload_component)
-        self.app.post("/api/components/dev/toggle")(self.toggle_dev_components)
         self.app.get("/api/plugins/{name}/icon")(self.plugin_icon)
         # Minecraft Vessel skin: served as a real image/png (inline, .png path)
         # so server-side skin providers (SkinRestorer / SkinsRestorer) accept it.
@@ -12750,13 +12749,6 @@ class SynthWebUIInterface:
         except Exception as exc:
             log_warning(f"{LOG_PREFIX} unable to compile component summary: {exc}")
 
-        # Check if dev components are enabled
-        dev_components_enabled = False
-        try:
-            dev_components_enabled = core_initializer.are_dev_components_enabled()
-        except Exception as exc:
-            log_warning(f"{LOG_PREFIX} unable to check dev components status: {exc}")
-
         # Build a cortex -> engines mapping for the UI (exclude 'live' — shown in its own section)
         by_cortex: dict[str, list[dict]] = {}
         try:
@@ -13144,7 +13136,6 @@ class SynthWebUIInterface:
             "interfaces": interfaces_data,
             "plugins": plugins_data,
             "summary": component_summary,
-            "dev_components_enabled": dev_components_enabled,
         }
         return JSONResponse(payload)
 
@@ -13663,43 +13654,6 @@ class SynthWebUIInterface:
             raise HTTPException(
                 status_code=500,
                 detail=f"Failed to reload {component_type} '{component_name}': {str(exc)}",
-            ) from exc
-
-    async def toggle_dev_components(self, request: Request):
-        """Enable or disable dev components discovery (runtime only, not persistent)."""
-        try:
-            data = await request.json()
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
-
-        enabled = data.get("enabled", False)
-
-        try:
-            from core.core_initializer import core_initializer
-            import main
-
-            # Set the flag in both core_initializer AND main.py (so it persists across restart)
-            core_initializer.enable_dev_components(enabled)
-            main.set_dev_components_enabled(enabled)
-
-            status_msg = "enabled" if enabled else "disabled"
-            log_info(
-                f"{LOG_PREFIX} Dev components {status_msg} globally (will persist across restarts)"
-            )
-
-            # Note: This does NOT automatically reload components - user must restart
-            return JSONResponse(
-                {
-                    "status": "ok",
-                    "enabled": enabled,
-                    "message": f"Dev components {status_msg}. Restart required to apply changes.",
-                }
-            )
-
-        except Exception as exc:
-            log_error(f"{LOG_PREFIX} Failed to toggle dev components: {exc}")
-            raise HTTPException(
-                status_code=500, detail=f"Failed to toggle dev components: {str(exc)}"
             ) from exc
 
     async def restart_system(self, request: Request):

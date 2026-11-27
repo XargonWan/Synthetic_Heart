@@ -214,7 +214,7 @@ The **OpenAI-compatible API** (``official/openai_api``) exposes Synthetic Heart 
 
 **Usage**
 
-1. Install and switch on the extension (Plugins > Store), or let the first start install it.
+1. Install and switch on the extension (Plugins > Catalog), or let the first start install it.
 2. Point an OpenAI-compatible client at your synth instance:
 
    .. code-block:: bash

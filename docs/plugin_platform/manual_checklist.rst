@@ -58,7 +58,7 @@ Publication
 #. Run the release pipeline on GitHub in the official plugins repository (secret
    ``SYNTH_PUBLISHER_KEY``, variable ``SYNTH_CORE_REF``): ``latest-develop`` gets one zip per
    extension and a signed ``synth-repo.json``; install from it on a clean machine.
-#. Plugins > Store lists the catalog; install, update and remove one extension.
+#. Plugins > Catalog lists what your repositories offer; install, update and remove one extension. Plugins > Repositories lists, adds and removes repositories (a development folder is one too).
 
 Platform
 --------

@@ -8,7 +8,7 @@ User-facing management
 ----------------------
 
 **Decision**: repositories are added and removed from the **WebUI** and from a
-**CLI**. In the WebUI they live in the **Plugins > Store** sub-tab
+**CLI**. In the WebUI they live in the **Plugins > Catalog** and **Plugins > Repositories** sub-tabs
 (``core/webui_templates/sections/plugins.html``), which today shows "Coming
 soon". The existing "Development Components" switch (not persistent, restarts
 SyntH, covers ``interface_dev``, ``plugins_dev`` and ``engines/<kind>/dev``)
