@@ -493,6 +493,72 @@
         }
     }
 
+    // A provider that is just an OpenAI-compatible or an Anthropic (Claude) API.
+    function isPlainApi(preset) {
+        return (preset.category || 'llm') !== 'tts' && ['openai', 'anthropic'].includes(preset.protocol);
+    }
+
+    function familyOrder(presets) {
+        return presets.slice().sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
+    }
+
+    function buildFamilyCard(family, cardStyle) {
+        const card = document.createElement('div');
+        card.style.cssText = cardStyle;
+        card.id = 'ext-ep-family-card';
+        const names = familyOrder(family).map(p => p.display_name).join(', ');
+        card.innerHTML = `
+            <span style="font-size:1.6rem; line-height:1;">🔌</span>
+            <span style="font-weight:700; font-size:0.9rem;">OpenAI / Claude API</span>
+            <span style="font-size:0.75rem; color:var(--muted); line-height:1.3;"></span>
+        `;
+        card.lastElementChild.textContent =
+            'Any OpenAI-compatible or Claude API: ' + names + '.';
+        card.addEventListener('mouseenter', () => {
+            card.style.borderColor = 'var(--primary,#7b61ff)';
+            card.style.background = 'var(--bg-card,#1a1a2e)';
+        });
+        card.addEventListener('mouseleave', () => {
+            card.style.borderColor = 'var(--border,#444)';
+            card.style.background = 'var(--background)';
+        });
+        card.addEventListener('click', () => selectPreset(familyOrder(family)[0]));
+        return card;
+    }
+
+    // Step 2 of a plain API: the provider dropdown (OpenAI, xAI, OpenRouter, Claude...).
+    function syncFamilySelect(preset) {
+        const header = document.getElementById('ext-ep-form-provider-header');
+        const name = document.getElementById('ext-ep-form-provider-name');
+        let select = document.getElementById('ext-ep-family-select');
+        const family = _presets.filter(isPlainApi);
+        const inFamily = family.length > 1 && isPlainApi(preset);
+        if (!inFamily) {
+            if (select) select.style.display = 'none';
+            if (name) name.style.display = '';
+            return;
+        }
+        if (!select && header) {
+            select = document.createElement('select');
+            select.id = 'ext-ep-family-select';
+            select.setAttribute('aria-label', 'Provider');
+            select.style.cssText = 'min-width:200px; padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:6px;';
+            familyOrder(family).forEach((p) => {
+                const option = document.createElement('option');
+                option.value = p.provider_id;
+                option.textContent = p.display_name;
+                select.appendChild(option);
+            });
+            select.addEventListener('change', () => {
+                const chosen = _presets.find(p => p.provider_id === select.value);
+                if (chosen) selectPreset(chosen);
+            });
+            header.appendChild(select);
+        }
+        if (select) { select.style.display = ''; select.value = preset.provider_id; }
+        if (name) { name.style.display = 'none'; }
+    }
+
     function renderPresetGrid() {
         const grid = document.getElementById('ext-ep-preset-grid');
         const loading = document.getElementById('ext-ep-preset-loading');
@@ -531,7 +597,20 @@
         const mainPresets = _presets.filter(p => (p.category || 'llm') !== 'tts');
         const ttsPresets = _presets.filter(p => (p.category || 'llm') === 'tts');
 
-        for (const preset of mainPresets) grid.appendChild(buildPresetCard(preset));
+        // The providers that are only an OpenAI-compatible or a Claude API (they differ in
+        // URL and the key hint, nothing else) are one button; a dropdown picks which.
+        const family = mainPresets.filter(isPlainApi);
+        let familyDrawn = false;
+        for (const preset of mainPresets) {
+            if (family.length > 1 && isPlainApi(preset)) {
+                if (!familyDrawn) {
+                    familyDrawn = true;
+                    grid.appendChild(buildFamilyCard(family, cardStyle));
+                }
+                continue;
+            }
+            grid.appendChild(buildPresetCard(preset));
+        }
 
         if (ttsPresets.length > 0) {
             const divider = document.createElement('div');
@@ -678,6 +757,7 @@
         renderExtraFields(preset.extra_fields, null);
 
         document.getElementById('ext-ep-modal-title').textContent = 'Add External Endpoint';
+        syncFamilySelect(preset);
         showStep(2);
     }
 

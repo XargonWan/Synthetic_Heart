@@ -1,3 +1,7 @@
+### feat(webui): one button for the OpenAI-compatible and Claude APIs
+
+In Add External Endpoint, the providers that are only an OpenAI-compatible API (OpenAI, xAI Grok, OpenRouter, GitHub Models, Ollama, Venice AI, Custom) or the Claude API (Anthropic) are one **OpenAI / Claude API** button; a dropdown in the next step picks the provider and fills the protocol, address, name and key hint from its preset. Gemini and Harmony, which have their own protocol and extras, keep their own buttons. The presets themselves are unchanged.
+
 ### feat(webui): update all, an update button per plugin, and Done/Error on the turn cards
 
 The Plugins page shows how many plugins have an update (in the highlight colour) with an **Update all** button next to it, and a plugin that is an extension with a newer version gets an update button beside its switch (`GET /api/extensions/store/updates`, `POST /api/extensions/store/update-all`; one that fails does not stop the others). On Activity, a turn card is **Done** in the highlight colour or **Error** in red, and a turn that sent no reply is an error ("no answer: ..." with the engine and reason, or that the model was not asked) instead of "processed".
