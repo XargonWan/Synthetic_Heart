@@ -66,6 +66,8 @@ class PackageEntry:
     experimental: bool = False
     default_install: bool = False
     capabilities: tuple[str, ...] = ()
+    #: Who wrote it (from the manifest), for the catalog.
+    authors: tuple[str, ...] = ()
     #: Where to download the package when it is not kept in the repository itself (a
     #: package too big for a Git host, hosted as a release asset). ``https`` only; the
     #: SHA-256 and size above still decide whether the file is the right one.
@@ -154,6 +156,12 @@ def _entry(raw: Any, position: int) -> PackageEntry:
     if not isinstance(caps, list) or not all(isinstance(c, str) for c in caps):
         problems.append(f"{where}.capabilities must be a list of strings")
         caps = []
+    raw_authors = raw.get("authors", [])
+    if not isinstance(raw_authors, list) or not all(
+        isinstance(a, str) for a in raw_authors
+    ):
+        problems.append(f"{where}.authors must be a list of names")
+        raw_authors = []
     for flag in ("experimental", "default_install"):
         if not isinstance(raw.get(flag, False), bool):
             problems.append(f"{where}.{flag} must be true or false")
@@ -172,6 +180,7 @@ def _entry(raw: Any, position: int) -> PackageEntry:
         experimental=bool(raw.get("experimental", False)),
         default_install=bool(raw.get("default_install", False)),
         capabilities=tuple(caps),
+        authors=tuple(a[:80] for a in raw_authors[:8]),
         url=url,
     )
 

@@ -336,11 +336,31 @@ class GithubReleaseTransport:
             allow_loopback_http=self._loopback,
         )
 
+    def _nothing_published(self, exc: TransportError) -> TransportError | None:
+        if "HTTP 404" not in str(exc):
+            return None
+        return TransportError(
+            f"nothing is published yet: the release {self.tag!r} of {self.repo} has no "
+            "catalog (the publishing pipeline has not run for it; HTTP 404)"
+        )
+
     def read(self, relpath: str, limit: int) -> bytes:
-        return b"".join(self._stream(relpath, limit))
+        try:
+            return b"".join(self._stream(relpath, limit))
+        except TransportError as exc:
+            friendly = self._nothing_published(exc)
+            if friendly is None:
+                raise
+            raise friendly from exc
 
     def fetch(self, relpath: str, dest: Path, limit: int) -> None:
-        _write_stream(self._stream(relpath, limit), dest)
+        try:
+            _write_stream(self._stream(relpath, limit), dest)
+        except TransportError as exc:
+            friendly = self._nothing_published(exc)
+            if friendly is None:
+                raise
+            raise friendly from exc
 
     def refresh(self) -> None:
         return None

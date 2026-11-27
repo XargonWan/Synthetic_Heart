@@ -111,34 +111,134 @@
         return table;
     }
 
-    function row(x, root) {
-        const buttons = [];
-        const button = (label, path, body, confirmText) => el('button', {
-            className: 'pill', textContent: label, style: 'margin-right:4px',
-            onclick: () => act(path, body, root, confirmText),
-        });
-        if (!x.installed) {
-            buttons.push(button('Install', '/install', { id: x.id }));
-        } else {
-            if (x.update) buttons.push(button('Update', '/update', { id: x.id }));
-            buttons.push(button(x.enabled ? 'Turn off' : 'Turn on', x.enabled ? '/disable' : '/enable', { id: x.id }));
-            buttons.push(button('Roll back', '/rollback', { id: x.id }));
-            buttons.push(button('Uninstall', '/remove', { id: x.id }));
-        }
-        const tags = [];
-        if (x.experimental) tags.push('experimental');
-        if (x.default_install) tags.push('default');
-        if (x.installed && !x.enabled) tags.push('off');
-        return el('tr', {}, [
-            el('td', {}, [el('strong', { textContent: x.name || x.id }), el('div', { className: 'meta', textContent: x.id })]),
-            el('td', { textContent: x.installed || '-' }),
-            el('td', { textContent: (x.available || '-') + (x.repo ? ' (' + x.repo + ')' : '') }),
-            el('td', { textContent: tags.join(', ') }),
-            el('td', {}, buttons),
-        ]);
+    // ---- Catalog: like Installed, a list with icons on the left, the details on the right ----
+
+    const LOGO = '/static/synth_logo_bg.png';
+    let selectedId = '';
+    let catalogFilter = '';
+
+    function iconFor(x) {
+        const img = el('img', { className: 'plugin-banner-icon', alt: '' });
+        img.src = x.installed ? BASE + '/icon/' + x.id : LOGO;
+        img.onerror = () => { img.onerror = null; img.src = LOGO; };
+        return img;
     }
 
-    let lastError = '';
+    function tagsOf(x) {
+        const tags = [];
+        if (x.update) tags.push('update ' + x.installed + ' → ' + x.available);
+        if (x.installed && !x.enabled) tags.push('off');
+        if (!x.installed) tags.push('not installed');
+        if (x.experimental) tags.push('experimental');
+        if (x.default_install) tags.push('default');
+        return tags;
+    }
+
+    function listItem(x, select) {
+        const item = el('div', { className: 'plugin-banner' + (x.id === selectedId ? ' selected' : '') });
+        item.setAttribute('role', 'option');
+        item.tabIndex = 0;
+        item.appendChild(iconFor(x));
+        item.appendChild(el('span', { className: 'plugin-banner-name', textContent: x.name || x.id }));
+        const controls = el('span', { className: 'plugin-banner-controls' });
+        if (x.update) controls.appendChild(el('span', { className: 'plugins-update-count', textContent: '⬆' }));
+        if (x.installed) {
+            controls.appendChild(el('span', {
+                className: 'plugin-led',
+                title: x.enabled ? 'on' : 'off',
+                style: 'width:10px;height:10px;border-radius:50%;display:inline-block;background:'
+                    + (x.enabled ? 'var(--success,#18c98c)' : 'var(--muted,#888)'),
+            }));
+        }
+        item.appendChild(controls);
+        item.addEventListener('click', () => select(x.id));
+        item.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); select(x.id); }
+        });
+        return item;
+    }
+
+    function detail(x, root) {
+        const pane = el('div', { className: 'plugin-detail' });
+        const head = el('div', { style: 'display:flex;align-items:center;gap:14px;margin-bottom:10px' });
+        const icon = iconFor(x);
+        icon.style.cssText = 'width:44px;height:44px';
+        head.appendChild(icon);
+        const title = el('div');
+        title.appendChild(el('h3', { textContent: x.name || x.id, style: 'margin:0' }));
+        title.appendChild(el('div', { className: 'meta', textContent: x.id }));
+        head.appendChild(title);
+        pane.appendChild(head);
+        pane.appendChild(el('div', {
+            className: 'plugin-detail-desc',
+            textContent: x.description || 'No description.',
+        }));
+        if (x.authors && x.authors.length) {
+            pane.appendChild(el('div', { className: 'plugin-detail-author meta', textContent: 'By ' + x.authors.join(' and ') }));
+        }
+        const facts = [
+            ['Installed', x.installed || 'no'],
+            ['Available', x.available ? x.available + (x.repo ? ' (' + x.repo + ')' : '') : '–'],
+        ];
+        const grid = el('dl', { style: 'display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;margin:12px 0' });
+        facts.forEach(([k, v]) => { grid.appendChild(el('dt', { textContent: k, className: 'meta' })); grid.appendChild(el('dd', { textContent: v, style: 'margin:0' })); });
+        pane.appendChild(grid);
+        const tags = tagsOf(x);
+        if (tags.length) pane.appendChild(el('div', { className: 'plugins-update-count', textContent: tags.join(' · '), style: 'margin-bottom:10px' }));
+        const buttons = el('div', { style: 'display:flex;flex-wrap:wrap;gap:8px' });
+        const button = (label, path, body, confirmText) => buttons.appendChild(el('button', {
+            className: 'pill', type: 'button', textContent: label,
+            onclick: () => act(path, body, root, confirmText),
+        }));
+        if (!x.installed) {
+            button('Install', '/install', { id: x.id });
+        } else {
+            if (x.update) button('Update to ' + x.available, '/update', { id: x.id });
+            button(x.enabled ? 'Turn off' : 'Turn on', x.enabled ? '/disable' : '/enable', { id: x.id });
+            button('Roll back', '/rollback', { id: x.id });
+            button('Uninstall', '/remove', { id: x.id }, 'Its data is removed with it.');
+        }
+        pane.appendChild(buttons);
+        return pane;
+    }
+
+    function catalogView(data, root) {
+        const all = data.extensions.slice().sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
+        if (!selectedId || !all.some((x) => x.id === selectedId)) selectedId = all.length ? all[0].id : '';
+        const wrap = el('div', { className: 'catalog-two-col', style: 'display:grid;grid-template-columns:minmax(220px,340px) 1fr;gap:18px;align-items:start;margin-top:10px' });
+        const left = el('div');
+        const search = el('input', {
+            type: 'search', placeholder: 'Search the catalog…', value: catalogFilter,
+            className: 'plugins-search-input', style: 'margin-bottom:10px;width:100%',
+        });
+        const list = el('div', { className: 'plugin-list', style: 'display:flex;flex-direction:column;gap:6px' });
+        list.setAttribute('role', 'listbox');
+        const right = el('div', { className: 'plugin-detail-pane' });
+        const draw = () => {
+            list.textContent = '';
+            const needle = catalogFilter.trim().toLowerCase();
+            const shown = all.filter((x) => !needle || (x.name + ' ' + x.id + ' ' + x.description).toLowerCase().includes(needle));
+            const groups = [['Updates', shown.filter((x) => x.update)],
+                ['Installed', shown.filter((x) => x.installed && !x.update)],
+                ['Available', shown.filter((x) => !x.installed)]];
+            groups.forEach(([label, items]) => {
+                if (!items.length) return;
+                list.appendChild(el('div', { className: 'plugin-category-header', textContent: label, style: 'margin-top:6px' }));
+                items.forEach((x) => list.appendChild(listItem(x, (id) => { selectedId = id; draw(); })));
+            });
+            if (!shown.length) list.appendChild(el('div', { className: 'meta', textContent: 'Nothing matches.' }));
+            right.textContent = '';
+            const current = all.find((x) => x.id === selectedId);
+            right.appendChild(current ? detail(current, root) : el('div', { className: 'meta', textContent: 'Select an extension on the left to see what it is.' }));
+        };
+        search.addEventListener('input', () => { catalogFilter = search.value; draw(); });
+        left.appendChild(search);
+        left.appendChild(list);
+        wrap.appendChild(left);
+        wrap.appendChild(right);
+        draw();
+        return wrap;
+    }
 
     async function overview(root, what) {
         try {
@@ -162,16 +262,13 @@
         }
         root.textContent = '';
         problems(data, root);
-        const table = el('table', { style: 'width:100%' }, [
-            el('tr', {}, ['Extension', 'Installed', 'Available', '', ''].map((h) => el('th', { textContent: h, style: 'text-align:left' }))),
-        ]);
-        data.extensions.forEach((x) => table.appendChild(row(x, root)));
-        root.appendChild(table);
         if (!data.extensions.length) {
             root.appendChild(el('div', { className: 'meta', textContent: data.repositories.length
                 ? 'Nothing is offered by your repositories.'
                 : 'Nothing is offered yet: add a repository in the Repositories tab.' }));
+            return;
         }
+        root.appendChild(catalogView(data, root));
     }
 
     async function renderRepositories(root) {

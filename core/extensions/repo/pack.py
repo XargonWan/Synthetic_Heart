@@ -163,6 +163,7 @@ def build_index(
                     else {}
                 ),
                 "capabilities": list(manifest.permissions.capabilities),
+                "authors": list(manifest.authors),
             }
         )
     unknown = sorted(set(default_install) - {p["id"] for p in packages})

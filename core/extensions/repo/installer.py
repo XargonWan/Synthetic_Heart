@@ -107,6 +107,7 @@ class Row:
     experimental: bool = False
     default_install: bool = False
     description: str = ""
+    authors: list[str] = field(default_factory=list)
 
 
 def host_platform() -> str:
@@ -699,9 +700,18 @@ class Installer:
                 )
                 row.name = entry.name or entry.id
                 row.description = entry.description
+                row.authors = list(entry.authors)
+        installed_manifests = self._installed_manifests()
         for ext_id, record in state.extensions.items():
             row = rows.setdefault(ext_id, Row(ext_id, ext_id))
             row.installed, row.enabled = record.version, record.enabled
+            manifest = installed_manifests.get(ext_id)
+            if manifest is not None:
+                # What is installed is read from its own manifest, even when no
+                # repository offers it any more.
+                row.name = row.name if row.name != ext_id else manifest.name
+                row.description = row.description or manifest.description
+                row.authors = row.authors or list(manifest.authors)
             have, best = _version(record.version), _version(row.available)
             row.update = bool(have and best and best > have)
         return sorted(rows.values(), key=lambda r: r.id), problems

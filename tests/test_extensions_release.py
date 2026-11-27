@@ -374,3 +374,25 @@ class TestEndToEnd:
             lines.append,
         )
         assert code == 1 and Installer(tmp_path).repos.load() == []
+
+
+def test_a_release_that_is_not_published_says_so_instead_of_a_bare_404() -> None:
+    from core.extensions.repo.transports import GithubReleaseTransport, TransportError
+
+    transport = GithubReleaseTransport("Owner/plugins", "latest-develop")
+
+    def refuse(relpath: str, limit: int):
+        raise TransportError(f"{relpath!r}: HTTP 404")
+
+    transport._stream = refuse  # type: ignore[method-assign]
+    with pytest.raises(TransportError, match="nothing is published yet") as info:
+        transport.read("synth-repo.json", 1000)
+    assert "'latest-develop'" in str(info.value) and "Owner/plugins" in str(info.value)
+    other = GithubReleaseTransport("Owner/plugins")
+
+    def broken(relpath: str, limit: int):
+        raise TransportError("download failed: HTTP 500")
+
+    other._stream = broken  # type: ignore[method-assign]
+    with pytest.raises(TransportError, match="HTTP 500"):
+        other.read("synth-repo.json", 1000)

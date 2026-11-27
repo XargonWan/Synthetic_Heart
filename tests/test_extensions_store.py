@@ -579,3 +579,68 @@ class TestMountOrder:
     ) -> None:
         client = self._app(tmp_path, monkeypatch)
         assert client.get("/no-such-alias/page.html").status_code == 404
+
+
+class TestCatalogView:
+    """The Catalog looks like Installed: a list with icons, the details on the right."""
+
+    @pytest.mark.asyncio
+    async def test_the_icon_of_an_installed_extension_is_served(
+        self, store: dict[str, Any]
+    ) -> None:
+        store["inst"].install("dev/one")
+        folder = store["inst"].install_dir("dev/one")
+        (folder / "icon.svg").write_text("<svg xmlns='http://www.w3.org/2000/svg'/>")
+        response = await store["web"].get("/api/extensions/store/icon/dev/one")
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("image/svg+xml")
+
+    @pytest.mark.asyncio
+    async def test_an_extension_without_an_icon_or_not_installed_is_a_404(
+        self, store: dict[str, Any]
+    ) -> None:
+        assert (
+            await store["web"].get("/api/extensions/store/icon/dev/one")
+        ).status_code == 404
+        assert (
+            await store["web"].get("/api/extensions/store/icon/dev/ghost")
+        ).status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_a_symlinked_icon_is_not_followed(
+        self, store: dict[str, Any], tmp_path: Path
+    ) -> None:
+        store["inst"].install("dev/one")
+        secret = tmp_path / "secret.svg"
+        secret.write_text("secret")
+        (store["inst"].install_dir("dev/one") / "icon.svg").symlink_to(secret)
+        assert (
+            await store["web"].get("/api/extensions/store/icon/dev/one")
+        ).status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_the_rows_carry_what_the_detail_shows(
+        self, store: dict[str, Any]
+    ) -> None:
+        store["inst"].install("dev/one")
+        rows = (await store["web"].get("/api/extensions/store", headers=OK)).json()[
+            "extensions"
+        ]
+        one = next(r for r in rows if r["id"] == "dev/one")
+        assert {
+            "name",
+            "description",
+            "authors",
+            "installed",
+            "available",
+            "enabled",
+        } <= set(one)
+
+    def test_the_script_draws_a_list_and_a_detail_pane(self) -> None:
+        script = (
+            Path(__file__).resolve().parent.parent
+            / "res/synth_webui/js/extension_store.js"
+        ).read_text(encoding="utf-8")
+        assert "function catalogView" in script and "function detail(x, root)" in script
+        assert "plugin-banner-icon" in script and "plugin-detail-desc" in script
+        assert "'/icon/' + x.id" in script

@@ -171,6 +171,26 @@ def build_router(
             reply["runtime"] = await reload(holder["id"])
         return reply
 
+    @router.get(f"{ROUTE}/icon/{{publisher}}/{{name}}")
+    async def icon(publisher: str, name: str) -> Any:
+        """The icon of an installed extension (its ``icon.svg`` or ``icon.png``), behind the
+        WebUI's own gate like every plugin icon; one that is not installed has none yet."""
+        from fastapi.responses import FileResponse
+
+        ext_id = f"{publisher}/{name}"
+        try:
+            base = installer.install_dir(ext_id)
+        except Exception:  # noqa: BLE001 - not a valid id
+            return JSONResponse({"detail": "Not found"}, status_code=404)
+        for filename, media in (
+            ("icon.svg", "image/svg+xml"),
+            ("icon.png", "image/png"),
+        ):
+            path = base / filename
+            if path.is_file() and not path.is_symlink():
+                return FileResponse(path, media_type=media)
+        return JSONResponse({"detail": "Not found"}, status_code=404)
+
     @router.get(f"{ROUTE}/updates")
     async def updates(request: Request, refresh: bool = False) -> Any:
         """What has a newer version in a repository: ``[{id, installed, available}]``."""
