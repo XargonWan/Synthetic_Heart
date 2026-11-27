@@ -118,7 +118,7 @@ Rules:
 - Critical message-chain plugins must declare that runtime disabling is not allowed.
 - Third-party logos require explicit permission and attribution in `LICENSE_EXTERNAL.md`; otherwise use an original glyph or the SyntH fallback.
 
-Use `extensions_src/radio_host/` (an extension that speaks) and the relevant wiki pages as reference implementations.
+Use `<plugins repo>/extensions/radio_host/` (an extension that speaks) and the relevant wiki pages as reference implementations.
 
 ### Interfaces
 
@@ -440,7 +440,7 @@ Anything installable that is not the Core is an **extension**: its own process
 only through the JSON-RPC gateway in `core/extensions/`. The hard rules (details in
 `docs/plugin_platform/`):
 
-- **No `core.*` import from an extension.** `rg "from core|import core" extensions_src/`
+- **No `core.*` import from an extension.** `rg "from core|import core" <plugins repo>/extensions/`
   must find nothing. A capability that is missing is a new gateway API (proposed to the
   maintainers), never a shortcut. Official extensions use the same API as anyone else.
 - **Every call is checked**: the capability is declared in the manifest **and** granted by
@@ -457,15 +457,20 @@ only through the JSON-RPC gateway in `core/extensions/`. The hard rules (details
   (a background turn on its own interface: scoped to that interface's actions, never in
   the chat history, priority below people), `voice.synthesize` / `voice.play` (the Core's
   voice and the stage) and, to add facts to the prompt, `[[provides.recon]]`. It names the
-  action it speaks with as `message_action`. Reference: `extensions_src/radio_host/`.
+  action it speaks with as `message_action`. Reference: `<plugins repo>/extensions/radio_host/`.
 - **No legacy or compatibility layer.** In-tree plugins are rewritten as extensions; the
   Core keeps only data migrations (`core/migrations.py`).
 - **UI**: an extension may put a window in exactly three WebUI slots, `activity`, `logs`
   and `more` (`[[provides.ui]]`); the Core draws them. Its static pages are sandboxed
   unless it holds `web.origin`, the one capability that lets a page act as the person.
-- **Where**: sources in `extensions_src/<name>/` (`synth-extension.toml`, `ext_main.py`),
-  SDK in `synth_sdk/`, Core side in `core/extensions/`, image bundling in
-  `scripts/build_bundled_extensions.py`, tests in `tests/test_extension*_*.py`.
+- **Where**: the official extensions' sources are **not in this repository**: they are in the
+  official plugins repository (`<plugins repo>` = `~/gits/synthetic-heart-official-plugins`,
+  GitHub `XargonWan/synthetic-heart-official-plugins`, branch `develop`), one folder each,
+  `extensions/<name>/` (`synth-extension.toml`, `ext_main.py`), with their tests in its
+  `ext_tests/` (run against this checkout, see its README). Here: SDK in `synth_sdk/`, the
+  platform in `core/extensions/`, image bundling in `scripts/build_bundled_extensions.py`
+  (the Dockerfile clones the plugins repository), and the platform's own tests in
+  `tests/test_extensions_*.py` (they use stand-in extensions, never the official ones).
 - The platform is **on by default** (`EXTENSIONS_ENABLED`). The defaults baked into the image (`default_install` in `extensions_bundled/`) are installed on, granted what they declare, at the first start; anything else is granted only by the operator.
 
 ## 6. Interfaces
@@ -495,7 +500,7 @@ interface/<module>/
 
 The folder is named after the **module** (not the component), so the historical
 `interface.<module>` import path keeps working: `interface/discord_interface/discord_interface.py`
-(component `discord_bot`). Telegram, Fluxer and Matrix are extensions (`extensions_src/`).
+(component `discord_bot`). Telegram, Fluxer and Matrix are extensions (`<plugins repo>/extensions/`).
 
 The `__init__.py` shim imports the submodule as a **module** (never `from pkg
 import <mod>`, which would resolve a same-named module-level global — e.g.

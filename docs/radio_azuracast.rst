@@ -7,7 +7,7 @@ Overview
 --------
 
 The **Radio Host** turns Synthetic Heart into an AI radio DJ. It is an extension
-(``official/radio_host``, sources in ``extensions_src/radio_host/``) that monitors an
+(``official/radio_host``, sources in ``<plugins repo>/extensions/radio_host/``) that monitors an
 `AzuraCast <https://www.azuracast.com/>`_ station, decides when the synth should speak,
 asks the model for a short remark, has the synth's voice say it and streams it into the
 station through the WebDJ connection, timed to land in the gap between songs. The same

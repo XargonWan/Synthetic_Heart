@@ -81,7 +81,7 @@ SHA-256. ``index`` writes and signs the index; ``keygen`` makes a publisher key.
 ::
 
     uv run python -m core.extensions.cli keygen ~/.config/synth/publisher.key
-    uv run python -m core.extensions.cli pack extensions_src/telegram_bot --out ./repo
+    uv run python -m core.extensions.cli pack <plugins repo>/extensions/telegram_bot --out ./repo
     uv run python -m core.extensions.cli index ./repo --sign ~/.config/synth/publisher.key \
         --name official --default-install official/telegram_bot
     uv run python -m core.extensions.cli repo add official ./repo --key <public key> --trusted

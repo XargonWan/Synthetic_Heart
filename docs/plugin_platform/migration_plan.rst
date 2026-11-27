@@ -124,7 +124,7 @@ Milestones
        commands unchanged; M0 characterisation tests green. Highest risk of the
        plan (see below).
        **Status (2026-11-23): ``telegram_bot`` and ``telegram`` (userbot) done.**
-       Sources in ``extensions_src/telegram_bot/`` and ``extensions_src/telegram/``;
+       Sources in ``<plugins repo>/extensions/telegram_bot/`` and ``<plugins repo>/extensions/telegram/``;
        details in :doc:`telegram_extension`. Getting there added generic Core APIs
        (interface traits, own actions, reactions, avatar, backlog, panels, calls).
    * - M5
@@ -186,7 +186,7 @@ Milestones
        :doc:`extension_runtime`); 61 tests against a real server, with mutation checks.
        **Synth Stage** (``official/synth_stage``) is an extension now: the Core no longer
        mounts ``/stage``; the extension serves the built client (``frontend/`` built by
-       ``scripts/build_stage_extension.sh`` into ``extensions_src/synth_stage/web/``) at
+       ``scripts/build_stage_extension.sh`` into ``<plugins repo>/extensions/synth_stage/web/``) at
        ``/stage/``, and the Dockerfile packs it with the other defaults. **Checked with
        Docker** (2026-11-25): the Stage stage builds (``pnpm install`` and ``vite build``;
        a plain ``docker build`` could not reach the npm registry from its network,
@@ -281,7 +281,7 @@ Milestones
        endpoint adapters (``official/protocol_harmony``, ``official/protocol_fish``, through
        the new ``provides.protocols`` API), the Dashboard (``official/synth_dashboard``),
        the AzuraCast radio host (``official/radio_host``) and the KittenTTS voice (source
-       in ``extensions_src/vox_kitten``, not yet released), plus the removal of the manual
+       in ``<plugins repo>/extensions/vox_kitten``, not yet released), plus the removal of the manual
        engine and ``interface/message_send_utils.py``. **Not done**: Discord (4,400 lines,
        voice and Live inside), Live as an extension (needs a duplex audio streaming API
        and a provider-neutral session config), the Vessel adapters (M8b: needs a

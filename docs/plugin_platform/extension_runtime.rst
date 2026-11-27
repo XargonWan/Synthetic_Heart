@@ -428,14 +428,14 @@ decides where the key goes:
   are refused.
 
 SDK: ``ctx.endpoints.get(name)`` and ``ctx.endpoints.ensure(name, base_url, ...)``. The
-Zen LLM Engine extension (``extensions_src/zen``) is the first user: the Core no longer
+Zen LLM Engine extension (``<plugins repo>/extensions/zen``) is the first user: the Core no longer
 seeds, names or tunes anything for Zen.
 
 Turns of its own, the synth's voice, and a Recon question
 ----------------------------------------------------------
 
 An extension that is not a chat but still *speaks*, such as a radio DJ (the AzuraCast
-Radio DJ, ``extensions_src/radio_host``, is the first), needs four more things from the
+Radio DJ, ``<plugins repo>/extensions/radio_host``, is the first), needs four more things from the
 Core. Each is a small, scoped API; none gives access to the model, the voice engine or the
 avatar directly.
 

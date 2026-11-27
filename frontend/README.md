@@ -28,8 +28,8 @@ accepted by the proxy, so the browser never sees it). Override with
 
 `pnpm build` produces `frontend/dist/`. It is served by the `official/synth_stage`
 extension at `/stage/` (same origin, so no CORS): `scripts/build_stage_extension.sh`
-builds it and copies it into `extensions_src/synth_stage/web/`, which the extension
-serves once it is on and granted `web.static`. The backend runs fine without it.
+builds it and copies it into the extension's `web/` folder (in the official plugins
+repository), which the extension serves once it is on and granted `web.static`. The backend runs fine without it.
 
 ## URL flags
 

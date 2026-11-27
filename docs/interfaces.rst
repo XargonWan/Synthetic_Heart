@@ -543,7 +543,7 @@ Best Practices
 **Documentation**
     Provide clear action schemas and examples in the ``examples`` tier.
 
-For complete implementations, examine the extensions in ``extensions_src/`` (``telegram_bot``, ``fluxer``, ``openai_api``) and :doc:`plugin_platform/extension_developer_guide`, or ``interface/discord_interface.py`` for an interface that still ships in the Core.
+For complete implementations, examine the extensions in ``<plugins repo>/extensions/`` (``telegram_bot``, ``fluxer``, ``openai_api``) and :doc:`plugin_platform/extension_developer_guide`, or ``interface/discord_interface.py`` for an interface that still ships in the Core.
 
 
 Typing and recording status

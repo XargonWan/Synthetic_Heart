@@ -391,7 +391,7 @@ from core.extensions.launcher import Launcher  # noqa: E402
 from core.extensions.manifest import load_manifest  # noqa: E402
 from core.extensions.sandbox import RuntimeLayout, SandboxPolicy  # noqa: E402
 from core.extensions.supervisor import RestartPolicy, Supervisor  # noqa: E402
-from tests.support.fake_fluxer import wait_until  # noqa: E402
+from tests.support.waiting import wait_until  # noqa: E402
 from tests.test_extensions_runtime import Harness  # noqa: E402
 
 WORLD_DIR = Path(__file__).resolve().parent / "support" / "world_extension"

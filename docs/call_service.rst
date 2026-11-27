@@ -251,7 +251,7 @@ What an interface can do is set by the platform, not by this project. Checked on
      - yes, **untested**
      - yes, **untested**: the face is drawn by the server (no browser); audio-only where the
        server cannot draw it
-     - the ``official/telegram`` extension (``extensions_src/telegram/calls.py``) on py-tgcalls, through the extension call API (``core/extensions/calls.py``). Written
+     - the ``official/telegram`` extension (``<plugins repo>/extensions/telegram/calls.py``) on py-tgcalls, through the extension call API (``core/extensions/calls.py``). Written
        from the library's published examples and API without an account to run it on: see
        *Debugging Telegram calls* below. For the video see *The SyntH's face in other
        interfaces' calls*.

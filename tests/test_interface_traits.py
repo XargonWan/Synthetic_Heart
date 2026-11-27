@@ -94,16 +94,14 @@ class TestBotsAndPeers:
 
 
 def test_speech_as_media_is_declared_by_the_interface_not_named_by_the_core():
-    from pathlib import Path
-
-    from core.extensions.manifest import load_manifest
+    from core.extensions.manifest import parse_manifest_text
     from core.interface_traits import traits_for
 
     assert traits_for("discord_bot").speech_as_media is True
     assert traits_for("some_new_interface").speech_as_media is False
-    manifest = load_manifest(
-        Path(__file__).resolve().parent.parent
-        / "extensions_src/telegram_bot/synth-extension.toml"
+    manifest = parse_manifest_text(
+        'schema = 1\n[extension]\nid = "dev/x"\nname = "x"\nversion = "1.0.0"\n'
+        '[compat]\ncore_api = ">=0.1"\n[[provides.interfaces]]\nid = "chatty"\n'
+        'paths = ["chatty/{chat}"]\nspeech_as_media = true\n'
     )
-    provided = {i.id: i for i in manifest.provides.interfaces}
-    assert provided["telegram_bot"].speech_as_media is True
+    assert manifest.provides.interfaces[0].speech_as_media is True

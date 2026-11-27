@@ -1,7 +1,7 @@
 Fluxer Interface
 ================
 
-The Fluxer extension (``official/fluxer``, source in ``extensions_src/fluxer/``) lets
+The Fluxer extension (``official/fluxer``, source in ``<plugins repo>/extensions/fluxer/``) lets
 synth participate in `Fluxer <https://fluxer.app>`_ chat servers. Fluxer is a
 self-hostable, Discord-compatible chat platform, so the extension speaks the same REST +
 gateway (WebSocket) protocol and hands every incoming message to the Core, which routes

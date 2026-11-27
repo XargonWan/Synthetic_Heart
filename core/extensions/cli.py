@@ -6,7 +6,7 @@
     uv run python -m core.extensions.cli search telegram
     uv run python -m core.extensions.cli install official/telegram --grant
     uv run python -m core.extensions.cli update
-    uv run python -m core.extensions.cli pack extensions_src/telegram --out ./myrepo
+    uv run python -m core.extensions.cli pack /path/to/synthetic-heart-official-plugins/extensions/telegram --out ./myrepo
     uv run python -m core.extensions.cli index ./myrepo --sign ./publisher.key
 
 It does the same things the WebUI Store does, through the same installer. A running Core

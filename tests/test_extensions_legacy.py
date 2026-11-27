@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -299,6 +298,29 @@ class FakeRegistry:
         self.set[key] = value
 
 
+_HEAD = """schema = 1
+[extension]
+id = "official/{name}"
+name = "{name}"
+version = "0.1.0"
+[compat]
+core_api = ">=0.1,<1"
+[entry]
+module = "ext_main"
+function = "main"
+"""
+
+#: Stand-ins for the two extensions the adapter tests write settings of: the settings
+#: and their types are what matters here, not the real packages.
+STAND_INS = {
+    "fluxer": _HEAD.format(name="fluxer")
+    + '[config.FLUXER_TOKEN]\ntype = "string"\nsensitive = true\nrequired = true\n',
+    "telegram": _HEAD.format(name="telegram")
+    + '[config.TELEGRAM_USE_SYNTH_AVATAR]\ntype = "bool"\ndefault = false\n'
+    + '[config.TELEGRAM_CALLS_ENABLED]\ntype = "bool"\ndefault = true\n',
+}
+
+
 class FakeStorage:
     def __init__(self) -> None:
         self.data: dict[tuple[str, str], str] = {}
@@ -313,13 +335,10 @@ class FakeStorage:
 @pytest.fixture
 def adapter(tmp_path: Path) -> tuple[CoreLegacyPort, FakeRegistry, FakeStorage]:
     installer = Installer(tmp_path / "runtime", core_api_version="0.1.0")
-    for name in ("fluxer", "telegram"):
+    for name, text in STAND_INS.items():
         target = installer.install_dir(f"official/{name}")
         target.mkdir(parents=True)
-        shutil.copy(
-            ROOT / "extensions_src" / name / "synth-extension.toml",
-            target / "synth-extension.toml",
-        )
+        (target / "synth-extension.toml").write_text(text, encoding="utf-8")
     registry, storage = FakeRegistry(), FakeStorage()
     return CoreLegacyPort(installer, registry, storage), registry, storage
 

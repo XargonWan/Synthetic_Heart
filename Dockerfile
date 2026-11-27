@@ -161,13 +161,20 @@ COPY skins/Rei /app/.skins-seed/Rei
 # extension package (official/synth_stage serves it at /stage/). Placed AFTER
 # `COPY . /app` so it is never clobbered; the host has no build output, this is the
 # sole source of it.
-COPY --from=stage_builder /build/dist /app/extensions_src/synth_stage/web
+COPY --from=stage_builder /build/dist /tmp/stage-dist
 
 # Pack the default extensions into /app/extensions_bundled: the read-only repository
-# the first start installs them from (offline). The signing key is made for this build
-# and discarded; only its public half is kept next to the index. Needs the network
-# here, to build each extension's libraries into its package.
-RUN /app/venv/bin/python /app/scripts/build_bundled_extensions.py
+# the first start installs them from (offline). Their sources are in the official plugins
+# repository (PLUGINS_REF is the branch or tag to take them from); the Stage client built
+# above is put into its package. The signing key is made for this build and discarded; only
+# its public half is kept next to the index. Needs the network here, to fetch the sources
+# and to build each extension's libraries into its package.
+ARG PLUGINS_REPO=https://github.com/XargonWan/synthetic-heart-official-plugins.git
+ARG PLUGINS_REF=develop
+RUN git clone --depth 1 --branch "$PLUGINS_REF" "$PLUGINS_REPO" /tmp/official-plugins && \
+    cp -r /tmp/stage-dist /tmp/official-plugins/extensions/synth_stage/web && \
+    /app/venv/bin/python /app/scripts/build_bundled_extensions.py --sources /tmp/official-plugins/extensions && \
+    rm -rf /tmp/official-plugins /tmp/stage-dist
 
 # vendored packages are installed by `uv sync` earlier via path sources.
 # Historically we pip-installed them here, but that invoked the system pip

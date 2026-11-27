@@ -50,7 +50,7 @@ Fix failures before moving on.
 | LLM engines | `engines/external_engines/` |
 | Live audio engines | `engines/live/` |
 | Interfaces | `interface/` |
-| Extensions (sources, SDK, Core side) | `extensions_src/`, `synth_sdk/`, `core/extensions/` (rules: `AGENTS.md` §5d, docs: `docs/plugin_platform/`) |
+| Extensions (sources, SDK, Core side) | `<plugins repo>/extensions/`, `synth_sdk/`, `core/extensions/` (rules: `AGENTS.md` §5d, docs: `docs/plugin_platform/`) |
 | Tests | `tests/` |
 | Docs | `docs/` |
 | DB schema | `init-db.sql` + inline in `core/db.py` and each plugin |

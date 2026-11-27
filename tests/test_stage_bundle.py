@@ -8,7 +8,6 @@ repository, the extension process and the web router.
 from __future__ import annotations
 
 import importlib.util
-import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -45,13 +44,36 @@ def load_script() -> Any:
     return module
 
 
+STAGE_MANIFEST = """schema = 1
+[extension]
+id = "official/synth_stage"
+name = "SyntH Stage"
+version = "0.1.0"
+[compat]
+core_api = ">=0.1,<1"
+[entry]
+module = "ext_main"
+function = "main"
+[provides.web]
+static = "web"
+alias = "stage"
+same_origin = true
+[permissions]
+capabilities = ["log", "web.static", "web.origin"]
+"""
+
+STAGE_MAIN = """async def main(ctx):
+    await ctx.stopping.wait()
+"""
+
+
 @pytest.fixture
 def sources(tmp_path: Path) -> Path:
-    """A copy of the Stage package with a stand-in for the built client."""
+    """A stand-in for the Stage package (manifest, entry, and a stand-in built client)."""
     target = tmp_path / "sources" / "synth_stage"
-    shutil.copytree(ROOT / "extensions_src" / "synth_stage", target)
-    shutil.rmtree(target / "web", ignore_errors=True)
     (target / "web" / "assets").mkdir(parents=True)
+    (target / "synth-extension.toml").write_text(STAGE_MANIFEST, encoding="utf-8")
+    (target / "ext_main.py").write_text(STAGE_MAIN, encoding="utf-8")
     (target / "web" / "index.html").write_text("<h1>the stage</h1>")
     (target / "web" / "assets" / "app.js").write_text("console.log('stage')")
     return tmp_path / "sources"
@@ -76,15 +98,6 @@ def test_an_unknown_default_is_an_error_not_a_silent_skip(
     script = load_script()
     with pytest.raises(SystemExit, match="no extension source"):
         script.build(tmp_path / "bundled", ("official/ghost",), sources=sources)
-
-
-def test_the_real_defaults_all_have_a_source() -> None:
-    script = load_script()
-    for extension_id in script.DEFAULTS:
-        assert (
-            script.source_of(extension_id, ROOT / "extensions_src")
-            / "synth-extension.toml"
-        ).is_file()
 
 
 @pytest.mark.asyncio
@@ -125,46 +138,3 @@ async def test_a_first_start_installs_and_serves_the_stage(
     assert index.status_code == 200 and "<h1>the stage</h1>" in index.text
     assert asset.status_code == 200 and "console.log" in asset.text
     assert outside.status_code == 404
-
-
-REAL_BUILD = ROOT / "extensions_src" / "synth_stage" / "web" / "index.html"
-
-
-@pytest.mark.skipif(
-    not REAL_BUILD.is_file(),
-    reason="the Stage client is not built (scripts/build_stage_extension.sh)",
-)
-@pytest.mark.asyncio
-async def test_the_real_stage_build_is_bundled_and_served(tmp_path: Path) -> None:
-    """With the real client built, its files are what gets packed and served, and its
-    own asset paths (``/stage/assets/...``) resolve through the alias."""
-    import re
-
-    script = load_script()
-    bundled = script.build(tmp_path / "bundled", ("official/synth_stage",))
-    root = tmp_path / "extensions"
-    installer = Installer(root, bundled=bundled)
-    assert installer.ensure_defaults() == (["official/synth_stage"], [])
-    runtime = ExtensionRuntime(
-        root,
-        memory_ports(),
-        policy=SandboxPolicy(drop_privileges=False),
-        restart=FAST,
-    )
-    app = FastAPI()
-    app.include_router(build_router(runtime.gateway, runtime.layout.install_dir))
-    try:
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://t"
-        ) as http:
-            await runtime.start()
-            index = await http.get("/stage/")
-            asset_path = re.search(r'src="(/stage/assets/[^"]+\.js)"', index.text)
-            assert asset_path is not None, index.text[:300]
-            asset = await http.get(asset_path.group(1))
-    finally:
-        await runtime.stop()
-    assert index.status_code == 200 and "<div id=" in index.text
-    assert asset.status_code == 200 and "javascript" in asset.headers["content-type"]
-    # Stage declared same_origin and was granted web.origin: no sandbox policy.
-    assert "content-security-policy" not in index.headers

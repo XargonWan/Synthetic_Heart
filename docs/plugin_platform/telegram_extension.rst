@@ -1,7 +1,7 @@
 Telegram bot extension (M4)
 ===========================
 
-``extensions_src/telegram_bot/`` is the first interface rewritten on the platform:
+``<plugins repo>/extensions/telegram_bot/`` is the first interface rewritten on the platform:
 the Telegram **bot** (BotFather token) as an extension, ``official/telegram_bot``.
 It replaces ``interface/telegram_bot/`` (3,470 lines, 30 Core modules) with about
 600 lines that import nothing from the Core. The userbot (``interface/telegram``)
@@ -114,7 +114,7 @@ Core's hardcoded interface lists.
 The user account (``official/telegram``, M4b)
 =============================================
 
-``extensions_src/telegram/`` replaces ``interface/telegram/`` (4,600 lines, deleted):
+``<plugins repo>/extensions/telegram/`` replaces ``interface/telegram/`` (4,600 lines, deleted):
 the Telethon **user account**, with voice and video calls. About 1,900 lines, none of
 them importing the Core. ``telethon`` and ``py-tgcalls`` live in its own ``lib/``.
 

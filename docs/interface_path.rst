@@ -194,7 +194,7 @@ Telegram User Account
 
 - **Path Format**: ``telegram/chat_id[/thread_id]`` or ``telegram/@username[/thread_id]``
 - **Writing first**: a user account can only message a bare user id it has seen.
-  the ``official/telegram`` extension (``extensions_src/telegram/tl.py``, ``Account.ensure_peer``) looks for the
+  the ``official/telegram`` extension (``<plugins repo>/extensions/telegram/tl.py``, ``Account.ensure_peer``) looks for the
   person once in the groups the account shares with them, and otherwise
   fails with a "Chat not found" error that says what to do (they message the
   account first, or the sender uses their ``@username``). A miss is remembered

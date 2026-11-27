@@ -5,7 +5,11 @@ The folder is the read-only repository the Core installs first-start defaults fr
 the matching ``public.key``. The signing key is made for this build and thrown away:
 the key only has to match the index it signs, inside this image.
 
-    uv run python scripts/build_bundled_extensions.py [--out DIR] [--default ID ...]
+    uv run python scripts/build_bundled_extensions.py --sources DIR [--out DIR] [--default ID ...]
+
+``--sources`` is the folder holding one directory per extension: the ``extensions/`` folder of
+the official plugins repository (github.com/XargonWan/synthetic-heart-official-plugins), which
+the Dockerfile clones for the build. ``SYNTH_EXTENSIONS_SOURCES`` sets it from the environment.
 
 Packages that are not defaults can be added with ``--also``; they are in the index but
 not installed on their own.
@@ -14,6 +18,7 @@ not installed on their own.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -44,8 +49,8 @@ def source_of(extension_id: str, sources: Path) -> Path:
 def build(
     out: Path,
     defaults: tuple[str, ...],
+    sources: Path,
     also: tuple[str, ...] = (),
-    sources: Path = ROOT / "extensions_src",
 ) -> Path:
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
@@ -66,8 +71,22 @@ def main() -> int:
     parser.add_argument("--out", type=Path, default=ROOT / "extensions_bundled")
     parser.add_argument("--default", action="append", dest="defaults")
     parser.add_argument("--also", action="append", default=[])
+    parser.add_argument(
+        "--sources",
+        type=Path,
+        default=Path(os.environ["SYNTH_EXTENSIONS_SOURCES"])
+        if os.environ.get("SYNTH_EXTENSIONS_SOURCES")
+        else None,
+        required="SYNTH_EXTENSIONS_SOURCES" not in os.environ,
+        help="folder with one directory per extension",
+    )
     args = parser.parse_args()
-    build(args.out, tuple(args.defaults or DEFAULTS), tuple(args.also))
+    build(
+        args.out,
+        tuple(args.defaults or DEFAULTS),
+        args.sources,
+        tuple(args.also),
+    )
     print(f"bundled repository written to {args.out}")
     return 0
 

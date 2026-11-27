@@ -27,12 +27,12 @@ single source of truth (:pyfile:`core/animation_handler.py`).
      (``EXTENSIONS_ENABLED``) and the baked-in defaults, Stage included, are installed
      granted on the first start, so it is available out of the box.
    - **Outside Docker**: build the client into the extension package, then install the
-     extension from the repository or run it from ``extensions_src/``:
+     extension from the repository or run it from ``<plugins repo>/extensions/``:
 
      .. code-block:: bash
 
         scripts/build_stage_extension.sh   # pnpm install + build, copied to
-                                           # extensions_src/synth_stage/web/
+                                           # <plugins repo>/extensions/synth_stage/web/
 
      See `Toolchain`_ for the Node >= 22 / pnpm requirements.
 
@@ -83,7 +83,7 @@ Production deployment
 ---------------------
 
 ``pnpm build`` produces ``frontend/dist/``. ``scripts/build_stage_extension.sh`` copies
-it into ``extensions_src/synth_stage/web/``, which the ``official/synth_stage`` extension
+it into ``<plugins repo>/extensions/synth_stage/web/``, which the ``official/synth_stage`` extension
 serves at ``/stage/`` on the Core's origin (no CORS involved) through the extension web
 provision (:pyfile:`core/extensions/webui_web.py`). Visit
 ``https://<host>:<port>/stage/`` to load it. The WebUI's token gate covers it like every
@@ -96,7 +96,7 @@ The Dockerfile builds Stage automatically as part of the image build, so no
 manual ``pnpm build`` step is needed for containerized deployments. A dedicated
 ``node:22-slim`` build stage (``stage_builder``) runs ``pnpm install
 --frozen-lockfile`` and ``pnpm build``, then the resulting ``dist/`` is copied
-into the runtime image at ``/app/extensions_src/synth_stage/web``, and
+into the runtime image at ``/app/<plugins repo>/extensions/synth_stage/web``, and
 ``scripts/build_bundled_extensions.py`` packs the default extensions (Stage
 included) into ``/app/extensions_bundled``, the repository the first start installs
 them from. The Node/pnpm toolchain stays in the build stage and never bloats the final

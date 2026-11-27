@@ -190,7 +190,7 @@ Best Practices
 Need Help?
 ==========
 
-- Check existing interfaces: the extensions in ``extensions_src/`` (``telegram_bot``, ``fluxer``) and ``interface/discord_interface.py``
+- Check existing interfaces: the extensions in ``<plugins repo>/extensions/`` (``telegram_bot``, ``fluxer``) and ``interface/discord_interface.py``
 - Check core modules: ``core/persona_manager.py``
 - Ask in the development channel
 

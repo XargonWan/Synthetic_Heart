@@ -1,7 +1,7 @@
 Telegram User-Account Extension
 ===============================
 
-``official/telegram`` (``extensions_src/telegram/``) lets SyntH use a **real Telegram
+``official/telegram`` (``<plugins repo>/extensions/telegram/``) lets SyntH use a **real Telegram
 account**, a normal user with a phone number, instead of a BotFather bot. It talks MTProto
 through `Telethon <https://docs.telethon.dev>`_ and can take **voice and video calls**. Use
 ``official/telegram_bot`` when a bot is enough; use this one when SyntH must appear as an

@@ -88,7 +88,7 @@ API-driven Gemini, OpenAI, Claude, Grok, or local OpenAI-compatible instances: h
 </div>
 
 ### OpenAI API compatible
-<img src="extensions_src/openai_api/icon.png" alt="OpenAI-compatible API server" width="120" align="left" hspace="12" vspace="8" />
+<img src="<plugins repo>/extensions/openai_api/icon.png" alt="OpenAI-compatible API server" width="120" align="left" hspace="12" vspace="8" />
 
 Synthetic Heart speaks the OpenAI protocol in **both directions**. Inbound, it exposes an OpenAI-compatible API (the `openai_api` extension) on port `11435`, so any tool, IDE plugin, app or client built for the OpenAI API can talk to your Synth as if it were a plain model endpoint — the persona, memory and emotions ride along transparently. Outbound, its typed prompt pipeline ships native renderers for OpenAI-compatible, Anthropic, Gemini, external-endpoint and Live engine paths, so your Synth can be driven by any OpenAI-compatible backend you point it at, cloud or self-hosted. In short: bring your SyntH into any application with AI support, and power it with whatever engine you trust.
 
@@ -111,9 +111,9 @@ SyntH can act as an agent, calling *tools* — native actions and remote MCP too
 SyntH can consume remote MCP servers as tools, and can expose every one of its own actions as an MCP tool (`synth_<action>`) — all still gated by the same per-action security levels.
 
 ### Multiple chat interfaces
-<img src="extensions_src/telegram_bot/icon.svg" alt="Telegram" width="56" align="left" hspace="12" vspace="8" />
+<img src="<plugins repo>/extensions/telegram_bot/icon.svg" alt="Telegram" width="56" align="left" hspace="12" vspace="8" />
 <img src="interface/discord_interface/icon.svg" alt="Discord" width="75" align="left" hspace="12" vspace="8" />
-<img src="extensions_src/matrix/icon.svg" alt="Matrix" width="56" align="left" hspace="12" vspace="8" style="background-color:#000000; padding:6px; border-radius:6px;" />
+<img src="<plugins repo>/extensions/matrix/icon.svg" alt="Matrix" width="56" align="left" hspace="12" vspace="8" style="background-color:#000000; padding:6px; border-radius:6px;" />
 
 Reach your Synth where you already are: the built-in WebUI, Telegram, Discord and Matrix. Every message flows through a single message chain, so the persona stays coherent no matter which interface you use.
 More interfaces can be simply added over time thanks due to the plugins system.
@@ -171,7 +171,7 @@ SyntH is fully usable on mobile devices via the WebUI — chat, avatar, archive 
 </div>
 
 ### Azuracast integration
-<img src="extensions_src/radio_host/icon.png" alt="AzuraCast logo — used to refer to the AzuraCast integration (see LICENSE_EXTERNAL.md)" width="120" align="left" hspace="12" vspace="8" />
+<img src="<plugins repo>/extensions/radio_host/icon.png" alt="AzuraCast logo — used to refer to the AzuraCast integration (see LICENSE_EXTERNAL.md)" width="120" align="left" hspace="12" vspace="8" />
 
 With the radio extension (`official/radio_host`, fetched from the official repository), SyntH becomes a **live AI radio DJ** for your [AzuraCast](https://www.azuracast.com/) station. It watches the stream for track changes and generates spoken banter between songs — not pre-recorded fillers, but fresh commentary produced through Synth's full context pipeline, so every transition carries its persona, current emotions, diary entries, memories and recent listener interactions. When AzuraCast exposes the *next* track, banter is pre-generated during the current song and injected the instant the new one starts, hiding the LLM + TTS latency; otherwise it falls back to generating the transition live on the track change. Each segment is rendered to speech, uploaded to the station and queued for immediate playback, then cleaned up automatically — and logged so you can review what Synth said on air. Setup is entirely WebUI-driven (station URL, API key, station ID, DJ language): no files to edit. See the [Azuracast integration guide](https://synthetic-heart.readthedocs.io/en/latest/radio_azuracast.html).
 

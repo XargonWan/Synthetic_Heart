@@ -291,7 +291,7 @@ Components can be tested in isolation:
 See Also
 --------
 
-- ``extensions_src/telegram_bot/`` - Reference implementation (an extension; see :doc:`plugin_platform/extension_developer_guide`)
+- ``<plugins repo>/extensions/telegram_bot/`` - Reference implementation (an extension; see :doc:`plugin_platform/extension_developer_guide`)
 - ``interface/discord_interface.py`` - Another example
 - ``core/core_initializer.py`` - Core initialization logic
 - ``core/config_manager.py`` - Configuration system

@@ -2,7 +2,7 @@ Matrix Interface
 ================
 
 The Matrix interface lets the synth take part in Matrix rooms (matrix.org or your own
-homeserver). It is an extension, ``official/matrix`` (sources in ``extensions_src/matrix/``),
+homeserver). It is an extension, ``official/matrix`` (sources in ``<plugins repo>/extensions/matrix/``),
 that runs in its own process with the ``matrix-nio`` library bundled in it. Every message that
 arrives in an allowed room goes through the standard message chain, so the persona, plugins and
 memory answer as they do on any other interface.

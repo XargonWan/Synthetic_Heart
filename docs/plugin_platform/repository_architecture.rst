@@ -102,7 +102,7 @@ in a repository; in CI it is the secret ``SYNTH_PUBLISHER_KEY``.
 
 **The pipeline** (``.github/workflows/publish.yml`` in that repository) runs on a push to
 ``develop`` or ``main`` (and on demand, or when SyntH dispatches ``core-updated``): it checks out
-this repository (the sources are ``extensions_src/`` here and the packer is ``core/extensions``),
+this repository (the sources are ``<plugins repo>/extensions/`` here and the packer is ``core/extensions``),
 builds the Stage client, runs ``python -m core.extensions.cli release`` (one zip per extension and
 the signed catalog), checks the catalog against the pinned key with ``verify_release.py``, moves
 the rolling tag, and uploads the assets (replacing the old ones). A pull request only builds,

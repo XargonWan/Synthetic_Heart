@@ -1,3 +1,13 @@
+### chore(extensions): the official extensions' sources and tests move to the plugins repository
+
+**Before.** `extensions_src/` held the sources of every official extension and `tests/test_extension_*.py` their tests, so the Core repository carried code that is released and versioned on its own.
+
+**Now.** They live in `synthetic-heart-official-plugins` (`extensions/<name>/`, tests in `ext_tests/`, which run against a SyntH checkout through `SYNTH_CORE`). The release pipeline there runs those tests, then builds and publishes. The Core tests of the platform use stand-in extensions; the Docker image clones the plugins repository (`PLUGINS_REPO`, `PLUGINS_REF`) to bundle the defaults, and `scripts/build_stage_extension.sh` takes the destination folder.
+
+**Not verified here.** The Docker build was not run, nor the GitHub pipeline with the new test step.
+
+**Location.** `Dockerfile`, `scripts/build_bundled_extensions.py`, `scripts/build_stage_extension.sh`, `tests/test_stage_bundle.py`, `tests/test_extensions_legacy.py`; in the plugins repository `extensions/`, `ext_tests/`, `scripts/build_release.sh`, `.github/workflows/publish.yml`.
+
 ### feat(extensions): Matrix, Harmony, Fish Audio and the KittenTTS voice are extensions; the manual engine is gone
 
 **Before.** The Matrix interface (`interface/matrix_interface/`), the Harmony and Fish Audio endpoint adapters (`core/external_endpoints/adapters/`) and the `EndpointProtocol.HARMONY`/`FISH_AUDIO` branches were Core code. The Core also carried a dev "manual" engine and `interface/message_send_utils.py`, a Telegram-era sender no production code used any more.
