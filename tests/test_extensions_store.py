@@ -368,3 +368,81 @@ class TestPluginsPage:
         ).read_text(encoding="utf-8")
         assert "renderCatalog" in script and "renderRepositories" in script
         assert "'/repo/add'" in script and "'/repo/remove'" in script
+
+
+class TestRepositoriesAlwaysAvailable:
+    """The Repositories tab must be able to show and add a repository even when the catalog
+    cannot be read: that is what fixes an unreachable one."""
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_catalog_is_a_message_and_the_list_is_still_there(
+        self, store: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def boom(*args: Any, **kwargs: Any) -> Any:
+            raise OSError("network is unreachable")
+
+        monkeypatch.setattr(store["inst"], "rows", boom)
+        response = await store["web"].get("/api/extensions/store", headers=OK)
+        assert response.status_code == 200
+        data = response.json()
+        assert [r["name"] for r in data["repositories"]] == ["test"]
+        assert data["extensions"] == []
+        assert any("network is unreachable" in p for p in data["problems"])
+
+    @pytest.mark.asyncio
+    async def test_a_damaged_list_of_repositories_is_a_message_not_a_500(
+        self, store: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def broken() -> Any:
+            raise ValueError("repositories.json is not valid JSON")
+
+        monkeypatch.setattr(store["inst"].repos, "load", broken)
+        response = await store["web"].get("/api/extensions/store", headers=OK)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["repositories"] == []
+        assert any("not valid JSON" in p for p in data["problems"])
+
+    @pytest.mark.asyncio
+    async def test_a_repository_can_be_added_then_listed_then_removed(
+        self, store: dict[str, Any], tmp_path: Path
+    ) -> None:
+        other = Repo(tmp_path / "other", tmp_path)
+        other.add("dev/extra")
+        other.publish()
+        added = await post(
+            store,
+            "repo/add",
+            {"name": "mine", "location": str(other.dir), "trusted": True},
+        )
+        assert added["ok"] is True and added["packages"] == 1
+        listed = (await store["web"].get("/api/extensions/store", headers=OK)).json()
+        assert {r["name"] for r in listed["repositories"]} == {"test", "mine"}
+        assert "dev/extra" in {x["id"] for x in listed["extensions"]}
+        removed = await post(store, "repo/remove", {"name": "mine"})
+        assert removed["ok"] is True
+        listed = (await store["web"].get("/api/extensions/store", headers=OK)).json()
+        assert {r["name"] for r in listed["repositories"]} == {"test"}
+
+    @pytest.mark.asyncio
+    async def test_a_repository_that_cannot_be_reached_is_refused_with_the_reason(
+        self, store: dict[str, Any], tmp_path: Path
+    ) -> None:
+        refused = await post(
+            store,
+            "repo/add",
+            {"name": "nowhere", "location": str(tmp_path / "does-not-exist")},
+        )
+        assert refused["ok"] is False and refused["error"]
+        listed = (await store["web"].get("/api/extensions/store", headers=OK)).json()
+        assert {r["name"] for r in listed["repositories"]} == {"test"}
+
+    def test_the_script_keeps_the_add_form_when_the_list_cannot_be_read(self) -> None:
+        script = (
+            Path(__file__).resolve().parent.parent
+            / "res/synth_webui/js/extension_store.js"
+        ).read_text(encoding="utf-8")
+        assert "HTTP ' + resp.status" in script
+        # the failure branch of the Repositories view still draws the form
+        failure = script[script.index("async function renderRepositories") :]
+        assert failure.index("repoForm(root)") < failure.index("problems(data, root)")

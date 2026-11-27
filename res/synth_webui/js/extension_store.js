@@ -11,7 +11,11 @@
             ? { method: 'GET' }
             : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
         const resp = await fetch(BASE + path, opts);
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        if (!resp.ok) {
+            let detail = '';
+            try { detail = (await resp.json()).detail || ''; } catch (e) { /* not JSON */ }
+            throw new Error('HTTP ' + resp.status + (detail ? ': ' + detail : ''));
+        }
         return resp.json();
     }
 
@@ -134,11 +138,14 @@
         ]);
     }
 
+    let lastError = '';
+
     async function overview(root, what) {
         try {
             return await call('');
         } catch (e) {
-            root.textContent = what + ' unavailable.';
+            lastError = what + ' could not be read (' + e.message + ').';
+            root.textContent = '';
             return null;
         }
     }
@@ -149,7 +156,10 @@
 
     async function renderCatalog(root) {
         const data = await overview(root, 'The catalog');
-        if (!data) return;
+        if (!data) {
+            root.appendChild(el('div', { className: 'component-error', textContent: lastError }));
+            return;
+        }
         root.textContent = '';
         problems(data, root);
         const table = el('table', { style: 'width:100%' }, [
@@ -166,7 +176,12 @@
 
     async function renderRepositories(root) {
         const data = await overview(root, 'The repositories');
-        if (!data) return;
+        if (!data) {
+            // Say why, and keep the way to add a repository: that is what fixes it.
+            root.appendChild(el('div', { className: 'component-error', textContent: lastError }));
+            root.appendChild(repoForm(root));
+            return;
+        }
         root.textContent = '';
         problems(data, root);
         root.appendChild(repoTable(data, root));

@@ -83,13 +83,32 @@ def build_router(
     async def overview(request: Request, refresh: bool = False) -> Any:
         if not webui_auth.request_authorized(request):
             return denied()
-        rows, problems = await asyncio.to_thread(installer.rows, refresh=refresh)
-        state = installer.state.load()
+        # The repositories are a local list: they are always there to be shown, added to
+        # and removed, whatever a repository's index (a network read) does.
+        try:
+            rows, problems = await asyncio.to_thread(installer.rows, refresh=refresh)
+        except Exception as exc:  # noqa: BLE001 - an unreadable catalog is a message
+            rows, problems = (
+                [],
+                [f"the catalog could not be read: {type(exc).__name__}: {exc}"],
+            )
+        try:
+            state_count = len(installer.state.load().extensions)
+        except Exception:  # noqa: BLE001
+            state_count = 0
+        try:
+            repositories = [_public_repo(r) for r in installer.repos.load()]
+        except Exception as exc:  # noqa: BLE001 - a damaged list is a message, not a 500
+            repositories = []
+            problems = [
+                *problems,
+                f"the list of repositories could not be read: {type(exc).__name__}: {exc}",
+            ]
         return {
             "extensions": [asdict(r) for r in rows],
-            "repositories": [_public_repo(r) for r in installer.repos.load()],
+            "repositories": repositories,
             "problems": problems,
-            "installed_count": len(state.extensions),
+            "installed_count": state_count,
         }
 
     async def act(request: Request, work: Callable[[dict[str, Any]], Any]) -> Any:
