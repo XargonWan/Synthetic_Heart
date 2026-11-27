@@ -22,6 +22,7 @@ import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
+from core.extensions.skins import default_skins_dir
 from core.extensions.repo import index as repo_index
 from core.extensions.repo.config import ConfigError, Repository
 from core.extensions.repo.installer import InstallError, Installer, UntrustedRepository
@@ -284,7 +285,11 @@ def run(argv: Sequence[str], out: Out = print) -> int:
             )
             out(f"wrote {path}{' (signed)' if key else ' (NOT signed)'}")
             return 0
-        inst = Installer(args.root or default_root(), bundled=args.bundled)
+        inst = Installer(
+            args.root or default_root(),
+            bundled=args.bundled,
+            skins_dir=default_skins_dir(),
+        )
         if args.command == "repo":
             return _run_repo(args, inst, out)
         return _run_manage(args, inst, out)

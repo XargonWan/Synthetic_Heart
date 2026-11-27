@@ -7,6 +7,9 @@
             if (typeof window.fetchSkins === 'function') {
                 window.fetchSkins();
             }
+            if (typeof window.fetchSkinCatalog === 'function') {
+                window.fetchSkinCatalog();
+            }
             const clearBtn = document.getElementById('clear-uploaded');
             if (clearBtn && !clearBtn.dataset.bound) {
                 clearBtn.addEventListener('click', () => {

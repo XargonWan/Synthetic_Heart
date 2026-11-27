@@ -109,6 +109,8 @@ class Row:
     default_install: bool = False
     description: str = ""
     authors: list[str] = field(default_factory=list)
+    #: ``"skins"`` (files for the Skins tab) or ``"plugin"``.
+    kind: str = "plugin"
 
 
 def host_platform() -> str:
@@ -133,8 +135,11 @@ class Installer:
         core_api_version: str = CORE_API_VERSION,
         transport_for: Callable[[Repository], Transport] | None = None,
         bundled: Path | None = None,
+        skins_dir: Path | None = None,
     ) -> None:
         self.root = Path(root)
+        #: Where the skins of installed skin extensions are put (``None``: nowhere).
+        self.skins_dir = skins_dir
         self.repos = RepoStore(self.root / "repositories.json")
         self.state = StateStore(self.root / "installed.json")
         self.grants = FileGrantStore(self.root / "grants.json")
@@ -369,6 +374,27 @@ class Installer:
 
     # ---------------------------------------------------------------- plan
 
+    def sync_skins(self) -> list[str]:
+        """Put the skins of the installed, enabled skin extensions in the skins directory
+        (and take away those of extensions that are gone). Returns notes; never raises."""
+        if self.skins_dir is None:
+            return []
+        from core.extensions.skins import sync_skins
+
+        try:
+            state = self.state.load()
+            installed = {
+                ext_id: (
+                    manifest,
+                    self.install_dir(ext_id),
+                    state.extensions[ext_id].enabled,
+                )
+                for ext_id, manifest in self._installed_manifests().items()
+            }
+            return sync_skins(self.skins_dir, installed)
+        except Exception as exc:  # noqa: BLE001 - skins never break an install
+            return [f"skins could not be synchronised: {type(exc).__name__}: {exc}"]
+
     def _installed_manifests(self) -> dict[str, Manifest]:
         from core.extensions.manifest import load_manifest
 
@@ -561,6 +587,7 @@ class Installer:
         )
         state.extensions[manifest.id] = record
         self.state.save(state)
+        self.sync_skins()
 
     # -------------------------------------------------------------- removal
 
@@ -594,6 +621,7 @@ class Installer:
                 extension_id
             )  # a default someone removed stays removed
         self.state.save(state)
+        self.sync_skins()
 
     # ------------------------------------------------------ on/off, updates
 
@@ -604,6 +632,7 @@ class Installer:
             raise InstallError(f"{extension_id} is not installed")
         record.enabled = enabled
         self.state.save(state)
+        self.sync_skins()
 
     def updates(self, *, refresh: bool = False) -> list[tuple[str, str, str]]:
         """``(id, installed, available)`` for every extension with a newer version."""
@@ -654,6 +683,7 @@ class Installer:
         )
         record.sha256, record.previous_sha256 = record.previous_sha256, record.sha256
         self.state.save(state)
+        self.sync_skins()
         return record.version
 
     # ---------------------------------------------------------- permissions
@@ -702,6 +732,7 @@ class Installer:
                 row.name = entry.name or entry.id
                 row.description = entry.description
                 row.authors = list(entry.authors)
+                row.kind = "skins" if entry.kind == "skins" else "plugin"
         installed_manifests = self._installed_manifests()
         for ext_id, record in state.extensions.items():
             row = rows.setdefault(ext_id, Row(ext_id, ext_id))
@@ -713,6 +744,7 @@ class Installer:
                 row.name = row.name if row.name != ext_id else manifest.name
                 row.description = row.description or manifest.description
                 row.authors = row.authors or list(manifest.authors)
+                row.kind = manifest.kind
             have, best = _version(record.version), _version(row.available)
             row.update = bool(have and best and best > have)
         return sorted(rows.values(), key=lambda r: r.id), problems

@@ -68,6 +68,8 @@ class PackageEntry:
     capabilities: tuple[str, ...] = ()
     #: Who wrote it (from the manifest), for the catalog.
     authors: tuple[str, ...] = ()
+    #: ``"skins"`` for an extension that only ships skins; ``""`` for everything else.
+    kind: str = ""
     #: Where to download the package when it is not kept in the repository itself (a
     #: package too big for a Git host, hosted as a release asset). ``https`` only; the
     #: SHA-256 and size above still decide whether the file is the right one.
@@ -162,6 +164,10 @@ def _entry(raw: Any, position: int) -> PackageEntry:
     ):
         problems.append(f"{where}.authors must be a list of names")
         raw_authors = []
+    kind = raw.get("kind", "")
+    if kind not in ("", "plugin", "skins"):
+        problems.append(f"{where}.kind must be 'plugin' or 'skins'")
+        kind = ""
     for flag in ("experimental", "default_install"):
         if not isinstance(raw.get(flag, False), bool):
             problems.append(f"{where}.{flag} must be true or false")
@@ -181,6 +187,7 @@ def _entry(raw: Any, position: int) -> PackageEntry:
         default_install=bool(raw.get("default_install", False)),
         capabilities=tuple(caps),
         authors=tuple(a[:80] for a in raw_authors[:8]),
+        kind="skins" if kind == "skins" else "",
         url=url,
     )
 

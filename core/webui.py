@@ -14377,6 +14377,8 @@ class SynthWebUIInterface:
                     "preview_url": preview,
                     "vrm_present": vrm_present,
                     "valid": vrm_present,
+                    "type": "vrm",
+                    **self._skin_origin(entry),
                 }
             )
 
@@ -14840,17 +14842,42 @@ class SynthWebUIInterface:
         log_info(f"{LOG_PREFIX} Uploaded skin pack '{root}'")
         return JSONResponse({"status": "ok", "folder": root}, status_code=201)
 
+    @staticmethod
+    def _skin_origin(folder: Path) -> dict[str, Any]:
+        """Where a skin comes from: bundled with SyntH, an extension, or the user's own."""
+        from core.extensions.skins import BUNDLED_SKINS, read_marker
+
+        marker = read_marker(folder)
+        bundled = folder.name in BUNDLED_SKINS
+        return {
+            "bundled": bundled,
+            "extension_id": marker["id"] if marker else None,
+            "removable": not bundled,
+        }
+
     async def delete_skin(self, skin_name: str) -> JSONResponse:
-        """Delete a skin folder. Rei is protected and cannot be deleted."""
+        """Delete a skin folder. The bundled skins (Rei, Zero) cannot be deleted, and a
+        skin that came from an extension is uninstalled through the extension."""
         import shutil
+
+        from core.extensions.skins import BUNDLED_SKINS, read_marker
 
         skins_dir = Path(__file__).resolve().parent.parent / "skins"
         skin_path = self._skin_path(skins_dir, skin_name)
         safe_name = skin_path.name
-        if safe_name == "Rei":
+        if safe_name in BUNDLED_SKINS:
             raise HTTPException(
                 status_code=403,
-                detail="The default skin 'Rei' cannot be deleted",
+                detail=f"The bundled skin '{safe_name}' cannot be deleted",
+            )
+        owner = read_marker(skin_path) if skin_path.is_dir() else None
+        if owner is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"'{safe_name}' is installed by the extension {owner['id']}: "
+                    "uninstall that extension instead"
+                ),
             )
 
         if not skin_path.exists() or not skin_path.is_dir():

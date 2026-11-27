@@ -164,6 +164,7 @@ def build_index(
                 ),
                 "capabilities": list(manifest.permissions.capabilities),
                 "authors": list(manifest.authors),
+                **({"kind": "skins"} if manifest.kind == "skins" else {}),
             }
         )
     unknown = sorted(set(default_install) - {p["id"] for p in packages})

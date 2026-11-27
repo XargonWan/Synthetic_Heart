@@ -88,12 +88,21 @@
             prevLabel.appendChild(prevInput);
             actions2.appendChild(prevLabel);
 
-            // Delete (hidden for Rei)
+            // Delete: not for the bundled skins (Rei, Zero); a skin that came from an
+            // extension is uninstalled through the extension.
             const folder = s.folder || s.name;
-            if(folder !== 'Rei'){
-                const delBtn = document.createElement('button'); delBtn.className='btn-ghost btn-danger'; delBtn.textContent='Delete';
-                delBtn.addEventListener('click', ()=> deleteSkin(folder));
+            if(s.removable !== false && folder !== 'Rei' && folder !== 'Zero'){
+                const delBtn = document.createElement('button'); delBtn.className='btn-ghost btn-danger';
+                delBtn.textContent = s.extension_id ? 'Uninstall' : 'Delete';
+                delBtn.addEventListener('click', ()=> s.extension_id ? uninstallSkin(s) : deleteSkin(folder));
                 actions2.appendChild(delBtn);
+            }
+            if(s.bundled){
+                const tag = document.createElement('div'); tag.className='skin-description';
+                tag.innerHTML = '<small>Bundled with SyntH</small>'; meta.appendChild(tag);
+            } else if(s.extension_id){
+                const tag = document.createElement('div'); tag.className='skin-description';
+                tag.innerHTML = '<small>Installed from ' + escapeHtml(s.extension_id) + '</small>'; meta.appendChild(tag);
             }
 
             card.appendChild(preview); card.appendChild(title); card.appendChild(meta);
@@ -208,6 +217,103 @@
     }
 
     // ----------------------------------------------------------------
+    // Skins from repositories (extensions of kind "skins")
+    // ----------------------------------------------------------------
+
+    const STORE = '/api/extensions/store';
+
+    async function storeCall(path, body){
+        const opts = body === undefined ? {method:'GET'}
+            : {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)};
+        const res = await fetch(_apiBase + STORE + path, opts);
+        if(!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+    }
+
+    function textEl(tag, text, cls){
+        const n = document.createElement(tag); n.textContent = text || '';
+        if(cls) n.className = cls;
+        return n;
+    }
+
+    async function uninstallSkin(skin){
+        if(!confirm(`Uninstall skin "${skin.name}"? Its files are removed.`)) return;
+        try{
+            const out = await storeCall('/remove', {id: skin.extension_id});
+            if(!out.ok) throw new Error(out.error || 'Uninstall failed');
+            await refreshSkins();
+        }catch(e){ alert('Error: '+e.message); }
+    }
+
+    async function installSkin(id, button){
+        button.disabled = true;
+        try{
+            const out = await storeCall('/install', {id});
+            if(out.needs_confirmation){
+                if(!confirm(out.error + '\n\nInstall anyway?')) { button.disabled = false; return; }
+                const again = await storeCall('/install', {id, confirm_untrusted: true});
+                if(!again.ok) throw new Error(again.error || 'Install failed');
+            } else if(!out.ok) {
+                throw new Error(out.error || 'Install failed');
+            }
+            await refreshSkins();
+        }catch(e){ alert('Error: '+e.message); button.disabled = false; }
+    }
+
+    async function fetchSkinCatalog(){
+        const host = document.getElementById('skins-catalog');
+        if(!host) return;
+        host.textContent = '';
+        let data;
+        try{
+            data = await storeCall('');
+        }catch(e){
+            host.appendChild(textEl('div', 'The skin catalog could not be read (' + e.message + ').', 'meta'));
+            return;
+        }
+        (data.problems || []).forEach(p => host.appendChild(textEl('div', p, 'component-error')));
+        const offered = (data.extensions || []).filter(x => x.kind === 'skins' && !x.installed);
+        const updates = (data.extensions || []).filter(x => x.kind === 'skins' && x.update);
+        if(!offered.length && !updates.length){
+            host.appendChild(textEl('div', data.repositories && data.repositories.length
+                ? 'No more skins are offered by your repositories.'
+                : 'No repositories yet: add one in Plugins > Repositories.', 'meta'));
+            return;
+        }
+        const grid = document.createElement('div'); grid.className = 'skins-grid';
+        updates.concat(offered).forEach(x => {
+            const card = document.createElement('div'); card.className = 'skin-card';
+            card.appendChild(textEl('strong', x.name || x.id));
+            const meta = document.createElement('div'); meta.className = 'skin-meta';
+            if(x.authors && x.authors.length) meta.appendChild(textEl('div', 'by ' + x.authors.join(', '), 'skin-author'));
+            if(x.description) meta.appendChild(textEl('div', x.description, 'skin-description'));
+            meta.appendChild(textEl('div', 'v' + x.available + (x.repo ? ' · ' + x.repo : ''), 'skin-version'));
+            card.appendChild(meta);
+            const actions = document.createElement('div'); actions.className = 'skin-actions';
+            const btn = document.createElement('button'); btn.className = 'btn-primary';
+            btn.textContent = x.installed ? 'Update to ' + x.available : 'Install';
+            btn.addEventListener('click', () => x.installed ? updateSkin(x.id, btn) : installSkin(x.id, btn));
+            actions.appendChild(btn); card.appendChild(actions);
+            grid.appendChild(card);
+        });
+        host.appendChild(grid);
+    }
+
+    async function updateSkin(id, button){
+        button.disabled = true;
+        try{
+            const out = await storeCall('/update', {id});
+            if(!out.ok) throw new Error(out.error || 'Update failed');
+            await refreshSkins();
+        }catch(e){ alert('Error: '+e.message); button.disabled = false; }
+    }
+
+    async function refreshSkins(){
+        await fetchSkins();
+        await fetchSkinCatalog();
+    }
+
+    // ----------------------------------------------------------------
     // Init: wire up buttons
     // ----------------------------------------------------------------
 
@@ -219,7 +325,7 @@
 
             // Nav skins tab click
             const navSkins = document.querySelector('.nav-btn[data-tab="skins"]');
-            if(navSkins) navSkins.addEventListener('click', function(){ fetchSkins(); });
+            if(navSkins) navSkins.addEventListener('click', function(){ fetchSkins(); fetchSkinCatalog(); });
 
             // set up upload input handler once element exists
             const skinUpload = document.getElementById('skin-vrm-upload');
@@ -310,6 +416,7 @@
 
     // Export for other modules
     window.fetchSkins = window.fetchSkins || fetchSkins;
+    window.fetchSkinCatalog = window.fetchSkinCatalog || fetchSkinCatalog;
     window.renderSkins = window.renderSkins || renderSkins;
     window.activateSkin = window.activateSkin || activateSkin;
     window.clearUploadedSkins = window.clearUploadedSkins || clearUploaded;

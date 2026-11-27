@@ -22,6 +22,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from core.extensions.skins import default_skins_dir
 from core.extensions.api import register_core_api
 from core.extensions.avatar import AvatarLoader, register_avatar_api
 from core.extensions.endpoints import EndpointPort, register_endpoint_api
@@ -303,7 +304,9 @@ async def _migrate_legacy(root: Path) -> str:
         from core.extensions.legacy_port import CoreLegacyPort, read_rows
         from core.extensions.repo.installer import Installer
 
-        installer = Installer(root, bundled=bundled_repository())
+        installer = Installer(
+            root, bundled=bundled_repository(), skins_dir=default_skins_dir()
+        )
         state = installer.state.load()
         if state.legacy_done:
             return ""
@@ -321,10 +324,13 @@ async def _install_defaults(root: Path) -> str:
     try:
         from core.extensions.repo.installer import Installer
 
-        installer = Installer(root, bundled=bundled_repository())
+        installer = Installer(
+            root, bundled=bundled_repository(), skins_dir=default_skins_dir()
+        )
         await asyncio.to_thread(installer.ensure_official_repository)
         installed, failed = await asyncio.to_thread(installer.ensure_defaults)
         updated, update_failed = await asyncio.to_thread(installer.update_bundled)
+        await asyncio.to_thread(installer.sync_skins)
     except Exception as exc:  # noqa: BLE001 - defaults must never stop start-up
         return f"[extensions] default install skipped: {type(exc).__name__}: {exc}"
     notes: list[str] = []
@@ -448,7 +454,12 @@ async def start_extension_runtime() -> StartReport | None:
         )
         global _store_task
         _store_task = asyncio.ensure_future(
-            mount_store(Installer(root, bundled=bundled_repository()), lambda: _runtime)
+            mount_store(
+                Installer(
+                    root, bundled=bundled_repository(), skins_dir=default_skins_dir()
+                ),
+                lambda: _runtime,
+            )
         )
         if defaults_note:
             log_info(defaults_note)

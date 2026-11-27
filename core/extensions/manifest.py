@@ -225,6 +225,31 @@ VESSEL_CAPABILITIES = frozenset(
 MAX_VESSELS = 4
 VESSEL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
 
+
+@dataclass(frozen=True)
+class SkinProvision:
+    """A skin (an avatar's look) shipped as files: no process, nothing to run.
+
+    ``path`` is a folder of the package holding the skin as the Skins tab knows it
+    (``persona.json``, the model, ``preview.png``, ``animations/``); the Core puts it in
+    the skins directory under ``name`` while the extension is installed and on.
+    """
+
+    #: The skin's folder name in the skins directory (and its name in the Skins tab).
+    name: str
+    #: The kind of model: how it is rendered. Only ``vrm`` today.
+    type: str = "vrm"
+    #: Folder inside the package.
+    path: str = "skin"
+
+
+#: Model types a skin can be. Others (``inochi2d``, ``live2d``) arrive with their renderers.
+SKIN_TYPES = ("vrm",)
+MAX_SKINS = 4
+SKIN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,39}$")
+#: A skin folder name the Core keeps for itself (uploads, scratch).
+RESERVED_SKIN_NAMES = frozenset({"temp"})
+
 #: Recon questions one extension may add.
 MAX_RECON = 4
 RECON_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{1,39}$")
@@ -249,6 +274,8 @@ class Provides:
     protocols: tuple[ProtocolProvision, ...] = ()
     #: Rift Vessel connectors (see :class:`VesselProvision`).
     vessels: tuple[VesselProvision, ...] = ()
+    #: Skins shipped as files (see :class:`SkinProvision`).
+    skins: tuple[SkinProvision, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -328,6 +355,12 @@ class Manifest:
     def author(self) -> str:
         """The authors as one line (``"A, B"``)."""
         return ", ".join(self.authors)
+
+    @property
+    def kind(self) -> str:
+        """``"skins"`` for an extension that only ships skins (files, no process), else
+        ``"plugin"``. The WebUI lists skins in the Skins tab and everything else in Plugins."""
+        return "skins" if self.provides.skins and self.entry is None else "plugin"
 
     @property
     def interface_ids(self) -> tuple[str, ...]:
@@ -549,6 +582,7 @@ def _parse_provides(data: Mapping[str, Any], c: _Collector) -> Provides:
                 "recon",
                 "protocols",
                 "vessels",
+                "skins",
             }
         ),
         "provides",
@@ -671,6 +705,7 @@ def _parse_provides(data: Mapping[str, Any], c: _Collector) -> Provides:
         recon=recon,
         protocols=protocols,
         vessels=vessels,
+        skins=_parse_skins(table, c),
     )
 
 
@@ -866,6 +901,43 @@ def _parse_vessels(
     names = [v.name for v in found]
     for dup in sorted({n for n in names if names.count(n) > 1}):
         c.add("provides.vessels", f"connector {dup!r} is declared twice")
+    return tuple(found)
+
+
+def _parse_skins(
+    provides: Mapping[str, Any], c: _Collector
+) -> tuple[SkinProvision, ...]:
+    raw = provides.get("skins", [])
+    if not isinstance(raw, list):
+        c.add("provides.skins", "must be a list of tables ([[provides.skins]])")
+        return ()
+    if len(raw) > MAX_SKINS:
+        c.add("provides.skins", f"at most {MAX_SKINS} skins")
+    found: list[SkinProvision] = []
+    for index, item in enumerate(raw[:MAX_SKINS]):
+        path = f"provides.skins[{index}]"
+        table = c.table(item, path)
+        if table is None or not isinstance(item, Mapping):
+            continue
+        c.unknown_keys(item, frozenset({"name", "type", "path"}), path)
+        name = c.string(item, "name", path, required=True) or ""
+        if name and (
+            not SKIN_NAME_RE.match(name) or name.lower() in RESERVED_SKIN_NAMES
+        ):
+            c.add(f"{path}.name", f"is not a usable skin folder name: {name!r}")
+        kind = c.string(item, "type", path) or "vrm"
+        if kind not in SKIN_TYPES:
+            c.add(
+                f"{path}.type",
+                f"must be one of {', '.join(SKIN_TYPES)}, got {kind!r}",
+            )
+        folder = c.string(item, "path", path) or "skin"
+        if not UI_PAGE_RE.match(folder) or ".." in folder.split("/"):
+            c.add(f"{path}.path", f"is not a folder inside the package: {folder!r}")
+        found.append(SkinProvision(name=name, type=kind, path=folder))
+    names = [skin.name.lower() for skin in found]
+    for dup in sorted({n for n in names if names.count(n) > 1}):
+        c.add("provides.skins", f"skin {dup!r} is declared twice")
     return tuple(found)
 
 

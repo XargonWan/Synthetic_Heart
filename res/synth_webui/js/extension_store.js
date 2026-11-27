@@ -203,7 +203,8 @@
     }
 
     function catalogView(data, root) {
-        const all = data.extensions.slice().sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
+        // Skins are listed in the Skins tab, not here.
+        const all = data.extensions.filter((x) => x.kind !== 'skins').sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
         if (!selectedId || !all.some((x) => x.id === selectedId)) selectedId = all.length ? all[0].id : '';
         const wrap = el('div', { className: 'catalog-two-col', style: 'display:grid;grid-template-columns:minmax(220px,340px) 1fr;gap:18px;align-items:start;margin-top:10px' });
         const left = el('div');
