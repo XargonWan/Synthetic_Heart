@@ -379,3 +379,18 @@ def test_no_redirect_when_the_registry_cannot_be_read(
         "core.external_endpoints.registry.get_external_endpoint_registry", boom
     )
     assert _pending() is False
+
+
+def test_the_setup_flag_is_registered_before_the_page_can_save_it() -> None:
+    """The page saves SETUP_COMPLETED through /api/config, which 404s on an unknown key.
+
+    The definition used to be registered only as a side effect of reading the
+    flag on the first-run redirect, and a configured install never takes that
+    path — so Finish setup answered "Something was not saved: SETUP_COMPLETED:
+    HTTP 404" and the flag was never set.
+    """
+    from core.config_manager import config_registry
+
+    webui_module.SynthWebUIInterface(autostart=False)
+    keys = {d["key"] for d in config_registry.export_definitions()}
+    assert "SETUP_COMPLETED" in keys
