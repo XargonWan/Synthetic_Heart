@@ -512,6 +512,72 @@ def test_initdb_timing_out_names_the_likely_cause(
     assert "again" in text.lower(), "the user must know a retry is safe"
 
 
+def test_initdb_timeout_is_retried_exactly_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cold first run (AV scan, slow disk) routinely outlasts the timeout while
+    the immediate retry finishes in seconds — so a timeout must not fail outright."""
+    _stub_portable_cluster(monkeypatch, tmp_path / "pgsql")
+    calls: list[str] = []
+
+    def fake_run(*a: object, **k: object) -> bootstrap.CommandResult:
+        calls.append("initdb")
+        return bootstrap.CommandResult(124, "", "timed out")
+
+    monkeypatch.setattr(bootstrap, "run_command", fake_run)
+    reporter = bootstrap.Reporter(1, quiet=True)
+    assert bootstrap.ensure_portable_cluster(reporter, pg_bin=None, port=5433) is None
+    assert len(calls) == 2, "a timeout must retry exactly once, then give up"
+    assert any("retrying initdb once" in m for m in reporter.messages)
+
+
+def test_initdb_hard_failure_is_not_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only timeouts are transient. initdb saying no means no."""
+    _stub_portable_cluster(monkeypatch, tmp_path / "pgsql")
+    calls: list[str] = []
+    monkeypatch.setattr(
+        bootstrap,
+        "run_command",
+        lambda *a, **k: (calls.append("initdb"), bootstrap.CommandResult(1, "", "no"))[
+            1
+        ],
+    )
+    reporter = bootstrap.Reporter(1, quiet=True)
+    assert bootstrap.ensure_portable_cluster(reporter, pg_bin=None, port=5433) is None
+    assert len(calls) == 1, "a real failure must return at once, not retry"
+
+
+def test_start_conflict_with_live_server_is_reused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """pg_ctl wordings vary and a lock file does not mean dead: if a server
+    answers on the port with our credentials it is reused, whatever pg_ctl
+    said. This is the reinstall-over-a-running-instance case."""
+    from types import SimpleNamespace
+
+    cluster = tmp_path / "pgsql"
+    cluster.mkdir(parents=True)
+    (cluster / "PG_VERSION").write_text("16\n", encoding="utf-8")
+    _stub_portable_cluster(monkeypatch, cluster)
+    monkeypatch.setenv("SYNTH_PG_SUPERUSER_PASSWORD", "pw")
+    monkeypatch.setattr(
+        bootstrap,
+        "run_command",
+        lambda *a, **k: bootstrap.CommandResult(
+            1, "", "another server might be running; permission denied"
+        ),
+    )
+    monkeypatch.setattr(
+        bootstrap, "psql_query", lambda *a, **k: SimpleNamespace(ok=True)
+    )
+    reporter = bootstrap.Reporter(1, quiet=True)
+    target = bootstrap.ensure_portable_cluster(reporter, pg_bin=None, port=5433)
+    assert target is not None, "a live server must be reused, not failed"
+    assert target.port == 5433
+
+
 def test_run_command_captures_output_without_using_pipes() -> None:
     """Output is captured, with the reader no longer being the child's lifeline.
 
