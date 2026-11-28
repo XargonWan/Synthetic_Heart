@@ -12,10 +12,22 @@ needs first. Status as of 2026-11-26. Nothing here is built.
      - Why it is not done
      - What it needs first
    * - Discord
-     - About 4,400 lines with voice calls and Live inside; the Core still names it in
-       ``tts_lipsync``, ``message_plugin`` and the transport-layer labels.
-     - Text and actions are expressible today. Voice needs ``calls.*`` and Live needs the
-       duplex API below. Remove the Core's Discord names in the same step.
+     - **The extension exists** (``official/discord`` in the plugins repository, not a default,
+       experimental): text, threads, replies, files, reactions, typing, avatar, voice channels
+       and calls through ``calls.*`` (join and leave, hearing, speaking), with its tests. The
+       in-tree interface (``interface/discord_interface``, 4,400 lines) is **still there**: it
+       is the only host of the Gemini Live voice session, and nothing here has been run against
+       a real Discord server yet. Both register ``discord_bot``; the Core refuses the second, so
+       they cannot run together.
+     - To remove the in-tree one: (1) a run against a test bot and server by hand (text, thread,
+       DM, files, voice join/leave, a spoken call, ``/leave``); (2) a decision about Live voice
+       (the duplex API below, or Live waits); (3) the settings migration
+       (``core/extensions/legacy.py``: ``DISCORD_BOT_TOKEN``, ``DISCORD_BOT_USE_SYNTH_AVATAR``,
+       not a default package); (4) the Core's Discord names removed (about 170 lines in 40
+       files, the largest in ``multimodal_attachment``, ``live_session_manager``,
+       ``message_plugin``, ``prompt_engine``, ``interface_path_utils``, ``chat_history_cache``,
+       ``delivery_guard``) and the 39 test files that name it rewritten around a stand-in
+       interface.
    * - Live engines
      - The session manager builds Gemini objects (``LiveConnectConfig``) in the Core.
        A Live session is a full-duplex model conversation, not Auris plus Vox (the

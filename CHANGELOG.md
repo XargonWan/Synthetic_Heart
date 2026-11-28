@@ -1,3 +1,11 @@
+### feat(discord): the Discord interface as an extension (not yet replacing the built-in one)
+
+`official/discord` in the plugins repository: servers, channels, threads and direct messages; replies, files in and out, reactions, typing, names and the synth avatar; voice channels and calls (`join_voice_discord`, `leave_voice_discord`, `/leave`, hearing and speaking through the Core's call service, DAVE decryption and the resilience patches for discord-ext-voice-recv). It uses the same interface id, paths (a thread repeats its id) and settings (`DISCORD_BOT_TOKEN`, `DISCORD_BOT_USE_SYNTH_AVATAR`) as the built-in interface, so a later switch keeps every stored conversation. It is not a default and nothing migrates to it yet: the built-in interface stays until the extension has been tried against a real server and the Gemini Live voice session (which only Discord hosts) has an answer. Installing it while the built-in one runs is safe: the Core refuses the second `discord_bot` and the extension disconnects, saying why. Other bots' messages are ignored, as in Fluxer.
+
+**Not carried over yet.** Gemini Live voice (needs the duplex-audio API); the in-tree trainer-only Live gate (`DISCORD_VOICE_TRAINER_ONLY` covers joining).
+
+**Location.** Plugins repository: `extensions/discord/`, `ext_tests/test_extension_discord*.py`. Here: `docs/plugin_platform/remaining_work.rst`.
+
 ### feat(webui): screenshots in the catalog, a progress bar for installs, questions as an in-app modal
 
 **Screenshots.** A plugin can ship a `screenshots/` folder (up to 8 pictures of at most 2 MB, shown in file-name order). They are published next to the package, listed in the signed index with their SHA-256, and shown in the catalog before the plugin is installed (a click shows one large).
